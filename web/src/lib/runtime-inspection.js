@@ -1,4 +1,5 @@
 import { savedSelection } from '../../saved-backtest/selection.js';
+import { refusalFrom } from './refusal.js';
 
 /** The frontend reports the server's declared mode; it grants no release clearance. */
 export const INSPECTION_MESSAGE = 'Inspection mode: real saved data. Sweep and data-pull controls are disabled while release checks remain unresolved.';
@@ -73,7 +74,8 @@ export function createInspectionReader(request, publish) {
           settled = { phase: 'legacy', mode: 'legacy', canSweep: true, canPull: true, savedResultsUrl: null,
             why: 'Legacy server: inspection capabilities are not reported. Existing controls are available; this is not sweep-readiness clearance.' };
         } else {
-          if (!response.ok) throw new Error(`Inspection-mode check answered HTTP ${response.status}. Sweep controls remain disabled.`);
+          // The body's reason, not the status alone (F4, D-3221).
+          if (!response.ok) throw new Error(`${await refusalFrom('/inspection.json', response)}. Sweep controls remain disabled.`);
           if ((response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') {
             throw new Error('Inspection-mode check did not answer JSON. Sweep controls remain disabled.');
           }

@@ -82,3 +82,30 @@ fn cli_declares_vocab_as_a_direct_dependency() {
         "crates/cli/Cargo.toml no longer declares vocab: {deps}"
     );
 }
+
+/// AC-gates-o1-4, D-4466: the manifest's telemetry comment does not say
+/// again that `cli` holds no loop over bars or candidates. `CLAUDE.md` §5
+/// stopped saying it (D-1448) and the comment beside the arrow kept it; the
+/// two loops the corrected sentence names are checked to exist.
+#[test]
+fn the_manifest_does_not_say_cli_is_loop_free() {
+    let manifest = include_str!("../Cargo.toml");
+    let flat = manifest
+        .lines()
+        .map(|line| line.trim_start_matches('#').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for stale in [
+        "`cli` holds no loop over bars and no loop over candidates",
+        "`cli` holds no loop over bars and none over candidates",
+    ] {
+        assert!(
+            !flat.contains(stale),
+            "crates/cli/Cargo.toml says again: {stale}"
+        );
+    }
+    assert!(flat.contains("it is NOT loop-free"), "{flat}");
+    let lib = include_str!("../src/lib.rs");
+    assert!(lib.contains("fn window_range_percentile("));
+    assert!(lib.contains("by_evidence.par_iter()"));
+}

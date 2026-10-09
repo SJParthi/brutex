@@ -18,6 +18,7 @@
 //! Five keys are required — `seq`, `ms`, `level`, `target`, `msg` — because
 //! without any one of them the line cannot be placed, filtered or read.
 
+use crate::encode::NONFINITE_KEY;
 use crate::event::{Event, MAX_FIELDS};
 use crate::json::{LineFault, Scan};
 use crate::level::Level;
@@ -122,6 +123,11 @@ impl Record {
         let mut fields: Vec<(String, OwnedValue)> = Vec::new();
         let mut cut = false;
         let mut dropped_fields = 0u64;
+        // ONE BIT PER KEY THIS DECODER READS, so a second occurrence is
+        // refused rather than letting the last one win (satk-6, D-4418). A key
+        // a later build added is stepped over and not tracked: nothing here
+        // reads it, so nothing here can be misled by its copy.
+        let mut seen = 0u16;
 
         scan.skip_space();
         if scan.peek() == Some(b'}') {
@@ -133,6 +139,11 @@ impl Record {
                 scan.skip_space();
                 scan.expect(b':')?;
                 scan.skip_space();
+                let bit = line_key_bit(&key);
+                if seen & bit != 0 {
+                    return Err(LineFault::RepeatedKey { key });
+                }
+                seen |= bit;
                 match key.as_str() {
                     "seq" => seq = Some(unsigned(&mut scan)?),
                     // ABSENT IS ZERO, NOT A REFUSAL. Every line this crate has
@@ -194,6 +205,29 @@ impl Record {
     }
 }
 
+/// One bit for each of the ten line keys [`Record::decode`] reads, and none
+/// for a key it steps over, so a key may appear at most once per line.
+///
+/// A `match` rather than a table search: the ten words are the compile-time
+/// table. `a_repeated_key_is_refused_by_name_and_the_writer_never_repeats_one`
+/// repeats every one of them, so a key the decoder reads and this misses
+/// fails that test.
+const fn line_key_bit(key: &str) -> u16 {
+    match key.as_bytes() {
+        b"seq" => 1 << 0,
+        b"run" => 1 << 1,
+        b"ms" => 1 << 2,
+        b"ts" => 1 << 3,
+        b"level" => 1 << 4,
+        b"target" => 1 << 5,
+        b"msg" => 1 << 6,
+        b"cut" => 1 << 7,
+        b"dropped" => 1 << 8,
+        b"fields" => 1 << 9,
+        _ => 0,
+    }
+}
+
 /// The `fields` object: keys to scalars, nothing nested, **at most
 /// [`MAX_FIELDS`] members**.
 ///
@@ -251,6 +285,13 @@ fn object(scan: &mut Scan<'_>) -> Result<Vec<(String, OwnedValue)>, LineFault> {
     loop {
         scan.skip_space();
         let key = scan.string()?;
+        // A REPEATED FIELD KEY IS REFUSED (satk-6, D-4418): `Record::field`
+        // answers with the first copy, so the second was a value the line
+        // carried and no reader would see. At most `MAX_FIELDS` comparisons,
+        // because the comma guard below admits no thirteenth member.
+        if out.iter().any(|(held, _)| *held == key) {
+            return Err(LineFault::RepeatedKey { key });
+        }
         scan.skip_space();
         scan.expect(b':')?;
         scan.skip_space();
@@ -287,11 +328,46 @@ fn scalar(scan: &mut Scan<'_>) -> Result<OwnedValue, LineFault> {
         Some(b'f') => scan.word(b"false").map(|()| OwnedValue::Bool(false)),
         Some(b'n') => scan.word(b"null").map(|()| OwnedValue::Null),
         Some(b'-' | b'0'..=b'9') => number(scan),
+        Some(b'{') => nonfinite(scan),
         Some(found) => Err(LineFault::Unexpected {
             at: scan.offset(),
             found,
         }),
     }
+}
+
+/// A non-finite float, in the one shape the writer gives it:
+/// `{"float":"NaN"}`, with `-NaN`, `Infinity` or `-Infinity` in its place.
+///
+/// Before D-4417 these were written as the bare strings and read back as
+/// [`OwnedValue::Str`], indistinguishable from a text field that said `NaN`,
+/// and [`Record::matches`] reported the round trip failed (satk-5). Lines
+/// written then still read as text; that ambiguity is in the bytes and no
+/// reader can remove it. Any other object in a field's place is refused where
+/// it opens, exactly as every nested value always was.
+fn nonfinite(scan: &mut Scan<'_>) -> Result<OwnedValue, LineFault> {
+    let refused = LineFault::Unexpected {
+        at: scan.offset(),
+        found: b'{',
+    };
+    scan.expect(b'{')?;
+    scan.skip_space();
+    if scan.string()? != NONFINITE_KEY {
+        return Err(refused);
+    }
+    scan.skip_space();
+    scan.expect(b':')?;
+    scan.skip_space();
+    let value = match scan.string()?.as_str() {
+        "NaN" => f64::NAN,
+        "-NaN" => -f64::NAN,
+        "Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        _ => return Err(refused),
+    };
+    scan.skip_space();
+    scan.expect(b'}')?;
+    Ok(OwnedValue::Float(value))
 }
 
 /// A number, in the narrowest of the three widths that holds it exactly.
@@ -332,8 +408,17 @@ fn number(scan: &mut Scan<'_>) -> Result<OwnedValue, LineFault> {
     // Taking that would put a value on the page that is not the value in the
     // file, and `Infinity` is precisely what this crate refuses to write as a
     // number. Refused by name instead.
+    //
+    // AND A DECIMAL TOO SMALL FOR AN f64 PARSES AS ZERO, ALSO WITHOUT AN ERROR
+    // (satk-6, D-4418): `1e-400` read as `0.0` while `1e400` was refused. A
+    // zero is only what the line says when its digits are all zero; a non-zero
+    // digit that came back as zero is the same "not the value in the file".
+    // This crate's writer never produces one: it writes the shortest decimal
+    // that names a finite f64, and the smallest subnormal is `5e-324`.
+    let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    let nonzero = mantissa.bytes().any(|b| matches!(b, b'1'..=b'9'));
     match text.parse::<f64>() {
-        Ok(v) if v.is_finite() => Ok(OwnedValue::Float(v)),
+        Ok(v) if v.is_finite() && !(nonzero && v.abs().to_bits() == 0) => Ok(OwnedValue::Float(v)),
         _ => Err(LineFault::BadNumber {
             text: text.to_owned(),
         }),
@@ -392,6 +477,178 @@ mod tests {
         let mut out = Vec::new();
         line(&mut out, 9, 1_786_197_791_427, 0, event);
         Record::decode(&out).unwrap_or_else(|e| panic!("its own bytes did not decode: {e}"))
+    }
+
+    /// A NON-FINITE FLOAT COMES BACK AS A FLOAT, AND TEXT THAT SAYS `NaN`
+    /// STAYS TEXT. satk-5, D-4417.
+    ///
+    /// Until D-4417 the writer put the string `"NaN"` on the line and the
+    /// reader took it back as text, so a statistic that went non-finite was
+    /// indistinguishable from a field that said so and `matches` reported the
+    /// round trip failed. Every non-finite value, both NaN signs included, now
+    /// returns as the same 64 bits; a genuine text `NaN` beside it is
+    /// untouched; a line written before the change still reads, as the text it
+    /// carries; and no other object is accepted in a field's place.
+    #[test]
+    fn a_non_finite_float_round_trips_as_a_float_and_text_saying_nan_stays_text() {
+        for v in [f64::NAN, -f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let event = Event::info("t", "m").with("x", v).with("s", "NaN");
+            let back = round_trip(&event);
+            assert!(back.matches(&event), "{v}: {back:?}");
+            match back.field("x") {
+                Some(&OwnedValue::Float(got)) => assert_eq!(got.to_bits(), v.to_bits()),
+                other => panic!("{v} came back as {other:?}"),
+            }
+            assert_eq!(back.field("s"), Some(&OwnedValue::Str("NaN".to_owned())));
+        }
+
+        let head = r#"{"seq":1,"ms":0,"level":"info","target":"t","msg":"m","fields":"#;
+        let old = format!(r#"{head}{{"x":"NaN"}}}}"#);
+        assert_eq!(
+            Record::decode(old.as_bytes())
+                .expect("an old line reads")
+                .field("x"),
+            Some(&OwnedValue::Str("NaN".to_owned())),
+            "a line written before D-4417 carries text, and reads as text"
+        );
+        let spaced = format!(r#"{head}{{"x": {{ "float" : "-Infinity" }} }}}}"#);
+        assert_eq!(
+            Record::decode(spaced.as_bytes())
+                .expect("spacing is JSON's")
+                .field("x"),
+            Some(&OwnedValue::Float(f64::NEG_INFINITY))
+        );
+        let at = head.len() + r#"{"x":"#.len();
+        for bad in [
+            r#"{"float":"nan"}"#,
+            r#"{"int":"NaN"}"#,
+            r#"{"float":"1.5"}"#,
+        ] {
+            let line = format!(r#"{head}{{"x":{bad}}}}}"#);
+            assert_eq!(
+                Record::decode(line.as_bytes()),
+                Err(LineFault::Unexpected { at, found: b'{' }),
+                "{bad} is refused where it opens"
+            );
+        }
+        for bad in [
+            r#"{"float":1}"#,
+            r#"{"float":"NaN","y":1}"#,
+            r"{}",
+            r#"{"float""#,
+        ] {
+            let line = format!(r#"{head}{{"x":{bad}}}}}"#);
+            assert!(Record::decode(line.as_bytes()).is_err(), "{bad} is refused");
+        }
+    }
+
+    /// A LINE THAT SAYS ONE THING TWICE IS REFUSED, NAMING THE KEY, AND A
+    /// LINE THIS CRATE WROTE NEVER DOES. satk-6, D-4418.
+    ///
+    /// The audit's probe P19, kept. Every line key, repeated, used to decode
+    /// with the last copy winning — an `error` line followed by a second
+    /// `"level":"trace"` read as trace and fell under a level filter — and a
+    /// repeated field key was kept twice with `field` answering the first.
+    /// Each is now `RepeatedKey`. A key a later build added may repeat: it is
+    /// stepped over, so nothing reads either copy. A literal too small for an
+    /// f64 is refused like one too large, while a written zero stays zero.
+    #[test]
+    fn a_repeated_key_is_refused_by_name_and_the_writer_never_repeats_one() {
+        let one = r#""seq":1,"ms":0,"level":"error","target":"t","msg":"m","fields":{"a":1}"#;
+        assert!(Record::decode(format!("{{{one}}}").as_bytes()).is_ok());
+        for (key, again) in [
+            ("seq", r#""seq":99"#),
+            ("run", r#""run":1,"run":2"#),
+            ("ms", r#""ms":5"#),
+            ("ts", r#""ts":"a","ts":"b""#),
+            ("level", r#""level":"trace""#),
+            ("target", r#""target":"other""#),
+            ("msg", r#""msg":"n""#),
+            ("cut", r#""cut":true,"cut":false"#),
+            ("dropped", r#""dropped":1,"dropped":2"#),
+            ("fields", r#""fields":{"b":2}"#),
+        ] {
+            let line = format!("{{{one},{again}}}");
+            assert_eq!(
+                Record::decode(line.as_bytes()),
+                Err(LineFault::RepeatedKey {
+                    key: key.to_owned()
+                }),
+                "{line}"
+            );
+        }
+        let later = format!(r#"{{{one},"later":1,"later":{{"x":[1]}}}}"#);
+        assert!(
+            Record::decode(later.as_bytes()).is_ok(),
+            "a key this build does not read is stepped over, copies and all"
+        );
+
+        let head = r#"{"seq":1,"ms":0,"level":"info","target":"t","msg":"m","fields":"#;
+        let twice = format!(r#"{head}{{"a":1,"b":2,"a":2}}}}"#);
+        assert_eq!(
+            Record::decode(twice.as_bytes()),
+            Err(LineFault::RepeatedKey {
+                key: "a".to_owned()
+            })
+        );
+
+        // THE WRITER NEVER WRITES A KEY TWICE: a repeat — the same key, or a
+        // longer one cut to the same spelling — keeps the FIRST value and is
+        // counted in `dropped`, as a field past the ceiling is, so its own
+        // lines always read back and say a field was not kept.
+        let event = Event::info("t", "m")
+            .with("a", 1_i64)
+            .with("b", 2_i64)
+            .with("a", 3_i64);
+        assert_eq!((event.fields().len(), event.dropped_fields()), (2, 1));
+        let back = round_trip(&event);
+        assert!(back.matches(&event), "{back:?}");
+        assert_eq!(
+            back.fields,
+            vec![
+                ("a".to_owned(), OwnedValue::Int(1)),
+                ("b".to_owned(), OwnedValue::Int(2))
+            ]
+        );
+        assert_eq!(back.dropped_fields, 1);
+        let prefix = "p".repeat(crate::event::MAX_KEY_BYTES);
+        let (one, two) = (format!("{prefix}one"), format!("{prefix}two"));
+        let cut = Event::info("t", "m").with(&one, 1_i64).with(&two, 2_i64);
+        assert_eq!((cut.fields().len(), cut.dropped_fields()), (1, 1));
+        let back = round_trip(&cut);
+        assert!(back.cut && back.dropped_fields == 1, "{back:?}");
+        let near = Event::info("t", "m").with(&prefix, 1_i64).with("p", 2_i64);
+        assert_eq!(
+            (near.fields().len(), near.dropped_fields()),
+            (2, 0),
+            "a different spelling is a different field"
+        );
+
+        // AN UNDERFLOWING LITERAL IS REFUSED; A WRITTEN ZERO IS NOT.
+        for text in ["1e-400", "-2.5e-999", "0.0000001e-330"] {
+            let line = format!(r#"{head}{{"x":{text}}}}}"#);
+            assert_eq!(
+                Record::decode(line.as_bytes()),
+                Err(LineFault::BadNumber {
+                    text: text.to_owned()
+                }),
+                "{text}"
+            );
+        }
+        for (text, want) in [
+            ("0.0", 0.0_f64),
+            ("-0.0", -0.0),
+            ("0e-999", 0.0),
+            ("5e-324", 5e-324),
+        ] {
+            let line = format!(r#"{head}{{"x":{text}}}}}"#);
+            match Record::decode(line.as_bytes()).expect(text).field("x") {
+                Some(&OwnedValue::Float(got)) => {
+                    assert_eq!(got.to_bits(), want.to_bits(), "{text}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
     }
 
     /// AN EVENT SURVIVES THE FILE, FIELD FOR FIELD.
@@ -460,9 +717,10 @@ mod tests {
     #[test]
     fn a_cut_line_and_a_dropped_field_come_back_saying_so() {
         let long = "x".repeat(4_000);
+        let keys: Vec<String> = (0..20).map(|i| format!("k{i}")).collect();
         let mut event = Event::info("t", &long);
-        for _ in 0..20 {
-            event = event.with("k", 1u32);
+        for key in &keys {
+            event = event.with(key, 1u32);
         }
         let back = round_trip(&event);
         assert!(back.cut, "the message was cut and the line must say so");

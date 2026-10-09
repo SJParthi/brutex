@@ -1618,6 +1618,24 @@ impl Candidate {
             .map_or(self.cross.refused() > 0, |hole| hole <= exit_offset);
         self.block_only || crossing_hole || self.hole.is_some_and(|hole| hole <= exit_offset)
     }
+
+    /// The offset from `entry` at which this path's TIME exit falls due: its
+    /// last held bar, or the walk's located hole when that lies past it
+    /// (D-4500).
+    ///
+    /// The two differ on exactly one shape. A path whose slice, or whose 15:09
+    /// proof, ended before its deadline holds every bar through `time_exit`
+    /// and has its time exit one PAST it, so the walk records the hole there
+    /// ([`crate::trade::Occupancy::time_unpriced_at`]). Reading the time exit at
+    /// `time_exit` would price a level-less variant at the data's last minute
+    /// -- the manufactured square-off RULE 1c of `crate::trade::walk` refuses --
+    /// and would offer that bar's open as a time-exit attribution beside a
+    /// target touched there. Every other path's hole is at or before
+    /// `time_exit`, so this is `time_exit - entry` unchanged. O(1): two reads.
+    fn timed_at(&self) -> usize {
+        let span = self.time_exit.saturating_sub(self.entry);
+        self.hole.map_or(span, |hole| hole.max(span))
+    }
 }
 
 /// The pessimistic exit offset of variant `v` on candidate `c`: the first of
@@ -1626,7 +1644,9 @@ impl Candidate {
 /// so the two cannot disagree about which exit a hole is compared with. O(1),
 /// UNVERIFIED as a measurement; `docs/06-limits.md` states it (D-1514).
 fn pessimistic_offset(c: &Candidate, v: Variant, trails_rungs: &[Ppm]) -> usize {
-    let span = c.time_exit.saturating_sub(c.entry);
+    // `timed_at`, not `time_exit - entry` (D-4500): a path cut before its
+    // deadline has no time exit on any bar it holds.
+    let span = c.timed_at();
     let stop_at = v.stop.map_or(NEVER, |r| c.cross.stop_at(r));
     let target_at = v.target.map_or(NEVER, |r| c.cross.target_at(r));
     let live = Trailing::live(&c.cross, v.tsl, trails_rungs);
@@ -4542,11 +4562,7 @@ fn one_variant(
             live,
             armed,
         };
-        let choices = ExitChoices::of(
-            firing,
-            pess_off,
-            pess_off == c.time_exit.saturating_sub(c.entry),
-        );
+        let choices = ExitChoices::of(firing, pess_off, pess_off == c.timed_at());
         // NO `entry_price` HERE ANY MORE, AND ITS ABSENCE IS THE FIX.
         //
         // This read the execution bar's OPEN and handed the SAME price to both
@@ -6155,6 +6171,7 @@ mod exit_family_tests {
             priceable: true,
             first_refused: None,
             first_missing: None,
+            time_unpriced_at: None,
             priceable_before_hole: false,
         };
         let bar = |price: i64| indicators::Candle {
@@ -9323,6 +9340,76 @@ mod tests {
             "the target is still a reachable fill on that bar"
         );
         assert_eq!(targeted.ambiguous_bars, 1, "two attributions share the bar");
+    }
+
+    /// D-4500. A path whose data, or whose 15:09 proof, ended before its
+    /// deadline has its time exit one PAST its last held bar, where the walk
+    /// locates the hole. On that path a level-less variant has no price at all
+    /// -- the data's last minute is not a square-off -- and a target touched on
+    /// the last held bar is priced as the target alone: no time exit is due on
+    /// that bar to stand beside it as a pessimistic attribution. The same bars
+    /// with the time exit ON bar 2 book the time exit pessimistically, as the
+    /// test above proves.
+    #[test]
+    fn a_path_cut_before_its_deadline_has_no_time_exit_on_its_last_bar() {
+        let bars = vec![
+            candle(0, 100_000, 100_000, 100_000, 100_000),
+            candle(1, 100_000, 100_400, 99_600, 100_000),
+            candle(2, 100_000, 106_000, 99_000, 100_000),
+        ];
+        let fixed = crate::excursion::Ladder::new(vec![50_000]).expect("one rung");
+        let trails = crate::excursion::Ladder::default();
+        let ladders = crate::excursion::Ladders {
+            stops: &fixed,
+            targets: &fixed,
+            trails: &trails,
+        };
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+        let path = |hole| super::Candidate {
+            signal: 0,
+            entry: 0,
+            time_exit: 2,
+            block_only: false,
+            hole,
+            cross: crate::excursion::crossings(&bars, 0, 2, 100_000, Side::Long, ladders),
+            entry_pess,
+            entry_opt,
+        };
+        // A hole AT or before the last held bar leaves `timed_at` the span.
+        for hole in [None, Some(0), Some(1), Some(2)] {
+            assert_eq!(path(hole).timed_at(), 2, "{hole:?}");
+        }
+        assert_eq!(path(Some(3)).timed_at(), 3, "one past the last held bar");
+        let rungs = (fixed.rungs(), fixed.rungs(), trails.rungs());
+        let variant = |target| super::Variant {
+            stop: None,
+            target,
+            tsl: None,
+            ttp: None,
+        };
+        let candidates = vec![path(Some(3))];
+        let baseline =
+            super::one_variant(&bars, &candidates, rungs, variant(None), Side::Long, None);
+        assert_eq!(
+            (baseline.trades, baseline.pessimistic),
+            (0, 0),
+            "a level-less variant on a cut path has no exit price"
+        );
+        let targeted = super::one_variant(
+            &bars,
+            &candidates,
+            rungs,
+            variant(Some(0)),
+            Side::Long,
+            None,
+        );
+        assert_eq!(targeted.trades, 1, "the target before the hole is priced");
+        assert_eq!(
+            (targeted.pessimistic, targeted.optimistic),
+            (5_000, 5_000),
+            "no time exit is due on the last held bar, so the target is the only fill"
+        );
+        assert_eq!(targeted.ambiguous_bars, 0, "one attribution on the bar");
     }
 
     #[test]

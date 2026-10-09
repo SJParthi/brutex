@@ -35,9 +35,11 @@ pub enum Value<'a> {
     Uint(u64),
     /// A float, for the statistics that keep full precision.
     ///
-    /// Never a price. Non-finite values are written as the JSON *strings*
-    /// `"NaN"`, `"Infinity"` and `"-Infinity"`, because JSON has no literal
-    /// for them and a line that is not JSON is a line no consumer can read.
+    /// Never a price. Non-finite values are written as the one-member object
+    /// `{"float":"NaN"}` (or `"-NaN"`, `"Infinity"`, `"-Infinity"`), because
+    /// JSON has no literal for them and a line that is not JSON is a line no
+    /// consumer can read; the reader maps that shape back to a float, so it is
+    /// never mistaken for text (D-4417).
     Float(f64),
     /// A flag.
     Bool(bool),
@@ -221,9 +223,9 @@ impl PartialEq<Value<'_>> for OwnedValue {
             // Bit equality, not numeric equality. `NaN != NaN` numerically, and
             // a round trip that preserved a NaN exactly must still be reported
             // as preserved. Two different NaN payloads compare unequal here,
-            // which is correct: the file carries the word `"NaN"` and nothing
-            // else, so a payload is not preserved and this must not claim it
-            // was.
+            // which is correct: the file carries `NaN` or `-NaN` and nothing
+            // else, so a sign is preserved and a payload is not, and this must
+            // not claim it was. D-4417.
             (&Self::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
             (&Self::Null, Value::Null) => true,
             _ => false,

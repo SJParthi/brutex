@@ -89,7 +89,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
-  import { mergePages, nextOrdinal, olderPageOf, pageFor } from '$lib/audit-pages.js';
+  import { generationOf, generationStep, mergePages, nextOrdinal, olderPageOf, pageFor } from '$lib/audit-pages.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -313,12 +313,12 @@
 
   /**
    * Growth samples. One per successful poll, bounded.
-   * @type {{at:number, bars:number, im:number, gen:number, months:Map<string,number>}[]}
+   * @type {{at:number, bars:number, im:number, gen:number|null, months:Map<string,number>}[]}
    */
   let samples = $state([]);
 
   /** The store as it was when this page opened — the "since you arrived" base. */
-  /** @type {{at:number, bars:number, im:number, gen:number} | null} */
+  /** @type {{at:number, bars:number, im:number, gen:number|null} | null} */
   let base = $state(null);
 
   let live = $state(true);
@@ -401,7 +401,8 @@
         at: body.at,
         bars: body.store.bars,
         im: body.store.instrument_months,
-        gen: body.store.generation ?? 0,
+        // null when no census is held, never 0 (F3, D-3219).
+        gen: generationOf(body.store),
         months
       };
       // The server's own clock decides the ordering. Two answers with the same
@@ -493,19 +494,20 @@
     const span = first && last ? last.at - first.at : 0;
     const dBars = first && last ? last.bars - first.bars : 0;
     const dIm = first && last ? last.im - first.im : 0;
-    const dGen = first && last ? last.gen - first.gen : 0;
+    // null across an unknown generation: no commit count was measured (F3).
+    const dGen = first && last ? generationStep(first.gen, last.gen) : 0;
     const barsPerMin = span > 0 ? (dBars / span) * 60 : null;
 
     // Did anything move between the last TWO answers? That is the strongest
     // evidence available and it is a comparison, not a guess.
     const prev = samples.at(-2);
-    const stepped = prev && last ? last.gen - prev.gen : 0;
+    const stepped = prev && last ? generationStep(prev.gen, last.gen) : 0;
     const steppedBars = prev && last ? last.bars - prev.bars : 0;
 
     /** @type {'moving'|'fresh'|'still'|'unknown'} */
     let state = 'unknown';
     if (!store || store.state !== 'held') state = 'unknown';
-    else if (stepped > 0 || steppedBars > 0 || dGen > 0 || dBars > 0) state = 'moving';
+    else if ((stepped ?? 0) > 0 || steppedBars > 0 || (dGen ?? 0) > 0 || dBars > 0) state = 'moving';
     else if (sinceCommit != null && sinceCommit <= FRESH_SECS) state = 'fresh';
     else state = 'still';
 
@@ -534,7 +536,7 @@
       barsPerMin,
       stepped,
       filling,
-      sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: last.gen - base.gen, secs: last.at - base.at } : null
+      sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: generationStep(base.gen, last.gen), secs: last.at - base.at } : null
     };
   });
 
@@ -1105,7 +1107,7 @@
             </span>
             <span class="sep">·</span>
             <span>
-              the manifest committed <b>{n0(pulse.dGen)}</b> time{pulse.dGen === 1 ? '' : 's'} and the
+              the manifest committed <b>{n0(pulse.dGen ?? Number.NaN)}</b> time{pulse.dGen === 1 ? '' : 's'} and the
               store gained <b>{n0(pulse.dBars)}</b> bars in the last <b>{dur(pulse.span)}</b> — measured,
               not timed
             </span>
@@ -1149,8 +1151,10 @@
             <span class="k">Commits (generation)</span>
             <span class="v">{n0(tGen.v)}</span>
             <span class="n">
-              {#if pulse.sinceOpen && pulse.sinceOpen.gen > 0}
-                +{n0(pulse.sinceOpen.gen)} since you opened this page
+              {#if pulse.sinceOpen && pulse.sinceOpen.gen === null}
+                not comparable: one of the two answers held no census generation
+              {:else if pulse.sinceOpen && (pulse.sinceOpen.gen ?? 0) > 0}
+                +{n0(pulse.sinceOpen.gen ?? Number.NaN)} since you opened this page
               {:else}
                 unchanged since you opened this page
               {/if}
@@ -1733,7 +1737,7 @@
           </li>
           <li>
             Census: <code>{payload.store.manifest}</code> — {payload.store.state}, generation
-            {n0(payload.store.generation ?? 0)}, {n0(payload.store.commits ?? 0)} committed entries.
+            {n0(payload.store.generation ?? Number.NaN)}, {n0(payload.store.commits ?? Number.NaN)} committed entries.
             {#if payload.store.degraded}<b class="down"> {payload.store.degraded}</b>{/if}
           </li>
           <li>

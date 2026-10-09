@@ -209,6 +209,11 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
             "O(n) reads and O(n) memory",
             "`MAX_WINDOW_MONTHS` = 240",
             "the_page_orders_only_itself_wherever_the_offset_lands",
+            "Since D-4439",
+            "`month_fold`",
+            "`MAX_SCAN_WINDOW_RECORDS` = 1,048,576",
+            "p99",
+            "a_ts_window_with_extremes_reads_each_month_once_until_it_moves",
         ],
     );
     let window = item(BARS, "pub fn window(");
@@ -223,6 +228,12 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
         window.contains("page_of(all, offset, limit, order)"),
         "{window}"
     );
+    assert!(
+        window.contains("let fold = month_fold(file, before);"),
+        "a ts window takes its extremes from the kept month folds: {window}"
+    );
+    assert!(window.contains("scan_admitted(total)?;"), "{window}");
+    assert!(BARS.contains("pub const MAX_SCAN_WINDOW_RECORDS: u64 = 1 << 20;"));
     assert!(
         !window.contains("all.sort_by(order)") && !window.contains("want - 1"),
         "nothing outside the page is ordered: {window}"
@@ -290,20 +301,33 @@ fn w1_api5_6_a_filtered_store_page_walks_and_copies_every_entry() {
 }
 
 #[test]
-fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
+fn w1_api5_7_a_scrub_opens_one_page_and_walks_the_log_once_per_snapshot() {
     names(
         "W1-api5-7",
         &[
             "`verify_json`",
             "`Manifest::newest`",
             "O(log length)",
-            "O(E_v) file opens",
-            "corrected",
-            "Since D-2281",
-            "inherent",
+            "Since D-4435",
+            "`MAX_VERIFY_PAGE` = 1,024",
+            "`next_offset`",
+            "`verify_memo`",
+            "p99",
+            "scrub_route_opens_no_more_than_a_page_of_a_larger_counter",
         ],
     );
-    assert!(VERIFY.contains("for entry in manifest.newest() {"));
+    let vendor = item(VERIFY, "pub fn vendor(");
+    assert!(vendor.contains("for entry in page {"), "{vendor}");
+    assert!(
+        vendor.contains("if limit == 0 || limit > MAX_VERIFY_PAGE {"),
+        "{vendor}"
+    );
+    assert!(!vendor.contains(".newest()"), "the page is cut, not walked");
+    assert!(VERIFY.contains("pub const MAX_VERIFY_PAGE: u64 = 1_024;"));
+    assert!(
+        item(VERIFY, "pub fn newest(").contains("Some(Arc::new(manifest.newest()))"),
+        "the log walk is the memo's build"
+    );
     let newest = MANIFEST
         .split_once("    pub fn newest(&self) -> Vec<Entry> {")
         .expect("Manifest::newest")
@@ -315,23 +339,22 @@ fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
         newest.contains("for held in self.log.iter().rev()"),
         "{newest}"
     );
-    assert!(
-        SERVER.contains("/// `O(log length)` in memory plus `O(E_v)` file opens."),
-        "the route's own doc names the log walk"
-    );
     // The scrub runs on the store-read pool, never on the handler's own task
     // (W1-api6-0, D-2281).
     let handler = item(SERVER, "async fn verify_json(");
     assert!(
-        handler.contains("run_store_read(move || verify_reading(&site, feed, &asked))"),
+        handler.contains("verify_reading(&site, feed, &asked, offset, limit)"),
         "{handler}"
     );
+    assert!(handler.contains("run_store_read(move || {"), "{handler}");
     assert!(!handler.contains("crate::verify::vendor("), "{handler}");
     assert!(!handler.contains("census_now("), "{handler}");
+    let reading = item(SERVER, "fn verify_reading(");
     assert!(
-        item(SERVER, "fn verify_reading(")
-            .contains("crate::verify::vendor(&site.store_root, census)")
+        reading.contains("site.verify_memo.of_census(&censuses, 0, feed, || {"),
+        "{reading}"
     );
+    assert!(reading.contains("crate::verify::vendor("), "{reading}");
 }
 
 #[test]
@@ -345,9 +368,29 @@ fn w1_api5_8_a_window_past_the_last_bar_reads_the_month_only_when_unsealed() {
             "zero-filled records",
             "Since D-2280 only in a month born without `FLAG_CHECKSUMS`",
             "`ceil(log2(n_valid + 1))` reads",
+            "Since D-4432",
+            "`last_ts_micros`",
+            "one record read",
+            "bars_json_past_the_headers_last_stamp_reads_one_record",
         ],
     );
     let route = item(SERVER, "async fn bars_json(");
+    assert!(
+        route.contains(
+            "if from_micros.is_some_and(|at| past_the_last_bar(&file, at)) {\n        \
+             return (axum::http::StatusCode::OK, json(), \"[]\".to_owned());"
+        ),
+        "past the header's last stamp, one record read answers: {route}"
+    );
+    let past = item(SERVER, "fn past_the_last_bar(");
+    assert!(
+        past.contains("if from <= header.last_ts_micros {"),
+        "{past}"
+    );
+    assert!(
+        past.contains("file.read_record(last).is_ok_and(|bar| {"),
+        "{past}"
+    );
     assert!(
         route.contains(
             "if landed == Some(held) && file.header().checksums_present() {\n        \

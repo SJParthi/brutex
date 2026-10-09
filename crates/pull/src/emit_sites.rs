@@ -8,8 +8,10 @@
 //! the production helper and then found the record in a file.**
 //!
 //! **THE COUNT IS MEASURED AND THE TABLE DOES NOT COVER ALL OF IT.** This header
-//! said 21 while the crate held 36, and `SITES` holds 36 rows, so the rest
-//! are driven by nothing here. Nothing pins either number -- there is no gate
+//! said 21 while the crate held 36. Measured again on 2026-10-09 (D-4414):
+//! 48 `telemetry::emit(` calls and 45 `SITES` rows, where one emit can need
+//! two rows when its message depends on the outcome (`capture::note_kept`), so
+//! some calls are driven by nothing here. Nothing pins either number -- there is no gate
 //! comparing the table to the crate -- so re-measure rather than trusting this
 //! sentence: `grep -c "telemetry::emit(" crates/pull/src/*.rs`. The gap is
 //! stated because a registry that looks exhaustive and is not is worse than one
@@ -560,6 +562,25 @@ static SITES: &[Site] = &[
         drive: drive_capture_refused,
     },
     Site {
+        // A KEPT BODY IS NAMED, SO A REFUSAL'S EVIDENCE CAN BE FOUND FROM THE
+        // LOG. Both callers drop the path `record_unreadable` returns, so this
+        // line is the only place the file is named (sobs-11, D-4414).
+        at: "crates/pull/src/capture.rs — note_kept, durable",
+        target: "pull.capture",
+        message: "vendor body kept",
+        says: ("path", Says::Holds("captures")),
+        drive: drive_capture_kept,
+    },
+    Site {
+        // AND A NAME THE DIRECTORY SYNC COULD NOT MAKE DURABLE IS SAID, at
+        // `Warn` and with the reason, rather than reported as kept.
+        at: "crates/pull/src/capture.rs — note_kept, name not durable",
+        target: "pull.capture",
+        message: "vendor body kept, and its name may not survive a power cut",
+        says: ("why", Says::Holds("may not survive a power cut")),
+        drive: drive_capture_kept_unsynced,
+    },
+    Site {
         // THE CORRECTION D-0332 MAKES, PROVEN TO REACH A FILE.
         //
         // Without this row `cargo mutants` replaces `note_volumes_corrected`
@@ -973,6 +994,41 @@ fn drive_capture_refused(scratch: &Scratch) {
         )
         .is_none(),
         "the vendor answer survives, but its diagnostic could not be written"
+    );
+}
+
+/// A real capture of an unreadable body, kept and named.
+fn drive_capture_kept(scratch: &Scratch) {
+    let kept = crate::capture::record_unreadable(
+        &scratch.root,
+        crate::vendor::Feed::TrueData,
+        "https://example.invalid/evidence",
+        "{}",
+        "the decoder refused it",
+    )
+    .expect("the first unreadable body is inside the budget");
+    assert!(kept.starts_with(scratch.root.join("captures")), "{kept:?}");
+}
+
+/// A real capture into a directory that takes the file and cannot be opened,
+/// so its fsync fails for real. The test runs where the mode bits bind.
+fn drive_capture_kept_unsynced(scratch: &Scratch) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = scratch.root.join("captures");
+    fs::create_dir_all(&dir).expect("the capture directory");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).expect("the directory is shut");
+    let kept = crate::capture::record(
+        &scratch.root,
+        crate::vendor::Feed::Gdfl,
+        crate::capture::Method::Get,
+        "https://example.invalid/evidence",
+        "{}",
+    );
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .expect("the directory is reopened");
+    assert!(
+        kept.is_some(),
+        "the bytes landed, so the path is returned whatever the name's fate"
     );
 }
 

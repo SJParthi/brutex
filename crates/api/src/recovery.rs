@@ -531,10 +531,16 @@ async fn prepare_reply(site: Loaded, asked: Submission, headers: JsonHeaders) ->
     let predecessor = asked.successor.as_ref().map(|(id, _)| hex(*id));
     // Journal syncs can take time. The blocking worker also survives a browser
     // disconnect; it still cannot claim a run or reach any source/vendor path.
-    let prepared = tokio::task::spawn_blocking(move || prepare_successor(&site, &asked))
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
+    // NAMED INSIDE THE WORKER, which a browser disconnect does not cancel, so
+    // the refusal reaches the log whether or not anybody reads the reply.
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_successor(&site, &asked).inspect_err(|why| {
+            note_blocked(StatusCode::SERVICE_UNAVAILABLE, "prepare", Some(id), why);
+        })
+    })
+    .await
+    .map_err(|dead| task_died("prepare", id, &dead))
+    .and_then(|result| result);
     match prepared {
         Ok(()) => (StatusCode::CREATED, headers, serde_json::json!({
             "started":false,"prepared":true,"plan":hex(id),"windows":count,
@@ -618,6 +624,7 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     let asked = match result {
         Ok(asked) => asked,
         Err(why) => {
+            note_blocked(StatusCode::BAD_REQUEST, "request", None, &why);
             return (
                 StatusCode::BAD_REQUEST,
                 headers,
@@ -640,7 +647,13 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     // on the blocking pool. This probe is one lock read and is advisory only:
     // `claim` below stays the authority, so a run that starts between the two
     // is still refused there. P1-04-04, D-2592.
+    //
+    // AND IT IS A REFUSAL LIKE `claim`'s, SO IT IS LOGGED LIKE ONE: stage
+    // `slot`, the plan named (sobs-8, D-4448). Without this the probe turned
+    // the logged 409 back into a silent one. D-2592 and D-4448 met here;
+    // D-4628.
     if slot_running(&site) {
+        note_blocked(StatusCode::CONFLICT, "slot", Some(id), TWICE);
         return (
             StatusCode::CONFLICT,
             headers,
@@ -649,7 +662,9 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     }
     let preflight_site = Loaded::clone(&site);
     let preflight = tokio::task::spawn_blocking(move || {
-        preflight_submission(&preflight_site, &asked)?;
+        preflight_submission(&preflight_site, &asked).inspect_err(|why| {
+            note_blocked(StatusCode::SERVICE_UNAVAILABLE, "preflight", Some(id), why);
+        })?;
         Ok::<_, String>(asked)
     })
     .await
@@ -667,6 +682,7 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
         }
     };
     if let Err(why) = claim(&site, Some((id, true))) {
+        note_blocked(StatusCode::CONFLICT, "slot", Some(id), &why);
         return (
             StatusCode::CONFLICT,
             headers,
@@ -677,9 +693,11 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     // seed syncs must not leave a claimed run with no worker. The response
     // still waits for the durable activation result, not mere acceptance.
     let units = asked.successor.is_none().then_some(asked.units);
+    // `activate_durable` names its own refusal, inside the detached task; a
+    // task that died before it could is named here.
     let prepared = tokio::spawn(activate_durable(site, id, units))
         .await
-        .map_err(failure)
+        .map_err(|dead| task_died("activation", id, &dead))
         .and_then(|result| result);
     if let Err(why) = prepared {
         return (
@@ -715,11 +733,62 @@ async fn activate_durable(
             update(&site, |progress| {
                 progress.finished = Some(format!("Recovery BLOCKED: {why}"));
             });
+            note_blocked(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "activation",
+                Some(id),
+                &why,
+            );
             return Err(why);
         }
     };
     let _task = tokio::spawn(drive(site, id, Ok(prepared), true));
     Ok(())
+}
+
+/// A recovery that was asked for and did not start, with why, on the surface
+/// that outlives the reply (sobs-8, D-4448).
+///
+/// # What was kept only in memory
+///
+/// Every refusal of `/pull/recovery` (a body that is not a plan, a preflight
+/// the saved history refuses, a run slot already held, a preparation refused,
+/// an activation BLOCKED) was the HTTP reply's `why` and, for a blocked
+/// activation, `Progress::finished`, which the next press overwrites and a
+/// restart loses. `api.request` logs the status and never the reason. One
+/// event per refused request, at the boundary: never per window.
+///
+/// `Error` for a refusal on this server's side (5xx), `Warn` for one the
+/// request can fix (4xx). `stage` names which check refused; `plan` is the
+/// plan's 64-hex identity, or empty when the body never named one.
+fn note_blocked(code: StatusCode, stage: &str, plan: Option<[u8; 32]>, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if code.is_server_error() {
+                telemetry::Level::Error
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.recovery",
+            "recovery blocked",
+        )
+        .with("stage", telemetry::Value::Str(stage))
+        .with("status", telemetry::Value::Uint(u64::from(code.as_u16())))
+        .with(
+            "plan",
+            telemetry::Value::Str(&plan.map_or_else(String::new, hex)),
+        )
+        .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// A recovery task that ended before it could name its own refusal (a panic
+/// in a build that unwinds, or a runtime shutting down): the runtime's words,
+/// logged once with the stage it died in, and returned for the reply.
+fn task_died(stage: &str, id: [u8; 32], dead: &tokio::task::JoinError) -> String {
+    let why = failure(dead);
+    note_blocked(StatusCode::SERVICE_UNAVAILABLE, stage, Some(id), &why);
+    why
 }
 
 /// Only an already-seeded, explicitly activated plan may resume at boot.
@@ -2613,6 +2682,171 @@ mod tests {
         );
         drop(attempts);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// sobs-8, D-4448: A RECOVERY TASK THAT DIES BEFORE IT CAN NAME ITS
+    /// REFUSAL IS NAMED FOR IT, with the runtime's words, the stage and the
+    /// plan, and the same words go back to the reply.
+    #[tokio::test]
+    async fn a_recovery_task_that_dies_is_named_with_its_stage() {
+        let _installed = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        let dead = tokio::spawn(async { panic!("sobs8 task panic") })
+            .await
+            .expect_err("the task panicked");
+        let why = task_died("activation", [0x5a; 32], &dead);
+        assert!(why.contains("sobs8 task panic"), "{why}");
+        let logged: Vec<_> = crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+            .into_iter()
+            .filter(|event| crate::emitted::says(event, "why", "sobs8 task panic"))
+            .collect();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let event = &logged[0];
+        assert_eq!(event.level, telemetry::Level::Error);
+        assert!(crate::emitted::says(event, "stage", "activation"));
+        assert!(crate::emitted::counts(event, "status", 503));
+        assert!(crate::emitted::says(event, "plan", &hex([0x5a; 32])));
+    }
+
+    /// sobs-8, D-4448: EVERY REFUSED RECOVERY NAMES ITS REASON IN THE LOG, not
+    /// only in the reply and in memory: a body that is not a plan (Warn), a
+    /// held run slot (Warn), a preflight the history refuses (Error), a
+    /// refused preparation (Error) and a BLOCKED activation (Error), each one
+    /// `pull.recovery` "recovery blocked" carrying its stage, plan and why.
+    #[tokio::test]
+    async fn every_refused_recovery_names_its_stage_and_reason_in_the_log() {
+        let _installed = crate::emitted::sink();
+        let blocked = |from: u64, stage: &str| -> Vec<telemetry::Record> {
+            crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+                .into_iter()
+                .filter(|event| crate::emitted::says(event, "stage", stage))
+                .collect()
+        };
+
+        // A BODY THAT IS NOT A PLAN: 400, Warn, no plan named.
+        let root = crate::scratch::path("sobs8-request");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let from = crate::emitted::mark();
+        let (status, _, answer) =
+            start(State(Loaded::clone(&site)), "invalid=sobs8".to_owned()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        let request: Vec<_> = blocked(from, "request")
+            .into_iter()
+            .filter(|event| crate::emitted::counts(event, "status", 400))
+            .collect();
+        assert!(!request.is_empty(), "the malformed body is logged");
+        assert!(
+            request
+                .iter()
+                .all(|event| event.level == telemetry::Level::Warn)
+        );
+        let reply: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert!(
+            request.iter().any(|event| crate::emitted::says(
+                event,
+                "why",
+                reply["why"].as_str().unwrap()
+            )),
+            "the reply's own reason is the logged one: {request:?}"
+        );
+
+        // A HELD RUN SLOT: 409, Warn, the plan named.
+        let scratch = crate::scratch::path("sobs8-slot");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let site = Loaded::new(Site::load(&scratch.join("missing-masters"), &scratch));
+        let selected = leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30));
+        let body = encoded_leg(&selected);
+        let id = scope_identity(&plan(vec![selected], today()).unwrap());
+        claim(&site, None).unwrap();
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        let slot = blocked(from, "slot");
+        assert!(
+            slot.iter()
+                .any(|event| event.level == telemetry::Level::Warn
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(event, "why", "already owns the run slot")),
+            "{slot:?}"
+        );
+        std::fs::remove_dir_all(&scratch).unwrap();
+
+        // A PREFLIGHT THE SAVED HISTORY REFUSES: 503, Error.
+        let (scratch, site, body, id) = missing_fixture("sobs8-preflight");
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), body.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let preflight = blocked(from, "preflight");
+        assert!(
+            preflight
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::counts(event, "status", 503)
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(event, "why", "original window states")),
+            "{preflight:?}"
+        );
+
+        // A PREPARATION REFUSED: the predecessor was never activated here.
+        let request = successor_form(&body, [3; 32], [4; 32], true);
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(
+            !blocked(from, "request").is_empty(),
+            "a successor naming another scope is refused as a request: {answer}"
+        );
+        let request = successor_form(&body, id, [4; 32], true);
+        let fresh = crate::scratch::path("sobs8-prepare");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let empty = Loaded::new(Site::load(&fresh.join("missing-masters"), &fresh));
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&empty)), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let prepare = blocked(from, "prepare");
+        assert!(
+            prepare
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::says(
+                        event,
+                        "why",
+                        "not recorded in active recovery history"
+                    )),
+            "{prepare:?}"
+        );
+        std::fs::remove_dir_all(&fresh).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
+
+        // A BLOCKED ACTIVATION: the source store is not a directory.
+        let gone = crate::scratch::path("sobs8-activation");
+        let site = Loaded::new(Site::load(
+            &gone.join("missing-masters"),
+            &gone.join("absent"),
+        ));
+        let id = key("sobs8 activation fixture");
+        let from = crate::emitted::mark();
+        let refused = activate_durable(Loaded::clone(&site), id, Some(Vec::new()))
+            .await
+            .expect_err("a missing store root blocks the activation");
+        let activation = blocked(from, "activation");
+        assert!(
+            activation
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(
+                        event,
+                        "why",
+                        "configured source store is unavailable"
+                    )),
+            "{activation:?}"
+        );
+        assert!(
+            refused.contains("configured source store is unavailable"),
+            "{refused}"
+        );
+        assert!(!gone.join("absent").exists(), "nothing was created");
     }
 
     /// audit-20261003 hunt-api-4, D-1584: ONE RETIRED SYMBOL CANNOT BLOCK

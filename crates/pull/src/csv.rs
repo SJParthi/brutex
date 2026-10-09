@@ -600,7 +600,7 @@ fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
     // AND ON STDERR WHEN SOMETHING WAS DEGRADED, the same pair the JSON
     // decoders' `note_negative_volume_bars` writes (CE-57, D-2681).
     if degraded(tally) {
-        eprintln!(
+        let _printed = telemetry::stderr_line(format_args!(
             "brutex: a {}-field CSV file decoded {rows} row(s) with {} unreadable \
              volume(s) stored as 0, {} unreadable open interest(s) stored absent, \
              and {} negative volume(s) and {} negative open interest(s) skipped",
@@ -609,7 +609,7 @@ fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
             tally.unreadable_open_interest,
             tally.negative_volume,
             tally.negative_open_interest
-        );
+        ));
     }
 }
 

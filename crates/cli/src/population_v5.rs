@@ -2363,6 +2363,21 @@ impl PopulationV5Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("Population V5 root changed while child files opened".to_owned());
             }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock. Receipt-last, so bytes past the last whole
+                // record were never acknowledged; a whole record is never cut.
+                for (file, path, stride) in [
+                    (&row_file, &row_path, POPULATION_V5_ROW_BYTES),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        POPULATION_V5_COMPLETION_BYTES,
+                    ),
+                ] {
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride as u64, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let row_generation = file_generation(&row_file, &row_path, bounds.max_row_bytes())?;
             let completion_generation = file_generation(
@@ -5424,6 +5439,38 @@ mod tests {
             panic!("ragged row file must refuse");
         };
         assert!(ragged_refusal.contains("ragged"));
+    }
+
+    /// rnew-1, D-4460: a process killed while writing a row or the Completion
+    /// leaves a sub-record tail. A reader still refuses it; the next writer
+    /// cuts it, says so once, and keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_in_either_file_is_cut_by_the_writer_and_history_kept() {
+        let root = TestRoot::new("kill-torn");
+        let receipt = {
+            let mut writer =
+                PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer opens");
+            writer
+                .append(&prepared(1, 1))
+                .expect("fixture writes")
+                .receipt()
+        };
+        let rows = root.path().join(ROW_FILE);
+        let completions = root.path().join(COMPLETION_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[
+                (rows.as_path(), POPULATION_V5_ROW_BYTES as u64),
+                (completions.as_path(), POPULATION_V5_COMPLETION_BYTES as u64),
+            ],
+            &mut || {
+                let opened = PopulationV5Ledger::open_read(root.path(), bounds())?;
+                Ok(format!(
+                    "{:?}",
+                    opened.structural_receipt(&receipt.population_id())?
+                ))
+            },
+            &mut || PopulationV5Ledger::open_write(root.path(), bounds()).map(drop),
+        );
     }
 
     #[cfg(unix)]

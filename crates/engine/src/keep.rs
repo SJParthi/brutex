@@ -17,7 +17,7 @@
 //! because `Sweep::levels` keeps every survivor for a ranker that wants only
 //! the top `keep`."** This module is the other half of that sentence.
 //!
-//! # Two things are bounded here and they are DIFFERENT bounds
+//! # What is bounded here, and what is not
 //!
 //! [`Streamed`] bounds what the ENGINE holds. A walk that streams keeps two
 //! levels alive at once — the one being joined from and the one being built —
@@ -26,40 +26,35 @@
 //! by that vector's length. The survivors themselves are handed to the caller
 //! at the level boundary and then dropped.
 //!
-//! [`Best`] bounds what a CALLER holds. It is a fixed-capacity retention over
-//! [`crate::Itemset`], ordered by `(hits, mask.words())` descending, and it is
-//! offered as a ready-made sink for callers that do not want to write one. A
-//! caller with a better score than support — `runner::rank` scores by forward
-//! edge, which this crate cannot compute and must not pretend to — feeds its
-//! own heap from the same boundary instead.
+//! What a CALLER holds is the caller's own sink. `runner::rank` scores by
+//! forward edge, which this crate cannot compute and must not pretend to, and
+//! feeds its own heap from the same boundary. This module used to offer a
+//! ready-made fixed-capacity retention ordered by support, `Best`; no
+//! production path ever constructed it (D-0762), its admission was O(log cap)
+//! and never timed, and D-4480 removed it with its tests rather than keep an
+//! unmeasured cost on a path nothing runs.
 //!
-//! # NEITHER IS A DEPTH PARAMETER, and the distinction is testable
+//! # NOT A DEPTH PARAMETER, and the distinction is testable
 //!
-//! `CLAUDE.md` §6 bans a `k` on the sweep, and a retention cap will be read as
+//! `CLAUDE.md` §6 bans a `k` on the sweep, and a retention will be read as
 //! one, so: the ladder still walks upward from k=1 and its normal completion is
 //! still the frequent frontier becoming empty. Its existing candidate or pair
 //! budget may refuse first, loudly, exactly as on the retaining path. Nothing
-//! here is consulted by the join, by the subset prune, by the support test or
-//! by either budget. A cap of zero and a cap past the widest level walk the
-//! **same ladder to the same depth and produce the same [`Tally`] for every
-//! level** — which is not an argument, it is
-//! `engine::keep::a_cap_of_zero_and_a_generous_cap_walk_the_same_ladder`.
+//! the sink does is consulted by the join, by the subset prune, by the support
+//! test or by either budget. A sink that keeps nothing and one that keeps every
+//! survivor walk the **same ladder to the same depth and produce the same
+//! [`Tally`] for every level** — which is not an argument, it is
+//! `engine::keep::a_sink_that_keeps_nothing_and_one_that_keeps_everything_walk_the_same_ladder`.
 //!
 //! # The narrowing is REPORTED, never absorbed
 //!
-//! `CLAUDE.md` §4 bans a fallback that hides a failure. A cap that refuses a
-//! survivor has genuinely narrowed the answer, so both numbers are carried out
-//! of the walk beside the result: [`Streamed::streamed`] is every survivor the
-//! engine handed over and dropped, and [`Best::discarded`] is every one the cap
-//! refused. `engine::keep::every_offer_is_either_held_or_counted_as_discarded`
-//! pins the identity that makes them readable — offered = held + discarded
-//! for distinct offers — and
-//! `engine::keep::a_repeated_mask_is_held_once_and_counted` the full one,
-//! offered = held + discarded + repeated (D-1497).
+//! `CLAUDE.md` §4 bans a fallback that hides a failure. A sink that drops a
+//! survivor has genuinely narrowed what the caller holds, so the number of
+//! survivors handed over is carried out of the walk beside the result:
+//! [`Streamed::streamed`] is every survivor the engine handed over and dropped,
+//! and a caller that keeps fewer can state the difference against it.
 
-use std::collections::TryReserveError;
-
-use crate::{Excluded, Frontier, Halt, Itemset};
+use crate::{Excluded, Frontier, Halt};
 
 /// One level's five exits, WITHOUT the survivors themselves.
 ///
@@ -186,335 +181,13 @@ impl Streamed {
     }
 }
 
-/// Does `a` rank below `b`, and is that order derived from the CANDIDATE?
-///
-/// `(hits, mask.words())` ascending. `[u64; 6]` has a total order, so two
-/// itemsets compare equal only when they are the same itemset — a mask is
-/// unique within a level and its popcount names the level, so it is unique
-/// across the whole walk. A strict total order has exactly one sorted sequence
-/// whatever order its elements arrived in, which is what makes this retention
-/// reproducible under `CLAUDE.md` §3 rule 5.
-///
-/// An insertion-order tiebreak would not be. `crate::drain` spreads support
-/// counting across every core and `runner` walks eight rungs at once, so
-/// arrival order is a property of the schedule and the schedule is not part of
-/// the answer.
-fn ranks_below(a: &Itemset, b: &Itemset) -> bool {
-    (a.hits, a.mask.words()) < (b.hits, b.mask.words())
-}
-
-/// [`ranks_below`] asked of two slots, by index.
-///
-/// # Why it takes indices and answers `false` off the end
-///
-/// So the out-of-range answer is REACHABLE from a test. Every caller below is a
-/// sift step whose indices are already in range, so that arm cannot fire in
-/// production — and an arm no fixture can enter is the coverage hole
-/// `CLAUDE.md` §9 refuses and, worse, a decision nobody has ever seen made.
-/// `crate::cannot_grow` takes its growth amount as a parameter for the same
-/// reason and says so in its own doc.
-///
-/// `false` and not a panic: "there is nothing at that index" is honestly "the
-/// one at `lower` does not rank below it", and it stops a sift rather than
-/// ending a run. It is also what makes the sift's `swap` calls sound — a `true`
-/// answer is proof that both slots exist.
-fn weaker(held: &[Itemset], lower: usize, upper: usize) -> bool {
-    match (held.get(lower), held.get(upper)) {
-        (Some(l), Some(u)) => ranks_below(l, u),
-        _ => false,
-    }
-}
-
-/// The best `cap` itemsets offered, in memory proportional to `cap`.
-///
-/// # What it is, in one line
-///
-/// A binary min-heap of fixed capacity: the weakest retained itemset sits at
-/// the root, so an offer is one comparison to reject and a sift to admit.
-///
-/// # Why the heap is written out rather than taken from `std`
-///
-/// `std::collections::BinaryHeap` is the obvious tool and is what
-/// `runner::rank` uses. CI gate 11 rule 4 counts that type's name in non-test
-/// source against a per-file allowlist, and this crate's entry is pinned at
-/// what it measures today. Raising it is a `.github/workflows/ci.yml` edit, and
-/// the reason gate 11 states for keeping its escape hatch in the gate and never
-/// in the code is exactly the reason a session that adds a construct must not
-/// also widen the list that would have refused it.
-///
-/// So the sift is spelled out here, which costs about forty lines and buys one
-/// thing the standard heap could not have given anyway: [`Self::discarded`], a
-/// count of what the cap refused, which a plain heap has no place to keep.
-///
-/// **This is not a depth control.** See the module header: a cap of zero walks
-/// the same ladder as a cap of a million.
-///
-/// **No production path calls this.** No shipping source in this crate
-/// constructs it and no other crate's `src` names it: `runner::rank` feeds its
-/// own heap, so no run's retention, ranking or report depends on this type.
-/// `engine/tests/production_callers.rs` fails the day a caller appears (D-0762).
-///
-/// **A mask is held at most once (v4-4, D-1497).** The heap orders by
-/// `(hits, mask)` and assumed every offer was a distinct itemset, so offering
-/// one itemset twice while there was room held it twice and later pushed a
-/// distinct one out. A set of the held masks now refuses a repeat, which is
-/// counted in [`Self::repeated`] rather than held or discarded.
-#[derive(Clone, Debug, Default)]
-pub struct Best {
-    cap: usize,
-    held: Vec<Itemset>,
-    /// The masks in `held`, so a repeat is found by one hash probe instead of
-    /// a scan of the heap. Expected, not worst-case, and UNVERIFIED as a
-    /// measured figure: no bench row times it (D-1497).
-    masks: crate::MaskSet,
-    discarded: u64,
-    repeated: u64,
-}
-
-impl Best {
-    /// A retention that will hold at most `cap` itemsets.
-    ///
-    /// Zero is a legal cap and is not raised to one, unlike
-    /// [`crate::Ladder::with_min_hits`]'s threshold. A threshold of zero
-    /// switches OFF the extinction that ends the walk; a retention of zero
-    /// simply keeps nothing, counts everything it was offered in
-    /// [`Self::discarded`], and changes no other number anywhere.
-    ///
-    /// The vector and the mask set are reserved to `cap` here, because that is
-    /// what the type promises to hold and growing to it by doubling would
-    /// overshoot the bound the caller asked for.
-    ///
-    /// # Errors
-    ///
-    /// [`TryReserveError`] when the allocator refuses `cap` itemsets, or `cap`
-    /// overflows the allocation size. This was an infallible
-    /// `Vec::with_capacity`, which panics past `isize::MAX` bytes and aborts
-    /// when the allocator refuses (W3-engine1-4, D-1497); `CLAUDE.md` §4 wants
-    /// the refusal named, the way the engine's own [`crate::Halt::Memory`]
-    /// names it.
-    pub fn try_with_capacity(cap: usize) -> Result<Self, TryReserveError> {
-        let mut held = Vec::new();
-        held.try_reserve_exact(cap)?;
-        // One more than `cap`: a full retention inserts the candidate's mask
-        // before it knows whether the candidate stays.
-        let mut masks = crate::MaskSet::default();
-        masks.try_reserve(cap.saturating_add(1))?;
-        Ok(Self {
-            cap,
-            held,
-            masks,
-            discarded: 0,
-            repeated: 0,
-        })
-    }
-
-    /// The cap this retention was built with.
-    #[must_use]
-    pub const fn cap(&self) -> usize {
-        self.cap
-    }
-
-    /// How many itemsets are held.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.held.len()
-    }
-
-    /// Is nothing held?
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.held.is_empty()
-    }
-
-    /// **Every itemset the cap refused**, across every offer.
-    ///
-    /// A caller that reports a top list without this number is claiming the
-    /// list is the whole frequent set. It is the count `CLAUDE.md` §4 requires
-    /// beside a narrowed answer, and it counts an EVICTION as well as an
-    /// outright rejection: an itemset admitted at one moment and pushed out by
-    /// a stronger one later is just as absent from the result.
-    #[must_use]
-    pub const fn discarded(&self) -> u64 {
-        self.discarded
-    }
-
-    /// **Every offer of a mask already held**, refused without touching the
-    /// heap (v4-4, D-1497).
-    ///
-    /// Neither held again nor counted in [`Self::discarded`]: the combination
-    /// it names IS in the result, once. So offered = held + discarded +
-    /// repeated. A mask offered again after it was evicted is not held, so it
-    /// is weighed like any offer and, if refused, counted in `discarded` again.
-    #[must_use]
-    pub const fn repeated(&self) -> u64 {
-        self.repeated
-    }
-
-    /// Offer one itemset.
-    ///
-    /// Refused and counted in [`Self::repeated`] when its mask is already held.
-    /// Otherwise held when the retention is not yet full, or when it ranks
-    /// above the weakest held, and refused and counted in [`Self::discarded`]
-    /// when it does not.
-    ///
-    /// # Cost: O(1) to refuse, O(log cap) to admit
-    ///
-    /// Every offer first inserts its mask into the held-mask set, which is the
-    /// repeat probe: expected O(1), not a worst-case bound, and it hashes six
-    /// words. A refusal is then one comparison against the root and one set
-    /// removal. An admission when full adds one removal for the evicted mask,
-    /// and the set never grows past its `cap + 1` reservation. Then a heap
-    /// sift -- `sift_up` while filling, `take_root`'s `sift_down` then
-    /// `sift_up` when full -- and each sift walks at most `floor(log2(cap))`
-    /// levels, so the admit cost grows with the retention's capacity, not with
-    /// the number offered. UNVERIFIED as a measured figure: no bench row times
-    /// an admission. It went unstated until audit finding o1engine-20;
-    /// `docs/06-limits.md` names it beside the join's costs. Memory is `cap`
-    /// itemsets, fixed; the vector was reserved for `cap` when the retention
-    /// was built.
-    pub fn offer(&mut self, candidate: Itemset) {
-        // ONE PROBE THAT IS ALSO THE INSERT. `insert` answers `false` when the
-        // mask is already held; a candidate the cap then refuses is taken back
-        // out below, so the set always names exactly the held masks.
-        if !self.masks.insert(candidate.mask) {
-            self.repeated = self.repeated.saturating_add(1);
-            return;
-        }
-        if self.held.len() < self.cap {
-            self.held.push(candidate);
-            self.sift_up(self.held.len().saturating_sub(1));
-            return;
-        }
-        // FULL. Exactly one itemset leaves — the candidate itself when it ranks
-        // no higher than the weakest held, or that weakest one when it does.
-        // Both are one combination refused, so the counter moves either way and
-        // moves once.
-        self.discarded = self.discarded.saturating_add(1);
-        if self
-            .held
-            .first()
-            .is_some_and(|weakest| ranks_below(weakest, &candidate))
-        {
-            if let Some(evicted) = self.take_root() {
-                self.masks.remove(&evicted.mask);
-            }
-            self.held.push(candidate);
-            self.sift_up(self.held.len().saturating_sub(1));
-        } else {
-            self.masks.remove(&candidate.mask);
-        }
-    }
-
-    /// Offer every survivor of one completed level.
-    ///
-    /// The level arrives in canonical mask order, which this ignores: the
-    /// retention's own order is total, so what it holds does not depend on the
-    /// order it was offered in.
-    /// `engine::keep::the_order_of_arrival_does_not_change_what_is_kept`
-    /// permutes a level and requires the same rows out.
-    pub fn offer_level(&mut self, level: &Frontier) {
-        for itemset in &level.frequent {
-            self.offer(*itemset);
-        }
-    }
-
-    /// Everything held, **strongest first**.
-    ///
-    /// Draining the heap yields ascending order, so the vector is reversed
-    /// once. The cost is `cap log cap` comparisons over what the caller itself
-    /// bounded, never over the frequent set — the same trade `runner::rank`
-    /// makes when it orders its own `keep` rows for reproducibility.
-    #[must_use]
-    pub fn into_ordered(mut self) -> Vec<Itemset> {
-        let mut out: Vec<Itemset> = Vec::with_capacity(self.held.len());
-        while let Some(weakest) = self.take_root() {
-            out.push(weakest);
-        }
-        out.reverse();
-        out
-    }
-
-    /// Remove and return the weakest held itemset.
-    fn take_root(&mut self) -> Option<Itemset> {
-        let last = self.held.len().checked_sub(1)?;
-        self.held.swap(0, last);
-        let out = self.held.pop();
-        self.sift_down(0);
-        out
-    }
-
-    /// Restore the heap property upward from `from`.
-    ///
-    /// # `checked_sub` rather than a guard on the index, and that is a mutation
-    ///
-    /// This read `while at > 0 { let parent = at.saturating_sub(1) / 2; .. }`,
-    /// and `cargo mutants` reported the guard as a SURVIVOR: at the root the
-    /// saturating subtraction yields the root again, `weaker` compares a slot
-    /// with itself, the strict order answers false, and the loop returns. So
-    /// `>=` and `>` behave identically and no test could tell them apart --
-    /// an equivalent mutant, which is a guard that is not carrying its weight.
-    ///
-    /// `checked_sub` removes the second spelling instead of testing for it: the
-    /// root has no parent, and that is now the loop's own condition rather than
-    /// a comparison beside it.
-    fn sift_up(&mut self, from: usize) {
-        let mut at = from;
-        while let Some(above) = at.checked_sub(1) {
-            let parent = above / 2;
-            if !weaker(&self.held, at, parent) {
-                return;
-            }
-            // A `true` from `weaker` is proof both slots exist.
-            self.held.swap(at, parent);
-            at = parent;
-        }
-    }
-
-    /// Restore the heap property downward from `from`.
-    ///
-    /// # The step count is BOUNDED IN THE LOOP, and that bound is not decoration
-    ///
-    /// Each step moves to a CHILD, whose index is strictly greater than its
-    /// parent's and which `weaker` has just proved is inside the vector, so a
-    /// sift cannot take more steps than the heap holds entries -- far fewer,
-    /// since the index at least doubles.
-    ///
-    /// The bound is written into the loop rather than argued in this comment
-    /// because `cargo mutants` showed what the argument is worth: with a bare
-    /// `loop`, inverting the comparison below made the walk swap a slot with
-    /// itself for ever and the run was reported as a TIMEOUT rather than a
-    /// failure. A timeout is a test that did not finish, not a test that
-    /// passed. Bounded, the same mutation leaves a heap whose order is wrong,
-    /// which `engine::keep::the_order_of_arrival_does_not_change_what_is_kept`
-    /// sees on the very next offer.
-    fn sift_down(&mut self, from: usize) {
-        let mut at = from;
-        for _ in 0..self.held.len() {
-            let left = at.saturating_mul(2).saturating_add(1);
-            let right = left.saturating_add(1);
-            let mut weakest = at;
-            if weaker(&self.held, left, weakest) {
-                weakest = left;
-            }
-            if weaker(&self.held, right, weakest) {
-                weakest = right;
-            }
-            if weakest == at {
-                return;
-            }
-            self.held.swap(at, weakest);
-            at = weakest;
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Best, Streamed, Tally, ranks_below, weaker};
+    use super::{Streamed, Tally};
     use crate::{Frontier, Itemset, Ladder, column::Column};
     use vocab::ConditionMask;
 
@@ -524,282 +197,6 @@ mod tests {
             mask: ConditionMask::default().with_bit(bit),
             hits,
         }
-    }
-
-    /// Forty itemsets, every one distinct under `(hits, mask.words())`.
-    fn forty() -> Vec<Itemset> {
-        (0..40_u32).map(|i| item(u64::from(i), i)).collect()
-    }
-
-    /// Does every parent rank at or below both of its children?
-    ///
-    /// The min-heap property, asked of the whole vector rather than of the one
-    /// slot a sift just touched -- a sift that fixed its own path and broke
-    /// another would pass the narrower question.
-    fn is_a_min_heap(best: &Best) -> bool {
-        (0..best.held.len()).all(|at| {
-            !weaker(&best.held, at.saturating_mul(2).saturating_add(1), at)
-                && !weaker(&best.held, at.saturating_mul(2).saturating_add(2), at)
-        })
-    }
-
-    /// An index past the end answers `false`, and that arm is REACHABLE.
-    ///
-    /// It cannot fire from a sift -- every index a sift passes is in range --
-    /// which is exactly why `weaker` takes indices rather than two itemsets. An
-    /// arm no fixture can enter is a coverage hole and a decision nobody has
-    /// ever seen made.
-    #[test]
-    fn an_index_past_the_end_ranks_below_nothing() {
-        let held = vec![item(1, 0), item(2, 1)];
-        assert!(weaker(&held, 0, 1), "1 hit ranks below 2");
-        assert!(!weaker(&held, 1, 0), "and 2 does not rank below 1");
-        assert!(!weaker(&held, 9, 0), "nothing at 9 ranks below the root");
-        assert!(
-            !weaker(&held, 0, 9),
-            "and the root ranks below nothing at 9"
-        );
-        assert!(!weaker(&held, 9, 9), "nor does nothing rank below nothing");
-        // EQUAL HITS FALL THROUGH TO THE MASK, which is what makes the order
-        // total and therefore reproducible. Without this the two would compare
-        // equal and which one survived a cut would depend on arrival.
-        let tie = vec![item(5, 0), item(5, 1)];
-        assert!(weaker(&tie, 0, 1), "bit 0's word sorts below bit 1's");
-        assert!(!weaker(&tie, 1, 0), "and the comparison is antisymmetric");
-
-        // STRICT, AND THAT IS THE WHOLE PROPERTY. `cargo mutants` turned the
-        // `<` in `ranks_below` into `<=` and no test noticed: with `<=` an
-        // itemset ranks below ITSELF, the root of a full heap is evicted and
-        // reinserted for every equal offer, and -- worse -- `sift_up`'s guard
-        // stops being an equivalence. A strict order is what makes two equal
-        // candidates interchangeable, which is what makes the cut reproducible
-        // under `CLAUDE.md` §3 rule 5.
-        let one = item(5, 0);
-        assert!(
-            !ranks_below(&one, &one),
-            "nothing ranks below itself; the order is strict"
-        );
-        assert!(
-            !weaker(&tie, 0, 0),
-            "and neither does a slot against itself"
-        );
-    }
-
-    /// Offered = held + discarded, at every cap, with nothing unaccounted.
-    ///
-    /// `CLAUDE.md` §4 wants a narrowing stated rather than absorbed, and this is
-    /// the identity that makes the statement checkable: a caller can always tell
-    /// how much of the frequent set it is NOT looking at.
-    #[test]
-    fn every_offer_is_either_held_or_counted_as_discarded() {
-        for cap in [0_usize, 1, 7, 39, 40, 100] {
-            let mut best = Best::try_with_capacity(cap).expect("a small cap reserves");
-            for it in forty() {
-                best.offer(it);
-            }
-            assert_eq!(best.cap(), cap, "the cap is echoed unchanged");
-            assert_eq!(
-                best.len().min(cap),
-                best.len(),
-                "nothing above the cap may be held"
-            );
-            assert_eq!(best.len(), cap.min(40), "and the cap is actually filled");
-            assert_eq!(
-                u64::try_from(best.len()).unwrap_or(u64::MAX) + best.discarded(),
-                40,
-                "every offer ends in exactly one of two places"
-            );
-            assert_eq!(
-                best.is_empty(),
-                cap == 0,
-                "empty exactly when it holds none"
-            );
-            assert!(
-                is_a_min_heap(&best),
-                "the heap property holds after the run"
-            );
-        }
-    }
-
-    /// **A MASK IS HELD AT MOST ONCE (v4-4, D-1497).**
-    ///
-    /// The audit's probe: three offers of one itemset at cap 3 held it three
-    /// times. Now it is held once and the two repeats are counted; a distinct
-    /// itemset still fills the room; a repeat of the ROOT of a full heap is a
-    /// repeat, not a discard; a repeat with different hits is still the same
-    /// mask; and an evicted mask offered again is weighed like any offer.
-    #[test]
-    fn a_repeated_mask_is_held_once_and_counted() {
-        let one = item(9, 3);
-        let mut best = Best::try_with_capacity(3).expect("a small cap reserves");
-        for _ in 0..3 {
-            best.offer(one);
-        }
-        assert_eq!(best.len(), 1, "one combination, held once");
-        assert_eq!(best.repeated(), 2);
-        assert_eq!(best.discarded(), 0, "a repeat is not a cap refusal");
-
-        best.offer(item(5, 4));
-        best.offer(item(1, 5));
-        assert_eq!(best.len(), 3, "distinct itemsets fill the room");
-        // FULL. The root is the weakest, (1, bit 5): its repeat is a repeat.
-        best.offer(item(1, 5));
-        best.offer(Itemset {
-            mask: one.mask,
-            hits: u64::MAX,
-        });
-        assert_eq!(best.repeated(), 4, "same mask, whatever its hits");
-        assert_eq!(best.discarded(), 0);
-        // A stronger distinct itemset evicts the root, and that mask is free.
-        best.offer(item(7, 6));
-        assert_eq!(best.discarded(), 1, "the eviction is counted once");
-        best.offer(item(1, 5));
-        assert_eq!(
-            best.discarded(),
-            2,
-            "an evicted mask is weighed, and refused"
-        );
-        assert_eq!(best.repeated(), 4, "and is not a repeat");
-        let kept: Vec<u64> = best.into_ordered().iter().map(|i| i.hits).collect();
-        assert_eq!(kept, vec![9, 7, 5], "three distinct, strongest first");
-
-        // EVERY OFFER LANDS IN EXACTLY ONE OF THREE PLACES, at every cap.
-        for cap in [0_usize, 1, 7, 40, 100] {
-            let mut best = Best::try_with_capacity(cap).expect("a small cap reserves");
-            for it in forty().into_iter().chain(forty()) {
-                best.offer(it);
-            }
-            let held = u64::try_from(best.len()).expect("fits");
-            assert_eq!(held + best.discarded() + best.repeated(), 80, "cap {cap}");
-            assert_eq!(best.len(), cap.min(40), "cap {cap}: no mask twice");
-            assert!(is_a_min_heap(&best));
-        }
-    }
-
-    /// **AN IMPOSSIBLE CAP IS A REFUSAL, NOT A PANIC (W3-engine1-4, D-1497).**
-    #[test]
-    fn an_impossible_cap_is_refused_rather_than_aborting() {
-        for cap in [usize::MAX, usize::MAX / 2, isize::MAX.unsigned_abs()] {
-            assert!(
-                Best::try_with_capacity(cap).is_err(),
-                "{cap} itemsets cannot be reserved"
-            );
-        }
-        let zero = Best::try_with_capacity(0).expect("zero reserves nothing");
-        assert!(zero.is_empty());
-        assert_eq!(zero.repeated(), 0);
-    }
-
-    /// A cap of zero keeps nothing and refuses everything, loudly.
-    #[test]
-    fn a_cap_of_zero_holds_nothing_and_says_so() {
-        let mut best = Best::try_with_capacity(0).expect("a small cap reserves");
-        for it in forty() {
-            best.offer(it);
-        }
-        assert!(best.is_empty());
-        assert_eq!(best.discarded(), 40);
-        assert!(
-            best.into_ordered().is_empty(),
-            "and draining an empty retention is not a special case"
-        );
-    }
-
-    /// What survives the cut is the strongest, and it comes out strongest first.
-    #[test]
-    fn the_strongest_are_kept_and_ordered_strongest_first() {
-        let mut best = Best::try_with_capacity(7).expect("a small cap reserves");
-        for it in forty() {
-            best.offer(it);
-        }
-        let out = best.into_ordered();
-        let want: Vec<Itemset> = (33..40_u32).rev().map(|i| item(u64::from(i), i)).collect();
-        assert_eq!(out, want, "the top seven by hits, descending");
-    }
-
-    /// Equal support at the capacity boundary is settled by the mask, not by
-    /// which candidate happened to arrive before the retention filled.
-    ///
-    /// The broader permutation test below varies support too, so an
-    /// implementation that compared only `hits` could still pass it: its top
-    /// nine have distinct scores and never need the second half of the key.
-    /// This fixture removes that escape hatch. Every candidate has nine hits,
-    /// the cap cuts through the tie, and three different arrival orders must
-    /// retain the same four masks in the same strongest-first order.
-    #[test]
-    fn equal_hits_at_the_cut_are_broken_by_the_candidate_mask() {
-        let ascending: Vec<Itemset> = (0..10_u32).map(|bit| item(9, bit)).collect();
-        let mut descending = ascending.clone();
-        descending.reverse();
-        let shuffled: Vec<Itemset> = [5_u32, 0, 9, 2, 7, 1, 8, 3, 6, 4]
-            .into_iter()
-            .map(|bit| item(9, bit))
-            .collect();
-
-        let run = |order: &[Itemset]| {
-            let mut best = Best::try_with_capacity(4).expect("a small cap reserves");
-            for candidate in order {
-                best.offer(*candidate);
-            }
-            (best.discarded(), best.into_ordered())
-        };
-        let expected: Vec<Itemset> = (6..10_u32).rev().map(|bit| item(9, bit)).collect();
-        let first = run(&ascending);
-
-        assert_eq!(first.0, 6, "six candidates fall outside a top-four cut");
-        assert_eq!(first.1, expected, "the four greatest masks win the tie");
-        assert_eq!(first, run(&descending), "reverse arrival changes nothing");
-        assert_eq!(first, run(&shuffled), "shuffled arrival changes nothing");
-    }
-
-    /// The retention is a SET decision, not an arrival-order one.
-    ///
-    /// `CLAUDE.md` §3 rule 5 is the whole reason the order falls through to the
-    /// mask words: `crate::drain` spreads support counting across every core and
-    /// `runner` walks eight rungs at once, so anything keyed on when a candidate
-    /// showed up is keyed on the schedule.
-    #[test]
-    fn the_order_of_arrival_does_not_change_what_is_kept() {
-        let ascending = forty();
-        let mut descending = ascending.clone();
-        descending.reverse();
-        // A stride permutation, so the third ordering is neither of the first
-        // two reversed and a sift that only ever walked one way is caught.
-        //
-        // Built rather than indexed. `ascending` IS `item(i, i)` for i in
-        // 0..40, so the strided member can be constructed directly -- and a
-        // `.get(at).unwrap_or_else(..)` here left a closure no input could
-        // enter, which is the coverage hole this crate refuses in production
-        // and should not tolerate in a fixture either. 17 is coprime with 40,
-        // so `17i mod 40` visits every index exactly once.
-        let strided: Vec<Itemset> = (0..40_u32)
-            .map(|i| {
-                let at = i.wrapping_mul(17) % 40;
-                item(u64::from(at), at)
-            })
-            .collect();
-        assert_eq!(strided.len(), ascending.len());
-
-        let run = |order: &[Itemset]| {
-            let mut best = Best::try_with_capacity(9).expect("a small cap reserves");
-            for it in order {
-                best.offer(*it);
-                assert!(
-                    is_a_min_heap(&best),
-                    "the heap property holds at every step"
-                );
-            }
-            (best.discarded(), best.into_ordered())
-        };
-
-        let first = run(&ascending);
-        assert_eq!(
-            first,
-            run(&descending),
-            "reversed arrival, identical answer"
-        );
-        assert_eq!(first, run(&strided), "strided arrival, identical answer");
-        assert_eq!(first.0, 31, "and thirty-one of the forty were refused");
     }
 
     /// A [`Tally`] answers the five-exit identity the [`Frontier`] answers.
@@ -865,23 +262,19 @@ mod tests {
         let copy = streamed.clone();
         assert_eq!(copy.levels, streamed.levels);
         assert!(!format!("{streamed:?}").is_empty());
-        assert!(!format!("{:?}", Best::default()).is_empty());
-        assert_eq!(
-            Best::default().cap(),
-            0,
-            "a default retention holds nothing"
-        );
-        assert!(Best::default().clone().is_empty());
     }
 
-    /// **A cap is not a depth control**, which is `CLAUDE.md` §6's whole point.
+    /// **What a caller keeps is not a depth control**, which is `CLAUDE.md`
+    /// §6's whole point.
     ///
-    /// Two walks over one column, one feeding a retention of zero and one a
-    /// retention wider than anything the ladder can produce. Every level, every
-    /// counter and the depth itself must be identical: the cap bounds what the
-    /// CALLER holds and is read by nothing inside the walk.
+    /// Two walks over one column, one handing every level to a sink that keeps
+    /// nothing and one to a sink that keeps every survivor. Every level, every
+    /// counter and the depth itself must be identical: retention is the
+    /// CALLER's and is read by nothing inside the walk. This was asked of a cap
+    /// of zero against a generous cap on `keep::Best` until D-4480 removed that
+    /// type; the two extremes of any retention are these two sinks.
     #[test]
-    fn a_cap_of_zero_and_a_generous_cap_walk_the_same_ladder() {
+    fn a_sink_that_keeps_nothing_and_one_that_keeps_everything_walk_the_same_ladder() {
         let live: Vec<u32> = (0..8).collect();
         let spec: Vec<Vec<u32>> = (0..64_u32)
             .map(|bar| (0..8_u32).filter(|b| bar % (b + 2) != 0).collect())
@@ -895,18 +288,25 @@ mod tests {
             .collect();
         let column = Column::from_rows(&masks);
 
-        let walk = |cap: usize| {
-            let mut best = Best::try_with_capacity(cap).expect("a small cap reserves");
+        let walk = |keep: bool| {
+            let mut kept: Vec<Itemset> = Vec::new();
+            let mut offered: u64 = 0;
             let out = Ladder::with_min_hits(1).walk_column_streamed(
                 &column,
                 &live,
-                &mut |level, _, _| best.offer_level(level),
+                &mut |level, _, _| {
+                    offered = offered
+                        .saturating_add(u64::try_from(level.frequent.len()).unwrap_or(u64::MAX));
+                    if keep {
+                        kept.extend_from_slice(&level.frequent);
+                    }
+                },
             );
-            (out, best)
+            (out, kept, offered)
         };
 
-        let (tight, none_kept) = walk(0);
-        let (loose, all_kept) = walk(1 << 20);
+        let (tight, none_kept, offered_tight) = walk(false);
+        let (loose, all_kept, offered_loose) = walk(true);
 
         assert_eq!(tight.levels, loose.levels, "the same levels, exit for exit");
         assert_eq!(tight.depth(), loose.depth(), "and the same depth");
@@ -919,18 +319,23 @@ mod tests {
             "the fixture must climb, or it proves nothing"
         );
 
-        assert!(none_kept.is_empty(), "a cap of zero keeps nothing");
+        assert!(
+            none_kept.is_empty(),
+            "a sink that keeps nothing keeps nothing"
+        );
         assert_eq!(
-            none_kept.discarded(),
-            tight.streamed,
-            "and refuses exactly what it was offered -- the loud number"
+            offered_tight, tight.streamed,
+            "and was offered exactly what the loud number says was handed over"
+        );
+        assert_eq!(
+            offered_loose, offered_tight,
+            "both sinks saw the same offers"
         );
         assert_eq!(
             u64::try_from(all_kept.len()).unwrap_or(u64::MAX),
             loose.streamed,
-            "while a cap past the frontier keeps every one of them"
+            "while a sink that keeps everything keeps every one of them"
         );
-        assert_eq!(all_kept.discarded(), 0, "and refuses none");
     }
 
     /// The engine holds no survivor after a streamed walk, and says how many.

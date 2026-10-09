@@ -70535,3 +70535,2814 @@ beside it.
 **Rejected.** Retrying inside `journal::read`. The audit route answers a BUSY
 read with 429 and every other refusal with 503 (`read_failure` in
 `crates/api/src/operation_audit.rs`), so the reader must keep returning it.
+
+### D-4490 — Gates 1 and 1f read a script by what it loads, and refuse a frame, a `srcdoc` and a script or `data:` URL — 2026-10-09
+
+**What was observed (srust-1).** `.github/source_scan.rs` `browser_findings`,
+which gate 1 runs over every tracked `.html` and `.css` outside `web/` and gate
+1f over every production string literal under `crates/`, accepted any
+`<script>` that had a `src`, whatever the value. It never read `srcdoc`, never
+decoded an attribute value, never looked at a frame element, and ended every
+tag at its first `>`, so `<a title=">" onclick=go()>` carried no handler to it.
+The audit's probes, rerun here on a scratch copy of 21443a2a with the gate
+scripts extracted from `ci.yml`: `<script src="data:text/javascript,fetch(..)">`
+and its base64 form as `docs/p6.html`/`docs/p7.html`, `<iframe
+srcdoc="&lt;script&gt;fetch(1)&lt;/script&gt;">` as `docs/p8.html`, the
+`>`-in-quotes handler and `href="&#106;avascript:go()"` as `docs/p6b.html`, and
+the first and third as a `pub const` appended to `crates/api/src/render.rs`
+(P10, P11): gates 1, 1f and 15 all exited 0.
+
+**The decision.** Tags are read as the HTML tokenizer reads them: a name runs to
+whitespace, `/` or `>`; a quoted value runs to its closing quote, a `>` inside it
+included; an unquoted one to whitespace or `>`. Every attribute value is read as
+a browser hands it to a URL parser: numeric references (any number of leading
+zeros), `&colon;`, `&Tab;`, `&NewLine;` and fifteen other named references
+decoded, lowercased, tab and line breaks removed, leading controls trimmed.
+Refused, case-blind, in both places:
+
+- a `javascript:` or `vbscript:` URL anywhere in a decoded value;
+- a `data:` URL in a decoded value — at its start or after `(`, a quote, `,`,
+  `;`, `=` or a space, and followed by something other than a space, so a
+  `title="market data: 5 rows"` and a path `/data:x` pass;
+- a `srcdoc` attribute on any element;
+- `<iframe>`, `<frame>`, `<frameset>`, `<embed>`, `<object>`, `<applet>`,
+  `<portal>`, `<fencedframe>`, and `<base>` (it re-points every relative `src`,
+  the licensed loaders' included);
+- a bare `fetch(` call (not `prefetch(`), beside the existing browser APIs;
+- every `<script>` but the two decisions license: D-0060 licensed the
+  `/typeahead.js` tag and D-1106 named it with `/masters.js`. Each must be
+  exactly `src` (one of the two) and a valueless `defer`, with an empty body.
+  A tracked `.html` or `.css` outside `web/` is licensed no script at all: no
+  decision allows one there, and none is tracked today (`git ls-files` shows
+  every `.html` and `.css` under `web/`).
+
+The real tree passes both gates unchanged (`source_scan browser` over every
+tracked `crates/*.rs` and `source_scan content` over the tracked listing both
+exit 0), and every probe above is refused after the change; the commands and
+outputs are in the fixer's report. Invariant FXE-01.
+
+**What it still cannot see.** Markup assembled at run time from pieces that are
+not one literal or one `concat!`, as D-1106 states. Percent escapes are not
+decoded: no browser decodes them before it reads a scheme, so `data%3a…` is a
+relative path. A `<script>` written as text inside `<style>` or `<textarea>` is
+refused although a browser reads it as text — failing closed.
+
+**Rejected.** Decoding character references in the whole text before the tag
+walk, as the audit suggested. Text content is inert to a browser, and
+`&lt;script&gt;` in text is exactly how `render.rs` escapes operator input —
+`every_page_carries_the_one_script_this_repository_chose_and_no_other` proves
+the injection "arrives escaped" that way (D-0060). Decoding it would refuse the
+escaping that makes a page safe. Values are decoded because that is where a
+browser decodes before it acts. Refusing every `data:` substring: 14 string
+literals under `crates/` (`source_scan strings`, test code included) carry it
+in prose, such as "refused before opening market data:" in
+`crates/cli/src/step3_orchestrator.rs` and "cannot stat Population V6 data:".
+
+### D-4493 — Gate 12's last text program is Rust, and gate 0 refuses the stream editor in every workflow — 2026-10-09
+
+**What was observed (srust-4).** D-2314 moved gate 12's 16 `sed` calls into
+`.github/gates_bounds.rs` because CI is a corner the standing rule covers.
+Commit 46511d59 (D-2105) then added one back, at `ci.yml` line 3347 of
+21443a2a: `xargs -0 -r "$scan" fns < "$work/sources.z" | sed -E
+'s/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/'`. Gate 0 refused `awk` and
+`jq` programs but its own test listed `sed -e 's/a/b/'` as acceptable, so a
+`sed` program of any shape passed; the audit's P13, a branching program
+(`sed -n -e ':a' -e 'N' -e '$!ba' -e 's/\n/ /g'`), passed gate 0 when rerun here
+on a scratch copy of 21443a2a.
+
+**The decision.** Gate 12 pipes the scanner's `fns` output through
+`gates-ledger path-declarations`, the Rust filter gate 10 already uses for the
+same `FILE:LINE:name` to `FILE<TAB>name` rewrite (`path_fn_line` in
+`.github/gates_ledger.rs`); gate 25 builds that binary earlier in the same job.
+Measured on 21443a2a's tree: both filters read the same 24,436 `fns` lines and
+wrote byte-identical output (`cmp` silent; sha256 `d9fd388e…f900f` for both).
+Gate 0's `source_scan workflow` refuses the words `sed` and `gsed` on every
+workflow line that is not a comment, as a program name however it is reached
+(`xargs sed`, `find -exec sed`, `"$(command -v sed)"`, `/usr/bin/sed`). It is a
+refusal, not a ratchet: the count is zero after this edit, and the awk ratchet
+(D-2342) shows a ratchet is only for a count above zero. Invariant FXE-02.
+
+**The cost, stated.** The rule reads a word, not a command shape, so a step
+name or an `echo` may not say the word either. That is the shape gate 15 already
+takes for its own word, and no line of the three workflows says it today
+outside comments.
+
+### D-4491 — No workflow step may hand an action a program: `github-script`, a code input and an `INPUT_` variable are refused — 2026-10-09
+
+**What was observed (srust-2).** Gate 0 read `run:` bodies and `shell:` values
+and never `uses:` or `with:`. The audit's P12 added a step
+`uses: actions/github-script@60a0d830… with: script: | const fs =
+require('fs'); …` to the `language-purity` job; gates 0, 1, 1b, 1g, 1f, 2, 13
+and 15 all exited 0. Rerun here: the base scanner (`source_scan workflow` built
+from 21443a2a) passed that `ci.yml` with exit 0.
+
+**The decision.** `source_scan workflow`, which gate 0 runs over every tracked
+`.yml` under `.github/`, refuses in every workflow and every job:
+
+- any `uses:` whose value names `github-script`, in any case, quoted or in a
+  flow mapping — it runs JavaScript written in the workflow itself;
+- a `with:` input named `script`, `code`, `run`, `command`, `commands`,
+  `entrypoint`, `args`, `pre`, `post` or `main` on any step, flow or block
+  form, the key quoted or bare: each hands an action a program rather than
+  data;
+- any line carrying `INPUT_`: the runner hands an action its inputs as
+  `INPUT_<NAME>` variables, so an `env:` entry of that shape is an input
+  beside `with:` that no input check would read.
+
+D-4494's allowlist refuses `github-script` too (it is not pinned); naming it
+separately keeps the reason in the refusal if the list ever grows, and the
+code-input names are refused even on a pinned action. Invariant FXE-03.
+
+### D-4494 — The seven pinned actions are the only external code CI runs, and Node runs outside the web job only inside five of them — 2026-10-09
+
+**What was observed (srust-5).** `CLAUDE.md` §2 forbids "any interpreted
+runtime, as a dependency, a dev-dependency, or a tool" and allows any toolchain
+under `web/` only. Outside ci.yml's `web` job, CI runs five actions whose code
+is JavaScript run on Node by the hosted runner. Their code is not in this
+repository; D-1457 pinned their commits and is silent on §2, and no gate kept a
+new one out: any `uses:` passed gate 0.
+
+**What runs, measured.** `runs.using` read from each action's own `action.yml`
+at the pinned commit (`curl https://raw.githubusercontent.com/<repo>/<sha>/action.yml`,
+2026-10-09); jobs read from the workflows at 21443a2a:
+
+| action | pinned commit | tag | runs on | where |
+|---|---|---|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | v4 | node20 (`dist/index.js`, and a `post` step) | ci.yml `language-purity`, `build`, `coverage`, `mutant-plan`, `mutants`, `complexity`, `web`; auto-merge.yml `auto-merge`; main-check.yml `dispatch` |
+| `dtolnay/rust-toolchain` | `89b12181fb390509a0842a86cc55eeb8eb928c1d` | stable | composite (bash steps, no Node) | ci.yml `build`, `coverage`, `mutant-plan`, `mutants`, `complexity` |
+| `Swatinem/rust-cache` | `6323deb102c322ba6fcbdcafc7e3dddab59af2b6` | v2 | node24 (`dist/restore.js`, `post` `dist/save.js`) | ci.yml `build`, `mutants`, `complexity` |
+| `actions/cache` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4 | node20 (`dist/restore/index.js`, `post` `dist/save/index.js`) | ci.yml `mutant-plan`, `mutants` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | v4 | node20 (`dist/upload/index.js`) | ci.yml `coverage`, `mutant-plan`, `mutants` |
+| `actions/download-artifact` | `d3f86a106a0bac45b974a628896c90dbdf5c8093` | v4 | node20 (`dist/index.js`) | ci.yml `mutants` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` | v4 | node20 (`dist/setup/index.js`) | ci.yml `web` only |
+
+**Why each is kept, and what replacing it would cost.** These are the
+fixer's reading of the workflows, not measurements of a replacement, which was
+not built: this audit's instruction for the item was that no existing job's
+checkout, caching or artifact transfer changes, so PR 74's mutation job stays
+green.
+
+- `actions/checkout` fetches the commit under test with the workflow's token
+  (`fetch-depth: 0`, which the gates' `git` history reads need) and, in
+  auto-merge.yml and main-check.yml, checks out `main` with
+  `persist-credentials: false` so the merge rules run from trusted code.
+  Replacing it is `run:` steps of `git init`, an authenticated `git fetch` of
+  the event's ref and `git checkout`, at nine call sites, each re-proving the
+  pull-request merge ref and the credential handling that the action does
+  today.
+- `Swatinem/rust-cache` and `actions/cache` restore the cargo registry, the
+  target directory and the pinned cargo-mutants and nextest binaries. Without
+  them every job, and every mutation shard, rebuilds the dependency graph and
+  reinstalls both tools; correct, slower by an amount not measured here.
+- `actions/upload-artifact` and `actions/download-artifact` carry the mutation
+  plan from `mutant-plan` to every `mutants` shard and keep the coverage and
+  shard outcomes for 35 days. They are the hosted runner's channel between
+  jobs. Whether that service can be reached from a `run:` step at all, so a
+  `.github/*.rs` client could replace them, is **UNVERIFIED** here.
+- `actions/setup-node` installs Node for the `web` job, which §2's `web/`
+  exception covers (D-0052, D-0053).
+
+**The decision.** `source_scan workflow` (gate 0, every tracked `.yml` under
+`.github/`) carries these seven as `ACTIONS`, each with its repository, full
+commit, tag, runtime and the `with:` inputs it may be handed, and refuses:
+a `uses:` that names anything else exactly (a tag or branch in place of the
+commit, another commit, a local action, a `docker://` image, a reusable
+workflow); a pin whose line lost D-1457's tag comment; a `uses:` that is not a
+step's own key, or a second one on the same step; an input its pin does not
+admit, or any input on a step that runs no pinned action; `actions/setup-node`
+anywhere but ci.yml's `web` job; and on any line outside that job, the name of
+a JavaScript runtime or package manager (`node`, `nodejs`, `npm`, `npx`,
+`yarn`, `pnpm`, `pnpx`, `bun`, `bunx`, `deno`, `corepack`, `tsx`, `ts-node`)
+however it is reached. Each line's job is read structurally, and a line in the
+jobs map at less than a job body's indentation that is not a job key is
+refused, so no line can be read as the web job's while GitHub runs it in
+another. Adding an action, or a Node action, is now an edit to `ACTIONS` and a
+decision, never a silent `uses:`. Invariant FXE-04.
+
+**What this does not settle.** Whether a Node-based action that GitHub's runner
+executes counts as "an interpreted runtime … as a tool" of this repository
+under §2's "without exception" is a ruling on the law, and a gate must not
+widen the law to match the tree (gate 1's own comment, D-0210). `CLAUDE.md` is
+not edited here. Until the owner rules, the five Node actions outside the web
+job are named, pinned and fenced, not licensed.
+
+### D-4492 — `.claude/launch.json` is read by a gate and holds exactly the two run configurations, the first a `cargo` invocation — 2026-10-09
+
+**Finding (srust-3, low).** `CLAUDE.md` §2 admits `.json` only under `.claude/`
+on the ground that exactly one tracked file uses it, `.claude/launch.json`,
+carrying the two run configurations `docs/07-plan.md` §0 names. No gate read
+that file: gate 1 and gate 1b matched its path and extension only. Its first
+configuration was `"runtimeExecutable": "sh"` with `["-c", "exec cargo run
+--release -p api -- serve"]` — a shell handed a program written in a tracked
+file outside `web/`. The `sh -c` form dates from the `BRUTEX_COMMIT=$(git
+rev-parse HEAD)` prefix that D-1970 removed; after that it carried only
+`exec`. Any edit could have made it `perl -e …` or `node -e …`, or added a
+second `runtimeExecutable` that a JSON reader keeping the last key would run,
+or an `env` key, and every gate stayed green. Nor did anything hold "exactly
+one tracked file": `.gitignore` ignores `/.claude/*` but `git add -f` tracks
+past it, and a `.claude/settings.json` (whose hooks are shell commands) or a
+`.claude/commands/*.md` passed gates 1 and 1b.
+
+**Probes, before** (scratch copy of base 21443a2a, gates 0, 1, 1b, 1g and 15
+run from `.github/workflows/ci.yml`; all five exit 0 for each): P18 config 1
+`perl` `["-e", "print 1"]`; P19 `node` `["-e", "1"]`; P20 `cargo` with its
+arguments followed by a second `"runtimeExecutable": "sh"` and `"runtimeArgs":
+["-c", "echo probe"]`; P21 a force-added `.claude/settings.json` with a
+`SessionStart` command hook; P22 a force-added `.claude/commands/x.md`; P23 an
+`"env": {"RUSTC_WRAPPER": "/bin/sh"}` key beside a correct `cargo` line.
+
+**The decision.**
+
+1. The first configuration starts `cargo` itself, with `["run", "--release",
+   "-p", "api", "--", "serve"]`. Without a shell, `exec` has nothing to
+   replace; the program and arguments are the ones the shell used to run, and
+   the name text is unchanged. That the preview tools start this form the way
+   they start the second configuration's `npm` is the same `runtimeExecutable`
+   mechanism; it was **not run in a preview tool here** (UNVERIFIED).
+2. `launch` in `.github/gh_json.rs` — the one JSON parser the gates already
+   build and test — reads the file and refuses: anything but one document; a
+   key twice in any object (the parser's `get` answers the first, `JSON.parse`
+   keeps the last); top-level keys other than exactly `version` and
+   `configurations`; a `version` other than `0.0.1`; a count other than two;
+   per configuration, keys other than exactly `name`, `runtimeExecutable`,
+   `runtimeArgs`, `port`, `url`; a name that does not start with §0's name
+   (`brutex — the whole application`, then `web — Vite dev server`, in that
+   order) or carries a control character; a program other than `cargo`, then
+   `npm`; an argument list other than the pinned one; a port other than 8080,
+   then 5173; an address other than `http://127.0.0.1:8080`, then
+   `http://localhost:5173`. Since program and arguments are pinned exactly, a
+   shell, `env`, `perl`, `node`, an absolute path to cargo, a `--config`
+   argument to cargo and an `npm exec` are all refused, not just the ones a
+   list would name.
+3. The second configuration stays: §0 names it, and `npm --prefix web run dev`
+   starts `web/package.json`'s own `dev` script by name — the `web/` exception
+   (D-0052, D-0053) reached by path, not a program carried in this file.
+4. Gate 1b (`gate_1b` in `.github/gates_tree.rs`) also refuses every tracked
+   path outside `web/` with a `.claude` component, in any letter case, other
+   than `.claude/launch.json`. This holds §2's sentence; it does not change
+   it, and `CLAUDE.md` is not edited.
+5. The gate 1b step builds `gh_json` and runs `launch < .claude/launch.json`;
+   gate 0 already runs `gh_json`'s tests.
+
+`crates/cli/src/operator_boundary_tests.rs`'s
+`the_launch_configuration_states_what_build_rs_actually_stamps` asserted the
+old `"exec cargo run --release -p api -- serve"` string and now asserts
+`"runtimeExecutable": "cargo"` and the absence of `"runtimeExecutable":
+"sh"`. Its predicates were checked against the file with `grep -F`; the test
+itself was **not run** here, because this fixer may not build `cli`.
+
+**Probes, after:** each of P18–P23, and P24 (the old `sh -c` shape), is
+refused by gate 1b; the real tree passes. Invariant FXE-05.
+
+### D-3211 — The backtest page keeps an uncounted swept surface uncounted — 2026-10-09
+
+**What was observed.** `/universes.json` answers a feed with no instrument
+master `"counted_from":"no master"` with every count `null`
+(`crates/api/src/coverage.rs` `target_json`). The backtest page's
+`loadSurface` read the swept target's `matched` as `Number(target.matched ??
+0)`, so the page held `matched: 0`, and `coverNote` built "0 of N are swept"
+from it: a measurement of a file the feed does not publish. A refused read
+(the unknown-feed 400 names its reason in `refused`) and a thrown read both set
+the surface to `null` and dropped the reason. Measured on this base: `coverNote`
+is a `$derived` with no render site in the template (`grep -n coverNote`
+finds only its declaration and one comment), so the invented zero lived in the
+page's state and its sentence rather than on screen; the finding is fixed at
+both.
+
+**Decided.** `sweptSurface.matched` is an exact non-negative safe integer or
+`null`, beside `countedFrom` (the server's own word) and `why` (the refusal).
+A non-2xx is read through `refusalFrom('/universes.json', response)`, a thrown
+read keeps its message, and the feed gate is asked again after the reason is
+read. `coverNote` says "swept count not measured (<why or counted_from>)"
+whenever `matched` is `null`; a measured count, a real zero included, is shown
+as before. OBSV-12, `web/tests/swept-surface.test.js`.
+
+**Rejected.** Rendering `coverNote` in the template. It was never rendered on
+this base, and placing a new line on the backtest form is a layout decision
+outside this finding.
+
+### D-3212 — A census- or master-stamped refusal names the half that failed — 2026-10-09
+
+**What was observed.** `/instruments.json` answers 503 when the selected
+feed's census will not load or its master will not decode, and `/store.json`
+answers 503 for an unreadable census; both keep a JSON array body and stamp
+the reason in `x-brutex-census-state`/`-note` and `x-brutex-master-state`/`-note`
+(D-0124). Three readers dropped it. `catalogue-loader.js` printed the master's
+sentence whatever had failed, so an unreadable census read "read — groww:
+master read; 812 instrument(s) in the merged universe" — a master that was
+fine, blamed — and an unknown feed's 400 printed "HTTP 400" though its body
+names the feed in `refused`. `feed-summary.js` (the census HEAD survey) and
+the `/ingest` roster measurement (`measureRoster`) printed the status alone.
+
+**Decided.** `web/src/lib/refusal.js` gains `headerRefusal(headers)`: the
+master half when the master state is present and not `read`, and the census
+half when the census state is `unreadable`, each with its note or a sentence
+saying none was sent; `null` when neither names a failure.
+`headerRefusalFrom(route, response)` puts it in the CE-83 sentence, falling
+back to the body's reason (`reasonOf`). The loader and the roster use
+`headerRefusalFrom('/instruments.json', …)`; the HEAD survey, which has no
+body, uses `headerRefusal` in `refusalSentence('census HEAD', …)`. OBSV-13.
+
+### D-3213 — A refused frontier page names the server's refusal — 2026-10-09
+
+**What was observed.** Every non-2xx `/frontier.json` answer writes its cause
+in `refusal` (`crates/api/src/frontierjson.rs` `refuse`, `unavailable`,
+`too_large`, `range_refusal`): a 400 selector refusal, the 429 saturation
+sentence, a 503 preflight failure, the 413 row ceiling, the 416 range.
+`fetchCompleteFrontier` threw "/frontier.json answered 503 on page 0." and
+the reason was never read. `web/tests/frontier-pages.test.js` pinned that
+behaviour with a stub that had no body.
+
+**Decided.** A non-2xx (or a 2xx other than 200/206) throws "Frontier page
+<n> refused: " followed by `refusalFrom('/frontier.json', response)`. The
+pinned test now gives its HTML stub a `text()` and asserts the HTML is quoted
+with the status, still without parsing the body as JSON. OBSV-14.
+
+### D-3214 — A refused `/live.json` read is shown with the server's refusal — 2026-10-09
+
+**What was observed.** `/live.json` refuses with `{"runs":[],"listed":false,
+"refusal":…}` under 429 (snapshot capacity full) or 503 (a task that could not
+be joined, an unset store root, a live census that refused)
+(`crates/api/src/livejson.rs` `unavailable`). The backtest page's
+`fetchLiveTop` wrote "/live.json answered 503. The heap is still being written
+to the store — this page could not read it back.": the status, and a cause
+nobody measured, in place of the one the server wrote.
+
+**Decided.** `fetchLiveTop` reads a non-2xx through
+`refusalFrom('/live.json', response)` and shows exactly that sentence in the
+panel's existing "could not be read" line. The run binding (conc18-4) is asked
+again after the body is read, so a refusal for a sweep replaced meanwhile is
+dropped. OBSV-15.
+
+### D-3215 — A refused saved-evidence read names the server's refusal — 2026-10-09
+
+**What was observed.** `/sweep-evidence.json` refuses a selector (400), a
+saturated detail door (429) or a changed or unreadable saved attempt (503)
+with the detail envelope `{"schema_version":1,"status":"refused",
+"evidence":null,"rows":[],"refusal":…}` (`crates/api/src/sweepevidence.rs`
+`refusal`). `fetchSweepEvidence` threw "Saved evidence request failed (HTTP
+503)." and never read it; every sibling saved-evidence reader already passes
+the same envelope through `detailRefusal`.
+
+**Decided.** `fetchSweepEvidence` throws `detailRefusal(response, …)`: the
+status sentence followed by the bounded `refusal`, and the status sentence
+alone for a body that is not the envelope (a proxy's HTML). OBSV-16.
+
+### D-3216 — An unreadable execution status is shown with its `running.why` — 2026-10-09
+
+**What was observed.** `/backtest/run.json` answers an exact attempt it cannot
+read with 503 (a malformed `?attempt=` with 400), and the global view's failed
+external read with 503, each as `{"running":{"status":"unknown","why":…}}`
+(`crates/api/src/sweeprun.rs` `browser_attempt_unknown`, `unknown_status`).
+None of `refusalOf`'s three keys (D-1789) is set, so the reason was unreadable
+by the shared helper, and six readers printed the status alone:
+`receipt-batch.js` `observe`, `boolean-launch.js` `observe`,
+`index-stop-launch.js` `observe`, and the backtest page's `pollSweep`,
+`adoptRunning` and `refreshCurrentAdmission`.
+
+**Decided.** `refusalOf` reads `running.why` after the three top-level keys,
+and only when `running.status` is `unknown`: a running or finished payload's
+`why` describes the run and is not a refusal. Every one of the six readers
+puts `refusalFrom('/backtest/run.json', response)` in its existing sentence;
+the page's two pollers ask their ticket again after the body is read, so a
+replaced read publishes nothing. No reader's resend or launch rule moved: each
+still refuses to resend and still leaves the state `unknown`. OBSV-17.
+
+### D-3217 — A refused launch-configuration read names the server's refusal — 2026-10-09
+
+**What was observed.** `/engine/boolean-launch.json` and
+`/engine/index-stop-launch.json` answer a failed bounded configuration read
+503 with `{"ready":false,"refusal":…}` (`crates/api/src/booleanlaunch.rs` and
+`crates/api/src/indexstoplaunch.rs`, `metadata`). `BooleanLaunch.svelte`
+`readConfiguration` printed "Research configuration returned HTTP 503", and
+`IndexStopLaunch.svelte` printed "The live app does not provide single-stop
+configuration details (HTTP 503)" — a guess about an older server, made for
+every status including the one that names its cause.
+
+**Decided.** Both read a non-2xx through `refusalFrom(<route>, response)` and
+keep their closing clause ("No launch was attempted." / "No sweep was
+submitted."). An older server's 404 now reads "answered HTTP 404 and named no
+reason", which is what was measured. OBSV-18.
+
+### D-3218 — The audit layer's own refusal is read by every detail reader, with whether the handler ran — 2026-10-09
+
+**What was observed.** Every route in `crates/api/src/operation_audit.rs`
+`AUDITED` (22 of them) can be refused by the audit journal itself, before or
+after its handler: 429 when the journal is busy, 503 otherwise, with
+`{"schema_version":1,"refusal":…,"code":"invocation_audit_unavailable",
+"handler_completed":bool,"why":…}` (`failure`), or the read twin
+`invocation_audit_read_unavailable` with no `handler_completed`
+(`read_failure`). `web/src/lib/detail-refusal.js` `detailRefusal` accepted only
+the detail envelope (`status:"refused"`, `rows:[]`), so every detail reader of
+an audited route — candidate trades, saved evidence, the Boolean catalog,
+evidence, qualified search, campaign and later comparison, Selection V6 and
+expression search — printed "(HTTP 429)." and dropped both the refusal and
+whether the handler had run. Only `invocation-audit.js` validated the envelope,
+in its own copy. `refusal.js` `refusalOf` read the envelope's bare `refusal`
+and dropped its `why`, so the `/live.json`, `/frontier.json`,
+`/backtest/run.json` and `/engine/boolean-launch.json` readers could not say
+whether the handler ran.
+
+**Decided.** One validator, `refusal.js` `auditRefusal`, moved from
+`invocation-audit.js` unchanged in what it accepts (schema 1; a write code with
+a boolean `handler_completed` or a read code without one; a non-blank refusal
+and a string why, each at most 4096). It answers "refusal why".
+`detailRefusal` reads it after the detail envelope, `refusalOf` reads it before
+its three keys, and `invocation-audit.js` now calls `detailRefusal` instead of
+its copy. An envelope that does not validate is still not echoed by
+`detailRefusal`, and is still read for its bare `refusal` by `refusalOf`, as
+before. OBSV-19.
+
+### D-3219 — An undated live heap and an unheld census generation are unknown, never zero — 2026-10-09
+
+**What was observed.** Two pages turned a null the server sends on purpose into
+a zero, and the zero read as a measurement.
+
+1. `/live.json` sends `idle_secs` and `stale` as null when the heap file cannot
+   be dated (`crates/api/src/livejson.rs`). The backtest page's
+   `fetchLiveTop` carried a comment saying an undated run "now sorts last", but
+   sorted on `Number(r?.idle_secs)`, and `Number(null)` is 0 and finite: the
+   undated run still sorted first. It was then rendered "updated 0s ago"
+   (`Number(best.idle_secs) || 0`) with no "not moving" pill
+   (`best.stale === true`).
+2. `/audit.json` sends `store.generation` and `store.commits` as null when no
+   census is held (`crates/api/src/audit_json.rs`, whose own test pins
+   `"generation":null` for an absent census). The audit page footer rendered
+   `n0(generation ?? 0)` and `n0(commits ?? 0)`, "generation 0, 0 committed
+   entries", although the same page's count-up effect had already been moved to
+   `?? Number.NaN` for this reason. Each sample held `generation ?? 0`, so a
+   census that became readable while the page was open read as all of its
+   commits "measured" between two answers, and the strip said RUNNING.
+
+**Decided.** An age is a non-negative finite JSON number or null; a null sorts
+after every dated heap and `liveFreshness` renders it "age unknown: /live.json
+could not date this heap" with an "undated" pill. `stale` keeps `true`, `false`
+or null. On `/audit`, `audit-pages.js` `generationOf` keeps a sample's
+generation as a non-negative safe integer or null, and `generationStep` takes
+no difference across a null. The strip says "not comparable" for such a
+difference instead of "unchanged", and the footer renders an unknown count as
+"—". OBSV-20, OBSV-21.
+
+### D-3220 — The backtest page's own readers name the server's reason on every refusal — 2026-10-09
+
+**What was observed.** Seven readers on `web/src/routes/backtest/+page.svelte`
+dropped the reason a refusing server had written:
+
+1. `fetchTrades` (`/trades.json`) and `fetchTop` (`/engine/top.json`) parsed
+   the body before checking the status. A plain-text refusal became a JSON
+   parse error, and a JSON one was shown as its bare `refusal` with no route
+   or status.
+2. `fetchLedger` (`/backtest.json`) printed "answered 429" alone for every
+   status but 404 and 503. A 503 that was not ledger-shaped, such as the
+   audit layer's envelope on this audited route, was reported as "`runs` is
+   not an array".
+3. `fetchVocab` (`/vocab.json`) printed the status alone.
+4. `loadSeries` and `loadBenchmark` (`/bars/window.json`) printed "answered
+   400" and "answered 400/200", although the route sends `{"error":…}` and
+   one of the two endpoints had not refused at all.
+5. `loadRungs` (`/store.json`) did `if (!response.ok) return;`. The switcher
+   had already been cleared, so an unreadable census, an unknown feed or an
+   UNAVAILABLE master removed it with nothing said.
+
+**Decided.** Each reader checks the status first and names the route, the
+status and the body's reason through `refusal.js`.
+- `/store.json` is read through `headerRefusalFrom`, because it stamps an
+  unreadable census in headers (D-3212).
+- `/backtest.json` reads a 503 as text. A ledger-shaped one is still admitted
+  as a ledger; anything else is named through the new `reasonOfText`, the
+  text half of `reasonOf`. A 200 that is not JSON still fails as a parse
+  error.
+- The buy-and-hold reference names each refused endpoint and only those.
+- The rung switcher renders "Timeframe switcher unavailable: <reason>" where
+  it would have been.
+
+Every new await is followed by the reader's existing staleness check. OBSV-22.
+
+### D-3221 — A plain-text refusal is named by every reader that can receive one — 2026-10-09
+
+**What was observed.** Any route can be refused before its handler runs, in
+plain text. `crates/api/src/server.rs` `request_bounds_refusal` answers 414,
+431 and a repeated-field 400 with "REFUSED — … Nothing was read or run.", and
+the cross-site admission layer answers 403 with its reason. Thirteen readers
+outside the backtest page lost that sentence:
+
+- **Status alone.** `feed-startup.js` and the console probe in
+  `+layout.svelte` (`/feeds.json`), `runtime-inspection.js`
+  (`/inspection.json`), Autopilot `tick` (`/autopilot.json`) and ingest
+  `pollRunCurrent` (`/pull/run.json`) printed only "HTTP N".
+- **JSON parsed first.** `database-pages.js` and the database page's
+  `readWindow` (`/bars/window.json`) and `refreshMasters` on `/mapping`
+  (`/masters/refresh`) parsed the body before checking the status, so the
+  sentence became a JSON parse error. `refreshMasters` then said "The refresh
+  keeps running on the server" about a refresh that was never dispatched.
+- **Not JSON.** The terminal's `quote` and `monthBars` (`/bars/window.json`),
+  Markets `readMonth` and the database page's `fetchBarFile` (`/bars.json`)
+  said "no reason recorded" or "the body was not JSON".
+- **Wrong cause.** Autopilot `send` called a non-JSON refusal "the API is not
+  behind this route" and pointed at the dev proxy.
+- **Dropped.** Ingest `resumeRunCurrent` returned silently on a non-2xx or a
+  throw. Ingest `readFolder` (`/folder.json`) threw a parse error.
+
+**Decided.** Each reader checks the status before parsing and names the
+route, the status and the reason through `refusal.js`. Plain text is quoted
+up to 500 characters, and a JSON body's `error`, `refused` or `refusal` key
+is read.
+- `readFolder` carries a `why` beside its parsed body, so a halt can still
+  name its folder.
+- `resumeRunCurrent` writes the reason to `pollError` and leaves Pull offered,
+  as before.
+- `refreshMasters` reads every JSON answer as before and names a non-JSON
+  refusal without claiming the refresh ran.
+- Autopilot `send` keeps the dev-proxy message for a 2xx HTML answer only.
+- A 404 to `/inspection.json` is still a legacy server, and a 2xx that is not
+  JSON still fails loudly.
+
+OBSV-23.
+
+### D-3222 — An unconfirmed command answer names the server's reason and is still never resent — 2026-10-09
+
+**What was observed.** Five POST readers handled an answer that neither
+confirmed nor refused by printing a fixed sentence, or the status alone. They
+dropped whatever the body said:
+
+- `receipt-batch.js`, `boolean-launch.js` and `index-stop-launch.js`
+  (`/engine/command`)
+- the backtest page's `/backtest/run` and `/backtest/descend`, through
+  `sweep-admission.js` `sweepSubmission`
+- the ingest page's `/pull/run`
+
+All of these routes but `/pull/run` are audited. The audit layer's 429 or 503
+names its refusal and says whether the handler was dispatched
+(`operation_audit.rs` `failure`), and that was the sentence lost. A
+plain-text request-bounds refusal was parsed as JSON first. For the backtest
+page that meant a null body; for the other readers it meant a parse error.
+
+**Decided.** One reader, `refusal.js` `commandReply`, reads the reply once and
+never throws.
+- A 2xx is parsed as JSON, or is null when it is not JSON.
+- A non-2xx is read as text. Its JSON body is kept, and its reason is named
+  through `reasonOfText`. For the audit envelope that is the refusal and the
+  why (D-3218).
+
+Each reader's unconfirmed message now carries `refusalSentence(route, status,
+reason)`. `sweepSubmission` takes the reason and the route.
+
+No phase or resend rule moved. Every unconfirmed answer stays `unknown`, and
+nothing is resent, including an audit refusal that says the handler was not
+dispatched. Treating that answer as a refusal would allow a resend, which is a
+decision for the owner and is not made here. OBSV-24.
+
+### D-3223 — A pull run with no before-reading shows no progress figure — 2026-10-09
+
+**What was observed.** `/ingest` `resumeRunCurrent` picks up a pull run
+already in flight when the page loads, and keeps watching it when its
+before-reading of the store fails. The comment there says the card "cannot
+show a difference". The card showed one anyway:
+
+- `share` and `unitsLeft` read `baseline?.units ?? 0`, so the card drew
+  "0% · 0/N".
+- `everGrew` was false, so the foot said "nothing landed yet".
+- `unitsLeft` counted every unit as still to go, and `etaSecs` extrapolated
+  over that count.
+
+None of these was measured. The headline comment on the card says the
+opposite: "EVERY NUMBER HERE IS MEASURED, AND THE ONES THAT ARE NOT ARE
+ABSENT".
+
+**Decided.** Without a baseline, `share` and `unitsLeft` are null, and so is
+`etaSecs`. The card shows "progress not measured" with one sentence saying
+why, in place of the fraction, the meter and the foot. A run pressed from this
+page is unchanged: it still refuses to start without a before-reading. OBSV-25.
+
+### D-3224 — A refused Stop on /ingest names its reason — 2026-10-09
+
+**What was observed.** `/ingest` `stopWatching` posts `/pull/run/stop`. On a
+non-2xx it read the body as JSON once, kept the one shape that means the stop
+was taken but not saved (`stopping:true, stop_persisted:false`, OBSV-09,
+D-3208), and otherwise threw "the server answered HTTP N". Every POST on this
+server passes origin admission (`same_origin_writes_only`) and the form-field
+check (`one_value_per_form_field`) before its handler. Both refuse in
+text/plain with a sentence that ends "Nothing was read or run." The page read
+that sentence, failed to parse it as JSON, and dropped it. A JSON refusal
+carrying `error` was dropped the same way.
+
+**Decided.** The body is read as text once and parsed as JSON from that text.
+The unpersisted-stop branch is unchanged. Every other non-2xx throws
+`refusalSentence('/pull/run/stop', status, reasonOfText(text))`, which names
+the route, the status and the server's own reason, or says that it named none.
+The stop stays undelivered: `stopAsked` and `aborted` are reset and no
+`stopWarning` is set. OBSV-26.
+
+### D-4445 — An unreadable serve-lock stamp is named, not called unstamped — 2026-10-09
+
+**What was observed.** When a second server is refused because the store's
+`serve.lock` is held, the refusal names the holder from the lock file's
+first line. The read was `read_to_string(path).unwrap_or_default()`, so a
+stamp the OS would not read (a permission error, a directory at that path)
+became the empty string and the refusal said the holder had "not yet stamped
+the file": a read failure reported as a state of the other process. sobs-15.
+
+**Decided.** `holder_named` reads the stamp's first line; an empty file is
+still "an instance that had not yet stamped the file", and a failed read says
+the stamp could not be read, quotes the OS error, and says which instance
+holds the lock is not established.
+
+### D-4446 — The audit journal's first record syncs its directory — 2026-10-09
+
+**What was observed.** `audit::Journal::appended` synced the journal file
+after each record. The first record also creates `audit/` (and the file in
+it), and nothing synced the directory, so a power cut after a reported append
+could lose the journal file whole. sobs-12, api half.
+
+**Decided.** When the file holds no byte yet, the append syncs `audit/` and
+its parent (the store root) before writing; a sync failure refuses the append
+by name and nothing is appended. Later records add no directory sync. A bare
+journal name syncs the working directory.
+
+### D-4447 — Every sweep launch route logs its server refusals — 2026-10-09
+
+**What was observed.** Of the three launch routes, only `/backtest/run`
+logged the unstamped-build refusal; `/backtest/descend` and `/engine/command`
+answered 503 and wrote nothing. The environment-budget refusal (D-0685) wrote
+no event on any route (`docs/06-limits.md` said so). sobs-9.
+
+**Decided.** One function, `sweeprun::refused_for_this_server`, answers both
+refusals on all three routes and writes one `api.sweep` Warn naming the
+route and carrying the refusal's sentence. The old inline emit on
+`/backtest/run` is gone, so the route set has one site.
+
+### D-4448 — A blocked recovery logs its stage and reason — 2026-10-09
+
+**What was observed.** A recovery refused at any stage (a malformed request,
+preparation, preflight, a busy slot, durable activation) kept its BLOCKED
+reason in memory and in the HTTP reply only; `/logs` showed the status code
+and not why. sobs-8.
+
+**Decided.** `recovery::note_blocked` writes one `pull.recovery` "recovery
+blocked" event per refusal, naming the stage, the status, the plan digest
+when there is one, and the reason; Error for a 5xx, Warn otherwise. The
+blocking stages emit inside their blocking closures, once each.
+
+### D-4449 — Every F&O contract that does not land is logged — 2026-10-09
+
+**What was observed.** A named F&O pull counted the contracts that did not
+land and kept the first five reasons for the receipt. No event was written,
+and reasons after the fifth were dropped everywhere. sobs-7.
+
+**Decided.** Every refused fetch and every failed landing writes one
+`api.pull` Error "contract not landed" with its stage (`fetch` or `land`)
+and the reason, with the credential marker stripped. The receipt still
+quotes five and, when more failed, says how many and that every one is in the
+event log under that message.
+
+### D-4450 — A spot run refused before it starts is logged — 2026-10-09
+
+**What was observed.** `broker_run` logged `pull.run` "started" and
+"finished". Its three early refusals (no live broker, a blocked mapping, a
+ladder refusal) returned before "started", so they wrote nothing. L1-R3-2.
+
+**Decided.** `refused_before_start` wraps each early return and writes one
+`pull.run` "refused before it started" with the feed, target, rung, window,
+status and reason; Error for a 5xx, Warn otherwise.
+
+### D-4451 — A log run is scoped to the work that belongs to it — 2026-10-09
+
+**What was observed.** `broker_run` claimed the sink's single ambient run key
+(`Sink::claim_run`), and `Sink::emit` stamped every event with it. While a
+pull held the key, every unrelated event the process wrote (page loads,
+autopilot, sweeps) was filed under that pull, so `/logs?run=` returned a story
+with others spliced in. Probe P9: a claimed run 777 answered
+`["autopilot","api.request","pull.run"]`. sobs-14.
+
+**Decided.** `telemetry::scope` adds a per-thread run scope built from `std`
+alone, so the crate still depends on nothing: `in_run` sets a thread-local
+for the length of each `poll` of a future and restores it after, `enter`
+does the same for a block, `inherit` carries the caller's scope into a
+spawned future, and `current_run` reads it. In `Sink::emit` a scope outranks
+the ambient key and an explicit `emit_for_run` outranks both; outside every
+scope the ambient key still applies, so `cli` is unchanged. `broker_run` now
+runs inside `in_run` with a reserved id (or the caller's), and claims
+nothing. The api carries the scope across its spawns (`inherit`) and its
+blocking pools (`detail::admitted`, `pullrun::off_worker`).
+
+**Rejected.** A task-local: it needs a runtime dependency, which `sink.rs`
+already refused for this crate. Releasing the ambient claim sooner: any
+window in which one run holds a process-wide key splices other work into it.
+
+**Honest limit.** A spawn that is not wrapped runs outside the scope; the
+spawner is the only place that knows the spawned work belongs to the run.
+Cost is one thread-local read per event and one boxed future per scope, not
+timed (UNVERIFIED).
+
+### D-4452 — The pull press logs its legs and its end — 2026-10-09
+
+**What was observed.** `/pull/run`'s coordinator (`pullrun::conduct`) wrote
+no event at all. Leg failures, halted feeds, dead chains and the summary
+lived only in the in-memory progress, and `pull_run` dropped the task's
+handle, so a press that panicked (in a build that unwinds) was written only
+to standard error. sobs-5.
+
+**Decided.** `pullrun::press` runs the coordinator in its own log run and
+under a supervisor. It logs "press started", one event per failed leg (with
+the status and the receipt's reason as bounded text, Error when the feed is
+halted, Warn when the leg is owed another pass), "pass ended with legs owed"
+per pass that leaves retries, "chain stopped abnormally" for a dead chain,
+and "press finished" (Info when clean, Warn otherwise). The supervisor awaits
+the task and logs "press ended abnormally" with the runtime's words when it
+panicked or was cancelled; it writes nothing for a normal end. All under
+`api.pullrun`, once per leg, pass or press.
+
+### D-4453 — The autopilot logs its halts, stalls and end — 2026-10-09
+
+**What was observed.** The backfill task logged pause and resume only. A
+feed's halt, a month passed over, the empty-universe halt, the clock wait
+and the task's own return were status-only, and `run_in` spawned `fly` bare
+and aborted it at shutdown, so a task that panicked left the status page
+drawing the phase it died in. sobs-6.
+
+**Decided.** One `autopilot` event per boundary: "feed halted" and "month
+passed over" (feed, month, reason) per verdict in `settle`; "backfill halted"
+when a pass with nothing to choose moves the phase into halted, gated on the
+transition by `Control::publish_into_halt` so a halt that stands is not
+logged once a minute; "waiting for a usable clock" on the first wait; and the
+supervisor started by `autopilot::launch` logs "backfill task ended" with the
+published reason when the task returns, or "backfill task ended abnormally"
+with the runtime's words when it panicked or was cancelled, and then
+publishes a halt naming that. The supervisor holds the task through a handle
+that aborts on drop, so the shutdown that aborts the supervisor still stops
+the backfill.
+
+### D-4454 — Every store scrub is logged, and `/db` can run one — 2026-10-09
+
+**What was observed.** `/verify.json` is the one check that opens bar files
+against the census. Its answer lived in the reply alone (logged at Debug as a
+200), and no page linked it. sobs-10.
+
+**Decided.** `note_scrub` writes one `api.verify` "scrub" event per scrub
+with the verdict, the counts, the first finding and the server's sentence:
+Info when verified, Warn when it disagreed or held nothing, Error when the
+census could not be read. `/db` gains a "Scrub" panel that runs a scrub for
+the chosen feed on request (never polled, since a scrub opens every counted
+file), draws the verdict, counts and findings, refuses a reply it cannot read
+by name, and links the log. `web/build` is rebuilt (Gate W1).
+
+### D-4455 — Every network retry decision is logged once — 2026-10-09
+
+**What was observed.** `with_retry` (bar windows) and `laddered` (discovery
+and rolling F&O calls) re-asked a vendor up to `THROTTLE_ATTEMPTS` times per
+request on 429, 5xx and transport failures, and logged none of it; only the
+final refusal reached the log, with no sign it was the last of several.
+L1-R3-5.
+
+**Decided.** Each `Step::Again` writes one `pull.http` Warn "retrying a
+refused request" with the feed, the call, the attempt, the status (null when
+nothing answered), the wait, whether the vendor named a throttle, and the
+vendor's words. At most `THROTTLE_ATTEMPTS - 1` per request; every other
+verdict ends the request and stays the caller's event.
+
+### D-4410 — A sink's dropped events outlive its process: the loss ledger, and a restart that never re-issues a burnt number — 2026-10-09
+
+**Finding (sobs-2, observability audit at 9b0614be, probe P8).** A sink
+numbers an event before it writes it, so a drop burns its number and
+`Tail::missing` reads the hole as the drop's receipt. That receipt exists only
+while a later event lands in the same file. A process whose disk stayed full
+until it exited left no line above the hole: the next `Sink::open` resumed from
+the last line it could read and handed the burnt numbers out again. Measured:
+185 drops, a restart at `next_seq` 21 re-issuing 21..=205, `missing =
+Some(0)`, and the dropping process's `Health::dropped` gone with it. The cli
+has no production caller of `Sink::health`, so nothing anywhere said so.
+
+**Decision.** `crates/telemetry/src/loss.rs` keeps a loss ledger,
+`<dir>/events.loss` (`telemetry::LEDGER_NAME`), beside the set. It is one
+fixed-length record of 127 bytes — `issued`, `lost` and `first` as twenty
+decimal digits each and an FNV-1a checksum — made by `Sink::open` while the
+disk has room and afterwards only overwritten in place with one positioned
+write at offset 0, so an overwrite needs no new block on a filesystem that
+rewrites a file's blocks in place.
+
+- Each DROPPED event records its number there (`Ledger::note_drop`), inside
+  the emit lock, on the drop path only. Nothing is added to an event that
+  lands.
+- `Sink::open` resumes at `max(last line read, issued)` and reserves run ids
+  above that too. When `lost > 0` it writes one `Error` event (no floor
+  filters `Error`) — `telemetry.sink` "events were lost before this sink
+  opened", with `lost`, `first_seq`, `last_seq` and `ledger` — names the same
+  in `Health::last_error`, and clears the count only once that event landed.
+  A notice the disk still refuses is a drop like any other and is counted into
+  the record the next sink reports.
+- A ledger write that fails is appended to the drop's own notice ("the loss
+  could not be recorded for the next sink ... a restart will not know of
+  it"); a clearing write that fails is reported and the next sink says the
+  same loss again — over-reported, never hidden. A ledger whose bytes are not
+  a record is replaced, named in `last_error` and written into the log as an
+  `Error` event, saying that what an earlier sink lost is unknown. A read that
+  fails is named and is not taken for an empty ledger, which would overwrite
+  the fact the file exists to keep.
+- `Health` gains no field: `crates/api/src/logs.rs` builds one by exhaustive
+  literal and this fix does not edit `api`.
+
+**Evidence, on a real full disk.** A scratch probe (not committed) opened a
+sink on a 64 KiB tmpfs, wrote 20 events, filled the rest of the volume with a
+file, and emitted 185 more: the page cache took four, 181 were refused with
+`No space left on device (os error 28)`, and the ledger still landed:
+`issued=205 lost=181 first=25`. With the filler removed, a reopened sink
+reported `next_seq=207`, its newest line was seq 206 "events were lost before
+this sink opened" with `lost=181 first_seq=25 last_seq=205`, and the
+unfiltered tail read `missing=Some(181) malformed=1` (the one fragment the
+full disk tore). Before this change the same shape read `missing=Some(0)`.
+
+**Limits, stated in `docs/06-limits.md`.** A copy-on-write filesystem (btrfs,
+ZFS, APFS) may need a new block for an overwrite, so there the ledger write can
+fail with the append; that is said in the drop's own notice. The ledger is not
+`fsync`ed per drop, matching the log's own durability (a kill keeps it, a
+power cut may not); `Sink::sync` syncs it (D-4411). A writer KILLED mid-line
+still hands its torn record's number to the next sink, because no live writer
+counted it. Proof: FXA-01.
+
+### D-4411 — A clean exit can make the event log durable: `telemetry::sync` syncs the file, the loss ledger and the directory — 2026-10-09
+
+**Finding (sobs-13).** `Sink::sync` existed with no production caller, so the
+log was never flushed to disk, not even at a clean shutdown: a power cut after
+the `api.main` "exited cleanly" line could lose it. It also synced the current
+file alone, so the directory entry of a file this process created — at open or
+by a roll — was left to the page cache, and the loss ledger of D-4410 had no
+barrier at all.
+
+**Decision.** `Sink::sync` now syncs, in order, the current file, the loss
+ledger and, for a sink that holds its directory (one made by `Sink::open`), the
+directory itself; the first failure is returned, named by step, and reported
+like every other failure. `telemetry::sync()` is the one call a `main` makes
+at a clean exit: `None` with no sink installed, else `Sink::sync`'s answer.
+This change does not edit `api` or `cli`; the calls they must add are, in
+`crates/api/src/main.rs` after `note_exit(code, count)` and in
+`crates/cli/src/main.rs` after `cli::run_durable_os` returns,
+`let _synced = telemetry::sync();` (the failure is already in
+`Sink::health` and on stderr once).
+
+**Cost, measured on this tree** (scratch probe, not committed, ext4 on the
+build VM's virtual disk, 300 calls each): after one event p50 10.4 ms, p99
+20.0 ms, max 72.2 ms; after 100 events p50 11.9 ms, p99 19.0 ms, max 21.3 ms.
+Three `fsync`s and one `open`, once per process exit — never per event, so the
+emit path is unchanged. Proof: FXA-02.
+
+### D-4412 — A torn tail the full disk would not close at open is closed by the first append — 2026-10-09
+
+**Finding (sobs-3, probe P6).** `Sink::open` terminates a torn last line
+before the first append. When the disk was full at that moment the
+terminating byte was refused, `terminate_torn_tail` named it, and `around`
+then built the sink with `Inner::torn = false`. The first event after space
+returned was appended straight onto the fragment: `emit` returned `Written`,
+`written=1 dropped=0`, and the event was unreadable inside one malformed line.
+`emit` already carried exactly this state forward for a tear it made itself
+(D-1539); the open path dropped it.
+
+**Decision.** `terminate_torn_tail` returns whether the tear is still open,
+and `Sink::resumed` sets `Inner::torn` from it, so the first append leads with
+the newline and is a line of its own. The notice now says that instead of
+"the next event will fuse". A whole file still gains no byte at open, and the
+newline is led with once. Proof: FXA-03, which fails with the flag forced to
+`false` (checked on this tree).
+
+### D-4413 — Production stderr lines in `pull` and `telemetry` cannot panic, and a refused line is counted and logged — 2026-10-09
+
+**Finding (r53-1, telemetry and pull sites).** `eprintln!` panics when stderr
+is a closed pipe ("failed printing to stderr: Broken pipe (os error 32)"), and
+`[profile.release]` sets `panic = "abort"`. The r53 audit ran
+`pull::csv::decode` with stderr on a closed pipe and it panicked; with abort,
+a long backfill whose operator's terminal went away dies with signal 6 on a
+line that only described a degraded decode. The same shape was at six
+`pull::http` decode notices, `pull::csv::note_decoded`,
+`pull::masters::note_index_skips` and the sink's own last-resort notice
+`telemetry::sink::Sink::report`.
+
+**Decision.** `telemetry::stderr_line(format_args!(..))` (`crates/telemetry/src/say.rs`)
+writes one line and flushes through the locked stream and never panics. A
+refused line is counted in `telemetry::unprinted()`, and the first refused
+line that a sink records is written to the installed sink as a
+`telemetry.stderr` `Warn` naming the error — once, because a stream that is
+gone stays gone; a failure before any sink exists leaves the next one to try.
+Every production stderr line in `pull` and `telemetry` goes through it; each
+of those pull lines already sits beside an event carrying the same fact, so a
+closed stderr loses only the terminal copy, and that loss is recorded. The
+sink's own notice, when refused, is also named in `Health::last_error`.
+Gate 23's declarations move with the code: the four `eprintln!` entries leave
+clause A and `telemetry/src/say.rs` declares its one `stderr()` handle in
+clause A2, so a new `eprintln!` in either crate is refused by the gate.
+
+The `api` and `cli` sites the audit also named are not edited here (other
+fixers own those crates); they can call the same `telemetry::stderr_line`.
+
+**Evidence.** `crates/pull/tests/closed_stderr.rs` re-runs its binary with
+stderr on a pipe whose read end is closed and decodes the audit's degraded
+body: with the old `eprintln!` restored in `csv.rs` the child exited 101
+(panic) and the test failed; with this change it passes, the rows decode and
+`unprinted()` rose by one. `crates/telemetry/tests/closed_stderr.rs` does the
+same for the writer, the first-failure event and a refusing sink's notice.
+Proof: FXA-04.
+
+### D-4414 — A kept vendor body is named in the log, and its name is made durable — 2026-10-09
+
+**Finding (sobs-11).** `pull::capture::record` and `record_unreadable` wrote a
+vendor body with `create_new`, `write_all` and `sync_all`, returned the path,
+and both callers in `pull::http` dropped it. A kept copy of an unreadable
+answer could not be found from the refusal that kept it, and nothing synced
+the `captures/` directory, so the file's name could be lost by a power cut
+even though its bytes were synced.
+
+**Decision.** After the file's `sync_all`, the capture syncs `captures/`, and
+also its parent when this call made `captures/`, because a new directory is
+itself an entry in its parent. Every capture that lands emits one
+`pull.capture` event naming `path`, `feed` and `kind` (`GET`, `POST` or
+`unreadable`): `Info` "vendor body kept" when both syncs held, and `Warn`
+"vendor body kept, and its name may not survive a power cut" with the failing
+directory and the reason in `why` when one did not. A directory sync that
+fails is not a refusal: the bytes landed, the path is still returned, and
+`capture::refused()` does not count it. The event carries no URL, body or
+header, the same rule as `note_refused`. Captures stay bounded per process, so
+the extra fsyncs are bounded too. On this ext4 VM, 300 runs of 4 KiB measured
+the directory open and fsync at p50 4.0 ms, p99 10.1 ms and max 26.2 ms. No
+other filesystem was measured.
+
+The `FetchError::BodyNotUnderstood` sentence does not carry the path. Only a
+source whose base URL names a real vendor has a feed and captures at all, so
+no offline test could drive that branch. The event is what links the two.
+`/logs` shows it; a page that lists `captures/` would be an `api` change, which
+is out of this fixer's scope.
+
+**Evidence.** A directory with mode `0o300` lets a file be created and refuses
+to be opened, so its fsync fails for real, where the mode bits bind (D-0995).
+`a_kept_capture_syncs_its_name_and_a_name_that_cannot_be_is_said_not_refused`
+covers four cases: an unopenable `captures/`, a new `captures/` under an
+unopenable root, an existing `captures/` under the same root (nothing is
+said), and a clean pass with nothing counted as refused. Two new rows in
+`emit_sites` drive the shipped recorders and read both events back from a
+file. With the emit removed, that test fails. Proof: FXA-05.
+
+### D-4415 — The lake reader refuses a dictionary-encoded page that has no dictionary before it — 2026-10-09
+
+**Finding (satk-9, medium).** A chunk starts at `dictionary_page_offset`, or
+at `data_page_offset` when the footer has none. If a footer loses its
+dictionary offset, the chunk starts past the dictionary. `parquet`'s value
+decoder then `expect`s a dictionary it was never given ("Decoder for dict
+should have been set", `parquet` 59.2 `decoder.rs:213`), and
+`[profile.release]` turns that panic into an abort. The audit reached it with
+one flipped footer byte: 8 of the single-byte flips of a 1,923-byte
+dictionary file panicked.
+
+**Decision.** `LakePageReader` records whether its chunk has handed out a
+dictionary page. A `PLAIN_DICTIONARY` or `RLE_DICTIONARY` data page with no
+dictionary before it is refused as a `ParquetError::General` naming the
+encoding and the missing dictionary, and the caller surfaces it as
+`LakeError::PageDecode` naming the column. The check is one boolean per page.
+
+The suggested footer-level check is not added. It would refuse a chunk whose
+`encodings` list a dictionary encoding while `dictionary_page_offset` is
+absent. But a writer may legally leave that offset unset and put the
+dictionary page at `data_page_offset`. The page walk reads that file
+correctly, and a footer rule would refuse it.
+
+**Evidence.**
+`a_dictionary_chunk_whose_footer_lost_its_dictionary_offset_is_refused_not_panicked`
+drops the offset through `patch_footer` on `volume` and on `open_interest`,
+and gets a named refusal for each.
+`no_single_flipped_byte_in_a_dictionary_file_panics_the_reader` keeps the
+audit's probe. It flips every byte of a 7,907-byte dictionary file with masks
+0x01, 0x80 and 0xff, which is 23,721 reads. Without the check 9 of them
+panicked and both tests failed; with it none panics. Proof: FXA-06.
+
+### D-4416 — A reader's time index is bound to the bars it holds, by device and inode — 2026-10-09
+
+**Finding (satk-2).** A reader opens its `.tix` lazily, by path, at its first
+lookup, and `confirm_index` compares only the header and the two entries
+holding the first and last committed bars. The audit replaced a month under an
+open reader by renaming in a new `.bin`, `.crc` and `.tix`. The old month held
+minutes 0–2 and 4–10; the new one held 0–7, 9 and 10. Both had ten bars with
+the same first and last stamps, so the reader accepted the new index against
+its old bars. `first_at_or_after(minute 4)` returned row 4, which in the held
+bars is minute 5, and `time_lookup` reported `Indexed`. No error was raised.
+
+**Decision.** Once its `.tix` is open, a reader's first lookup checks that the
+month's `.bin` path still names the file the handle holds: the same `dev` and
+`ino` from an `fstat` of the held handle and a `stat` of the path. If not, or
+if either `stat` is refused, the handle bisects its own bars under a new
+`time_index::Why::Replaced`. That reason is written as the usual `store.tix`
+warning and reported by `time_lookup`. The check runs after the `.tix` opens.
+So a swap that renames the `.bin` before the `.tix` cannot pair a new index
+with an unchanged `.bin` path. The reverse order puts a new `.tix` beside the
+old `.bin` for an instant, which is the stale-index case `docs/06-limits.md`
+already states, and the limits text now says which order is safe. The format
+is unchanged, so there is no new version. The cost is two `stat`s per handle,
+measured at p50 1.13 µs and p99 1.94 µs.
+
+**Evidence.**
+`a_reader_opened_before_its_month_was_replaced_never_pairs_old_bars_with_the_new_index`
+replays the audit's probe P07. With the check disabled it fails on
+`Indexed` ≠ `Bisection(Replaced)`. With the check, minute 4 is row 3 and
+every probe answers against the held bars. A reader opened after the swap
+uses the new index. A `.bin` path that names nothing makes the handle bisect.
+Proof: FXA-07.
+
+### D-4417 — A non-finite float in the event log reads back as a float, not as text — 2026-10-09
+
+**Finding (satk-5).** `encode::push_float` wrote NaN and the infinities as the
+JSON strings `"NaN"`, `"Infinity"` and `"-Infinity"`, and `record::scalar`
+read them back as `OwnedValue::Str`. A statistic that went non-finite could
+not be told apart from a text field that said so. `Record::matches` reported
+the round trip failed, against the crate's own comments in `record.rs` and
+`value.rs`.
+
+**Decision.** A non-finite float is written as the one-member object
+`{"float":"NaN"}`, with `"-NaN"`, `"Infinity"` or `"-Infinity"` in its place.
+That is legal JSON and greppable. A field's value is otherwise always a
+scalar, so the shape cannot be mistaken for text. The reader maps exactly this
+shape back to `OwnedValue::Float`; a NaN keeps its sign but not its payload.
+Any other object in a field's place is still refused where it opens, as
+before. The key is `encode::NONFINITE_KEY`, shared by the writer and the
+reader.
+
+Lines written before this change carry the bare strings and still read as
+text. That ambiguity is in their bytes, and no reader can remove it. A reader
+built before this change, given a new line that carries a non-finite float,
+refuses the line and counts it in `Tail::malformed`, so the failure is loud
+rather than silent. The api's `/logs.json` already renders a non-finite
+`Float` as `null`.
+
+**Evidence.**
+`a_non_finite_float_round_trips_as_a_float_and_text_saying_nan_stays_text`
+round-trips NaN, -NaN, +inf and -inf bit for bit, with `matches` true. A
+text field `"NaN"` beside them stays text, and an old line reads as text.
+Five other object shapes are refused. Proof: FXA-08.
+
+### D-4418 — An event log line that repeats a key is refused by name, and the writer never repeats one — 2026-10-09
+
+**Finding (satk-6).** `Record::decode` matched each key and let the last copy
+win. An `"level":"error"` followed by `"level":"trace"` read as trace and fell
+under a level filter. A repeated `fields` replaced the first object, and a
+repeated field key was kept twice with `Record::field` answering the first.
+`1e-400` read as `0.0` while `1e400` was refused.
+
+**Decision.** The ten line keys the decoder reads are tracked in a `u16` mask,
+and a second occurrence of any of them is `LineFault::RepeatedKey { key }`.
+A key a later build added is still stepped over, copies included, because
+nothing reads it. Inside `fields`, a key equal to one already kept is
+`RepeatedKey` too. That costs at most `MAX_FIELDS` comparisons, since the
+comma guard admits no thirteenth member. A decimal with a non-zero digit that
+parses to zero is `BadNumber`, the same as one that parses to infinity.
+
+The writer never produces either. Its line keys are fixed, and the smallest
+finite float it writes is `5e-324`. `Event::with` now counts a field in
+`dropped` instead of keeping it when the line would spell its key the same as
+one already kept. That covers the same key again, or a longer key that
+`MAX_KEY_BYTES` cuts to the same prefix. The first value is kept, as the first
+`MAX_FIELDS` are, and the line's `"dropped"` says a field was not.
+
+Measured on this VM in release, building a 12-field event 200,000 times: p50
+375–377 ns and p99 416–507 ns before, p50 442 ns and p99 524–543 ns after,
+which is about 66 ns per full event. No production caller builds an event
+with a repeated key. That was checked by a scan of every `Event::…`
+builder chain and of every event built in a loop in `api` and `cli`. Old logs
+from this workspace's writers therefore stay readable. A log written by
+another program that repeats a key is refused line by line and counted in
+`Tail::malformed`.
+
+**Evidence.** `a_repeated_key_is_refused_by_name_and_the_writer_never_repeats_one`
+covers all ten line keys repeated, a repeated unknown key that is accepted,
+a repeated field key, the writer's first-value-kept rule for the same key and
+for a cut-to-the-same-spelling key, three underflowing literals refused, and
+`0.0`, `-0.0`, `0e-999` and `5e-324` kept. Four existing tests built their
+ceiling cases from one repeated key; they now use distinct keys of the same
+width. Proof: FXA-09.
+
+### D-4419 — `Batch::row` gets a random-index p99 row, gated against the memory it must touch — 2026-10-09
+
+**Finding (so1-2).** `docs/06-limits.md` said `Batch::row` "is an index into a
+decoded batch, which C-L-01 measures". C-L-01 re-reads index 0 and the last
+index: two rows that stay in the cache, as a minimum of means. That is the
+blind spot D-3307 found in C-12. The audit's probe at random rows measured p99
+3.0x to 6.0x at 248,000 rows and 13x to 37x at 2,480,000, against 2,480.
+
+**Re-verified.** On this box, the row's random-index p99 against 2,480 rows:
+1.6x to 4.0x at 24,800 (twelve runs, two over 3.0x), 6.0x to 10.0x at 248,000
+and 13x to 36x at 2,480,000. Nothing in `row` grows with the batch. It reads
+seven columns at one index. The growth is seven cache misses.
+
+**Decision.** A size-against-size p99 gate on this operation would gate the
+cache, and at 24,800 rows it went red on unchanged code two runs in twelve. So
+FXA-10 gates the row against its own floor instead: seven bounds-checked reads
+of seven plain `Vec<i64>` columns of the same length, at the same kind of
+random index, timed sample by sample in alternation with the row's samples so
+a burst of load lands on both. Every round visits all four sizes after an
+untimed walk that reads every value. The walk goes through `black_box`
+because `iter().count()` elided the loads and left the medium batch cold. The
+row's p99 against the floor's p99 is gated under the shared 3.0x ceiling at
+2,480, 24,800, 248,000 and 2,480,000 rows. Each size's p99 against 2,480 rows
+is printed and not gated, and `docs/06-limits.md` states it with p50, p99 and
+max. The limits line that credited C-L-01 is corrected.
+
+**Evidence.** Six runs at a load average of 11 to 13: gated ratio 0.95x to
+1.46x at every size. An O(n) fold planted in `row` on one call in fifty took it
+to 5.1x, 10.2x and 18.1x at the first three sizes, while C-L-01's two
+`row(last)` comparisons read 1.04x and 0.82x and passed. Proof: FXA-10.
+
+### D-4430 — The server opens a browser only when asked — 2026-10-09
+
+**What was observed.** rustonly-4: `api` started the operating system's URL
+handler on every start unless `BRUTEX_NO_OPEN` was set. Off macOS and Windows
+that handler is `xdg-open`, whose freedesktop.org implementation is a shell
+script, so a default start could run a shell. D-1202 kept the handler and
+made it switchable off; the finding asked for the opposite default.
+
+**Decided.** Opening is opt-in. `BRUTEX_OPEN` set to exactly `1` asks for the
+handler; absent or any other value spawns nothing, and the start-up banner
+prints the address with the reason it was not opened (`not opened
+(BRUTEX_OPEN is not set)`). `BRUTEX_NO_OPEN` is kept as a veto that wins
+over an ask, so a launcher that still sets it keeps its meaning. The handler
+list itself (D-1202) is unchanged. Proved by `open_if_asked`'s tests in
+`crates/api/src/server.rs`. FXB1-01.
+
+**Rejected.** Dropping the handler. An operator who wants the window keeps it
+with one variable; nothing in the default path runs an outside program.
+
+### D-4431 — An oversized index catalogue is refused for its size before its text — 2026-10-09
+
+**What was observed.** r64-6: `indexmap::Published::read` read at most
+`MAX_CATALOGUE_BYTES + 1` bytes and decoded them as UTF-8 before checking the
+length, so a file larger than the bound whose cut fell inside a multi-byte
+character was refused as "stream did not contain valid UTF-8" rather than for
+its size.
+
+**Decided.** The capped read keeps raw bytes, judges the length first, and
+decodes only a file within the bound. Proved by
+`an_oversized_catalogue_cut_inside_a_character_is_refused_by_size`. FXB1-02.
+
+### D-4432 — `/bars.json` past the header's last stamp answers after one record read — 2026-10-09
+
+**What was observed.** W1-api5-8: a `from=` after the month's last bar paid
+the bisection, and in a month born without `FLAG_CHECKSUMS` a landing at
+`n_valid` fell back to reading the whole month to answer `[]`.
+
+**Decided.** `bars_json` first asks `past_the_last_bar`: when `from` is past
+the header's `last_ts_micros`, it reads the one record at `n_valid - 1` and
+answers `[]` when that record carries the header's stamp (or, in a month born
+without checksums, is the all-zero record an interrupted append leaves). An
+unreadable or disagreeing record, or an empty month, falls through to the
+existing bisection, so a damaged tail is still found by the path that found
+it before. Proved by
+`bars_json_past_the_headers_last_stamp_reads_one_record`. FXB1-03.
+
+### D-4433 — A persistent `/engine/top.json` refusal costs one record read, not a cold walk — 2026-10-09
+
+**What was observed.** W1-api6-3: a damaged results-ledger record made
+`Selection::refresh` refuse, `with_verified` dropped the handle, and every
+following request ran `Selection::open` again: an O(history) cold walk to the
+same 503.
+
+**Decided.** The fold stops at the first record that will not read and keeps
+the handle with the refusal in `Selection::stalled`. Every later request
+refreshes the handle (constant metadata checks) and reads that one record
+again, so the refusal is re-proven from the bytes each time. A repair moves
+the file's generation, the refresh refuses and the next request opens cold,
+so a repair is seen at once. No refusal is cached as an answer. Proved by
+`a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`.
+FXB1-04.
+
+### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
+
+**What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page
+held one reader, so two clients alternating candidates made every request a
+cold `TradeReader::open` (O(trades of that candidate)). Nothing in `api`
+measured a route's latency.
+
+**Decided.** `candidatejson::trade_page` keeps up to `TRADE_READERS_KEPT` = 8
+readers, least recently used evicted, each served only for its exact root,
+summary and key; a reader whose page refuses is dropped, never kept. A new
+test-only module `api::latency` times a call `n` times and prints p50, p99,
+max, n and the load average; every `#[ignore]`d latency measurement in the
+crate uses it and is run on purpose with
+`cargo test -p api --lib -- --ignored --nocapture latency`. Figures are in
+`docs/06-limits.md`. Proved by
+`trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent`.
+FXB1-05, FXB1-06.
+
+### D-4435 — `/verify.json` checks one page of at most 1,024 months — 2026-10-09
+
+**What was observed.** W1-api5-7 and W1-api6-0: a scrub walked
+`Manifest::newest` (O(log length)) and opened every held month of the feed on
+every request; moving it to the store-read pool (D-2281) kept the cost.
+
+**Decided.** `verify::vendor` checks one page: `offset` (default 0) and
+`limit` (default and ceiling `MAX_VERIFY_PAGE` = 1,024; 0 or past the
+ceiling is refused by name, as is an offset past the held entries). The newest-entry list is built once per census snapshot and kept in
+`Site::verify_memo`, so the log walk is paid once per snapshot. The report
+carries `held`, `offset`, `limit` and `next_offset`, and a clean partial page
+says "not verified" and names the range it checked: only an answer that
+covers every held entry may say "verified". Proved by
+`scrub_route_checks_one_page_and_names_the_rest` and
+`scrub_route_opens_no_more_than_a_page_of_a_larger_counter`. FXB1-07.
+
+### D-4436 — A query string is split once per request — 2026-10-09
+
+**What was observed.** o1api-4: `param(query, name)` scanned the whole query
+for every field asked, so a request asking k fields paid k scans of up to
+8,192 bytes.
+
+**Decided.** `server::Query::parse` splits the query once into a map of the
+first value per key (pre-sized for `QUERY_FIELDS_RESERVED` = 32 keys), and
+`Query::param` answers each field with one probe, decoded exactly as `param`
+decodes. The bars window, the addressed bars routes, the instruments page,
+the ingest forms and `/logs.json` use it. Repeated keys keep the FIRST value,
+as `param` did. Proved by `a_split_query_answers_every_field_as_param_does`.
+FXB1-08.
+
+### D-4437 — `/live.json`'s ceilings are tested at their limits and measured — 2026-10-09
+
+**What was observed.** so1-4: `livejson::respond` serves
+`cli::live::CensusCache`, whose refresh lists the live folder and copies rows
+per request, bounded by `LIVE_ENTRY_LIMIT` (4,096), `LIVE_RUN_LIMIT` (128)
+and `LIVE_ROW_LIMIT` (256), none of which `docs/06-limits.md` named.
+
+**Decided.** No code change in `cli` (out of this fix's scope). The route is
+tested at 128 runs of 256 rows, and one run or one row past either ceiling is
+refused by name; the warm answer and the cold refresh are measured at the
+ceilings and recorded. Proved by
+`the_live_route_answers_at_its_ceilings_and_refuses_past_them`. FXB1-09.
+
+### D-4438 — A master refresh with no master moved does not reparse the universe — 2026-10-09
+
+**What was observed.** so1-5: `POST /masters/refresh` called `Site::reparse`,
+which re-ran `universe()` (catalog, join and coverage builds) on every press,
+while `docs/06-limits.md` said the universe's sorts were startup-only.
+
+**Decided.** `Parsed` carries `MasterStamps` (device, inode, length, modified
+and status-change time of each master, taken before the parse). The refresh
+calls `Site::reparse_if_moved`: when every stamp equals the held parse's, it
+answers that no master moved and keeps the parse; otherwise it parses as
+before. A master that cannot be stamped (any error but not-found) makes the
+stamps absent, so the refresh parses. The reparse runs on `spawn_blocking`.
+`reparse` itself stays unconditional. Proved by
+`a_refresh_with_no_master_moved_does_not_reparse`. FXB1-10.
+
+### D-4439 — A `ts` window's extremes come from kept month folds; a scan has a ceiling — 2026-10-09
+
+**What was observed.** W1-api5-4: `extremes=1` and every non-`ts` sort read
+every bar of the window's months on every request: O(n) reads and memory, n
+up to about 1.9 million at `MAX_WINDOW_MONTHS` = 240.
+
+**Decided.** A `ts` window with extremes now seeks its page and takes the
+extremes from `month_fold`: one fold per month file, kept in `MONTH_FOLDS`
+(at most `MONTH_FOLDS_KEPT` = 4,096, cleared whole when full) under the
+file's stamp and header, and kept only when a stat after the read equals the
+one before it. A moved file is read again. A non-`ts` sort still reads its
+range, now refused by name past `MAX_SCAN_WINDOW_RECORDS` = 1,048,576
+records. Proved by
+`a_ts_window_with_extremes_reads_each_month_once_until_it_moves` and
+`a_scan_past_its_ceiling_is_refused_by_name`. FXB1-11, FXB1-12.
+
+### D-4440 — The qualified campaign's whole-history read is measured, and kept — 2026-10-09
+
+**What was observed.** W1-api1-4: `/boolean-qualified-campaign.json` reads
+and authenticates its H acknowledged records on every GET; argued inherent,
+never timed.
+
+**Decided.** Kept: the page's `"history_checked":true` says every record was
+read for THIS answer, and a record that rots in place with its metadata
+unchanged is invisible to any cache keyed on metadata. A test proves the
+oldest of 40 records, damaged, refuses the page; the GET is measured at
+H = 1, 100, 1,000 and 7,000. Proved by
+`a_qualified_history_of_h_records_is_read_whole_for_every_answer`. FXB1-13.
+
+### D-4441 — The audit journal's per-request cost is measured as its directory grows — 2026-10-09
+
+**What was observed.** W1-api3-0: each audited request creates one file in
+the flat `audit/invocations-v1/` directory, with no retention, rotation or
+sharding; the cost of `begin` and the terminal was never timed.
+
+**Decided.** Measured to 10^4 real invocations and, by a labelled proxy, to
+10^5 directory entries. Sharding or retention is a new journal layout (a new
+version under D-1445 and `docs/02-store-format.md`) in `cli`, and is left to
+the owner. FXB1-14.
+
+### D-4442 — A Boolean evidence page proves currency through the read that serves it — 2026-10-09
+
+**What was observed.** W1-api1-6: `statistics` and `admission` each called
+`require_current` before and after their page, around `rows`/`splits` reads
+that already hold the lease and check every linked catalog before and after.
+A warm unpinned statistics page made 8·C catalog checks, an admission page
+10·C.
+
+**Decided.** The two outer calls are removed from both. The only one left is
+the in-memory `sources` arm's, which has no bracketed read of its own. A warm
+unpinned statistics page is now 4·C (the reuse check and the page read), an
+admission page 6·C. A changed tree still refuses, from the read. One catalog
+check is measured by a proxy of its system calls. Proved by
+`an_evidence_pages_currency_cost_per_linked_catalog_is_stated`. FXB1-15.
+
+### D-4443 — A qualification page renders at most 16,384 folds — 2026-10-09
+
+**What was observed.** W1-api2-8: each qualification row renders all F of its
+later folds, and F is bounded only by the saved run's byte budget, so a page
+was O(limit × F) with no ceiling in `api`.
+
+**Decided.** `MAX_PAGE_FOLD_ROWS` = 16,384 (256 rows of 64 folds). A page
+whose rows × F passes it is refused before any row is read, naming the
+largest `limit` that fits, or that the qualification cannot be paged here
+when one row alone passes it. Proved by
+`a_page_past_the_fold_row_ceiling_is_refused_with_the_limit_that_fits`.
+FXB1-16.
+
+### D-4460 — Nine ledgers cut a kill-torn tail or header loudly, and a rollback's cut is synced — 2026-10-09
+
+**Finding (rnew-1).** Nine ledgers whose failed append rolls back with
+`append_rollback` refused a ragged length at open and never called
+`fixed_tail::heal_torn_tail`: Execution V3, Admission V2, Finalization V2 and
+V3, Population V5 and V6, Selection V1/V2 (`selection.rs`), V3 and V4. A
+process killed mid-append (kill, OOM, power loss) runs no rollback, so the
+sub-record tail it left wedged that ledger for every later run, while their
+sibling ledgers (Execution V4, Base Evidence V3) already repaired it.
+`append_rollback`'s own `set_len` was not synced, so a power loss could bring
+back the partial record it had just removed.
+
+**Decided.** Each of the nine writers, under its exclusive lock and before its
+header check, cuts a tail that is not a whole record with
+`fixed_tail::heal_torn_tail` (Population V6 and the Selection ledgers also cut
+a non-empty strict prefix of their constant header with `heal_torn_header`,
+through the new `heal_header_and_tail`, and then write the header whole as for
+a new file). Every cut is synced and emits `cli.ledger` Warn "torn ledger tail
+truncated" or "torn ledger header truncated" naming the path. A whole record
+is never cut; readers still refuse a ragged file; short content that is not
+the header's own prefix still refuses unchanged. `append_rollback` follows its
+cut with `sync_all` and names a failed barrier as a failed rollback.
+
+**What changes.** No stored format, digest or result: the bytes cut were
+never acknowledged (every one of these ledgers is receipt-last). D-0918's
+"a one-byte header still refuses the writer" for Population V6 is superseded:
+a one-byte file that is the header's first byte is a torn header and is cut;
+a byte that is not still refuses (C4-CLI-06-01 amended).
+
+**Proof.** `fixed_tail::attack::torn_tails` appends a 1-byte, half-stride and
+stride−1 tail to every file of each ledger and requires a reader refusal, a
+writer cut back to exactly the committed length, exactly one logged cut naming
+the file, and the committed state read back unchanged. The nine tests are
+named in FXC-01. `a_rollback_cut_is_synced_and_a_failed_barrier_is_named`.
+
+**Not covered here.** Finalization V4 and Population Statistics V2/V3 (and
+other ledgers not in the finding's list) still refuse a torn tail; they were
+not in rnew-1 and are left as found.
+
+### D-4461 — A new result file's directory and name are made durable before its header — 2026-10-09
+
+**Finding (sobs-12, cli half).** `results.rs`, `frontier.rs`, `trades.rs` and
+`result_set.rs` created `results/` with `create_dir_all` and the file with
+`OpenOptions::create`, and synced only the file. The directory entries were
+never flushed, so a power cut right after the first synced record could lose
+the whole file. The Selection ledgers had the same shape.
+
+**Decided.** `fixed_tail::create_dir_all_durable` makes every directory it
+creates durable with one barrier on that directory's parent, and
+`fixed_tail::sync_parent` makes a new file's name durable BEFORE its header
+is written, so a kill between the two leaves an empty file that the next
+writer treats as new and barriers again. A failed barrier is refused by name.
+Cost: barriers only on creation, never per record; an existing directory
+costs one `try_exists`.
+
+**Residual, stated.** A directory or file that a failed barrier left in place
+is found existing by the next writer and takes no barrier, so a power cut
+after that retry but before the kernel flushes the directory could still lose
+it. Closing that needs a barrier on every open; not done. `api/src/audit.rs`,
+also named by sobs-12, is outside this change.
+
+**Proof.** `a_new_ledgers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`
+(results), `a_new_frontiers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`,
+`a_new_trade_files_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`,
+`a_new_receipt_files_directory_and_name_are_made_durable_and_a_failed_barrier_is_named`,
+`created_directories_are_made_durable_and_a_failed_barrier_is_named`. FXC-02.
+
+### D-4462 — A sweep refused by its required audit is logged, and `command finished` carries the code the shell reads — 2026-10-09
+
+**Finding (sobs-4).** In `run_durable`'s sweep arm an admission that could not
+start wrote one stdout line and no event, and a terminal audit that could not
+be confirmed turned exit 0 into FAILED after `command finished` had already
+been logged with `exit_code=0`: `/logs` said success for a run the shell was
+told had failed. `operation_audit::Attempt::finish` logged its own failure
+only from `Drop`, which an explicit `finish` disarms.
+
+**Decided.** The arm is `run_admitted`. An admission refusal emits one
+`cli.lifecycle` Warn "command refused" with the reason and `exit_code`.
+`command started` is emitted inside the audit and `command finished` only
+after the audit's terminal has settled, with the exit code returned and, when
+the terminal is unconfirmed, an `audit` field naming why. `finish` itself
+emits `cli.audit` Error "terminal audit unconfirmed" with phase and reason, so
+every caller's failure is logged once.
+
+**Proof.** `an_admission_that_cannot_start_is_refused_and_logged`,
+`the_finish_event_carries_the_exit_code_the_shell_reads` (`cli/src/lib.rs`),
+`an_unconfirmed_terminal_is_logged_once_by_finish_itself`
+(`operation_audit_tests.rs`). FXC-03.
+
+### D-4463 — A `cli` or `api` stderr line can no longer panic on a closed stream — 2026-10-09
+
+**Finding (r53-1, the `cli` and `api` sites).** `eprintln!` panics when stderr
+is a closed pipe, and the release profile aborts on a panic. Seven sites could
+kill the process they were reporting on: `cli/src/lib.rs` (the session-index
+diagnostic and two descent progress lines), `cli/src/operation_audit.rs` (two
+audit diagnostics) and `api/src/main.rs` (two).
+
+**Decided.** Each crate writes stderr through one `tell` that drops a line it
+cannot write. Gate 23's rule is kept: the declared `eprintln!` counts for
+those three files are removed and each of `cli/src/lib.rs` and
+`api/src/main.rs` declares its one `stderr()` handle. A diagnostic among them
+still emits its event (the session index now emits `cli.session_index` Warn
+"bars out of order"); progress lines do not. `pull` and `telemetry`, also named
+by r53-1, are outside this change.
+
+**Proof.** `a_stderr_line_is_dropped_not_a_panic_when_the_stream_is_closed`
+in `crates/cli/src/lib.rs` and in `crates/api/src/main.rs`;
+`bars_out_of_order_stop_the_session_index_and_are_logged`. FXC-04.
+
+### D-4464 — A panic leaves one event in the log before the default hook runs — 2026-10-09
+
+**Finding (sobs-1).** No panic hook existed (`std::panic::set_hook`: 0 hits);
+both binaries abort on a panic in release, and the message and location went
+only to stderr.
+
+**Decided.** `cli::panic_log::install` runs first in both `main`s. Its hook
+emits ONE `error` event, "process panicked", with message, location, thread
+and pid, syncs the sink, then hands the panic to the previous hook. The emit
+runs on a helper thread waited for at most `panic_log::WAIT` (2 s), so a
+panic raised while the sink's lock is held cannot hang the process; a panic
+inside the hook's own work writes nothing more; with no sink, a full disk or
+a closed stderr every failure is dropped, never unwrapped.
+
+**Proof.** `crates/cli/tests/panic_hook.rs`
+`a_panic_is_logged_once_and_a_closed_stderr_or_missing_sink_never_aborts`
+re-runs itself as a child whose stderr is a closed pipe, with and without a
+sink, and requires exit 101 (unwound, not aborted) and exactly one event;
+`panic_log::tests::delivery_is_bounded_and_never_waits_on_a_blocked_write`.
+FXC-05.
+
+### D-4465 — The sweep-evidence read bound is on what a read touches, not on the file — 2026-10-09
+
+**Finding (r3-1).** `sweep_evidence::bound` refused any read of a file longer
+than `max_bytes`, so a ranked file past the API's 64 MiB scan bound (335,545
+rows at 200 bytes, reachable by raising the screen cap) refused every page
+and every read of that identity, including reads of its 16-byte header.
+
+**Decided.** `bound(touched, max_bytes)` refuses a read that would TOUCH more
+than the bound: a header, one event, or one page's header plus rows. The
+file's length is used only for its row count. A page wider than the bound is
+still refused, not cut.
+
+**Proof.** `a_ranked_file_beyond_the_read_bound_still_reads_and_pages`
+(`crates/cli/tests/sweep_evidence.rs`). FXC-06.
+
+### D-4466 — `crates/cli/Cargo.toml` no longer says `cli` is loop-free — 2026-10-09
+
+**Finding (AC-gates-o1-4).** The manifest's telemetry comment still said
+"`cli` holds no loop over bars and no loop over candidates" after `CLAUDE.md`
+§5 stopped saying it. It is false: `window_range_percentile` walks bars and
+`screen` walks every candidate in `by_evidence.par_iter()`.
+
+**Decided.** The comment says what is true: `cli` is not on gate 17's list,
+is not loop-free, and keeps its events at structural boundaries.
+Documentation only. **Proof.** `the_manifest_does_not_say_cli_is_loop_free`
+(`crates/cli/tests/crate_graph_claims.rs`). FXC-07.
+
+### D-4467 — A Base Evidence append scans the ledger once; its fresh reopen reads one block — 2026-10-09
+
+**Finding (W2-cli10-0; stated by D-1639).** `append_and_reopen_base_evidence_v2`
+opened the ledger for write and then read-only, and each open's `scan`
+read, seal-checked and ordered-hashed every record: one family append was
+O(R_total) twice over every Base record ever committed.
+
+**Decided, as D-1845 did for Finalization V4.** The writer's open scan stays:
+it is the index the append and its duplicate check run on, and the only proof
+that earlier history is intact before anything is appended. The fresh reopen
+no longer scans: under the shared lock it opens the files afresh, verifies
+both headers, requires each path to still name the inode the writer wrote,
+reads the ONE completion at its physical index (now kept per universe) and
+its predecessor's end, validates that completion's block and compares it with
+the prepared bytes: O(this family's records). The earlier blocks are those
+the writer's open validated and its generation checks held unchanged up to
+its last barrier.
+
+**No output changes.** The returned audit is required equal to the one the
+append derived, which a full fresh open also derives (the test compares it).
+
+**Proof.** `a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage`
+(`candidate_universe.rs`) counts one scan per written or reused append, and
+damages the ledger between the writer's release and the reopen four ways (a
+sealed payload byte, a same-bytes file at a new inode, a cut record block, a
+cut completion), each refused by name. Counted, not timed. FXC-08.
+
+### D-4468 — A post-training OOS witness no longer re-derives its cohort identity — 2026-10-09
+
+**Finding (W2-cli16-1; D-1684 made the fold once per cohort).**
+`StoredOosFoldV1::mint_inner` called `cohort.require_integrity()` before and
+after each witness, and each call re-derived the cohort identity, hashing the
+signal, minute-context, daily and execution streams: Θ(S + Q + D + E) twice
+per witness, on top of the fold's own derivation.
+
+**Decided.** A witness re-checks only what can change while a fold is held:
+the strict source guards and the admitted root
+(`require_sources_current`), before and after. The cohort's identity is
+derived once, when the fold is built (`fold_inner` calls `require_integrity`),
+and cannot change under it: the fold borrows the cohort immutably. No output
+changes.
+
+**Proof.** `strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`
+(`strict_v6_tests.rs`) now counts ONE cohort identity derivation for a fold
+and three witnesses (seven before). FXC-09.
+
+### D-4469 — A held trade or frontier writer is not the disk state a fresh open sees: D-1777 narrowed — 2026-10-09
+
+**Finding (r64-1).** D-1777 says a cached handle "sees the same disk state a
+fresh open would". For `chosen-trades.bin` and `frontier.bin` that is false
+for an in-place rewrite: their `refresh` reads only rows appended since, so a
+row the held handle already indexed and something else then rewrote is never
+re-read, while a fresh open re-reads it and refuses every write. D-1841 stated
+this narrowing and its code never landed.
+
+**Decided: the narrowing is stated, not removed.** Re-verifying the indexed
+prefix on every recorded run is the Θ(rows) per run D-1777 removed, and a
+cheaper stamp check cannot see a same-size rewrite within one timestamp tick
+(D-0036). The held handle still refuses every row appended since, a replaced
+or shrunken file, and a ragged tail; a new process, a changed inode or any
+refused refresh reopens fresh and re-reads everything. `index_row`'s and
+`with_cached_handle`'s rustdocs say so. D-1777's sentence is amended by this
+entry; the receipt sidecar keeps its prefix re-hash (D-1560, D-3305).
+
+**Proof.** `a_held_writer_does_not_reread_a_row_it_indexed_and_a_fresh_open_does`
+(`crates/cli/src/trades.rs`) rewrites row 0 in place behind a held writer,
+requires the held handle to append past it and a fresh open to refuse with
+"whole chosen-trade row 0 whose integrity seal failed". FXC-10.
+
+### D-4480 — `keep::Best` is removed, not measured — 2026-10-09
+
+**What was observed.** Audit finding o1engine-20: the bounded best-results
+keeper `engine::keep::Best` admitted in O(log cap) (a binary-heap sift) plus a
+hash probe per offer, and every document that named the cost said
+"Measured: none: no caller". Reading the callers confirmed it: no shipping
+source in `engine` constructs it, and no other crate's `src` names it --
+`runner::rank` keeps its own heap, scored by forward edge, which support
+cannot stand in for. Its only users were its own eight tests, two engine
+tests that used it as a convenient sink, and the D-0762 scan that pinned the
+absence of a caller.
+
+**Decided.** Remove it: `Best`, its two order helpers `ranks_below` and
+`weaker`, and the eight tests that exercised nothing else. The two engine
+tests that used it as a sink (`two_streamed_runs_of_one_sweep_serialise_to_the_same_bytes`,
+`the_copying_streamed_walk_agrees_with_the_column_one`) now serialise every
+level the boundary hands over, which asks the property they relied on -- the
+boundary's order is a function of the candidates, not of the schedule --
+directly and over every survivor rather than the top eleven. SR-03's test is
+rewritten as a sink that keeps nothing against one that keeps everything,
+the two extremes any retention lies between. The D-0762 scan is replaced by
+`best_is_gone_and_no_crate_names_it`, which refuses the token in shipping
+source and the definitions in `keep.rs`. C4-ENGINE-04, AFX-08 and AFX-09 are
+retired with their tests; FXD-01 is the guard.
+
+**Rejected.** Measuring it. A bench row would time a cost no run pays, and
+the finding's own rule is that an unmeasured cost on a live path is the
+defect; with no path at all, the honest state is no cost. A caller that wants
+a bounded top list writes its sink at the level boundary and brings its own
+measurement, as `runner::rank` did.
+
+**Store, digests and outputs.** None change. No run constructed `Best`, so no
+stored output, digest or report was ever derived from it.
+
+### D-4481 — Support is counted a batch at a time, block by block, not one candidate per pass over the column — 2026-10-09
+
+**What was observed.** Audit finding so1-1. The sweep counted every candidate
+with its own `Column::support` pass over the whole column: one
+`ConditionMask::hits` per bar, six word-ANDs against 48 bytes fetched. Once
+the column leaves the level-two cache the pass is bound by the fetch, so its
+per-bar cost grows with the column: the audit measured p99 per bar 1.87× to
+3.04× from 10^3 to 10^6 bars, and C-E-01 1.8× to 2.7× from 10^4 to 10^6 on
+this box. `docs/04-invariants.md` recorded C-E-01 at 0.663× (an M4 Pro, and the
+minimum of whole passes, which hides a tail) and called the difference noise;
+`docs/06-limits.md` said mask evaluation had "no size that grows". Re-measured
+here one candidate per pass (FXD-03): p50 about 1.2 / 2.0 / 6.4 ns a bar at
+10^4 / 10^5 / 10^6.
+
+**Decided.** `Column::support_each(&mut [Itemset])` counts a slice of
+candidates in one walk of the column, in blocks of `SUPPORT_BLOCK_ROWS` = 512
+rows (24 KiB, half the 48 KiB L1d of the box measured): every candidate is
+counted against a block before the next block is read, so each block is
+fetched once per batch. `support_block` is the per-block unit; its row fold
+`block_hits` is out of line (`#[inline(never)]`) because a probe measured the
+inlined closure form at about 2.4 ns a bar against 1.17 ns; the cause was not
+investigated. `drain` gives each support lane its slice of the batch and k=1
+counts all its offered positions in one call, then classifies them in the
+caller's order. The per-(bar, candidate) operation is the same one `hits`, and
+the count is the same: tested against `Column::support` at 0, 1, 511, 512, 513
+and 1,101 bars. `Column::support` stays as that reference and is no longer
+called by the sweep. C-E-01 now times `support_each` over 64 candidates
+(median of five block walks): 0.994× / 1.000×. FXD-02 gates one block's p99
+at 10^3 to 10^6 bars: 1.064× / 1.212× / 1.321×, and 0.932× / 1.232× / 1.287×
+with four extra CPU-bound processes running. FXD-03 prints the
+one-candidate pass on every run.
+
+**What stays, named.** A lane that holds one candidate -- a level's tail
+drain, a level of a few survivors -- is the old shape and pays FXD-03's
+per-bar cost. That is the memory system's, not an operation count: counting
+one candidate reads every bar's 48 bytes once however it is arranged.
+`docs/06-limits.md` names it.
+
+**Rejected.** Gating the one-candidate pass flat: it is not flat on any machine
+whose cache is smaller than the column, so the gate would be false or red.
+
+**Needs the owner.** `CLAUDE.md` §3 rule 4 names
+`engine::column::Column::support` as the production mask-evaluation path. It
+no longer is: the sweep calls `Column::support_each`, which performs the same
+one fixed-six-word `hits` per bar for each candidate. The rule's content holds;
+its method name is stale. This entry does not edit `CLAUDE.md`, which no
+agent message may authorise.
+
+**Store, digests and outputs.** None change. Counts are identical by test, the
+level order is the same canonical sort, and k=1 names its exclusions in the
+same order (`exclusions_are_named_in_caller_order_around_the_blocked_count`).
+
+### D-4482 — The p99 rows measure every size inside each of nine groups and gate the median paired ratio — 2026-10-09
+
+**What was observed.** Audit finding so1-3. O1P-03 and O1P-04 ran all rounds
+of 10^3, then all of 10^4, and so on, and gated each size's smallest round p99
+against the smallest 10^3 one, two-sided. The base and the comparand were
+measured in different stretches of the machine's load: in the audit's run 1
+of 4, O1P-04's 10^3 p99 read 11,458 ns against a normal 3,469 to 3,593, so 10^4
+came out at 0.309× and BREACHED on unchanged code. O1P-04's vector also grew
+by every push of every round, so its "10^3" ended holding 1.6 million; a scan
+planted on every 1,024th push read 1.117× at 10^4 and 2.062× at 10^5 under
+that design and breached only at 10^6.
+
+**Decided.** Each p99 row runs 9 groups. Inside a group every size is
+measured back to back after a warm-up, starting at a different size each
+group, and each group gives its own p99 ratio against its own 10^3. The row
+gates the median of the nine, so a load spike must disturb five groups to
+move the verdict while an O(n) operation moves all nine.
+`the_interleaved_statistic_can_pass_and_can_fail` runs before any row and
+proves the statistic on fixed numbers. O1P-04 truncates its pre-touched vector
+to exactly `n` before every sample, so the size it names is the size it
+holds; the first-touch shape is printed beside it and not gated, because
+whether a reservation's pages are fresh is the allocator's state (only 10^6
+crosses glibc's mapping threshold). O1P-03 gates 10^4 only: production's k=1
+table never holds more than 384 positions, and at 10^5 its p99 moved between
+1.35× and 4.66× with the machine's load.
+
+**Proved both ways.** Clean, at load 9.4: O1P-03 1.062× at 10^4; O1P-04 0.761×
+/ 0.676× / 0.825×. With four extra CPU-bound processes running (load 9.6 rising
+to 11.7): 1.382×; 1.005× / 0.986× / 1.027×. Planted O(n) scans: in `append` on
+every 32nd push, 12.955× / 9,867× / 19,835× at load 16.6 to 17.4; in `offer`
+for one position in 64, 8.832× at 10^4, load 11.9. Neither plant was
+committed.
+
+**Store, digests and outputs.** None. Bench-only.
+
+### D-4483 — Each level's sorts are measured and kept, not removed — 2026-10-09
+
+**What was observed.** Audit finding W3-engine1-1: every level sorts its
+survivors canonically (`sort_canonically`) and its index sorts the keyed
+prefix pairs (`JoinIndex::try_new`), O(|F| log |F|) per level, and
+`docs/06-limits.md` recorded it as "not timed here".
+
+**Decided.** Keep both, measure both. Canonical order is the output's identity
+(§3 rule 5), and the prefix join walks prefix blocks in the index's order,
+which decides what a level halted by the pair budget emits; neither can be
+replaced by an unordered structure without changing outputs. Both production
+sort sites now call `engine::primitives::sort_level`, and the FXD-08 row times
+it and `JoinProbe::try_new` at 10^3 to 10^6 survivors (p50 / p99 / max in
+`docs/06-limits.md`): the sort 23.5 µs / 0.716 ms / 22.6 ms / 306 ms at p50.
+Per item per log2 |F| the figure grows (sort 2.11× / 5.32× / 6.55×, index 0.84×
+/ 3.65× / 8.73× against 10^3) because wider levels tie on more leading key
+words and outgrow the caches; both causes are bounded, and the row gates the
+ratio at 21×, seven key words on top of the 3.0× ceiling, which a quadratic
+sort fails at 10^5.
+
+**Store, digests and outputs.** None change: `sort_level` is the same sort.
+
+### D-4484 — An expression's scratch is chosen from its stack height, two bit planes wide — 2026-10-09
+
+**What was observed.** Audit finding o1engine-22: D-1455 sized `evaluate`'s
+scratch from the program's LENGTH (8, 64 or 576 one-byte slots), so a
+599-instruction AND of 300 conditions, whose stack never stands taller than
+two, cleared 576 bytes on every bar. The per-bar cost still followed scratch
+capacity, not the program's shape, and nothing timed it.
+
+**Decided.** `Expression` carries its stack `height`, measured once by
+`from_parts` (the one constructor `decode`, `parse` and the search use) and
+never encoded. `evaluate` walks two bit planes, truth and known, of
+`Tier::of(height).words()` words: one per plane up to height 64, nine (576
+values, the deepest 1,151 instructions reach) past it. Kleene AND, OR and NOT
+are bit operations on `(true, known)` pairs, tested equal to `Truth`'s table
+over every program of up to five instructions on seven symbols and 2,000
+longer seeded ones under all 27 assignments. FXD-04 holds the
+per-instruction p99 from 1 to 1,151 instructions (0.32× to 0.35×, one-sided)
+and FXD-05 height 576 against height 2 at 1,151 instructions (1.440×,
+two-sided), load 7.6.
+
+**Store, digests and outputs.** None change. The wire format and `VERSION` are
+untouched, `height` is a function of `code` and `len` so equality is
+unchanged, and every program answers what it answered before.
+
+### D-4485 — The search node's sibling comparison is measured and bounded, not removed — 2026-10-09
+
+**What was observed.** Audit finding o1engine-23: each `Cursor::advance`
+node is O(1) plus one canonical-order comparison of the two subtrees a join
+combines, up to 575 instruction pairs, and the cost was "stated from the
+code's shape; not timed".
+
+**Decided.** Keep the comparison and bound it. It defines canonical order, and
+an O(1) form would need the order of two arbitrary subtrees from O(1) state:
+a per-position common-prefix length still leaves the join comparing the
+second sibling against the first from where that prefix ends. FXD-06 decodes
+the worst node -- the last placement of a 1,151-instruction program whose two
+575-instruction siblings are identical -- and gates its p99 against the same
+placement with siblings that differ at once at 3.0×; measured 1.541× (p99
+2,560 ns against 1,696 ns, load 7.6). A realistic three-bit search is
+reported beside it: 37 ns p50, 584 ns p99 per node over 200,000 nodes.
+
+**Store, digests and outputs.** None. Bench and documents only.
+
+### D-4486 — A ranked row whose money total an `f64` may have rounded is refused by name — 2026-10-09
+
+**What was observed.** Audit finding GAP16-26: D-1173 made `edge`'s money
+exact `i128`/`i64` and converted each value to `f64` once, which is exact only
+below 2^53 paisa. Past it the conversion rounds, and the rounded total would be
+ranked, persisted as IEEE bits in `cli`'s sweep-evidence row and printed, as
+though it were the sum.
+
+**Decided.** `Edge::money_is_exact` is true exactly when all eight money
+fields (four sums, four extrema) are finite and strictly below
+`EXACT_PAISA_LIMIT` (2^53) in magnitude. A field of exactly 2^53 is refused
+too: it is also what 2^53 + 1 converts to, so the stored value cannot prove
+which it was. `rank` refuses every inexact row under every lens, counts it in
+`Ranked::inexact` (read by `Ranked::inexact()`), and the FINDINGS report, on
+the retained and the streamed path, prints `REFUSED, money inexact` with the
+count whenever it is not zero. The mean and `t` are statistics (§7) and are
+not asked.
+
+**Rejected.** Changing `Edge`'s money fields to integers: `cli` persists their
+IEEE bits and `api` serves them, so that is a new sweep-evidence row version in
+`cli`, which this change may not build. Clamping or saturating: a different
+number presented as the sum, which §4 bans.
+
+**Store, digests and outputs.** No format changes. A report prints the new line
+only when something was refused, so every report with nothing refused is
+byte-identical. A run is affected only if some money total reached 2^53 paisa
+(about 9.0 × 10^13 rupees); over the 1,222,791 bars `crates/engine`'s bench
+says an instrument holds, that needs an average of about 7.4 × 10^9 paisa
+(7.4 crore rupees) per bar. That is arithmetic on those two figures, not a
+scan of stored outputs.
+
+### D-4500 — A level exit before an unpriced time exit is priced, under grid cost model V3 — 2026-10-09
+
+**What was observed (audit `lookahead`, high; `r64-5`, medium).** D-1514
+priced a level exit strictly before a hole ON a path and left three
+unpriceable paths block-only in `trade::walk_core`: the horizon bar missing or
+refused (`horizon_bar` answers `None`), the slice or the session's 15:09 proof
+ending before the deadline (`deadline > forced_stamp && !forced.real`), and an
+exit record `round_trip` cannot price. Each pushed `held(.., false, ..)`, and
+every grid door built `block_only: true` from it, so a stop that had closed the
+position at bar N vanished from every cell when a bar after N was the horizon
+minute or when the data stopped after N. Probe `zz_audit_r64_2` on the
+`hole_after_exit` fixture: horizon bar removed, 6 of 6 earlier stop rows lost;
+slice cut two bars after the stop, 6 of 6 lost; the bar before the horizon
+removed, 0 of 6 lost. `docs/06-limits.md` called the three conservative
+"because nothing before a hole was what made them unpriceable"; the hole was
+after the stop. `CLAUDE.md` §3 rule 7.
+
+**The change.**
+
+- `trade::Occupancy` gains `time_unpriced_at`: where the path's own time exit
+  has no price. A missing or refused horizon bar: the first bar at or after
+  the deadline on the path's whole prefix (`trade::deadline_index`, a binary
+  search over at most 1,440 strictly ascending whole-minute bars of one IST
+  day, so at most 12 comparisons whatever the slice length; measured p50 9,
+  p99 10, max 10 over the 375-bar sessions of the `holed` fixture). A cut:
+  `forced.bar + 1`, one past the last held bar. An unpriceable exit record:
+  the exit bar. On each, `priceable_before_hole` is set when the entry is
+  priceable both ways, and `Occupancy::hole_offset` is the earliest of
+  `first_refused`, `first_missing` and `time_unpriced_at`. The amended field
+  docs keep the old sentence and say why it was wrong.
+- `grid::Candidate::timed_at` is `max(time_exit - entry, hole)`, and
+  `pessimistic_offset` and the on-time-exit-bar argument of `ExitChoices::of`
+  read it. They differ only on a cut path, whose time exit is one past its last
+  held bar: a level-less variant stays unpriced (no square-off is manufactured
+  at the data's last minute, RULE 1c), and a target touched on the last held
+  bar is not paired with a time-exit attribution that is not due there.
+- Unchanged: every occupancy extent and `open_until` (a refused variant still
+  blocks to the time exit), the time-exit walk (`Trades::trades`, `eligible`,
+  `signals`, `while_open`, `too_late`), `outcome::forward`, the sweep, and the
+  replay labels of refused paths (`BlockOnly` as before).
+
+**Which results change, and the new version.** Wherever a walk path's time
+exit is unpriced for one of the three reasons and a variant's level exit falls
+strictly before that place, that cell gains the trade (money, counts, MAE,
+drawdown, rows) and may admit a later signal the old block refused. That
+reaches every grid door (`evaluate*`, `with_levels`, `per_trade`,
+`materialize_*`, the resolved-policy and expression grids, walk-forward scoring
+through `validate`) and the V1 replay universe, its candidate paths and every
+digest sealed over them. A slice with none of the three paths is
+byte-identical. Because cell money changed, the grid is a new cost model:
+`exit_grid_policy::printed_ohlcv_cost_model_id_v3` is the one this build
+implements. The V2 identity's value is unchanged and is refused by name,
+`ExitGridErrorV1::SupersededCostModelIdV2`, by resolution and by both resolved
+grids' runtime integrity checks; V1 is still `SupersededCostModelIdV1`. The
+policy digest hashes the id, so every `ExitGridPolicyV1` digest, resolved-grid
+digest and anything sealed over one that this build computes differs from one
+computed before it, on clean data too, and a stored artefact naming V2 is
+refused rather than replayed under arithmetic that did not produce it.
+
+**What the `cli` must change (not built here).** `cli` still names
+`printed_ohlcv_cost_model_id_v2()` as the implemented model, in production at
+`execution_capability.rs` (`exact_execution_law_digest_v1`, line 153) and
+`ledger_all.rs` (line 285), and in fixtures and tests in
+`anchored_search_lineage_v4.rs`, `boolean_candidate_grid.rs`,
+`boolean_candidate_tests.rs`, `candidate_universe.rs`,
+`execution_disposition_v2.rs`, `global_replay.rs`,
+`institutional_evidence.rs`, `ledger_exit_policy_tests.rs`,
+`population_admission_writer.rs`, `selection_v4_authority.rs`,
+`step3_orchestrator.rs` and `stored_data_completeness.rs`. Each must name
+`_v3`, `execution_capability.rs`'s refusal table (line 3833) gains
+`SupersededCostModelIdV2`, and every cli pin that hashes the model id is
+re-pinned. Until then the cli's policies are refused by name, loudly; none is
+replayed under the wrong model.
+
+**What it still does not do.** `grid::money_envelope_fits` reads every bar of
+every occupied path through its exit bar, and a later bar priced so large that
+`max |price| × paths × 4` leaves `i64` refuses the WHOLE grid, every path
+counted in `refused_paths`: a representability refusal of the whole sample,
+loud, and not an exit decision, so it is not made causal here. The legacy
+`grid::evaluate` derives its rung ladders from the time-exit trades' whole-path
+excursions and answers no cell when no time-exit trade exists; a ladder is the
+search grid chosen over the sample, not an exit decision, and the resolved V1
+policy door does not take that path.
+
+**Tests.** `runner::hole_after_exit::a_missing_horizon_bar_after_a_stop_leaves_the_stop_priced`,
+`a_refused_horizon_bar_after_a_stop_leaves_the_stop_priced`,
+`an_unfillable_horizon_record_after_a_stop_leaves_the_stop_priced` and
+`the_data_ending_anywhere_after_a_stop_leaves_the_stop_priced` (every cut from
+the bar after the stop to past its horizon) each fail on the code before this
+decision. `no_row_that_closed_before_a_cut_depends_on_any_bar_after_it` is the
+property itself: for every fifth cut across a session close, a session boundary
+and an open, under a stop, a target and the time exit, the rows that closed
+before the cut are identical with every later bar removed, altered in price, or
+refused; it fails on the old walk and fails again with `timed_at` reduced to the
+span. `runner::trade::tests::each_unpriced_time_exit_is_located_where_its_price_is_absent`,
+`deadline_index_is_the_first_bar_at_or_after_the_deadline_within_twelve_probes`
+(against a brute-force scan, deadlines on, off and outside the minute grid and
+at both `i64` extremes), the amended
+`a_path_held_only_by_a_hole_says_where_it_can_still_be_priced` and
+`hole_offset_is_the_earlier_hole_and_only_on_a_path_priced_before_it`;
+`runner::grid::tests::a_path_cut_before_its_deadline_has_no_time_exit_on_its_last_bar`;
+`runner::exit_grid_policy::tests::a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name`
+and `a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime`
+now cover V2 as well; `runner::research_family_readiness::legacy_resolution_identity_matches_the_recorded_pre_extraction_library`
+keeps the V1 and V2 digests as records and pins the four V3 digests from this
+build (not an independent capture).
+
+### D-4507 — An exchange test listing is found whatever its spacing or case — 2026-10-09
+
+**What was observed (audit `satk-1`, low).** `core::vendor::decode_master_row`
+declined a row as `Skip::TestInstrument` when its raw `underlying` or
+`trading_symbol` contained `NSETEST` or `BSETEST`, case-sensitive. The identity
+built from the same field later goes through `collapse_spaces` and
+`Symbol::new`, which remove spaces and upper-case, so an index row spelled
+`NSE TEST`, `BSE TEST 1` or `nsetest` passed the filter and was KEPT as the real
+index `NSETEST`, `BSETEST1` or `NSETEST` (probe P03).
+
+**Decision.** The scan runs on the folded field: `holds_test_marker` copies the
+field into a `[u8; MAX_FIELD_BYTES]` buffer with every ASCII whitespace byte
+removed and every ASCII letter upper-cased, and searches that for either
+marker. It is applied to both fields, as before. It is at least as broad as the
+identity's own normalisation, so no spelling that reaches the store as a
+marker's symbol can pass it. O(1): it runs after `MasterRow::over_wide`, so the
+field is at most 64 bytes and fits the buffer exactly.
+
+**What changes.** Rows whose underlying or trading symbol carries a marker in
+any spacing or case are declined as `TestInstrument` instead of kept. No stored
+format, digest or vocabulary changes. Nothing else in the filter changes: a
+hyphenated `NSE-TEST` is still not a marker, because the identity rule does not
+remove a hyphen either. This supersedes the unmerged D-3152 fix (case only),
+which never reached this tree.
+
+**Tests.** `core::vendor::tests::a_test_marker_is_found_whatever_its_spacing_or_case`
+(eleven spacings and cases on an index row, a contract row and the trading
+symbol, a marker in the last bytes at the 64-byte gate, and near misses and real
+names that must stay kept); it fails on the raw scan.
+
+### D-4508 — A whole number with any number of zero decimals is a whole number; a fraction is refused by name — 2026-10-09
+
+**What was observed (audit `r64-4`, low).** Since D-1570 a JSON number carries
+the vendor's own digits. `rolling::stamp`, `rolling::count` and
+`http::one_number` read a non-integer number through `csv::paisa`, the
+two-decimal price reader, and kept it when the hundredths were a multiple of
+100. A whole number written with three or more decimals (`7.000`,
+`1700000000.000`, `-0.000`) was therefore refused as unreadable, while `7.0` and
+`1.7e9` were accepted (probe `zz_audit_r64_1`), against D-1491's "an integer or
+a whole-number decimal". The same reader multiplied by 100 first, so a whole
+number above `i64::MAX / 100` written with a point was refused too, and every
+refusal read "not a whole number" whatever the reason.
+
+**Decision.** One reader, `http::whole_number`, used by all three. It accepts
+an optional `-`, digits, an optional point followed by at least one digit, and
+an optional `e`/`E` exponent with an optional sign; it is a whole number when no
+non-zero digit lands after the point, at any exponent and with any number of
+zeros. It refuses by name, `NotWhole::{NotDecimal, Fractional, OutOfRange}`,
+and the reason reaches the refusal: `RollingError::Uncountable` and
+`RollingError::Unstampable` gain a `why: &'static str` field, and
+`one_number`'s message ends in the reason. An exponent past `i64` decides by
+its sign (a fraction below, out of range above) and a zero mantissa is zero at
+any exponent. O(text length) in one pass plus at most 19 digit steps; nothing
+is written for digits the exponent moves past the text.
+
+**What changes.** These cells, refused before, are now read: whole numbers
+with three or more zero decimals, `-0.000` (zero), and whole numbers between
+`i64::MAX / 100` and `i64::MAX` written with a point. `i64::MIN` written with a
+point (`-9223372036854775808.0`) is now produced by the reader and is refused
+as the null sentinel in all three callers; `one_number` checks it after both of
+its arms (its old comment said that arm could not produce it, and is amended).
+Fractions, text, booleans, nulls, negatives (for counts) and stamps whose
+microseconds overflow are refused as before, now with their reason. No stored
+format or digest changes: every value now accepted is the integer its text
+states.
+
+**Tests.** `pull::http::tests::a_whole_number_with_any_zero_decimals_reads_and_a_fraction_is_refused_by_name`
+(45 texts: `i64::MAX` and `i64::MIN` with zero decimals, `-0.000`, a hundred
+thousand zeros, exponents on, inside and past the digits and past `i64`, the
+one-past-`i64` neighbours, malformed exponents and points; and the same through
+`one_number` from JSON) and
+`pull::rolling::tests::a_whole_number_with_three_or_more_zero_decimals_is_read_and_refusals_say_why`
+(stamps, volumes and open interest with zero decimals; the reason for a
+fraction, an out-of-range whole, a non-number, the sentinel, a negative and a
+microsecond overflow, and in the displayed message). Both fail on the old
+readers.
+
+### D-3500 — Gate 0's spawn scan refuses the constructor reached by another spelling — 2026-10-06
+
+**What was observed.** Lens L4 (one authority) built `.github/source_scan.rs`
+at `969493e` and handed `spawns` five one-line files that each start `sh`:
+a `type` alias of `std::process::Command`, the qualified
+`<std::process::Command>::new`, `Command::new` taken as a value
+(`let f = Command::new; f("sh")`), `["sh"].map(Command::new)`, and an
+`impl .. for Command` whose `Self::new("sh")` is the constructor. Each exited
+0. The scan read only the literal `Command :: new (` token run, so the
+argument of every other spelling was never read. Gate 2 refuses the ident
+`Command` in a build script outright, but crate code outside `build.rs` had
+only this scan, and gate 1e's PATH stubs see only what a build or test
+actually runs.
+
+**Decided.** `spawn_findings` asks `hidden_constructor` about every `Command`
+token first, and refuses: `Command :: new` not followed by `(`; `Command >`
+followed by `::`; `for [path ::] Command` followed by `{` or `where`; and any
+statement opening with `[pub [(..)]] type` that holds the token. Each refusal
+names the spelling. Type positions crate code uses (`&mut Command`,
+`-> Command`, `Option<Command>`, `Vec::<Command>`, a field, a `use` group, and
+every impl of a file's own `enum` or `struct Command`) stay clean; the whole
+tree is clean under the widened scan. Round 3 (D-3515) added the attribute-led
+alias, the turbofish `Command::<>::new`, `impl .. for (Command)` and
+`Command<>`, and `<$c>::new` in a macro. Proved by
+`a_spawn_through_another_spelling_of_the_constructor_is_refused`, which failed
+first on the type-alias line.
+
+**Not closed.** A constructor reached through a macro that builds the path
+from fragments, or through a trait method on another type that returns a
+`Command`, is still not read; gate 1e's runtime stubs remain the second signal.
+
+### D-3501 — A manifest comment naming a banned crate says it is banned — 2026-10-06
+
+**What was observed.** `crates/pull/Cargo.toml` said rustls "reaches `ring`
+0.17.14", that `nm target/release/api` shows "72 `ring_core` symbols", and that
+"the binary is not free of C: `ring` arrives through the `reqwest` line". D-0211
+removed `ring` (the `-no-provider` feature and `rustls-graviola`) and D-0212
+banned it in `deny.toml`. `cargo tree --workspace --locked -i ring --target all`
+prints nothing on `969493e`; `ring` keeps only a `Cargo.lock` entry for an
+optional edge. The coordinator's Rust-only scan raised it; L4 reproduced it.
+
+**Decided.** The two `pull` paragraphs now state the current provider and the
+ban, and `lake`'s `encryption` sentence says `deny.toml` bans `ring`. `deny.toml`
+is the one authority on which native crates may build, so
+`core/tests/graph.rs` reads its `[bans] deny` list and refuses any run of
+manifest comment lines that names a banned crate in backticks without saying
+`deny.toml` (`a_manifest_comment_naming_a_banned_crate_says_it_is_banned`). On
+the old manifests it named five mentions: `lake/Cargo.toml:10 ring`,
+`pull/Cargo.toml:89 ring`, and `pull/Cargo.toml:115` `aws-lc-rs`,
+`aws-lc-sys`, `ring`.
+
+**Rejected.** A test that the resolved graph holds no banned crate: that is
+`cargo deny check`'s job already (D-0212), and a test cannot run cargo
+(D-2344). The defect here was the prose, not the graph.
+
+### D-3502 — `CLAUDE.md` §5 and `AGENTS.md` §5 are checked against the manifests — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` ("The hand-drawn crate graphs are
+checked by nothing — D-0683") recorded that `cli`'s `pull` and `vocab` arrows
+were missing from the law's picture for three weeks while the checked
+`docs/01-architecture.md` table carried both, and that a check deriving the
+pictures from the manifests was "still not built". Lens L4's scope (d) names
+it.
+
+**Decided.** `core/tests/graph.rs` reads the first fenced block of `## 5.` in
+`CLAUDE.md` and `AGENTS.md`: `depends on NOTHING a · b` gives each root no
+arrows, `x y <-- a · b` gives each consumer `{x, y}`, a consumer drawn twice is
+refused, and the drawn map must equal the thirteen manifests' declared
+workspace dependencies both ways
+(`the_law_pictures_of_the_graph_are_the_manifests`). Dropping `vocab` from
+`cli`'s row in `CLAUDE.md` turns it red. §5's sentence "nothing parses this
+block as a whole" is replaced in both files; this entry is that edit's
+authority. The ASCII diagram above `docs/01-architecture.md`'s table is still
+unparsed.
+
+### D-3503 — Gates 10b and 27 read an id that shares its cell with the claim — 2026-10-06
+
+**What was observed.** Seventeen rows of `docs/04-invariants.md` write the
+id and the claim in one cell, `| AU-O1STORE-2 — **…** | proof | ✓ |`
+(AU-PROBEAPI-6, AU-O1CLI-2..6, AU-O1ENGINE-22..24 and -40, AU-O1STORE-1..2,
+AU-PROBESTORE-4..6, -7a, -7b). `invariant_id` in `.github/gates_tree.rs`
+(gate 10b) and `row_id` in `.github/gates_ledger.rs` (gate 27) take an id only
+when `|` follows it, so these seventeen were never counted and a second row
+with any of their ids passed both gates. D-1185 cites "Invariant
+AU-O1STORE-2", which therefore resolved by eye only.
+
+**Decided.** Both readers take ` — ` (space, em dash, space) after the id as
+the end of the id, exactly like `|`; `| I-1 x |`, `| I-1 - x |` and an em dash
+without the spaces still read nothing. Proved by
+`gate_10b_reads_an_id_that_shares_its_cell_with_the_claim` and
+`gate27_reads_an_id_that_shares_its_cell_with_the_claim`, each red on the old
+reader. The seventeen ids are unique today, so both gates stay green.
+
+**Rejected.** Rewriting the seventeen rows into the four-column shape: it
+reorders cells gate 10 reads for the proof and status, and the next author
+would write the shape again with nothing refusing it.
+
+### D-3504 — Every cited decision heads an entry; every cited `I-` invariant has a row — 2026-10-06
+
+**What was observed.** `docs/06-limits.md` (D-0684) records that gate 27b
+checks uniqueness only: "A number that heads nothing is not reported." Lens L4
+resolved every `D-NNNN` in the tracked tree outside `web/` against the
+ledger's headings and found, besides the known D-0051 and D-0676 and the
+gate-test fixture D-1234, two dangling citations: `docs/04-invariants.md`'s
+heading "Fixboard numeric passes 5 and 6 (D-2710 onward)" (the run starts at
+D-2712) and `.github/source_scan.rs`'s "audit-20261003 (D-1600..D-1619)" (the
+run ends at D-1614). `crates/core/src/vendor.rs` cited invariant `I-41`; the
+`I-` rows ended at `I-39`.
+
+**Decided.** The heading reads D-2712, the range D-1614, and `I-41` gets the
+row its test always proved. `crates/core/tests/citations.rs` walks the root
+documents and manifests, `docs/` but the ledger, `.github/` and `crates/`, and
+fails on any `D-NNNN` that heads nothing unless it is one of three named
+unwritten numbers, each with its reason; it fails on any `I-` id cited under
+`crates/` with no row. On `0edc1a0` it named D-2710, D-1619 and I-41.
+
+**Not closed.** Other invariant prefixes (`C-`, `X-`, `AF-`, …) cited in code
+are not resolved: the same shapes name findings, fixtures and retired rows,
+and no reader yet tells them apart.
+
+### D-3505 — `pull::rolling::shift_six` rounds a negative tie by core's half-up rule — 2026-10-06
+
+**What was observed.** `shift_six` (the implied-volatility reader) says it
+rounds "half-up at the seventh decimal, which is the same rule `CLAUDE.md` §7
+gives for snapping a price — one rounding rule for the whole product". The one
+authority for that rule is `core::price::Paisa::from_rupee_text_half_up`, which
+sends a tie toward positive infinity (`-14.5` is `-14`). `shift_six` added one
+to the magnitude whenever the seventh digit was 5 or more and negated after,
+so `-0.0000005` read as `-1` millionth where the rule gives `0`.
+
+**Decided.** For a negative value the magnitude grows only past the tie (a
+seventh digit above 5, or 5 with a nonzero digit after it); positive values are
+unchanged. `a_negative_tie_rounds_by_the_one_rule_core_gives_a_price` pins six
+named cases and compares 3,100 texts (both signs, two whole parts, fractions of
+seven to nine digits) with core's function applied to the text with the point
+moved four places; it failed first on `-0.0000005`.
+
+**Effect on stored bytes.** Only a vendor implied volatility that is negative
+and an exact tie at the seventh decimal reads differently; files written before
+keep their bytes (append-only), and a re-pull of such a row writes the
+corrected millionth.
+
+### D-3506 — One function builds each shared results path — 2026-10-06
+
+**What was observed.** `results/population-write.lock`, the one lock every
+population, admission, execution and Selection V4 writer and joined reader
+holds, was built in six places: a private `lock_path` in
+`execution_capability.rs`, `admission_store.rs`, `execution_disposition_v2.rs`
+and `population.rs`, and inline in `selection_v4_authority.rs` and
+`admission_join.rs`. `results/runs.bin` was built by
+`cli::results::Results::path` and again by `api::backtest::path_in`. All
+agreed, and nothing kept them agreeing: a renamed lock in one writer would lock
+a file no other writer locks while every write still succeeded. The refuter
+found no divergence today and confirmed nothing guarded it (`unguarded`).
+
+**Decided.** `cli::population::population_write_lock` is the one construction
+of the lock path and the five other sites call it; `api::backtest::path_in`
+calls `Results::path`. `cli/tests/one_path_authority.rs` counts each
+`.join("…")` construction across every crate's `src/` and requires exactly one,
+in its owner's file; it named the six lock sites before the change.
+
+### D-3507 — `InstrumentKey::swept_surface` enumerates the engine surface; `/store` names all 210 — 2026-10-06
+
+**What was observed.** D-0048 makes the `/store` coverage axis "the union of
+what the censuses hold and what the engine sweeps", so a swept instrument the
+store lacks is still a row. D-0506 and D-0682 widened the sweep to the 208 F&O
+shares, and `api::census::swept_series` kept `["BANKNIFTY", "NIFTY"]`, its doc
+quoting a §1 that no longer says it: on an empty store `/store?show=gaps`
+showed two rows, and a swept share nobody had pulled had no row anywhere. Core
+offered `is_sweepable` (a yes or no) but no enumeration, so a caller that
+needed the list wrote its own. Five `api` comments still called the surface "a
+two-element table", "a TWO-ROW table" or "two instruments".
+
+**Decided.** `core::instrument::InstrumentKey::swept_surface` yields the two
+`SWEPT` indices and then each NSE cash equity of `FNO_UNDERLYINGS`, every
+candidate filtered through `is_sweepable`;
+`the_swept_surface_is_exactly_what_is_sweepable_admits` compares it with the
+predicate over every index and cash key the universe can spell on both
+exchanges. `swept_series` maps it, and `held_series` sorts the axis it joins.
+An empty store's gaps view is now
+210 rows × 36 months = 7,560 cells over 38 pages of 200; the indices sort
+first, so page 1 still opens on them. Nine tests that encoded the two-row
+axis were re-derived (grid rows 360 → 7,848, page counts, the clamp's last
+page) and `A-18` restated. The comments are corrected.
+
+**Cost.** `held_series` stays O(keys log keys) (`docs/06-limits.md` §32) with
+210 more keys; a page still renders 200 cells.
+
+**Not changed.** The `web/` comments that say 213 equities
+(`web/src/routes/terminal/+page.svelte`, `web/src/lib/terminal.svelte.js`) are
+left: a comment edit rebuilds hashed `web/build` chunks Gate W1 compares, and
+that churn belongs with the next `web/` change.
+
+### D-3508 — Gate 1 refuses a committed cargo-mutants marker in any tracked file — 2026-10-06
+
+**What was observed.** Commits 92bcd1a and 99d8217 on `pr74/g18-rest`
+carried a live mutation out of an `--in-place` cargo-mutants run:
+`crates/telemetry/src/tail.rs:503` read `while pos >= /* ~ <marker> ~ */ 0`,
+an endless loop (repaired in 0d8c386). The marker is the text cargo-mutants
+writes into every line it mutates, "changed by cargo-" followed by
+"mutants". No language-purity gate read for it, so only the slow test and
+mutation jobs could have stopped it, and an endless loop stops them by timing
+out. The coordinator raised it to lens L4.
+
+**Decided.** `source_scan content` (gate 1) refuses any tracked file outside
+`web/` that holds the marker, naming the line. The needle is the constant
+`MUTANT_MARKER`, held in two pieces so the tool's own source does not hold it
+whole, and no tracked file may spell it whole either (this entry splits it).
+`a_live_mutation_marker_is_refused_in_any_tracked_file` failed first on the
+`tail.rs` shape; planting the marker on that line and running the gate 1 step
+exited 1 naming `crates/telemetry/src/tail.rs:503`.
+
+### D-3509 — `CLAUDE.md` §10 is compared with the files under `docs/` — 2026-10-06
+
+**What was observed.** §10 is the one statement of which documents bind. It
+listed eight documents while fourteen existed (D-0212 item 5) and then said
+"all fourteen are listed now" while 25 more existed (D-1764), each found by a
+reader rather than a check; `CLAUDE.md` itself records that "nothing checks
+this file". A new `docs/36-…` today would sit outside both the table and the
+"`docs/12-` to `docs/35-`" sentence with every gate green.
+
+**Decided.** `crates/core/tests/citations.rs` reads §10's table rows and the
+range its "hold no authority" sentence names, requires every row to name an
+existing file, and requires every `.md` under `docs/` to be a row, a numbered
+report inside that range, or under `docs/research-policy/`
+(`every_document_is_classified_by_the_law`). Planting `docs/36-probe.md` turns
+it red. No law text changes: the table, the range and the files agree today.
+
+### D-3510 — Gates 1g and 2 refuse every door to a nightly toolchain — 2026-10-06
+
+**What was observed.** Gate 1g allowlisted the keys of `rust-toolchain.toml`
+and never read `toolchain.channel`'s value, so `"nightly-2026-09-01"` passed.
+`RUSTC_BOOTSTRAP: 1` in a workflow (which turns the pinned stable cargo into a
+nightly one) and `cargo +toolchain` were refused by no gate. Once nightly is
+on, four manifest keys run code cargo picks and no gate read them:
+`cargo-features`, `profile.*.rustflags` (a linker, or `overflow-checks=off`
+past gate 25, which reads only the `overflow-checks` key),
+`profile.*.codegen-backend`, and `package.metabuild` (a build-dependency run as
+a build script, with no `build.rs` for gate 2 to see). The refuter reproduced
+every part on a clone: gates 0, 1g, 13 and 25 all printed OK, and stable
+`cargo metadata` accepted the manifest with `RUSTC_BOOTSTRAP=1`.
+
+**Decided.** Gate 1g refuses a `toolchain.channel` that is not a quoted run of
+one to three dot-separated digit groups (`"1.97.1"`), and its environment-name
+list gains `RUSTC_BOOTSTRAP` and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`;
+its other-door rule refuses `cargo +…`. `source_scan build-keys` prints
+`package.metabuild`, `cargo-features` and any `profile.…rustflags` or
+`profile.…codegen-backend` leaf, so gate 2 (which refuses every line it prints)
+and gate 13 layer 3 refuse them in every TOML spelling. Proved by
+`gate_1g_refuses_every_door_to_a_nightly_toolchain` and
+`a_nightly_only_manifest_key_is_a_build_key`, both red first.
+
+**Needs the owner.** `auto-merge.yml`'s sensitive-path list covers `.github/`,
+`CLAUDE.md` and `CODEOWNERS`, not `rust-toolchain.toml` or `Cargo.toml`, so a
+change to those two alone auto-merges on green CI. Whether they need a
+code-owner review is a policy choice, not a gate defect; UNVERIFIED that it is
+wanted.
+
+### D-3511 — Gate 0 refuses a program run through sed, make, git, find, env or xargs — 2026-10-06
+
+**What was observed.** Gate 0's inline-program reading knew interpreters by
+name. A workflow step could still run a program written inline or assembled at
+run time through tools that are not on that list: GNU sed's `e` command and
+the `e` flag of `s` (`sed "s/.*/$PROG/e"`), `make --eval`, a git `!` alias
+(`git -c alias.x="!$PROG" x`), `find -exec "$PROG"`, `env -S "$PROG"`, and
+`xargs -I{} sh -c '{}'` (a shell's `-c` program that is each input line). The
+refuter ran twelve such lines through `source_scan workflow`; ten passed. And
+gate 12's step still piped the scanner's `fns` output through an inline
+`sed -E` program, which D-2315 calls a second language in a tracked file.
+
+**Decided.** `inline_programs` reads, over the whole unsplit line,
+`runner_programs`: a `sed` script any of whose commands is `e` or an `s` with
+an `e` flag, `make -E`/`--eval`, `git -c alias.…`/`git config alias.…` with a
+`!` value, `find -exec`/`-execdir`/`-ok`/`-okdir` of a `$` word, and `env
+-S`/`--split-string`; a shell's `-c` program holding `{}` counts as assembled
+at run time. Round 3 (D-3515) found that reading sed scripts leaks (attached
+`-e`, `{` blocks, `I` address flags, `\%re%` addresses, `-f -`), so `sed`,
+`make`, `rustup`, `git -c`, `git --config-env` and `git config` — none used by
+any workflow — are refused outright, `env -S` in any flag cluster, and an
+`xargs -I R` whose shell `-c` program holds `R`. `find … -exec rustfmt {} +`,
+gate 6d's `xargs -I{} env {}` and gate 0's own `xargs … "$tool"` stay clean. Gate 12 reads `FILE:LINE:name` through
+`gates-ledger path-declarations`, the reading gate 10 already uses, so no
+inline `sed` program remains in a workflow. Proved by
+`a_program_runner_that_is_not_an_interpreter_is_refused`, red first.
+
+**Not closed.** `xargs "$tool"` and `find -exec "$tool"` cannot be told from a
+hostile `$PROG` by text alone; a named program in a variable is the D-2344
+limit gate 0 already records.
+
+### D-3512 — The IST offset is spelled only by its authorities — 2026-10-06
+
+**What was observed.** `pull::session::IST_OFFSET_SECS` is pinned to
+`store::path::IST_OFFSET_SECS`, and `indicators::IST_OFFSET_MICROS` documents
+itself as "one definition, three crates". Production code re-typed the offset
+as a bare literal in seven places, each agreeing today and none tied to an
+authority: `indicators/src/orb.rs` (a private `IST_OFFSET_MICROS`),
+`pull/src/gaps.rs` (a private `IST_OFFSET_SECS` inside `ist`),
+`cli/src/boolean_oos_reader.rs` (two), `cli/src/boolean_qualification_reader.rs`
+and `runner/src/expression_oos.rs` (two).
+
+**Decided.** Each names an authority it may depend on: `indicators` its own
+constant, `pull` `session`'s, `cli` and `runner` `indicators::IST_OFFSET_MICROS`.
+`crates/core/tests/one_ist_offset.rs` walks every crate's `src/`, skips
+`*_tests.rs` and each column-0 `#[cfg(test)] mod` (past multi-line
+attributes), and refuses any spelling of 19,800 seconds outside the three
+definitions and `session`'s pin; it listed the seven sites before the change.
+Round 3 (D-3515) found the first reader stopped at an indented
+`#[cfg(test)]` statement and missed `api/src/bars.rs` (two, spelled
+`5 * 3600 + 1800`), `api/src/calendar_of.rs` (two) and
+`runner/src/expression_validation.rs`; those name the authority now too. Test
+fixtures keep their literals.
+
+### D-3513 — `pull::ssm` dates its SigV4 stamp with `telemetry::civil_from_days` — 2026-10-06
+
+**What was observed.** `pull/src/ssm.rs` carried a private Hinnant
+`civil_from_days` whose comment said `pull` "does not take `costs`, and
+`docs/01-architecture.md` gives it `core` and `store` only" — false since
+D-0206 (`costs`), D-0217 (`greeks`) and the `telemetry` arrow. Nothing tested
+it: its only caller, `now_stamp`, reads the clock and runs only against real
+AWS.
+
+**Decided.** `now_stamp` calls a pure `stamp_of(secs)` built on
+`telemetry::civil_from_days`, and the private copy and its comment are gone.
+`the_amz_date_is_the_civil_stamp_of_the_clock` pins the epoch, both ends of a
+leap day, 2000-02-29, the last second of 2100-02-28 (a century year that is
+not a leap year), and a known instant.
+
+**Not closed.** About a dozen other civil-date conversions remain (`costs`,
+`store`, `pull::session`, `cli` and `indicators` test helpers among them).
+Several are forced by the graph — `indicators` may depend on `vocab` alone
+(gate 22), and `costs` and `store` do not depend on `telemetry` — so a single
+authority would have to live in `core`. Recorded in `docs/06-limits.md`.
+
+### D-3514 — The backtest chart's month presets use the 375-minute session — 2026-10-06
+
+**What was observed.** `web/src/routes/backtest/+page.svelte` computed a
+month as `Math.round((555 * 60) / secs) * 21` bars while its doc said "a
+6.25-hour session". 555 is the minute of the 09:15 open past IST midnight; a
+regular session is 375 one-minute bars (`pull::session::BARS_PER_REGULAR_SESSION`).
+Every preset spanned about 1.48 times its label: at one minute "1M" was 11,655
+bars against 7,875, so "3M" showed about 4.4 months.
+
+**Decided.** `web/src/lib/presets.js` holds `barsPerMonth`: a session's bars
+at the rung, rounded up as the fold counts a short last bucket, times 21, one a
+session at daily and wider, and zero for a rung with no length.
+`web/tests/backtest-presets.test.js` pins the fold's per-session counts (375,
+188, 75, 38, 25, 13, 7) from `pull/tests/anchor.rs`; it failed first because
+the module did not exist. `web/build` is rebuilt (Gate W1), with the deferred
+`web/` comments of D-3507 (213 equities, now 208) in the same build.
+svelte-check stays at 0 and W2's 870 tests pass.
+
+**Not closed.** The 375 is a copy in the browser of a fact the api does not
+serve; serving `BARS_PER_REGULAR_SESSION` would make it one authority.
+
+### D-3515 — Round 3 of lens L4: the lens's own gates, attacked and corrected — 2026-10-06
+
+**What was observed.** A fresh-eyes adversarial review of D-3500..D-3514
+proved each new gate leaky or wrong in places, by running the tools on crafted
+input: the spawn scan passed `#[allow(..)] type C = Command;`,
+`Command::<>::new`, `impl .. for (Command)`, `Command<>` and `<$c>::new` in a
+macro, and refused `Vec::<Command>` and a local `enum Command`'s `Display`
+impl; gate 0 passed eleven sed, git, env, make and xargs forms (each run and
+seen to execute); gate 1g passed `"cargo" +nightly`, `cargo '+nightly'` and a
+`\` continuation; gates 10b and 27 still skipped six `| C4-RUNNER-0N: claim |`
+rows; the IST-offset test stopped at an indented `#[cfg(test)]` and missed
+five production sites; and `cli/tests/one_path_authority.rs` counted only
+`.join("runs.bin")`.
+
+**Decided.** Each is closed in its own gate and proved by its test, the
+review's inputs added to the refused lists: the spawn scan reads past
+attributes, refuses the turbofish, the parenthesised and `<>` impl targets and
+the metavariable constructor, requires a qualified self `<` not preceded by
+`::`, and exempts impls in a file declaring its own `Command`; gate 0 refuses
+the six tools by name and the three forms by shape (D-3511); gate 1g reads
+`cargo +` with quotes removed and continuations joined; the id readers take
+` — `, ` – ` and `: `; the IST test skips only test modules (D-3512); and the
+path test counts any production string literal ending in either name, skipping
+test modules, with a planted `"x/results/runs.bin"` in `api` turning it red.
+
+**Recorded.** The D-0370 and D-0372 duplicate headings the coordinator asked
+about are D-0684's: issued twice on 2026-08-29, tabled there with subject and
+writing commit, kept because the ledger is append-only and citations name
+them, and pinned by gate 27b to exactly two headings each while every other
+number must head one. No change is needed; gate 27b is the gate that refuses
+duplicate decision ids.
+
+### D-3516 — The browser holds the IST offset and the session once, and derives a candle on `pull::fold`'s grid — 2026-10-09
+
+**What was observed (lens L4, round 4).** `web/src/routes/markets/+page.svelte`
+derived a coarser candle from stored bars with its own fold,
+`Math.floor((t + 19800) / w) * w - 19800`: every width counted from IST
+midnight. `pull::fold`, the store's one fold authority, counts every intraday
+rung from the 09:15 open, and D-1430 corrected `runner::resample` for exactly
+this. The two grids agree only when the width divides 555 minutes, so at 2, 10,
+30 and 60 minutes the page's first candle of a session began at 09:14, 09:10,
+09:00 and 09:00 and held part of a width, while the stored rung of the same
+name began at 09:15. Which one the page drew depended on which rung the feed
+held (`asStored` draws the stored bars as they are). Separately, twelve sites
+in ten files under `web/src` typed the IST offset (as seconds, milliseconds,
+microseconds and a BigInt: the markets, db, ingest and autopilot pages,
+`hold-series.js`, `trade-analytics.js`, `boolean-oos.js`,
+`index-stop-results.js`, `index-stop-vix.js`, `index-stop-launch.js`) and
+three typed the 375-bar
+session (`presets.js`, the db page, the ingest page's rung table), none tied to
+the Rust definitions.
+
+**Decided.** `web/src/lib/ist.js` restates `pull::session::IST_OFFSET_SECS`,
+`SESSION_OPEN_MINUTE` and `BARS_PER_REGULAR_SESSION` once, with the unit
+variants derived from the seconds, and every file above imports them;
+`presets.js` re-exports its `SESSION_MINUTES` from it. `ist.js` also holds
+`bucketStart(t, width)`: under a day, `t − ((t + IST − 09:15) mod day) mod
+width`, the rule `runner::resample` restates (D-1430), which for every width
+that divides a day is `pull::fold`'s grid edge for edge; a day or wider keeps
+IST midnight. The markets page's `aggregate` calls it. `web/tests/ist.test.js`
+reads the three `pub const` lines of `crates/pull/src/session.rs` and holds the
+web copy to them, holds `bucketStart` to the open-anchored grid at all eight
+stored intraday rungs over a whole session, on the next session and 20,000
+days earlier, to a 09:15 start for widths that do not divide a day (7, 45 and
+75 minutes), and to IST midnight at a day; it extracts the markets page's own
+`aggregate` with the Svelte parser and drives 375 one-minute bars through it
+(13 thirty-minute candles from 09:15, the last of 15 minutes; 7 hourly); and it
+refuses any other spelling of 19,800 seconds (any unit, any separators) or of
+375 or 555 in the code of any `.js`, `.ts` or `.svelte` file under `web/src`,
+comments removed, with a reader test of its own. Run against the sources as
+they were, the aggregate test and the spelling test failed (the spelling test
+listing `boolean-oos.js`'s two BigInt sites first) and the other five passed.
+D-3514's "Not closed" — the browser's 375 was a copy of a fact the api does
+not serve — is closed by the same test: the copy is now held to the Rust
+definition rather than served. `web/tests/autopilot-coverage.test.js` and
+`web/tests/database-page-fixture.js` run page functions lifted out by the
+Svelte parser and pass in what the page imports; each now passes the
+`ist.js` constant its page imports. `web/build` is rebuilt (Gate W1).
+
+**Rejected.** Serving the three numbers from the api. They are fixed by law
+and the exchange, not by configuration, and the page would then refuse to draw
+a chart while the server is down for a number it can read from source at test
+time.
+
+### D-3517 — The IST-offset reader sees the offset in minutes and skips every test-only module file — 2026-10-09
+
+**What was observed (lens L4, round 4).** `runner::synthetic::IST_OPEN_UTC_MICROS`
+was `(555 - 330) * 60 * 1_000_000`: the IST offset as 330 minutes, in
+production code, a spelling `crates/core/tests/one_ist_offset.rs` (D-3512,
+ONEAUTH-13) did not hold, so the test passed with a copy of the offset tied
+to nothing. The same reader skipped `*_tests.rs` and inline test modules but
+read as production every file a `#[cfg(test)] mod name;` declares under any
+other name: `pull/src/emit_sites.rs`, `store/src/emits.rs`,
+`engine/src/manifest.rs` and `api/src/{scratch,isolated,emitted}.rs`.
+
+**Decided.** `IST_OPEN_UTC_MICROS` is `SESSION_OPEN_MINUTE * MINUTE_MICROS -
+IST_OFFSET_MICROS` on `indicators`' constants (D-3518), and
+`runner::synthetic::tests::a_session_opens_at_0345_utc_and_closes_after_0959_utc`
+pins it to the clock time it names. The reader adds `- 330` and `+ 330` to its
+spellings, treats `pub mod` at any `pub(…)` visibility as a module, passes
+over `//` lines among a test module's attributes, and resolves every column-0
+`#[cfg(test)]` `mod name;` to the file Rust would compile (beside a `lib.rs`,
+`main.rs` or `mod.rs`, under the stem's directory otherwise, or the
+`#[path]` given, relative to the declaring file) and skips it. The middle two
+were found by the widened spellings themselves: their first run listed the
+test-only `(555 - 330)` in `indicators::column`'s `pub(super) mod tests` and a
+test fixture's `555..930` in `api::pullrun`, whose test module carries a
+comment between `#[cfg(test)]` and `#[allow(…)]`. A column-0 `#[cfg(test)]`
+item that is not a module is still read, strictly. Its reader test now lists
+the `(555 - 330)` line and that strict read, and a new test pins the
+module-file resolution on `lib.rs` and non-`lib.rs` declarations, `#[path]`,
+`pub(in …)` behind a comment, an inline module, `pubx mod` and a
+`#[cfg(all(test, unix))]` declaration that is not read.
+
+### D-3518 — The 09:15 open has named authorities, each tied to `pull::session`'s — 2026-10-09
+
+**What was observed (lens L4, round 4).** Six production definitions of the
+open: `pull::session::SESSION_OPEN_MINUTE` (const-asserted to 555),
+`pull::calendar::OPEN_MINUTE`, `store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT`,
+a private `OPEN_MINUTE` in `indicators::orb`, a private
+`OPEN_MINUTES_PAST_IST_MIDNIGHT` in `runner::resample`, and the `555` inside
+`runner::synthetic::IST_OPEN_UTC_MICROS`, and a seventh, test-only, in
+`runner::exit_grid_policy` (`REGULAR_OPEN_IST_MINUTE`, under `#[cfg(test)]`).
+Round 2 refuted "the three 09:15 constants" as pinned; the last four were tied
+to no other copy (the resampler only through its byte-equality with
+`pull::fold`), and the session
+length was restated in `runner::synthetic::BARS_PER_SESSION` and
+`pull::calendar::FULL_BARS` beside `BARS_PER_REGULAR_SESSION`.
+
+**Decided.** `indicators::SESSION_OPEN_MINUTE` is the sweep side's one copy
+(`indicators` may not name `pull` or `store`, gate 22): `orb` uses it,
+`runner::resample`'s constant and `runner::exit_grid_policy`'s test-only one
+are defined as it, and `runner::synthetic` builds its open from it.
+`pull::calendar` const-asserts its `u16` copy to 555 (a
+`u16`/`u32` comparison needs a cast this crate refuses) and `pull::session`
+const-asserts its own to `store`'s. `crates/cli/tests/one_session_open.rs`,
+in the one crate that names all four, holds every open, both offsets and every
+session length to `pull::session`'s, and holds every bar of three
+`runner::synthetic::sessions` to a minute of a regular session as
+`pull::session::IstMoment` reads the clock, its minute of day the open plus
+its index and its IST day its session. `crates/core/tests/one_ist_offset.rs`
+refuses any production spelling of the open (`9 * 60 + 15`, 33,300 seconds or
+the whole number 555) outside nine named lines: the four definitions, the two
+pins, `cli::stored`'s frozen `NSE_OPEN_MINUTE_V2` (its digest is stored
+evidence and may not follow a moved open) and the dated irregular sessions of
+`pull::calendar` (each is what happened on its day). Run against the code as
+it was, it listed `indicators/src/orb.rs`, `runner/src/exit_grid_policy.rs`,
+`runner/src/resample.rs` and `runner/src/synthetic.rs`, and the offset test
+listed `runner/src/synthetic.rs`.
+
+### D-3519 — The browser's rung list and charge list are held to their Rust sources — 2026-10-09
+
+**What was observed (lens L4, round 4).** Round 2 recorded (`docs/06-limits.md`)
+that the web's `CAMPAIGN_RUNGS` is not tied to the Rust rung list and that its
+index-to-label lookups do not fail loudly: `BooleanQualifiedSearch.svelte` and
+`ResearchTester.svelte` print `CAMPAIGN_RUNGS[Number(rung)]` for a rung index
+the server sends, so a list that drifted from `cli::EVERY_RUNG` would label a
+result with another rung and nothing would refuse it. `charge-scope.js` prints
+its own list of the charges a share trade pays (brokerage, STT, stamp duty and
+five more, "an UNVERIFIED list") when the server sends no `equity_note`, a copy
+of `runner::audit`'s equity header held to nothing.
+
+**Decided.** `web/tests/boolean-campaign.test.js` reads `pub const EVERY_RUNG`
+from `crates/cli/src/lib.rs` and holds `CAMPAIGN_RUNGS` to it, order and all;
+`web/tests/charge-scope.test.js` reads `equity_header` from
+`crates/runner/src/audit.rs`, joins its continued lines, and holds the page's
+note to the header's list verbatim and its trades sentence to each of the
+eight charges. Each failed when the web copy was edited (two rungs swapped; DP
+charges dropped). The versioned rung arrays in `cli` (`CANONICAL_RUNGS` of the
+selection and replay versions, `CALENDAR_POLICY_RUNGS_V2`) are left as they
+are: each is a frozen part of one evidence version and must not follow a later
+list (`CLAUDE.md` §3 rule 8).
+
+### D-3520 — Decision citations are resolved in the front end, the handovers and the tool configurations too — 2026-10-09
+
+**What was observed (lens L4, round 4).** `crates/core/tests/citations.rs`
+(D-3504, ONEAUTH-05) read the root law files, `docs/`, `.github/` and
+`crates/`, and left `web/` out on the ground that it "cites no decision as
+authority". Its sources cited 83 distinct decisions before this round, the two root handovers
+and `.config/nextest.toml` three more, and nothing resolved any of them.
+All of them resolve today.
+
+**Decided.** The test reads every `.md` and `.toml` at the root, `.config/`,
+`config/`, `.claude/`, and `web/`'s `.js`, `.mjs`, `.ts`, `.svelte`, `.css`,
+`.html`, `.md` and `.rs` files, skipping `target`, `node_modules`, `build` and
+`.svelte-kit` directories (generated or installed text), and asserts that a
+web source and a handover are read and nothing under a skipped directory is.
+
+### D-3521 — The five civil-date copies are compared on every day — 2026-10-09
+
+**What was observed.** Round 2 recorded in `docs/06-limits.md` that Hinnant's
+civil-date algorithm is written in `telemetry::clock`, `costs::day`,
+`store::path`, `pull::session` and `cli::stability` (the `cli::stored`,
+`cli::vix_reference` and `api`/`indicators` copies it also named are test
+fixtures), each tested where it lives and "no test compares them with one
+another". No one crate can hold it for all five: `telemetry` depends on nothing
+(gate 21) and `costs` and `store` name neither `telemetry` nor `pull`.
+
+**Decided.** `crates/cli/tests/one_civil_calendar.rs` walks every day
+`pull::session::Day` admits (2,932,897, 1970-01-01 to 9999-12-31) and holds
+`telemetry::civil_from_days`, `cli::stability::Grain::Month`, `costs::day`
+both ways on its 40,542-day window, and `store::path::YearMonth::ist_bounds_micros`
+on all 96,360 months (each starting at its first day's IST midnight and
+ending where the next starts) to `pull`'s answer. The copies stay; the
+"compares nothing" half of the limit is closed.
+
+### D-3522 — Lens L4 round 4: what else was checked, and the question left open — 2026-10-09
+
+**Checked and not a defect, with the reason.**
+- The candidate-persistence layout (`owner.lock`, `body.bin`,
+  `complete.bin` under `<namespace>/<identity>/`) is spelled in
+  `boolean_candidate_persistence`, `boolean_observation_file` and
+  `boolean_campaign_reader`. A reader that drifted from the writer opens a
+  file that does not exist and refuses through `readonly_file::open`; unlike
+  the lock of D-3506, no drift degrades silently.
+- `attempts.bin` is joined three times in `cli::sweep_evidence`, each onto
+  the same `base(root)` (`results/sweep-evidence-v1`), and in `api::recovery`
+  onto its own `root(site)` (`audit/recovery-v1`): two different files, each
+  built in one module from one base function.
+- `web/src/lib/boolean-work-model.js` bounds `live_conditions` by 384, the
+  mask width; a wider mask makes the page refuse the descriptor loudly.
+- `charge-scope.js`'s `SWEPT_INDICES` decides only whether the zero-levy
+  sentence may print when the server sent no `equity_note`; every other case,
+  an unknown symbol included, is labelled gross.
+- `pull::calendar`'s irregular-session windows that begin at 555 are dated
+  facts about those days, not the regular open, and `cli::stored`'s
+  `NSE_OPEN_MINUTE_V2` is frozen with its digest (D-3518 names both).
+- Every decision a web, handover or tool file cites resolves (D-3520). The
+  browser takes condition names and `vocab_version` from `/vocab.json`
+  (D-0288): `web/src` names a table row only in comments, and
+  `condition-groups.js` splits a served name by its shape, holding no list.
+  A search outside `crates/costs` for a `const`, `static` or `let` named for
+  STT, stamp, brokerage, SEBI, GST, txn, transaction, levy, charge, fee or cost
+  and bound to a number found no cost rate (its five hits are three test
+  timestamps and two feed constants).
+- Not measured: a census of every place `api` and `cli` re-bucket bars. This
+  round checked the browser's fold (D-3516) and the sweep side's open
+  (D-3518) only.
+
+**Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
+join the auto-merge workflow's sensitive paths (D-3510) is not decided here.
+
+### D-4647 — The audit's fix integration is merged onto the integration, and `masters` keeps D-3158's refusal — 2026-10-09
+
+**What was merged.** `wip/audit-fx/integ` at `a7a27dc3` (the attack-audit
+thread's fix integration: 81 commits and 282 files past `de932e5b`, the head
+D-4614 merged) into `bff477f0`, the integration that carries D-4614 to
+D-4622. Every conflict was combined so both sides' fixes hold; where both
+sides fixed one defect twice, one fix was kept and the entry for that file
+names which. Ledgers keep both tails, ours first; `docs/04-invariants.md`'s
+OBSV rows keep their table and this merge's rows follow it.
+
+**`crates/pull/src/masters.rs`.** Ours removed `IndexSkips` and
+`note_index_skips` with D-3128 and refuses a field that is not a list or a
+name (D-3158, `json_kind`). Theirs re-spelled `note_index_skips`'s
+`eprintln!` as `telemetry::stderr_line` (r53-1, D-4413), which kept a helper
+ours had already deleted. Kept ours; the re-spelled helper is not restored.
+Gate 23 clause A's declared list loses `crates/pull/src/csv.rs`'s line, which
+D-4413 moved to `stderr_line`, and its comment says `masters.rs`'s line had
+already gone with its skip.
+
+**Rejected.** Restoring the skip helper so theirs' re-spelling has a caller.
+It would bring back the silent skip D-3128 removed.
+
+### D-4648 — A null-price bar count is printed through `stderr_line` — 2026-10-09
+
+**Merged.** Ours counts null-price bars into `pull::fetch::DecodeSkips`
+(D-3122); theirs moved `http.rs`'s print onto `telemetry::stderr_line`
+(r53-1, D-4413). The merged print reads `skipped.null_price` and goes through
+`stderr_line`, so gate 23's clause A list does not gain the line back.
+
+### D-4649 — A capture is staged, linked, and its directory synced once — 2026-10-09
+
+**What was observed.** Git merged two directory barriers into
+`write_new_capture_via` without a conflict marker. Ours (pull1-3, D-2527;
+conc:pull1-3, D-3600) stages the bytes, links them under the final name and
+refused the capture when the directory sync failed. Theirs (sobs-11, D-4414)
+returns `Landed { path, unsynced }`: a sync that fails after publication is
+not a refusal, and the parent is synced too when the call created
+`captures/`. The auto-merged body synced twice and could both refuse and
+report the same capture.
+
+**Decided.** One barrier: theirs' `sync_directory(dir)` and the parent sync
+when made, after ours' staged write and link. The return type is theirs'
+`Landed`; ours' three tests read `.path`.
+
+**Rejected.** Keeping ours' refusal. A capture already whole under its name
+would be reported as failed, and theirs' unwritable-directory test proves
+the report instead.
+
+### D-4650 — A new result-set file syncs its parent, then every open heals its header — 2026-10-09
+
+**Merged.** Theirs syncs the parent directory before a new file's first
+header (sobs-12, D-4461); ours heals an empty, zero or torn header on every
+open (conc5-1, D-2644). `result_set` now calls `fixed_tail::sync_parent`
+when the file is empty and `write_header` on every open.
+
+**Left as found.** Two parent-directory barriers coexist in `fixed_tail`:
+ours' `sync_parent_directory` (conc11-1, D-2645, refuses a path with no
+parent) and theirs' `sync_parent` (falls back to `.`). They have different
+callers and no path syncs twice; unifying them is a separate change.
+
+### D-4651 — `command finished` is `finished_event` plus the audit field — 2026-10-09
+
+**Merged.** Theirs split `command_started` from `command_finished` and added
+`audit` when the terminal invocation audit cannot be confirmed (sobs-4,
+D-4462). Ours made the finish Warn on a refused exit with `why` and `reason`
+(D-2595, D-3207, D-4615). `command_finished` now builds `finished_event` and
+adds `audit` when there is one. Both sides' tests are kept.
+
+### D-4652 — Population V6 cuts a torn header with a log, then applies the one header rule — 2026-10-09
+
+**Merged.** Both sides healed a header torn by a kill. Theirs cuts a
+non-empty strict prefix of the header and logs the cut (rnew-1, D-4460);
+ours initialises an empty or all-zero header through
+`fixed_tail::init_or_heal_header` (conc5-1, D-2644). The merged open runs
+theirs' `heal_torn_header` and then ours' rule; theirs' test, which also
+checks a foreign byte still refuses, is kept with its comment updated.
+
+### D-4653 — Test listings are found by theirs' `holds_test_marker` — 2026-10-09
+
+**Merged.** Ours made the marker scan case-blind (D-3152); theirs'
+`holds_test_marker` (satk-1, D-4507) upper-cases and also removes ASCII
+whitespace, so it finds everything ours finds. Kept theirs; ours'
+`holds_ignoring_ascii_case` is dropped.
+
+### D-4654 — The sink's resume point is read inside the split-out open — 2026-10-09
+
+**Merged.** Theirs split `Sink::open` into `resumed` (sobs-3, D-4412); ours
+made `resume_point` return the resumed point and the reason it could not
+resume (CE-51, D-2510). `resumed` now destructures that pair.
+
+**Gate 20 re-declared.** Theirs added `loss.rs`, `say.rs` and `scope.rs` and
+new tests in `record.rs` and `sink.rs`, but kept the declaration at 32 lines,
+so the merged tree would fail gate 20 on five files. A crate-scoped coverage
+profile of the merged tree counts 47: `loss.rs` 5, `record.rs` 3, `say.rs` 3,
+`scope.rs` 2 and `sink.rs` 23 are new, and the rest are unchanged. That same
+profile reproduced CI's 20 and 28 for D-4613. Every new line is in a test
+module: `panic!` arms of asserts that run only when a test fails, and methods
+of test doubles their test never calls (`Fills::sync` and `Fills::reopen`
+in `sink.rs`, a writer's `flush` in `say.rs`). No production line is
+declared. Gate 20 declares the nine counts, and `docs/06-limits.md` §54's
+2026-10-09 follow-up names each line.
+
+**Rejected.** Rewriting theirs' tests so that no line goes uncovered, the way
+D-4613 did for a production arm. The lines are test-only, and gate 20's own
+comment names exactly this category as declared. CI's workspace profile on
+this tree is not yet shown.
+
+### D-4655 — The trade page keeps eight readers and opens none under the lock — 2026-10-09
+
+**What was observed.** Ours (cand-2, D-2576) took the one cached trade
+reader out of its mutex before any file read, so a cold
+`TradeReader::open` no longer held the lock while every other detail request
+waited on it holding a permit. Theirs (W1-api2-3, D-4434) replaced the one
+slot with eight kept readers, least recently paged evicted, and held the
+mutex across the whole page, cold open included. Each fix undid the other.
+
+**Decided.** `trade_page` locks twice: once for `take_serving`, which takes
+the reader for the asked candidate out, and once for `keep`, which puts it
+back as the most recent. Each is a scan of at most `TRADE_READERS_KEPT` = 8
+keys. `serve` opens and pages with no lock held. Because two requests for one
+candidate may now both open, `keep` replaces a reader already back for the
+same candidate, so no candidate holds two of the eight slots. A reader whose
+page refused is not put back (D-2763). A poisoned cache is used as found, as
+`detail::Checkout` does. `page_through`, which the tests drive over a plain
+`Vec`, runs the same three steps.
+
+**Proved by.** `a_reader_put_back_twice_for_one_candidate_is_kept_once`
+(new), `a_cold_trade_reader_does_not_park_detail_permits` (ours) and
+`trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent`
+(theirs), all in `crates/api/src/candidatejson.rs`. MRG-13.
+
+### D-4656 — The store grid's doc says all 210 swept series are on the axis — 2026-10-09
+
+**Merged.** The code is theirs: `census::swept_series` reads
+`InstrumentKey::swept_surface`, the two indices and the 208 F&O shares
+(D-3507). Ours' doc still said only the two indices were seeded (D-2570).
+The doc is theirs', and it says what D-2570 said before D-3507 made the
+choice.
+
+### D-4657 — One `autopilot` event per feed verdict: `note_decision` is the writer — 2026-10-09
+
+**What was observed.** Both audits found that a feed's halt and stall never
+reached `/logs`, and each added a writer. Ours (conc13-4, D-2595)
+`note_decision` writes "backing off", "stalled" and "halted", each with
+feed, month, attempts, and the tick's own cause. A halt's line carries the
+cause rather than the paragraph around it, so telemetry's string bound does
+not cut it. Theirs (sobs-6, D-4453) wrote "month passed over" and "feed
+halted" from `settle`. The merge ran both, so every stall and every halt was
+logged twice.
+
+**Decided.** `note_decision` is the one writer, because it already covers
+the three verdicts and carries the cause. Theirs' two calls in `settle` are
+removed, and `note_backfill` loses the `at` argument no remaining caller
+passes. It still writes the pass's "backfill halted", the clock wait and the
+task's end. Theirs' test now asserts that a backoff, a stall and a halt are
+exactly `[backing off, stalled, halted]` under one run, each naming
+`why`, `feed` and `month`, and that the halt's paragraph is on the status
+page. That assertion fails on a second writer. FXB2-12's "a backoff writes
+none" clause is retired; MRG-14 states the merged claim. Ours' conc6-1
+(D-2694) mark on the feed's own report is kept beside it.
+
+**Rejected.** Keeping theirs' writer and dropping the backoff line. D-2595
+logged the backoff because the status sentence that carried it is
+overwritten by the next publish and lost on restart. Theirs' reason, that the
+tick's failure is logged already, does not log the decision to wait or for
+how long.
+
+### D-4658 — The `/bars` window limit states the scan ceiling and the store-read pool together — 2026-10-09
+
+**Merged.** `docs/06-limits.md`'s W1-api5-4 item. Theirs rewrote it for
+D-4439: a non-`ts` scan is refused past `MAX_SCAN_WINDOW_RECORDS`, and a
+`ts` window with extremes no longer scans. Ours had added that at most
+`detail::MAX_STORE_READ_CONCURRENT` = 8 scans run at once (D-2593) and that a
+request holds its month files open (resources-2). The item keeps theirs'
+text and measurements and adds ours' two facts after them. The memory bound
+stays UNVERIFIED.
+
+### D-4623 — Two readers both sides changed keep both changes: `/logs.json` and `/bars/window.json` — 2026-10-09
+
+**Merged.** Theirs made each query reader parse its query string once
+(D-4436). Ours had changed two of those readers: `/logs.json` reads `limit`
+with `whole_count`, so a huge number asks for the ceiling rather than being
+refused (D-3684), and `/bars/window.json` runs its read in the store-read
+pool (D-2593). The merged `/logs.json` parses once and keeps `whole_count`;
+`bars_window_reading` takes the exchange, segment and symbol from the parsed
+`WindowAsk` and still runs inside `detail::run_store_read`.
+
+### D-4624 — `Parsed` carries both master-stamp sets — 2026-10-09
+
+**What was observed.** Git merged two `let stamps` bindings in `Site::load`
+without a marker. Ours takes the per-source identity stamps that
+`/masters/status.json` judges a change by (clock-5, D-2580, D-2757); theirs
+takes `MasterStamps` for the refresh skip (so1-5, D-4438). The second binding
+shadowed the first, and `masters: stamps` got the wrong type.
+
+**Decided.** Both are taken before the parse and both are stored: theirs'
+binding is `master_stamps`. `Site::load` and `reparse_unless` set both fields,
+and the skip returns before the second set is taken.
+
+### D-4625 — The press's log scope replaces its claim on the shared run key — 2026-10-09
+
+**Merged.** Ours made a press hold one telemetry run key from its first leg
+to its end through a `PressRun` guard that claimed and released the sink's
+shared key (atomics-1, D-2582). Theirs gave every task its own log scope
+(D-4451), which answers the same question, "which lines are this press's",
+without a shared key. Kept theirs. `PressRun` and the per-leg claim and
+release are removed, and so is its `pull.press started` event. The scope
+now opens in `broker_run_at`, beside the autopilot's stop epoch
+(D-2506, D-2695), and `broker_run_scoped` takes the epoch.
+`a_press_of_two_feeds_keeps_one_run_key_until_the_last_leg_finishes` keeps
+its name, because ZX-99 cites it. It now drives a real two-feed press and
+requires both legs' lines between "press started" and "press finished" in one
+run's story, and that the production source holds no `.claim_run(` or
+`.release_run(`. ZX-99's claim-and-release clauses are retired.
+
+**Known risk.** The rewritten test synchronises two legs with a flag and a
+50 ms grace. That is a timing assumption, and a slow runner can break it.
+
+### D-4626 — The shutdown drain aborts the supervised press — 2026-10-09
+
+**Merged.** Ours made a served process's stop wait for a running press and
+keep its handle for the drain (autopilot-4, lifecycle-1, D-2583). Theirs ran
+the press under a supervisor that logs how it ended (sobs-5, D-4452), and
+the autopilot under `autopilot::launch` (D-4453). `pull_run` calls
+`pullrun::press`, and `press_with` stores the supervisor's handle in
+`site.press_task`. A six-line `AbortsPress` guard aborts the press when the
+supervisor is dropped, so the drain's abort reaches the press. It copies
+`autopilot::Aborting`, which is private to its module. `run_in` uses
+`autopilot::launch` and keeps `draining` for `drain_background`. ZX-93 now
+names the supervisor's handle.
+
+### D-4627 — One writer where both sides logged one boundary: a retry, a failed leg, a sweep refusal — 2026-10-09
+
+**What was observed.** Each audit added a log line at the same three
+boundaries, so the merged tree wrote two lines for each:
+- **A bars-ladder retry.** Ours writes `pull.http` "transport failed,
+  retrying" for an unanswered request (conc13-2, D-2526). Theirs writes
+  `note_retry`'s "retrying a refused request" for every retry, with a null
+  status for a transport failure (L1-R3-5, D-4455).
+- **A failed press leg.** Ours writes `api.pull` "leg failed" (conc13-4,
+  D-2595). Theirs writes `note_press`'s `api.pullrun` "leg failed; …" with
+  feed, leg, status, reason and receipt (sobs-5, D-4452).
+- **A sweep route's unstamped-build or budget refusal.** Ours writes
+  `refuse_logged` with a route-specific message (conc13-3, D-2595). Theirs
+  writes `refused_for_this_server(route, why)` (sobs-9, D-4447).
+
+**Decided.** Theirs is the writer in all three, because it is the richer line
+and theirs' tests count those exact messages per route and per press.
+`note_transport_retry` is deleted and its rationale moved into `note_retry`'s
+doc. Ours' `api.pull` leg event is removed. The three routes' stamp and
+budget arms call `refused_for_this_server`, and every other arm stays on
+`refuse_logged`. Ours' tests now assert exactly one event per occurrence:
+- `a_retried_transport_failure_is_logged_at_warn` reads its own log run;
+- `a_failed_leg_is_logged_at_its_level` uses `note_leg_failure`'s new
+  signature and asserts that no `api.pull` line appears.
+
+`api::emitted`'s count of lib emit sites is 81 on the merged tree: ours' 77,
+plus theirs' seven, less these two and D-4625's `pull.press started`. ZX-62's
+message and ZK-35's leg event are amended. D-4657 is the same pattern in the
+autopilot. There ours is the writer, because it carries the backoff and the
+tick's cause.
+
+### D-4628 — The recovery's early held-slot refusal is logged — 2026-10-09
+
+**What was observed.** Ours answers a recovery whose slot is already held
+with a 409 before any stage runs (D-2592), and that early return wrote no
+line. Theirs requires every refused recovery to log `pull.recovery`
+"recovery blocked" with its stage and reason (D-4448), and its
+`every_refused_recovery_names_its_stage_and_reason_in_the_log` would fail on
+the early return.
+
+**Decided.** The probe calls `note_blocked(CONFLICT, "slot", …)` before it
+returns.

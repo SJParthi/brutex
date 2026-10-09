@@ -204,8 +204,9 @@ both declared on 2026-09-01: D-0453 drew `pull` here and in
 `docs/01-architecture.md`, but not in `CLAUDE.md`, and its own list left out
 `vocab`, which D-0683 adds to all three. Gates 9 and 9b pin one arrow each, and
 `core/tests/graph.rs` checks the table in `docs/01-architecture.md` against all
-thirteen manifests; **nothing parses this block as a whole**, so check it
-against that gate and the manifests rather than trusting it.
+thirteen manifests, and since D-3502 it parses this block and `CLAUDE.md`'s
+copy as a whole (`the_law_pictures_of_the_graph_are_the_manifests`), every
+member and every arrow, both ways.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
 of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot

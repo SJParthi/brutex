@@ -15,6 +15,12 @@ pub(super) fn project(reader: &Qualification, asked: &Asked) -> Result<Value, St
     if matches!(asked.kind.as_str(), "index-weeks" | "index-days") {
         return super::index_consistency_projection::page(reader, asked);
     }
+    fold_rows_admitted(
+        asked
+            .limit
+            .min(reader.row_count().saturating_sub(asked.offset)),
+        reader.fold_count(),
+    )?;
     let rows = reader.rows(pin, asked.offset, asked.limit)?;
     let stats = reader.original().statistics();
     let observations = stats.rows(stats.completion_digest(), asked.offset, asked.limit)?;
@@ -126,6 +132,48 @@ fn same_coordinate(
     Ok(())
 }
 
+/// The most fold rows one qualification page renders: 256 rows of 64 folds.
+///
+/// Every row of a page carries all of its F later folds, and F is the saved
+/// qualification's own `fold_count`, bounded by nothing but its byte budget
+/// (`cli` checks each row's folds equal it). A page was O(limit × F) with no
+/// ceiling of its own. Since D-4443 a page whose rows × F would pass this is
+/// refused before a row is read, naming the largest `limit` that fits, so a
+/// page renders at most this many folds whatever F is. W1-api2-8.
+pub(crate) const MAX_PAGE_FOLD_ROWS: usize = 16_384;
+
+/// Whether `rows` rows of `folds` folds each fit [`MAX_PAGE_FOLD_ROWS`], or the
+/// refusal that says what to ask for instead.
+fn fold_rows_admitted(rows: usize, folds: usize) -> Result<(), String> {
+    if rows
+        .checked_mul(folds)
+        .is_some_and(|cells| cells <= MAX_PAGE_FOLD_ROWS)
+    {
+        return Ok(());
+    }
+    let fits = MAX_PAGE_FOLD_ROWS / folds.max(1);
+    Err(if fits == 0 {
+        format!(
+            "one qualification row carries {folds} later folds, more than the {MAX_PAGE_FOLD_ROWS} a page renders (D-4443); this qualification cannot be paged here"
+        )
+    } else {
+        format!(
+            "a qualification page of {rows} rows with {folds} later folds each would render {} fold rows, past the {MAX_PAGE_FOLD_ROWS} a page renders (D-4443); ask limit={fits} or less",
+            rows.saturating_mul(folds)
+        )
+    })
+}
+
+/// One later fold of a row, as the page serves it.
+fn fold_row(
+    index: usize,
+    [first, last]: [i64; 2],
+    [sessions, trades, wins]: [u64; 3],
+    return_paisa: i64,
+) -> Value {
+    json!({"index":index.to_string(),"first_day":first.to_string(),"last_day":last.to_string(),"sessions":sessions.to_string(),"trades":trades.to_string(),"wins":wins.to_string(),"return_paisa":return_paisa.to_string()})
+}
+
 fn row_detail(reader: &Qualification, row: &QualificationRow) -> Result<Value, String> {
     let later = reader
         .later()
@@ -137,7 +185,7 @@ fn row_detail(reader: &Qualification, row: &QualificationRow) -> Result<Value, S
             "later":crate::server::hex32(folds.later_digest()),"training_run":crate::server::hex32(folds.training_run_id()),"later_run":crate::server::hex32(folds.later_run_id()),"resolution":crate::server::hex32(folds.resolution_digest()),
             "ordinal":folds.ordinal().to_string(),"training_last_day":folds.training_last_day().to_string(),"first_day":folds.requested().first_day().to_string(),"last_day":folds.requested().last_day().to_string(),"execution_refusal_bits":folds.execution_refusal_bits().bits().to_string(),
             "decided":folds.decided_folds().to_string(),"profitable":folds.profitable_oos_folds().to_string(),"return_paisa":folds.aggregate_oos_paisa()?.to_string(),
-            "rows":folds.folds().iter().enumerate().map(|(index,fold)|json!({"index":index.to_string(),"first_day":fold.window.first_day().to_string(),"last_day":fold.window.last_day().to_string(),"sessions":fold.sessions.to_string(),"trades":fold.trades.to_string(),"wins":fold.wins.to_string(),"return_paisa":fold.return_paisa.to_string()})).collect::<Vec<_>>()
+            "rows":folds.folds().iter().enumerate().map(|(index,fold)|fold_row(index,[fold.window.first_day(),fold.window.last_day()],[fold.sessions,fold.trades,fold.wins],fold.return_paisa)).collect::<Vec<_>>()
         }))
     } else {
         None

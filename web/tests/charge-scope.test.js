@@ -135,3 +135,29 @@ test('the rung leaders and the ledger table state charges for a stock', () => {
   assert.match(page, /runs\.some\(\(run\) => chargeScope\(run\)\.gross\)/);
   assert.match(page, /data-ledger-charges>\s*Rows that are not a swept spot index: \{ledgerChargeNote\}/);
 });
+
+// D-3519 (ONEAUTH-22). When the server sends no `equity_note` the page prints its OWN list
+// of the charges a share trade pays and the run did not subtract. That list is
+// a copy of `runner::audit`'s equity header, the one wording every `cli`
+// report prints, and is held to it so the two cannot name different charges.
+test("the page's charge list is the audit header's", async () => {
+  const { chargeScope } = await scope();
+  const audit = readFileSync(new URL('../../crates/runner/src/audit.rs', import.meta.url), 'utf8');
+  const start = audit.indexOf('fn equity_header(');
+  assert.ok(start > 0, 'runner::audit has its equity header');
+  // The header is one Rust string continued across lines with `\n  \`.
+  const text = audit.slice(start).replace(/\\n\s*\\\n\s*/g, ' ');
+  const found = /so (brokerage, [^.]*?\(an UNVERIFIED list\))/.exec(text);
+  assert.ok(found, 'the header names its charge list');
+  const list = found[1];
+  const gross = chargeScope({ underlying: 'RELIANCE' });
+  assert.ok(gross.note.includes(`gross of every charge: ${list} are not subtracted`), gross.note);
+  // The sentence over the trades names the same charges, one by one.
+  const names = list
+    .replace(' (an UNVERIFIED list)', '')
+    .replace(' and ', ', ')
+    .split(', ')
+    .map((name) => name.replace(/^the /, '').replace(/s$/, ''));
+  assert.equal(names.length, 8);
+  for (const name of names) assert.ok(gross.trades.includes(name), `trades sentence lacks ${name}`);
+});

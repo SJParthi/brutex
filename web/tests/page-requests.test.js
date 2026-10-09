@@ -151,7 +151,9 @@ test('the actual layout and legacy status stream use owned cancellation and guar
  assert.match(layout,/refreshProbe = watching.refresh/);assert.match(layout,/onclick=\{\(\) => refreshProbe\(\)\}/);
  const page=readFileSync(new URL('../src/routes/backtest/+page.svelte',import.meta.url),'utf8');
  const status=page.slice(page.indexOf('async function adoptRunning'),page.indexOf('async function startSweep'));
- assert.equal((status.match(/if \(!ticket.current\(\)\) return;/g)??[]).length,6);
+ // 8, not 6: W6 (D-3216) reads a refused run.json body for its reason in
+ // adoptRunning and pollSweep, and each read is followed by its own guard.
+ assert.equal((status.match(/if \(!ticket.current\(\)\) return;/g)??[]).length,8);
  assert.doesNotMatch(page,/setTimeout\(pollSweep/);assert.match(page,/statusRequests.dispose\(\)/);
 });
 
@@ -170,6 +172,8 @@ test('the shared census and optional surface cannot publish for a replaced feed 
  const catalog=page.slice(page.indexOf('async function loadCatalog'),page.indexOf('const heldNow ='));
  assert.match(catalog,/const ticket = catalogGate.begin\(feed\)/);
  assert.match(catalog,/await readStoreCensus\(feed\);\s*if \(!catalogGate.admits\(ticket, activeFeed\)\) return/);
- assert.equal((catalog.match(/if \(!catalogGate.admits\(ticket, activeFeed\)\) return/g)??[]).length,5);
+ // 6, not 5: W1 (D-3211) reads a refused /universes.json body for its reason
+ // in loadSurface, and that read is followed by its own guard.
+ assert.equal((catalog.match(/if \(!catalogGate.admits\(ticket, activeFeed\)\) return/g)??[]).length,6);
  assert.match(page,/return \(\) => catalogGate.invalidate\(\)/);
 });

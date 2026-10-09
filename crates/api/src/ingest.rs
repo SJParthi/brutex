@@ -59,7 +59,7 @@ use brutex_core::symbol::Symbol;
 use brutex_core::universe::{self, Universe};
 use pull::session::{Day, IstMoment, SessionError, Window};
 
-use crate::server::param;
+use crate::server::{Query, param};
 
 /// The longest window one request may ask for, in days.
 ///
@@ -242,8 +242,10 @@ impl SpotTarget {
     /// label, the counter and the run were three different answers to one
     /// question.
     ///
-    /// TWO CONSTANT-TIME TESTS, not a lookup. `is_sweepable` compares against a
-    /// two-element table and `contains` is a bitflag test, so deciding whether
+    /// TWO CONSTANT-TIME TESTS, not a lookup. `is_sweepable` compares an index
+    /// against the two-element `SWEPT` table and a share against one
+    /// `FNO_INDEX` probe and the five index names (D-3507 corrected "a
+    /// two-element table"), and `contains` is a bitflag test, so deciding whether
     /// one instrument is in the target costs the same at 800 as at one — this
     /// runs once per candidate while building the list, never inside the pull.
     #[must_use]
@@ -1326,14 +1328,20 @@ pub fn parse_day(field: &'static str, text: &str) -> Result<Day, Refusal> {
 /// triple is there but incomplete — a piece absent and a piece present-but-empty
 /// are the same unfinished date. Otherwise whatever [`parse_day`] refuses.
 pub fn parse_day_field(body: &str, field: &'static str) -> Result<Day, Refusal> {
-    let iso = param(body, field);
+    parse_day_in(&Query::parse(body), field)
+}
+
+/// [`parse_day_field`] over a body already split once: four probes, not four
+/// scans of the body (o1api-4, D-4436).
+fn parse_day_in(fields: &Query<'_>, field: &'static str) -> Result<Day, Refusal> {
+    let iso = fields.param(field);
     if !iso.is_empty() {
         return parse_day(field, &iso);
     }
     let (y, m, d) = (
-        param(body, &format!("{field}_y")),
-        param(body, &format!("{field}_m")),
-        param(body, &format!("{field}_d")),
+        fields.param(&format!("{field}_y")),
+        fields.param(&format!("{field}_m")),
+        fields.param(&format!("{field}_d")),
     );
     // ANY PIECE MISSING IS A DATE THAT WAS NOT FINISHED, NOT A MALFORMED ONE.
     //
@@ -1383,8 +1391,13 @@ pub fn parse_day_field(body: &str, field: &'static str) -> Result<Day, Refusal> 
 /// Whatever [`parse_day_field`] refuses, [`Refusal::WindowBackwards`], or
 /// [`Refusal::WindowTooLong`].
 pub fn parse_window(body: &str, today: Day) -> Result<Window, Refusal> {
-    let from = parse_day_field(body, "from")?;
-    let to = parse_day_field(body, "to")?;
+    parse_window_in(&Query::parse(body), today)
+}
+
+/// [`parse_window`] over a body already split once (o1api-4, D-4436).
+fn parse_window_in(fields: &Query<'_>, today: Day) -> Result<Window, Refusal> {
+    let from = parse_day_in(fields, "from")?;
+    let to = parse_day_in(fields, "to")?;
     let window = Window::new(from, to).map_err(|why| Refusal::WindowBackwards { why })?;
     let days = window.days();
     if days > MAX_WINDOW_DAYS {
@@ -1532,7 +1545,10 @@ pub fn parse_spot(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
 /// submission by construction — a rule that cannot be broken by adding a
 /// fifteenth `?`.
 fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
-    let raw = param(body, "target");
+    // ONE SPLIT for every single-valued field (o1api-4, D-4436); the list
+    // field `member` and `cash_identity` keep their own one pass each.
+    let fields = Query::parse(body);
+    let raw = fields.param("target");
     if raw.is_empty() {
         return Err(Refusal::FieldMissing { field: "target" });
     }
@@ -1568,13 +1584,13 @@ fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
         cash_identity: parse_cash_identity(body)?,
         target,
         members,
-        window: parse_window(body, today)?,
+        window: parse_window_in(&fields, today)?,
         feed: {
-            let raw = param(body, "vendor");
+            let raw = fields.param("vendor");
             parse_feed(&raw).ok_or(Refusal::UnknownVendor { got: raw })?
         },
         granularity: {
-            let raw = param(body, "granularity");
+            let raw = fields.param("granularity");
             parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?
         },
     })
@@ -1683,7 +1699,9 @@ pub fn parse_fno(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
 
 /// [`parse_fno`]'s body, split for the reason [`parse_spot_inner`] is.
 fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
-    let typed = param(body, "underlying");
+    // ONE SPLIT for every field this form names (o1api-4, D-4436).
+    let fields = Query::parse(body);
+    let typed = fields.param("underlying");
     if typed.is_empty() {
         return Err(Refusal::FieldMissing {
             field: "underlying",
@@ -1703,7 +1721,7 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         });
     }
 
-    let raw = param(body, "series");
+    let raw = fields.param("series");
     if raw.is_empty() {
         return Err(Refusal::FieldMissing { field: "series" });
     }
@@ -1716,13 +1734,13 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
     // unfinished. That refusal is right when ONE expiry was meant and wrong
     // when a month was, and only the caller knows which — so the emptiness is
     // read here, once, before the parse that cannot tell them apart.
-    let named = !param(body, "expiry").is_empty()
-        || !param(body, "expiry_y").is_empty()
-        || !param(body, "expiry_m").is_empty()
-        || !param(body, "expiry_d").is_empty();
+    let named = !fields.param("expiry").is_empty()
+        || !fields.param("expiry_y").is_empty()
+        || !fields.param("expiry_m").is_empty()
+        || !fields.param("expiry_d").is_empty();
 
     let expiry = if named {
-        let one = parse_day_field(body, "expiry")?;
+        let one = parse_day_in(&fields, "expiry")?;
         // THE GATE. Strictly behind today: a contract expiring today is still
         // trading today, and `CLAUDE.md` §8's argument about a fall-back applies
         // here too — `<=` would admit exactly the case the rule exists to exclude.
@@ -1741,7 +1759,7 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         None
     };
 
-    let asked_window = parse_window(body, today)?;
+    let asked_window = parse_window_in(&fields, today)?;
     let mut window = asked_window;
     let mut clamped_from = None;
     if let Some(one) = expiry {
@@ -1794,7 +1812,7 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         // by name, and so does a value outside any plausible band — see
         // `Refusal::UnreadableRate` and `pull::pricing::MAX_PLAUSIBLE_RATE`.
         rate: {
-            let raw = crate::server::param(body, "rate");
+            let raw = fields.param("rate");
             let text = raw.trim();
             if text.is_empty() {
                 None
@@ -1819,11 +1837,11 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         // field that was wrong, and a shared helper would have to be told which
         // one it was serving to do that.
         feed: {
-            let raw = param(body, "vendor");
+            let raw = fields.param("vendor");
             parse_feed(&raw).ok_or(Refusal::UnknownVendor { got: raw })?
         },
         granularity: {
-            let raw = param(body, "granularity");
+            let raw = fields.param("granularity");
             let rung = parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?;
             // ONE MINUTE, AND ONLY ONE MINUTE, FOR AN EXPIRED SERIES.
             //

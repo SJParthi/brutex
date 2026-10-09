@@ -608,3 +608,46 @@ fn rolled_back_global_history_cannot_reuse_an_immutable_attempt_reservation() {
         None
     );
 }
+
+/// r3-1, D-4465: a ranked file far beyond the read bound still reads and
+/// pages. The bound is on what one read TOUCHES -- a header, one event, one
+/// page -- never on how large the file has grown, and a page that would touch
+/// more than the bound is still refused rather than cut.
+#[test]
+fn a_ranked_file_beyond_the_read_bound_still_reads_and_pages() {
+    let fixture = Fixture::new();
+    let identity = [9; 32];
+    let attempt = evidence::begin(&fixture.0, identity, Operation::Sweep).expect("start");
+    attempt.level(depth(1)).expect("depth");
+    let rows: Vec<RankedRow> = (1..=64).map(rank).collect();
+    attempt.ranked(&rows).expect("ranks");
+    attempt.finish(Completion::Completed).expect("finish");
+    let saved = read(&fixture, identity);
+    let bound = 4_096;
+    let ranked = fs::metadata(fixture.child(&saved, "ranked"))
+        .expect("the ranked file")
+        .len();
+    assert!(
+        ranked > bound,
+        "the fixture must exceed the bound: {ranked}"
+    );
+
+    assert_eq!(
+        evidence::read(&fixture.0, identity, bound).expect("a bounded read"),
+        Some(saved)
+    );
+    assert_eq!(
+        evidence::latest(&fixture.0, bound).expect("a bounded latest"),
+        Some(saved)
+    );
+    assert_eq!(
+        evidence::ranked_page(&fixture.0, &saved, 60, 4, bound).expect("a page within the bound"),
+        (61..=64).map(rank).collect::<Vec<_>>()
+    );
+    let why = evidence::ranked_page(&fixture.0, &saved, 0, 64, bound)
+        .expect_err("a page that would touch more than the bound");
+    assert!(
+        why.contains("would touch 12816 bytes") && why.contains("4096-byte read bound"),
+        "{why}"
+    );
+}

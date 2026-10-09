@@ -1,0 +1,1 @@
+import{t as e}from"./Bx2Br2eN.js";async function t(t,n){try{let r=await t?.json?.();if(typeof r==`object`&&r&&!Array.isArray(r)&&r.schema_version===1&&r.status===`refused`&&Array.isArray(r.rows)&&r.rows.length===0&&typeof r.refusal==`string`&&r.refusal.length<=4096&&r.refusal.trim())return n+` `+r.refusal.trim();let i=e(r);if(i!==null)return n+` `+i}catch{}return n}export{t};

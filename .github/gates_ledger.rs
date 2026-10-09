@@ -479,6 +479,11 @@ fn row_id(line: &str) -> Option<&str> {
         return None;
     }
     let after = after.strip_prefix('`').unwrap_or(after);
+    // D-3503: `| ID — claim |` shares the cell with its claim and is a row.
+    let after = [" — ", " – ", ": "]
+        .iter()
+        .find_map(|sep| after.strip_prefix(sep))
+        .map_or(after, |_| "|");
     after
         .trim_start_matches(' ')
         .starts_with('|')
@@ -1506,7 +1511,7 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/lake/src/reader.rs", 3),
     ("crates/telemetry/src/value.rs", 5),
     ("crates/telemetry/src/encode.rs", 1),
-    ("crates/telemetry/src/record.rs", 1),
+    ("crates/telemetry/src/record.rs", 5),
     ("crates/cli/src/live.rs", 1),
     ("crates/cli/src/institutional_evidence.rs", 8),
     ("crates/cli/src/institutional_statistics.rs", 19),
@@ -1547,7 +1552,10 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/cli/src/population_admission_v2.rs", 6),
     ("crates/cli/src/population_admission_v3.rs", 2),
     ("crates/cli/src/population_admission_v4.rs", 1),
-    ("crates/cli/src/population_base_evidence_ledger_v2.rs", 1),
+    // Two since D-4467 (W2-cli10-0): `audits` and `physical` start empty in
+    // `open_inner` and `scan` try_reserves both to the completion count
+    // before its first insert.
+    ("crates/cli/src/population_base_evidence_ledger_v2.rs", 2),
     ("crates/cli/src/population_base_evidence_v2.rs", 1),
     ("crates/cli/src/population_finalization_v2.rs", 4),
     ("crates/cli/src/population_finalization_v3.rs", 2),
@@ -1655,7 +1663,7 @@ const ALLOW_PANIC: Allow = &[
     ("crates/pull/src/ssm.rs", 1),
     ("crates/runner/src/rank.rs", 1),
     ("crates/telemetry/src/json.rs", 5),
-    ("crates/telemetry/src/record.rs", 4),
+    ("crates/telemetry/src/record.rs", 7),
 ];
 
 /// Rule 5c. Nothing disarms those lints outside a test module. Two entries,
@@ -2730,6 +2738,26 @@ mod tests {
         let (ok, text) = g27(&long);
         assert!(!ok);
         assert!(text.contains(&format!("      1:| A-10 | {}\n", "x".repeat(99))));
+    }
+
+    #[test]
+    fn gate27_reads_an_id_that_shares_its_cell_with_the_claim() {
+        // D-3503 (ONEAUTH-04): 17 rows wrote `| AU-O1STORE-2 — **claim** |`,
+        // the reader wanted `|` after the id, and a second row with the same
+        // id passed in either shape.
+        let doc = "| AU-O1STORE-2 — **a** | t | ✓ |\n| AU-O1STORE-2 | b | t | ✓ |\n";
+        let (ok, text) = g27(doc);
+        assert!(!ok);
+        assert!(text.contains("AU-O1STORE-2"), "{text}");
+        assert_eq!(
+            row_id("| `AU-PROBESTORE-7a` — **x** |"),
+            Some("AU-PROBESTORE-7a")
+        );
+        assert_eq!(row_id("| C-1 x |"), None);
+        assert_eq!(row_id("| C-1 -- x |"), None);
+        assert_eq!(row_id("| C-1 —x |"), None);
+        assert_eq!(row_id("| C4-RUNNER-01: claim |"), Some("C4-RUNNER-01"));
+        assert_eq!(row_id("| C-1:x |"), None);
     }
 
     #[test]

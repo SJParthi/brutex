@@ -160,6 +160,10 @@ fn stored_self_check_reports_partial_history_and_missing_feed_as_failures()
 /// the commit itself, and only a dirty tree is left unstamped, so the old
 /// sentence sent an operator hunting a missing variable instead of the
 /// uncommitted source that actually caused the refusal.
+///
+/// D-4492 (srust-3): the configuration starts `cargo` itself, not a shell
+/// handed `exec cargo run ...`; gate 1b's `gh_json launch` pins the whole
+/// argument list, and this test keeps only the program's name.
 #[test]
 fn the_launch_configuration_states_what_build_rs_actually_stamps() -> std::io::Result<()> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.claude/launch.json");

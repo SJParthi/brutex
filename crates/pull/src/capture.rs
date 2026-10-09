@@ -50,6 +50,13 @@
 //! `fetch_update` that fails and returns; it never opens a file again and never
 //! allocates.
 //!
+//! Each capture that lands costs the file's `sync_all`, one fsync of
+//! `captures/`, a second of its parent when this capture made `captures/`, and
+//! one `pull.capture` event naming the path (sobs-11, D-4414). Measured on this
+//! repository's ext4 VM, 300 runs of 4 KiB: create, write and `sync_all` p50
+//! 4.0 ms, p99 13.9 ms, max 19.5 ms; the directory open and fsync p50 4.0 ms,
+//! p99 10.1 ms, max 26.2 ms. Another filesystem is unmeasured.
+//!
 //! The total is bounded by construction at `FEED_COUNT * 2 * PER_SLOT` files
 //! for the life of the process, so a twelve-hour backfill writes exactly as
 //! much as a single request does once the budget is spent. That bound is the
@@ -270,6 +277,35 @@ fn with_discard(staging: &std::path::Path, why: String) -> String {
     }
 }
 
+/// One capture on disk: where it is, and whether its NAME is durable yet.
+#[derive(Debug)]
+struct Landed {
+    /// The file written.
+    path: std::path::PathBuf,
+    /// Why a directory holding it could not be synced, when one could not.
+    ///
+    /// The bytes are on disk and synced either way. What a failed directory
+    /// sync leaves undurable is the entry that NAMES them: after a power cut
+    /// the file can be gone, or orphaned where no listing finds it. So this is
+    /// not a refusal — the capture exists and is returned — and it is not
+    /// silence: [`note_kept`] raises the event to `Warn` and carries this
+    /// sentence. sobs-11, D-4414.
+    unsynced: Option<String>,
+}
+
+/// Syncs one directory, so the names in it survive a power cut.
+fn sync_directory(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::File::open(dir)
+        .and_then(|held| held.sync_all())
+        .map_err(|why| {
+            format!(
+                "{} could not be synced, so the capture's name may not survive a power cut \
+                 — {why}",
+                dir.display()
+            )
+        })
+}
+
 /// Persists one capture without ever opening an existing file for writing.
 ///
 /// # Staged, linked, then the directory synced (pull1-3, D-2527)
@@ -289,7 +325,7 @@ fn write_new_capture_with_stamp(
     prefix: &str,
     bytes: &[u8],
     stamp: u128,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<Landed, String> {
     write_new_capture_staged(
         dir,
         prefix,
@@ -310,7 +346,7 @@ fn write_new_capture_staged(
     bytes: &[u8],
     stamp: u128,
     write: &dyn Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<Landed, String> {
     write_new_capture_via(dir, prefix, bytes, stamp, write)
 }
 
@@ -327,15 +363,23 @@ fn write_new_capture_staged(
 /// after the link so the name survives a power loss. conc:pull1-3, D-3600.
 ///
 /// The same fix landed independently as pull1-3, D-2527; the body below is
-/// that one, because it also names a staging file it could not remove and a
-/// directory sync that failed after publication (see the doc above).
+/// that one, because it also names a staging file it could not remove.
+///
+/// A directory sync that fails after publication is not a refusal: the
+/// capture is whole under its name and is returned, with the reason in
+/// [`Landed::unsynced`] (sobs-11, D-4414). The staged write and that report
+/// came from two branches; the merge keeps both (D-4649).
 fn write_new_capture_via(
     dir: &std::path::Path,
     prefix: &str,
     bytes: &[u8],
     stamp: u128,
     mut write: impl FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<Landed, String> {
+    // WHETHER THIS CALL MAKES THE DIRECTORY, decided before it does: a new
+    // `captures/` is itself a name, in its parent, and is as undurable as the
+    // file's until the parent is synced too.
+    let made = !dir.is_dir();
     std::fs::create_dir_all(dir)
         .map_err(|why| format!("{} cannot be created — {why}", dir.display()))?;
 
@@ -398,15 +442,16 @@ fn write_new_capture_via(
         // as published-but-unsettled rather than as "not written".
         discard_staging(&staging)
             .map_err(|left| format!("{} was published whole, but {left}", path.display()))?;
-        if let Err(why) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
-            return Err(format!(
-                "{} was published whole, but {} could not be synced, so the \
-                 entry's survival of a power cut is UNVERIFIED — {why}",
-                path.display(),
-                dir.display()
-            ));
-        }
-        return Ok(path);
+        // THE NAME, NOT ONLY THE BYTES. `sync_all` made the file's contents
+        // durable; the entry naming it lives in the directory, and until that
+        // is synced a power cut can lose the file whole. One or two fsyncs per
+        // capture, and captures are bounded per process — see the module's
+        // cost note. sobs-11, D-4414.
+        let parent = dir.parent().filter(|_| made);
+        let unsynced = sync_directory(dir)
+            .and_then(|()| parent.map_or(Ok(()), sync_directory))
+            .err();
+        return Ok(Landed { path, unsynced });
     }
 
     Err(format!(
@@ -417,12 +462,42 @@ fn write_new_capture_via(
 }
 
 /// Production wrapper around the injectable stamp used by collision tests.
-fn write_new_capture(
-    dir: &std::path::Path,
-    prefix: &str,
-    bytes: &[u8],
-) -> Result<std::path::PathBuf, String> {
+fn write_new_capture(dir: &std::path::Path, prefix: &str, bytes: &[u8]) -> Result<Landed, String> {
     write_new_capture_with_stamp(dir, prefix, bytes, process_stamp())
+}
+
+/// Names one kept capture in the log, so the file can be found from it.
+///
+/// # Why (sobs-11, D-4414)
+///
+/// Both callers drop the path this module returns — they are on a pull's data
+/// path, or already on its failure path, and a capture must not change either
+/// — so before this event a kept body was findable only by listing
+/// `captures/` and guessing which file belonged to which refusal. The event
+/// carries the path, the feed and the kind (`GET`, `POST` or `unreadable`),
+/// which is what `/logs` needs to point at the file beside the refusal it
+/// explains.
+///
+/// `Info` when the file and its name are durable; `Warn`, with the reason, when
+/// a directory sync failed and the name may not survive a power cut. Like
+/// [`note_refused`] it carries no URL, body or header: the file holds those.
+fn note_kept(feed: Feed, kind: &str, landed: &Landed) {
+    let path = landed.path.display().to_string();
+    let event = match &landed.unsynced {
+        None => telemetry::Event::info("pull.capture", "vendor body kept"),
+        Some(_) => telemetry::Event::warn(
+            "pull.capture",
+            "vendor body kept, and its name may not survive a power cut",
+        ),
+    }
+    .with("feed", telemetry::Value::Str(feed.wire()))
+    .with("kind", telemetry::Value::Str(kind))
+    .with("path", telemetry::Value::Str(&path));
+    let event = match &landed.unsynced {
+        Some(why) => event.with("why", telemetry::Value::Str(why)),
+        None => event,
+    };
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// Keep this answer, if the slot has room.
@@ -478,8 +553,8 @@ pub fn record(
     );
     text.push_str(body);
 
-    let path = match write_new_capture(&dir, &prefix, text.as_bytes()) {
-        Ok(path) => path,
+    let landed = match write_new_capture(&dir, &prefix, text.as_bytes()) {
+        Ok(landed) => landed,
         Err(why) => {
             // COUNTED, NOT SWALLOWED, AND NOT PROPAGATED. See the module note:
             // a vendor answer that arrived intact is not refused because a
@@ -488,7 +563,8 @@ pub fn record(
             return None;
         }
     };
-    Some(path)
+    note_kept(feed, method.word(), &landed);
+    Some(landed.path)
 }
 
 /// How many bodies THIS BUILD COULD NOT READ each feed has kept.
@@ -582,14 +658,15 @@ pub fn record_unreadable(
     );
     text.push_str(body);
 
-    let path = match write_new_capture(&dir, &prefix, text.as_bytes()) {
-        Ok(path) => path,
+    let landed = match write_new_capture(&dir, &prefix, text.as_bytes()) {
+        Ok(landed) => landed,
         Err(failure) => {
             note_refused(feed, "unreadable", &failure);
             return None;
         }
     };
-    Some(path)
+    note_kept(feed, "unreadable", &landed);
+    Some(landed.path)
 }
 
 #[cfg(test)]
@@ -831,7 +908,8 @@ mod tests {
         );
 
         let path = write_new_capture_with_stamp(&dir, prefix, b"TEN BYTES!", stamp)
-            .expect("the next write");
+            .expect("the next write")
+            .path;
         assert_eq!(std::fs::read(&path).expect("whole"), b"TEN BYTES!");
         assert!(
             path.extension()
@@ -865,8 +943,10 @@ mod tests {
         let old = candidate_path(&dir, prefix, stamp, 0);
         std::fs::write(&old, b"first process").expect("old evidence");
 
-        let new = write_new_capture_with_stamp(&dir, prefix, b"second process", stamp)
+        let landed = write_new_capture_with_stamp(&dir, prefix, b"second process", stamp)
             .expect("a collision advances to another exclusive name");
+        assert_eq!(landed.unsynced, None, "a writable directory syncs");
+        let new = landed.path;
         assert_ne!(new, old, "one pathname cannot name two captures");
         assert_eq!(
             std::fs::read(&old).expect("old capture remains"),
@@ -902,7 +982,8 @@ mod tests {
                     body.as_bytes(),
                     23,
                 )
-                .expect("eight writers fit inside sixteen bounded attempts");
+                .expect("eight writers fit inside sixteen bounded attempts")
+                .path;
                 (path, body)
             }));
         }
@@ -993,7 +1074,8 @@ mod tests {
         }
         // AND A WHOLE ONE LANDS, UNDER THE FINAL NAME ONLY.
         let landed = write_new_capture_with_stamp(&dir, "dhan-GET-whole", body, 7)
-            .expect("a whole capture lands");
+            .expect("a whole capture lands")
+            .path;
         assert_eq!(std::fs::read(&landed).expect("read back"), body.to_vec());
         assert!(
             staging_path(&landed).symlink_metadata().is_err(),
@@ -1036,7 +1118,8 @@ mod tests {
         std::fs::write(&held, b"EARLIER CAPTURE").expect("held name");
 
         let landed = write_new_capture_with_stamp(&dir, prefix, b"NEW BODY", stamp)
-            .expect("a later name is free");
+            .expect("a later name is free")
+            .path;
         assert_eq!(landed, candidate_path(&dir, prefix, stamp, 2));
         assert_eq!(
             std::fs::read(&landed).expect("the landed body"),
@@ -1098,6 +1181,86 @@ mod tests {
             refused(),
             before_root + 1,
             "failure before the recorder opens a file is counted too"
+        );
+    }
+
+    /// **THE NAME IS SYNCED AS WELL AS THE BYTES, AND A NAME THAT CANNOT BE IS
+    /// SAID — NOT REFUSED.** sobs-11, D-4414.
+    ///
+    /// A directory with mode `0o300` lets a file be created in it and refuses
+    /// to be opened, so its fsync fails for real rather than by injection. Run
+    /// where the mode bits bind (D-0995), because root would open it anyway.
+    /// Four shapes, and each one pins a different half of the rule: the
+    /// capture directory's own sync; the parent's sync, ONLY when this call
+    /// made the capture directory; and a clean pass where both hold.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_capture_syncs_its_name_and_a_name_that_cannot_be_is_said_not_refused() {
+        crate::support::where_permission_binds(
+            "capture::tests::a_kept_capture_syncs_its_name_and_a_name_that_cannot_be_is_said_not_refused",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let set = |path: &std::path::Path, mode: u32| {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                        .expect("the mode is set");
+                };
+                let base = scratch("dir sync");
+
+                // The capture directory cannot be opened: the file lands, its
+                // name is not durable, and the sentence names that directory.
+                let shut = base.join("shut dir").join("captures");
+                std::fs::create_dir_all(&shut).expect("mkdir");
+                set(&shut, 0o300);
+                let landed = write_new_capture_with_stamp(&shut, "dhan-GET-0", b"body", 1)
+                    .expect("the file itself is written");
+                set(&shut, 0o700);
+                assert_eq!(std::fs::read(&landed.path).expect("kept"), b"body");
+                let why = landed.unsynced.expect("an unsyncable directory is said");
+                assert!(
+                    why.contains(&shut.display().to_string()) && why.contains("power cut"),
+                    "{why}"
+                );
+
+                // This call MAKES `captures/` under a root that cannot be
+                // opened: the new directory's own name is undurable, and the
+                // parent's sync is what says so.
+                let made = base.join("made here");
+                std::fs::create_dir_all(&made).expect("mkdir");
+                set(&made, 0o300);
+                let landed =
+                    write_new_capture_with_stamp(&made.join("captures"), "dhan-GET-0", b"b", 2)
+                        .expect("the file itself is written");
+                set(&made, 0o700);
+                let why = landed.unsynced.expect("a new directory's parent is synced");
+                assert!(
+                    why.contains(&made.display().to_string()) && !why.contains("captures"),
+                    "the PARENT is named: {why}"
+                );
+
+                // The same unopenable root, with `captures/` already there: the
+                // parent is not this call's business, so nothing is said.
+                let held = base.join("held root");
+                std::fs::create_dir_all(held.join("captures")).expect("mkdir");
+                set(&held, 0o300);
+                let landed =
+                    write_new_capture_with_stamp(&held.join("captures"), "dhan-GET-0", b"b", 3)
+                        .expect("the file is written");
+                set(&held, 0o700);
+                assert_eq!(
+                    landed.unsynced, None,
+                    "an existing directory's parent is not synced again"
+                );
+
+                // And the clean case, through the public recorder: the path is
+                // returned and nothing was counted as refused.
+                let before = refused();
+                let kept =
+                    record_unreadable(&base.join("clean root"), Feed::Gdfl, "u", "{}", "why")
+                        .expect("kept");
+                assert!(kept.starts_with(base.join("clean root").join("captures")));
+                assert_eq!(refused(), before, "a kept capture is no refusal");
+                let _ = std::fs::remove_dir_all(&base);
+            },
         );
     }
 }

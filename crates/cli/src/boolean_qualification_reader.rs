@@ -641,5 +641,5 @@ fn verify_context(plan: &ObservedPlan, later: &Later) -> Result<(), String> {
 fn day(micros: i64) -> i64 {
     // Exact Euclidean IST mapping without adding the offset to a wide timestamp.
     micros.div_euclid(86_400_000_000)
-        + (micros.rem_euclid(86_400_000_000) + 19_800_000_000) / 86_400_000_000
+        + (micros.rem_euclid(86_400_000_000) + indicators::IST_OFFSET_MICROS) / 86_400_000_000
 }

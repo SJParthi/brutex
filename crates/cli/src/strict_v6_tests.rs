@@ -358,11 +358,19 @@ mod strict_v6_fixture_tests {
             Ok(())
         };
         crate::candidate_universe::OOS_SOURCE_BUILDS.with(|count| count.set(0));
+        crate::stored_post_training_oos::COHORT_ID_DERIVATIONS.with(|count| count.set(0));
         let fold = cohort.fold_recorded(&mut record)?;
         let mut witnesses = Vec::new();
         for _ in 0..3 {
             witnesses.push(fold.mint_witness_recorded(&disposition, &mut record)?);
         }
+        // W2-cli16-1, D-4468: the cohort identity is derived once, by the
+        // fold, and never per witness; it was 1 + 2 per witness (7) before.
+        assert_eq!(
+            crate::stored_post_training_oos::COHORT_ID_DERIVATIONS.with(std::cell::Cell::get),
+            1,
+            "three witnesses of one fold derive its cohort identity once"
+        );
         assert_eq!(
             crate::candidate_universe::OOS_SOURCE_BUILDS.with(std::cell::Cell::get),
             1,

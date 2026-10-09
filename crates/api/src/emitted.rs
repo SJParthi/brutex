@@ -185,6 +185,25 @@ pub(crate) fn counts(record: &telemetry::Record, key: &str, want: u64) -> bool {
     record.field(key).and_then(telemetry::OwnedValue::as_u64) == Some(want)
 }
 
+/// Every record the shared sink holds for one log run, oldest first.
+///
+/// sobs-14, D-4451: a test that drives its work inside [`telemetry::in_run`]
+/// under an id from [`telemetry::reserve_run_id`] reads back its own events and
+/// no other test's, which [`mark`] cannot promise while tests running in
+/// parallel write the same target and message.
+pub(crate) fn run_story(run: u64) -> Vec<telemetry::Record> {
+    let sink = sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes a file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_run(run);
+    let mut records = telemetry::tail(&dir, sink.keep_files(), &query).records;
+    records.reverse();
+    records
+}
+
 /// One production emit site, and the record it must leave in the file.
 struct Case {
     /// Where the `telemetry::emit` call lives, so a failure names the line
@@ -1662,19 +1681,39 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 24 -> 25 at that merge (D-4610): the zero/next side's 24 plus D-2771's
     // shutdown drain WARN, which the other side drove; measured on the merged
     // tree by the sum below.
-    const REACHED_IN_SERVER_TESTS: usize = 25;
+    // The other side went 21 -> 25 at D-4449, D-4450, D-4454 and D-4455
+    // (fxb2): `api.pull contract not landed`
+    // (`an_fno_landing_keeps_five_refusal_reasons_and_counts_all_six`),
+    // `pull.run refused before it started`
+    // (`a_run_refused_before_it_starts_is_logged_with_its_reason`), `api.verify
+    // scrub` (`server::verification_route_tests::every_scrub_writes_its_
+    // verdict_to_the_log_once`) and `pull.http retrying a refused request`
+    // (`server::fno_boundary_tests::every_retry_on_the_bars_ladder_is_one_
+    // event_with_its_reason`), each read back from this sink.
+    // 25 -> 28 at the audit-fix merge (D-4627): the four above join this
+    // side's 25, less D-2526's `pull.http transport failed, retrying`, which
+    // logged the same retry `note_retry` logs and was removed so each retry
+    // writes one line; its test reads `note_retry`'s now.
+    const REACHED_IN_SERVER_TESTS: usize = 28;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
-    const REACHED_IN_RECOVERY_TESTS: usize = 2;
-    // Three sites read back by their own module's tests (conc13-3, conc13-4,
-    // D-2595): `autopilot` halted / stalled / backing off (one site,
-    // `autopilot::note_decision`), read back by
-    // `autopilot::tests::a_halt_a_stall_and_a_backoff_are_logged`; `api.pull
-    // leg failed`, by `pullrun::tests::a_failed_leg_is_logged_at_its_level`; and
-    // the `api.sweep` lease refusal, by
-    // `sweeprun::tests::a_lease_refusal_is_logged_with_its_reason`.
-    const REACHED_IN_MODULE_TESTS: usize = 3;
+    // 2 -> 3 at D-4448: `pull.recovery recovery blocked`, read back by
+    // `recovery::tests::every_refused_recovery_names_its_stage_and_reason_in_the_log`.
+    const REACHED_IN_RECOVERY_TESTS: usize = 3;
+    // Four sites read back by their own module's tests. `autopilot`'s verdicts
+    // (`autopilot::note_decision`: halted, stalled, backing off; conc13-4,
+    // D-2595), by `autopilot::tests::a_halt_a_stall_and_a_backoff_are_logged`
+    // and `autopilot::tests::a_stall_and_a_halt_are_logged_once_each_with_feed_and_month`;
+    // `autopilot`'s pass halt, clock wait and end (`autopilot::note_backfill`,
+    // sobs-6, D-4453), by the same module's sobs-6 tests; `api.pullrun`
+    // (`pullrun::note_press`, D-4452), by
+    // `pullrun::tests::a_press_logs_its_legs_and_verdict_under_one_run_and_nothing_else`;
+    // and the `api.sweep` lease refusal, by
+    // `sweeprun::tests::a_lease_refusal_is_logged_with_its_reason`. Each side
+    // counted its own; the merge keeps one writer per verdict and per leg, so
+    // this side's `api.pull leg failed` is gone (D-4627, D-4657): 3 + 2 - 1.
+    const REACHED_IN_MODULE_TESTS: usize = 4;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1776,7 +1815,11 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// drained` and `api.server background work abandoned at shutdown`
     /// (autopilot-4, lifecycle-1, D-2583), whose arms the shutdown tests drive
     /// but which only write into the sink of a process that is ending.
-    const UNREACHABLE: usize = 15;
+    ///
+    /// ONE OF THOSE FIVE IS GONE: `pull.press started` went with the press's
+    /// claim on the shared run key, which the per-task log scope replaced at
+    /// the audit-fix merge (D-4625). 15 -> 14.
+    const UNREACHABLE: usize = 14;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1821,9 +1864,17 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 76 -> 77 at that merge (D-4610): the zero/next side's 76 plus D-2771's
     // WARN. Measured: `lib_emit_sites()` returns 77 on the merged tree.
+    //
+    // The other side went 65 -> 72 at D-4448 to D-4455 (fxb2): seven new
+    // sites, each read back in the column its test lives in, above.
+    //
+    // 77 -> 81 at the audit-fix merge: this side's 77 plus that side's seven,
+    // less the three this side's sites duplicated or that the log scope
+    // retired (`pull.http transport failed, retrying`, `api.pull leg failed`
+    // and `pull.press started`; D-4625, D-4627).
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 77,
+        lib_sites, 81,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
@@ -1836,6 +1887,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
             + REACHED_IN_MODULE_TESTS
             + UNREACHABLE,
         lib_sites,
-        "every emit site is proven here, in server::tests or recovery::tests, or named above"
+        "every emit site is proven here, in server::tests, recovery::tests or its own \
+         module's tests, or named above"
     );
 }

@@ -7197,6 +7197,96 @@ mod tests {
         }
     }
 
+    /// W2-cli10-0, D-4467: one Base append scans the ledger ONCE, in its
+    /// writer's open, written or reused; the fresh reopen reads only the
+    /// committed completion and its block. It still refuses a damaged block, a
+    /// replaced file, a shortened record file and a vanished completion put
+    /// down between the writer's release and the reopen.
+    #[test]
+    fn a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage() {
+        use super::population_base_evidence_v2::reopen_probe;
+        type Attack = (&'static str, fn(&std::path::Path));
+        let bounds = BaseEvidenceLedgerBoundsV2::new(64, 8).expect("nonzero Base bounds");
+        let (first_candidate, first_base) = candidate_base_fixture(71, InstrumentFamilyV1::Nifty);
+        let (candidate, base) = candidate_base_fixture(72, InstrumentFamilyV1::Nifty);
+
+        let root = test_dir();
+        let first =
+            append_and_reopen_base_evidence_v2(root.path(), bounds, &first_candidate, &first_base)
+                .expect("the first family commits")
+                .audit();
+        let before = reopen_probe::scans();
+        let written = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+            .expect("the second family commits after the first");
+        assert!(matches!(
+            written,
+            BaseEvidenceProductionCommitV2::Written(_)
+        ));
+        assert_eq!(reopen_probe::scans() - before, 1, "the writer's open only");
+        let before = reopen_probe::scans();
+        let reused = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+            .expect("the exact retry reuses");
+        assert!(matches!(reused, BaseEvidenceProductionCommitV2::Reused(_)));
+        assert_eq!(reopen_probe::scans() - before, 1, "the writer's open only");
+        assert_eq!(written.audit(), reused.audit());
+        let full = BaseEvidenceLedgerReaderV2::open(root.path(), bounds)
+            .expect("a full fresh open")
+            .audit(candidate.universe_id())
+            .expect("generation checked")
+            .expect("the second family is complete");
+        assert_eq!(
+            full,
+            written.audit(),
+            "the bounded reopen derives what a scan derives"
+        );
+        assert_ne!(full, first, "the second block, not the first");
+
+        let attacks: [Attack; 4] = [
+            ("record seal does not match payload", |root| {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(root.join("base-evidence-records-v3.bin"))
+                    .expect("record file opens");
+                file.seek(SeekFrom::Start(64 + 120)).expect("payload seeks");
+                let mut byte = [0_u8; 1];
+                file.read_exact(&mut byte).expect("payload reads");
+                file.seek(SeekFrom::Start(64 + 120)).expect("payload seeks");
+                file.write_all(&[byte[0] ^ 0xA5]).expect("payload corrupts");
+            }),
+            ("no longer names the Base file this append wrote", |root| {
+                let path = root.join("base-evidence-records-v3.bin");
+                let displaced = root.join("base-evidence-records-v3.displaced");
+                std::fs::rename(&path, &displaced).expect("the written inode is displaced");
+                std::fs::copy(&displaced, &path).expect("same bytes at a new inode");
+            }),
+            ("beyond physical record count", |root| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(root.join("base-evidence-records-v3.bin"))
+                    .expect("record file opens")
+                    .set_len(64)
+                    .expect("the block is cut");
+            }),
+            ("disappeared after receipt-last append", |root| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(root.join("base-evidence-completions-v3.bin"))
+                    .expect("completion file opens")
+                    .set_len(64)
+                    .expect("the completion is cut");
+            }),
+        ];
+        for (expected, attack) in attacks {
+            let root = test_dir();
+            reopen_probe::between(attack);
+            let why = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                .expect_err("damage between the append and the reopen refuses")
+                .to_string();
+            assert!(why.contains(expected), "{expected}: {why}");
+        }
+    }
+
     #[test]
     fn durable_base_is_receipt_last_idempotent_fixed_offset_and_zero_row_safe() {
         let root = test_dir();

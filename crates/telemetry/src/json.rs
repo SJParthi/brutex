@@ -83,6 +83,17 @@ pub enum LineFault {
     /// Never produced by this crate's own writer; a line hand-edited into a
     /// thousand-deep structure is refused rather than recursed into.
     TooDeep,
+    /// A key that appears twice: one of the line's own keys, or one field's.
+    ///
+    /// Never produced by this crate's own writer, which writes each line key
+    /// once and folds a repeated field key into one field. Refused rather than
+    /// resolved, because whichever copy a reader kept, the other was a claim
+    /// the line also made: a `level` written `error` and then `trace` read as
+    /// `trace` and fell under a level filter (satk-6, D-4418).
+    RepeatedKey {
+        /// The key that appeared twice.
+        key: String,
+    },
 }
 
 impl core::fmt::Display for LineFault {
@@ -104,6 +115,10 @@ impl core::fmt::Display for LineFault {
             Self::MissingKey { key } => write!(f, "the line carries no {key}"),
             Self::UnknownLevel { ref word } => write!(f, "{word} is not one of the five levels"),
             Self::TooDeep => f.write_str("nested past what this scanner follows"),
+            Self::RepeatedKey { ref key } => write!(
+                f,
+                "the key {key} appears twice, so which value the line means cannot be known"
+            ),
         }
     }
 }
@@ -617,6 +632,10 @@ mod tests {
             }
             .to_string(),
             LineFault::TooDeep.to_string(),
+            LineFault::RepeatedKey {
+                key: "level".to_owned(),
+            }
+            .to_string(),
         ];
         for line in &said {
             assert!(!line.is_empty(), "a fault with no words is not a diagnosis");
@@ -626,5 +645,6 @@ mod tests {
         assert!(said[4].contains("1e999999"), "{}", said[4]);
         assert!(said[6].contains("seq"), "{}", said[6]);
         assert!(said[7].contains("fatal"), "{}", said[7]);
+        assert!(said[9].contains("level appears twice"), "{}", said[9]);
     }
 }

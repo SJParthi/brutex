@@ -354,6 +354,23 @@ mod operator_shutdown_tests {
             "let _flying = tokio::spawn(crate::pullrun::",
             "conduct("
         )));
+        // THE PRESS IS STARTED UNDER A SUPERVISOR NOW (sobs-5, D-4452), and
+        // it is that supervisor's handle `press_with` keeps for the drain;
+        // aborting it aborts the press it holds. D-4626.
+        let press = include_str!("pullrun.rs")
+            .split_once("fn press_with<")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map_or("", |(body, _)| body);
+        assert!(press.contains(".press_task"), "{press}");
+        assert!(press.contains("= Some(supervisor)"), "{press}");
+        let supervise = include_str!("pullrun.rs")
+            .split_once("async fn supervise(")
+            .expect("supervise exists")
+            .1;
+        assert!(
+            supervise.contains("AbortsPress(flying)"),
+            "the supervisor holds the press so that its abort reaches it"
+        );
     }
 
     /// The operator's stop listens for SIGTERM and SIGHUP as well as Ctrl-C,
@@ -1090,6 +1107,56 @@ fn field_value<'a>(pair: &'a str, name: &str) -> Option<&'a str> {
     pair.strip_prefix(name)?.strip_prefix('=')
 }
 
+/// How many fields a [`Query`] reserves room for before its first insert.
+///
+/// No route or form this server reads names more than a few dozen fields;
+/// a longer query grows the map, which [`MAX_REQUEST_TARGET_BYTES`] and
+/// [`MAX_FORM_BYTES`] bound. D-4436.
+const QUERY_FIELDS_RESERVED: usize = 32;
+
+/// One query string or form body, split ONCE, read by field name in one hash
+/// probe each.
+///
+/// # Why (o1api-4, D-4436)
+///
+/// [`param`] scans the whole string per call, so a reader of `k` fields paid
+/// `k` scans of up to [`MAX_REQUEST_TARGET_BYTES`] (or a form body's bound).
+/// A reader that names three or more fields parses once here instead: one
+/// scan of the string, then O(1) expected per field, so its cost is one pass
+/// however many fields it reads. Each key keeps its FIRST value, exactly as
+/// `param`'s first match does, and a pair without `=` names nothing, exactly
+/// as `param` reads it;
+/// `api::server::serve_edge_tests::a_split_query_answers_every_field_as_param_does`
+/// holds the two readers equal over every form the existing tests use. A
+/// repeated field is still read with [`params`], one pass, as a list.
+#[derive(Debug)]
+pub struct Query<'a> {
+    first: std::collections::HashMap<&'a str, &'a str>,
+}
+
+impl<'a> Query<'a> {
+    /// Splits `raw` once.
+    #[must_use]
+    pub fn parse(raw: &'a str) -> Self {
+        let mut first = std::collections::HashMap::with_capacity(QUERY_FIELDS_RESERVED);
+        for pair in raw.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                first.entry(key).or_insert(value);
+            }
+        }
+        Self { first }
+    }
+
+    /// The decoded value of `name`, or empty when it is absent: [`param`]'s
+    /// answer, in one hash probe.
+    #[must_use]
+    pub fn param(&self, name: &str) -> String {
+        self.first
+            .get(name)
+            .map_or_else(String::new, |value| percent_decode(value))
+    }
+}
+
 /// EVERY value a repeated field carries, in the order they were sent.
 ///
 /// # Why a second reader and not a wider `param`
@@ -1363,12 +1430,13 @@ async fn page(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> axum::response::Html<String> {
-    let raw = uri.query().unwrap_or("");
-    let typed = parse_query(raw);
-    let sort = param(raw, "sort");
-    let all = param(raw, "all") == "1";
-    let u = param(raw, "u");
-    let page = page_number(raw);
+    // ONE SCAN for all five fields (o1api-4, D-4436).
+    let query = Query::parse(uri.query().unwrap_or(""));
+    let typed = query.param("q");
+    let sort = query.param("sort");
+    let all = query.param("all") == "1";
+    let u = query.param("u");
+    let page = query.param("page").parse().unwrap_or(0);
     axum::response::Html(instruments_html_from(
         &site.universe().read,
         &typed,
@@ -2519,7 +2587,12 @@ fn day_window_bounds(query: &str) -> Result<(Option<i64>, Option<i64>), String> 
 ///
 /// One comparison per known rung — two — so this is constant work.
 fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
-    let raw = param(query, "timeframe");
+    timeframe_value(&param(query, "timeframe"))
+}
+
+/// [`timeframe_param`] over a value already read, for a reader that parsed
+/// its query once ([`Query`]). D-4436.
+fn timeframe_value(raw: &str) -> Result<store::path::Timeframe, String> {
     if raw.is_empty() {
         return Ok(store::path::Timeframe::MINUTE_1);
     }
@@ -2551,7 +2624,12 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
 /// One spelling of one parse, so `month` and the range's `to` cannot disagree
 /// about what a month looks like.
 fn month_param(query: &str, key: &str) -> Result<store::path::YearMonth, String> {
-    let raw = param(query, key);
+    month_value(&param(query, key), key)
+}
+
+/// [`month_param`] over a value already read, for a reader that parsed its
+/// query once ([`Query`]). D-4436.
+fn month_value(raw: &str, key: &str) -> Result<store::path::YearMonth, String> {
     raw.split_once('-')
         .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
         .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
@@ -2594,15 +2672,15 @@ impl Addressed {
     ///
     /// The refusal sentence, ready to render.
     fn parse(query: &str) -> Result<Self, String> {
-        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-            return Err(format!(
-                "{:?} is not a feed this build can read",
-                param(query, "feed")
-            ));
+        // ONE SCAN of the query for all seven fields (o1api-4, D-4436).
+        let query = Query::parse(query);
+        let feed = query.param("feed");
+        let Some(vendor) = ingest::parse_vendor(&feed) else {
+            return Err(format!("{feed:?} is not a feed this build can read"));
         };
         // `YYYY-MM`, the same spelling every other route uses.
-        let month = month_param(query, "month")?;
-        let timeframe = timeframe_param(query)?;
+        let month = month_value(&query.param("month"), "month")?;
+        let timeframe = timeframe_value(&query.param("timeframe"))?;
         // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
         //
         // A spot series has no contract segment and its path is one level
@@ -2613,7 +2691,7 @@ impl Addressed {
         // refuses by name rather than falling back to `None`: falling back would
         // read the UNDERLYING's month and answer with a different instrument's
         // bars, which is the one failure worse than a 400.
-        let raw_contract = param(query, "contract");
+        let raw_contract = query.param("contract");
         let contract = if raw_contract.is_empty() {
             None
         } else {
@@ -2634,9 +2712,9 @@ impl Addressed {
             month,
             timeframe,
             contract,
-            exchange: param(query, "exchange"),
-            segment: param(query, "segment"),
-            symbol: param(query, "symbol"),
+            exchange: query.param("exchange"),
+            segment: query.param("segment"),
+            symbol: query.param("symbol"),
         })
     }
 
@@ -2831,6 +2909,23 @@ async fn bars_json(
     // after the bisection's `ceil(log2(n_valid + 1))` reads instead of
     // `n_valid`. A file born without the flag has nothing that could detect the
     // zeros, so it keeps the full read.
+    //
+    // AND PAST THE HEADER'S LAST STAMP, NO BISECTION AT ALL (W1-api5-8, D-4432).
+    // A month born without `FLAG_CHECKSUMS` kept the whole read above, and
+    // every month paid the bisection. The header answers it first:
+    // `Header::advance` refuses any batch that does not begin after the
+    // committed `last_ts_micros`, and sets it to the batch's last stamp, so
+    // no committed bar is stamped past it -- including the records an
+    // interrupted append left as zeros, whose stamps the header carries even
+    // though their bytes never landed. A `from` after it is an empty window.
+    // The one record read is the content check: the last record must be the
+    // bar the header names (in a sealed month that read verifies its block),
+    // or, in an unsealed month, the zeros of an interrupted append. Anything
+    // else -- a refusal, a different stamp -- is a file whose bytes disagree
+    // with its header, and it takes the path below, which reads and names it.
+    if from_micros.is_some_and(|at| past_the_last_bar(&file, at)) {
+        return (axum::http::StatusCode::OK, json(), "[]".to_owned());
+    }
     let landed = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok());
@@ -2874,6 +2969,28 @@ async fn bars_json(
         );
     }
     (axum::http::StatusCode::OK, json(), out)
+}
+
+/// Whether `from` lies after every bar `file` has committed, proven by its
+/// header and one record read. See the D-4432 comment in [`bars_json`].
+///
+/// True only when the header holds a record, `from` is after the header's
+/// `last_ts_micros`, and record `n_valid - 1` reads as the bar that stamp
+/// names -- or, in a month born without checksums, as the all-zero record an
+/// interrupted append leaves. A read that refuses or disagrees is `false`,
+/// and the caller's slower path reads and names the damage.
+fn past_the_last_bar(file: &store::file::BarFile, from: i64) -> bool {
+    let header = file.header();
+    let Some(last) = header.n_valid.checked_sub(1) else {
+        return false;
+    };
+    if from <= header.last_ts_micros {
+        return false;
+    }
+    file.read_record(last).is_ok_and(|bar| {
+        bar.ts_micros == header.last_ts_micros
+            || (!header.checksums_present() && bar == store::format::Bar::default())
+    })
 }
 
 /// Whether one stored instrument-month is COMPLETE, and where it is not.
@@ -3691,29 +3808,25 @@ struct WindowAsk {
     offset: usize,
     limit: usize,
     want_extremes: bool,
+    /// The three path words, read in the same one scan. D-4436.
+    exchange: String,
+    segment: String,
+    symbol: String,
 }
 
 impl WindowAsk {
     /// Reads one, or names the first thing wrong with it.
     fn parse(query: &str) -> Result<Self, String> {
-        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-            return Err(format!(
-                "{:?} is not a feed this build can read",
-                param(query, "feed")
-            ));
+        // ONE SCAN of the query for all eleven fields (o1api-4, D-4436).
+        let query = Query::parse(query);
+        let feed = query.param("feed");
+        let Some(vendor) = ingest::parse_vendor(&feed) else {
+            return Err(format!("{feed:?} is not a feed this build can read"));
         };
-        let month_of = |key: &str| {
-            let raw = param(query, key);
-            raw.split_once('-')
-                .and_then(|(y, m)| {
-                    store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
-                })
-                .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
-        };
-        let from = month_of("from")?;
-        let to = month_of("to")?;
-        let timeframe = timeframe_param(query)?;
-        let raw_contract = param(query, "contract");
+        let from = month_value(&query.param("from"), "from")?;
+        let to = month_value(&query.param("to"), "to")?;
+        let timeframe = timeframe_value(&query.param("timeframe"))?;
+        let raw_contract = query.param("contract");
         let contract = if raw_contract.is_empty() {
             None
         } else {
@@ -3723,17 +3836,17 @@ impl WindowAsk {
                 })?,
             )
         };
-        let sort = bars::SortKey::parse(&param(query, "sort")).ok_or_else(|| {
+        let asked_sort = query.param("sort");
+        let sort = bars::SortKey::parse(&asked_sort).ok_or_else(|| {
             format!(
-                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi.",
-                param(query, "sort")
+                "{asked_sort:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi."
             )
         })?;
         // A NON-NUMBER IS A REFUSAL, NOT A ZERO. `offset=banana` silently
         // reading from the top would answer a different question than the one
         // asked, and the pager would look right while showing the wrong rows.
         let number = |key: &str, fallback: usize| {
-            let raw = param(query, key);
+            let raw = query.param(key);
             if raw.is_empty() {
                 Ok(fallback)
             } else {
@@ -3745,7 +3858,7 @@ impl WindowAsk {
         // reader of a store asks for first: the newest row. Anything else that
         // is not `asc` or `desc` is refused: `dir=ASC` once answered newest
         // first with a 200 (Z1-slice14-F3, D-1762).
-        let desc = match param(query, "dir").as_str() {
+        let desc = match query.param("dir").as_str() {
             "" | "desc" => true,
             "asc" => false,
             other => {
@@ -3755,7 +3868,7 @@ impl WindowAsk {
             }
         };
         // Same rule: `extremes=yes` once dropped the extremes silently.
-        let want_extremes = match param(query, "extremes").as_str() {
+        let want_extremes = match query.param("extremes").as_str() {
             "" | "0" | "false" => false,
             "1" | "true" => true,
             other => {
@@ -3787,6 +3900,9 @@ impl WindowAsk {
                 }
             },
             want_extremes,
+            exchange: query.param("exchange"),
+            segment: query.param("segment"),
+            symbol: query.param("symbol"),
         })
     }
 }
@@ -3825,16 +3941,12 @@ async fn bars_window_json(
     // conductors and the autopilot. It now shares the store-read pool's
     // `MAX_STORE_READ_CONCURRENT` slots and answers 429 past them, as
     // `/folder.json` does. resources-4, P1-04-01, D-2593.
+    //
+    // THE PATH WORDS RIDE IN `asked`, read in its one scan of the query
+    // (o1api-4, D-4436), so the pool's closure takes no second scan of its
+    // own. D-2593 and D-4436 met here; D-4623.
     let root = site.store_root.clone();
-    let (exchange, segment, symbol) = (
-        param(query, "exchange"),
-        param(query, "segment"),
-        param(query, "symbol"),
-    );
-    let read = crate::detail::run_store_read(move || {
-        bars_window_reading(&root, &asked, &exchange, &segment, &symbol)
-    })
-    .await;
+    let read = crate::detail::run_store_read(move || bars_window_reading(&root, &asked)).await;
     match read {
         Ok((status, body)) => (status, json(), body),
         Err(why) => {
@@ -3849,20 +3961,15 @@ async fn bars_window_json(
 }
 
 /// Everything [`bars_window_json`] does once the request is parsed, on the
-/// store-read pool (resources-4, P1-04-01, D-2593).
-fn bars_window_reading(
-    root: &Path,
-    asked: &WindowAsk,
-    exchange: &str,
-    segment: &str,
-    symbol: &str,
-) -> (axum::http::StatusCode, String) {
+/// store-read pool (resources-4, P1-04-01, D-2593). The exchange, segment and
+/// symbol are `asked`'s own, read in its one scan (D-4436; D-4623).
+fn bars_window_reading(root: &Path, asked: &WindowAsk) -> (axum::http::StatusCode, String) {
     let window = match bars::window(
         root,
         asked.vendor,
-        exchange,
-        segment,
-        symbol,
+        &asked.exchange,
+        &asked.segment,
+        &asked.symbol,
         asked.timeframe,
         asked.contract,
         asked.from,
@@ -5238,20 +5345,19 @@ fn store_body(
 /// an operator saw the disagreement is a repair nobody audited — `CLAUDE.md`
 /// §4 wants the reason surfaced rather than swallowed by a fix.
 ///
-/// # Cost
+/// # Cost, and why it is paged
 ///
-/// One bar file opened per held entry (its header and two records read), and
-/// the walk is the ask: a scrub of a vendor is a scrub of every month it
-/// claims. Nothing is sorted. The walk itself is `Manifest::newest`, which
-/// builds a set over the manifest's whole append log, so a request is
-/// `O(log length)` in memory plus `O(E_v)` file opens. This said "O(1) per entry
-/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-1446;
-/// `docs/06-limits.md`'s D-1446 section.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// One bar file opened per checked entry (its header and two records read).
+/// Until D-4435 one request checked every month the counter claimed, E_v
+/// opens for E_v entries, so its cost grew with the store (W1-api5-7,
+/// W1-api6-0). It checks one page now: `offset=` (default 0) and `limit=`
+/// (default and ceiling [`crate::verify::MAX_VERIFY_PAGE`]), and the answer
+/// carries `held`, `offset`, `limit` and `next_offset` so a reader can walk
+/// the rest. `verified` is true only for an answer that covered every held
+/// entry. The newest-per-key list a page is cut from is built once per census
+/// snapshot (`Site::verify_memo`), so the `O(log length)` walk of
+/// `Manifest::newest` is paid by the first request after a pull, not by every
+/// one. Measured at the ceiling in `docs/06-limits.md`'s D-4435 section.
 async fn verify_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -5270,10 +5376,23 @@ async fn verify_json(
             no_such_feed_json(&asked),
         );
     };
-    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per held
-    // entry, and running it inline held a runtime worker for the whole walk.
-    // W1-api6-0, D-2281.
-    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked)).await {
+    let window = verify_window(&param(query, "offset"), &param(query, "limit"));
+    let (offset, limit) = match window {
+        Ok(window) => window,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                headers,
+                verify_refused_json(&why, &asked),
+            );
+        }
+    };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per
+    // checked entry, and running it inline held a runtime worker for the whole
+    // page. W1-api6-0, D-2281.
+    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked, offset, limit))
+        .await
+    {
         Ok((code, body)) => (code, headers, body),
         Err(why) => {
             let (code, body) = crate::detail::admission_refused(
@@ -5286,8 +5405,83 @@ async fn verify_json(
     }
 }
 
+/// Write one scrub's verdict to the log, once per scrub.
+///
+/// sobs-10, D-4454. The scrub is the one check that opens bar files to test the
+/// census, and its answer lived in the HTTP reply alone: a disagreement found
+/// at 02:00 by a page left open was gone when the tab closed, and nothing on
+/// `/logs` said a scrub had ever run. One event per request, written after the
+/// walk and never inside it, carrying the counts and the first finding; the
+/// rest of the findings stay in the reply, bounded by `verify::MAX_NAMED`.
+///
+/// Info when the counter checked out, Warn when it disagreed with a file or
+/// held nothing to check, Error when the question was refused (the census
+/// could not be read), which is the reply's 503.
+fn note_scrub(feed: Vendor, report: &crate::verify::Report) {
+    let level = if report.refused.is_some() {
+        telemetry::Level::Error
+    } else if report.verified() {
+        telemetry::Level::Info
+    } else {
+        telemetry::Level::Warn
+    };
+    let say = report.say();
+    let t = report.tally;
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(level, "api.verify", "scrub")
+            .with("feed", telemetry::Value::Str(feed.as_str()))
+            .with("verified", telemetry::Value::Bool(report.verified()))
+            .with("seen", telemetry::Value::Uint(t.seen()))
+            .with("agreed", telemetry::Value::Uint(t.agreed))
+            .with("missing", telemetry::Value::Uint(t.missing))
+            .with("rows", telemetry::Value::Uint(t.rows))
+            .with("bounds", telemetry::Value::Uint(t.bounds))
+            .with("unreadable", telemetry::Value::Uint(t.unreadable))
+            .with("busy", telemetry::Value::Uint(t.busy))
+            .with("undrawn", telemetry::Value::Uint(report.undrawn))
+            .with(
+                "first",
+                telemetry::Value::Str(report.named.first().map_or("", String::as_str)),
+            )
+            .with("say", telemetry::Value::Str(&say)),
+    );
+}
+
+/// `/verify.json`'s `offset=` and `limit=`, each defaulted when absent and
+/// refused by name when not a number. The bounds against the counter are
+/// [`crate::verify::vendor`]'s. D-4435.
+fn verify_window(offset: &str, limit: &str) -> Result<(u64, u64), String> {
+    let number = |name: &str, text: &str, absent: u64| -> Result<u64, String> {
+        if text.is_empty() {
+            return Ok(absent);
+        }
+        text.parse::<u64>()
+            .map_err(|_| format!("{name}={text} is not a whole number"))
+    };
+    Ok((
+        number("offset", offset, 0)?,
+        number("limit", limit, crate::verify::MAX_VERIFY_PAGE)?,
+    ))
+}
+
+/// A `/verify.json` page refused before any file was opened, in the shape
+/// [`no_such_feed_json`] answers a feed with. D-4435.
+fn verify_refused_json(why: &str, asked: &str) -> String {
+    format!(
+        r#"{{"refused":{},"feed":{}}}"#,
+        render::json_string(why),
+        render::json_string(asked),
+    )
+}
+
 /// [`verify_json`]'s census read, scrub and render, run on the store-read pool.
-fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::StatusCode, String) {
+fn verify_reading(
+    site: &Site,
+    feed: Vendor,
+    asked: &str,
+    offset: u64,
+    limit: u64,
+) -> (axum::http::StatusCode, String) {
     // FRESH, NEVER THE STARTUP SNAPSHOT. A scrub answering from a census read
     // at boot would verify a store that has since been written to.
     let (censuses, _entries) = census_now(site);
@@ -5298,7 +5492,28 @@ fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::Status
         );
     };
 
-    let report = crate::verify::vendor(&site.store_root, census);
+    // ONCE PER CENSUS SNAPSHOT: the snapshot is replaced, never mutated, so
+    // its newest-per-key list is too. The generation is the census's alone;
+    // the universe parse does not enter a scrub. D-4435.
+    let newest = site
+        .verify_memo
+        .of_census(&censuses, 0, feed, || (crate::verify::newest(census), true));
+    let report = match crate::verify::vendor(
+        &site.store_root,
+        census,
+        newest.as_deref().map(Vec::as_slice),
+        offset,
+        limit,
+    ) {
+        Ok(report) => report,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                verify_refused_json(&why, asked),
+            );
+        }
+    };
+    note_scrub(feed, &report);
     // A DISAGREEMENT IS NOT A SERVER FAULT, so it is 200 with the finding in
     // the body: the request was answered correctly and the ANSWER is bad news.
     // A refusal — a counter that could not be read at all — is 503, because
@@ -5316,12 +5531,18 @@ fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::Status
         .collect::<Vec<_>>()
         .join(",");
     let body = format!(
-        "{{\"feed\":{},\"verified\":{},\"say\":{},\"seen\":{},\"agreed\":{},\
+        "{{\"feed\":{},\"verified\":{},\"say\":{},\"held\":{},\"offset\":{},\
+         \"limit\":{limit},\"next_offset\":{},\"seen\":{},\"agreed\":{},\
          \"missing\":{},\"rows\":{},\"bounds\":{},\"unreadable\":{},\
          \"undrawn\":{},\"findings\":[{named}],\"refused\":{}}}",
         render::json_string(feed.as_str()),
         report.verified(),
         render::json_string(&report.say()),
+        report.held,
+        report.offset,
+        report
+            .next_offset
+            .map_or_else(|| "null".to_owned(), |at| at.to_string()),
         t.seen(),
         t.agreed,
         t.missing,
@@ -5830,6 +6051,11 @@ pub struct Site {
     /// `/instruments.json`'s answer per feed, for one census snapshot and one
     /// universe parse. See [`crate::answer_memo`]. W1-api5-3, D-2285.
     instruments_memo: crate::answer_memo::CensusMemo<Vendor, InstrumentsAnswer>,
+    /// `/verify.json`'s newest-per-key entry list per feed, for one census
+    /// snapshot, so a page is cut by position and the log walk is paid once
+    /// per snapshot. See [`crate::verify::newest`]. W1-api5-7, D-4435.
+    verify_memo:
+        crate::answer_memo::CensusMemo<Vendor, Option<std::sync::Arc<Vec<pull::manifest::Entry>>>>,
     /// `/calendar.json`'s served answers per feed and symbol, for one census
     /// snapshot. See [`crate::answer_memo`]. W1-api5-5, D-2286.
     calendar_memo: crate::answer_memo::CensusMemo<
@@ -6046,10 +6272,60 @@ impl Site {
     ///
     /// The verdict, when the fresh parse reads no vendor at all.
     pub fn reparse(&self, masters: &Path) -> Result<String, String> {
+        self.reparse_unless(masters, false)
+    }
+
+    /// [`Site::reparse`], SKIPPED when no master has moved since the parse
+    /// this site answers from. What `POST /masters/refresh` calls.
+    ///
+    /// # Why (so1-5, D-4438)
+    ///
+    /// A refresh re-parsed every master and rebuilt the merged universe, its
+    /// catalogue orders, join and coverage, every time it was pressed, while
+    /// `pull::masters::land` already declines to rewrite a master whose bytes
+    /// are unchanged. So a refresh that landed nothing new rebuilt the same
+    /// universe from the same bytes. The skip compares one `stat` per master
+    /// (device, inode, length and both clocks, [`MasterStamps`]) with the
+    /// stamps taken BEFORE the parse being answered from; any write moves the
+    /// status-change time, so a master that reads differently cannot keep its
+    /// stamp. A stamp that could not be taken never matches, and the parse
+    /// runs. The answer says which happened.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Site::reparse`] refuses with, when it runs.
+    pub fn reparse_if_moved(&self, masters: &Path) -> Result<String, String> {
+        self.reparse_unless(masters, true)
+    }
+
+    /// [`Site::reparse`], or nothing when `skip_unmoved` and every master's
+    /// stamp is the one the held parse was taken under.
+    fn reparse_unless(&self, masters: &Path, skip_unmoved: bool) -> Result<String, String> {
         let _reload = self
             .reload_lock
             .lock()
             .map_err(|_| "master reload lock poisoned; previous universe retained".to_owned())?;
+        // TAKEN BEFORE THE READ, like `parsed_at` below: a master written
+        // during the parse keeps a stamp the next refresh does not match.
+        //
+        // TWO STAMPS OF ONE DIRECTORY, ONE QUESTION EACH. These answer "may
+        // this refresh skip its parse" (so1-5, D-4438) and refuse to match
+        // when a master could not be stat'ed; `stamps` below answers
+        // `/masters/status.json`'s "changed since the parse" per source
+        // (clock-5, D-2580; D-2757). Both are taken before the read, and the
+        // skip returns before the second is taken. D-4624.
+        let master_stamps = MasterStamps::of(masters);
+        if skip_unmoved {
+            let held = self.universe();
+            if master_stamps.is_some() && held.masters == master_stamps {
+                return Ok(format!(
+                    "no master moved since the parse this process answers from \
+                     (generation {}), so the universe was not re-parsed: {}",
+                    held.generation,
+                    held.read.notes.join(" · ")
+                ));
+            }
+        }
         // A file changed during parsing must remain visibly newer than this
         // snapshot, not be hidden by a timestamp taken after the read.
         let parsed_at = std::time::SystemTime::now();
@@ -6111,6 +6387,7 @@ impl Site {
             targets,
             target_keys,
             generation,
+            masters: master_stamps,
         };
         Ok(summary)
     }
@@ -6157,6 +6434,7 @@ impl Site {
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
             instruments_memo: crate::answer_memo::Memo::default(),
+            verify_memo: crate::answer_memo::Memo::default(),
             calendar_memo: crate::answer_memo::Memo::default(),
             indexmap_memo: crate::answer_memo::Memo::default(),
             store_filter_memo: crate::answer_memo::Memo::with_cap(STORE_FILTERS_KEPT),
@@ -6186,6 +6464,9 @@ impl Site {
                 targets,
                 target_keys,
                 generation: 0,
+                // UNKNOWN until `Site::load` names the directory it parsed,
+                // and an unknown stamp never lets a refresh skip its parse.
+                masters: None,
             }),
             censuses,
             series,
@@ -6215,15 +6496,21 @@ impl Site {
         // read showing as a change rather than hiding behind it. D-2757;
         // clock-5, D-2580.
         let stamps = crate::mastersrun::stamps_of(masters);
+        // And the refresh's skip stamps, taken BEFORE the parse too, as
+        // `Site::reparse` takes them (so1-5, D-4438). Both sets, for the two
+        // questions `reparse_unless` names. D-4624.
+        let master_stamps = MasterStamps::of(masters);
         let mut site = Self::new(
             universe(masters),
             census::read_all(store_root),
             store_root.to_path_buf(),
         );
-        site.parsed
+        let parsed = site
+            .parsed
             .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .stamps = stamps;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        parsed.stamps = stamps;
+        parsed.masters = master_stamps;
         site
     }
 
@@ -6390,6 +6677,39 @@ pub struct Parsed {
     /// `autopilot::SeriesCache` compares it to know whether its work lists are
     /// still the universe's (W1-api1-1, D-0949).
     pub generation: u64,
+    /// One `stat` of every master, taken before this parse read them, or
+    /// `None` when that is unknown. [`Site::reparse_if_moved`] skips a parse
+    /// only when a fresh set equals it. so1-5, D-4438.
+    pub(crate) masters: Option<MasterStamps>,
+}
+
+/// What one `stat` of each master said: the directory and, per master in
+/// [`master_paths`] order, its stamp or `None` for a master that is not
+/// there. so1-5, D-4438.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MasterStamps {
+    dir: PathBuf,
+    files: Vec<Option<crate::answer_memo::FileStamp>>,
+}
+
+impl MasterStamps {
+    /// Stamps every master under `dir`, or `None` when any `stat` failed for
+    /// a reason other than absence: a stamp that could not be taken must not
+    /// compare equal to anything.
+    pub(crate) fn of(dir: &Path) -> Option<Self> {
+        let mut files = Vec::with_capacity(Vendor::MASTERED.len());
+        for (_, path) in master_paths(dir) {
+            match crate::answer_memo::FileStamp::of(&path) {
+                Ok(stamp) => files.push(Some(stamp)),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => files.push(None),
+                Err(_) => return None,
+            }
+        }
+        Some(Self {
+            dir: dir.to_path_buf(),
+            files,
+        })
+    }
 }
 
 /// How many instruments each spot target names.
@@ -7629,41 +7949,20 @@ pub(crate) struct Blocked {
 ///
 /// The result is discarded for the reason `pull::ingest`'s `note_*` helpers
 /// give — a level-filtered event legitimately reaches no file.
-fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u64> {
-    // STAMP EVERY LATER EVENT WITH THIS RUN, before the first of them.
+fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) {
+    // THE RUN IS THE SCOPE `broker_run_at` OPENED, so this line and every later
+    // one of the run carry its id and nothing else does. See `broker_run_at`.
     //
-    // A log file spanning three backfills is three interleaved stories, and an
-    // operator who hands the folder to somebody who was not here needs to take
-    // one. The id is the start instant in milliseconds — monotonic on any sane
-    // clock, unique unless two runs begin in the same millisecond, and readable
-    // as a timestamp by a human who has nothing else to go on.
-    //
-    // Set on the SINK rather than threaded through every note helper, for the
-    // reason `emit` reads a global at all: a parameter on every function
-    // between here and a leaf is one somebody forgets, and the site they forget
-    // is the one being diagnosed. Cleared by `note_run_finished`.
-    // CLAIMED, NOT STORED — because this function runs once per LEG and the
-    // legs of one press run CONCURRENTLY.
-    //
-    // `conduct` spawns one chain per vendor. Each reaches here, and a bare
-    // `set_run` meant the second feed overwrote the first feed's key, so every
-    // event after that carried the wrong id — including the first feed's — and
-    // whichever finished first cleared the key to zero, after which the
-    // survivor's remaining events carried no run at all. `/logs?run=` then
-    // showed one story assembled from two feeds and a second that stopped
-    // mid-sentence.
-    //
-    // A press now claims the key ITSELF, before its first leg, and holds it
-    // until the conductor ends (`pullrun::PressRun`; atomics-1, D-2582): it was
-    // the first LEG that claimed it here, and that leg released it when it
-    // finished, under siblings still running. Inside a press every leg's claim
-    // therefore fails and every leg inherits the press's key; a lone hand pull
-    // or an autopilot round still claims its own here. The losers do not take
-    // it and, in `note_run_finished`, do not release it.
-    let claimed = telemetry::global().and_then(|sink| {
-        let id = telemetry::now_millis().unsigned_abs();
-        sink.claim_run(id).then_some(id)
-    });
+    // NOTHING IS CLAIMED HERE ANY MORE, AND NOTHING NEEDS RELEASING. This
+    // function claimed the sink's one ambient key per LEG, and the legs of one
+    // press run concurrently; atomics-1 (D-2582) moved the claim to the press
+    // (a `PressRun` guard, since removed) so a leg finishing first could not
+    // release the key under its siblings. sobs-14 (D-4451) found the ambient
+    // key itself
+    // wrong — while held it named every unrelated event the process wrote —
+    // and replaced it with a per-task scope. A press's legs inherit the
+    // press's scope (`pullrun::press`), which keeps D-2582's one id for the
+    // whole press without a key anybody can release early. D-4625.
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.run", "started")
             .with(
@@ -7680,7 +7979,51 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u
             .with("to", telemetry::Value::Str(&asked.window.to().to_string()))
             .with("instruments", telemetry::Value::Uint(instruments as u64)),
     );
-    claimed
+}
+
+/// A run refused before [`note_run_started`], named once on the log.
+///
+/// # What left no line (L1-R3-2, D-4450)
+///
+/// [`broker_run`] refuses three things before it starts a run: a process that
+/// may not reach a broker, a basket whose mapping is not ready, and a rung the
+/// pull order puts out of sequence. Each returned a `Blocked` reason to the
+/// receipt and the journal's NOT STARTED record, and wrote nothing to the log,
+/// so the autopilot's refused ticks and a hand pull's refusal were invisible
+/// on `/logs`. One event per refused run, carrying what was asked and the
+/// receipt's own reason, at `Error` for a refusal on this server's side (5xx)
+/// and `Warn` for one the request or the order can fix.
+///
+/// `run` is always a blocked run here; the `map_or` default is never taken.
+fn refused_before_start(asked: &ingest::SpotRequest, run: BrokerRun) -> BrokerRun {
+    let (why, code) = run
+        .blocked
+        .as_ref()
+        .map_or(("", axum::http::StatusCode::OK), |blocked| {
+            (blocked.why.as_str(), blocked.code)
+        });
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if code.is_server_error() {
+                telemetry::Level::Error
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.run",
+            "refused before it started",
+        )
+        .with("feed", telemetry::Value::Str(asked.feed.wire()))
+        .with("target", telemetry::Value::Str(asked.target.label()))
+        .with("rung", telemetry::Value::Str(asked.granularity.dir()))
+        .with(
+            "from",
+            telemetry::Value::Str(&asked.window.from().to_string()),
+        )
+        .with("to", telemetry::Value::Str(&asked.window.to().to_string()))
+        .with("status", telemetry::Value::Uint(u64::from(code.as_u16())))
+        .with("why", telemetry::Value::Str(why)),
+    );
+    run
 }
 
 /// The run's own verdict, on the one surface that survives a restart.
@@ -7696,7 +8039,7 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u
 /// surface that survives the restart the receipt does not. The asymmetry is the
 /// point, and it resolves the other way — the receipt is what should gain the
 /// figure next, not the line that should lose it.
-fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
+fn note_run_finished(out: &BrokerRun, balanced: bool) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(
             if balanced && out.total.failures.is_empty() {
@@ -7757,19 +8100,6 @@ fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
         )
         .with("took_micros", telemetry::Value::Uint(out.took)),
     );
-    // CLEARED AFTER THE LAST EVENT OF THE RUN, so a served request that arrives
-    // between backfills is not filed under the one that just ended. An event
-    // outside a run carries no run, and says so by omitting the key.
-    //
-    // ONLY BY THE LEG THAT TOOK IT. `claimed` is `Some` for the first leg of a
-    // press and `None` for every concurrent sibling, so a leg that finished
-    // early can no longer clear the key out from under the ones still running --
-    // which is what left the survivors emitting events with no run at all.
-    // `release_run` compares before it clears, so even the winner cannot clear
-    // a key a LATER press has since taken.
-    if let (Some(sink), Some(run)) = (telemetry::global(), claimed) {
-        sink.release_run(run);
-    }
 }
 
 /// The universe, one instrument at a time — the whole of what a spot pull does.
@@ -8694,7 +9024,46 @@ pub(crate) async fn broker_run(
 /// already moved the epoch past the captured value and stops the run at its
 /// first instrument. Captured here, the pause had bumped the epoch before the
 /// capture and a whole month was fetched against it. autopilot-1, D-2506.
+///
+/// # The run's scope opens here
+///
+/// Both callers come through this function — a hand walk via [`broker_run`],
+/// the autopilot directly with its epoch — so this is where the log run's
+/// scope is opened (sobs-14, D-4451), and [`broker_run_scoped`] is the run.
+/// D-2506's epoch and D-4451's scope met here; D-4625.
 pub(crate) async fn broker_run_at(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    censuses: &[census::VendorCensus],
+    epoch: Option<u64>,
+) -> BrokerRun {
+    // ONE RUN ID FOR EVERYTHING THIS CALL WRITES, AND FOR NOTHING ELSE
+    // (sobs-14, D-4451).
+    //
+    // A log spanning three backfills is three interleaved stories, and the id
+    // is how a reader who was not here takes one. It was a process-wide key
+    // CLAIMED by the first leg (`Sink::claim_run`), so while a pull held it
+    // EVERY event the server wrote carried it — a page load's `api.request`,
+    // an autopilot pause, a sweep refusal — and `/logs?run=` returned the
+    // pull with other stories spliced in (the audit's probe P9). A SCOPE
+    // names only the work polled inside it: this call's own events, on
+    // whichever thread runs them, and nothing a concurrent task writes.
+    //
+    // A press (`pullrun::press`) opens one scope for all its legs, which are
+    // one story, so a leg inherits it; a call outside any scope (a hand pull,
+    // an autopilot tick, a recovery window) reserves a fresh id from the
+    // log's own sequence (`telemetry::reserve_run_id`), unique across
+    // restarts, where the old millisecond id was unique only unless two runs
+    // began in one millisecond. No sink, no id: zero is "no run".
+    let run = telemetry::current_run()
+        .or_else(telemetry::reserve_run_id)
+        .unwrap_or(0);
+    telemetry::in_run(run, broker_run_scoped(asked, site, censuses, epoch)).await
+}
+
+/// [`broker_run_at`], inside its run's scope: the refusals before a run
+/// starts, and the run, against the caller's stop generation `epoch`.
+async fn broker_run_scoped(
     asked: &ingest::SpotRequest,
     site: &Site,
     censuses: &[census::VendorCensus],
@@ -8704,7 +9073,7 @@ pub(crate) async fn broker_run_at(
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
     // it was found.
     if site.broker == Broker::Refused {
-        return BrokerRun::unreachable_broker();
+        return refused_before_start(asked, BrokerRun::unreachable_broker());
     }
 
     // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
@@ -8723,7 +9092,10 @@ pub(crate) async fn broker_run_at(
     // blip is a run that never finishes, and a single `?` here would be that.
     let mut targets = spot_targets(asked, site);
     if let Some(why) = spot_mapping_refusal(asked, &site.universe().read, &targets) {
-        return BrokerRun::blocked(why, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        return refused_before_start(
+            asked,
+            BrokerRun::blocked(why, axum::http::StatusCode::UNPROCESSABLE_ENTITY),
+        );
     }
     let mut dated = std::collections::HashMap::new();
     // Sorted so a run is reproducible: `HashMap` order is not stable between
@@ -8766,10 +9138,10 @@ pub(crate) async fn broker_run_at(
     // each answer honestly: `autopilot::tick` already takes a fresh census
     // either side of this call, and a hand run reads one per request.
     if let Some(why) = ladder_refusal(asked, &targets, censuses) {
-        return BrokerRun::out_of_order(why);
+        return refused_before_start(asked, BrokerRun::out_of_order(why));
     }
 
-    let claimed_run = note_run_started(asked, targets.len());
+    note_run_started(asked, targets.len());
     let mut out = BrokerRun {
         attempted: targets.len(),
         ..BrokerRun::default()
@@ -8921,7 +9293,7 @@ pub(crate) async fn broker_run_at(
     site.autopilot.publish(|status| status.now = None);
     out.record_stop();
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    note_run_finished(&out, out.total.balances(), claimed_run);
+    note_run_finished(&out, out.total.balances());
     out
 }
 
@@ -9511,9 +9883,17 @@ where
                     ),
                 });
             }
-            Step::Again { wait_ms, .. } => {
-                // `throttled` is deliberately ignored — see the header. The
-                // transport has already taken the decrease.
+            Step::Again { wait_ms, throttled } => {
+                // `throttled` is deliberately not acted on — see the header.
+                // The transport has already taken the decrease. It is logged.
+                note_retry(
+                    feed,
+                    what,
+                    attempt,
+                    why.status,
+                    (wait_ms, throttled),
+                    &why.detail,
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             }
             // The loop's own exit says it better than a branch here can.
@@ -10560,23 +10940,6 @@ const fn step(
     }
 }
 
-/// One retried transport failure, on the log (conc13-2, D-2526).
-///
-/// `Warn`, because a run that recovered still spent a backoff on a fault the
-/// operator may need to see recurring, and `/logs?level=warn` is where a
-/// recurring network fault is looked for. `why` is the transport's own words,
-/// which never carry a header this build set (the token travels only in the
-/// sensitive auth header), and the sink clips it at its string ceiling.
-fn note_transport_retry(feed: pull::vendor::Feed, attempt: u32, wait_ms: u64, why: &str) {
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn("pull.http", "transport failed, retrying")
-            .with("feed", telemetry::Value::Str(feed.wire()))
-            .with("attempt", telemetry::Value::Uint(u64::from(attempt)))
-            .with("wait_ms", telemetry::Value::Uint(wait_ms))
-            .with("why", telemetry::Value::Str(why)),
-    );
-}
-
 /// One window, re-asked while the reason to re-ask still stands.
 ///
 /// The refusal decides, and it decides from the status the vendor actually
@@ -10811,17 +11174,16 @@ async fn with_retry(
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .record_throttled();
                         }
-                        // AN UNANSWERED FAILURE THAT IS RETRIED IS STILL SAID
-                        // (conc13-2, D-2526). A timeout, a reset or a DNS fault
-                        // that recovered within `THROTTLE_ATTEMPTS` used to leave
-                        // no line and no count anywhere: only the final verdict
-                        // was ever logged, and a recovered blip has none. One
-                        // `Warn` per retried attempt -- at most
-                        // `THROTTLE_ATTEMPTS - 1` per chunk, so the cost is
-                        // bounded by the retry ladder itself, not by the run.
-                        if status.is_none() {
-                            note_transport_retry(feed, attempt, wait_ms, &text);
-                        }
+                        // EVERY RETRY IS SAID, AN UNANSWERED ONE INCLUDED, AND
+                        // ONCE. A timeout, a reset or a DNS fault that recovered
+                        // within `THROTTLE_ATTEMPTS` used to leave no line at all
+                        // (conc13-2, D-2526); so did a 429 or 5xx re-ask
+                        // (L1-R3-5, D-4455). Both sides added a `pull.http` Warn
+                        // here, and the transport one was the other's `status:
+                        // null` case, so a blip wrote two lines. One writer,
+                        // `note_retry`, at most `THROTTLE_ATTEMPTS - 1` per
+                        // chunk. D-4627.
+                        note_retry(feed, "window", attempt, status, (wait_ms, throttled), &text);
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     }
                     // The loop's own exit says it better than a branch here can.
@@ -10835,6 +11197,52 @@ async fn with_retry(
         "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport is not \
          blipping, it is down"
     ))
+}
+
+/// Write one retry decision: the ladder chose to ask the vendor again.
+///
+/// L1-R3-5, D-4455. [`with_retry`] and [`laddered`] re-asked a vendor up to
+/// [`THROTTLE_ATTEMPTS`] times per request and wrote nothing while they did:
+/// a pull that spent minutes in 429 and 5xx backoff read on `/logs` exactly
+/// like one whose vendor was slow, and the refusal the caller finally logs
+/// ("vendor refused a window", "contract not landed") did not say it was the
+/// last of several. One event per [`Step::Again`], so at most
+/// `THROTTLE_ATTEMPTS - 1` per request and never one per bar. Every other
+/// verdict ends the request and is the caller's event.
+///
+/// `status` is absent when nothing answered (a transport failure); `wait` is
+/// the backoff in milliseconds and whether the vendor named a throttle.
+///
+/// The transport failure is conc13-2's case (D-2526), which had its own
+/// `pull.http transport failed, retrying` line on the bars ladder; beside
+/// this one it logged the same retry twice, so it is this event with a null
+/// `status` now (D-4627). `why` is the transport's or the vendor's own words,
+/// which never carry a header this build set (the token travels only in the
+/// sensitive auth header), and the sink clips it at its string ceiling.
+fn note_retry(
+    feed: pull::vendor::Feed,
+    what: &str,
+    attempt: u32,
+    status: Option<u16>,
+    (wait_ms, throttled): (u64, bool),
+    why: &str,
+) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.http", "retrying a refused request")
+            .with("feed", telemetry::Value::Str(feed.wire()))
+            .with("what", telemetry::Value::Str(what))
+            .with("attempt", telemetry::Value::Uint(u64::from(attempt)))
+            .with("of", telemetry::Value::Uint(u64::from(THROTTLE_ATTEMPTS)))
+            .with(
+                "status",
+                status.map_or(telemetry::Value::Null, |code| {
+                    telemetry::Value::Uint(u64::from(code))
+                }),
+            )
+            .with("wait_ms", telemetry::Value::Uint(wait_ms))
+            .with("throttled", telemetry::Value::Bool(throttled))
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 /// Whether a throttle `step` named under `status` is one the transport did not
@@ -12231,12 +12639,12 @@ pub(crate) async fn pull_run(
     };
 
     let legs_asked = legs.len();
-    // KEPT, NOT DROPPED, so a shutdown can drain it (lifecycle-1, D-2583).
-    let press = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), run, legs));
-    *site
-        .press_task
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(press);
+    // STARTED AND WATCHED, under one run id for the whole press (sobs-5,
+    // sobs-14; D-4451, D-4452), and KEPT, NOT DROPPED, so a shutdown can drain
+    // it (lifecycle-1, D-2583): `pullrun::press` puts its supervisor's handle
+    // in `Site::press_task`, and aborting that supervisor aborts the press it
+    // holds. See `pullrun::press`. D-4626.
+    let _log_run = crate::pullrun::press(Loaded::clone(&site), run, legs);
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),
@@ -12358,7 +12766,10 @@ async fn detached_pull<F>(scope: &'static str, work: F) -> (axum::http::StatusCo
 where
     F: std::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
 {
-    match tokio::spawn(work).await {
+    // THE RUN OPEN WHERE THE PULL WAS ASKED FOR TRAVELS WITH IT: a press's
+    // leg is spawned here, and a spawned task is outside every scope unless
+    // it is handed one (sobs-14, D-4451).
+    match tokio::spawn(telemetry::inherit(work)).await {
         Ok(answer) => answer,
         Err(why) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -12712,9 +13123,10 @@ impl FnoLanded {
     /// must re-read before the next contract. D-0948.
     fn record_refusal(&mut self, refusal: &str) -> bool {
         self.failed = self.failed.saturating_add(1);
+        let why = refusal.trim_start_matches(CREDENTIAL_DEAD);
+        note_contract_not_landed("fetch", why);
         if self.why.len() < 5 {
-            self.why
-                .push(refusal.trim_start_matches(CREDENTIAL_DEAD).to_owned());
+            self.why.push(why.to_owned());
         }
         refusal.starts_with(CREDENTIAL_DEAD)
     }
@@ -12740,11 +13152,54 @@ impl FnoLanded {
             return true;
         };
         self.failed = self.failed.saturating_add(1);
+        note_contract_not_landed("land", &why);
         if self.why.len() < 5 {
             self.why.push(why);
         }
         false
     }
+}
+
+/// The receipt's reasons for the contracts that did not land: the first few
+/// quoted, and, when more failed than are quoted, where the rest are.
+///
+/// THE REASONS PAST THE FIFTH ARE NOT LOST, and the receipt says where they
+/// are rather than letting five read as all of them (sobs-7, D-4449).
+fn contract_reason_facts(facts: &mut Vec<(&'static str, String)>, failed: usize, why: &[String]) {
+    if !why.is_empty() {
+        facts.push(("First reasons", why.join(" · ")));
+    }
+    if failed > why.len() {
+        facts.push((
+            "Every reason",
+            format!(
+                "{failed} contract(s) did not land and {} reason(s) are quoted here; \
+                 every one is in the event log as api.pull \"contract not landed\"",
+                why.len()
+            ),
+        ));
+    }
+}
+
+/// One expired contract that did not land, with its reason, in the log.
+///
+/// # What was discarded (sobs-7, D-4449)
+///
+/// [`FnoLanded`] counts every contract that failed and keeps the first five
+/// reasons for the receipt; the sixth onward was counted and dropped, and none
+/// of them was logged, while the spot path's peer
+/// ([`BrokerRun::record_refusal`]) logs every refused instrument. So a walk
+/// that lost forty contracts could explain five of them, and only to whoever
+/// still had the receipt open. One event per failed contract: each one is a
+/// request the vendor was already asked (`fetch`) or bars that would not file
+/// (`land`), so the volume is bounded by the contracts asked, never by bars.
+/// `why` begins with the contract's own vendor symbol.
+fn note_contract_not_landed(stage: &str, why: &str) {
+    let _noted = telemetry::emit(
+        &telemetry::Event::error("api.pull", "contract not landed")
+            .with("stage", telemetry::Value::Str(stage))
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 /// The windows one contract still owes, and how many of its months are done.
@@ -16439,9 +16894,7 @@ async fn fno_report(
         "Contracts that did not land",
         format!("{failed} of {}", wanted.len()),
     ));
-    if !why.is_empty() {
-        facts.push(("First reasons", why.join(" · ")));
-    }
+    contract_reason_facts(&mut facts, failed, &why);
     page.say_counted(
         facts,
         axum::http::StatusCode::BAD_GATEWAY,
@@ -20964,22 +21417,16 @@ fn serve_lock_refusal(store_root: &Path, path: &Path, refusal: &std::fs::TryLock
             // older, longer holder's tail after that line, and quoting the whole
             // file showed the operator a second, stale pid as though it held the
             // store. R9-api-cx-2, D-1446.
-            let held_by = std::fs::read_to_string(path).unwrap_or_default();
-            let held_by = held_by.lines().next().unwrap_or_default().trim();
+            let held_by = holder_named(std::fs::read_to_string(path));
             format!(
                 "REFUSED: another brutex api is already serving this store.\n  \
-                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
+                 store: {}\n  lock:  {} ({refusal})\n  held by: {held_by}\n\
                  Two servers over one store run two autopilots against one \
                  append-only tree and spend one shared vendor token's quota twice. \
                  A different port is not a second store. Stop the other instance, \
                  or point this one at another BRUTEX_STORE.",
                 store_root.display(),
                 path.display(),
-                if held_by.is_empty() {
-                    "an instance that had not yet stamped the file"
-                } else {
-                    held_by
-                }
             )
         }
         std::fs::TryLockError::Error(host) => format!(
@@ -20989,6 +21436,35 @@ fn serve_lock_refusal(store_root: &Path, path: &Path, refusal: &std::fs::TryLock
              a filesystem that supports advisory locks.",
             path.display(),
             store_root.display()
+        ),
+    }
+}
+
+/// Who holds the serve lock, from what reading its stamp answered.
+///
+/// # An unreadable stamp is not an unwritten one (sobs-15, D-4445)
+///
+/// This read `read_to_string(path).unwrap_or_default()`, so a stamp the OS
+/// refused to read (EACCES, EIO, a stamp that is not UTF-8) became the empty
+/// string, and the refusal said the other server "had not yet stamped the
+/// file". That names a cause nobody observed and drops the one that happened.
+/// The read failure is named now, in the refusal the caller logs as
+/// `api.serve refused: this store cannot be served`.
+///
+/// The first line only, for the reason [`serve_lock_refusal`] gives.
+fn holder_named(read: std::io::Result<String>) -> String {
+    match read {
+        Ok(text) => {
+            let line = text.lines().next().unwrap_or_default().trim();
+            if line.is_empty() {
+                "an instance that had not yet stamped the file".to_owned()
+            } else {
+                line.to_owned()
+            }
+        }
+        Err(why) => format!(
+            "unknown: the lock file's stamp could not be read ({why}), so which \
+             instance holds it is not established"
         ),
     }
 }
@@ -21537,45 +22013,52 @@ fn log_level_from(raw: Option<&str>) -> (telemetry::Config, String) {
     (config, note)
 }
 
-/// The environment variable that suppresses opening a browser on start.
+/// The environment variable that ASKS for a browser on start: `1` opens one.
+///
+/// Opening is opt-in (rustonly-4, D-4430). Absent, or any other value, the
+/// server prints its address and spawns nothing.
+pub const OPEN_ENV: &str = "BRUTEX_OPEN";
+
+/// The environment variable that refuses a browser on start, whatever
+/// [`OPEN_ENV`] says. Kept from when opening was the default, so a launcher
+/// that still sets it keeps the meaning it had (D-4430).
 pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 
-/// Opens the operator's browser at `url`, and returns what happened.
+/// What the start-up launch did, for [`opening_line`].
+#[derive(Debug, PartialEq, Eq)]
+enum Launch {
+    /// The operating system's URL handler was started.
+    Opened,
+    /// Nothing was spawned because nobody asked, or [`NO_OPEN_ENV`] refused;
+    /// the reason names the variable.
+    Declined(String),
+    /// The handler was asked for and could not be started; the reason names it.
+    Failed(String),
+}
+
+/// Opens the operator's browser at `url` only when [`OPEN_ENV`] is `1`, and
+/// returns what happened.
+///
+/// # Opt-in, and why it changed (rustonly-4, D-4430)
+///
+/// This opened a browser on every start unless [`NO_OPEN_ENV`] was set. Off
+/// macOS and Windows the handler is `xdg-open`, whose freedesktop.org
+/// `xdg-utils` implementation is a shell script, so a default start could run
+/// a shell. Whether a given host's `xdg-open` is that script, a wrapper, or
+/// absent is UNVERIFIED. The default now spawns nothing: the banner prints the
+/// address, and the IDE run configuration (`.claude/launch.json`) already
+/// names the same URL for the IDE to open. An operator who wants the window
+/// sets `BRUTEX_OPEN=1`, and only then is the handler started.
 ///
 /// # Why this is not a violation of `CLAUDE.md` §2
 ///
 /// §2 forbids "any `build.rs` that invokes an external process". This is not a
 /// build script: nothing here runs during `cargo build`, and gate 2 greps
-/// `*build.rs` for exactly that reason. The bare-machine promise §2 protects —
-/// that `cargo build`, `cargo test` and `cargo clippy` pass with no foreign
-/// toolchain — is untouched, because the only thing spawned here is the
-/// operating system's own URL handler, at run time, on a machine that by
-/// definition already has a browser the operator is about to look at.
-///
-/// # On Linux the handler may be a script, and that is allowed (rustonly-4, D-1202)
-///
-/// Off macOS and Windows the handler is `xdg-open`. The freedesktop.org
-/// `xdg-utils` implementation of it is a shell script, so on such a host this
-/// binary can start a shell at run time. Whether a given host's `xdg-open` is
-/// that script, a wrapper, or absent is UNVERIFIED and is not this crate's to
-/// decide: it is the operator's desktop, chosen and installed by them, exactly
-/// as `open` and `explorer.exe` are on the other two families.
-///
-/// D-1202 records why that is not the "interpreted runtime, as a dependency, a
-/// dev-dependency, or a tool" `CLAUDE.md` §2 forbids: nothing in the workspace
-/// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (no
-/// test calls [`open_in_browser`]; the tests drive [`open_unless_suppressed`]
-/// only on its suppressed arm, and a `:0` listener never opens), the URL it is
-/// handed is this server's own `http://` loopback address and never operator
-/// text, and [`NO_OPEN_ENV`] turns it off. A spawn failure is printed, never
-/// swallowed.
-///
-/// # Why it is opt-OUT rather than opt-in
-///
-/// The whole stated run procedure is one click, and a procedure whose last step
-/// is "now go and type the address yourself" is not one click. A default that
-/// has to be enabled would leave every fresh clone in the state this function
-/// exists to remove.
+/// `*build.rs` for exactly that reason. `cargo build`, `cargo test` and `cargo
+/// clippy` never reach the spawn (no test calls [`open_in_browser`]; the tests
+/// drive [`open_if_asked`] only on its declining arms, and a `:0` listener is
+/// never opened), and the URL handed to it is this server's own `http://`
+/// loopback address, never operator text. D-1202 records the rest.
 ///
 /// # Why a failure is reported rather than swallowed
 ///
@@ -21584,8 +22067,12 @@ pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 /// silent failure would leave an operator waiting for a window that is never
 /// coming, so the caller prints the URL. `CLAUDE.md` §4: degrade loudly and
 /// name the reason.
-fn open_in_browser(url: &str) -> Result<(), String> {
-    open_unless_suppressed(url, std::env::var_os(NO_OPEN_ENV).as_deref())
+fn open_in_browser(url: &str) -> Launch {
+    open_if_asked(
+        url,
+        std::env::var_os(OPEN_ENV).as_deref(),
+        std::env::var_os(NO_OPEN_ENV).as_deref(),
+    )
 }
 
 /// The URL launcher available on one supported host family.
@@ -21618,17 +22105,38 @@ const fn browser_handler(host: BrowserHost) -> (&'static str, &'static [&'static
     }
 }
 
-/// [`open_in_browser`] with the opt-out as an argument, so a test owns it.
+/// [`open_in_browser`] with both variables as arguments, so a test owns them.
 ///
 /// Split out because the workspace denies `unsafe_code` and `std::env::set_var`
-/// is `unsafe` in edition 2024 — so the suppression arm is untestable while the
-/// variable is read inside the function. That constraint pushed toward the same
-/// shape [`log_dir_from`] already has, and the lint was right: a function that
-/// reads process-global state is one no test can pin without racing every other
-/// test in the binary.
-fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Result<(), String> {
-    if suppressed.is_some() {
-        return Err(format!("{NO_OPEN_ENV} is set"));
+/// is `unsafe` in edition 2024 — so the declining arms are untestable while the
+/// variables are read inside the function. That constraint pushed toward the
+/// same shape [`log_dir_from`] already has, and the lint was right: a function
+/// that reads process-global state is one no test can pin without racing every
+/// other test in the binary.
+///
+/// `asked` must be exactly `1`. A refusal wins over an ask, and an ask with any
+/// other value (`0`, `yes`, empty) is declined by name rather than read as a
+/// yes: the side that spawns nothing is the safe one (D-4430).
+fn open_if_asked(
+    url: &str,
+    asked: Option<&std::ffi::OsStr>,
+    refused: Option<&std::ffi::OsStr>,
+) -> Launch {
+    if refused.is_some() {
+        return Launch::Declined(format!("{NO_OPEN_ENV} is set"));
+    }
+    match asked {
+        None => {
+            return Launch::Declined(format!(
+                "opening a browser is opt-in; set {OPEN_ENV}=1 to have it opened"
+            ));
+        }
+        Some(value) if value != "1" => {
+            return Launch::Declined(format!(
+                "{OPEN_ENV} is {value:?}, and only 1 opens a browser"
+            ));
+        }
+        Some(_) => {}
     }
     // THE HANDLER IS THE PLATFORM'S, NEVER A BROWSER BY NAME. Naming a browser
     // picks one the operator may not use and may not have; the OS already knows
@@ -21649,6 +22157,7 @@ fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Re
                 .map(drop)
                 .map_err(|why| format!("{program}: the child cannot be reaped: {why}"))
         })
+        .map_or_else(Launch::Failed, |()| Launch::Opened)
 }
 
 /// Waits for `child` on a thread of its own, so it is reaped when it exits.
@@ -21802,17 +22311,19 @@ fn first_event_note(first: telemetry::Emitted) -> Option<String> {
 /// ADDRESS rather than on a test flag: a flag has to be remembered by every
 /// future harness, and the one that forgets is the one that opens the window.
 /// `open` is a parameter so a test proves that without a browser. G18-api-16.
-fn opening_line(
-    addr: std::net::SocketAddr,
-    open: impl FnOnce(&str) -> Result<(), String>,
-) -> String {
+///
+/// A launch nobody asked for is not a failure, and the line says so in other
+/// words: `address:` with the reason, where a failed launch keeps its
+/// `NOT OPENED` (D-4430).
+fn opening_line(addr: std::net::SocketAddr, open: impl FnOnce(&str) -> Launch) -> String {
     let home = format!("http://{addr}/");
     if addr.port() == 0 {
         "  opening: skipped — port 0 addresses nothing".to_owned()
     } else {
         match open(&home) {
-            Ok(()) => format!("  opening: {home}"),
-            Err(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
+            Launch::Opened => format!("  opening: {home}"),
+            Launch::Declined(why) => format!("  address: {home} — not opened ({why})"),
+            Launch::Failed(why) => format!("  opening: NOT OPENED ({why}) — go to {home}"),
         }
     }
 }
@@ -22032,7 +22543,11 @@ async fn run_in_over(
                 // answered while the autopilot is still counting down its grace
                 // window. It holds the same `Arc`, so pause/resume and the
                 // status it publishes are the ones the routes read.
-                let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
+                //
+                // SUPERVISED (sobs-6, D-4453): `launch` names on the log how the
+                // backfill task ended, and the drain's abort of its handle below
+                // aborts the backfill rather than detaching it (D-2583). D-4626.
+                let flying = autopilot::launch(Loaded::clone(&site));
                 // Held past `serve`, which consumes `site`, so the drain below
                 // can reach the controls (autopilot-4, lifecycle-1, D-2583).
                 let draining = Loaded::clone(&site);
@@ -22710,6 +23225,38 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("cleanup");
     }
 
+    /// sobs-15, D-4445: a stamp the OS will not read is named as unreadable,
+    /// never reported as "not yet stamped"; an empty stamp still is, and a
+    /// stamp's first line is quoted alone.
+    #[test]
+    fn an_unreadable_serve_lock_stamp_is_named_not_called_unstamped() {
+        let refused = holder_named(Err(std::io::Error::from_raw_os_error(13)));
+        assert!(refused.contains("could not be read"), "{refused}");
+        assert!(refused.contains("os error 13"), "{refused}");
+        assert!(!refused.contains("not yet stamped"), "{refused}");
+        assert_eq!(
+            holder_named(Ok(String::new())),
+            "an instance that had not yet stamped the file"
+        );
+        assert_eq!(
+            holder_named(Ok("  \nsecond".to_owned())),
+            "an instance that had not yet stamped the file"
+        );
+        assert_eq!(
+            holder_named(Ok(" addr=1 pid=2 \naddr=3 pid=4\n".to_owned())),
+            "addr=1 pid=2"
+        );
+        // THROUGH THE REFUSAL ITSELF: a lock path that is a directory reads
+        // as EISDIR, a real OS refusal and not a fixture of this test's own.
+        let root = crate::scratch::path("sobs15-unreadable-stamp");
+        let path = root.join(SERVE_LOCK);
+        std::fs::create_dir_all(&path).expect("a directory where the stamp would be");
+        let busy = serve_lock_refusal(&root, &path, &std::fs::TryLockError::WouldBlock);
+        assert!(busy.contains("held by: unknown"), "{busy}");
+        assert!(busy.contains("could not be read"), "{busy}");
+        assert!(!busy.contains("not yet stamped"), "{busy}");
+    }
+
     /// A directory holding one or both masters, named after the test.
     /// The third mastered vendor's file, written for every fixture.
     ///
@@ -23374,6 +23921,8 @@ mod tests {
     /// answers that the credential must be re-read. D-0948.
     #[test]
     fn an_fno_landing_keeps_five_refusal_reasons_and_counts_all_six() {
+        let _installed = crate::emitted::sink();
+        let from = crate::emitted::mark();
         let mut landed = FnoLanded::default();
         let dead = format!("{CREDENTIAL_DEAD}NIFTY24JANFUT: token rejected");
         assert!(
@@ -23393,8 +23942,82 @@ mod tests {
                 "contract 4: refused".to_owned(),
                 "contract 5: refused".to_owned(),
             ],
-            "five reasons kept, the sixth dropped"
+            "five reasons kept for the receipt"
         );
+        // sobs-7, D-4449: AND EVERY ONE OF THE SIX IS IN THE LOG, the sixth
+        // included, without the marker, as a fetch refusal at Error.
+        let logged: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.pull", "contract not landed")
+                .into_iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "why", "NIFTY24JANFUT: token rejected")
+                        || (2..=6).any(|n| {
+                            crate::emitted::says(record, "why", &format!("contract {n}: refused"))
+                        })
+                })
+                .collect();
+        assert_eq!(logged.len(), 6, "{logged:?}");
+        assert!(
+            logged
+                .iter()
+                .any(|record| crate::emitted::says(record, "why", "contract 6: refused")),
+            "the sixth reason reaches the log: {logged:?}"
+        );
+        for record in &logged {
+            assert_eq!(record.level, telemetry::Level::Error, "{record:?}");
+            assert!(crate::emitted::says(record, "stage", "fetch"), "{record:?}");
+            assert!(
+                !crate::emitted::says(record, "why", CREDENTIAL_DEAD),
+                "the marker never reaches the log: {record:?}"
+            );
+        }
+
+        // A LANDING THAT FAILED IS LOGGED AS ONE TOO, beside the counts.
+        let from = crate::emitted::mark();
+        let done = pull::ingest::Ingested {
+            rows_read: 3,
+            ..pull::ingest::Ingested::default()
+        };
+        assert!(!landed.record_landing("SOBS7LANDFUT", &done));
+        assert_eq!(landed.failed, 7);
+        assert_eq!(landed.why.len(), 5, "still five quoted");
+        let land: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.pull", "contract not landed")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "why", "SOBS7LANDFUT"))
+                .collect();
+        assert_eq!(land.len(), 1, "{land:?}");
+        assert!(crate::emitted::says(&land[0], "stage", "land"));
+        assert!(crate::emitted::says(
+            &land[0],
+            "why",
+            "fetched 3 row(s) and stored none"
+        ));
+
+        // THE RECEIPT SAYS WHERE THE REST ARE, and only when there is a rest.
+        let mut facts = Vec::new();
+        contract_reason_facts(&mut facts, landed.failed, &landed.why);
+        assert_eq!(facts.len(), 2, "{facts:?}");
+        assert_eq!(facts[0].0, "First reasons");
+        assert!(facts[0].1.contains("contract 5: refused"), "{facts:?}");
+        assert_eq!(facts[1].0, "Every reason");
+        assert!(
+            facts[1]
+                .1
+                .starts_with("7 contract(s) did not land and 5 reason(s)"),
+            "{facts:?}"
+        );
+        assert!(facts[1].1.contains("contract not landed"), "{facts:?}");
+        let mut whole = Vec::new();
+        contract_reason_facts(&mut whole, 5, &landed.why);
+        assert_eq!(
+            whole.len(),
+            1,
+            "five failed, five quoted: nothing more to say"
+        );
+        let mut none = Vec::new();
+        contract_reason_facts(&mut none, 0, &[]);
+        assert!(none.is_empty());
     }
 
     #[test]
@@ -23611,6 +24234,112 @@ mod tests {
         assert_eq!(site.universe().read.merged.by_key.len(), count);
     }
 
+    /// **A refresh whose masters did not move is answered without a parse;
+    /// any write, a replacement, an appearance, a removal or an unknown stamp
+    /// parses again, and a refused parse is never skipped into.** so1-5,
+    /// D-4438.
+    #[test]
+    fn a_refresh_with_no_master_moved_does_not_reparse() {
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n");
+        let dir = masters("reparse-if-moved", Some(&groww), Some(DHAN_HEAD));
+        let site = Loaded::new(site("reparse-if-moved", &dir));
+        let generation = || site.universe().generation;
+        let start = generation();
+        assert!(
+            site.universe().masters.is_some(),
+            "the boot parse is stamped"
+        );
+
+        let said = site.reparse_if_moved(&dir).expect("unchanged masters");
+        assert!(said.starts_with("no master moved"), "{said}");
+        assert_eq!(generation(), start, "the boot parse still answers");
+        assert_eq!(
+            crate::mastersrun::reload(&site, &dir).expect("a skipped reload is a reload"),
+            said
+        );
+        assert_eq!(generation(), start);
+
+        // The same bytes written again: the status-change time moves.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("groww_instruments.csv"), &groww).expect("rewrite");
+        site.reparse_if_moved(&dir).expect("a rewrite parses");
+        assert_eq!(generation(), start + 1);
+        site.reparse_if_moved(&dir).expect("and is then unchanged");
+        assert_eq!(generation(), start + 1);
+
+        // A master that goes is a parse, which refuses the lost feed; one
+        // that comes back is a parse, which is accepted.
+        let zerodha = dir.join("zerodha_instruments.csv");
+        std::fs::remove_file(&zerodha).expect("remove fixture only");
+        let why = site
+            .reparse_if_moved(&dir)
+            .expect_err("a lost feed parses and refuses");
+        assert!(why.contains("previously readable feed"), "{why}");
+        assert_eq!(generation(), start + 1);
+        std::fs::write(&zerodha, ZERODHA_HEAD).expect("restore fixture");
+        site.reparse_if_moved(&dir)
+            .expect("a returned master parses");
+        assert_eq!(generation(), start + 2);
+
+        // A damaged master refuses, keeps the held parse, and stays refused:
+        // the refusal did not record its stamps, so it is never skipped.
+        site.reparse_if_moved(&dir).expect("settled");
+        let settled = generation();
+        std::fs::write(
+            dir.join("groww_instruments.csv"),
+            format!("{GROWW_HEAD}broken\n"),
+        )
+        .expect("damage fixture only");
+        for _ in 0..2 {
+            let why = site.reparse_if_moved(&dir).expect_err("damage refuses");
+            assert!(why.contains("previous universe retained"), "{why}");
+        }
+        assert_eq!(generation(), settled);
+        std::fs::write(dir.join("groww_instruments.csv"), &groww).expect("repair");
+        site.reparse_if_moved(&dir).expect("a repair parses");
+        assert_eq!(generation(), settled + 1);
+
+        // An unknown stamp never matches.
+        site.parsed
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .masters = None;
+        site.reparse_if_moved(&dir).expect("parses");
+        assert_eq!(generation(), settled + 2);
+
+        // `reparse` itself is unconditional, as every caller before D-4438
+        // relies on.
+        site.reparse(&dir).expect("parses");
+        assert_eq!(generation(), settled + 3);
+        assert_eq!(MasterStamps::of(&dir), site.universe().masters);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a refresh's reparse costs when nothing moved (four `stat`s and a
+    /// lock) against a parse of the same fixture masters. A measurement, run
+    /// on purpose; the numbers are in `docs/06-limits.md`'s D-4438 row. so1-5.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_master_refresh_skip_and_parse() {
+        let mut groww = String::from(GROWW_HEAD);
+        for n in 0..20_000 {
+            let isin = (0..10)
+                .map(|d| format!("INE{n:06}A0{d}"))
+                .find(|isin| brutex_core::isin::Isin::new(isin).is_ok())
+                .expect("one check digit verifies");
+            let _ = writeln!(groww, "NSE,CASH,,SYM{n},EQ,EQ,{isin},,,NSE-SYM{n}");
+        }
+        let dir = masters("reparse-latency", Some(&groww), Some(DHAN_HEAD));
+        let site = Loaded::new(site("reparse-latency", &dir));
+        let skip = crate::latency::Timed::run(2_000, || site.reparse_if_moved(&dir).map(drop))
+            .expect("skip");
+        let parse = crate::latency::Timed::run(20, || site.reparse(&dir).map(drop)).expect("parse");
+        println!("masters: {} groww rows, {} bytes", 20_000, groww.len());
+        println!("{}", skip.line("reparse_if_moved, nothing moved"));
+        println!("{}", parse.line("reparse, 20,000-row fixture master"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn crawl_rows_never_borrow_another_vendors_isin() {
         let mut merged = merge::Merged::default();
@@ -23706,6 +24435,8 @@ mod tests {
         asked
             .members
             .insert(brutex_core::symbol::Symbol::new("INFY").expect("symbol"));
+        let _installed = crate::emitted::sink();
+        let from = crate::emitted::mark();
         let run = broker_run(&asked, &site, &[]).await;
         assert_eq!(run.attempted, 0);
         let blocked = run
@@ -23713,6 +24444,78 @@ mod tests {
             .expect("preflight refuses before network or ladder");
         assert_eq!(blocked.code, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
         assert!(blocked.why.contains("INFY"));
+        // L1-R3-2, D-4450: AND THE LOG SAYS SO, with the receipt's reason.
+        let logged: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "pull.run", "refused before it started")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "why", &blocked.why))
+                .collect();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert_eq!(logged[0].level, telemetry::Level::Warn);
+        assert!(crate::emitted::counts(&logged[0], "status", 422));
+        assert!(crate::emitted::says(&logged[0], "feed", asked.feed.wire()));
+    }
+
+    /// L1-R3-2, D-4450: THE OTHER TWO REFUSALS BEFORE A RUN STARTS ARE LOGGED
+    /// TOO. A process that may not reach a broker (503, Error) and a minute
+    /// run whose day pass is not held (409, Warn), each one `pull.run`
+    /// "refused before it started" carrying the rung and the receipt's reason.
+    #[tokio::test]
+    async fn a_run_refused_before_it_starts_is_logged_with_its_reason() {
+        let _installed = crate::emitted::sink();
+        let dir = masters(
+            "l1r32-refused",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=1min",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        for (site, code, level, needle) in [
+            (
+                Site::load(&dir, &store_root("l1r32-unreachable")),
+                503,
+                telemetry::Level::Error,
+                "may not reach a live broker",
+            ),
+            (
+                Site::serving(&dir, &store_root("l1r32-order")),
+                409,
+                telemetry::Level::Warn,
+                "",
+            ),
+        ] {
+            let from = crate::emitted::mark();
+            let out = broker_run(&asked, &site, &[]).await;
+            let blocked = out.blocked.expect("refused before the loop");
+            assert_eq!(blocked.code.as_u16(), code, "{}", blocked.why);
+            assert!(blocked.why.contains(needle), "{}", blocked.why);
+            let logged: Vec<telemetry::Record> =
+                crate::emitted::landed(from, "pull.run", "refused before it started")
+                    .into_iter()
+                    .filter(|record| crate::emitted::says(record, "why", &blocked.why))
+                    .collect();
+            assert_eq!(logged.len(), 1, "{code}: {logged:?}");
+            assert_eq!(logged[0].level, level, "{code}");
+            assert!(crate::emitted::counts(
+                &logged[0],
+                "status",
+                u64::from(code)
+            ));
+            assert!(
+                crate::emitted::says(&logged[0], "rung", "1min"),
+                "{logged:?}"
+            );
+            assert!(crate::emitted::says(&logged[0], "from", "2026-08-03"));
+            assert!(crate::emitted::says(&logged[0], "to", "2026-08-05"));
+            assert_eq!(out.attempted, 0, "a refused run attempted nothing");
+        }
     }
 
     #[test]
@@ -28943,16 +29746,19 @@ mod tests {
 
         // PAGING PAST THE END CLAMPS. `?page=999` is a stale bookmark, not an
         // attack, and it must land somewhere real.
+        // Nothing held, so the axis is the 210 swept series (D-3507): 7,560
+        // rows over 38 pages of 200, and page index 37 is the last.
         let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
+        let last = store_ok(&site, day(2026, 8, 7), 37, "show=gaps");
         let past = store_ok(&site, day(2026, 8, 7), 999, "show=gaps");
-        assert_eq!(past, first, "an out-of-range page clamps to the last one");
+        assert_eq!(past, last, "an out-of-range page clamps to the last one");
+        assert!(last.contains("page 38 of 38"), "{last}");
         assert!(
-            past.contains("NSE-INDEX-NIFTY"),
+            past.contains("class=\"num miss\""),
             "and still has rows: {past}"
         );
-        // The fixture's one index × 36 months fits one page, so there is no
-        // pager at all — navigation that leads nowhere is worse than none.
-        assert!(!first.contains("class=\"pager\""), "{first}");
+        assert!(first.contains("NSE-INDEX-NIFTY"), "{first}");
+        assert!(first.contains("class=\"pager\""), "{first}");
     }
 
     /// A Dhan manifest at `root` holding one 1-minute month of each named
@@ -29000,10 +29806,10 @@ mod tests {
         // instruments. Without a fixture that large the paging arms are code no
         // test enters.
         //
-        // EIGHT HELD SERIES ON DISK, PLUS THE TWO SWEPT ONES THE AXIS ALWAYS
-        // NAMES, is ten. This set `site.series` by hand; the gaps view now draws
-        // its axis from the request's own census (UC-20, D-1446), so the ten
-        // rows have to be in a manifest to be on the page.
+        // EIGHT HELD SERIES ON DISK, PLUS THE 210 SWEPT ONES THE AXIS ALWAYS
+        // NAMES (D-3507), is 218. This set `site.series` by hand; the gaps view
+        // now draws its axis from the request's own census (UC-20, D-1446), so
+        // the eight rows have to be in a manifest to be on the page.
         let dir = agreeing("storepager");
         let site = site("storepager", &dir);
         let names: Vec<String> = (0..8).map(|i| format!("IDX{i:02}")).collect();
@@ -29014,20 +29820,23 @@ mod tests {
             store::path::YearMonth::new(2026, 8).expect("a month"),
         );
         let (censuses, _) = census_now(&site);
-        assert_eq!(census::grid_rows(census::held_series(&censuses).len()), 360);
+        assert_eq!(
+            census::grid_rows(census::held_series(&censuses).len()),
+            7_848
+        );
 
         let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
-        assert!(first.contains("page 1 of 2"), "{first}");
+        assert!(first.contains("page 1 of 40"), "{first}");
         assert!(first.contains("next"), "{first}");
         assert!(!first.contains("previous"), "no previous to nowhere");
-        assert!(first.contains("360 instrument-month(s)"), "{first}");
+        assert!(first.contains("7848 instrument-month(s)"), "{first}");
         assert!(first.contains("showing 200"), "{first}");
 
-        let last = store_ok(&site, day(2026, 8, 7), 1, "show=gaps");
-        assert!(last.contains("page 2 of 2"), "{last}");
+        let last = store_ok(&site, day(2026, 8, 7), 39, "show=gaps");
+        assert!(last.contains("page 40 of 40"), "{last}");
         assert!(last.contains("previous"), "{last}");
         assert!(!last.contains("next &rarr;"), "{last}");
-        assert!(last.contains("showing 160"), "the remainder: {last}");
+        assert!(last.contains("showing 48"), "the remainder: {last}");
 
         // And past the end clamps onto that last page exactly.
         assert_eq!(store_ok(&site, day(2026, 8, 7), 99, "show=gaps"), last);
@@ -29365,32 +30174,52 @@ mod tests {
         assert!(
             include_str!("server.rs")
                 .contains(".and_then(|child| {\n            reap_detached(child)"),
-            "open_unless_suppressed hands its child to the reaper"
+            "open_if_asked hands its child to the reaper"
         );
     }
 
-    /// `BRUTEX_NO_OPEN` is honoured, and the refusal names the variable rather
-    /// than reporting a spawn that never happened.
+    /// Opening a browser is opt-in (rustonly-4, D-4430): nothing is spawned
+    /// unless `BRUTEX_OPEN` is exactly `1`, `BRUTEX_NO_OPEN` refuses even an
+    /// ask, and each decline names the variable that decided it.
     ///
     /// The spawning arm is deliberately not exercised: asserting it would open
     /// a browser window on the machine running the suite, and a test with a
     /// visible side effect on the operator's desktop is one they will disable.
     #[test]
-    fn the_browser_is_not_opened_when_the_operator_said_not_to() {
-        let why = open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("1")))
-            .expect_err("it must refuse when the variable is set");
-        assert!(
-            why.contains(NO_OPEN_ENV),
-            "the refusal names the variable that caused it: {why}"
-        );
-        // AN EMPTY VALUE STILL SUPPRESSES. `var_os` returns `Some("")` for
-        // `BRUTEX_NO_OPEN=`, and an operator who wrote that meant "off" — the
-        // test pins the presence rule rather than a truthiness one.
-        assert!(
-            open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("")))
-                .is_err(),
-            "presence suppresses, whatever the value"
-        );
+    fn the_browser_is_opened_only_when_the_operator_asked_for_it() {
+        let url = "http://127.0.0.1:8080/";
+        let declined = |launch: Launch| match launch {
+            Launch::Declined(why) => why,
+            other => panic!("nothing may be spawned here: {other:?}"),
+        };
+        // ABSENT: THE DEFAULT SPAWNS NOTHING, and says how to ask.
+        let why = declined(open_if_asked(url, None, None));
+        assert!(why.contains("opt-in") && why.contains(OPEN_ENV), "{why}");
+        // ANY VALUE BUT `1` IS NOT AN ASK, the empty one included.
+        for value in ["", "0", "yes", "true", "11", " 1"] {
+            let why = declined(open_if_asked(url, Some(std::ffi::OsStr::new(value)), None));
+            assert!(
+                why.contains(OPEN_ENV) && why.contains("only 1 opens"),
+                "{value:?}: {why}"
+            );
+        }
+        // A REFUSAL WINS over an ask, and over silence, whatever its value.
+        for refused in ["", "1", "0"] {
+            for asked in [None, Some("1"), Some("0")] {
+                let why = declined(open_if_asked(
+                    url,
+                    asked.map(std::ffi::OsStr::new),
+                    Some(std::ffi::OsStr::new(refused)),
+                ));
+                assert_eq!(
+                    why,
+                    format!("{NO_OPEN_ENV} is set"),
+                    "{asked:?} {refused:?}"
+                );
+            }
+        }
+        assert_eq!(OPEN_ENV, "BRUTEX_OPEN");
+        assert_eq!(NO_OPEN_ENV, "BRUTEX_NO_OPEN");
     }
 
     /// The Windows row is the regression proof: the URL is appended later as
@@ -29945,14 +30774,15 @@ mod tests {
     }
 
     #[test]
-    fn a_site_with_no_universe_still_shows_the_two_instruments_that_matter() {
+    fn a_site_with_no_universe_still_shows_every_swept_instrument() {
         // Nothing has been ingested and no master was read, so the axis has only
-        // the swept pair on it — which is the answer, not an absence of one. The
+        // the 210 swept series on it (D-3507) — which is the answer, not an
+        // absence of one. The
         // grid's axis no longer comes from the masters at all (see
         // `census::held_series`), so an empty merge cannot empty it.
         let empty = masters("nomasters", None, None);
         let site = site("nomasters", &empty);
-        assert_eq!(site.series.len(), 2, "the engine surface, exactly");
+        assert_eq!(site.series.len(), 210, "the engine surface, exactly");
         assert_eq!(
             site.universe().targets,
             [0; ingest::SpotTarget::ALL.len()],
@@ -30982,6 +31812,191 @@ mod tests {
             "the bisection walked up through the zeros to n_valid; an unsealed \
              month must still be read, and its three real bars returned: {body}"
         );
+    }
+
+    /// **PAST THE HEADER'S LAST STAMP, A MONTH IS ANSWERED FROM ITS HEADER AND
+    /// ONE RECORD (W1-api5-8, D-4432)** -- sealed or not.
+    ///
+    /// An unsealed month (a forged version-2 file: three real bars, then seven
+    /// records of zeros under a header naming ten, `last_ts` the third bar's)
+    /// used to be read whole to answer a window past its end. Record 5, inside
+    /// the zeros, is overwritten with a bar stamped 2024-01-03: a whole read
+    /// returns it, so an empty answer for `from=2024-01-02` proves the month
+    /// was not read. The content check is pinned both ways: the same month
+    /// with its LAST record replaced by a bar the header does not name is read
+    /// (and returns that bar), and a sealed month whose last record is in a
+    /// zero tail is read and its damage named, never answered empty. At
+    /// exactly the last stamp the window is not past it.
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "three forged months and their asks")]
+    async fn bars_json_past_the_headers_last_stamp_reads_one_record() {
+        use std::os::unix::fs::FileExt as _;
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        // 2024-01-01 12:00 IST plus `m` minutes.
+        let stamp = |m: i64| ((19_723 * 86_400 - 19_800 + 6 * 3_600) + m * 60) * 1_000_000;
+        let bar = |m: i64| store::format::Bar {
+            ts_micros: stamp(m),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let v2 = store::layout::Layout::V2;
+        // Three real bars and seven records of zeros, the header naming ten;
+        // `then` rewrites records after the image is laid out.
+        let forge = |root: &std::path::Path, then: &dyn Fn(&mut Vec<u8>)| {
+            let genesis = store::header::Header::genesis_at(v2, symbol_id, 60, 0);
+            let named = genesis.advance(10, stamp(0), stamp(2)).expect("a commit");
+            let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).expect("small")];
+            for commit in [
+                genesis.commit().expect("genesis"),
+                named.commit().expect("commit"),
+            ] {
+                let at = usize::try_from(commit.offset).expect("small");
+                image
+                    .iter_mut()
+                    .skip(at)
+                    .zip(commit.bytes)
+                    .for_each(|(dst, src)| *dst = src);
+            }
+            for m in 0..3 {
+                image.extend_from_slice(&bar(m).image());
+            }
+            image.resize(
+                usize::try_from(v2.offset_of(10).expect("an offset")).expect("small"),
+                0,
+            );
+            then(&mut image);
+            let bin = path.to_path_buf(root);
+            std::fs::create_dir_all(bin.parent().expect("a parent")).expect("the directory");
+            std::fs::write(&bin, &image).expect("the forged month");
+        };
+        let put = |image: &mut Vec<u8>, index: u64, at: store::format::Bar| {
+            let from = usize::try_from(v2.offset_of(index).expect("an offset")).expect("small");
+            image
+                .iter_mut()
+                .skip(from)
+                .zip(at.image())
+                .for_each(|(dst, src)| *dst = src);
+        };
+        // 2024-01-03 10:00 IST, inside the month and past every real bar.
+        let later = |minutes: i64| store::format::Bar {
+            ts_micros: stamp(2 * 1_440 - 120 + minutes),
+            ..bar(0)
+        };
+        let ask = |root: &std::path::Path, tag: &str, window: &str| {
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), root));
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{window}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+
+        // UNSEALED, A ZERO TAIL, A STRAY BAR INSIDE THE ZEROS.
+        let root = store_root("barspastheader");
+        forge(&root, &|image| put(image, 5, later(0)));
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(!file.header().checksums_present(), "the premise: unsealed");
+        assert_eq!(file.header().last_ts_micros, stamp(2));
+        assert!(past_the_last_bar(&file, stamp(2) + 1));
+        assert!(
+            !past_the_last_bar(&file, stamp(2)),
+            "at the last stamp is not past it"
+        );
+        assert!(!past_the_last_bar(&file, stamp(0)));
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheader", "&from=2024-01-02").await;
+        assert_eq!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "answered from the header: a whole read would have returned record 5"
+        );
+        let (code, _, body) = ask(&root, "barspastheader", "&from=2024-01-01").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert!(body.matches("\"t\":").count() >= 3, "{body}");
+
+        // UNSEALED, THE LAST RECORD IS A BAR THE HEADER DOES NOT NAME: read.
+        let root = store_root("barspastheadermismatch");
+        forge(&root, &|image| put(image, 9, later(5)));
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(
+            !past_the_last_bar(&file, stamp(2) + 1),
+            "a disagreeing last record"
+        );
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheadermismatch", "&from=2024-01-02").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body.matches("\"t\":").count(),
+            1,
+            "the month is read, and the bar the header does not name is what it holds: {body}"
+        );
+
+        // SEALED, A ZERO TAIL: the last record fails its block check.
+        let root = store_root("barspastheadersealed");
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        file.append(&(0..3).map(bar).collect::<Vec<_>>())
+            .expect("legal bars");
+        let header = file.header();
+        drop(file);
+        let layout = store::layout::Layout::CURRENT;
+        let bin = path.to_path_buf(&root);
+        let raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("the month opens for the fault");
+        let from = layout.offset_of(3).expect("an offset");
+        let to = layout.offset_of(10).expect("an offset");
+        raw.write_all_at(&vec![0u8; usize::try_from(to - from).expect("small")], from)
+            .expect("the zero extent");
+        let mut grown = header;
+        grown.n_valid = 10;
+        grown.generation = header.generation + 1;
+        let commit = grown.commit().expect("a header image");
+        raw.write_all_at(&commit.bytes, commit.offset)
+            .expect("the header names the zeros");
+        drop(raw);
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("opens");
+        assert!(file.header().checksums_present(), "the premise: sealed");
+        assert!(
+            !past_the_last_bar(&file, stamp(2) + 1),
+            "the zeros fail their block"
+        );
+        drop(file);
+        let (code, _, body) = ask(&root, "barspastheadersealed", "&from=2024-01-02").await;
+        assert_ne!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "a sealed zero tail is never answered empty from its header"
+        );
+
+        // AN EMPTY MONTH IS NEVER PAST ANYTHING BY THIS PROOF.
+        let root = store_root("barspastheaderempty");
+        let file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        assert!(!past_the_last_bar(&file, i64::MAX));
     }
 
     /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS
@@ -33082,8 +34097,11 @@ mod tests {
         // needle matches that prose and the test fails on its own explanation.
         // Measured: this test's first version did exactly that. The call site is
         // what decides, so the call site is what is matched.
+        // Since D-4435 the newest-per-key list is built once per census
+        // snapshot and the scrub walks one page of it.
         assert!(
-            source.contains("for entry in manifest.newest()"),
+            source.contains("Some(Arc::new(manifest.newest()))")
+                && source.contains("for entry in page {"),
             "the scrub must walk one row per instrument-month"
         );
         assert!(
@@ -33890,7 +34908,7 @@ mod tests {
         assert_eq!(
             opening_line(zero, |url| {
                 asked.push(url.to_owned());
-                Ok(())
+                Launch::Opened
             }),
             "  opening: skipped — port 0 addresses nothing"
         );
@@ -33899,14 +34917,22 @@ mod tests {
         assert_eq!(
             opening_line(bound, |url| {
                 asked.push(url.to_owned());
-                Ok(())
+                Launch::Opened
             }),
             "  opening: http://127.0.0.1:8123/"
         );
         assert_eq!(asked, ["http://127.0.0.1:8123/"]);
         assert_eq!(
-            opening_line(bound, |_| Err("no launcher".to_owned())),
+            opening_line(bound, |_| Launch::Failed("no launcher".to_owned())),
             "  opening: NOT OPENED (no launcher) — go to http://127.0.0.1:8123/"
+        );
+        // NOT ASKED IS NOT A FAILURE (D-4430): the address, and why it was
+        // not opened, without the failure's capitals.
+        assert_eq!(
+            opening_line(bound, |_| Launch::Declined(
+                "BRUTEX_OPEN is not set".to_owned()
+            )),
+            "  address: http://127.0.0.1:8123/ — not opened (BRUTEX_OPEN is not set)"
         );
     }
 
@@ -36012,13 +37038,13 @@ mod tests {
             1,
             "one row is tinted held: {html}"
         );
-        // One index instrument in the fixture universe × 36 months back.
+        // The 210 swept series × 36 months back (D-3507).
         assert!(
-            html.contains("72 instrument-month(s) in the grid"),
+            html.contains("7560 instrument-month(s) in the grid"),
             "{html}"
         );
         assert!(
-            html.contains("<b>1 of 72</b> shown row(s) are held"),
+            html.contains("<b>1 of 200</b> shown row(s) are held"),
             "{html}"
         );
         assert!(html.contains("quartiles of 8250"), "{html}");
@@ -36081,7 +37107,7 @@ mod tests {
 
         let boot = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            boot.contains("72 instrument-month(s) in the grid"),
+            boot.contains("7560 instrument-month(s) in the grid"),
             "{boot}"
         );
         assert!(!boot.contains("class=\"sw q4\""), "nothing held: {boot}");
@@ -36102,8 +37128,8 @@ mod tests {
         }
         let after = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            after.contains("108 instrument-month(s) in the grid"),
-            "three series on the axis, the new one included: {after}"
+            after.contains("7596 instrument-month(s) in the grid"),
+            "211 series on the axis, the new one included: {after}"
         );
         assert!(after.contains("NSE-INDEX-NEWIDX"), "{after}");
         assert_eq!(
@@ -36121,13 +37147,13 @@ mod tests {
         publish_index_months(&site.store_root, &names, august);
         let grown = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            grown.contains("396 instrument-month(s) in the grid"),
+            grown.contains("7884 instrument-month(s) in the grid"),
             "{grown}"
         );
-        assert!(grown.contains("page 1 of 2"), "{grown}");
+        assert!(grown.contains("page 1 of 40"), "{grown}");
         let clamped = store_ok(&site, today, 999, "show=gaps");
-        assert!(clamped.contains("page 2 of 2"), "{clamped}");
-        assert!(clamped.contains("showing 196"), "{clamped}");
+        assert!(clamped.contains("page 40 of 40"), "{clamped}");
+        assert!(clamped.contains("showing 84"), "{clamped}");
         let _ = std::fs::remove_dir_all(&site.store_root);
     }
 
@@ -36197,12 +37223,18 @@ mod tests {
         (format!("http://{addr}"), rx)
     }
 
-    /// **A RETRIED TRANSPORT FAILURE LEAVES A `Warn` LINE (conc13-2, D-2526).**
+    /// **A RETRIED TRANSPORT FAILURE LEAVES ONE `Warn` LINE (conc13-2, D-2526).**
     ///
     /// The loopback vendor reads the first request and closes the socket with
     /// no answer -- a transport fault with no status -- then answers 200. On
     /// the old code `with_retry`'s `Step::Again` arm slept and re-asked with no
-    /// event, so the run recovered and `landed` below found nothing.
+    /// event, so the run recovered and the story below held nothing.
+    ///
+    /// ONE line, not two: the retry is `note_retry`'s `pull.http retrying a
+    /// refused request` with a null status (L1-R3-5, D-4455), and the separate
+    /// `transport failed, retrying` line this test used to read wrote the same
+    /// retry a second time. Read from this call's own log run, so a parallel
+    /// test's retry cannot be counted. D-4627.
     #[tokio::test]
     async fn a_retried_transport_failure_is_logged_at_warn() {
         const BODY: &str = concat!(
@@ -36239,14 +37271,17 @@ mod tests {
             pull::http::HttpSource::new(spec, pull::http::Credential::token("shhh".to_owned()))
                 .expect("a client");
 
-        let from = crate::emitted::mark();
-        let got = fetch_chunks(
-            &asked,
-            &site,
-            &source,
-            "13",
-            pull::vendor::Listing::Index,
-            &spec,
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let got = telemetry::in_run(
+            run,
+            fetch_chunks(
+                &asked,
+                &site,
+                &source,
+                "13",
+                pull::vendor::Listing::Index,
+                &spec,
+            ),
         )
         .await
         .expect("the retry was answered");
@@ -36263,29 +37298,41 @@ mod tests {
         );
         assert!(!got.bodies.is_empty(), "the second attempt answered");
 
-        let lines = crate::emitted::landed(from, "pull.http", "transport failed, retrying");
-        let mine: Vec<&telemetry::Record> = lines
+        let story = crate::emitted::run_story(run);
+        let retries: Vec<&telemetry::Record> = story
             .iter()
-            .filter(|record| {
-                crate::emitted::says(record, "feed", pull::vendor::Feed::Dhan.wire())
-                    && crate::emitted::counts(record, "attempt", 1)
-                    && crate::emitted::counts(record, "wait_ms", 250)
-            })
+            .filter(|record| record.target == "pull.http" && record.message.contains("retrying"))
             .collect();
-        assert!(
-            !mine.is_empty(),
-            "a retried transport failure is on the log: {lines:?}"
+        assert_eq!(
+            retries.len(),
+            1,
+            "one retried transport failure, one line: {story:?}"
         );
-        for record in mine {
-            assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
-            assert!(
-                record
-                    .field("why")
-                    .and_then(telemetry::OwnedValue::as_str)
-                    .is_some_and(|why| !why.is_empty() && !why.contains("shhh")),
-                "the reason is said and the token is not: {record:?}"
-            );
-        }
+        let record = retries[0];
+        assert_eq!(record.message, "retrying a refused request", "{record:?}");
+        assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+        assert!(crate::emitted::says(
+            record,
+            "feed",
+            pull::vendor::Feed::Dhan.wire()
+        ));
+        assert!(crate::emitted::says(record, "what", "window"));
+        assert!(crate::emitted::counts(record, "attempt", 1));
+        assert!(crate::emitted::counts(record, "wait_ms", 250));
+        assert!(
+            record
+                .field("status")
+                .and_then(telemetry::OwnedValue::as_u64)
+                .is_none(),
+            "nothing answered, so no status is claimed: {record:?}"
+        );
+        assert!(
+            record
+                .field("why")
+                .and_then(telemetry::OwnedValue::as_str)
+                .is_some_and(|why| !why.is_empty() && !why.contains("shhh")),
+            "the reason is said and the token is not: {record:?}"
+        );
     }
 
     /// **THE CONTIGUOUS PREFIX IS KEPT AND THE SUFFIX IS NOT**, driven over a
@@ -37650,9 +38697,10 @@ mod broker_target_tests {
             at[..at.find("\n}\n").expect("it has an end")].to_owned()
         };
         let select = body_of("fn spot_targets(");
-        // The loop is `broker_run_at`'s; `broker_run` only hands it the stop
-        // generation (D-4614).
-        let run = body_of("pub(crate) async fn broker_run_at(");
+        // `broker_run` hands `broker_run_at` the stop generation (D-4614),
+        // `broker_run_at` opens the run's scope, and `broker_run_scoped` is the
+        // run (sobs-14, D-4451); the loop is read where it now lives. D-4625.
+        let run = body_of("async fn broker_run_scoped(");
         // The target's own list is built once per parse (D-2288); the
         // selection walks the chosen target's list, and the list is built by
         // the target's own predicate.

@@ -1,6 +1,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { ask } from './ask.js';
+  import { refusalFrom } from './refusal.js';
   import { booleanLaunchPlan, booleanPlanTimeframes, createBooleanLaunch, validateBooleanLaunchMetadata } from './boolean-launch.js';
   import IndexConsistencyPolicy from './IndexConsistencyPolicy.svelte';
 
@@ -72,7 +73,8 @@
     const query = /^[1-9]\d{0,19}$/.test(points) ? `?max_points=${encodeURIComponent(points)}` : '';
     try {
       const response = await ask(`/engine/boolean-launch.json${query}`, { signal: abort.signal, cache: 'no-store' });
-      if (!response.ok) throw new Error(`Research configuration returned HTTP ${response.status}. No launch was attempted.`);
+      // THE SERVER'S `refusal`, NOT THE STATUS ALONE (W7, D-3217).
+      if (!response.ok) throw new Error(`${await refusalFrom('/engine/boolean-launch.json', response)}. No launch was attempted.`);
       const body = validateBooleanLaunchMetadata(await response.json());
       if (ticket !== configGeneration || abort.signal.aborted) return;
       config = { phase: 'ready', body, why: '' };

@@ -869,3 +869,192 @@ fn unknown_document_members_do_not_enter_the_graph() {
         ])
     );
 }
+
+/// `deny.toml`, whose `[bans] deny` list names every crate the build refuses.
+const DENY: &str = include_str!("../../../deny.toml");
+
+/// Every crate name in `deny.toml`'s `[bans] deny` list.
+fn banned_crates(deny: &str) -> BTreeSet<String> {
+    let Some((_, list)) = deny.split_once("\ndeny = [") else {
+        return BTreeSet::new();
+    };
+    let list = list.split_once("\n]").map_or(list, |(head, _)| head);
+    list.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_once("name = \"")?.1.split_once('"'))
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
+/// Each run of consecutive comment lines in `manifest` that names a banned
+/// crate in backticks and never says `deny.toml`: the comment's 1-based first
+/// line and the crate it names.
+fn unbanned_mentions(manifest: &str, banned: &BTreeSet<String>) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut block: Vec<&str> = Vec::new();
+    let mut first = 0;
+    for (index, line) in manifest.lines().chain(std::iter::once("")).enumerate() {
+        if line.trim_start().starts_with('#') {
+            if block.is_empty() {
+                first = index + 1;
+            }
+            block.push(line);
+            continue;
+        }
+        let text = block.join("\n");
+        if !text.contains("deny.toml") {
+            for name in banned {
+                if text.contains(&format!("`{name}`")) {
+                    out.push((first, name.clone()));
+                }
+            }
+        }
+        block.clear();
+    }
+    out
+}
+
+/// D-3501 (ONEAUTH-02). `pull`'s manifest said `ring` "arrives through the
+/// `reqwest` line" and put 72 `ring_core` symbols in the shipped binary for
+/// months after D-0211 removed it and D-0212 banned it. `deny.toml` is the one
+/// authority on which native crates may build; a manifest comment that names
+/// one of them must say it is banned, or it is a second, unchecked answer.
+#[test]
+fn a_manifest_comment_naming_a_banned_crate_says_it_is_banned() {
+    let banned = banned_crates(DENY);
+    for name in [
+        "ring",
+        "aws-lc-rs",
+        "aws-lc-sys",
+        "cc",
+        "pyo3",
+        "openssl-sys",
+    ] {
+        assert!(banned.contains(name), "deny.toml no longer bans {name}");
+    }
+    let mut stale = Vec::new();
+    for (crate_name, manifest) in MANIFESTS.iter().chain([&("workspace", WORKSPACE)]) {
+        for (line, name) in unbanned_mentions(manifest, &banned) {
+            stale.push(format!("{crate_name}/Cargo.toml:{line} names `{name}`"));
+        }
+    }
+    assert_eq!(stale, Vec::<String>::new());
+}
+
+/// The reader itself: a block is the whole comment run, a mention needs the
+/// backticks, and `deny.toml` anywhere in the run clears it.
+#[test]
+fn the_banned_mention_reader_reads_whole_comment_runs() {
+    let banned = BTreeSet::from(["ring".to_owned(), "cc".to_owned()]);
+    let manifest = "# `ring` arrives here\n#\n# still the same run\nx = 1\n\
+                    # ring without backticks\ny = 2\n\
+                    # `cc` is named\n# and deny.toml bans it\nz = 3\n\
+                    # `ring` at the end of the file";
+    assert_eq!(
+        unbanned_mentions(manifest, &banned),
+        vec![(1, "ring".to_owned()), (10, "ring".to_owned())]
+    );
+    assert_eq!(
+        banned_crates(
+            "x\ndeny = [\n    # { name = \"no\" },\n    { name = \"a\" },\n]\nname = \"b\"\n"
+        ),
+        BTreeSet::from(["a".to_owned()])
+    );
+    assert_eq!(banned_crates("nothing"), BTreeSet::new());
+}
+
+/// `CLAUDE.md`, whose §5 block is one hand-drawn picture of the graph.
+const LAW: &str = include_str!("../../../CLAUDE.md");
+
+/// `AGENTS.md`, whose §5 block is the second.
+const AGENTS: &str = include_str!("../../../AGENTS.md");
+
+/// A crate name and the workspace crates it depends on, per crate.
+type Graph = BTreeMap<String, BTreeSet<String>>;
+
+/// The graph a `## 5.` picture draws: `depends on NOTHING  a · b` gives each of
+/// `a` and `b` no arrows, and `x y <-- a · b` gives each of `a` and `b` the set
+/// `{x, y}`. A consumer drawn twice is reported by its second line, so it cannot
+/// hide behind the first; `None` when the section or its block is missing.
+fn drawn_graph(document: &str) -> Option<(Graph, Vec<String>)> {
+    let (_, section) = document.split_once("\n## 5.")?;
+    let section = section
+        .split_once("\n## ")
+        .map_or(section, |(head, _)| head);
+    let (_, block) = section.split_once("```\n")?;
+    let (block, _) = block.split_once("```")?;
+    let mut graph = BTreeMap::new();
+    let mut twice = Vec::new();
+    for line in block.lines() {
+        let (deps, consumers) = if let Some(roots) = line.strip_prefix("depends on NOTHING") {
+            (BTreeSet::new(), roots)
+        } else if let Some((left, right)) = line.split_once("<--") {
+            (left.split_whitespace().map(str::to_owned).collect(), right)
+        } else {
+            continue;
+        };
+        for consumer in consumers
+            .split('·')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            if graph.insert(consumer.to_owned(), deps.clone()).is_some() {
+                twice.push(consumer.to_owned());
+            }
+        }
+    }
+    Some((graph, twice))
+}
+
+/// D-3502 (ONEAUTH-03). `CLAUDE.md` §5 and `AGENTS.md` §5 are hand-drawn and
+/// were checked by nothing: `docs/06-limits.md` recorded that `cli`'s `pull` and
+/// `vocab` arrows were missing from them for three weeks while the checked table
+/// carried both. The manifests are the one authority; each picture is now
+/// compared against them both ways, every member and every arrow.
+#[test]
+fn the_law_pictures_of_the_graph_are_the_manifests() {
+    let real: Graph = MANIFESTS
+        .iter()
+        .map(|(name, manifest)| ((*name).to_owned(), declared_deps(manifest)))
+        .collect();
+    for (file, document) in [("CLAUDE.md", LAW), ("AGENTS.md", AGENTS)] {
+        let (drawn, twice) =
+            drawn_graph(document).unwrap_or_else(|| panic!("{file} has no §5 picture"));
+        assert_eq!(twice, Vec::<String>::new(), "{file} §5 draws a crate twice");
+        assert_eq!(
+            drawn, real,
+            "{file} §5 draws a graph the manifests do not declare; the manifests win"
+        );
+    }
+}
+
+/// The picture reader: roots, a multi-consumer row, a consumer drawn twice, a
+/// line with no arrow, and the block ending at its fence before §6.
+#[test]
+fn the_picture_reader_reads_roots_rows_and_repeats() {
+    let document = "# x\n## 5. Graph\ntext <-- not in a block\n```\n\
+                    depends on NOTHING   a · b\n\nprose without an arrow\n\
+                    a b   <-- c · d\na <-- d\n```\nafter <-- fence\n## 6. Next\n```\nz <-- y\n```\n";
+    let (graph, twice) = drawn_graph(document).expect("a picture");
+    let set = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| (*n).to_owned())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        graph,
+        BTreeMap::from([
+            ("a".to_owned(), set(&[])),
+            ("b".to_owned(), set(&[])),
+            ("c".to_owned(), set(&["a", "b"])),
+            ("d".to_owned(), set(&["a"])),
+        ])
+    );
+    assert_eq!(twice, vec!["d".to_owned()]);
+    assert_eq!(drawn_graph("## 5. no block\n"), None);
+    assert_eq!(
+        drawn_graph("## 4. wrong section\n```\na <-- b\n```\n"),
+        None
+    );
+}

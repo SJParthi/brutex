@@ -890,6 +890,10 @@ fn the_journals_per_request_growth_is_stated_in_the_limits() {
         "directory's entry count",
         "run_owed",
         "not bounded by `max_concurrent`",
+        "d-4441",
+        "p99",
+        "a proxy",
+        "latency_audit_begin_and_terminal_by_directory_size",
     ] {
         assert!(section.contains(phrase), "missing {phrase:?}");
     }
@@ -915,4 +919,51 @@ fn the_backtest_page_is_not_a_registered_route_and_its_json_is() {
         !routes.iter().any(|route| route == "/backtest"),
         "`/backtest` belongs to the front end's fallback: {routes:?}"
     );
+}
+
+/// **What one audited request's `begin` and terminal cost as the flat journal
+/// directory grows.** W1-api3-0, D-4441.
+///
+/// The journal is filled with REAL finished invocations to 10^2, 10^3 and
+/// 10^4, and 200 more `begin` + `finish` pairs are timed at each size. A last
+/// row pads the same directory with 90,000 plain empty files that are not
+/// journal entries, which is a proxy for a 10^5-entry directory and is
+/// labelled so: filling it with real invocations costs four `fsync`s each.
+/// A measurement, run on purpose; the numbers are in `docs/06-limits.md`.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_audit_begin_and_terminal_by_directory_size() -> Result<(), String> {
+    let root = Scratch::new();
+    let request = |label: &str| -> Result<(), String> {
+        let mut attempt = journal::begin(&root.0, Origin::Http, label)?;
+        attempt.finish(Phase::Completed, 200)
+    };
+    let mut held = 0_usize;
+    for size in [100_usize, 1_000, 10_000] {
+        while held < size {
+            request("/live.json")?;
+            held += 1;
+        }
+        let timed = crate::latency::Timed::run(200, || request("/live.json"))?;
+        held += 200;
+        println!(
+            "{}",
+            timed.line(&format!(
+                "audited request's begin + terminal, {size} real invocations already held"
+            ))
+        );
+    }
+    let base = root.0.join("audit/invocations-v1");
+    for n in 0..90_000_u32 {
+        std::fs::File::create(base.join(format!("padding-{n:06}")))
+            .map_err(|why| why.to_string())?;
+    }
+    let timed = crate::latency::Timed::run(200, || request("/live.json"))?;
+    println!(
+        "{}",
+        timed.line(&format!(
+            "audited request's begin + terminal, {held} real + 90000 padding names (proxy for 10^5)"
+        ))
+    );
+    Ok(())
 }

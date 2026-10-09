@@ -517,7 +517,13 @@ fn paisa(mean: f64) -> i64 {
 #[must_use]
 pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     let rows: Vec<&crate::rank::Scored> = ranked.top.iter().collect();
-    render_findings_of(&rows, ranked.considered, sweep)
+    render_findings_at(
+        &rows,
+        ranked.considered,
+        crate::significance::effective_trials(sweep),
+        crate::rank::Lens::Detectability,
+        ranked.inexact(),
+    )
 }
 
 /// [`render_findings`] for the streamed ranked path, using the exact trial
@@ -530,6 +536,7 @@ pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> Strin
         ranked.considered,
         outcome.effective_trials,
         ranked.lens,
+        ranked.inexact(),
     )
 }
 
@@ -562,6 +569,10 @@ pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> Strin
 /// Recomputing it from the rows would make the report say the search found as
 /// many combinations as it kept, which is the distinction `Ranked::considered`
 /// exists to protect.
+///
+/// A filtered list carries no ranking, so it carries no refusal count: the
+/// rows are whatever the caller kept. A caller holding a [`Ranked`] reaches
+/// [`render_findings`] instead, which prints `Ranked::inexact` (D-4486).
 #[must_use]
 pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep: &Sweep) -> String {
     render_findings_at(
@@ -569,6 +580,7 @@ pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep:
         considered,
         crate::significance::effective_trials(sweep),
         crate::rank::Lens::Detectability,
+        0,
     )
 }
 
@@ -599,11 +611,17 @@ fn bar_rows(out: &mut String, bar: f64, trials: u64) {
 }
 
 /// Findings with the trial count and ranking lens already resolved.
+///
+/// `inexact` is `Ranked::inexact`: rows refused because a money total reached
+/// 2^53 paisa (GAP16-26, D-4486). Printed when it is not zero, so every report
+/// of an ordinary series is byte-identical to the one before that refusal
+/// existed, and a report that lost rows to it says how many and why.
 fn render_findings_at(
     rows: &[&crate::rank::Scored],
     considered: u64,
     n: u64,
     lens: crate::rank::Lens,
+    inexact: u64,
 ) -> String {
     let mut out = String::with_capacity(1_024);
     // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
@@ -632,6 +650,14 @@ fn render_findings_at(
             }
         },
     );
+    if inexact > 0 {
+        row(
+            &mut out,
+            "REFUSED, money inexact",
+            &inexact.to_string(),
+            "a money total at or past 2^53 paisa; an f64 cannot hold it exactly",
+        );
+    }
     bar_rows(&mut out, bar, n);
     let _ = writeln!(out);
 
@@ -1755,6 +1781,7 @@ mod tests {
                 3_689,
                 3_689,
                 crate::rank::Lens::Detectability,
+                0,
             )
         };
         let text = verdicts(&thin);

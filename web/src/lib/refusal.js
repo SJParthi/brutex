@@ -12,10 +12,48 @@
 //             /indexmap, /instruments, /universes and /verify share
 //   refusal   `/masters/status.json` and the masters refresh
 //
+// AND ONE NESTED SHAPE: `/backtest/run.json` answers an attempt it cannot read
+// (503) or a malformed `?attempt=` (400) with
+// `{"running":{"status":"unknown","why":…}}` (`crates/api/src/sweeprun.rs`
+// `browser_attempt_unknown`, `unknown_status`), and none of the three keys
+// above is set. Its `why` is read only when the status is `unknown`: a running
+// or finished payload's `why` describes the run, not a refusal (W6, D-3216).
+//
+// AND THE AUDIT LAYER'S OWN ENVELOPE: every route in
+// `crates/api/src/operation_audit.rs` `AUDITED` can be refused before or after
+// its handler by the journal itself, with
+// `{"schema_version":1,"refusal":…,"code":"invocation_audit_unavailable",
+// "handler_completed":bool,"why":…}` or the read twin
+// `invocation_audit_read_unavailable` (no `handler_completed`). Its `why` is
+// the half that says whether the handler ran, so a validated one is read as
+// `refusal` and `why` together; an unvalidated one is read as a bare `refusal`
+// like any other body (F1, D-3218).
+//
 // A body that names none of them is not invented into one: the sentence then
 // says the route named no reason, which is itself the fact worth showing.
 
 const KEYS = ['error', 'refused', 'refusal'];
+
+/** Longest refusal or why the audit envelope may carry (`detail-refusal.js`'s bound). */
+const AUDIT_LIMIT = 4096;
+
+/**
+ * The audit layer's refusal and why, when `body` is exactly its envelope, or null.
+ * One validator for every reader: `detail-refusal.js`, `invocation-audit.js`
+ * and `refusalOf` all read the envelope through this.
+ * @param {unknown} body
+ * @returns {string | null}
+ */
+export function auditRefusal(body) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const record = /** @type {Record<string, unknown>} */ (body);
+  const { refusal, why, code } = record;
+  const write = code === 'invocation_audit_unavailable' && typeof record.handler_completed === 'boolean';
+  const read = code === 'invocation_audit_read_unavailable' && !Object.hasOwn(record, 'handler_completed');
+  if (record.schema_version !== 1 || !(write || read) || typeof refusal !== 'string' || refusal.trim() === '' ||
+      refusal.length > AUDIT_LIMIT || typeof why !== 'string' || why.length > AUDIT_LIMIT) return null;
+  return why.trim() === '' ? refusal.trim() : `${refusal.trim()} ${why.trim()}`;
+}
 
 /**
  * The named reason in a parsed refusal body, or null when it names none.
@@ -24,10 +62,17 @@ const KEYS = ['error', 'refused', 'refusal'];
  */
 export function refusalOf(body) {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const audit = auditRefusal(body);
+  if (audit !== null) return audit;
   const record = /** @type {Record<string, unknown>} */ (body);
   for (const key of KEYS) {
     const value = record[key];
     if (typeof value === 'string' && value.trim() !== '') return value.trim();
+  }
+  const running = record.running;
+  if (running !== null && typeof running === 'object' && !Array.isArray(running)) {
+    const { status, why } = /** @type {Record<string, unknown>} */ (running);
+    if (status === 'unknown' && typeof why === 'string' && why.trim() !== '') return why.trim();
   }
   return null;
 }
@@ -49,6 +94,16 @@ export async function reasonOf(response) {
   } catch {
     return null;
   }
+  return reasonOfText(text);
+}
+
+/**
+ * `reasonOf` for a body already read as text, for a reader that must parse the
+ * same body as something else first (`/backtest.json`'s ledger-shaped 503).
+ * @param {string} text
+ * @returns {string | null}
+ */
+export function reasonOfText(text) {
   if (text.trim() === '') return null;
   try {
     return refusalOf(JSON.parse(text));
@@ -81,4 +136,87 @@ export function refusalSentence(route, status, reason) {
  */
 export async function refusalFrom(route, response) {
   return refusalSentence(route, response.status, await reasonOf(response));
+}
+
+// THE STAMPED HALF: `/instruments.json` and `/store.json` put their reason in
+// HEADERS, because their body is a JSON array in every state (D-0124).
+//
+// `/instruments.json` answers 503 when the census will not load OR the feed's
+// master will not decode, and stamps both (`crates/api/src/server.rs`,
+// `instruments_json`); `/store.json` answers 503 for an unreadable census, and
+// a HEAD of it has no body at all. Three readers printed the status alone, and
+// the catalogue loader printed the MASTER's sentence whatever had failed, so an
+// unreadable census read "read — <feed>: master read; …": a master that was
+// fine, blamed, and the census note that named the failure dropped (W2,
+// D-3212). The master half is named only when the master did not read.
+
+const CENSUS_STATE = 'x-brutex-census-state';
+const CENSUS_NOTE = 'x-brutex-census-note';
+const MASTER_STATE = 'x-brutex-master-state';
+const MASTER_NOTE = 'x-brutex-master-note';
+
+/**
+ * Why a census- or master-stamped answer is not a measurement, read from its
+ * headers, or null when neither stamp names a failure.
+ * @param {Headers | null | undefined} headers
+ * @returns {string | null}
+ */
+export function headerRefusal(headers) {
+  const read = (/** @type {string} */ name) => (headers?.get?.(name) ?? '').trim();
+  const parts = [];
+  const master = read(MASTER_STATE);
+  if (master !== '' && master !== 'read') {
+    const note = read(MASTER_NOTE);
+    parts.push(note ? `${master} — ${note}` : `the instrument master is ${master} and the response carried no master note`);
+  }
+  if (read(CENSUS_STATE) === 'unreadable') {
+    const note = read(CENSUS_NOTE);
+    parts.push(note ? `the store census is unreadable: ${note}` : 'the store census is unreadable and the response carried no census note');
+  }
+  return parts.length > 0 ? parts.join('; ') : null;
+}
+
+/**
+ * The sentence for a refused stamped read: the headers' reason first, then the
+ * body's (an unknown feed's 400 names itself in `refused`), else none named.
+ * @param {string} route
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+export async function headerRefusalFrom(route, response) {
+  return refusalSentence(route, response.status, headerRefusal(response.headers) ?? (await reasonOf(response)));
+}
+
+/**
+ * A command POST's reply, read once (F5, D-3222). A 2xx is parsed as JSON, or
+ * is `null` when it is not JSON, so an unparseable acceptance stays
+ * unconfirmed rather than becoming a parse error. A non-2xx is read as text:
+ * its JSON body is kept, and its reason is named, plain text included. A
+ * launch that cannot be confirmed is never resent; this only says why.
+ * Never throws.
+ * @param {Response} response
+ * @returns {Promise<{ body: any, reason: string | null }>}
+ */
+export async function commandReply(response) {
+  if (response.ok) {
+    try {
+      return { body: await response.json(), reason: null };
+    } catch {
+      return { body: null, reason: null };
+    }
+  }
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {
+    return { body: null, reason: null };
+  }
+  /** @type {unknown} */
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Not JSON: the text itself is the reason.
+  }
+  return { body, reason: reasonOfText(text) };
 }

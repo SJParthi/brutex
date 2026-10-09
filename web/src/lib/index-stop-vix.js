@@ -2,8 +2,9 @@ import {ask} from './ask.js';
 import {detailRefusal} from './detail-refusal.js';
 import {createPageRequests} from './page-requests.js';
 import {validateSetting} from './index-stop-results.js';
+import {IST_OFFSET_MICROS_BIG} from './ist.js';
 
-const U64=(1n<<64n)-1n,I64=(1n<<63n)-1n,MINUTE=60000000n,IST=19800000000n;
+const U64=(1n<<64n)-1n,I64=(1n<<63n)-1n,MINUTE=60000000n,IST=IST_OFFSET_MICROS_BIG;
 /** @param {any} v */const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 /** @param {any} v */const hex=v=>typeof v==='string'&&/^[0-9a-f]{64}$/.test(v)&&v!=='0'.repeat(64);
 /** @param {any} v */const uint=v=>typeof v==='string'&&v.length<=20&&/^(0|[1-9]\d*)$/.test(v)&&BigInt(v)<=U64;

@@ -771,7 +771,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    match tokio::task::spawn_blocking(work).await {
+    // THE RUN TRAVELS ONTO THE BLOCKING THREAD, which no scope reaches unless
+    // it is handed one (sobs-14, D-4451).
+    let run = telemetry::current_run().unwrap_or(0);
+    match tokio::task::spawn_blocking(move || {
+        let _scope = telemetry::enter(run);
+        work()
+    })
+    .await
+    {
         Ok(value) => value,
         Err(failed) => std::panic::resume_unwind(failed.try_into_panic().unwrap_or_else(|_| {
             Box::new("blocking work was cancelled: the runtime is shutting down")
@@ -890,51 +898,6 @@ impl Drop for Finisher {
     }
 }
 
-/// The telemetry run key, held by a whole press for as long as it runs.
-///
-/// # Why the press holds it and not its first leg (atomics-1, D-2582)
-///
-/// `server::note_run_started` claims the key once per LEG, and the legs of one
-/// press run concurrently, one chain per feed. The first leg to start took the
-/// key and RELEASED it when that leg finished — while its sibling feeds' legs
-/// were still running — so their later events carried no run, or a fresh id
-/// the next leg claimed, and `/logs?run=` showed one press as several broken
-/// stories. D-0238 said the outermost scope takes the key; the code took it per
-/// leg. The conductor now claims it before the first pass and releases it when
-/// the conductor ends — normally, or when its task is dropped — so every leg's
-/// claim fails while the press holds it, and a leg that did not claim does not
-/// release. A lone hand pull or an autopilot round still claims its own.
-///
-/// A guard that LOST the claim (another run already held the key) holds
-/// nothing and releases nothing: the holder's key is not cleared.
-struct PressRun<'sink> {
-    sink: Option<&'sink telemetry::Sink>,
-    run: Option<u64>,
-}
-
-impl<'sink> PressRun<'sink> {
-    /// Claims `id` on `sink`, if there is one and the key is free.
-    fn claim(sink: Option<&'sink telemetry::Sink>, id: u64) -> Self {
-        let run = sink.filter(|sink| sink.claim_run(id)).map(|_| id);
-        // Emitted after the claim, so it carries the press's own key.
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::info("pull.press", "started")
-                .with("run_key_held", telemetry::Value::Bool(run.is_some())),
-        );
-        Self { sink, run }
-    }
-}
-
-impl Drop for PressRun<'_> {
-    fn drop(&mut self) {
-        if let (Some(sink), Some(run)) = (self.sink, self.run) {
-            // `release_run` compares before it clears: a key a later run has
-            // since taken is left alone.
-            sink.release_run(run);
-        }
-    }
-}
-
 /// The result of a feed's last pass. Kept inside the conductor so a terminal
 /// refusal cannot be mistaken for a clean pass when that feed is skipped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1034,7 +997,7 @@ fn note_leg_failure(
     run: u64,
     nth: usize,
     leg: &Leg,
-    status: axum::http::StatusCode,
+    (status, html): (axum::http::StatusCode, &str),
     outcome: LegOutcome,
 ) {
     let reason = match outcome {
@@ -1057,20 +1020,32 @@ fn note_leg_failure(
     // progress below is in memory and overwritten; a halted feed had no
     // durable trace of when or why. Error for a feed-halting outcome, Warn for
     // one still owed. One event per failed leg. conc13-4, D-2595.
+    //
+    // ONE, AND IT IS THE PRESS'S. Both sides closed this gap: conc13-4 with an
+    // `api.pull leg failed` line here, sobs-5 (D-4452) with this `api.pullrun`
+    // one, which also names the feed and quotes the receipt's own reason. Kept
+    // together they wrote every failed leg twice; this is the one writer, and
+    // the conc13-4 test reads it back. D-4627.
     let halts = matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent);
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::new(
-            if halts {
-                telemetry::Level::Error
-            } else {
-                telemetry::Level::Warn
-            },
-            "api.pull",
-            "leg failed",
-        )
-        .with("leg", telemetry::Value::Str(&leg.label))
-        .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
-        .with("why", telemetry::Value::Str(reason)),
+    note_press(
+        if halts {
+            telemetry::Level::Error
+        } else {
+            telemetry::Level::Warn
+        },
+        if halts {
+            "leg failed; its feed is halted for this run"
+        } else {
+            "leg failed; it is owed another pass"
+        },
+        run,
+        &[
+            ("feed", telemetry::Value::Str(&leg.vendor)),
+            ("leg", telemetry::Value::Str(&leg.label)),
+            ("status", telemetry::Value::Uint(u64::from(status.as_u16()))),
+            ("reason", telemetry::Value::Str(reason)),
+            ("receipt", telemetry::Value::Str(&receipt_reason(html))),
+        ],
     );
     with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
@@ -1137,7 +1112,7 @@ where
             clean.store(true, std::sync::atomic::Ordering::Relaxed);
             continue;
         }
-        note_leg_failure(&site, run, nth, leg, status, outcome);
+        note_leg_failure(&site, run, nth, leg, (status, &html), outcome);
         if leg.route == Route::Spot {
             failed_spot_rank = Some(ladder_rank(&leg.dir));
         }
@@ -1221,7 +1196,9 @@ async fn run_pass<F, Fut>(
             nth,
             again,
             std::sync::Arc::clone(&attempted),
-            tokio::spawn(run_chain(
+            // SPAWNED INSIDE THE PRESS'S SCOPE, so its legs' events carry
+            // the press's run id (sobs-14, D-4451).
+            tokio::spawn(telemetry::inherit(run_chain(
                 Loaded::clone(site),
                 run,
                 nth,
@@ -1229,7 +1206,7 @@ async fn run_pass<F, Fut>(
                 Checkpoints::clone(clean),
                 attempted,
                 request.clone(),
-            )),
+            ))),
         ));
     }
     let mut retrying = false;
@@ -1288,10 +1265,23 @@ where
         site: Loaded::clone(&site),
         run,
     };
-    // ONE TELEMETRY RUN FOR THE WHOLE PRESS, taken before any leg starts and
-    // dropped before the finisher (atomics-1, D-2582). See `PressRun`.
-    let press_run = PressRun::claim(telemetry::global(), telemetry::now_millis().unsigned_abs());
+    // ONE TELEMETRY RUN FOR THE WHOLE PRESS is the scope `press` opened
+    // before this future was first polled, so it is in force before any leg
+    // starts and outlives the last one (atomics-1, D-2582, by sobs-14's scope,
+    // D-4451). Nothing is claimed here and nothing is released. D-4625.
     let groups = by_feed(legs);
+    note_press(
+        telemetry::Level::Info,
+        "press started",
+        run,
+        &[
+            (
+                "legs",
+                telemetry::Value::Uint(groups.iter().map(|(_, held)| held.len() as u64).sum()),
+            ),
+            ("feeds", telemetry::Value::Uint(groups.len() as u64)),
+        ],
+    );
     // THIS PRESS'S FEEDS ONLY. Every row count below — the start, the ticker,
     // the before/after of each pass and the end — is over the store vendors the
     // press drives, so a hand pull on another feed cannot reset the idle
@@ -1316,13 +1306,13 @@ where
     let ticker = {
         let site = Loaded::clone(&site);
         let vendors = vendors.clone();
-        tokio::spawn(async move {
+        tokio::spawn(telemetry::inherit(async move {
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
                 let seen = rows_in_off_worker(&site, &vendors).await;
                 with_progress(&site, run, |progress| progress.rows_now = seen);
             }
-        })
+        }))
     };
     let mut outcomes = vec![PassOutcome::Clean; groups.len()];
     let checkpoints = checkpoints_for(&groups);
@@ -1341,6 +1331,21 @@ where
             progress.passes = passes;
             progress.rows_now = after;
         });
+        let owed = outcomes
+            .iter()
+            .filter(|outcome| **outcome == PassOutcome::Retry)
+            .count();
+        if owed > 0 {
+            note_press(
+                telemetry::Level::Warn,
+                "pass ended with legs owed",
+                run,
+                &[
+                    ("pass", telemetry::Value::Uint(u64::from(passes))),
+                    ("feeds_owed", telemetry::Value::Uint(owed as u64)),
+                ],
+            );
+        }
         if stopping(&site, run)
             || outcomes
                 .iter()
@@ -1383,19 +1388,224 @@ where
     ticker.abort();
     let _cancelled = ticker.await;
     let current_rows = rows_in_off_worker(&site, &vendors).await;
+    let mut verdict = None;
     with_progress(&site, run, |progress| {
         progress.rows_now = current_rows;
-        progress.finished = Some(run_summary(
+        let summary = run_summary(
             progress,
             &outcomes,
             current_rows
                 .zip(started_rows)
                 .map(|(now, start)| now.saturating_sub(start)),
+        );
+        verdict = Some((
+            summary.clone(),
+            progress.passes,
+            progress.retries,
+            progress.stopping,
         ));
+        progress.finished = Some(summary);
     });
-    // Released after the summary, the last thing the press does.
-    drop(press_run);
+    // THE VERDICT, ON THE SURFACE THAT OUTLIVES THE PROCESS (sobs-5, D-4452).
+    // `None` when the slot holds another claim: this run had no document to
+    // finish, and says nothing over the run that does.
+    if let Some((summary, passes, retries, stopped)) = verdict {
+        let halted = outcomes
+            .iter()
+            .filter(|outcome| **outcome == PassOutcome::Halted)
+            .count();
+        note_press(
+            finished_level(halted, stopped, passes),
+            "press finished",
+            run,
+            &[
+                ("passes", telemetry::Value::Uint(u64::from(passes))),
+                ("retries", telemetry::Value::Uint(u64::from(retries))),
+                ("feeds_halted", telemetry::Value::Uint(halted as u64)),
+                ("stopped", telemetry::Value::Bool(stopped)),
+                ("summary", telemetry::Value::Str(&summary)),
+            ],
+        );
+    }
 }
+
+/// The level "press finished" is written at: Info only for a clean press (no
+/// feed halted, not stopped, and ended before the pass allowance ran out),
+/// Warn for any other end. sobs-5, D-4452.
+fn finished_level(halted: usize, stopped: bool, passes: u32) -> telemetry::Level {
+    if halted == 0 && !stopped && passes < MAX_PASSES {
+        telemetry::Level::Info
+    } else {
+        telemetry::Level::Warn
+    }
+}
+
+/// `POST /pull/run`'s task, started and watched.
+///
+/// # The handle that was dropped (sobs-5, D-4452)
+///
+/// The route spawned [`conduct`] and dropped its `JoinHandle`, so a press
+/// whose task panicked left its `Finisher` sentence on the status document and
+/// nothing on the log: the panic went to standard error alone, and the page's
+/// sentence is gone with the next press or a restart. The press now runs under
+/// a supervisor that awaits it and names an abnormal end.
+///
+/// # One run id for the whole press (sobs-14, D-4451)
+///
+/// The press reserves one id from the log's sequence and runs inside its
+/// scope, and so does its supervisor. Every leg inherits it, through
+/// `run_chain`'s spawn and the route's own `detached_pull`, so `/logs?run=`
+/// shows the press, its legs and their pulls as one story and nothing else.
+/// Returned for the caller and its tests; `0` when no log is installed.
+///
+/// That scope is also what atomics-1 (D-2582) asked of the press: one id from
+/// before its first leg until its last, which a leg finishing early cannot
+/// take away. It was a claim on the sink's one ambient key, held by a
+/// `PressRun` guard; sobs-14 found the ambient key spliced every unrelated
+/// event into the press, and the scope gives D-2582's property with no key to
+/// claim or release. D-4625.
+///
+/// # The supervisor's handle is kept (lifecycle-1, D-2583)
+///
+/// Put in `Site::press_task`, which `server::drain_background` waits on at
+/// shutdown and aborts past its grace. The supervisor holds the press through
+/// `AbortsPress`, so that abort reaches the press rather than detaching it;
+/// a press that ends normally is waited for and then said by its supervisor,
+/// as before. D-2583 kept the press's own handle, D-4452 gave it to the
+/// supervisor; both are kept. D-4626.
+pub fn press(site: Loaded, generation: u64, legs: Vec<Leg>) -> u64 {
+    press_with(site, generation, legs, request_leg)
+}
+
+/// [`press`] with the request seam [`conduct_with`] takes.
+fn press_with<F, Fut>(site: Loaded, generation: u64, legs: Vec<Leg>, request: F) -> u64
+where
+    F: Fn(Loaded, Leg) -> Fut + Clone + Send + Sync + 'static,
+    Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
+{
+    let log_run = telemetry::reserve_run_id().unwrap_or(0);
+    let flying = tokio::spawn(telemetry::in_run(
+        log_run,
+        conduct_with(Loaded::clone(&site), generation, legs, request),
+    ));
+    let supervisor = tokio::spawn(telemetry::in_run(log_run, supervise(flying, generation)));
+    // KEPT, NOT DROPPED, so a shutdown can drain it (lifecycle-1, D-2583).
+    *site
+        .press_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(supervisor);
+    log_run
+}
+
+/// A press's task handle that aborts the press when dropped.
+///
+/// Dropping a plain [`tokio::task::JoinHandle`] detaches its task. The
+/// supervisor holds the press through this, so the shutdown drain's abort of
+/// the supervisor (D-2583) stops the press too, as aborting the press's own
+/// handle did before the supervisor existed (D-4452). `autopilot::launch`
+/// holds its backfill the same way (D-4453). D-4626.
+struct AbortsPress(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortsPress {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Awaits a press's task and names an abnormal end on the log.
+///
+/// A normal end said everything it had to in "press finished". A task that
+/// panicked (in a build that unwinds) or was cancelled is named here with the
+/// runtime's own words, which carry the panic's message: the one place a
+/// panic in the press reaches the log rather than standard error alone.
+async fn supervise(flying: tokio::task::JoinHandle<()>, generation: u64) {
+    let mut flying = AbortsPress(flying);
+    if let Err(dead) = (&mut flying.0).await {
+        note_press(
+            telemetry::Level::Error,
+            "press ended abnormally",
+            generation,
+            &[("why", telemetry::Value::Str(&dead.to_string()))],
+        );
+    }
+}
+
+/// One `api.pullrun` event: every line the coordinator writes goes through
+/// here (sobs-5, D-4452).
+///
+/// # What was silent
+///
+/// The coordinator held zero emit sites. Leg failures, halted feeds, dead
+/// chains, passes ending with legs owed and the final verdict lived only in
+/// the in-memory status document, which the next press overwrites and a
+/// restart loses. A leg refused before `broker_run` (a busy seat, an unknown
+/// feed, an unreadable clock) is called in-process, so it never passed the
+/// request logger either. Each of those is now one bounded event: one per
+/// press start and finish, one per failed leg (a request already made), one
+/// per pass that ended owing legs, at most [`MAX_PASSES`] of those. Never
+/// per bar or per row. `generation` is the press's claim on the run slot,
+/// the number `/pull/run.json` describes; the event's run id is the press's
+/// scope (see [`press`]).
+fn note_press(
+    level: telemetry::Level,
+    message: &str,
+    generation: u64,
+    fields: &[(&str, telemetry::Value<'_>)],
+) {
+    if !telemetry::admits(level, "api.pullrun") {
+        return;
+    }
+    let event = fields.iter().fold(
+        telemetry::Event::new(level, "api.pullrun", message)
+            .with("generation", telemetry::Value::Uint(generation)),
+        |event, &(key, value)| event.with(key, value),
+    );
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
+/// The reason a leg's receipt gives, as plain text, bounded.
+///
+/// Every receipt [`crate::render::receipt_page`] draws carries its reason in
+/// one `halt` block; a leg refused before it reached `broker_run` (a busy
+/// seat, an unknown feed) has no other line anywhere saying why. Tags are
+/// dropped, the five entities `render::escape` writes are restored, and the
+/// text is cut at [`MAX_RECEIPT_REASON`] characters. An answer with no such
+/// block (not a receipt) yields an empty string, which says exactly that.
+///
+/// Cost: one search of the receipt up to its `halt` block (a page this leg
+/// has just rendered, once per failed leg), then at most eight times
+/// [`MAX_RECEIPT_REASON`] characters of the block, whatever its length.
+fn receipt_reason(html: &str) -> String {
+    let Some((_, after)) = html.split_once("<div class=\"halt") else {
+        return String::new();
+    };
+    let block = after.split_once('>').map_or("", |(_, rest)| {
+        rest.split_once("</div>").map_or(rest, |(inner, _)| inner)
+    });
+    let mut text = String::with_capacity(block.len().min(MAX_RECEIPT_REASON));
+    let mut in_tag = false;
+    for c in block.chars().take(MAX_RECEIPT_REASON.saturating_mul(8)) {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if in_tag => {}
+            _ => text.push(c),
+        }
+    }
+    let text = text
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    text.trim().chars().take(MAX_RECEIPT_REASON).collect()
+}
+
+/// How many characters of a receipt's reason a leg-failure event quotes.
+pub const MAX_RECEIPT_REASON: usize = 600;
 
 /// Terminal feeds remain part of the final verdict even while other feeds
 /// reach an idle stop. Neither a skipped feed nor a stopped task is success.
@@ -1445,8 +1655,9 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: Option<u64
 /// indistinguishable from one working slowly, which is the confusion this
 /// module exists to remove.
 ///
-/// The panic itself goes to standard error through the panic hook and never
-/// reaches `telemetry`, so this is the only surface that can say it happened.
+/// The panic itself goes to standard error through the panic hook, and its
+/// message reaches `telemetry` here: the `JoinError` carries it, and this
+/// writes it as `api.pullrun` "chain stopped abnormally" (sobs-5, D-4452).
 fn note_dead_chain(
     site: &Site,
     run: u64,
@@ -1454,6 +1665,16 @@ fn note_dead_chain(
     attempted: usize,
     dead: &tokio::task::JoinError,
 ) {
+    note_press(
+        telemetry::Level::Error,
+        "chain stopped abnormally",
+        run,
+        &[
+            ("feed_index", telemetry::Value::Uint(nth as u64)),
+            ("attempted", telemetry::Value::Uint(attempted as u64)),
+            ("why", telemetry::Value::Str(&dead.to_string())),
+        ],
+    );
     with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             // Labels may be empty. An explicit attempt count, not display
@@ -3198,13 +3419,31 @@ mod tests {
             "checkpoint-empty-label-panic",
             vec![minute.clone(), option.clone()],
         );
-        passes
-            .run(|_site, _leg| async {
+        // sobs-5, D-4452: THE DEAD CHAIN IS NAMED ON THE LOG, with the panic.
+        let _installed = crate::emitted::sink();
+        let log_run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        telemetry::in_run(
+            log_run,
+            passes.run(|_site, _leg| async {
                 panic!("synthetic first-leg panic");
                 #[allow(unreachable_code)]
                 receipt(200, "STORED")
-            })
-            .await;
+            }),
+        )
+        .await;
+        let dead: Vec<telemetry::Record> = crate::emitted::run_story(log_run)
+            .into_iter()
+            .filter(|record| record.message == "chain stopped abnormally")
+            .collect();
+        assert_eq!(dead.len(), 1, "{dead:?}");
+        assert_eq!(dead[0].level, telemetry::Level::Error);
+        assert!(crate::emitted::says(
+            &dead[0],
+            "why",
+            "synthetic first-leg panic"
+        ));
+        assert!(crate::emitted::counts(&dead[0], "feed_index", 0));
+        assert!(crate::emitted::counts(&dead[0], "attempted", 1));
         let progress = observed(&passes.site);
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (0, 1, 0));
@@ -3255,84 +3494,110 @@ mod tests {
         assert_eq!(observed(&passes.site), progress);
     }
 
-    /// atomics-1, D-2582: a press holds ONE telemetry run key from before its
-    /// first leg until the conductor ends. Two feeds' legs are replayed on a
-    /// standalone sink in the order the defect needs — the fast feed's leg
-    /// starts and finishes while the slow feed's leg is still running — with
-    /// each leg doing exactly what `server::note_run_started` and
-    /// `note_run_finished` do (claim, and release only what it claimed). The
-    /// key stays the press's throughout and is zero only after the press
-    /// guard drops. Without the press guard (the old shape) the fast leg
-    /// claimed the key and its release cleared it under the slow leg.
-    #[test]
-    fn a_press_of_two_feeds_keeps_one_run_key_until_the_last_leg_finishes() {
-        let dir = crate::scratch::path("atomics1-press-run");
-        let _ = std::fs::remove_dir_all(&dir);
-        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("a standalone sink");
-        let leg_claims = |id: u64| sink.claim_run(id).then_some(id);
-        let leg_ends = |claimed: Option<u64>| {
-            if let Some(run) = claimed {
-                sink.release_run(run);
+    /// atomics-1, D-2582, under sobs-14's scope (D-4451): a press keeps ONE
+    /// run id from before its first leg until its last leg finishes. The
+    /// defect's order is driven through the real press: the fast feed's leg
+    /// answers at once and its chain ends while the slow feed's leg is still
+    /// running, and the slow leg writes only after that. Under the old shape
+    /// (a key claimed and released per leg) the fast leg's release cleared the
+    /// key under the slow leg; here every line, the slow leg's included, is in
+    /// the press's story, between its start and its verdict.
+    ///
+    /// The `PressRun` guard this test used to drive is gone: the press's
+    /// scope gives the same property with no ambient key to claim or release,
+    /// so the conductor's production source must claim and release none, and
+    /// must run inside the scope `press_with` opens. D-4625.
+    #[tokio::test]
+    async fn a_press_of_two_feeds_keeps_one_run_key_until_the_last_leg_finishes() {
+        let _installed = crate::emitted::sink();
+        let held = site("atomics1-press-run");
+        let generation = claim(&held);
+        let fast_answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&fast_answered);
+        let log_run = press_with(
+            Loaded::clone(&held),
+            generation,
+            vec![leg("zerodha", "1day"), leg("groww", "1day")],
+            move |_site, leg| {
+                let seen = std::sync::Arc::clone(&seen);
+                async move {
+                    if leg.vendor == "zerodha" {
+                        let _dropped = crate::emitted::sink().emit(
+                            &telemetry::Event::info("pull.member", "atomics1 fast leg")
+                                .with("leg", telemetry::Value::Str(&leg.label)),
+                        );
+                        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    } else {
+                        while !seen.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+                        }
+                        // The fast feed's leg has answered; its chain gets the
+                        // time to end before this leg writes.
+                        tokio::time::sleep(core::time::Duration::from_millis(50)).await;
+                        let _dropped = crate::emitted::sink().emit(
+                            &telemetry::Event::info("pull.member", "atomics1 slow leg")
+                                .with("leg", telemetry::Value::Str(&leg.label)),
+                        );
+                    }
+                    receipt(200, "STORED")
+                }
+            },
+        );
+        assert_ne!(log_run, 0, "a sink is installed, so the press has an id");
+        let story = tokio::time::timeout(core::time::Duration::from_secs(30), async {
+            loop {
+                let story = crate::emitted::run_story(log_run);
+                if story.iter().any(|r| r.message == "press finished") {
+                    return story;
+                }
+                tokio::time::sleep(core::time::Duration::from_millis(20)).await;
             }
+        })
+        .await
+        .expect("the press finishes and says so");
+        let at = |message: &str| -> Vec<usize> {
+            story
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.message == message)
+                .map(|(n, _)| n)
+                .collect()
         };
-
-        // The old shape, for contrast: the fast leg's release empties the key.
-        let fast = leg_claims(11);
-        let slow = leg_claims(12);
-        assert_eq!((fast, slow), (Some(11), None));
-        leg_ends(fast);
-        assert_eq!(
-            sink.run(),
-            0,
-            "the old shape: the slow leg is left with no run"
+        let (started, finished) = (at("press started"), at("press finished"));
+        let (fast, slow) = (at("atomics1 fast leg"), at("atomics1 slow leg"));
+        assert_eq!((started.len(), finished.len()), (1, 1), "{story:?}");
+        assert!(!fast.is_empty(), "the fast leg's line: {story:?}");
+        assert!(!slow.is_empty(), "the slow leg's line: {story:?}");
+        assert!(
+            fast[0] < slow[0],
+            "the slow leg wrote after the fast one: {story:?}"
         );
-        leg_ends(slow);
-
-        // The press holds it.
-        let press = PressRun::claim(Some(&sink), 7);
-        assert_eq!(press.run, Some(7));
-        let fast = leg_claims(11);
-        let slow = leg_claims(12);
-        assert_eq!(
-            (fast, slow),
-            (None, None),
-            "no leg takes a key the press holds"
+        assert!(
+            fast.iter()
+                .chain(&slow)
+                .all(|n| started[0] < *n && *n < finished[0]),
+            "every leg's line sits inside the press's own story: {story:?}"
         );
-        leg_ends(fast);
-        assert_eq!(
-            sink.run(),
-            7,
-            "the slow feed's events still carry the press"
+
+        // NO AMBIENT KEY IS CLAIMED OR RELEASED, and the conductor runs inside
+        // the press's scope, opened before its first pass.
+        let production = include_str!("pullrun.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        assert!(!production.contains(".claim_run("), "nothing claims a key");
+        assert!(
+            !production.contains(".release_run("),
+            "nothing releases one"
         );
-        leg_ends(slow);
-        assert_eq!(sink.run(), 7);
-        drop(press);
-        assert_eq!(sink.run(), 0, "released only when the press ends");
-
-        // A guard that lost the claim releases nothing it did not take.
-        assert!(sink.claim_run(99));
-        let loser = PressRun::claim(Some(&sink), 7);
-        assert_eq!(loser.run, None);
-        drop(loser);
-        assert_eq!(sink.run(), 99, "the holder's key survives the loser's drop");
-        sink.release_run(99);
-        // Id zero is never a key; no sink holds nothing.
-        assert_eq!(PressRun::claim(Some(&sink), 0).run, None);
-        assert_eq!(PressRun::claim(None, 7).run, None);
-        assert_eq!(sink.run(), 0);
-
-        // And the conductor takes it before the first pass.
-        let source = include_str!("pullrun.rs");
-        let conduct = source
-            .split_once("async fn conduct_with<")
-            .expect("conduct_with")
+        let opened = production
+            .split_once("fn press_with<")
+            .expect("press_with")
             .1;
-        let claim = conduct
-            .find("PressRun::claim(telemetry::global()")
-            .expect("claimed");
-        let first_pass = conduct.find("run_pass(&site").expect("a pass");
-        assert!(claim < first_pass, "the key is claimed after a pass ran");
-        let _ = std::fs::remove_dir_all(&dir);
+        let opened = &opened[..opened.find("\n}\n").expect("press_with ends")];
+        let scope = opened.find("telemetry::in_run(").expect("a scope");
+        let conductor = opened.find("conduct_with(").expect("the conductor");
+        assert!(scope < conductor, "the conductor runs inside the scope");
     }
 
     /// A census of `rows` one-row months for `vendor`, written over whatever
@@ -4182,15 +4447,36 @@ mod tests {
     /// conc13-4, D-2595. On the old code a failed leg only wrote the run's
     /// in-memory progress; nothing reached `/logs`. Each outcome is driven: a
     /// feed-halting one is Error, a retryable one Warn, and each names its leg.
+    ///
+    /// ONE line per failed leg, and it is the press's `api.pullrun` one
+    /// (sobs-5, D-4452): the `api.pull leg failed` line this test first read
+    /// wrote the same failure a second time, so it is gone and must stay gone.
+    /// D-4627.
     #[test]
     fn a_failed_leg_is_logged_at_its_level() {
         let _sink = crate::emitted::sink();
         let site = site("conc13-4-leg");
-        for (outcome, level) in [
-            (LegOutcome::Credential, telemetry::Level::Error),
-            (LegOutcome::Permanent, telemetry::Level::Error),
-            (LegOutcome::Retry, telemetry::Level::Warn),
-            (LegOutcome::Empty, telemetry::Level::Warn),
+        for (outcome, level, message) in [
+            (
+                LegOutcome::Credential,
+                telemetry::Level::Error,
+                "leg failed; its feed is halted for this run",
+            ),
+            (
+                LegOutcome::Permanent,
+                telemetry::Level::Error,
+                "leg failed; its feed is halted for this run",
+            ),
+            (
+                LegOutcome::Retry,
+                telemetry::Level::Warn,
+                "leg failed; it is owed another pass",
+            ),
+            (
+                LegOutcome::Empty,
+                telemetry::Level::Warn,
+                "leg failed; it is owed another pass",
+            ),
         ] {
             let label = format!("conc13-4 {outcome:?}");
             let one = Leg {
@@ -4198,16 +4484,301 @@ mod tests {
                 ..leg("dhan", "spot")
             };
             let from = crate::emitted::mark();
-            note_leg_failure(&site, 1, 0, &one, axum::http::StatusCode::CONFLICT, outcome);
+            note_leg_failure(
+                &site,
+                1,
+                0,
+                &one,
+                (axum::http::StatusCode::CONFLICT, ""),
+                outcome,
+            );
             let mut ours = 0;
-            for record in crate::emitted::landed(from, "api.pull", "leg failed") {
+            for record in crate::emitted::landed(from, "api.pullrun", message) {
                 if crate::emitted::says(&record, "leg", &label) {
                     ours += 1;
                     assert_eq!(record.level, level, "{outcome:?}");
-                    assert!(record.field("why").is_some(), "{record:?}");
+                    assert!(crate::emitted::says(&record, "feed", "dhan"), "{record:?}");
+                    assert!(crate::emitted::counts(&record, "status", 409), "{record:?}");
+                    assert!(record.field("reason").is_some(), "{record:?}");
                 }
             }
             assert_eq!(ours, 1, "{outcome:?}");
+            let second = crate::emitted::landed(from, "api.pull", "leg failed")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "leg", &label))
+                .count();
+            assert_eq!(second, 0, "{outcome:?}: one writer per failed leg");
         }
+    }
+
+    /// sobs-5 and sobs-14 (D-4451, D-4452): A PRESS WRITES ITS OWN STORY, AND
+    /// ONLY ITS OWN, UNDER ONE RUN ID.
+    ///
+    /// One feed's credential is refused (a halt), the other fails one leg
+    /// once and recovers. The log must hold, under the press's id: the start,
+    /// both leg failures with their status, feed and the receipt's reason,
+    /// the pass that ended owing a leg, every event the legs themselves
+    /// wrote, and a `Warn` verdict naming the halted feed. An unrelated event
+    /// written by another task while the press runs must NOT carry the id.
+    #[tokio::test]
+    async fn a_press_logs_its_legs_and_verdict_under_one_run_and_nothing_else() {
+        let _installed = crate::emitted::sink();
+        let held = site("sobs5-press");
+        let generation = claim(&held);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let log_run = press_with(
+            Loaded::clone(&held),
+            generation,
+            vec![
+                leg("zerodha", "1day"),
+                leg("groww", "1day"),
+                leg("groww", "1min"),
+            ],
+            move |site, leg| {
+                // WHAT A LEG'S OWN PULL WRITES, from inside the leg.
+                let _dropped = crate::emitted::sink().emit(
+                    &telemetry::Event::info("pull.member", "sobs5 leg")
+                        .with("leg", telemetry::Value::Str(&leg.label)),
+                );
+                let answer = if leg.vendor == "zerodha" {
+                    receipt(401, "NOT STARTED")
+                } else if leg.dir == "1min"
+                    && counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                {
+                    grow_synthetic_census(&site);
+                    receipt(503, "FAILED")
+                } else {
+                    receipt(200, "STORED")
+                };
+                std::future::ready(answer)
+            },
+        );
+        assert_ne!(log_run, 0, "a sink is installed, so the press has an id");
+        // ANOTHER TASK'S EVENT, WRITTEN WHILE THE PRESS RUNS.
+        let unrelated = tokio::spawn(async {
+            crate::emitted::sink().emit(
+                &telemetry::Event::warn("autopilot", "sobs5 unrelated")
+                    .with("probe", telemetry::Value::Str("p9")),
+            )
+        })
+        .await
+        .expect("the unrelated task ran");
+        assert_eq!(unrelated, telemetry::Emitted::Written);
+
+        let story = tokio::time::timeout(core::time::Duration::from_secs(30), async {
+            loop {
+                let story = crate::emitted::run_story(log_run);
+                if story.iter().any(|r| r.message == "press finished") {
+                    return story;
+                }
+                tokio::time::sleep(core::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the press finishes and says so");
+        let said = |message: &str| -> Vec<&telemetry::Record> {
+            story.iter().filter(|r| r.message == message).collect()
+        };
+
+        let started = said("press started");
+        assert_eq!(started.len(), 1, "{story:?}");
+        assert!(crate::emitted::counts(started[0], "legs", 3));
+        assert!(crate::emitted::counts(started[0], "feeds", 2));
+        assert!(crate::emitted::counts(started[0], "generation", generation));
+
+        let halted = said("leg failed; its feed is halted for this run");
+        assert_eq!(halted.len(), 1, "the dead credential, once: {story:?}");
+        assert_eq!(halted[0].level, telemetry::Level::Error);
+        assert!(crate::emitted::says(halted[0], "feed", "zerodha"));
+        assert!(crate::emitted::counts(halted[0], "status", 401));
+        assert!(crate::emitted::says(halted[0], "reason", "CREDENTIAL"));
+        assert!(
+            crate::emitted::says(halted[0], "receipt", "synthetic coordinator receipt"),
+            "the receipt's own reason rides on the line: {:?}",
+            halted[0]
+        );
+
+        let owed = said("leg failed; it is owed another pass");
+        assert_eq!(owed.len(), 1, "the one transient failure: {story:?}");
+        assert_eq!(owed[0].level, telemetry::Level::Warn);
+        assert!(crate::emitted::says(owed[0], "leg", "groww · 1min"));
+        assert!(crate::emitted::counts(owed[0], "status", 503));
+
+        let pass = said("pass ended with legs owed");
+        assert!(!pass.is_empty(), "{story:?}");
+        assert!(crate::emitted::counts(pass[0], "pass", 1));
+        assert!(crate::emitted::counts(pass[0], "feeds_owed", 1));
+
+        let finished = said("press finished");
+        assert_eq!(finished.len(), 1);
+        assert_eq!(
+            finished[0].level,
+            telemetry::Level::Warn,
+            "a halted feed is not a clean press"
+        );
+        assert!(crate::emitted::counts(finished[0], "feeds_halted", 1));
+        assert!(crate::emitted::says(finished[0], "summary", "INCOMPLETE"));
+        assert_eq!(
+            observed(&held).finished.as_deref(),
+            finished[0]
+                .field("summary")
+                .and_then(telemetry::OwnedValue::as_str),
+            "the log's verdict is the page's verdict"
+        );
+
+        // THE LEGS' OWN EVENTS ARE IN THE STORY: one per request made.
+        let legs_said = said("sobs5 leg").len() as u64;
+        assert!(legs_said >= 4, "every request's own line: {story:?}");
+        // AND NOTHING ELSE IS: the press, its legs, and the census reads and
+        // growth those legs did.
+        assert!(
+            story.iter().all(|r| r.target == "api.pullrun"
+                || r.target == "pull.member"
+                || r.target == "pull.manifest"
+                || r.target.starts_with("api.census")),
+            "only the press's own work carries its id: {:?}",
+            story
+                .iter()
+                .map(|r| (&r.target, &r.message))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !story.iter().any(|r| r.message == "sobs5 unrelated"),
+            "the audit's probe P9: another task's event is not filed under the press"
+        );
+    }
+
+    /// sobs-5, D-4452: ONLY A CLEAN PRESS FINISHES AT INFO. A halted feed, a
+    /// stop, or a press that spent its pass allowance each finish at Warn.
+    #[test]
+    fn only_a_clean_press_finishes_at_info() {
+        use telemetry::Level::{Info, Warn};
+        assert_eq!(finished_level(0, false, 1), Info);
+        assert_eq!(finished_level(0, false, MAX_PASSES - 1), Info);
+        assert_eq!(finished_level(1, false, 1), Warn, "a halted feed");
+        assert_eq!(finished_level(0, true, 1), Warn, "a stop");
+        assert_eq!(
+            finished_level(0, false, MAX_PASSES),
+            Warn,
+            "the allowance spent"
+        );
+        assert_eq!(finished_level(2, true, MAX_PASSES), Warn);
+    }
+
+    /// sobs-5, D-4452: A PRESS WHOSE TASK DIES IS NAMED ON THE LOG, under its
+    /// own run id, with the panic's message, and the status document still
+    /// reads the `Finisher`'s sentence rather than a frozen run.
+    #[tokio::test]
+    async fn a_press_that_dies_is_named_on_the_log() {
+        /// A capture whose clone panics, so the press's own task (which clones
+        /// the request for each chain) panics outside any chain.
+        struct Boom;
+        impl Clone for Boom {
+            fn clone(&self) -> Self {
+                panic!("sobs5 press panic");
+            }
+        }
+        let _installed = crate::emitted::sink();
+        let held = site("sobs5-dies");
+        let generation = claim(&held);
+        let boom = Boom;
+        let log_run = press_with(
+            Loaded::clone(&held),
+            generation,
+            vec![leg("zerodha", "1day")],
+            move |_site, _leg| {
+                let _held = &boom;
+                std::future::ready(receipt(200, "STORED"))
+            },
+        );
+        let died = tokio::time::timeout(core::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(record) = crate::emitted::run_story(log_run)
+                    .into_iter()
+                    .find(|r| r.message == "press ended abnormally")
+                {
+                    return record;
+                }
+                tokio::time::sleep(core::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the supervisor names the death");
+        assert_eq!(died.level, telemetry::Level::Error);
+        assert!(
+            crate::emitted::says(&died, "why", "sobs5 press panic"),
+            "{died:?}"
+        );
+        assert!(crate::emitted::counts(&died, "generation", generation));
+        assert!(
+            observed(&held)
+                .finished
+                .is_some_and(|said| said.contains("stopped abnormally")),
+            "the Finisher released the slot"
+        );
+    }
+
+    /// A press whose task ends normally writes nothing from its supervisor.
+    #[tokio::test]
+    async fn a_supervisor_is_silent_over_a_press_that_ended_normally() {
+        let _installed = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        supervise(tokio::spawn(async {}), 9_090_901).await;
+        assert!(
+            crate::emitted::landed(from, "api.pullrun", "press ended abnormally")
+                .iter()
+                .all(|r| !crate::emitted::counts(r, "generation", 9_090_901)),
+        );
+    }
+
+    /// sobs-5, D-4452: A RECEIPT'S REASON IS READ AS TEXT, BOUNDED. Tags are
+    /// dropped, `render::escape`'s entities restored, the length capped, and
+    /// an answer that is not a receipt yields nothing rather than a guess.
+    #[test]
+    fn a_receipts_reason_is_read_as_bounded_text() {
+        let (_, html) = receipt(409, "NOT STARTED");
+        assert_eq!(
+            receipt_reason(&html),
+            "Spot pull synthetic coordinator receipt"
+        );
+        let quoted = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "Spot pull",
+            verdict: "REFUSED",
+            reason: "seat <busy> & \"held\" by 'zerodha'",
+            good: false,
+            facts: &[],
+            footnote: "",
+        });
+        assert_eq!(
+            receipt_reason(&quoted),
+            "Spot pull seat <busy> & \"held\" by 'zerodha'"
+        );
+        let long = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "S",
+            verdict: "REFUSED",
+            reason: &"x".repeat(5 * MAX_RECEIPT_REASON),
+            good: false,
+            facts: &[],
+            footnote: "",
+        });
+        assert_eq!(receipt_reason(&long).chars().count(), MAX_RECEIPT_REASON);
+        assert_eq!(receipt_reason("not a receipt"), "");
+        assert_eq!(
+            receipt_reason("<div class=\"halt\""),
+            "",
+            "an unclosed block"
+        );
+        assert_eq!(
+            receipt_reason("<div class=\"halt\">open, never closed"),
+            "open, never closed"
+        );
+        // THE BLOCK IS READ ONLY SO FAR. Markup past eight times the cap is
+        // never reached, however long the block runs; text inside it is.
+        let tags = |n: usize| "<i></i>".repeat(n);
+        let near = format!("<div class=\"halt\">{}seen</div>", tags(100));
+        assert_eq!(receipt_reason(&near), "seen");
+        let far = format!("<div class=\"halt\">{}unread</div>", tags(1_000));
+        assert_eq!(receipt_reason(&far), "");
     }
 }

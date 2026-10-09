@@ -40,7 +40,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brutex_core::instrument::{Exchange, Segment};
+use brutex_core::instrument::{Exchange, InstrumentKey, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use pull::manifest::{ENTRY_STRIDE, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest, manifest_path};
@@ -833,16 +833,14 @@ pub fn grid_rows(series: usize) -> usize {
 ///   unreadable contributes nothing and says so elsewhere — [`VendorCensus::note`]
 ///   is already loud about it, and inventing rows for it here would be a
 ///   different lie from the one just fixed.
-/// * **Always on.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, held or not.
-///   They are the two spot indices of the engine surface `CLAUDE.md` §1 names;
-///   the surface is wider than them — it also takes the cash equities of the
-///   208 F&O underlyings that are shares (D-0506, D-0682) — but only the two
-///   indices are seeded here. An equity on the surface that is not held has no
-///   row on `/store`; it appears once a census holds it. Before the first
-///   ingest there is nothing held at all, and a blank grid would say nothing
-///   where "two rows, neither held" says what to do next. (This said §1 fixed
-///   the surface "at exactly" the two indices, which stopped being true at
-///   D-0506; Z1-slice12-F2, D-2570.)
+/// * **Swept.** Every key `InstrumentKey::swept_surface` names, always: the two
+///   indices and the 208 F&O shares `CLAUDE.md` §1 puts on the engine surface
+///   (D-0506, D-0682, D-3507). Their absence is the single most important
+///   thing this page can report. Before the first ingest there is nothing held
+///   at all, and a blank grid would say nothing where "210 rows, none held"
+///   says what to do next. (This said §1 fixed the surface "at exactly" the two
+///   indices until D-2570, and then that only the two were seeded, which
+///   D-3507 ended; D-4656.)
 ///
 /// # Cost
 ///
@@ -1117,24 +1115,24 @@ pub fn held_page(
         .collect()
 }
 
-/// The two spot-index series the engine sweeps, as the store spells them.
+/// The series the engine sweeps, as the store spells them, in
+/// `swept_surface` order; [`held_series`] sorts the axis they join.
 ///
-/// They are the always-on rows of the axis, held or not, so an empty store
-/// still names what it is missing. They are NOT the whole engine surface:
-/// `CLAUDE.md` §1 also sweeps the cash equities of the 208 F&O underlyings that
-/// are shares (D-0506, D-0682), and those are not seeded here — an unheld swept
-/// equity has no row on `/store`. Seeding all 210 would be a product choice the
-/// page has not made (Z1-slice12-F2, D-2570).
+/// `InstrumentKey::swept_surface` is the one enumeration of the surface
+/// (D-3507): the two indices and the 208 F&O shares. This listed the two
+/// indices by hand until then, so a swept share the store did not hold had no
+/// row on `/store`. They are always on the axis, held or not, so an empty store
+/// still names what it is missing. (Z1-slice12-F2, D-2570, had called seeding
+/// all 210 a product choice the page had not made; D-3507 made it, and D-4656
+/// records the merge that kept D-3507's code.)
 #[must_use]
 pub fn swept_series() -> Vec<Series> {
-    ["BANKNIFTY", "NIFTY"]
-        .into_iter()
-        .filter_map(|s| Symbol::new(s).ok())
-        .map(|symbol| Series {
+    InstrumentKey::swept_surface()
+        .map(|key| Series {
             contract: None,
-            exchange: Exchange::Nse,
-            segment: Segment::Index,
-            symbol,
+            exchange: key.exchange,
+            segment: key.segment,
+            symbol: key.underlying,
             timeframe: Timeframe::MINUTE_1,
         })
         .collect()
@@ -1747,15 +1745,34 @@ mod tests {
         std::fs::remove_file(file).expect("cleanup");
     }
 
+    /// D-3507 (ONEAUTH-08). D-0048 makes the axis the union of what is held
+    /// and what the engine sweeps, and D-0506 widened the sweep to the 208 F&O
+    /// shares. The axis kept the two indices only, so a swept share the store
+    /// did not hold had no row anywhere on `/store`.
+    #[test]
+    fn an_empty_store_names_every_swept_instrument_it_is_missing() {
+        let axis = held_series(&[]);
+        assert_eq!(axis.len(), 210, "two indices and 208 shares");
+        assert!(axis.contains(&series(Segment::Cash, "RELIANCE")));
+        assert!(axis.contains(&series(Segment::Index, "NIFTY")));
+        for index in brutex_core::universe::FNO_INDEX_UNDERLYINGS {
+            assert!(!axis.contains(&series(Segment::Cash, index)), "{index}");
+        }
+        assert!(!axis.contains(&series(Segment::Index, "FINNIFTY")));
+    }
+
     #[test]
     fn the_grid_is_addressed_by_arithmetic_and_pages_without_building_the_rest() {
         let dir = root("grid");
         let census = vec![read_vendor(&dir, Vendor::Groww)];
-        let two = swept_series();
-        assert_eq!(two.len(), 2, "the engine surface is exactly two");
-        assert_eq!(two[0].symbol.as_str(), "BANKNIFTY");
-        assert_eq!(two[1].symbol.as_str(), "NIFTY");
+        // The arithmetic is checked on a two-series axis; the swept axis is
+        // 210 series (D-3507) and is addressed by the same arithmetic.
+        let two = vec![
+            series(Segment::Index, "BANKNIFTY"),
+            series(Segment::Index, "NIFTY"),
+        ];
         assert_eq!(grid_rows(two.len()), 2 * GRID_MONTHS);
+        assert_eq!(grid_rows(swept_series().len()), 210 * GRID_MONTHS);
         assert_eq!(grid_rows(0), 0);
 
         let today = day(2026, 8, 7);
@@ -1820,21 +1837,24 @@ mod tests {
             "a held future must be on the axis: {axis:?}"
         );
         assert!(axis.contains(&voltas));
-        // And the two swept series are still named, held or not, so a fresh
+        // And the 210 swept series are still named, held or not, so a fresh
         // install says what it is missing rather than showing nothing.
         assert!(axis.contains(&nifty()));
         assert!(axis.contains(&series(Segment::Index, "BANKNIFTY")));
-        assert_eq!(axis.len(), 4);
+        assert!(axis.contains(&series(Segment::Cash, "RELIANCE")));
+        assert_eq!(axis.len(), 2 + 210);
         assert!(axis.windows(2).all(|w| w[0] < w[1]), "sorted: {axis:?}");
 
         // THE CONTRADICTION, ASSERTED AWAY. Rows held and cells held must agree
         // about whether this store has anything in it.
+        // The whole axis: the two futures sort after the 210 swept series'
+        // 7,560 rows (D-3507), past any first page.
         let grid = coverage_page(
             &axis,
             std::slice::from_ref(&census),
             day(2026, 7, 15),
             0,
-            200,
+            grid_rows(axis.len()),
         );
         let filled = grid.iter().filter(|c| c.is_held()).count();
         assert_eq!(
@@ -1869,8 +1889,10 @@ mod tests {
         let dir = root("axisabsent");
         let absent = read_vendor(&dir, Vendor::Groww);
         assert_eq!(absent.state.name(), "absent");
-        assert_eq!(held_series(&[absent]), swept_series());
-        assert_eq!(held_series(&[]), swept_series(), "and no census at all");
+        let swept: std::collections::BTreeSet<Series> = swept_series().into_iter().collect();
+        let set = |axis: Vec<Series>| axis.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(set(held_series(&[absent])), swept);
+        assert_eq!(set(held_series(&[])), swept, "and no census at all");
         // Two vendors holding the same series contribute one row, not two.
         let month = YearMonth::new(2026, 7).expect("valid");
         let shared = series(Segment::Fno, "ABB-III");
@@ -1878,7 +1900,7 @@ mod tests {
         let b = census_of(&root("axisb"), Vendor::Dhan, &[(shared, month, 7)]);
         let axis = held_series(&[a, b]);
         assert_eq!(axis.iter().filter(|s| **s == shared).count(), 1);
-        assert_eq!(axis.len(), 3, "the shared series plus the swept pair");
+        assert_eq!(axis.len(), 1 + 210, "the shared series plus the swept 210");
     }
 
     /// A series renders as the store path with its separators changed, and the
@@ -1933,7 +1955,13 @@ mod tests {
         );
 
         let axis = held_series(&[a, b]);
-        let names: Vec<String> = axis.iter().map(ToString::to_string).collect();
+        // The swept shares sort among the cash series; the index rows are the
+        // ones this fixture interleaves (D-3507).
+        let names: Vec<String> = axis
+            .iter()
+            .filter(|s| s.segment == Segment::Index)
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(
             names,
             [

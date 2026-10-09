@@ -1,3 +1,5 @@
+import { detailRefusal } from './detail-refusal.js';
+
 /** Saved evidence is a separate, attempt-bound contract. Never turn absence into zero. */
 const U64_MAX = (1n << 64n) - 1n;
 const I64_MIN = -(1n << 63n);
@@ -40,7 +42,9 @@ export async function fetchSweepEvidence(identity, request) {
     const url = '/sweep-evidence.json?identity=' + identity + '&kind=depth&page=' + page +
       '&limit=' + PAGE_ROWS + (summary ? '&attempt=' + summary.attempt : '');
     const response = await request(url);
-    if (!response?.ok) throw new Error('Saved evidence request failed (HTTP ' + String(response?.status) + ').');
+    // THE ROUTE'S OWN `refusal` BESIDE THE STATUS (W5, D-3215), through the
+    // detail envelope reader every sibling saved-evidence route already uses.
+    if (!response?.ok) throw new Error(await detailRefusal(response, 'Saved evidence request failed (HTTP ' + String(response?.status) + ').'));
     const body = await response.json();
     if (!object(body) || body.schema_version !== 1 || body.identity !== identity || body.refusal !== null) {
       throw new Error('Saved evidence is refused or belongs to another run.');

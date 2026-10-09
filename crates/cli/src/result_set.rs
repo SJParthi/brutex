@@ -311,7 +311,8 @@ impl Receipts {
     /// file fails any validation performed by [`Self::open_read`].
     pub fn open(root: &Path) -> Result<Self, Refusal> {
         let dir = root.join("results");
-        std::fs::create_dir_all(&dir)
+        // Every directory this makes is made durable (sobs-12, D-4461).
+        crate::fixed_tail::create_dir_all_durable(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
         let mut file = crate::readonly_file::regular(
@@ -335,8 +336,21 @@ impl Receipts {
             STRIDE,
             &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
         )?;
+        if file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
+            .len()
+            == 0
+        {
+            // The new name is made durable BEFORE the header is written
+            // (sobs-12, D-4461): a kill between the two leaves an empty file,
+            // which the next writer treats as new and barriers again.
+            crate::fixed_tail::sync_parent(&path)?;
+        }
         // Writes the header into an empty file, and re-initialises an
         // all-zero or torn one, under this writer's lock (conc5-1, D-2644).
+        // Every open reaches it, not only a new file's, so a zero header left
+        // by an earlier kill is healed too (D-4650).
         write_header(&mut file, &path)?;
         Self::from_file(file, lock, path, None)
     }
@@ -1809,5 +1823,51 @@ mod tests {
             why.contains("scripted.bin could not be read to hash its validated prefix: disk gone"),
             "{why}"
         );
+    }
+
+    /// sobs-12, D-4461: the receipt writer makes the `results/` directory it
+    /// creates durable, and the new file's name durable BEFORE its header is
+    /// written. Each failed directory barrier is refused by name, and a retry
+    /// after one completes the file.
+    #[test]
+    fn a_new_receipt_files_directory_and_name_are_made_durable_and_a_failed_barrier_is_named() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let r = root("durable-names");
+        let _ = std::fs::remove_dir_all(&r);
+        std::fs::create_dir_all(&r).expect("a temp root");
+        let dir = r.join("results");
+        let path = Receipts::path(&r);
+
+        let armed = Armed::arm(&r.display().to_string(), Kind::DirectorySync);
+        let why = Receipts::open(&r).expect_err("the barrier on the root refuses");
+        assert!(
+            why.contains("the results directory could not be made")
+                && why.contains("injected directory sync fault"),
+            "{why}"
+        );
+        drop(armed);
+        assert!(
+            dir.is_dir() && !path.exists(),
+            "no file before its directory is durable"
+        );
+
+        let armed = Armed::arm(&dir.display().to_string(), Kind::DirectorySync);
+        let why = Receipts::open(&r).expect_err("the barrier on results/ refuses");
+        assert!(why.contains("injected directory sync fault"), "{why}");
+        drop(armed);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the file was created")
+                .len(),
+            0,
+            "no header is written before its name is durable"
+        );
+
+        drop(Receipts::open(&r).expect("a retry completes the file"));
+        assert_eq!(
+            std::fs::metadata(&path).expect("the receipt file").len(),
+            16
+        );
+        let _ = std::fs::remove_dir_all(&r);
     }
 }

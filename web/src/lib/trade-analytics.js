@@ -7,6 +7,8 @@
  * executable without a browser.
  */
 
+import { IST_OFFSET_MICROS } from './ist.js';
+
 export const TIME_GRAINS = Object.freeze([
   Object.freeze({ key: 'hour', label: 'Hours' }),
   Object.freeze({ key: 'weekday', label: 'Weekdays' }),
@@ -118,7 +120,6 @@ const checkedMultiply = (left, right) => {
 };
 
 const DAY_MICROS = 86_400_000_000;
-const IST_OFFSET_MICROS = 19_800_000_000;
 
 /** @param {number} micros @param {string} grain @returns {number|null} */
 const periodKeyOf = (micros, grain) => {

@@ -112,6 +112,10 @@
   import { onDestroy } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import { monthLabel, stampLabel } from '$lib/dates.js';
+  // THE OFFSET AND THE CANDLE GRID ARE `$lib/ist.js`'s (D-3516): one web copy
+  // of `pull::session`'s offset, and the grid `pull::fold` files the store's
+  // rungs on, so a candle derived here is the candle the store holds.
+  import { IST_OFFSET_SECONDS, IST_OFFSET_MS, bucketStart } from '$lib/ist.js';
   // `group`, `rupee` AND THE LOCALE ITSELF LIVE IN `$lib/money.js` so a test can
   // drive them. Their claim -- "8,78,28,617 and never 87,828,617" -- is a
   // property of the RUNTIME's ICU data and not of this code: a build without the
@@ -122,6 +126,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { refusalFrom } from '$lib/refusal.js';
   import {
     store,
     syncStore,
@@ -134,13 +139,11 @@
   /* ======================================================================
      PRIMITIVES
      ====================================================================== */
-  const IST_OFFSET = 19800; // +05:30 in seconds. Used for BUCKETING only.
-
   /**
    * The IST calendar day a UTC second falls in, as an integer.
    * @param {number} t a UTC epoch second
    */
-  const istDay = (t) => Math.floor((t + IST_OFFSET) / 86400);
+  const istDay = (t) => Math.floor((t + IST_OFFSET_SECONDS) / 86400);
 
   /**
    * THE ONLY ORDERING PRIMITIVE. Three-way, always.
@@ -1026,16 +1029,17 @@
       month
     });
     const r = await ask(`/bars.json?${q}`, { signal });
+    // THE SERVER'S OWN SENTENCE, not a status code. It names the file, which
+    // is worth ten "HTTP 400"s -- and a plain-text request-bounds refusal is a
+    // sentence too, which "the body was not JSON" dropped (F4, D-3221).
+    if (!r.ok) throw new Error(`${month}: ${await refusalFrom('/bars.json', r)}`);
     let body = null;
     try {
       body = await r.json();
     } catch {
       throw new Error(`${month}: HTTP ${r.status}, and the body was not JSON`);
     }
-    // THE SERVER'S OWN SENTENCE, not a status code. It names the file, which
-    // is worth ten "HTTP 400"s.
     if (body && typeof body === 'object' && !Array.isArray(body) && body.error) throw new Error(`${month}: ${body.error}`);
-    if (!r.ok && r.status !== 206) throw new Error(`${month}: HTTP ${r.status}`);
     const bars = Array.isArray(body) ? body : (body?.bars ?? []);
     return { bars, faults: Array.isArray(body) ? null : (body?.faults ?? null) };
   }
@@ -1079,8 +1083,13 @@
 
   /* ---- aggregation -----------------------------------------------------
      Done on the paisa integers: min, max and last are exact on integers and
-     lossy on floats. Buckets are aligned to IST, so an hourly candle breaks
-     on the hour an Indian trader sees rather than 30 minutes off it. */
+     lossy on floats. Buckets are `bucketStart`'s: an intraday candle is
+     counted from the 09:15 open, as `pull::fold` files the stored rung of the
+     same width, and a daily one from IST midnight. This counted every width
+     from IST midnight until D-3516, so a derived 30-minute or hourly candle
+     began at 09:00 and held 15 or 45 minutes while the stored rung of the same
+     name began at 09:15 -- the same label, two different candles, depending on
+     which rung the feed happened to hold. */
   /**
    * @param {Bar[]} raw
    * @param {number | null} seconds
@@ -1093,7 +1102,7 @@
     /** @type {Bar | null} */
     let cur = null;
     for (const b of raw) {
-      const start = Math.floor((b.t + IST_OFFSET) / seconds) * seconds - IST_OFFSET;
+      const start = bucketStart(b.t, seconds);
       if (!cur || cur.t !== start) {
         cur = { t: start, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v };
         out.push(cur);
@@ -1464,7 +1473,7 @@
   /** Epoch ms -> the `YYYY-MM` KEY form, so `monthLabel` can spell it. */
   /** @param {number} ms epoch milliseconds */
   function isoMonth(ms) {
-    const d = new Date(ms + IST_OFFSET * 1000);
+    const d = new Date(ms + IST_OFFSET_MS);
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
   }
 

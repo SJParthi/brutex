@@ -385,6 +385,25 @@ impl InstrumentKey {
             Err(InstrumentError::NotSweepable)
         }
     }
+
+    /// Every key [`Self::is_sweepable`] admits: the two [`Self::SWEPT`]
+    /// indices first, then each NSE cash equity of
+    /// [`crate::universe::FNO_UNDERLYINGS`] that the predicate admits, in that
+    /// list's order — 210 keys (D-0506, D-0682).
+    ///
+    /// The one enumeration of the engine surface (D-3507). Before it, a caller
+    /// that needed the list rather than a yes or no wrote its own, and
+    /// `api::census` wrote the 2016 pair. Each candidate passes through
+    /// `is_sweepable`, so the list cannot admit what the predicate refuses.
+    pub fn swept_surface() -> impl Iterator<Item = Self> {
+        let indices = Self::SWEPT
+            .into_iter()
+            .filter_map(|(exchange, name)| Self::index(exchange, name).ok());
+        let shares = crate::universe::FNO_UNDERLYINGS
+            .into_iter()
+            .filter_map(|name| Self::cash(Exchange::Nse, name).ok());
+        indices.chain(shares).filter(Self::is_sweepable)
+    }
 }
 
 impl fmt::Display for InstrumentKey {
@@ -670,6 +689,51 @@ impl fmt::Display for Contract {
     clippy::panic
 )]
 mod tests {
+
+    /// D-3507 (ONEAUTH-08). `swept_surface` is the one enumeration of what
+    /// `is_sweepable` admits, compared with that predicate over every key the
+    /// universe could spell: both indices and every F&O name as index and as
+    /// cash, on both exchanges.
+    #[test]
+    fn the_swept_surface_is_exactly_what_is_sweepable_admits() {
+        use super::{Exchange, InstrumentKey, Segment};
+        use std::collections::BTreeSet;
+        let surface: Vec<InstrumentKey> = InstrumentKey::swept_surface().collect();
+        assert_eq!(surface.len(), 210, "two indices and 208 shares (D-0682)");
+        let distinct: BTreeSet<String> = surface.iter().map(ToString::to_string).collect();
+        assert_eq!(distinct.len(), surface.len(), "no key twice");
+        assert_eq!(
+            surface
+                .iter()
+                .filter(|k| k.segment == Segment::Index)
+                .count(),
+            2
+        );
+        assert!(surface.iter().all(InstrumentKey::is_sweepable));
+        assert_eq!(
+            surface[0],
+            InstrumentKey::index(Exchange::Nse, "NIFTY").expect("key")
+        );
+        assert_eq!(
+            surface[1],
+            InstrumentKey::index(Exchange::Nse, "BANKNIFTY").expect("key")
+        );
+        let reliance = InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("key");
+        assert!(surface.contains(&reliance));
+        let mut admitted = 0;
+        for exchange in [Exchange::Nse, Exchange::Bse] {
+            for name in crate::universe::FNO_UNDERLYINGS {
+                for key in [
+                    InstrumentKey::index(exchange, name).expect("key"),
+                    InstrumentKey::cash(exchange, name).expect("key"),
+                ] {
+                    assert_eq!(key.is_sweepable(), surface.contains(&key), "{key}");
+                    admitted += usize::from(key.is_sweepable());
+                }
+            }
+        }
+        assert_eq!(admitted, surface.len());
+    }
 
     #[test]
     fn contracts_order_by_strike_numerically_and_agree_with_equality() {

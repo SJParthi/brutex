@@ -98,6 +98,18 @@ pub const CURDAY_RUNGS: [i32; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 161
 /// an exchange that ordinarily trades Monday to Friday. One definition, three
 /// crates.
 pub const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+
+/// Minutes from IST midnight to the regular NSE open, 09:15.
+///
+/// `pub` for the reason [`IST_OFFSET_MICROS`] is: `orb` counts its windows
+/// from it, and `runner`'s resampler and synthetic sessions anchor on it, so
+/// the sweep side of the graph holds ONE copy. `pull::session`,
+/// `pull::calendar` and `store::path` hold the same number on the other side,
+/// which this crate may not name (gate 22). `orb` and `runner::resample` each
+/// kept a private copy and `runner::synthetic` spelled it as a bare `555`,
+/// tied to nothing; `crates/cli/tests/one_session_open.rs` now holds this one
+/// to `pull::session::SESSION_OPEN_MINUTE`. D-3518.
+pub const SESSION_OPEN_MINUTE: i64 = 9 * 60 + 15;
 const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
 /// The IST calendar-day number for a timestamp.

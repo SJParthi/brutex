@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
+import { IST_OFFSET_MS } from '../src/lib/ist.js';
 
 const source = readFileSync(new URL('../src/routes/autopilot/+page.svelte', import.meta.url), 'utf8');
 const ast = parse(source);
@@ -21,7 +22,7 @@ const verdictNode = /** @type {any} */ (declaration('verdict'));
 const arrow = verdictNode.declarations[0].init.arguments[0];
 assert.equal(arrow.type, 'ArrowFunctionExpression');
 const actualVerdict = source.slice(arrow.start, arrow.end);
-const page = new Function(`${code}
+const page = new Function('IST_OFFSET_MS', `${code}
   const feedName = value => value;
   function view(snapshot, target, state='waiting') {
     const ap={target,state}, link={kind:'ok'}, census=foldTargetCensus(snapshot,target,target.feed);
@@ -31,7 +32,7 @@ const page = new Function(`${code}
     const verdict=(${actualVerdict})();
     return {census,rows,verdict};
   }
-  return {view,foldTargetCensus,span,classOf};`)();
+  return {view,foldTargetCensus,span,classOf};`)(IST_OFFSET_MS);
 
 /** @param {string} day */
 const micros = (day) => Date.parse(`${day}T09:15:00+05:30`) * 1000;

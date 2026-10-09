@@ -107,8 +107,9 @@ test('empty, one-row, and exactly full-page results require one request', async 
 test('failed HTTP and JSON responses and transport failures never publish a preceding page', async () => {
   let parsed = false;
   await assert.rejects(fetchCompleteFrontier(identity, async () => ({
-    ok: false, status: 503, json: async () => { parsed = true; throw new Error('HTML body'); }
-  })), /answered 503/);
+    ok: false, status: 503, json: async () => { parsed = true; throw new Error('HTML body'); },
+    text: async () => '<html>upstream busy</html>'
+  })), { message: 'Frontier page 0 refused: /frontier.json answered HTTP 503: <html>upstream busy</html>' });
   assert.equal(parsed, false, 'an HTTP failure must retain its status even for an HTML response');
   for (const failure of ['transport', 'JSON']) {
     const source = server(257);
@@ -206,4 +207,20 @@ test('rule key order may differ while the recorded values stay identical', async
     if (page === 1) body.rules = Object.fromEntries(Object.entries(body.rules).reverse());
   });
   assert.equal((await fetchCompleteFrontier(identity, source.request)).rows.length, 257);
+});
+
+// W3 (OBSV-14, D-3213): every `/frontier.json` refusal carries `refusal` in its
+// body (`crates/api/src/frontierjson.rs` `refuse`/`unavailable`/`too_large`/
+// `range_refusal`); the assembler printed the status and the page number only.
+test('a refused frontier page names the server reason, the status and the page (W3)', async () => {
+  const refusal = 'detail read capacity is full; no blocking task was queued. Retry after another trade/frontier request finishes';
+  const body = { rows: null, count: 0, total_count: null, admitted: 0, total_admitted: null, page_complete: false, complete: false, refusal };
+  await assert.rejects(fetchCompleteFrontier(identity, async () => Response.json(body, { status: 429 })),
+    { message: `Frontier page 0 refused: /frontier.json answered HTTP 429: ${refusal}` });
+  const source = server(257);
+  await assert.rejects(fetchCompleteFrontier(identity, async (url) => url.includes('page=1')
+    ? Response.json({ ...body, refusal: 'run abc commits 5000 frontier rows; one request verifies at most 4096' }, { status: 413 })
+    : source.request(url)), { message: 'Frontier page 1 refused: /frontier.json answered HTTP 413: run abc commits 5000 frontier rows; one request verifies at most 4096' });
+  await assert.rejects(fetchCompleteFrontier(identity, async () => new Response('', { status: 502 })),
+    { message: 'Frontier page 0 refused: /frontier.json answered HTTP 502 and named no reason' });
 });

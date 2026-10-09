@@ -6,8 +6,10 @@
 //! Records are the fixed 1,024-byte Phase-A records.  A separate fixed
 //! completion is appended only after the contiguous record block is synced.
 //! Opening scans and validates the bounded ledger once; after that, completion
-//! lookup and a fixed-offset record lookup are O(1) in record count.  Opening,
-//! append, exact retry comparison and fresh-reopen comparison are O(records).
+//! lookup and a fixed-offset record lookup are O(1) in record count.  Opening
+//! is O(every committed record); append, exact retry comparison and the fresh
+//! reopen after an append are O(this family's records), and the append path
+//! scans the whole ledger once, in its writer's open (W2-cli10-0, D-4467).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
 //! times this, so the shape above is read from the source rather
@@ -860,6 +862,10 @@ struct LedgerV2 {
     completion_file: File,
     bounds: BaseEvidenceLedgerBoundsV2,
     audits: HashMap<[u8; 32], BaseEvidenceReopenAuditV2>,
+    /// Each complete universe's physical completion index, so the fresh
+    /// reopen after an append reads its one completion at a fixed offset
+    /// instead of scanning every block again (W2-cli10-0, D-4467).
+    physical: HashMap<[u8; 32], u64>,
     orphan: Option<OrphanV2>,
     total_records: u64,
     lock_generation: FileGenerationV2,
@@ -967,6 +973,7 @@ impl LedgerV2 {
                 completion_file,
                 bounds,
                 audits: HashMap::new(),
+                physical: HashMap::new(),
                 orphan: None,
                 total_records: 0,
                 lock_generation,
@@ -987,6 +994,8 @@ impl LedgerV2 {
     }
 
     fn scan(&mut self) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+        #[cfg(test)]
+        reopen_probe::count_scan();
         verify_header(
             &mut self.record_file,
             RECORD_MAGIC,
@@ -1019,6 +1028,10 @@ impl LedgerV2 {
         self.audits.try_reserve(capacity).map_err(|why| {
             BaseEvidenceLedgerRefusalV2::Allocation(format!("completion index: {why}"))
         })?;
+        self.physical.clear();
+        self.physical.try_reserve(capacity).map_err(|why| {
+            BaseEvidenceLedgerRefusalV2::Allocation(format!("completion offsets: {why}"))
+        })?;
         let mut committed = 0_u64;
         for physical in 0..completions {
             let completion = read_completion(&mut self.completion_file, physical)?;
@@ -1049,6 +1062,8 @@ impl LedgerV2 {
                     "one Candidate universe has more than one Base completion".to_owned(),
                 ));
             }
+            self.physical
+                .insert(completion.candidate_universe_id, physical);
             committed = end;
         }
         self.orphan = scan_orphan(&mut self.record_file, committed, records)?;
@@ -1300,8 +1315,15 @@ impl LedgerV2 {
         )
         .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         sync_directory(&self.root_file, &self.root)?;
+        let physical = completion_start
+            .checked_sub(HEADER_BYTES_U64)
+            .map(|bytes| bytes / COMPLETION_BYTES_U64)
+            .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic(
+                "appended completion index",
+            ))?;
         let audit = BaseEvidenceReopenAuditV2 { completion };
         self.audits.insert(receipt.universe_id(), audit);
+        self.physical.insert(receipt.universe_id(), physical);
         self.orphan = None;
         self.completion_generation = file_generation(&self.completion_file, &self.completion_path)?;
         Ok(BaseEvidenceProductionCommitV2::Written(audit))
@@ -1320,6 +1342,19 @@ impl LedgerV2 {
 }
 
 /// Appends one authenticated Base family and returns only after exact fresh reopen.
+///
+/// # Cost (W2-cli10-0, D-4467)
+///
+/// The writer's open scans and validates every committed block once: O(R)
+/// in every Base record ever committed, inherent to an open that must refuse
+/// damaged history before it appends. The fresh reopen no longer scans the
+/// ledger a second time. It opens the files afresh under the shared lock,
+/// verifies both headers, requires each path to still name the file the
+/// writer appended to, reads the ONE completion at its physical index and its
+/// predecessor's end, validates that completion's block and compares it with
+/// the prepared bytes: O(this family's records). The earlier blocks are the
+/// ones the writer's open validated and its generation checks held unchanged
+/// up to its last barrier.
 pub(crate) fn append_and_reopen_base_evidence_v2(
     root: &Path,
     bounds: BaseEvidenceLedgerBoundsV2,
@@ -1329,31 +1364,199 @@ pub(crate) fn append_and_reopen_base_evidence_v2(
     let mut ledger = LedgerV2::open(root, bounds)?;
     let commit = ledger.append(candidate, prepared)?;
     let expected = commit.audit();
-    drop(ledger);
-    let mut reopened = LedgerV2::open_read(root, bounds)?;
-    let audit = reopened
-        .audit(expected.candidate_universe_id())?
+    let physical = ledger
+        .physical
+        .get(&expected.candidate_universe_id())
+        .copied()
         .ok_or_else(|| {
             BaseEvidenceLedgerRefusalV2::Reconciliation(
-                "Base completion disappeared after receipt-last append".to_owned(),
+                "the appended Base completion has no physical index".to_owned(),
             )
         })?;
+    let held = [ledger.record_generation, ledger.completion_generation];
+    drop(ledger);
+    #[cfg(test)]
+    reopen_probe::run_between(root);
+    let audit = reopen_committed(root, bounds, physical, held, prepared)?;
     if audit != expected {
         return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
             "freshly reopened Base completion differs from the exact append".to_owned(),
         ));
     }
-    compare_prepared(
-        &mut reopened.record_file,
-        audit.completion.first_record,
-        prepared,
-    )?;
     Ok(match commit {
         BaseEvidenceProductionCommitV2::Written(_) => {
             BaseEvidenceProductionCommitV2::Written(audit)
         }
         BaseEvidenceProductionCommitV2::Reused(_) => BaseEvidenceProductionCommitV2::Reused(audit),
     })
+}
+
+/// The bounded fresh reopen of the one block an append committed
+/// (W2-cli10-0, D-4467). `held` is the record and completion generation the
+/// writer measured after its last barrier.
+fn reopen_committed(
+    root: &Path,
+    bounds: BaseEvidenceLedgerBoundsV2,
+    physical: u64,
+    held: [FileGenerationV2; 2],
+    prepared: &PreparedBaseEvidenceV2,
+) -> Result<BaseEvidenceReopenAuditV2, BaseEvidenceLedgerRefusalV2> {
+    let root = admit_root(root)?;
+    refuse_retired_v2_ledger(&root)?;
+    let lock_path = root.join(LOCK_FILE);
+    let lock_file = open_file(&lock_path, false, false)?;
+    lock_file
+        .lock_shared()
+        .map_err(|why| io_error("take shared reopen lock", &lock_path, &why))?;
+    let reopened = (|| {
+        let [held_records, held_completions] = held;
+        let record_path = root.join(RECORD_FILE);
+        let completion_path = root.join(COMPLETION_FILE);
+        let mut record_file = open_file(&record_path, false, false)?;
+        let mut completion_file = open_file(&completion_path, false, false)?;
+        verify_header(
+            &mut record_file,
+            RECORD_MAGIC,
+            RECORD_KIND,
+            RECORD_BYTES_U64,
+            &record_path,
+        )?;
+        verify_header(
+            &mut completion_file,
+            COMPLETION_MAGIC,
+            COMPLETION_KIND,
+            COMPLETION_BYTES_U64,
+            &completion_path,
+        )?;
+        require_same_file(
+            held_records,
+            file_generation(&record_file, &record_path)?,
+            &record_path,
+        )?;
+        require_same_file(
+            held_completions,
+            file_generation(&completion_file, &completion_path)?,
+            &completion_path,
+        )?;
+        let records = record_count(&record_file, RECORD_BYTES_U64, bounds.records, "records")?;
+        let completions = record_count(
+            &completion_file,
+            COMPLETION_BYTES_U64,
+            bounds.completions,
+            "completions",
+        )?;
+        if physical >= completions {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
+                "Base completion disappeared after receipt-last append".to_owned(),
+            ));
+        }
+        let completion = read_completion(&mut completion_file, physical)?;
+        let cursor = match physical.checked_sub(1) {
+            None => 0,
+            Some(previous) => {
+                let before = read_completion(&mut completion_file, previous)?;
+                before
+                    .first_record
+                    .checked_add(before.base_record_count)
+                    .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic(
+                        "committed record cursor",
+                    ))?
+            }
+        };
+        if completion.first_record != cursor {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(format!(
+                "completion {} begins at {}, not contiguous cursor {cursor}",
+                hex32(completion.completion_id),
+                completion.first_record
+            )));
+        }
+        let end = cursor.checked_add(completion.base_record_count).ok_or(
+            BaseEvidenceLedgerRefusalV2::Arithmetic("committed record cursor"),
+        )?;
+        if end > records {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(format!(
+                "completion {} reaches {end}, beyond physical record count {records}",
+                hex32(completion.completion_id)
+            )));
+        }
+        validate_block(&mut record_file, &completion)?;
+        compare_prepared(&mut record_file, completion.first_record, prepared)?;
+        Ok(BaseEvidenceReopenAuditV2 { completion })
+    })();
+    let unlocked = lock_file
+        .unlock()
+        .map_err(|why| io_error("release shared reopen lock", &lock_path, &why));
+    match (reopened, unlocked) {
+        (Ok(audit), Ok(())) => Ok(audit),
+        (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+    }
+}
+
+/// Refuses a freshly opened file that is not the one the writer appended to.
+#[cfg(unix)]
+fn require_same_file(
+    held: FileGenerationV2,
+    fresh: FileGenerationV2,
+    path: &Path,
+) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+    if (held.device, held.inode) == (fresh.device, fresh.inode) {
+        Ok(())
+    } else {
+        Err(BaseEvidenceLedgerRefusalV2::Io(format!(
+            "{} no longer names the Base file this append wrote (device {} inode {}, now device {} inode {})",
+            path.display(),
+            held.device,
+            held.inode,
+            fresh.device,
+            fresh.inode
+        )))
+    }
+}
+
+/// Off unix there is no inode to compare; the block checks still run.
+#[cfg(not(unix))]
+fn require_same_file(
+    _held: FileGenerationV2,
+    _fresh: FileGenerationV2,
+    _path: &Path,
+) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+    Ok(())
+}
+
+/// Test-only probes for the Base append's scan count and the window between
+/// the writer's release and the fresh reopen (W2-cli10-0, D-4467).
+#[cfg(test)]
+pub(crate) mod reopen_probe {
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+
+    type Damage = Box<dyn FnOnce(&Path)>;
+
+    std::thread_local! {
+        static SCANS: Cell<u64> = const { Cell::new(0) };
+        static BETWEEN: RefCell<Option<Damage>> = const { RefCell::new(None) };
+    }
+
+    /// Whole-ledger scans on this thread.
+    pub(crate) fn scans() -> u64 {
+        SCANS.with(Cell::get)
+    }
+
+    pub(super) fn count_scan() {
+        SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
+    }
+
+    /// Runs `damage` once on this thread, after the next append's writer
+    /// released the ledger and before its fresh reopen.
+    pub(crate) fn between(damage: impl FnOnce(&Path) + 'static) {
+        BETWEEN.with(|slot| *slot.borrow_mut() = Some(Box::new(damage)));
+    }
+
+    pub(super) fn run_between(root: &Path) {
+        if let Some(damage) = BETWEEN.with(|slot| slot.borrow_mut().take()) {
+            damage(root);
+        }
+    }
 }
 
 fn validate_block(

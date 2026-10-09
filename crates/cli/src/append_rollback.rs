@@ -16,8 +16,14 @@
 //! `crate::fixed_tail::sync_or_roll_back`, which cuts the block (D-1900,
 //! D-2555).
 //!
-//! What it does per append: one `seek` and one write, and one `set_len` only
-//! when the write fails.
+//! What it does per append: one `seek` and one write, and one `set_len` and
+//! one `sync_all` only when the write fails (the cut is made durable, D-4460).
+//!
+//! A process that DIES mid-write (kill, OOM, power loss) runs no rollback and
+//! leaves a sub-record tail. That is not this helper's case either: every
+//! ledger that appends through it cuts such a tail when its writer opens,
+//! under its exclusive lock, with `fixed_tail::heal_torn_tail`, loudly
+//! (rnew-1, D-4460). Readers keep refusing it.
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -68,7 +74,10 @@ pub(crate) fn append_all(
     let Err(why) = body(file) else {
         return Ok(());
     };
-    match file.set_len(end) {
+    // THE CUT IS MADE DURABLE BEFORE THE REFUSAL RETURNS (rnew-1, D-4460). An
+    // unsynced `set_len` can be undone by a power loss, bringing back the
+    // partial record this rollback exists to remove.
+    match file.set_len(end).and_then(|()| sync_cut(file, label)) {
         Ok(()) => Err(format!(
             "cannot append {label}: {why}; truncated back to {end} bytes"
         )),
@@ -78,12 +87,81 @@ pub(crate) fn append_all(
     }
 }
 
+/// The barrier after a rollback's cut, through a test fault hook so a test
+/// can prove a failed barrier is named rather than reported as a clean cut.
+fn sync_cut(file: &File, label: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if tests::take_cut_fault(label) {
+        return Err(std::io::Error::other("injected rollback barrier fault"));
+    }
+    #[cfg(not(test))]
+    let _ = label;
+    file.sync_all()
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "a failed fixture must fail its test")]
 pub(crate) mod tests {
     use super::{append, append_all, append_with};
+    use std::cell::RefCell;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
+
+    std::thread_local! {
+        /// A label whose next rollback barrier fails, armed by a test.
+        static CUT_FAULT: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Whether the rollback barrier for `label` is armed to fail; disarms it.
+    pub(super) fn take_cut_fault(label: &str) -> bool {
+        CUT_FAULT.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            if armed.as_deref() == Some(label) {
+                *armed = None;
+                return true;
+            }
+            false
+        })
+    }
+
+    /// rnew-1, D-4460: the rollback's cut is followed by a barrier, and a
+    /// barrier that fails is named as a failed rollback, never as a clean cut.
+    #[test]
+    fn a_rollback_cut_is_synced_and_a_failed_barrier_is_named() {
+        let scratch = Scratch::new("cut-barrier");
+        let path = scratch.file(&[1, 2, 3]);
+        let mut file = open_rw(&path);
+        CUT_FAULT.with(|armed| *armed.borrow_mut() = Some("Cut V1 record".to_owned()));
+        assert!(!take_cut_fault("Other V1 record"), "another label passes");
+        let refusal = append_with(&mut file, &[9; 4], "Cut V1 record", |file, raw| {
+            file.write_all(raw.get(..2).expect("partial"))?;
+            Err(std::io::Error::other("injected short write"))
+        })
+        .expect_err("refuses");
+        assert_eq!(
+            refusal,
+            "cannot append Cut V1 record: injected short write; truncation back to 3 bytes also failed: injected rollback barrier fault"
+        );
+        assert!(!take_cut_fault("Cut V1 record"), "the fault fired once");
+        // The cut itself still happened; only its barrier was refused.
+        assert_eq!(std::fs::read(&path).expect("read"), [1, 2, 3]);
+        let source = include_str!("append_rollback.rs");
+        let body = source
+            .split_once("pub(crate) fn append_all(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .expect("append_all body")
+            .0;
+        assert!(
+            body.contains("file.set_len(end).and_then(|()| sync_cut(file, label))"),
+            "{body}"
+        );
+        let cut = source
+            .split_once("fn sync_cut(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .expect("sync_cut body")
+            .0;
+        assert!(cut.trim_end().ends_with("file.sync_all()"), "{cut}");
+    }
 
     /// Test support: opens the ledger file at `path`, injects a write that lands
     /// part of `width` bytes and then fails, and requires the refusal to name

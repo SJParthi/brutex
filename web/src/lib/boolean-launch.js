@@ -1,5 +1,6 @@
 import { ask } from './ask.js';
 import { sweepOutcome } from './sweep.js';
+import { commandReply, refusalFrom, refusalSentence } from './refusal.js';
 import { validateIndexConsistencyPolicy } from './index-consistency.js';
 import { validateBooleanWorkModel } from './boolean-work-model.js';
 import { NATIVE_POLICY_FIELDS, NATIVE_POLICY_NAMES } from './native-policy-schema.js';
@@ -351,7 +352,8 @@ export function createBooleanLaunch({ request = ask, changed, onSearch, wait = p
     if (!current(id)) return;
     const response = await request(`/backtest/run.json?attempt=${encodeURIComponent(/** @type {string} */ (state.attempt))}`, { cache: 'no-store', signal });
     if (!current(id)) return;
-    if (!response.ok) throw new Error(`Exact attempt status is unavailable (HTTP ${response.status}). The launch will not be resent.`);
+    // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+    if (!response.ok) throw new Error(`Exact attempt status is unavailable: ${await refusalFrom('/backtest/run.json', response)}. The launch will not be resent.`);
     const body = await response.json();
     if (!current(id)) return;
     const observed = booleanLaunchObservation(body?.running, state.plan ?? recordedPlan(body?.running), /** @type {string} */ (state.attempt), state);
@@ -380,7 +382,8 @@ export function createBooleanLaunch({ request = ask, changed, onSearch, wait = p
         if (!current(work.id)) return;
         const response = await request('/engine/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(plan), signal: work.signal });
         if (!current(work.id)) return;
-        const body = await response.json();
+        // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222).
+        const { body, reason } = await commandReply(response);
         if (!current(work.id)) return;
         if (body?.accepted === false && text(body.refusal) && response.status !== 202 &&
             (body.attempt === undefined || body.attempt === null) &&
@@ -390,7 +393,7 @@ export function createBooleanLaunch({ request = ask, changed, onSearch, wait = p
         if (body?.accepted === true && integer(body.attempt)) state = { ...state, attempt: body.attempt };
         if (!response.ok || response.status !== 202 || body?.accepted !== true || body.refusal !== null || !state.attempt ||
             (body.attempt_key !== undefined && body.attempt_key !== state.attempt) || body.started === false) {
-          throw new Error('The server did not unambiguously accept or refuse this launch with an exact attempt string. It may have started; it will not be resent.');
+          throw new Error(`The server did not unambiguously accept or refuse this launch with an exact attempt string (${refusalSentence('/engine/command', response.status, reason)}). It may have started; it will not be resent.`);
         }
         state = { ...state, phase: 'running' }; publish();
         await poll(work.id, work.signal);

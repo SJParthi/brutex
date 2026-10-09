@@ -2038,6 +2038,12 @@ fn refused(why: &Refusal) -> (axum::http::StatusCode, JsonHeaders, String) {
 /// middleware's `served ... 503` with no reason, while the page told the
 /// operator to read the logs. Every refusal arm of the three routes now says
 /// why, once, at the route's own boundary (gate 17 does not cover `api`).
+///
+/// EXCEPT THE TWO ABOUT THIS SERVER. The unstamped build and the environment
+/// budget were closed by both sides at once — conc13-3 through this helper,
+/// sobs-9 (D-4447) through [`refused_for_this_server`], which also names the
+/// route — so each of those arms wrote two lines. They go through that one
+/// writer on all three routes; every other arm stays here. D-4627.
 fn refuse_logged(
     message: &'static str,
     why: &Refusal,
@@ -2045,6 +2051,43 @@ fn refuse_logged(
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(telemetry::Level::Warn, "api.sweep", message)
             .with("why", telemetry::Value::Str(why.why())),
+    );
+    refused(why)
+}
+
+/// The three launch routes, as the `route` field of a refusal names them.
+const RUN_ROUTE: &str = "/backtest/run";
+/// See [`RUN_ROUTE`].
+const DESCEND_ROUTE: &str = "/backtest/descend";
+/// See [`RUN_ROUTE`].
+const COMMAND_ROUTE: &str = "/engine/command";
+
+/// A launch refused for a fact about THIS SERVER, logged once, on every route.
+///
+/// # What was silent (sobs-9, D-4447)
+///
+/// An unstamped build and a screen budget in the server's own environment are
+/// decided before any request arrives, and each refuses every launch. Only
+/// `/backtest/run`'s unstamped arm wrote an event; `/backtest/descend` and
+/// `/engine/command` refused both silently, and no route logged the budget, so
+/// `/logs` showed `api.request` 503s with no reason beside them. One event per
+/// refused press, carrying the route and the refusal's own sentence, before
+/// anything is claimed. The message keeps `/backtest/run`'s wording so a
+/// reader filtering on it finds every route.
+fn refused_for_this_server(
+    route: &str,
+    why: &Refusal,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let _ = telemetry::emit_if!(
+        telemetry::Level::Warn,
+        "api.sweep",
+        if matches!(why, Refusal::Unstamped(_)) {
+            "a sweep was refused because this build carries no commit stamp"
+        } else {
+            "a sweep was refused because this server's environment sets a screen budget"
+        },
+        "route" => telemetry::Value::Str(route),
+        "why" => telemetry::Value::Str(why.why()),
     );
     refused(why)
 }
@@ -2127,19 +2170,14 @@ pub(crate) fn run_with(
     // slot first would make this route answer 409 `Busy` to a second press
     // while the first was busy failing for a reason no wait can fix.
     if let Some(why) = stamp_refusal(stamp) {
-        let _ = telemetry::emit_if!(
-            telemetry::Level::Warn,
-            "api.sweep",
-            "a sweep was refused because this build carries no commit stamp",
-            "why" => telemetry::Value::Str(why.why()),
-        );
-        return refused(&why);
+        return refused_for_this_server(RUN_ROUTE, &why);
     }
 
     // BEFORE THE SLOT FOR THE SAME REASON: a budget in the server's own
     // environment refuses every rung this run could sweep. D-0685.
+    // One writer for this arm, with the route (D-4447; D-4627).
     if let Some(why) = environment_budget_refusal() {
-        return refuse_logged("a sweep was refused by this server's environment", &why);
+        return refused_for_this_server(RUN_ROUTE, &why);
     }
 
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
@@ -2297,16 +2335,14 @@ pub(crate) fn descend_with(
         }
     };
 
+    // Both server refusals: one writer each, with the route (D-4447; D-4627).
     if let Some(why) = stamp_refusal(stamp) {
-        return refuse_logged(
-            "a descent was refused because this build carries no commit stamp",
-            &why,
-        );
+        return refused_for_this_server(DESCEND_ROUTE, &why);
     }
     // A descent's first step is `cli::one_rung`, which refuses a server budget;
     // refused here instead, before the slot, as `run_with` does. D-0685.
     if let Some(why) = environment_budget_refusal() {
-        return refuse_logged("a descent was refused by this server's environment", &why);
+        return refused_for_this_server(DESCEND_ROUTE, &why);
     }
 
     let busy = || {
@@ -3511,18 +3547,16 @@ fn command_with_configuration(
         }
     };
 
+    // Both server refusals: one writer each, with the route (D-4447; D-4627).
     if let Some(why) = stamp_refusal(stamp) {
-        return refuse_logged(
-            "a command was refused because this build carries no commit stamp",
-            &why,
-        );
+        return refused_for_this_server(COMMAND_ROUTE, &why);
     }
     // Only the words whose run prices the screen; the strict word refuses the
     // budget at every value through `validate_runtime` below. D-0685.
     if asked.prices_a_screen()
         && let Some(why) = environment_budget_refusal()
     {
-        return refuse_logged("a command was refused by this server's environment", &why);
+        return refused_for_this_server(COMMAND_ROUTE, &why);
     }
 
     // Resolve only the explicit strict command, once, before claiming a slot or
@@ -3999,6 +4033,55 @@ mod tests {
             site.sweep.lock().expect("private slot").is_none(),
             "an unstamped build claimed the slot"
         );
+    }
+
+    /// sobs-9, D-4447: AN UNSTAMPED BUILD IS LOGGED ON EVERY LAUNCH ROUTE, not
+    /// only on `/backtest/run`. One `api.sweep` Warn per press, naming the
+    /// route and carrying the refusal's sentence, read back from the binary's
+    /// installed sink. (The environment-budget arm is proven in the child of
+    /// `a_usable_server_budget_is_refused_before_the_slot_and_writes_nothing`,
+    /// the one process here whose environment may carry a budget.)
+    #[test]
+    fn an_unstamped_build_is_logged_on_every_launch_route() {
+        let _installed = crate::emitted::sink();
+        let site = finisher_site("sobs9-unstamped-routes");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN}}}"#);
+        let descent = descent_body(r#""rung":"15min","max_points":20,"top":25"#);
+        let audit = command_body(r#""command":"audit-range","rung":"15min","min_hits":500"#);
+        let presses: [(&str, Route<'_>); 3] = [
+            (super::RUN_ROUTE, &|| super::run_with(&site, &run, None)),
+            (super::DESCEND_ROUTE, &|| {
+                super::descend_with(&site, &descent, None)
+            }),
+            (super::COMMAND_ROUTE, &|| {
+                super::command_with(&site, &audit, None)
+            }),
+        ];
+        for (route, press) in presses {
+            let from = crate::emitted::mark();
+            let (status, _, body) = press();
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{route}: {body}"
+            );
+            let lines: Vec<telemetry::Record> = crate::emitted::landed(
+                from,
+                "api.sweep",
+                "a sweep was refused because this build carries no commit stamp",
+            )
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "route", route))
+            .collect();
+            assert_eq!(lines.len(), 1, "{route}: one line per press: {lines:?}");
+            assert_eq!(lines[0].level, telemetry::Level::Warn, "{route}");
+            assert!(
+                crate::emitted::says(&lines[0], "why", "BRUTEX_COMMIT"),
+                "{route}: the refusal's own sentence: {:?}",
+                lines[0]
+            );
+        }
+        assert!(site.sweep.lock().expect("private slot").is_none());
     }
 
     /// audit-20261003 hunt-api-2, D-1582: CTRL-C ENDS THE PROCESS WHILE A
@@ -5262,6 +5345,28 @@ mod tests {
         assert!(body.contains("BRUTEX_COMMIT"), "{body}");
         assert!(!body.contains("BRUTEX_SCREEN_BUDGET_MS"), "{body}");
         assert_eq!(listing(&store), before, "unstamped descend wrote");
+        // sobs-9, D-4447: THE BUDGET'S REFUSAL REACHES THIS CHILD'S LOG, once
+        // per route and naming it, beside the unstamped one above.
+        let budget_lines = || {
+            telemetry::tail(
+                &root.join("logs"),
+                telemetry::global()
+                    .expect("this child's one sink")
+                    .keep_files(),
+                &telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.sweep"),
+            )
+            .records
+            .into_iter()
+            .filter(|record| {
+                record.message
+                    == "a sweep was refused because this server's environment sets a screen budget"
+            })
+            .collect::<Vec<_>>()
+        };
+        assert!(
+            budget_lines().is_empty(),
+            "nothing refused for a budget yet"
+        );
 
         // ONE ROUTE AT A TIME, each checked before the next is called, so a
         // route that writes is the one named.
@@ -5295,6 +5400,36 @@ mod tests {
             );
             assert_eq!(listing(&store), before, "{route} wrote into the store");
         }
+        // `tail` answers newest first; the presses are listed in the order made.
+        let logged: Vec<String> = budget_lines()
+            .iter()
+            .rev()
+            .map(|record| {
+                assert!(
+                    record
+                        .field("why")
+                        .and_then(telemetry::OwnedValue::as_str)
+                        .is_some_and(|why| why.contains("BRUTEX_SCREEN_BUDGET_MS is set")),
+                    "the refusal's own sentence rides on the line: {record:?}"
+                );
+                assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+                record
+                    .field("route")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                super::RUN_ROUTE,
+                super::DESCEND_ROUTE,
+                super::COMMAND_ROUTE,
+                super::COMMAND_ROUTE
+            ],
+            "one budget refusal per press, naming its route"
+        );
 
         // THE ENVIRONMENT'S OWN SPELLING, WITH NO KNOB SET, READ BY THE ENGINE
         // TOO. This child's value may be padded; only here does the rule's trim

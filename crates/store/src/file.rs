@@ -2838,11 +2838,36 @@ impl BarFile {
                     return bisecting(&tix.path, Why::Unreadable(why.refusal(&tix.path)));
                 }
             };
+            // THE INDEX IS BOUND TO THE BARS THIS HANDLE HOLDS, NOT TO A PATH
+            // (satk-2, D-4416). A reader opens its `.tix` lazily, by path, at
+            // its first lookup. A month replaced in between — `.bin`, `.crc`
+            // and `.tix` renamed in — left this handle the OLD bars and handed
+            // it the NEW index, and when both began and ended in the same slots
+            // at the same rows `confirm_index` accepted the pair and lookups
+            // returned wrong rows with no error. So the path's file must still
+            // be the file held. Asked AFTER the `.tix` is open: a swap that
+            // renames the `.bin` first and the `.tix` second cannot hand this
+            // handle a new index and an unchanged `.bin` path. Two `stat`s,
+            // once per handle.
+            if !self.holds_the_named_bars() {
+                return bisecting(&tix.path, Why::Replaced);
+            }
             match self.confirm_index(&index, tix) {
                 Ok(()) => TixState::Ready(index),
                 Err(why) => bisecting(&tix.path, why),
             }
         })
+    }
+
+    /// Whether the file at this month's `.bin` path is still the one this
+    /// handle holds: same device, same inode. `false` when either `stat` is
+    /// refused, because then nothing says the path names these bars.
+    fn holds_the_named_bars(&self) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        match (self.bars.metadata(), fs::metadata(&self.bars_path)) {
+            (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+            _ => false,
+        }
     }
 
     /// Whether `index` is this month's index and describes its committed bars:

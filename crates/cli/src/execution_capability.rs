@@ -1404,7 +1404,7 @@ impl ExecutionCapabilityLedger {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        crate::population::population_write_lock(root)
     }
 
     /// Creates missing fixed-layout files, then scans and indexes all committed

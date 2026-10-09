@@ -43,6 +43,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { watchVisible } from '$lib/page-requests.js';
+  import { refusalFrom } from '$lib/refusal.js';
   import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
@@ -656,7 +657,8 @@
     try {
       const r = await ask('/feeds.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      // The body's reason, not the status alone (F4, D-3221).
+      if (!r.ok) throw new Error(await refusalFrom('/feeds.json', r));
       const ct = r.headers.get('content-type') ?? '';
       if (!ct.includes('json')) {
         throw new Error(`answered ${ct || 'no content-type'}, not JSON — the API is not behind this route`);

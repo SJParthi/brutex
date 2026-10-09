@@ -1196,35 +1196,27 @@ pub fn now_stamp() -> Result<String, SsmError> {
             )
         })?
         .as_secs();
-    // Civil date from a day count, by the same closed form `costs::day` uses —
-    // no calendar crate, and no float.
-    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    Ok(stamp_of(secs))
+}
+
+/// The `SigV4` `X-Amz-Date` of `secs` seconds past the Unix epoch:
+/// `YYYYMMDDTHHMMSSZ`.
+///
+/// The civil date is `telemetry::civil_from_days`, the workspace's one Hinnant
+/// implementation that `pull` can name (D-3513). This file carried a private
+/// copy whose comment said `pull` depended on `core` and `store` only, and
+/// nothing tested it: `now_stamp` reads the clock, so its one caller runs only
+/// against real AWS.
+fn stamp_of(secs: u64) -> String {
+    let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
     let rest = secs % 86_400;
-    let (y, m, d) = civil_from_days(days);
-    Ok(format!(
+    let (y, m, d) = telemetry::civil_from_days(days);
+    format!(
         "{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z",
         rest / 3600,
         (rest % 3600) / 60,
         rest % 60
-    ))
-}
-
-/// The civil date of a day count, by Howard Hinnant's `civil_from_days`.
-///
-/// The same algorithm `crates/costs/src/day.rs` carries, written here rather
-/// than depended on: `pull` does not take `costs`, and `docs/01-architecture.md`
-/// gives it `core` and `store` only. Integer arithmetic throughout.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    )
 }
 
 #[cfg(test)]
@@ -1322,6 +1314,37 @@ mod tests {
             body.contains("refuse_unusable_value(&value)?;"),
             "get_parameter refuses an unusable value before returning it"
         );
+    }
+
+    /// D-3513 (ONEAUTH-14). The epoch, a leap day at both ends, the last
+    /// second of a century year that is not a leap year, and 2100.
+    #[test]
+    fn the_amz_date_is_the_civil_stamp_of_the_clock() {
+        assert_eq!(super::stamp_of(0), "19700101T000000Z");
+        assert_eq!(super::stamp_of(1_709_164_800), "20240229T000000Z");
+        assert_eq!(super::stamp_of(1_709_251_199), "20240229T235959Z");
+        assert_eq!(super::stamp_of(1_709_251_200), "20240301T000000Z");
+        assert_eq!(super::stamp_of(951_782_400), "20000229T000000Z");
+        assert_eq!(super::stamp_of(4_107_542_399), "21000228T235959Z");
+        assert_eq!(super::stamp_of(4_107_542_400), "21000301T000000Z");
+        assert_eq!(super::stamp_of(1_234_567_890), "20090213T233130Z");
+    }
+
+    /// D-3513: `now_stamp` is `stamp_of` the clock — sixteen characters, the
+    /// `T` and `Z` where `SigV4` puts them, digits elsewhere, and a date no
+    /// earlier than this change was written.
+    #[test]
+    fn the_clock_stamp_is_a_sigv4_date_of_now() {
+        let stamp = super::now_stamp().expect("the clock is after the epoch");
+        assert_eq!(stamp.len(), 16, "{stamp}");
+        for (k, c) in stamp.char_indices() {
+            match k {
+                8 => assert_eq!(c, 'T', "{stamp}"),
+                15 => assert_eq!(c, 'Z', "{stamp}"),
+                _ => assert!(c.is_ascii_digit(), "{stamp}"),
+            }
+        }
+        assert!(stamp.as_str() >= "20261006T000000Z", "{stamp}");
     }
 
     /// §8 — the parameter path never reaches the output, whatever AWS says.

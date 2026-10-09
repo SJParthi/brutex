@@ -37,17 +37,9 @@ export function validateInvocationAudit(body, before = null) {
 export async function fetchInvocationAudit(before, request) {
   const response = await request(auditUrl(before));
   if (!response?.ok) {
-    const fallback = 'Durable audit unavailable (HTTP ' + String(response?.status) + ').';
-    let body;
-    try { body = await response?.json?.(); } catch { throw new Error(fallback); }
-    const writeFailure = body?.code === 'invocation_audit_unavailable' && typeof body.handler_completed === 'boolean';
-    const readFailure = body?.code === 'invocation_audit_read_unavailable' && !Object.hasOwn(body, 'handler_completed');
-    if (body?.schema_version === 1 && (writeFailure || readFailure) && typeof body.refusal === 'string' &&
-        body.refusal.trim() && body.refusal.length <= 4096 &&
-        typeof body.why === 'string' && body.why.length <= 4096) {
-      throw new Error(`${fallback} ${body.refusal.trim()} ${body.why}`);
-    }
-    throw new Error(await detailRefusal({ json: async () => body }, fallback));
+    // The audit envelope's validation lives in `refusal.js` `auditRefusal`,
+    // which `detailRefusal` reads for every audited detail route (F1, D-3218).
+    throw new Error(await detailRefusal(response, 'Durable audit unavailable (HTTP ' + String(response?.status) + ').'));
   }
   return validateInvocationAudit(await response.json(), before);
 }

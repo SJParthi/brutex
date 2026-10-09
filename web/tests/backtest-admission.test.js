@@ -146,7 +146,7 @@ test('every drill loader drops stale success, failure, catch, and close-panel wr
   const rungs = between(page, 'async function loadRungs(run)', 'BUY & HOLD');
   const benchmark = between(page, 'async function loadBenchmark(run)', 'Current-store buy-and-hold over');
   assert.match(series, /catch \(error\) \{\s*if \(seq !== seriesSeq\) return;/);
-  assert.match(rungs, /catch \{\s*if \(seq !== rungsSeq\) return;/);
+  assert.match(rungs, /catch \(error\) \{\s*if \(seq !== rungsSeq\) return;/);
   assert.match(benchmark, /catch \(error\) \{\s*if \(seq !== benchSeq\) return;/);
   assert.match(page, /if \(!run\) \{\s*seriesSeq \+= 1;/);
   assert.match(page, /if \(!run\) \{\s*benchSeq \+= 1;/);

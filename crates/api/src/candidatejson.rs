@@ -357,6 +357,17 @@ fn validate_window(total: u64, offset: u64, count: usize) -> Result<(), String> 
     }
     Ok(())
 }
+/// How many candidate trade readers the page keeps open at once.
+///
+/// One slot meant that a reader switching between two candidates re-read and
+/// re-verified every trade of each on every switch (W1-api2-3). Eight lets an
+/// operator compare a tier's leading candidates, both sides of one rank, or
+/// the same rank across a handful of captures without a cold open. A kept
+/// reader holds its trade file's open handle and that candidate's record, not
+/// its rows. The ninth distinct candidate evicts the least recently paged
+/// one. D-4434.
+pub(crate) const TRADE_READERS_KEPT: usize = 8;
+
 struct Cached {
     model: Model,
     root: PathBuf,
@@ -366,6 +377,31 @@ struct Cached {
     key: Key,
     reader: TradeReader,
 }
+impl Cached {
+    /// Whether this reader is the one `summary`'s candidate `key` names.
+    fn serves(&self, root: &Path, summary: &Summary, key: Key) -> bool {
+        self.model == summary.model
+            && self.root == root
+            && self.identity == summary.identity
+            && self.attempt == summary.attempt
+            && self.digest == summary.digest
+            && self.key == key
+    }
+    /// Whether `other` is a reader for this one's candidate. D-4655.
+    fn same_as(&self, other: &Self) -> bool {
+        self.model == other.model
+            && self.root == other.root
+            && self.identity == other.identity
+            && self.attempt == other.attempt
+            && self.digest == other.digest
+            && self.key == other.key
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// Cold trade-reader opens [`page_through`] made on this thread.
+    static COLD_TRADE_READERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 fn trade_page(
     root: &Path,
     summary: &Summary,
@@ -373,25 +409,45 @@ fn trade_page(
     offset: u64,
     limit: usize,
 ) -> Result<(Candidate, Vec<cli::trades::Row>), String> {
-    static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<Vec<Cached>>> = OnceLock::new();
     // THE READER IS TAKEN OUT, AND THE LOCK RELEASED, BEFORE ANY FILE IS READ
-    // (cand-2, D-2576). The guard used to be held across `page_through`, whose
-    // cold `TradeReader::open` reads and verifies every trade of a candidate up
-    // to `MAX_SCAN_BYTES`. Every other trade-page request then blocked on this
+    // (cand-2, D-2576). The guard used to be held across the page, whose cold
+    // `TradeReader::open` reads and verifies every trade of a candidate up to
+    // `MAX_SCAN_BYTES`. Every other trade-page request then blocked on this
     // mutex INSIDE `detail::run`, each holding one of the four detail permits,
-    // so one cold open answered 429 to every other detail route. Now a second
-    // request finds the slot empty and opens its own reader; whichever finishes
-    // last puts its reader back (`detail::Checkout`, the index-stop caches'
-    // shape since D-1912). A reader that refused stays out (D-2763).
-    let slot = CACHE.get_or_init(|| Mutex::new(None));
-    let mut held = crate::detail::Checkout::take(slot);
+    // so one cold open answered 429 to every other detail route.
+    //
+    // EIGHT READERS ARE KEPT, NOT ONE (W1-api2-3, D-4434), and the two fixes
+    // hold together (D-4655): the mutex is taken once to take the serving
+    // reader out and once to put it back, each a scan of at most
+    // `TRADE_READERS_KEPT` keys, and never across an open or a page read. A
+    // second request for a reader already out opens its own; whichever
+    // finishes last is the one kept (`keep`). A reader that refused stays out
+    // (D-2763). A poisoned cache holds plain readers and no invariant spans
+    // the panic, and the shipped binary aborts on panic regardless, so it is
+    // used as found, as `detail::Checkout` does.
+    let slot = CACHE.get_or_init(|| Mutex::new(Vec::with_capacity(TRADE_READERS_KEPT)));
+    let lock = || {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let held = take_serving(&mut lock(), root, summary, key);
     #[cfg(test)]
     crate::detail::note_slot_free(slot);
-    page_through(&mut held, root, summary, key, offset, limit)
+    let (held, page) = serve(held, root, summary, key, offset, limit)?;
+    keep(&mut lock(), held);
+    Ok(page)
 }
-/// One page through the slot, opening a reader when the slot holds another.
+/// One page through the kept readers, opening one when none serves `key`:
+/// [`trade_page`]'s three steps over one `Vec` with no lock between them.
 ///
-/// A page that fails EVICTS the reader. The slot is keyed on content only, and
+/// The readers are held least recently paged first, so a hit moves to the
+/// end and a miss with every slot full evicts the front. Finding the reader
+/// compares at most [`TRADE_READERS_KEPT`] keys, a constant; the cold open of
+/// a reader no slot holds is `O(trades of that candidate)` and is what the
+/// slots exist to avoid repeating. D-4434.
+///
+/// A page that fails EVICTS its reader. The slot is keyed on content only, and
 /// the reader also pins its trade file's filesystem generation, so a file
 /// relinked, restored or merely `chmod`ed under the same content left a
 /// reader that refused every request for that candidate until a restart, while
@@ -399,23 +455,49 @@ fn trade_page(
 /// next one cold-opens and re-verifies every row and the seal, as every sibling
 /// cache does. D-2763, apicache-1.
 fn page_through(
-    cached: &mut Option<Cached>,
+    kept: &mut Vec<Cached>,
     root: &Path,
     summary: &Summary,
     key: Key,
     offset: u64,
     limit: usize,
 ) -> Result<(Candidate, Vec<cli::trades::Row>), String> {
-    if cached.as_ref().is_none_or(|held| {
-        held.model != summary.model
-            || held.root != root
-            || held.identity != summary.identity
-            || held.attempt != summary.attempt
-            || held.digest != summary.digest
-            || held.key != key
-    }) {
+    let held = take_serving(kept, root, summary, key);
+    let (held, page) = serve(held, root, summary, key, offset, limit)?;
+    keep(kept, held);
+    Ok(page)
+}
+/// Takes the reader serving `key` out of `kept`, if one is there. At most
+/// [`TRADE_READERS_KEPT`] comparisons. D-4434, D-4655.
+fn take_serving(
+    kept: &mut Vec<Cached>,
+    root: &Path,
+    summary: &Summary,
+    key: Key,
+) -> Option<Cached> {
+    let at = kept
+        .iter()
+        .position(|held| held.serves(root, summary, key))?;
+    Some(kept.remove(at))
+}
+/// Pages `held`, cold-opening a reader first when there is none. Reads files;
+/// no cache lock is held here. A failed page drops the reader rather than
+/// returning it to be kept (D-2763).
+fn serve(
+    held: Option<Cached>,
+    root: &Path,
+    summary: &Summary,
+    key: Key,
+    offset: u64,
+    limit: usize,
+) -> Result<(Cached, (Candidate, Vec<cli::trades::Row>)), String> {
+    let mut held = if let Some(held) = held {
+        held
+    } else {
+        #[cfg(test)]
+        COLD_TRADE_READERS.with(|count| count.set(count.get() + 1));
         let reader = TradeReader::open(root, summary, key, crate::detail::MAX_SCAN_BYTES)?;
-        *cached = Some(Cached {
+        Cached {
             model: summary.model,
             root: root.to_path_buf(),
             identity: summary.identity,
@@ -423,16 +505,24 @@ fn page_through(
             digest: summary.digest,
             key,
             reader,
-        });
-    }
-    let held = cached.as_mut().ok_or("candidate reader cache missing")?;
-    match held.reader.page(offset, limit) {
-        Ok(rows) => Ok((held.reader.candidate().clone(), rows)),
-        Err(why) => {
-            *cached = None;
-            Err(why)
         }
+    };
+    let rows = held.reader.page(offset, limit)?;
+    let candidate = held.reader.candidate().clone();
+    Ok((held, (candidate, rows)))
+}
+/// Puts `held` back as the most recently paged. A reader for the same
+/// candidate already back, which a concurrent request that opened its own put
+/// there first, is replaced, so no candidate is ever kept twice; otherwise a
+/// full cache evicts its least recently paged. At most
+/// [`TRADE_READERS_KEPT`] comparisons. D-4434, D-4655.
+fn keep(kept: &mut Vec<Cached>, held: Cached) {
+    if let Some(at) = kept.iter().position(|other| other.same_as(&held)) {
+        kept.remove(at);
+    } else if kept.len() >= TRADE_READERS_KEPT {
+        kept.remove(0);
     }
+    kept.push(held);
 }
 fn tier_json(tier: &Tier) -> Value {
     let rules = tier.rules;
@@ -703,9 +793,14 @@ mod tests {
             rank: 1,
             direction: Direction::Long,
         };
-        let mut slot = None;
+        let short = Key {
+            direction: Direction::Short,
+            ..key
+        };
+        let mut slot = Vec::new();
+        page_through(&mut slot, &root, &summary, short, 0, 16)?;
         page_through(&mut slot, &root, &summary, key, 0, 16)?;
-        assert!(slot.is_some(), "the first page caches its reader");
+        assert_eq!(slot.len(), 2, "each first page caches its reader");
 
         let directory = root
             .join("results/candidate-trades-v1")
@@ -728,10 +823,14 @@ mod tests {
             page_through(&mut slot, &root, &summary, key, 0, 16).is_err(),
             "the stale reader refuses the request that meets it"
         );
-        assert!(slot.is_none(), "and that refusal evicts it");
+        assert_eq!(slot.len(), 1, "and that refusal evicts it, and only it");
+        assert!(
+            slot.iter().all(|held| held.key == short),
+            "the other side's reader is not the one evicted"
+        );
         page_through(&mut slot, &root, &summary, key, 0, 16)
             .map_err(|why| format!("the next request must cold-open and answer: {why}"))?;
-        assert!(slot.is_some(), "the fresh reader is cached");
+        assert_eq!(slot.len(), 2, "the fresh reader is cached");
         std::fs::remove_dir_all(root).map_err(|why| why.to_string())?;
         Ok(())
     }
@@ -1122,33 +1221,185 @@ mod tests {
         Ok(())
     }
 
-    /// **The trade page keeps one reader, so a change of candidate re-reads
-    /// every one of its trades, and that is stated.** W1-api2-3, D-1444.
+    /// **The trade page keeps eight readers warm: switching among up to
+    /// eight candidates opens each once, the ninth evicts the least recently
+    /// paged, and the kept pages are the cold pages.** W1-api2-3, D-4434.
     #[test]
-    fn a_trade_pages_single_slot_and_cold_reread_are_stated() {
-        let api = include_str!("candidatejson.rs");
-        let cli = include_str!("../../cli/src/candidate_trades.rs");
-        assert!(body(api, "trade_page").contains("static CACHE: OnceLock<Mutex<Option<Cached>>>"));
-        let page = body(api, "page_through");
-        assert!(page.contains("|| held.key != key"));
-        assert!(
-            page.contains("TradeReader::open(root, summary, key, crate::detail::MAX_SCAN_BYTES)")
-        );
-        assert!(
-            cli.contains("for seq in 0..count {"),
-            "the cold open visits every row"
-        );
-        let bullet = crate::booleanjson::tests::d0951_bullet("W1-api2-3");
-        for word in [
-            "candidatejson::trade_page",
-            "single slot",
-            "TradeReader::open",
-            "O(trades of that candidate)",
-            "MAX_SCAN_BYTES",
-            "Alternating between two candidates",
-            "O(page)",
-        ] {
-            assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+    fn trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent() -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-kept-readers");
+        let _ = std::fs::remove_dir_all(&root);
+        // Five captures, two sides each: ten distinct candidates.
+        let mut wanted = Vec::with_capacity(10);
+        for n in 0..5_u8 {
+            let query = and_capture(&root, [0x90 + n; 32], true)?;
+            let asked = Asked::parse(&query)?;
+            let summary = candidate_trades::read_model(
+                &root,
+                asked.identity,
+                asked.attempt,
+                asked.model,
+                crate::detail::MAX_SCAN_BYTES,
+            )?
+            .ok_or("the capture is sealed")?;
+            for direction in [Direction::Long, Direction::Short] {
+                let key = Key {
+                    tier: 0,
+                    rank: 1,
+                    direction,
+                };
+                wanted.push((summary.clone(), key));
+            }
         }
+        let cold = || COLD_TRADE_READERS.with(std::cell::Cell::get);
+        let mut kept = Vec::new();
+        let mut page = |at: usize| -> Result<_, String> {
+            let (summary, key) = wanted.get(at).ok_or("premise: ten candidates")?;
+            let got = page_through(&mut kept, &root, summary, *key, 0, 16)?;
+            let fresh = TradeReader::open(&root, summary, *key, crate::detail::MAX_SCAN_BYTES)?
+                .candidate()
+                .clone();
+            assert_eq!(got.0, fresh, "a kept reader answers what a cold one does");
+            Ok(kept.len())
+        };
+
+        // Alternating between two candidates: two cold opens, not a hundred.
+        let start = cold();
+        for turn in 0..100 {
+            page(turn % 2)?;
+        }
+        assert_eq!(cold() - start, 2, "two candidates, two opens");
+
+        // Eight distinct candidates fit; revisiting them in any order is warm.
+        for at in 2..8 {
+            page(at)?;
+        }
+        assert_eq!(cold() - start, 8);
+        for at in [7, 0, 3, 5, 1, 6, 2, 4] {
+            assert_eq!(page(at)?, TRADE_READERS_KEPT, "never more than the cap");
+        }
+        assert_eq!(cold() - start, 8, "every revisit is warm");
+
+        // The ninth evicts the least recently paged (7, from the revisit).
+        assert_eq!(page(8)?, TRADE_READERS_KEPT);
+        assert_eq!(cold() - start, 9);
+        page(4)?;
+        assert_eq!(cold() - start, 9, "the most recent survived");
+        page(7)?;
+        assert_eq!(cold() - start, 10, "the least recent was evicted");
+        assert_eq!(page(9)?, TRADE_READERS_KEPT);
+        std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
+        Ok(())
+    }
+
+    /// **Two requests that cold-open one candidate at once leave one reader
+    /// kept, not two.** cand-2 D-2576 releases the lock across each open and
+    /// W1-api2-3 D-4434 keeps eight readers; D-4655 holds them together. Both
+    /// requests may open, and whichever puts back last replaces the other's,
+    /// so the eight slots never spend two on one candidate.
+    #[test]
+    fn a_reader_put_back_twice_for_one_candidate_is_kept_once() -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-kept-once");
+        let _ = std::fs::remove_dir_all(&root);
+        let query = and_capture(&root, [79; 32], true)?;
+        let asked = Asked::parse(&query)?;
+        let summary = candidate_trades::read_model(
+            &root,
+            asked.identity,
+            asked.attempt,
+            asked.model,
+            crate::detail::MAX_SCAN_BYTES,
+        )?
+        .ok_or("the capture is sealed")?;
+        let key = Key {
+            tier: 0,
+            rank: 1,
+            direction: Direction::Long,
+        };
+        let short = Key {
+            direction: Direction::Short,
+            ..key
+        };
+        let open = |key: Key| -> Result<Cached, String> {
+            Ok(Cached {
+                model: summary.model,
+                root: root.clone(),
+                identity: summary.identity,
+                attempt: summary.attempt,
+                digest: summary.digest,
+                key,
+                reader: TradeReader::open(&root, &summary, key, crate::detail::MAX_SCAN_BYTES)?,
+            })
+        };
+        let mut kept = Vec::new();
+        keep(&mut kept, open(short)?);
+        keep(&mut kept, open(key)?);
+        keep(&mut kept, open(key)?);
+        assert_eq!(kept.len(), 2, "the second put-back replaces the first");
+        assert_eq!(kept.iter().filter(|held| held.key == key).count(), 1);
+        assert_eq!(
+            kept.last().map(|held| held.key),
+            Some(key),
+            "and is the most recently paged"
+        );
+        assert!(
+            take_serving(&mut kept, &root, &summary, short).is_some(),
+            "the other candidate's reader was not the one replaced"
+        );
+        std::fs::remove_dir_all(root).map_err(|why| why.to_string())?;
+        Ok(())
+    }
+
+    /// What a kept trade reader saves: a warm page among eight kept readers
+    /// against a cold open of the same candidate. A measurement, run on
+    /// purpose; the numbers are in `docs/06-limits.md`. W1-api2-3, D-4434.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_trade_reader_warm_page_and_cold_open() -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-reader-latency");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut wanted = Vec::with_capacity(TRADE_READERS_KEPT);
+        for n in 0..4_u8 {
+            let query = and_capture(&root, [0xb0 + n; 32], true)?;
+            let asked = Asked::parse(&query)?;
+            let summary = candidate_trades::read_model(
+                &root,
+                asked.identity,
+                asked.attempt,
+                asked.model,
+                crate::detail::MAX_SCAN_BYTES,
+            )?
+            .ok_or("the capture is sealed")?;
+            for direction in [Direction::Long, Direction::Short] {
+                let key = Key {
+                    tier: 0,
+                    rank: 1,
+                    direction,
+                };
+                wanted.push((summary.clone(), key));
+            }
+        }
+        let mut kept = Vec::new();
+        let mut turn = 0_usize;
+        let warm = crate::latency::Timed::run(4_000, || {
+            let (summary, key) = wanted
+                .get(turn % wanted.len())
+                .ok_or("premise: eight candidates")?;
+            turn += 1;
+            page_through(&mut kept, &root, summary, *key, 0, 16).map(drop)
+        })?;
+        let (summary, key) = wanted.first().ok_or("premise: a candidate")?;
+        let cold = crate::latency::Timed::run(1_000, || {
+            TradeReader::open(&root, summary, *key, crate::detail::MAX_SCAN_BYTES).map(drop)
+        })?;
+        println!(
+            "{}",
+            warm.line("trade page, 8 readers kept, cycling all 8 (warm)")
+        );
+        println!(
+            "{}",
+            cold.line("TradeReader::open of a no-cell candidate (cold, fixed part)")
+        );
+        std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
+        Ok(())
     }
 }

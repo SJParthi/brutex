@@ -158,6 +158,26 @@ pub struct Ranked {
     pub(crate) redundant: u64,
     /// Whether every non-empty level had a successor that decided closure.
     pub(crate) closure_complete: bool,
+    /// Scored combinations REFUSED because a money total could not be held
+    /// exactly -- GAP16-26, D-4486. See [`Self::inexact`].
+    pub(crate) inexact: u64,
+}
+
+impl Ranked {
+    /// How many scored combinations were refused, by name, because a money
+    /// field reached 2^53 paisa, where an `f64` stops proving it holds the
+    /// exact integer -- GAP16-26, D-4486.
+    ///
+    /// They are in [`Self::considered`] and in neither [`Self::top`] nor
+    /// [`Self::closed_top`]: a rounded total would have been stored and printed
+    /// as though it were the sum, which is the fallback `CLAUDE.md` §4 bans.
+    /// `crate::report`'s FINDINGS block prints this count whenever it is not
+    /// zero. Zero on every series a price can produce; reaching it takes
+    /// totals past 90 lakh crore rupees.
+    #[must_use]
+    pub fn inexact(&self) -> u64 {
+        self.inexact
+    }
 }
 
 impl Default for Ranked {
@@ -169,6 +189,7 @@ impl Default for Ranked {
             lens: Lens::Detectability,
             redundant: 0,
             closure_complete: true,
+            inexact: 0,
         }
     }
 }
@@ -207,6 +228,7 @@ pub struct Accumulator {
     lens: Lens,
     redundant: u64,
     closure_complete: bool,
+    inexact: u64,
     held: Held,
 }
 
@@ -234,6 +256,7 @@ impl Accumulator {
             lens,
             redundant: 0,
             closure_complete: true,
+            inexact: 0,
             held,
         }
     }
@@ -270,7 +293,7 @@ impl Accumulator {
         if self.keep == 0 {
             return;
         }
-        match &mut self.held {
+        let inexact = match &mut self.held {
             Held::Detectability(heap) => offer_part::<Scored>(
                 heap,
                 &level.frequent,
@@ -307,7 +330,8 @@ impl Accumulator {
                 &redundant,
                 closure_known,
             ),
-        }
+        };
+        self.inexact = self.inexact.saturating_add(inexact);
     }
 
     /// Finish the ranking, strongest first, with the full considered count.
@@ -326,6 +350,7 @@ impl Accumulator {
             lens: self.lens,
             redundant: self.redundant,
             closure_complete: self.closure_complete,
+            inexact: self.inexact,
         }
     }
 }
@@ -623,11 +648,18 @@ fn admit<K: Ord>(heap: &mut Heap<K>, keep: usize, scored: K) {
     }
 }
 
-/// The best `keep` of one contiguous run of itemsets, scored.
+/// The best `keep` of one contiguous run of itemsets, scored, and how many
+/// were refused because a money total was not exact.
 ///
 /// One bounded heap, exactly as the whole walk used to be. This is the unit of
 /// parallel work: it touches nothing outside the slice it was handed, so any
 /// number of these run at once without coordination.
+///
+/// **A row whose money is not exact is refused, not ranked** (GAP16-26,
+/// D-4486). Its `Edge` carries a total at or past 2^53 paisa, which the `f64`
+/// may have rounded; ranking it would store and print that rounding as the
+/// sum. It is counted, and the count reaches the report through
+/// [`Ranked::inexact`].
 fn top_of<K: Ranked1>(
     part: &[engine::Itemset],
     column: &Column,
@@ -635,7 +667,7 @@ fn top_of<K: Ranked1>(
     keep: usize,
     redundant: &std::collections::HashSet<ConditionMask>,
     closure_known: bool,
-) -> Vec<Marked<K>> {
+) -> (Vec<Marked<K>>, u64) {
     // `keep.min(part.len())` AND NOT `keep`, WHICH WAS A REAL COST.
     //
     // A chunk cannot yield more rows than it holds, so reserving `keep` on a
@@ -650,7 +682,13 @@ fn top_of<K: Ranked1>(
     // rows, against the 1.9 MB the single heap this replaced would have used
     // (widths pinned by `the_header_widths_and_peak_are_the_measured_type_widths`).
     let mut heap: Heap<Marked<K>> = Heap::with_capacity(keep.min(part.len()));
+    let mut inexact = 0_u64;
     for itemset in part {
+        let edge = edge(column, forward, &itemset.mask);
+        if !edge.money_is_exact() {
+            inexact = inexact.saturating_add(1);
+            continue;
+        }
         admit(
             &mut heap,
             keep,
@@ -658,13 +696,16 @@ fn top_of<K: Ranked1>(
                 ranked: K::wrap(Scored {
                     mask: itemset.mask,
                     hits: itemset.hits,
-                    edge: edge(column, forward, &itemset.mask),
+                    edge,
                 }),
                 closed: closure_known && !redundant.contains(&itemset.mask),
             },
         );
     }
-    heap.into_iter().map(|core::cmp::Reverse(s)| s).collect()
+    (
+        heap.into_iter().map(|core::cmp::Reverse(s)| s).collect(),
+        inexact,
+    )
 }
 
 /// How many itemsets one parallel chunk carries.
@@ -691,6 +732,8 @@ fn chunk_size(total: usize) -> usize {
 }
 
 /// Score one frontier in parallel and merge its bounded chunk heaps into `heap`.
+///
+/// Returns how many of the frontier's rows were refused as inexact money.
 fn offer_part<K: Ranked1 + Send>(
     heap: &mut Heap<Marked<K>>,
     itemsets: &[engine::Itemset],
@@ -699,15 +742,20 @@ fn offer_part<K: Ranked1 + Send>(
     keep: usize,
     redundant: &std::collections::HashSet<ConditionMask>,
     closure_known: bool,
-) {
+) -> u64 {
     let width = chunk_size(itemsets.len());
-    let parts: Vec<Vec<Marked<K>>> = itemsets
+    let parts: Vec<(Vec<Marked<K>>, u64)> = itemsets
         .par_chunks(width)
         .map(|part| top_of::<K>(part, column, forward, keep, redundant, closure_known))
         .collect();
-    for scored in parts.into_iter().flatten() {
-        admit(heap, keep, scored);
+    let mut inexact = 0_u64;
+    for (scored, refused) in parts {
+        inexact = inexact.saturating_add(refused);
+        for one in scored {
+            admit(heap, keep, one);
+        }
     }
+    inexact
 }
 
 /// Drain one bounded heap into the public best-first order.
@@ -952,6 +1000,128 @@ mod tests {
         let (a, b) = (scored(f64::NAN, 1), scored(f64::NAN, 2));
         assert_ne!(a.cmp(&b), core::cmp::Ordering::Equal);
         assert_eq!(a.cmp(&a), core::cmp::Ordering::Equal);
+    }
+
+    /// The count a FINDINGS block prints on its `REFUSED, money inexact` row.
+    fn refused_count(text: &str) -> Option<String> {
+        text.lines()
+            .find(|line| line.trim_start().starts_with("REFUSED, money inexact"))
+            .and_then(|line| line.split_whitespace().nth(3))
+            .map(str::to_owned)
+    }
+
+    /// The synthetic sessions with every price multiplied by `2^shift`.
+    fn scaled_sessions(shift: u32) -> Vec<indicators::Candle> {
+        synthetic::sessions(8)
+            .iter()
+            .map(|b| {
+                let s = |p: i64| p.saturating_mul(1_i64 << shift);
+                indicators::Candle::new(
+                    b.ts_micros,
+                    s(b.open),
+                    s(b.high),
+                    s(b.low),
+                    s(b.close),
+                    b.volume,
+                    indicators::OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    /// GAP16-26, D-4486: a row whose money total reached 2^53 paisa is REFUSED
+    /// by name, never ranked with a rounded total, and every other row ranks
+    /// exactly as it did.
+    ///
+    /// The fixture is FOUND, not assumed: the smallest power-of-two price
+    /// scale at which some frequent rows' totals pass 2^53 and others' do not,
+    /// so the test proves both halves on one sweep. Under every lens, with
+    /// `keep` large enough to keep every exact row: the refused count is
+    /// exactly the rows `edge` calls inexact, no kept row is inexact, every
+    /// exact row is kept, the incremental ranker agrees, and the findings
+    /// report names the count -- and a report with nothing refused does not
+    /// print the line at all, so ordinary reports are byte-identical.
+    #[test]
+    fn a_row_whose_money_is_not_exact_is_refused_by_name() {
+        let mut found = None;
+        for shift in 30..=46 {
+            let bars = scaled_sessions(shift);
+            let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+                .run(&bars, &mut evaluator());
+            let column = Column::build(&bars, &mut evaluator());
+            let f = forward(&bars, &column, Horizon::DEFAULT);
+            let inexact: Vec<ConditionMask> = out
+                .sweep
+                .all_frequent()
+                .filter(|i| !crate::outcome::edge(&column, &f, &i.mask).money_is_exact())
+                .map(|i| i.mask)
+                .collect();
+            let all = out.sweep.all_frequent().count();
+            if !inexact.is_empty() && inexact.len() < all {
+                found = Some((shift, out, column, f, inexact, all));
+                break;
+            }
+        }
+        let (shift, out, column, f, inexact, all) =
+            found.expect("some price scale splits the frequent rows at 2^53");
+        let refused = u64::try_from(inexact.len()).expect("fits");
+        for lens in [
+            Lens::Detectability,
+            Lens::Payoff,
+            Lens::Path,
+            Lens::Asymmetry,
+        ] {
+            let r = rank_by(&out.sweep, &column, &f, all, lens);
+            assert_eq!(r.inexact(), refused, "lens {lens:?}");
+            assert_eq!(r.considered, u64::try_from(all).expect("fits"));
+            assert_eq!(r.top.len() + inexact.len(), all, "every exact row kept");
+            assert!(r.top.iter().all(|s| s.edge.money_is_exact()));
+            assert!(r.top.iter().all(|s| !inexact.contains(&s.mask)));
+
+            let mut incremental = Accumulator::new(all, lens);
+            for (index, level) in out.sweep.levels.iter().enumerate() {
+                incremental.offer_retired(
+                    level,
+                    out.sweep.levels.get(index.saturating_add(1)),
+                    &column,
+                    &f,
+                );
+            }
+            let got = incremental.finish();
+            assert_eq!(got.inexact(), refused);
+            assert_eq!(got.top, r.top);
+
+            let text = crate::report::render_findings(&r, &out.sweep);
+            assert_eq!(refused_count(&text), Some(refused.to_string()), "{text}");
+            assert!(text.contains("2^53 paisa"), "{text}");
+        }
+
+        // The streamed path `cli` runs reports the same refusal, through the
+        // renderer `cli` prints.
+        let run = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000)).run_ranked(
+            &scaled_sessions(shift),
+            &mut evaluator(),
+            Horizon::DEFAULT,
+            all,
+        );
+        assert_eq!(run.ranked.inexact(), refused);
+        let text = crate::report::render_ranked_findings(&run.ranked, &run.outcome);
+        assert_eq!(refused_count(&text), Some(refused.to_string()), "{text}");
+
+        // Keeping nothing scores nothing, so it refuses nothing.
+        assert_eq!(rank(&out.sweep, &column, &f, 0).inexact(), 0);
+
+        // An ordinary series: nothing refused, and no line printed.
+        let bars = synthetic::sessions(8);
+        let plain = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let plain_column = Column::build(&bars, &mut evaluator());
+        let plain_f = forward(&bars, &plain_column, Horizon::DEFAULT);
+        let r = rank(&plain.sweep, &plain_column, &plain_f, 25);
+        assert_eq!(r.inexact(), 0);
+        assert!(!r.top.is_empty());
+        let text = crate::report::render_findings(&r, &plain.sweep);
+        assert!(!text.contains("REFUSED, money inexact"), "{text}");
     }
 
     #[test]

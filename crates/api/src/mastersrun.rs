@@ -29,6 +29,13 @@
 //! reports by comparing each master's mtime against the moment of the current
 //! parse. This module said "there is no reload path" for several commits after
 //! the reload landed (Z1-slice13-F1, D-1762).
+//!
+//! Since D-4438 (so1-5) `reload` calls `Site::reparse_if_moved`: a refresh
+//! whose masters all keep the stamps the held parse was taken under is
+//! answered without a parse, because `pull::masters::land` rewrites only a
+//! master whose bytes changed. A parse that does run runs on the blocking
+//! pool, not on a runtime worker. Measured in `docs/06-limits.md`'s D-4438
+//! row.
 
 use std::path::Path;
 
@@ -417,7 +424,11 @@ async fn credentialed_leg<P: masters::Pause>(
 ///
 /// Whatever `Site::reparse` refused with, already an operator-readable sentence.
 pub(crate) fn reload(site: &crate::server::Loaded, dir: &Path) -> Result<String, String> {
-    let reloaded = site.reparse(dir);
+    // SKIPPED WHEN NO MASTER MOVED (so1-5, D-4438): `land` rewrites only a
+    // master whose bytes changed, so unchanged stamps are unchanged input.
+    let before = site.universe().generation;
+    let reloaded = site.reparse_if_moved(dir);
+    let moved = site.universe().generation != before;
     let _ = telemetry::emit_if!(
         if reloaded.is_ok() {
             telemetry::Level::Info
@@ -425,9 +436,10 @@ pub(crate) fn reload(site: &crate::server::Loaded, dir: &Path) -> Result<String,
             telemetry::Level::Error
         },
         "api.masters.reload",
-        match reloaded {
-            Ok(_) => "the universe was re-parsed and every page now answers from it",
-            Err(_) => "the universe could NOT be re-parsed, so the previous one still stands",
+        match (&reloaded, moved) {
+            (Ok(_), true) => "the universe was re-parsed and every page now answers from it",
+            (Ok(_), false) => "no master moved, so the universe already answering was kept unparsed",
+            (Err(_), _) => "the universe could NOT be re-parsed, so the previous one still stands",
         },
         "detail" => telemetry::Value::Str(match reloaded {
             Ok(ref notes) | Err(ref notes) => notes,
@@ -719,7 +731,20 @@ async fn refresh_work(
         .map(|source| crate::render::json_string(source.file))
         .collect();
 
-    let reloaded = reload(&site, &dir);
+    // OFF THE ASYNC WORKERS (so1-5, D-4438): a parse reads every master whole
+    // and rebuilds the universe, which held a runtime worker for its length.
+    // The `REFRESH` lock above is still held, so refreshes stay one at a time.
+    let reloaded = {
+        let (site, dir) = (crate::server::Loaded::clone(&site), dir.clone());
+        tokio::task::spawn_blocking(move || reload(&site, &dir))
+            .await
+            .unwrap_or_else(|why| {
+                Err(format!(
+                    "the master reparse task could not be joined ({why}); whether the \
+                     universe was replaced is unknown, so read /masters/status.json"
+                ))
+            })
+    };
 
     let status = if attempted_landed && complete && reloaded.is_ok() {
         axum::http::StatusCode::OK

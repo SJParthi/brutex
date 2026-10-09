@@ -194,6 +194,19 @@ pub struct FoldResult {
     /// `1_000_000` halted at k=9 and kept **318,862**. A tighter budget produced
     /// 226x more work and a worse answer, and said nothing.
     pub halted: Option<engine::Halt>,
+    /// The training sweep's closure was NOT proved:
+    /// [`crate::closed::Closed::closure_complete`] was `false`, so some of the
+    /// [`Self::considered`] candidates on its deepest two levels may be counted
+    /// and priced as closed when an equal-support superset exists. `false`, the
+    /// default, when every set was checked against a complete successor level.
+    ///
+    /// Until D-4503 (audit W3-runner1-3, c4a-7) the walk-forward called
+    /// `closed()` and read `kept` without this flag, and the audit row for a
+    /// halted fold said only that it "ranked a truncated candidate set". It is
+    /// read from the flag at the call site rather than inferred from
+    /// [`Self::halted`]: the two agree today because `closed` derives one from
+    /// the other, and the audit labels the fold from this field.
+    pub closure_unproved: bool,
     /// The exit variant chosen IN SAMPLE.
     ///
     /// All four rungs `None` means the no-levels baseline won. Chosen on the
@@ -351,6 +364,12 @@ pub struct FoldProgress {
     pub test_bars: usize,
     /// Distinct closed candidates the training sweep produced, every one of
     /// which the fold priced.
+    ///
+    /// **Amended by D-4503 (audit c4a-7):** closed only when the fold's
+    /// closure was proved. On a fold whose sweep halted this counts
+    /// `closed().kept` over a partial top level, which may include sets that
+    /// are not closed; [`FoldResult::closure_unproved`] says which folds, and
+    /// this hook does not carry it because `cli` builds this struct by name.
     pub candidates: usize,
     /// Whether the fold chose a candidate at all.
     pub decided: bool,
@@ -452,6 +471,14 @@ impl Validated {
     #[must_use]
     pub fn halted_folds(&self) -> usize {
         self.folds.iter().filter(|f| f.halted.is_some()).count()
+    }
+
+    /// How many folds priced a candidate set whose closure was not proved
+    /// ([`FoldResult::closure_unproved`], D-4503). O(folds), as
+    /// [`Self::halted_folds`] is, and off every per-bar and per-candidate path.
+    #[must_use]
+    pub fn closure_unproved_folds(&self) -> usize {
+        self.folds.iter().filter(|f| f.closure_unproved).count()
     }
 }
 
@@ -3082,6 +3109,9 @@ fn walk_forward_exact_grid_v4(
             considered: considered_masks,
             priced: considered_masks,
             halted: None,
+            // The search above refused a halted or incomplete sweep, and
+            // the flag is still read rather than assumed (D-4503).
+            closure_unproved: !closed.closure_complete,
             chosen_exit: choice.map(|value| value.coordinate),
             chosen_exit_total: choice.map(|value| value.in_sample_pessimistic),
             out_of_sample_exit: choice.map(|value| value.out_of_sample_pessimistic),
@@ -5323,6 +5353,7 @@ fn walk_forward_core(
             considered,
             priced,
             halted: swept.sweep.halted,
+            closure_unproved: !closed.closure_complete,
             chosen,
             chosen_exit,
             chosen_exit_total,
@@ -5491,7 +5522,7 @@ pub(crate) mod tests {
     use crate::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v2,
+        printed_ohlcv_cost_model_id_v3,
     };
     use crate::outcome::Horizon;
     use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -5619,7 +5650,7 @@ pub(crate) mod tests {
             ratios,
             32,
             ExitGridSelectorV1::PessimisticTotal,
-            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -7571,6 +7602,68 @@ pub(crate) mod tests {
             "a walk that went extinct on its own must not report a halt"
         );
         assert_eq!(complete.folds.len(), 3, "the control walk must have folds");
+    }
+
+    /// D-4503 (audit W3-runner1-3, c4a-7). Each fold carries whether its
+    /// candidates' closure was proved, read from `closed()` and not assumed,
+    /// and the audit prints the count and marks each unproved fold's candidate
+    /// count with `?`. On the same starved and roomy fixtures as the test
+    /// above: the unproved folds are exactly the halted ones, some but not all;
+    /// the extinct walk has none, prints a zero and marks nothing.
+    #[test]
+    fn a_fold_whose_closure_is_unproved_is_labelled_and_counted() {
+        let bars = crate::synthetic::sessions(12);
+        let starved = Sweeper::new(Ladder::with_min_hits(120).with_ceiling(4));
+        let truncated = walk_forward(&bars, h(15), 3, Direction::Long, &starved, evaluator);
+        for fold in &truncated.folds {
+            assert_eq!(fold.closure_unproved, fold.halted.is_some(), "{fold:?}");
+        }
+        assert_eq!(truncated.closure_unproved_folds(), truncated.halted_folds());
+        assert!(truncated.closure_unproved_folds() > 0);
+        assert!(truncated.closure_unproved_folds() < truncated.folds.len());
+        let mut out = String::new();
+        crate::audit::walk_forward(&mut out, &truncated);
+        let unproved = truncated.closure_unproved_folds();
+        assert!(
+            out.contains("whose closure is UNPROVED")
+                && out.contains(
+                    "marked ? below -- their candidates may include sets that are not closed"
+                ),
+            "{out}"
+        );
+        let line = out
+            .lines()
+            .filter(|line| line.contains("whose closure is UNPROVED"))
+            .collect::<Vec<_>>();
+        assert_eq!(line.len(), 1, "{out}");
+        assert!(
+            line.iter()
+                .flat_map(|line| line.split_whitespace())
+                .any(|token| token == unproved.to_string()),
+            "the row carries the count: {out}"
+        );
+        for fold in &truncated.folds {
+            let marked = format!("{}?", fold.considered);
+            assert_eq!(
+                out.contains(&marked),
+                fold.closure_unproved,
+                "{marked}: {out}"
+            );
+        }
+
+        let roomy = Sweeper::new(Ladder::with_min_hits(1200).with_ceiling(20_000));
+        let complete = walk_forward(&bars, h(15), 3, Direction::Long, &roomy, evaluator);
+        assert!(complete.folds.iter().all(|fold| !fold.closure_unproved));
+        assert_eq!(complete.closure_unproved_folds(), 0);
+        let mut out = String::new();
+        crate::audit::walk_forward(&mut out, &complete);
+        assert!(
+            out.contains("every fold's candidates were checked against a complete level above"),
+            "{out}"
+        );
+        for fold in &complete.folds {
+            assert!(!out.contains(&format!("{}?", fold.considered)), "{out}");
+        }
     }
 
     #[test]

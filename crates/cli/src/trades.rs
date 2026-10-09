@@ -479,7 +479,8 @@ impl Trades {
     /// cannot be opened, or an existing file is not this format at this version.
     pub fn open(root: &Path) -> Result<Self, Refusal> {
         let dir = root.join("results");
-        std::fs::create_dir_all(&dir)
+        // Every directory this makes is made durable (sobs-12, D-4461).
+        crate::fixed_tail::create_dir_all_durable(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
         let file = OpenOptions::new()
@@ -533,6 +534,10 @@ impl Trades {
             .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
             .len();
         if len == 0 {
+            // The new name is made durable BEFORE the header is written
+            // (sobs-12, D-4461): a kill between the two leaves an empty file,
+            // which the next writer treats as new and barriers again.
+            crate::fixed_tail::sync_parent(&self.path)?;
             return write_fresh_header(&mut self.file, &self.path);
         }
         check_header(&mut self.file, &self.path, len)?;
@@ -1302,7 +1307,12 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
 
 /// Indexes one whole row, recording its first integrity failure rather than
 /// refusing. The cold walk (`index_of`) and a warm `Trades::refresh` both call
-/// this, so a refreshed handle indexes exactly what a fresh open would.
+/// this, so a refreshed handle indexes each NEW row exactly as a fresh open
+/// would. It is not the same disk state a fresh open sees: a row indexed once
+/// is never read again, so an earlier row rewritten in place after this handle
+/// indexed it is invisible to the held handle until it reopens, while a fresh
+/// open re-reads it and refuses every write (r64-1, D-4469;
+/// `a_held_writer_does_not_reread_a_row_it_indexed_and_a_fresh_open_does`).
 fn index_row(
     blocks: &mut std::collections::HashMap<[u8; 32], Block>,
     write_refusal: &mut Option<Refusal>,
@@ -2260,6 +2270,104 @@ mod tests {
         assert!(why.contains("16 bytes"), "hard ceiling: {why}");
         assert!(why.contains("No partial chosen-trade index"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// r64-1, D-4469: what a HELD writer re-reads. `refresh` and the append
+    /// path read only rows appended since the handle last read, so a row it
+    /// already indexed and something else then rewrote in place is not seen by
+    /// it; a fresh open re-reads every row and refuses to append.
+    /// `cli::with_cached_handle` holds exactly this handle across recorded
+    /// runs, so this is the narrowing D-1777's "same disk state a fresh open
+    /// would" sentence did not state.
+    #[test]
+    fn a_held_writer_does_not_reread_a_row_it_indexed_and_a_fresh_open_does() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-held-prefix-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut held = Trades::open(&dir).expect("opens");
+        assert_eq!(held.append_all(&[row([1; 32], 0)]).expect("first run"), 1);
+
+        // A payload byte of row 0, rewritten in place: same length, bad seal.
+        let path = Trades::path(&dir);
+        let mut bytes = std::fs::read(&path).expect("the ledger");
+        bytes[16 + 40] ^= 0xff;
+        let mut raw = [0_u8; STRIDE_BYTES];
+        raw.copy_from_slice(&bytes[16..16 + STRIDE_BYTES]);
+        assert!(!Row::seal_matches(&raw), "the flipped byte is sealed");
+        std::fs::write(&path, &bytes).expect("an in-place rewrite");
+
+        held.refresh()
+            .expect("the held handle sees no new row to read");
+        assert_eq!(
+            held.append_all(&[row([2; 32], 0)])
+                .expect("the held handle never re-reads row 0"),
+            1
+        );
+
+        let mut fresh =
+            Trades::open(&dir).expect("a fresh open indexes damage, it does not refuse");
+        let why = fresh
+            .append_all(&[row([3; 32], 0)])
+            .expect_err("a fresh open re-reads row 0 and refuses every write");
+        assert!(
+            why.contains("whole chosen-trade row 0 whose integrity seal failed"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sobs-12, D-4461: the chosen-trade writer makes the `results/` directory
+    /// it creates durable, and the new file's name durable BEFORE its header is
+    /// written. Each failed directory barrier is refused by name, and a retry
+    /// after one completes the file.
+    #[test]
+    fn a_new_trade_files_directory_and_name_are_made_durable_and_a_failed_barrier_is_named() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let r = std::env::temp_dir().join(format!(
+            "brutex-trades-durable-names-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&r);
+        std::fs::create_dir_all(&r).expect("a temp root");
+        let dir = r.join("results");
+        let path = Trades::path(&r);
+
+        let armed = Armed::arm(&r.display().to_string(), Kind::DirectorySync);
+        let why = Trades::open(&r)
+            .err()
+            .expect("the barrier on the root refuses");
+        assert!(
+            why.contains("the results directory could not be made")
+                && why.contains("injected directory sync fault"),
+            "{why}"
+        );
+        drop(armed);
+        assert!(
+            dir.is_dir() && !path.exists(),
+            "no file before its directory is durable"
+        );
+
+        let armed = Armed::arm(&dir.display().to_string(), Kind::DirectorySync);
+        let why = Trades::open(&r)
+            .err()
+            .expect("the barrier on results/ refuses");
+        assert!(why.contains("injected directory sync fault"), "{why}");
+        drop(armed);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the file was created")
+                .len(),
+            0,
+            "no header is written before its name is durable"
+        );
+
+        drop(Trades::open(&r).expect("a retry completes the file"));
+        assert_eq!(std::fs::metadata(&path).expect("the trade file").len(), 16);
+        let _ = std::fs::remove_dir_all(&r);
     }
 }
 

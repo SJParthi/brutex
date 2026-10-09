@@ -70,6 +70,13 @@ jobs:
           #     is a second language in a tracked file outside web/ (CLAUDE.md
           #     section 2); such a program lives under web/ and is run by path.
           #     D-2342 widens the forms; awk is a pinned ratchet (06-limits).
+          #   * the stream editor's name on any line that is not a comment:
+          #     every invocation runs a program (D-4493).
+          #   * an action that is not one of the seven `ACTIONS` pins in
+          #     .github/source_scan.rs, a pin without its tag comment, an input
+          #     its pin does not admit, `actions/github-script` or any input or
+          #     `INPUT_` variable that carries a program (D-4491), and setup-node
+          #     or a JavaScript runtime outside this file's `web` job (D-4494).
           # Every tracked .yml under .github/, not only workflows/ (D-2341).
           # An empty listing is refused.
           work=$(mktemp -d)
@@ -181,7 +188,9 @@ jobs:
           #
           #   1. `source_scan content`: outside web/, no NUL byte, nothing that
           #      is not UTF-8, no `.rs` opening with a shebang, and no browser
-          #      code in a `.html` or `.css`. Also no NAME holding a control
+          #      code in a `.html` or `.css`: no `<script>` of any kind, frame,
+          #      `srcdoc`, script or `data:` URL, read as gate 1f reads them
+          #      (D-4490). Also no NAME holding a control
           #      character, a non-ASCII byte, `"` or `\` (git quotes those in
           #      every listing read without `-z`), and no `mutants::skip`
           #      token in crate code: `#[cfg_attr(miri, mutants::skip)]`
@@ -324,13 +333,26 @@ jobs:
           # of failure as a permissive one accepting an illegal file: the gate
           # stopped describing the rule it was written to enforce.
           #
-          # `.claude/` is the run configuration IntelliJ and the preview tools
-          # read. It is operator tooling, not source, and it is not shipped.
+          # `.claude/` is the run configuration the preview tools read (not
+          # IntelliJ; see gate 1). It is operator tooling, not source, and it
+          # is not shipped.
           # The listing first: `git ls-files ... | grep || true` swallowed a git
           # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
           # A git that fails stops the step, and an empty listing is refused.
           # D-2311: the rule is `gate_1b` in .github/gates_tree.rs.
+          #
+          # D-4492 (srust-3): `.claude/launch.json` is the only tracked path
+          # under any `.claude` directory outside web/, and it is READ, not
+          # matched by extension: one JSON document, no key twice, exactly the
+          # two configurations docs/07-plan.md section 0 names, each program and
+          # argument list pinned -- `cargo run --release -p api -- serve` and
+          # `npm --prefix web run dev` -- so no shell or other interpreter is
+          # handed a program there. The reader is `launch` in .github/gh_json.rs,
+          # whose tests gate 0 ran.
           "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1b
+          gj="${RUNNER_TEMP:-/tmp}/gh-json"
+          rustc --edition=2024 -D warnings .github/gh_json.rs -o "$gj"
+          "$gj" launch < .claude/launch.json
 
       - name: Gate 1g — no tracked configuration runs a program
         run: |
@@ -426,6 +448,16 @@ jobs:
           # `cookie`/`write`/`body`, `window.location`, `window.open(`,
           # `addEventListener`, `innerHTML`, `outerHTML`, `XMLHttpRequest`,
           # `await fetch(`, `eval(`).
+          #
+          # D-4490 (srust-1): a `<script src>` used to pass whatever its value,
+          # so `src="data:text/javascript,..."` and `<iframe srcdoc=...>`
+          # passed here and in gate 1. Tags are now read as the HTML tokenizer
+          # reads them (a `>` inside quotes does not end one), every attribute
+          # value is decoded (`&#106;`, `&colon;`, `&Tab;`), and refused are: a
+          # script or `data:` URL, `srcdoc`, a frame or plug-in element,
+          # `<base>`, a bare `fetch(`, and every `<script>` but the two the
+          # decisions license, `/typeahead.js` and `/masters.js`, external,
+          # `defer` and empty. A tracked `.html` outside web/ is licensed none.
           #
           # WHAT IT CANNOT SEE: markup assembled at run time from pieces that
           # are not one literal or one `concat!` -- `format!("<scr{}", "ipt>")`.
@@ -1583,6 +1615,7 @@ jobs:
           #       the only channel in existence at that instant, which is the same
           #       argument telemetry/src/sink.rs carries below.
           #   pull/src/http.rs   eprintln! 6
+          #       r53-1 (D-4413): now 0, written through `telemetry::stderr_line`.
           #       Bar-refusal notices, every one of which ALSO emits a
           #       `pull.decode` event immediately above the print -- verified
           #       site by site, not assumed. 2 -> 6 on 2026-08-29 because the
@@ -1601,6 +1634,8 @@ jobs:
           #   telemetry/src/sink.rs  eprintln! 1
           #       The sink's own last-resort notice. It is the thing that failed,
           #       so it is the one place stderr is the only channel left.
+          #       r53-1 (D-4413): it now goes through `telemetry::stderr_line`, so a
+          #       closed stderr cannot abort the process; the count is 0 here.
           #   telemetry/src/record.rs eprintln! 1 -- REMOVED (D-1109). The one
           #       "eprintln!" in that file is inside a test's assertion message,
           #       a string literal; it prints nothing. The line count read it as a
@@ -1729,16 +1764,19 @@ jobs:
           #     Folded with D-1450.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
-          api/src/main.rs:eprintln!:2
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
-          cli/src/lib.rs:eprintln!:3
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
-          greeks/src/solver.rs:println!:7
-          pull/src/http.rs:eprintln!:6
-          telemetry/src/sink.rs:eprintln!:1'
+          greeks/src/solver.rs:println!:7'
+          # pull/src/http.rs (6), pull/src/csv.rs (1) and telemetry/src/sink.rs
+          # (1) LEFT THIS LIST (r53-1, D-4413):
+          # `eprintln!` panics on a closed stderr and the release profile aborts,
+          # so each now writes through `telemetry::stderr_line`, which counts a
+          # refused line and logs the first. Its one handle is in clause A2.
+          # pull/src/masters.rs's one had already gone with its skip (D-3128,
+          # D-4647).
           # Test-only measurements; production audit/recovery notices also emit.
           #
           # THREE MORE, one kind (D-0695): the STDOUT PROOF LINE of a test's
@@ -1765,7 +1803,6 @@ jobs:
           cli/src/boolean_candidate_tests.rs:eprintln!:2
           cli/src/index_stop_qualification_tests.rs:eprintln!:2
           cli/src/index_stop_tests.rs:println!:1
-          cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
           # TWO MORE, one kind (D-1849): the result lines of two IGNORED
@@ -1773,16 +1810,17 @@ jobs:
           # `--ignored --nocapture`; test-only, no production path.
           declared="$declared cli/src/lib.rs:println!:1
           cli/src/audited_stored_tests.rs:println!:1"
-          # ONE MORE (two until D-3128), one kind (D-1933): the stderr half of a
-          # degraded decode,
+          # NONE NOW (two until D-3128, one until D-4413), one kind (D-1933):
+          # the stderr half of a degraded decode,
           # each written beside a `telemetry::emit` of the same counts.
           # `pull/src/csv.rs` names unreadable and negative volume and open
           # interest a CSV decode stored or skipped (CE-57, D-2681). It prints
           # only when something was degraded, so a clean run prints nothing.
           # `pull/src/masters.rs` printed the NSE index entries it skipped
           # (CE-58, D-2682) until D-3158 refused them instead; the print went
-          # with the skip (D-3128).
-          declared="$declared pull/src/csv.rs:eprintln!:1"
+          # with the skip (D-3128). csv.rs's line LEFT THE LIST with r53-1
+          # (D-4413): it now writes through `telemetry::stderr_line`, declared
+          # once in clause A2 (D-4647).
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -1798,8 +1836,19 @@ jobs:
           # cli/src/main.rs names `stdout()` and `stderr()` once each (v53-2,
           # D-1484): its three prints became one `cli::deliver` write, which
           # says a failed stdout on stderr and emits `cli.output`.
-          declared_handles='api/src/server.rs:handle:3
-          cli/src/main.rs:handle:2'
+          # telemetry/src/say.rs names `stderr()` once: `stderr_line`, the
+          # writer that cannot panic, through which pull's decode notices and
+          # the sink's own last-resort notice go (r53-1, D-4413).
+          # api/src/main.rs and cli/src/lib.rs name `stderr()` once each (r53-1,
+          # D-4463): their seven `eprintln!` -- api main 2, cli lib 3, cli
+          # operation_audit 2 -- PANICKED on a closed stderr and now go through
+          # one `tell` per crate, which writes and drops a failed line. The
+          # diagnostics among them still emit their event beside it.
+          declared_handles='api/src/main.rs:handle:1
+          api/src/server.rs:handle:3
+          cli/src/lib.rs:handle:1
+          cli/src/main.rs:handle:2
+          telemetry/src/say.rs:handle:1'
           # Both sides are compared as sorted lists of non-empty words, so an
           # empty declaration and an empty measurement are equal on the healthy
           # case (the shell had to normalise a blank `printf` line by hand).
@@ -3364,8 +3413,13 @@ jobs:
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
           git ls-files -z -- 'crates/*.rs' > "$work/sources.z"
+          # D-3511: the `FILE:LINE:name` -> `FILE<TAB>name` reading is gate
+          # 10's `path-declarations`, not an inline sed program.
+          # D-4493 (srust-4): `FILE:LINE:name` becomes `FILE<TAB>name` through
+          # the Rust tool gate 10 already uses, not a sed program; gate 0 now
+          # refuses sed in any workflow. Gate 25 above built the ledger tool.
           xargs -0 -r "$scan" fns < "$work/sources.z" \
-            | sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' > "$work/path-fns"
+            | "${RUNNER_TEMP:-/tmp}/gates-ledger" path-declarations > "$work/path-fns"
           git ls-files -z > "$work/tracked.z"
           "$scan" modules "$work/tracked.z" > "$work/modules"
           xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"
@@ -4107,12 +4161,21 @@ jobs:
           # not the same measurement and were never going to agree — a
           # crate-scoped run compiles the test module differently. §54 now says
           # which one it is quoting.
+          #
+          # D-4654: the audit's fix integration added `loss.rs`, `say.rs` and
+          # `scope.rs` and new tests in `record.rs` and `sink.rs`, every new
+          # uncovered line inside a test module: `panic!` arms of failing-only
+          # asserts and methods of test doubles their test never calls. 32 -> 47.
+          # §54's 2026-10-09 follow-up names each line.
           declared='
           clock.rs 1
           level.rs 1
           lib.rs 6
-          record.rs 1
-          sink.rs 20
+          loss.rs 5
+          record.rs 3
+          say.rs 3
+          scope.rs 2
+          sink.rs 23
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

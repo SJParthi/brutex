@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
 import { fetchWithBusyRetry } from '../saved-backtest/requests.js';
 import { validateLedgerPayload } from '../src/lib/comparison.js';
+import * as refusal from '../src/lib/refusal.js';
 
 const page = readFileSync(new URL('../src/routes/backtest/+page.svelte', import.meta.url), 'utf8');
 const ast = parse(page);
@@ -25,7 +26,9 @@ const reply = (status, body = unavailable(), headers = {}) => new Response(JSON.
 /** @param {(url:string,options:any)=>Promise<Response>} request
  * @param {(ms:number,signal:AbortSignal)=>Promise<any>} [wait] */
 function mounted(request, wait = async () => {}) {
-  const create = new Function('ask_', 'fetchWithBusyRetry', 'validateLedgerPayload', `
+  // The refusal helpers the loader names (F2, D-3220), so a refused read
+  // reaches the page's sentence rather than a ReferenceError caught as one.
+  const create = new Function('ask_', 'fetchWithBusyRetry', 'validateLedgerPayload', ...Object.keys(refusal), `
     let ledgerSeq = 0, ledgerAbort = null;
     let load = { phase: 'failed', body: null, why: 'older failure' };
     const LIMIT = 500;
@@ -33,7 +36,7 @@ function mounted(request, wait = async () => {}) {
     return { fetchLedger, cancelLedger, state: () => load, owner: () => ledgerAbort };
   `);
   return create(request, (/** @type {string} */ url, /** @type {any} */ options, /** @type {any} */ transport) =>
-    fetchWithBusyRetry(url, options, transport, { wait }), validateLedgerPayload);
+    fetchWithBusyRetry(url, options, transport, { wait }), validateLedgerPayload, ...Object.values(refusal));
 }
 
 test('the actual ledger loader recovers from server backpressure with a visible, exact GET retry', async () => {
@@ -65,6 +68,7 @@ test('persistent busy replies stop; generic 503 evidence is validated once and m
     await app.fetchLedger();
     assert.equal(calls, expectedCalls); assert.equal(app.state().phase, phase);
     if (phase === 'failed') assert.equal(app.state().body, null);
+    if (phase === 'failed') assert.doesNotMatch(app.state().why, /is not defined/, 'the failure is the page sentence, not a harness gap');
     assert.equal(app.owner(), null);
   }
 });

@@ -354,7 +354,13 @@ impl TradeDirectionV1 {
 /// Exact closure classification inherited from the uncapped Apriori walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ClosureV1 {
-    /// No immediate superset had equal support.
+    /// No immediate superset the sweep built had equal support:
+    /// `runner::ClosureVerdict::Closed`. **Amended by D-4503 (audit
+    /// AC-whp-cx-2):** this said "No immediate superset had equal support",
+    /// but a superset `engine`'s join prunes as uninformative under
+    /// `vocab::implication` can have equal support and is never built, so it
+    /// cannot disqualify this itemset; it only restates it. Closed relative to
+    /// the informative lattice the sweep walks, not to every frequent set.
     Closed,
     /// An equal-support immediate superset represents this itemset.
     Redundant,
@@ -2512,6 +2518,18 @@ struct PopulationPaths {
     receipt_v4: PathBuf,
 }
 
+/// `<root>/results/population-write.lock`, the one lock every population,
+/// admission, execution and Selection V4 writer and joined reader holds.
+///
+/// The only place this path is built (D-3506): four writers built it in a
+/// private `lock_path` and two readers inline, and a rename in one of them
+/// would have locked a file no other writer locks while every write still
+/// succeeded. `cli/tests/one_path_authority.rs` counts the construction.
+#[must_use]
+pub(crate) fn population_write_lock(root: &Path) -> PathBuf {
+    root.join("results").join("population-write.lock")
+}
+
 /// Open population row/receipt files and their in-memory exact indexes.
 #[derive(Debug)]
 pub struct PopulationLedger {
@@ -2578,7 +2596,7 @@ impl PopulationLedger {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        population_write_lock(root)
     }
 
     /// Opens existing population files without creating any path.

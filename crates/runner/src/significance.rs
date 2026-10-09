@@ -399,12 +399,41 @@ pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
     high
 }
 
+/// The degrees of freedom past which [`student_t_two_sided_tail`] is taken AT
+/// this value rather than at the caller's (D-4505, audit satk-7).
+///
+/// # Why a ceiling, and why it is the conservative direction
+///
+/// `ln B(df/2, 1/2)` is a difference of two `ln Γ` values each about
+/// `(df/2) ln(df/2)` large, and `x = df / (df + t^2)` rounds toward one, so the
+/// incomplete-beta tail loses digits as `df` grows: an audit measured the
+/// Student-t bar BELOW the normal bar at `df = 1e9` and `1e12`, wrong by more
+/// than a whole t-unit past `1e14`, and the tail of `t = 6` at exactly `1.0` at
+/// `df = 1e18`. At this ceiling the lost digits are about `1e-16 · (df/2) ·
+/// ln(df/2) ≈ 1e-8` of the tail, four orders below the Student-minus-normal gap
+/// they would have to cross.
+///
+/// For a fixed `|t|` the true two-sided tail FALLS as `df` grows, toward the
+/// normal tail, so the tail at the ceiling is never lighter than the true tail
+/// at any larger `df`. Reading it there can only refuse a row the exact tail
+/// would admit, never admit one it would refuse, and the bar it implies is
+/// never below the normal bar. How far above the exact bar it can sit is
+/// bounded by the gap between the bar at the ceiling and the normal bar, the
+/// Fisher expansion's `(t^3 + t) / (4 df)` to first order: MEASURED below
+/// 2.3e-5 t-units for every trial count from 1 to `u64::MAX` by
+/// `the_student_t_bar_is_monotone_and_never_below_the_normal_bar_at_any_df`.
+pub const STUDENT_DF_CEILING: u64 = 10_000_000;
+
 /// `P(|T| >= |t|)` for Student's t with `df` degrees of freedom.
 ///
 /// Abramowitz & Stegun 26.7.1 gives the distribution as an incomplete beta
 /// function, so the two-sided tail is `I_x(df/2, 1/2)` with
 /// `x = df / (df + t^2)`. Computed in the tail itself rather than as one minus
 /// a CDF, so a tail of `1e-10` keeps its digits. NaN in, NaN out.
+///
+/// Above [`STUDENT_DF_CEILING`] degrees of freedom the tail is the one AT the
+/// ceiling: never lighter than the exact tail, so conservative, and monotone
+/// non-increasing in `df` over every `u64` (D-4505).
 #[must_use]
 pub fn student_t_two_sided_tail(t: f64, df: u64) -> f64 {
     if t.is_nan() || df == 0 {
@@ -415,10 +444,9 @@ pub fn student_t_two_sided_tail(t: f64, df: u64) -> f64 {
     }
     #[allow(
         clippy::cast_precision_loss,
-        reason = "a degrees-of-freedom count is an observation count; 2^53 is \
-                  beyond any series this engine stores."
+        reason = "capped at STUDENT_DF_CEILING, far below 2^53, so exact."
     )]
-    let nu = df as f64;
+    let nu = df.min(STUDENT_DF_CEILING) as f64;
     let x = nu / (nu + t * t);
     regularized_incomplete_beta(0.5 * nu, 0.5, x)
 }

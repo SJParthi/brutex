@@ -125,6 +125,12 @@ const _: () = assert!(DAYS == 2_469);
 /// Minute-of-day a standard NSE equity session opens: **09:15**.
 pub const OPEN_MINUTE: u16 = 9 * 60 + 15;
 
+// The calendar's copy of `session::SESSION_OPEN_MINUTE`, at the width its
+// windows use. Pinned to the literal, as `session` pins its own, because a
+// `u16` and a `u32` compare only through a cast this crate refuses;
+// `crates/cli/tests/one_session_open.rs` compares the two (D-3518).
+const _: () = assert!(OPEN_MINUTE == 555);
+
 /// Minute-of-day a standard session's LAST bar opens: **15:29**.
 ///
 /// The close is exclusive — 15:30 is `AtOrAfterSessionClose` in
