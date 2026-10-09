@@ -66459,3 +66459,110 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4500 — A level exit before an unpriced time exit is priced, under grid cost model V3 — 2026-10-09
+
+**What was observed (audit `lookahead`, high; `r64-5`, medium).** D-1514
+priced a level exit strictly before a hole ON a path and left three
+unpriceable paths block-only in `trade::walk_core`: the horizon bar missing or
+refused (`horizon_bar` answers `None`), the slice or the session's 15:09 proof
+ending before the deadline (`deadline > forced_stamp && !forced.real`), and an
+exit record `round_trip` cannot price. Each pushed `held(.., false, ..)`, and
+every grid door built `block_only: true` from it, so a stop that had closed the
+position at bar N vanished from every cell when a bar after N was the horizon
+minute or when the data stopped after N. Probe `zz_audit_r64_2` on the
+`hole_after_exit` fixture: horizon bar removed, 6 of 6 earlier stop rows lost;
+slice cut two bars after the stop, 6 of 6 lost; the bar before the horizon
+removed, 0 of 6 lost. `docs/06-limits.md` called the three conservative
+"because nothing before a hole was what made them unpriceable"; the hole was
+after the stop. `CLAUDE.md` §3 rule 7.
+
+**The change.**
+
+- `trade::Occupancy` gains `time_unpriced_at`: where the path's own time exit
+  has no price. A missing or refused horizon bar: the first bar at or after
+  the deadline on the path's whole prefix (`trade::deadline_index`, a binary
+  search over at most 1,440 strictly ascending whole-minute bars of one IST
+  day, so at most 12 comparisons whatever the slice length; measured p50 9,
+  p99 10, max 10 over the 375-bar sessions of the `holed` fixture). A cut:
+  `forced.bar + 1`, one past the last held bar. An unpriceable exit record:
+  the exit bar. On each, `priceable_before_hole` is set when the entry is
+  priceable both ways, and `Occupancy::hole_offset` is the earliest of
+  `first_refused`, `first_missing` and `time_unpriced_at`. The amended field
+  docs keep the old sentence and say why it was wrong.
+- `grid::Candidate::timed_at` is `max(time_exit - entry, hole)`, and
+  `pessimistic_offset` and the on-time-exit-bar argument of `ExitChoices::of`
+  read it. They differ only on a cut path, whose time exit is one past its last
+  held bar: a level-less variant stays unpriced (no square-off is manufactured
+  at the data's last minute, RULE 1c), and a target touched on the last held
+  bar is not paired with a time-exit attribution that is not due there.
+- Unchanged: every occupancy extent and `open_until` (a refused variant still
+  blocks to the time exit), the time-exit walk (`Trades::trades`, `eligible`,
+  `signals`, `while_open`, `too_late`), `outcome::forward`, the sweep, and the
+  replay labels of refused paths (`BlockOnly` as before).
+
+**Which results change, and the new version.** Wherever a walk path's time
+exit is unpriced for one of the three reasons and a variant's level exit falls
+strictly before that place, that cell gains the trade (money, counts, MAE,
+drawdown, rows) and may admit a later signal the old block refused. That
+reaches every grid door (`evaluate*`, `with_levels`, `per_trade`,
+`materialize_*`, the resolved-policy and expression grids, walk-forward scoring
+through `validate`) and the V1 replay universe, its candidate paths and every
+digest sealed over them. A slice with none of the three paths is
+byte-identical. Because cell money changed, the grid is a new cost model:
+`exit_grid_policy::printed_ohlcv_cost_model_id_v3` is the one this build
+implements. The V2 identity's value is unchanged and is refused by name,
+`ExitGridErrorV1::SupersededCostModelIdV2`, by resolution and by both resolved
+grids' runtime integrity checks; V1 is still `SupersededCostModelIdV1`. The
+policy digest hashes the id, so every `ExitGridPolicyV1` digest, resolved-grid
+digest and anything sealed over one that this build computes differs from one
+computed before it, on clean data too, and a stored artefact naming V2 is
+refused rather than replayed under arithmetic that did not produce it.
+
+**What the `cli` must change (not built here).** `cli` still names
+`printed_ohlcv_cost_model_id_v2()` as the implemented model, in production at
+`execution_capability.rs` (`exact_execution_law_digest_v1`, line 153) and
+`ledger_all.rs` (line 285), and in fixtures and tests in
+`anchored_search_lineage_v4.rs`, `boolean_candidate_grid.rs`,
+`boolean_candidate_tests.rs`, `candidate_universe.rs`,
+`execution_disposition_v2.rs`, `global_replay.rs`,
+`institutional_evidence.rs`, `ledger_exit_policy_tests.rs`,
+`population_admission_writer.rs`, `selection_v4_authority.rs`,
+`step3_orchestrator.rs` and `stored_data_completeness.rs`. Each must name
+`_v3`, `execution_capability.rs`'s refusal table (line 3833) gains
+`SupersededCostModelIdV2`, and every cli pin that hashes the model id is
+re-pinned. Until then the cli's policies are refused by name, loudly; none is
+replayed under the wrong model.
+
+**What it still does not do.** `grid::money_envelope_fits` reads every bar of
+every occupied path through its exit bar, and a later bar priced so large that
+`max |price| × paths × 4` leaves `i64` refuses the WHOLE grid, every path
+counted in `refused_paths`: a representability refusal of the whole sample,
+loud, and not an exit decision, so it is not made causal here. The legacy
+`grid::evaluate` derives its rung ladders from the time-exit trades' whole-path
+excursions and answers no cell when no time-exit trade exists; a ladder is the
+search grid chosen over the sample, not an exit decision, and the resolved V1
+policy door does not take that path.
+
+**Tests.** `runner::hole_after_exit::a_missing_horizon_bar_after_a_stop_leaves_the_stop_priced`,
+`a_refused_horizon_bar_after_a_stop_leaves_the_stop_priced`,
+`an_unfillable_horizon_record_after_a_stop_leaves_the_stop_priced` and
+`the_data_ending_anywhere_after_a_stop_leaves_the_stop_priced` (every cut from
+the bar after the stop to past its horizon) each fail on the code before this
+decision. `no_row_that_closed_before_a_cut_depends_on_any_bar_after_it` is the
+property itself: for every fifth cut across a session close, a session boundary
+and an open, under a stop, a target and the time exit, the rows that closed
+before the cut are identical with every later bar removed, altered in price, or
+refused; it fails on the old walk and fails again with `timed_at` reduced to the
+span. `runner::trade::tests::each_unpriced_time_exit_is_located_where_its_price_is_absent`,
+`deadline_index_is_the_first_bar_at_or_after_the_deadline_within_twelve_probes`
+(against a brute-force scan, deadlines on, off and outside the minute grid and
+at both `i64` extremes), the amended
+`a_path_held_only_by_a_hole_says_where_it_can_still_be_priced` and
+`hole_offset_is_the_earlier_hole_and_only_on_a_path_priced_before_it`;
+`runner::grid::tests::a_path_cut_before_its_deadline_has_no_time_exit_on_its_last_bar`;
+`runner::exit_grid_policy::tests::a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name`
+and `a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime`
+now cover V2 as well; `runner::research_family_readiness::legacy_resolution_identity_matches_the_recorded_pre_extraction_library`
+keeps the V1 and V2 digests as records and pins the four V3 digests from this
+build (not an independent capture).

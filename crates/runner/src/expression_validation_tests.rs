@@ -5,7 +5,7 @@ use super::*;
 use crate::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
     RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-    printed_ohlcv_cost_model_id_v2,
+    printed_ohlcv_cost_model_id_v3,
 };
 use crate::expression::Expression;
 use crate::identity::{Direction, Params, Run};
@@ -76,7 +76,7 @@ fn policy(side: crate::excursion::Side) -> Result<ExitGridPolicyV1, String> {
         RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
         32,
         ExitGridSelectorV1::PessimisticTotal,
-        printed_ohlcv_cost_model_id_v2(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,

@@ -4,7 +4,7 @@ use super::*;
 use crate::excursion::Side;
 use crate::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
+    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
 };
 use brutex_core::instrument::Exchange;
 
@@ -23,7 +23,7 @@ fn internally_corrupted_resolution_cannot_reach_ladders_or_training_attestation(
         RatioLimitsV1::new(1, 1_000_000, 1)?,
         1000,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v2(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         1,
         1,
@@ -110,7 +110,7 @@ fn a_training_slice_past_the_arithmetic_envelope_is_refused_at_attestation()
         RatioLimitsV1::new(1, 1_000_000, 1)?,
         1000,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v2(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         1,
         1,
@@ -150,7 +150,7 @@ fn an_attested_training_slice_debug_prints_its_identity() -> Result<(), Box<dyn 
         RatioLimitsV1::new(1, 1_000_000, 1)?,
         1000,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v2(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         1,
         1,
