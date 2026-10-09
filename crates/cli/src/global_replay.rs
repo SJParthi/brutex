@@ -2671,23 +2671,23 @@ impl GlobalReplayLedger {
     pub fn open_read(root: &Path, max_completions: usize) -> Result<Self, GlobalReplayRefusal> {
         validate_completion_bound(max_completions)?;
         let paths = ReplayPaths::of(root);
-        let writer_lock = File::open(&paths.lock)
+        let writer_lock = crate::readonly_file::read(&paths.lock)
             .map_err(|why| format!("{} could not be opened: {why}", paths.lock.display()))?;
         writer_lock
             .lock_shared()
             .map_err(|why| format!("{} could not be shared-locked: {why}", paths.lock.display()))?;
         let opened = (|| {
             let files = ReplayFiles {
-                stream: File::open(&paths.stream).map_err(|why| {
+                stream: crate::readonly_file::read(&paths.stream).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.stream.display())
                 })?,
-                decision: File::open(&paths.decision).map_err(|why| {
+                decision: crate::readonly_file::read(&paths.decision).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.decision.display())
                 })?,
-                trade: File::open(&paths.trade).map_err(|why| {
+                trade: crate::readonly_file::read(&paths.trade).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.trade.display())
                 })?,
-                completion: File::open(&paths.completion).map_err(|why| {
+                completion: crate::readonly_file::read(&paths.completion).map_err(|why| {
                     format!("{} could not be opened: {why}", paths.completion.display())
                 })?,
             };
@@ -3180,13 +3180,15 @@ fn validate_completion_bound(max_completions: usize) -> Result<(), GlobalReplayR
 }
 
 fn open_or_create(path: &Path) -> Result<File, GlobalReplayRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn ensure_header(

@@ -1039,17 +1039,16 @@ pub fn render_auto(auto: &Auto, id: Option<&RunId>) -> String {
 
 /// The same names, from the six raw words a stored row carries.
 ///
-/// # Why `cli` cannot call `condition_names` directly
+/// # Why a caller passes words rather than a `ConditionMask`
 ///
-/// It takes a `&ConditionMask`, and that type lives in `vocab`. `CLAUDE.md` §5
-/// lists `cli`'s arrows and `vocab` is **not among them** -- adding one so a
-/// listing could print a name would be the silent scope change §3 rule 2
-/// forbids, and it would be invisible in review because `Cargo.toml` is the
-/// only file that changes.
+/// [`condition_names`] takes a `&ConditionMask`, and a stored row carries the
+/// six raw words. This makes the mask, so every listing that calls it decodes
+/// a stored row the same way, and `cli` passes the `[u64; WORDS]` it read off
+/// disk.
 ///
-/// So the conversion lives here, in a crate that already holds the arrow
-/// legitimately, and `cli` passes the `[u64; WORDS]` it read off disk. The
-/// caller needs no vocabulary type at all.
+/// This section used to say `cli` had no `vocab` arrow and could not call
+/// [`condition_names`] itself. `cli` has declared `vocab` since D-0683 and
+/// `CLAUDE.md` §5 draws it; the old reason is retired by G1-4 (D-4736).
 ///
 /// # Why the ledger stores WORDS and not NAMES
 ///

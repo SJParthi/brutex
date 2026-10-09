@@ -1,9 +1,12 @@
-//! D-1544's record of five validation primitives with no production caller,
+//! D-1544's record of validation primitives with no production caller,
 //! checked against the source it describes (audit-20261003 gaps-3).
 //!
-//! Benjamini-Hochberg, the anchored walk-forward bottom-half rate, the V3
-//! projected walk-forward door and the two admission projections are built
-//! and tested, and no `cli` verb or `api` route reaches them. A reader of the
+//! Benjamini-Hochberg, the V3 projected walk-forward door and the two
+//! admission projections are built and tested, and no `cli` verb or `api`
+//! route reaches them. The anchored walk-forward bottom-half rate was the
+//! fifth until D-1724 wired it into the stored audit; this scan could not see
+//! that, because it read each file only up to its first `#[cfg(test)]`, and
+//! now asserts the wiring its doc names instead (G3-3, D-4737). A reader of the
 //! runner API would otherwise take FDR control and those doors to be
 //! available. Each one's own documentation now says so, and this test fails
 //! the moment either half moves: the sentence goes missing, or a `cli` or
@@ -68,6 +71,57 @@ fn doc_above(file: &str, signature: &str) -> String {
     lines.join("\n")
 }
 
+/// `source` with every `#[cfg(test)]` item removed: the attribute run, then
+/// the item it covers, which ends at its own `;` or at the first later line
+/// closing its brace at the same indentation (`cargo fmt --check` makes that
+/// exact). Everything else is kept, so a test module declared near the top of a
+/// file does not hide the production code below it (G3-3, D-4737).
+fn release_text(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut kept = String::with_capacity(source.len());
+    let mut at = 0_usize;
+    while let Some(line) = lines.get(at) {
+        let trimmed = line.trim_start();
+        if !(trimmed.starts_with("#[cfg(test") || trimmed.starts_with("#[cfg(all(test")) {
+            kept.push_str(line);
+            kept.push('\n');
+            at += 1;
+            continue;
+        }
+        let mut item = at + 1;
+        while let Some(next) = lines.get(item) {
+            let next = next.trim_start();
+            if next.starts_with("#[") {
+                while lines
+                    .get(item)
+                    .is_some_and(|line| !line.trim_end().ends_with(']'))
+                {
+                    item += 1;
+                }
+                item += 1;
+            } else if next.starts_with("//") {
+                item += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(head) = lines.get(item) else { break };
+        at = item + 1;
+        if head.trim_end().ends_with('{') {
+            let indent = &head[..head.len() - head.trim_start().len()];
+            let close = format!("{indent}}}");
+            while let Some(body) = lines.get(at) {
+                at += 1;
+                let body = body.trim_end();
+                if body == close || body == format!("{close};") {
+                    break;
+                }
+            }
+        }
+    }
+    kept
+}
+
 #[test]
 fn every_unwired_validation_primitive_says_so_and_has_no_cli_or_api_caller() {
     let unwired = [
@@ -75,11 +129,6 @@ fn every_unwired_validation_primitive_says_so_and_has_no_cli_or_api_caller() {
             "crates/runner/src/significance.rs",
             "pub fn benjamini_hochberg(",
             "benjamini_hochberg",
-        ),
-        (
-            "crates/runner/src/pbo.rs",
-            "pub fn anchored_walk_forward_bottom_half_rate_v1(",
-            "anchored_walk_forward_bottom_half_rate_v1",
         ),
         (
             "crates/runner/src/validate.rs",
@@ -105,16 +154,22 @@ fn every_unwired_validation_primitive_says_so_and_has_no_cli_or_api_caller() {
     let callers: Vec<(PathBuf, String)> = callers
         .into_iter()
         .map(|path| {
-            // Everything from the first test-only item on is a test, by this
-            // workspace's convention of a trailing `#[cfg(test)] mod tests`.
-            let text = read(&path);
-            let production = text
-                .split_once("\n#[cfg(test)]")
-                .map_or(text.as_str(), |(head, _)| head)
-                .to_owned();
+            // Only the test items are dropped. Cutting at the first
+            // `#[cfg(test)]` kept 56 lines of `cli/src/lib.rs`, whose first
+            // test module is declared on line 57, so the scan saw almost
+            // nothing of the file that calls the most (G3-3, D-4737).
+            let production = release_text(&read(&path));
             (path, production)
         })
         .collect();
+    let lib = callers
+        .iter()
+        .find(|(path, _)| path.ends_with("crates/cli/src/lib.rs"))
+        .map(|(_, text)| text.lines().count());
+    assert!(
+        lib.is_some_and(|lines| lines > 10_000),
+        "premise: cli/src/lib.rs is read past its first test module ({lib:?} lines)"
+    );
     for (home, signature, name) in unwired {
         let doc = doc_above(&read(&repo().join(home)), signature);
         assert!(
@@ -130,4 +185,29 @@ fn every_unwired_validation_primitive_says_so_and_has_no_cli_or_api_caller() {
             );
         }
     }
+
+    // The one D-1724 wired: its doc names the caller, and the caller exists in
+    // the release text and makes the call.
+    let doc = doc_above(
+        &read(&repo().join("crates/runner/src/pbo.rs")),
+        "pub fn anchored_walk_forward_bottom_half_rate_v1(",
+    );
+    assert!(
+        doc.contains("**Production caller: `cli`'s `overfitting_of` (D-1724).**")
+            && !doc.contains("No production caller"),
+        "the wired bottom-half rate's doc must name its caller:\n{doc}"
+    );
+    let lib = callers
+        .iter()
+        .find(|(path, _)| path.ends_with("crates/cli/src/lib.rs"))
+        .map(|(_, text)| text.as_str())
+        .unwrap_or_default();
+    let body = lib
+        .split_once("fn overfitting_of(")
+        .map(|(_, rest)| rest.split_once("\nfn ").map_or(rest, |(body, _)| body))
+        .expect("cli::overfitting_of exists in release code");
+    assert!(
+        body.contains("runner::pbo::anchored_walk_forward_bottom_half_rate_v1("),
+        "overfitting_of no longer calls the exact bottom-half rate"
+    );
 }

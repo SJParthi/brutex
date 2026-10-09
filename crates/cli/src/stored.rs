@@ -5181,7 +5181,8 @@ mod tests {
             got.references
                 .iter()
                 .all(|reference| reference.ist_day() < OPEN_WEDNESDAY_2026_08_05),
-            "same-day and future daily bytes cannot enter the offered stream"
+            "daily records on or after the last signal day are not offered; an earlier \
+             signal day's same-day record is (GAP4-48, G3-8)"
         );
         assert_eq!(
             got.references.last().map(DailyReference::ist_day),
@@ -5200,6 +5201,25 @@ mod tests {
         // pivot ladder for five sessions -- the same mechanism the two
         // disaster-recovery Saturdays were excluded for.
         assert_eq!(CHARTER_NON_REGULAR_IST_DAYS.len(), 9);
+    }
+
+    /// G3-8 (D-4738): GAP4-48's false claim -- that the filter keeps a
+    /// same-day daily record out of the offered stream -- survived as the
+    /// message of an assertion whose next line proves Tuesday's same-day record
+    /// IS offered. No text in this file may say it again; the filter drops only
+    /// the last signal day and later, and per-row causality is
+    /// `AnchoredEvaluator::advance_before`'s. The phrase is assembled from two
+    /// literals so this test's own source does not match it.
+    #[test]
+    fn no_message_says_the_filter_withholds_same_day_daily_records() {
+        let stale = concat!(
+            "same-day and future daily bytes cannot ",
+            "enter the offered stream"
+        );
+        assert!(
+            !include_str!("stored.rs").contains(stale),
+            "stored.rs says again that same-day daily records are not offered"
+        );
     }
 
     /// GAP4-48, D-1664: the offered daily stream is exactly what the signal

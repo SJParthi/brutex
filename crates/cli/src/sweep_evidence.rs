@@ -899,7 +899,7 @@ fn verify_terminal_detail<const N: usize>(
     expected: u64,
     expected_digest: [u8; 32],
 ) -> Result<(), String> {
-    let mut file = File::open(path).map_err(io_error)?;
+    let mut file = crate::readonly_file::read(path).map_err(io_error)?;
     file.lock_shared().map_err(io_error)?;
     let result = (|| {
         let before = crate::result_set::file_generation(&file, path)?;
@@ -1097,18 +1097,17 @@ fn append_identity_start(path: &Path, evidence: Evidence) -> Result<(), String> 
 /// before any lifecycle row can refer to the token.
 fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let path = start_path(root, evidence.attempt);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|why| {
-            forget_flushed();
-            format!(
-                "sweep attempt reservation refused at {}: {why}; existing history was not replaced",
-                path.display()
-            )
-        })?;
+    let mut file = crate::readonly_file::regular(
+        OpenOptions::new().read(true).write(true).create_new(true),
+        &path,
+    )
+    .map_err(|why| {
+        forget_flushed();
+        format!(
+            "sweep attempt reservation refused at {}: {why}; existing history was not replaced",
+            path.display()
+        )
+    })?;
     let mut raw = [0_u8; 16 + EVENT_BYTES];
     raw[..16].copy_from_slice(&EVENT_HEADER);
     raw[16..].copy_from_slice(&event_bytes(evidence)?);
@@ -1191,7 +1190,7 @@ fn durable_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn flush_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
+    crate::readonly_file::directory(path)
         .and_then(|directory| barrier(&directory, path))
         .map_err(io_error)
 }
@@ -1206,13 +1205,15 @@ fn forget_flushed() {
     remembered.clear();
 }
 fn open_append(path: &Path) -> Result<File, String> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(io_error)
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(io_error)
 }
 fn emit(e: Evidence) {
     crate::note(
@@ -1513,7 +1514,7 @@ fn allocate(root: &Path, starts: &mut [Evidence]) -> Result<(), String> {
     .map(|_| ())
 }
 fn last_event(path: &Path, max_bytes: u64) -> Result<Option<Evidence>, String> {
-    let mut file = match File::open(path) {
+    let mut file = match crate::readonly_file::read(path) {
         Ok(file) => file,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(why) => return Err(io_error(why)),
@@ -1551,7 +1552,7 @@ fn count_optional<const N: usize>(
     magic: [u8; 8],
     max_bytes: u64,
 ) -> Result<u64, String> {
-    let mut file = match File::open(path) {
+    let mut file = match crate::readonly_file::read(path) {
         Ok(file) => file,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(why) => return Err(io_error(why)),
@@ -1586,7 +1587,7 @@ fn page<const N: usize>(
         e.ranked_rows
     };
     let path = detail_path(root, e, kind);
-    let file = match File::open(&path) {
+    let file = match crate::readonly_file::read(&path) {
         Ok(file) => file,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
             return if expected > 0 || (kind == "ranked" && e.ranked_available) {

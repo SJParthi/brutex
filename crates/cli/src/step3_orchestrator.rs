@@ -393,7 +393,7 @@ impl AdmittedRootV1 {
             ));
         }
         let generation = directory_identity_v1(&path_metadata)?;
-        let directory = File::open(&canonical).map_err(|why| {
+        let directory = crate::readonly_file::directory(&canonical).map_err(|why| {
             format!(
                 "Step 3 root admission could not hold directory capability {}: {why}",
                 canonical.display()

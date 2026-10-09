@@ -1266,7 +1266,7 @@ impl AdmittedDirectoryV1 {
             ));
         }
         let identity = directory_identity_v1(&spelling)?;
-        let directory = File::open(&canonical).map_err(|why| {
+        let directory = crate::readonly_file::directory(&canonical).map_err(|why| {
             format!(
                 "all-rung root admission could not hold {label} {}: {why}",
                 canonical.display()

@@ -2089,7 +2089,7 @@ impl GlobalReplayLedgerV2 {
     pub fn open_read(root: &Path, max_completions: usize) -> Result<Self, GlobalReplayRefusalV2> {
         validate_completion_bound_v2(max_completions)?;
         let paths = ReplayPathsV2::of(root);
-        let writer_lock = File::open(&paths.lock)
+        let writer_lock = crate::readonly_file::read(&paths.lock)
             .map_err(|why| format!("{} could not be opened: {why}", paths.lock.display()))?;
         writer_lock
             .lock_shared()
@@ -2735,17 +2735,20 @@ fn validate_completion_bound_v2(max_completions: usize) -> Result<(), GlobalRepl
 }
 
 fn open_or_create_v2(path: &Path) -> Result<File, GlobalReplayRefusalV2> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn open_read_v2(path: &Path) -> Result<File, GlobalReplayRefusalV2> {
-    File::open(path).map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::read(path)
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn ensure_header_v2(

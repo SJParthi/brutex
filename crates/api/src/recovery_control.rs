@@ -160,10 +160,10 @@ fn persist(site: &Site, id: [u8; 32], status: Status) -> Result<(), String> {
     }
     // Journal::open synced its own directory entry. These parents may have
     // been created above; a durable file in a lost directory is not a STOP.
-    fs::File::open(site.store_root.join("audit"))
+    cli::readonly_file::directory(site.store_root.join("audit"))
         .and_then(|file| file.sync_all())
         .map_err(|error| error.to_string())?;
-    fs::File::open(&site.store_root)
+    cli::readonly_file::directory(&site.store_root)
         .and_then(|file| file.sync_all())
         .map_err(|error| error.to_string())
 }

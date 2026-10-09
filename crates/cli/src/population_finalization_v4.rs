@@ -85,7 +85,7 @@ const RUNNER_POLICY_END: usize = RUNNER_HEADER_BYTES + RUNNER_POLICY_BYTES;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 
@@ -2863,8 +2863,8 @@ fn open_root(
     }
     let canonical = std::fs::canonicalize(root)
         .map_err(|why| format!("cannot canonicalize Finalization V4 root: {why}"))?;
-    let file =
-        File::open(&canonical).map_err(|why| format!("cannot open Finalization V4 root: {why}"))?;
+    let file = crate::readonly_file::directory(&canonical)
+        .map_err(|why| format!("cannot open Finalization V4 root: {why}"))?;
     let identity = PlatformIdentity::of(
         &file
             .metadata()
@@ -2888,7 +2888,7 @@ fn open_child(
     let mut options = OpenOptions::new();
     options.read(true).write(writable).create(writable);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let existed = path.exists();
     let file = options
         .open(path)

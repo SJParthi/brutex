@@ -15530,8 +15530,9 @@ The rollback on a failed append is one `seek`, one `set_len` and one
 
 ## Walk-forward fold rung counts are derived per training window — D-1660, 3 October 2026
 
-`cli::fold_rungs` hands each walk-forward fold `grid_rungs` over its own
-training signal slice (GAP4-46). That is one `reference_price`, one
+`cli::walk_forward_rungs` hands each walk-forward fold `grid_rungs` over its
+own training signal slice (GAP4-46); this section once gave it a name no `cli`
+function has (G3-5, D-4739). That is one `reference_price`, one
 `grid_step_ppm` and one `max_stop_points` pass per fold, so **O(training
 bars) per fold and O(folds x span) per walk-forward shape**, beside the
 per-fold column build that already costs O(training bars). It runs on the
@@ -15545,8 +15546,10 @@ measured bound**: read off the source, no bench times it. With
 `minute_gaps::days_with_minute_holes` (W2-cli9-3) withholds, before any column
 is built, every day with an interior minute gap and every day holding a
 signal bar whose demanded closing minute is absent. **O(signal + minutes +
-d log d)** for d flagged days, one `kind_of` lookup per signal bar, off every
-per-bar sweep path. **UNVERIFIED as a measured bound**: read off the source.
+d)** for d flagged days: the two ascending day lists are merged in O(d).
+This said `d log d` until G5-4 (D-4735), after D-1662 had removed the sort.
+One `kind_of` lookup per signal bar, off every per-bar sweep path.
+**UNVERIFIED as a measured bound**: read off the source.
 
 `column_withholding_at_build` and `exact_minute_withholding_unsourceable_days`
 keep their 64-pass loops (W2-cli8-6). Each pass still reloads the daily and
@@ -16070,3 +16073,31 @@ per bar, so it stays O(limit) time with no allocation beyond the copy it
 already made. It runs twice per `cli verify`, at limits 600 and 900, and never
 on a sweep.
 **UNVERIFIED as a measured bound**, read off the source.
+
+### The FIFO-peer scan reads source text and sees three spellings (D-4732)
+
+`readonly_file::regular`, `read` and `directory` add `O_NONBLOCK` and one
+`fstat` to each open they replace. That is O(1) per open, and no bar or
+candidate loop opens a file. `no_cli_or_api_open_can_wait_for_a_fifo_peer`
+proves only what it reads. It sees release-build source text in `crates/cli/src`
+and `crates/api/src`, with `#[cfg(test)]` items removed by brace and
+indentation, so it depends on `cargo fmt --check`. It refuses:
+- an unqualified `File::open(`;
+- an unqualified `File::create(`;
+- an `OpenOptions::new()` that does not reach `regular`, open read-write, or
+  name a `NONBLOCK` custom flag before its `.open(`.
+
+A read-write open is admitted because `open(2)` never waits on a FIFO for
+`O_RDWR`, which `a_read_write_open_of_a_fifo_never_waits` measures. A read or
+write on such a handle can still wait, and the scan does not see it.
+
+It does not see these:
+- `std::fs::read`, `fs::read_to_string` and `fs::write`. These remain in `api`
+  asset, config and probe paths, and each can wait on a FIFO planted at its
+  path.
+- `File::create_new`, which cannot wait, because `O_EXCL` fails on any
+  existing name.
+- An open built behind a helper that hides `OpenOptions::new()`.
+
+**UNVERIFIED**: how many such whole-file helpers can be reached from an
+operator-writable path. They were not counted.

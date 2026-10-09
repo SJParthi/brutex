@@ -65769,3 +65769,215 @@ Tests: `cli::population_statistics_v2::tests::an_open_sizes_its_index_by_audits_
 audits; it is sized by audits, not by the 28 records"),
 `cli::population_statistics_v2::tests::an_open_reserves_for_stored_records_not_the_audit_ceiling`,
 `cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-4732 — Every `cli` and `api` open that could wait on a FIFO peer goes through a non-blocking door, and a scan holds it — 2026-10-09
+
+**Finding.** G5-2 and W2-cli13-4. D-1743 is headed "Every cli ledger open sets
+`O_NONBLOCK` and admits only a regular file". It fixed the opens it listed.
+`frontier.rs`, `trades.rs` and four `sweep_evidence.rs` readers still used
+`File::open`. A census of `crates/cli/src` and `crates/api/src` release code
+counted 170 opens that set no `O_NONBLOCK`: plain `File::open` and
+`File::create` calls, `OpenOptions` chains, and directory opens used as
+durability barriers. A FIFO planted at one of those paths made `open(2)` wait
+for a peer that never came. `a_fifo_at_any_cli_ledger_path_refuses_without_waiting`
+failed on the first new door it reached: "opening …/results/frontier.bin
+waited for a FIFO peer".
+
+**The decision.**
+- `readonly_file` is `pub`, with three doors:
+  - `regular`, the D-1743 door, now public;
+  - `read`, for a read-only regular file;
+  - `directory`, a read-only open with `O_NONBLOCK` that refuses anything but
+    a directory.
+- Every `File::open` and `File::create` in `cli` and `api` release code now
+  goes through one of these doors, and so does every `OpenOptions` chain that
+  set no non-blocking flag and did not open read-write.
+- A read-write open never waits on a FIFO (fifo(7)), and
+  `a_read_write_open_of_a_fifo_never_waits` pins that. `api`'s serve lock
+  stays a plain read-write open, so a lock name that reaches a device still
+  reaches its stamp. `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+  drives that path through `/dev/full`, and routing the lock through
+  `regular` broke it.
+- Sixteen modules opened their handle with `O_NOFOLLOW` alone. They now use
+  `O_NOFOLLOW_NONBLOCK` and keep their own type check.
+- The FIFO test now also covers `Frontier`, `Trades` and five `sweep_evidence`
+  readers. Each is planted and refused within its bounded wait.
+- `api::backtest::read` gets its own FIFO test with a 5 s bound.
+- `no_cli_or_api_open_can_wait_for_a_fifo_peer` walks every release source in
+  both crates, with `#[cfg(test)]` items removed. It refuses an unqualified
+  `File::open(` or `File::create(`, and any `OpenOptions::new()` that does not
+  reach `regular`, open read-write, or carry a `NONBLOCK` custom flag.
+
+D-1743's heading claimed every ledger open. That claim is true only from this
+entry on.
+
+**Honest limits.** The scan does not see `std::fs::read`, `fs::write`,
+`read_to_string` or `File::create_new`. `create_new` cannot wait, because
+`O_EXCL` fails on any existing name. The other three are whole-file helpers in
+`api` asset and config paths, and they are listed in `docs/06-limits.md`.
+The scan works on source text, not syntax: an open built through a helper
+that hides `OpenOptions::new()` is not seen.
+
+Invariants L1FC-01, L1FC-02, L1FC-03, L1FC-14.
+
+### D-4733 — The search-checkpoint staged marker is checked by its real name; corrects D-1770 — 2026-10-09
+
+**Finding.** G5-1. `a_torn_completion_marker_is_an_interrupted_reservation`
+asserted `!newest.join("complete.writing").exists()`. No code writes that
+name: at fbdabaec the assertion is the only place in `crates/` it appears.
+`publish_marker` stages its seal as `complete.tmp`. The check therefore held
+whatever the publisher left behind. D-1770's bullet ("Staging's
+`complete.writing` is kept") named the same file that does not exist.
+
+**The decision.** The name is one constant, `STAGED_MARKER = "complete.tmp"`.
+The test watches the publisher from the `marker_created` hook. While staging,
+the reservation must hold exactly `payload` and `STAGED_MARKER`. After the
+publication is acknowledged, `STAGED_MARKER` must be gone and `complete` must
+hold all 32 bytes. A kill between the synced seal and the rename leaves
+`STAGED_MARKER` and no `complete`. The reopen must count that reservation as
+interrupted, keep the older checkpoint as latest, publish the next sequence,
+and leave the staged file byte for byte as it was.
+
+A mutant publisher that copies instead of renaming fails the new check at
+`search_checkpoint_tests.rs:354` ("an acknowledged publication leaves no staged
+marker"). The old check passed it.
+
+**Corrects D-1770.** The kept staging name is `complete.tmp`, not
+`complete.writing`. D-1770 stays as written; this entry is the correction.
+
+Invariant L1FC-04.
+
+### D-4734 — No `.rs` file in `crates/` says NSE trades only Monday to Friday — 2026-10-09
+
+**Finding.** G5-3. D-1667 removed the weekday-only sentence from two files and
+pinned those two. `pull::fold` and `pull`'s unit test still said "an exchange
+that trades Monday to Friday", and `docs/00-charter.md` §3 records six weekend
+sessions.
+
+**The decision.** Both now read "ordinarily trades Monday to Friday", with the
+charter's count. `no_weekday_comment_says_nse_never_trades_on_a_weekend` now
+walks every `.rs` file under `crates/` and reads the files as prose, with
+comment markers removed. The `fold.rs` sentence was wrapped across two `//`
+lines, and whitespace collapsing alone could not see it. With the `pull`
+edits reverted, the test failed: "…/crates/pull/src/fold.rs still says "an
+exchange that trades Monday to Friday"". Only comments changed in `pull`, and
+no string literal was added there (gates 1c and 1d).
+
+Invariant L1FC-05.
+
+### D-4735 — `withhold_holed_days` is deleted; the census bound is O(d), not d log d — 2026-10-09
+
+**Finding.** G5-4. `minute_gaps::withhold_holed_days` took its day set from
+`days_with_interior_gaps` alone. W2-cli9-3 (D-1662) replaced that census
+because it cannot see a session that stops early. The function was still
+`pub`, and nothing called it. A new test found two release callers of the
+interior census, `days_with_minute_holes` and `withhold_holed_days`, where
+there should be one. `docs/06-limits.md` priced the census at "O(signal +
+minutes + d log d)", but D-1662 replaced the sort with an O(d) merge.
+
+**The decision.** The function is deleted, so the edge-blind census has one
+caller, inside `days_with_minute_holes`, and a test pins that. Its three tests
+now drive the doors' real path: `days_with_minute_holes`, `withhold` on each
+slice, and `GapExclusion::signal_only` or `one_series`. A new case,
+`a_session_that_stops_early_is_withheld`, shows that the interior census finds
+nothing where the overlay census withholds the day. `docs/06-limits.md` now
+says O(signal + minutes + d).
+
+Invariants L1FC-06, L1FC-07.
+
+### D-4736 — No comment in `crates/` may deny `cli` one of its nine arrows — 2026-10-09
+
+**Finding.** G1-4. These comments denied arrows that `cli` has:
+- a comment in `cli::append_condition_names`: "`CLAUDE.md` §5 does not give
+  `cli` a `vocab` arrow";
+- the doc of `runner::report::names_from_words`: "`vocab` is **not among
+  them**";
+- the head of `crates/cli/Cargo.toml`: "ONE DEPENDENCY, AND IT IS THE JOIN
+  CRATE" and "NO ARROW TO `store`".
+
+`cli` declares all nine arrows (D-0683, D-0208). D-1706's test read only the
+files directly under `crates/cli/src`, and only six exact sentences.
+
+**The decision.** Each sentence is corrected. The manifest's head is now
+history that cites D-0169 and D-0208. `crate_graph_claims.rs` now walks every
+`.rs` file and `Cargo.toml` under `crates/`. It reads `cli`'s arrows from the
+`path = "../X"` keys of `cli`'s own manifest, and the premise requires nine.
+It flags a comment clause when the clause has:
+- a denial word;
+- one of those arrows;
+- either `cli` with no other crate named before the denial, or, inside
+  `crates/cli`, no crate named before the denial at all.
+
+Quoted text is a citation and is skipped. A separate test pins the detector
+against five false sentences and six true ones. The exact lint-name check
+stays limited to `cli`, because `api` has no `indicators` or `runner` arrow
+and so its reasons for the same suppression are true. Run against the
+fbdabaec tree, the widened test named exactly the three sentences above.
+
+Invariants L1FC-08, L1FC-09.
+
+### D-4737 — The unwired-primitive record reads past test modules; the bottom-half rate's doc names its caller — 2026-10-09
+
+**Finding.** G3-3. `unwired_validation_record.rs` cut each caller file at its
+first `#[cfg(test)]`. `cli/src/lib.rs` declares its first test module on line
+57, so the scan read 56 lines of the file that makes the most calls. `pbo.rs`
+still said "**No production caller (D-1544).**" for
+`anchored_walk_forward_bottom_half_rate_v1`, which D-1724 wired into
+`cli::overfitting_of`. Once the scan read the whole file it failed: "crates/cli/src/lib.rs
+names anchored_walk_forward_bottom_half_rate_v1: it is wired now".
+
+**The decision.** The scan now removes only the `#[cfg(test)]` items, by
+brace and indentation, so the release text is complete. Its premise requires
+more than 10,000 lines of `lib.rs`. The doc names its caller, and the test
+asserts both halves: the doc says so, and `overfitting_of`'s release body
+makes the call. D-1544's sentence for the other four primitives still holds.
+
+Invariant L1FC-10.
+
+### D-4738 — The GAP4-48 assertion's message says what the filter does — 2026-10-09
+
+**Finding.** G3-8. In `daily_context_is_strictly_prior_parallel_and_explicitly_unverified`,
+the assertion message read "same-day and future daily bytes cannot enter the
+offered stream". The assertion's next line proves that Tuesday's same-day
+record is offered. D-1664 says the filter limits the offered set and drops
+only the last signal day and later.
+
+**The decision.** The message now reads "daily records on or after the last
+signal day are not offered; an earlier signal day's same-day record is". A
+test refuses the old phrase anywhere in `stored.rs`. It failed before the edit
+with "stored.rs says again that same-day daily records are not offered".
+
+Invariant L1FC-11.
+
+### D-4739 — The per-fold rung resolver is `cli::walk_forward_rungs`; corrects D-1660 — 2026-10-09
+
+**Finding.** G3-5. D-1660 and the matching `docs/06-limits.md` section name
+`cli::fold_rungs`. No such `cli` function exists. The resolver is
+`cli::walk_forward_rungs`, and `runner::validate::fold_rungs` is the unrelated
+`BRUTEX_GRID_RUNGS` reader.
+
+**The decision.** `docs/06-limits.md` names `cli::walk_forward_rungs`. A
+`vocab` stale-claims test refuses `cli::fold_rungs` in that document and
+requires both the real name there and `fn walk_forward_rungs(` in
+`cli/src/lib.rs`. D-1660 stays as written; this entry corrects its function
+name.
+
+Invariant L1FC-12.
+
+### D-4740 — The browser reads a zero stop ceiling as no ceiling, as the route does — 2026-10-09
+
+**Finding.** D-1732, left open there. On `web/src/routes/backtest/+page.svelte`,
+`wholeNumber` (n > 0) read the descent's stop ceiling, so the page refused
+`0`. The route and `cli` read `0` as no ceiling. The function's comment also
+still quoted the server refusal that D-1732 removed.
+
+**The decision.** The ceiling has its own reading, `stopCeiling`. Like
+`wholeNumber`, it matches the digits first, but it accepts `0`. It feeds both
+`startDescent` (`max_points: 0`) and the derived control state. The list
+length keeps `wholeNumber`, so `0` is still refused there, as the route does.
+The summary line says "no stop ceiling" for `0`. The refusal and hint texts
+say that 0 means no ceiling. `web/tests/descent-ceiling.test.js` evaluates
+both functions from the page source and pins the call sites. It failed first
+with "the page defines stopCeiling".
+
+Invariant L1FC-13.

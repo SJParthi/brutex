@@ -309,6 +309,13 @@ fn os_litter_is_passed_over_and_a_stranger_is_named() -> Result<(), String> {
 /// CE-3, D-1909: a completion marker cut short by a crash is an interrupted
 /// reservation. The newest whole checkpoint is `latest`, and the resume
 /// publishes the next sequence. A publication leaves no scratch marker.
+///
+/// G5-1 (D-4733): the scratch-marker check named `complete.writing`, a file
+/// no code writes, so it held whatever the publisher left behind. The name is
+/// now observed while the publisher is staging -- the reservation holds the
+/// payload and exactly that staged file -- then required gone once the
+/// publication is acknowledged, and a staged marker a kill left before its
+/// rename is required present and ignored by the reopen.
 #[test]
 fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String> {
     // 0 only: a short NON-EMPTY marker is refused, not passed over
@@ -318,9 +325,41 @@ fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String
         let scratch = Scratch::new().map_err(error)?;
         let mut journal = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
         journal.publish(b"valid old", 1024)?;
+        let staging: Rc<RefCell<Option<Vec<String>>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&staging);
+        MARKER_CREATED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |namespace: &Path| {
+                let mut names: Vec<String> = fs::read_dir(namespace.join("0000000000000002"))
+                    .map(|entries| {
+                        entries
+                            .filter_map(Result::ok)
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                names.sort();
+                *slot.borrow_mut() = Some(names);
+            }));
+        });
         journal.publish(b"torn", 1024)?;
         let newest = journal.directory.join("0000000000000002");
-        assert!(!newest.join("complete.writing").exists());
+        assert_eq!(
+            staging
+                .borrow_mut()
+                .take()
+                .ok_or("the staging hook did not run")?,
+            vec![STAGED_MARKER.to_owned(), "payload".to_owned()],
+            "the publisher stages its seal under exactly the name checked below"
+        );
+        assert!(
+            !newest.join(STAGED_MARKER).exists(),
+            "an acknowledged publication leaves no staged marker"
+        );
+        assert_eq!(
+            fs::read(newest.join("complete")).map_err(error)?.len(),
+            32,
+            "the staged seal was renamed into place whole"
+        );
         OpenOptions::new()
             .write(true)
             .open(newest.join("complete"))
@@ -337,6 +376,31 @@ fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String
         assert_eq!(sequence, 3);
         let resumed = reopened.latest(1024)?.ok_or("the resume is latest")?;
         assert_eq!(resumed.payload, b"resumed");
+
+        // A kill after the staged seal was synced and before its rename: the
+        // reservation holds the whole seal under the staged name and no
+        // `complete`. The reopen passes it over as interrupted and leaves it.
+        let killed = reopened.directory.join("0000000000000003");
+        let seal = fs::read(killed.join("complete")).map_err(error)?;
+        fs::remove_file(killed.join("complete")).map_err(error)?;
+        fs::write(killed.join(STAGED_MARKER), &seal).map_err(error)?;
+        drop(reopened);
+        let mut after_kill = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        assert_eq!(
+            (after_kill.interrupted(), after_kill.acknowledged()),
+            (2, 1),
+            "the torn and the staged reservations are both interrupted"
+        );
+        assert_eq!(
+            after_kill.latest(1024)?.ok_or("latest")?.payload,
+            b"valid old"
+        );
+        assert_eq!(after_kill.publish(b"after the kill", 1024)?.0, 4);
+        assert_eq!(
+            fs::read(killed.join(STAGED_MARKER)).map_err(error)?,
+            seal,
+            "the staged marker is ignored, not read, renamed or removed"
+        );
     }
     Ok(())
 }

@@ -890,8 +890,8 @@ impl LedgerV2 {
     ) -> Result<Self, BaseEvidenceLedgerRefusalV2> {
         let root = admit_root(root)?;
         refuse_retired_v2_ledger(&root)?;
-        let root_file =
-            File::open(&root).map_err(|why| io_error("hold Base ledger root", &root, &why))?;
+        let root_file = crate::readonly_file::directory(&root)
+            .map_err(|why| io_error("hold Base ledger root", &root, &why))?;
         if !root_file
             .metadata()
             .map_err(|why| io_error("stat held Base ledger root", &root, &why))?
@@ -1780,12 +1780,11 @@ fn open_file(
     writable: bool,
     create: bool,
 ) -> Result<File, BaseEvidenceLedgerRefusalV2> {
-    OpenOptions::new()
-        .read(true)
-        .write(writable)
-        .create(create)
-        .open(path)
-        .map_err(|why| io_error("open", path, &why))
+    crate::readonly_file::regular(
+        OpenOptions::new().read(true).write(writable).create(create),
+        path,
+    )
+    .map_err(|why| io_error("open", path, &why))
 }
 
 fn sync_directory(root_file: &File, root: &Path) -> Result<(), BaseEvidenceLedgerRefusalV2> {

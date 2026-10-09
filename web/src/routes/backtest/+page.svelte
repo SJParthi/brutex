@@ -2741,16 +2741,17 @@
    * text the operator did not type a number into, and the third turns a
    * fat-fingered ceiling into a plausible one.
    *
-   * ZERO IS REFUSED HERE AS WELL AS ON THE SERVER, and the duplication is
-   * deliberate rather than a second copy of a rule. `descent_from` is the
-   * authority — it refuses `max_points` at zero because "a ceiling of zero
-   * admits no trade and a negative one is not a distance", and `top` at zero
-   * because "a listing of no rows is not a shorter answer, it is no answer" —
-   * and those refusals still arrive if this is wrong. This exists so the
-   * control can name WHICH field is empty while the operator is looking at it,
-   * instead of after a round trip. It never widens what the server accepts and
-   * it never narrows it silently: anything this lets through is still judged
-   * there.
+   * ZERO IS REFUSED HERE AS WELL AS ON THE SERVER, for the one field that
+   * reads it: the list length. `descent_from` is the authority — it refuses
+   * `top` at zero because "a listing of no rows is not a shorter answer, it is
+   * no answer" — and that refusal still arrives if this is wrong. This exists
+   * so the control can name WHICH field is empty while the operator is looking
+   * at it, instead of after a round trip.
+   *
+   * THE STOP CEILING IS NOT READ HERE. D-1732 made the route read a zero
+   * ceiling as no ceiling, as `cli` does, and refuse only a negative one; this
+   * function refused zero for the ceiling as well, so the page could not ask
+   * for a run the route accepts. [`stopCeiling`] is its reading (D-4740).
    *
    * @param {string} text
    * @returns {number | null}
@@ -2760,6 +2761,26 @@
     if (!/^\d+$/.test(digits)) return null;
     const n = Number(digits);
     return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+
+  /**
+   * A stop ceiling in whole index points, `0` meaning no ceiling, or `null`
+   * for anything else.
+   *
+   * ZERO IS A CEILING THE ROUTE ACCEPTS. `descent_from_wire` refuses only a
+   * negative `max_points` and passes zero to `cli`, where `Rules::admits` reads
+   * a zero ceiling as none (D-1732). The digits are matched first for the
+   * reason [`wholeNumber`] gives, so a sign, a decimal point or an exponent is
+   * still refused here and never reaches the run's identity (D-4740).
+   *
+   * @param {string} text
+   * @returns {number | null}
+   */
+  function stopCeiling(text) {
+    const digits = (text ?? '').trim();
+    if (!/^\d+$/.test(digits)) return null;
+    const n = Number(digits);
+    return Number.isSafeInteger(n) ? n : null;
   }
 
   /**
@@ -2775,7 +2796,7 @@
    * deleted rather than given a sensible value.
    *
    * The three are STRINGS because they are what was typed. Parsing happens in
-   * `wholeNumber`, once, where the refusal can be named.
+   * `stopCeiling` and `wholeNumber`, once each, where the refusal can be named.
    */
   let descent = $state({ rung: '', points: '', top: '' });
 
@@ -2878,14 +2899,14 @@
       };
       return;
     }
-    const ceiling = wholeNumber(descent.points);
+    const ceiling = stopCeiling(descent.points);
     if (ceiling === null) {
       sweep = {
         phase: 'failed',
         run: null,
         why:
-          'The stop ceiling must be a whole number of INDEX POINTS above zero — the widest ' +
-          'adverse excursion this run may accept. It is never a ppm: the engine converts it ' +
+          'The stop ceiling must be a whole number of INDEX POINTS, 0 for no ceiling — the ' +
+          'widest adverse excursion this run may accept. It is never a ppm: the engine converts it ' +
           'against the midpoint of the span’s own bars, and that conversion is the reason ' +
           'this command exists.'
       };
@@ -3713,7 +3734,7 @@
    * missing BEFORE the press — the same reason `blocked` is read at page load
    * rather than discovered after a five-hour sweep refuses its append.
    */
-  const descentPoints = $derived(wholeNumber(descent.points));
+  const descentPoints = $derived(stopCeiling(descent.points));
   const descentRows = $derived(wholeNumber(descent.top));
 
   /**
@@ -7026,7 +7047,7 @@
           placeholder="whole number"
           bind:value={descent.points}
           aria-label="stop ceiling, in whole index points"
-          title="The widest adverse excursion this run may accept, in INDEX POINTS. Never a ppm and never paisa — the engine converts it against the midpoint of this span's own bars."
+          title="The widest adverse excursion this run may accept, in INDEX POINTS; 0 means no ceiling. Never a ppm and never paisa — the engine converts it against the midpoint of this span's own bars."
         />
         <span class="dnum-u">pts</span>
       </label>
@@ -7091,14 +7112,16 @@
         floor.
       {:else if descentStop === 'points'}
         <b class="warnish">The stop ceiling is not a whole number of points.</b> It is the widest
-        adverse excursion this run may accept, in <b>index points</b> — not a ppm and not paisa.
+        adverse excursion this run may accept, in <b>index points</b> — not a ppm and not paisa;
+        0 means no ceiling.
       {:else if descentStop === 'rows'}
         <b class="warnish">The list length is not a whole number of rows.</b> Zero is refused by the
         route: a listing of no rows is no answer.
       {:else}
         this press descends <b>{sweepSymbol}</b> on <b>{activeFeed}</b> at
-        <b>{descent.rung}</b>, walking the support threshold <b>down</b> from a ceiling of
-        <b>{exact(descentPoints ?? 0)} points</b> and listing the top
+        <b>{descent.rung}</b>, walking the support threshold <b>down</b>
+        {#if descentPoints === 0}with <b>no stop ceiling</b>{:else}from a ceiling of
+          <b>{exact(descentPoints ?? 0)} points</b>{/if} and listing the top
         <b>{exact(descentRows ?? 0)}</b>.
         <b>The Engine settings above are not sent with it</b> — `conduct_descent` applies no knobs,
         so spreading them here would let that panel imply it had configured a run it never touched.
@@ -14166,7 +14189,8 @@
      NOT `type="number"`. Its spinner adds a control nobody asked for, its
      silent coercion accepts `1e3` and `12.5`, and `valueAsNumber` on an
      unparseable value is `NaN` — three ways for a figure the operator did not
-     type to reach the run's identity. `wholeNumber` is the one reading. ---- */
+     type to reach the run's identity. `stopCeiling` and `wholeNumber` are the
+     two readings. ---- */
   .dnum {
     display: flex;
     align-items: center;

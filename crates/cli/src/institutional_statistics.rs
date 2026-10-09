@@ -1036,7 +1036,7 @@ impl InstitutionalStatisticsLedgerV1 {
     pub fn open_read(root: &Path, max_records: usize) -> Result<Self, String> {
         validate_bound(max_records)?;
         let paths = StatisticsPathsV1::of(root);
-        let writer_lock = File::open(&paths.lock)
+        let writer_lock = crate::readonly_file::read(&paths.lock)
             .map_err(|why| format!("{} could not be opened: {why}", paths.lock.display()))?;
         writer_lock
             .lock_shared()
@@ -1414,17 +1414,20 @@ fn scan_records<const STRIDE: usize, T>(
 }
 
 fn open_or_create(path: &Path) -> Result<File, String> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn open_read(path: &Path) -> Result<File, String> {
-    File::open(path).map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::read(path)
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn append_sync(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {

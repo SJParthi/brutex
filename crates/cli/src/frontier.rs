@@ -835,7 +835,7 @@ impl Frontier {
     /// length when it exceeds `max_bytes`. No row is indexed in that case.
     pub fn open_read_bounded(root: &Path, max_bytes: u64) -> Result<Self, Refusal> {
         let path = Self::path(root);
-        let mut file = File::open(&path).map_err(|why| {
+        let mut file = crate::readonly_file::read(&path).map_err(|why| {
             if why.kind() == std::io::ErrorKind::NotFound {
                 format!(
                     "{} does not exist yet. No run has recorded a frontier — \
@@ -908,13 +908,15 @@ impl Frontier {
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        let file = crate::readonly_file::regular(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &path,
+        )
+        .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
         // THE WRITER'S OPEN HOLDS THE EXCLUSIVE LOCK while it measures, cuts
         // a torn tail and indexes (D-1901, sweep-2). Unlocked, the length could
         // land inside another writer's live append, and cutting THAT would

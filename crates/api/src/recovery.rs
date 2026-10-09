@@ -831,10 +831,10 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
         std::fs::hard_link(&staging, &active_file).map_err(failure)?;
         std::fs::remove_file(&staging).map_err(failure)?;
     }
-    std::fs::File::open(root(site))
+    cli::readonly_file::directory(root(site))
         .and_then(|file| file.sync_all())
         .map_err(failure)?;
-    std::fs::File::open(site.store_root.join("audit"))
+    cli::readonly_file::directory(site.store_root.join("audit"))
         .and_then(|file| file.sync_all())
         .map_err(failure)?;
     Ok(journal)
@@ -848,7 +848,7 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
         let mut journal = prepared?;
         let mut attempts =
             Journal::open_existing(&root(&worker_site).join("attempts.bin")).map_err(failure)?;
-        std::fs::File::open(root(&worker_site))
+        cli::readonly_file::directory(root(&worker_site))
             .and_then(|file| file.sync_all())
             .map_err(failure)?;
         let answer = execute(&worker_site, &mut journal, &mut attempts, explicit).await;

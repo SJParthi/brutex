@@ -107,7 +107,6 @@
 //! lying. Reusing the row means the page renders both with one decoder, and a
 //! field added to the frontier appears here without a second edit.
 
-use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -394,7 +393,13 @@ impl Live {
             .path
             .with_extension(format!("{}.tmp", std::process::id()));
         let write = || -> std::io::Result<()> {
-            let mut file = File::create(&temp)?;
+            let mut file = crate::readonly_file::regular(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true),
+                &temp,
+            )?;
             file.write_all(&body)?;
             // `sync_data` and not `sync_all`: this file is not history, and a
             // torn live view costs a poll rather than a run. The ledger's own
@@ -740,7 +745,7 @@ fn read_one_with_limit(
     now: std::time::SystemTime,
     row_limit: Option<usize>,
 ) -> Option<Run> {
-    let mut file = File::open(path).ok()?;
+    let mut file = crate::readonly_file::read(path).ok()?;
     let mut header = [0_u8; HEADER_BYTES];
     file.read_exact(&mut header).ok()?;
     if header.get(0..8)? != MAGIC {

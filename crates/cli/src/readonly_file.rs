@@ -1,5 +1,8 @@
 //! Read-only immutable-evidence opens that cannot follow a final symlink or
-//! wait for a FIFO peer, and the cli ledger door that cannot wait either.
+//! wait for a FIFO peer, and the ledger and directory doors that cannot wait
+//! either. Every `cli` and `api` open goes through one of them or carries
+//! `O_NONBLOCK` itself; `no_cli_or_api_open_can_wait_for_a_fifo_peer` walks
+//! both crates and refuses any other (G5-2, D-4732).
 //! Intermediate directories and device/filesystem I/O still require a trusted
 //! store root; this is not an `openat` path sandbox.
 
@@ -55,7 +58,15 @@ pub(crate) fn open(path: &Path) -> std::io::Result<File> {
 /// cfg'd tails, not two functions: a compiled-out body is still a body
 /// cargo-mutants mutates, and no build of this target can compile or kill the
 /// mutant (G18-cli-b-21, D-2028).
-pub(crate) fn regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
+///
+/// Public since G5-2 (D-4732), so `api` opens its own journals and the ledger
+/// files it reads through this one door rather than a second copy of it.
+///
+/// # Errors
+///
+/// The host's open error, or a refusal naming `path` when the opened handle
+/// is not a regular file.
+pub fn regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
     #[cfg(any(
         target_os = "macos",
         all(
@@ -93,6 +104,76 @@ pub(crate) fn regular(options: &mut OpenOptions, path: &Path) -> std::io::Result
     }
 }
 
+/// [`regular`] opened read-only: the drop-in for `File::open` on any ledger,
+/// result, journal or lock file `cli` or `api` reads (G5-2, D-4732). It keeps
+/// `File::open`'s error kinds, so a caller's `NotFound` arm is unchanged, and
+/// it can never wait for a FIFO or socket peer.
+///
+/// # Errors
+///
+/// The host's open error, or a refusal naming `path` when the opened handle is
+/// not a regular file.
+pub fn read(path: impl AsRef<Path>) -> std::io::Result<File> {
+    regular(OpenOptions::new().read(true), path.as_ref())
+}
+
+/// A directory handle that cannot wait for a FIFO or socket peer: the target of
+/// a durability barrier's `fsync`, or a root a ledger holds open (G5-2,
+/// D-4732). `File::open` on a directory path set no `O_NONBLOCK`, so a FIFO
+/// planted there held the opener forever; this opens read-only with
+/// `O_NONBLOCK` and refuses any handle whose `fstat` is not a directory,
+/// naming the path. A final symlink is followed, as `File::open` followed it,
+/// and an absent path keeps its `NotFound` kind.
+///
+/// On any other target it refuses with `Unsupported`, for the reason
+/// [`regular`] gives.
+///
+/// # Errors
+///
+/// The host's open error, or `NotADirectory` naming `path`.
+pub fn directory(path: impl AsRef<Path>) -> std::io::Result<File> {
+    let path = path.as_ref();
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(store::open_flags::O_NONBLOCK)
+            .open(path)?;
+        if file.metadata()?.is_dir() {
+            Ok(file)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!(
+                    "{} is not a directory; a durability barrier or a held root is never anything else",
+                    path.display()
+                ),
+            ))
+        }
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory opens require verified macOS or Linux x86_64/aarch64 flags",
+        ))
+    }
+}
+
 #[cfg(not(any(
     target_os = "macos",
     all(
@@ -115,7 +196,7 @@ pub(crate) fn open(_path: &Path) -> std::io::Result<File> {
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -311,6 +392,102 @@ mod tests {
                 assert!(not_regular(&why), "{fifo_at}: {why}");
             }
         }
+
+        // G5-2 (D-4732): the HTTP readers D-1743's heading claimed and its
+        // body never reached -- `/top.json` and `/frontier.json` through
+        // `Frontier`, `/trades.json` through `Trades`.
+        let frontier = crate::frontier::Frontier::path(&root);
+        mkfifo(&frontier)?;
+        for bounded in [false, true] {
+            let at = root.clone();
+            let why = refuses_promptly(&frontier, move || {
+                if bounded {
+                    crate::frontier::Frontier::open_read_bounded(&at, 1 << 20).err()
+                } else {
+                    crate::frontier::Frontier::open_read(&at).err()
+                }
+            })?;
+            assert!(not_regular(&why), "the frontier reader: {why}");
+        }
+        std::fs::remove_file(&frontier)?;
+        let trades = crate::trades::Trades::path(&root);
+        mkfifo(&trades)?;
+        for bounded in [false, true] {
+            let at = root.clone();
+            let why = refuses_promptly(&trades, move || {
+                if bounded {
+                    crate::trades::Trades::open_read_bounded(&at, 1 << 20).err()
+                } else {
+                    crate::trades::Trades::open_read(&at).err()
+                }
+            })?;
+            assert!(not_regular(&why), "the trades reader: {why}");
+        }
+        std::fs::remove_file(&trades)?;
+
+        // `/sweep-evidence.json` and `/candidate.json`: every sweep-evidence
+        // file a reader opens -- the global journal, the identity's start
+        // index, one attempt's lifecycle and reservation, and a child detail
+        // file both counted and paged.
+        sweep_evidence_fifos_refuse(&not_regular)?;
+        Ok(())
+    }
+
+    /// Each sweep-evidence reader door, a FIFO planted in place of the file it
+    /// opens. The attempt is finished before any FIFO exists, so no writer of
+    /// this test can reach one.
+    fn sweep_evidence_fifos_refuse(
+        not_regular: &dyn Fn(&str) -> bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::sweep_evidence::{self as evidence, Completion, Operation};
+        const BOUND: u64 = 1 << 20;
+        let scratch = crate::search_checkpoint::tests::Scratch::new()?;
+        let root = scratch.0.clone();
+        let identity = [0x5a_u8; 32];
+        let attempt = evidence::begin(&root, identity, Operation::Sweep)?;
+        let token = attempt.token();
+        attempt.finish(Completion::Completed)?;
+        let read = evidence::read(&root, identity, BOUND)?.ok_or("the attempt reads back")?;
+        let base = root.join("results").join("sweep-evidence-v1");
+        let own = base.join("5a".repeat(32));
+
+        // A child detail file the evidence declares empty: counted by every
+        // read, opened by every page.
+        let levels = own.join(format!("{token}-levels.bin"));
+        mkfifo(&levels)?;
+        let at = root.clone();
+        let why = refuses_promptly(&levels, move || evidence::read(&at, identity, BOUND).err())?;
+        assert!(not_regular(&why), "the counted child: {why}");
+        let at = root.clone();
+        let why = refuses_promptly(&levels, move || {
+            evidence::depth_page(&at, &read, 0, 1, BOUND).err()
+        })?;
+        assert!(not_regular(&why), "the paged child: {why}");
+        std::fs::remove_file(&levels)?;
+
+        for (file, door) in [
+            (base.join("attempts.bin"), 0),
+            (own.join("starts.bin"), 1),
+            (own.join(format!("{token}-lifecycle.bin")), 2),
+            (base.join(format!("{token}-start.bin")), 1),
+        ] {
+            let aside = file.with_extension("aside");
+            std::fs::rename(&file, &aside)?;
+            mkfifo(&file)?;
+            let at = root.clone();
+            let why = refuses_promptly(&file, move || match door {
+                0 => evidence::latest(&at, BOUND).err(),
+                1 => evidence::read(&at, identity, BOUND).err(),
+                _ => evidence::read_attempt(&at, identity, token, BOUND).err(),
+            })?;
+            assert!(not_regular(&why), "{}: {why}", file.display());
+            std::fs::remove_file(&file)?;
+            std::fs::rename(&aside, &file)?;
+        }
+        assert!(
+            evidence::read(&root, identity, BOUND)?.is_some(),
+            "every displaced file was restored and reads again"
+        );
         Ok(())
     }
     /// The ledger door: a socket and a directory refuse by name, a symlink to
@@ -359,5 +536,284 @@ mod tests {
             "{refusal}"
         );
         Ok(())
+    }
+
+    /// The premise the scan below takes for a read-write `OpenOptions`: with
+    /// no `O_NONBLOCK`, `open(2)` admits a FIFO for `O_RDWR` at once (fifo(7)),
+    /// where `O_RDONLY` waits for a writer. So a read-write open needs no door
+    /// to be bounded, and the serve lock's keeps reaching a device that refuses
+    /// its stamp (G5-2, D-4732).
+    #[test]
+    fn a_read_write_open_of_a_fifo_never_waits() -> Result<(), Box<dyn std::error::Error>> {
+        let scratch = crate::search_checkpoint::tests::Scratch::new()?;
+        let fifo = scratch.0.join("fifo");
+        mkfifo(&fifo)?;
+        let path = fifo.clone();
+        let opened = refuses_promptly(&fifo, move || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .ok()
+                .map(|file| format!("opened {}", file.metadata().is_ok()))
+        })?;
+        assert_eq!(opened, "opened true");
+        let path = fifo.clone();
+        let waited = refuses_promptly(&fifo, move || {
+            std::fs::File::open(&path).ok().map(|_| "opened".to_owned())
+        })
+        .err()
+        .ok_or("premise: a read-only open of a FIFO waits for a writer")?;
+        assert!(
+            waited.to_string().contains("waited for a FIFO peer"),
+            "{waited}"
+        );
+        Ok(())
+    }
+
+    /// `source` with every `#[cfg(test)]` item removed, so a scan reads only
+    /// what a release build compiles, each removed line left empty so line numbers
+    /// still name the file's own lines, and the file names of the test-only
+    /// `mod NAME;` declarations it removed (`#[path]` honoured). The item an
+    /// attribute run covers ends at its own `;`, or at the first later line
+    /// that closes its brace at the same indentation, which `cargo fmt
+    /// --check` makes exact.
+    fn split_release(source: &str) -> (String, Vec<(String, bool)>) {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut kept = String::with_capacity(source.len());
+        let mut gated = Vec::new();
+        let mut at = 0_usize;
+        while let Some(line) = lines.get(at) {
+            let trimmed = line.trim_start();
+            if !(trimmed.starts_with("#[cfg(test") || trimmed.starts_with("#[cfg(all(test")) {
+                kept.push_str(line);
+                kept.push('\n');
+                at += 1;
+                continue;
+            }
+            // Further attributes and comments between the `cfg` and its item.
+            let mut item = at + 1;
+            let mut path_attribute = None;
+            while let Some(next) = lines.get(item) {
+                let next = next.trim_start();
+                if next.starts_with("#[") {
+                    if let Some(named) = next.strip_prefix("#[path = \"") {
+                        path_attribute = named.split('"').next().map(str::to_owned);
+                    }
+                    while lines
+                        .get(item)
+                        .is_some_and(|l| !l.trim_end().ends_with(']'))
+                    {
+                        item += 1;
+                    }
+                    item += 1;
+                } else if next.starts_with("//") {
+                    item += 1;
+                } else {
+                    break;
+                }
+            }
+            let start = at;
+            let Some(head) = lines.get(item) else { break };
+            at = item + 1;
+            let declared = head
+                .trim()
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub(super) ")
+                .trim_start_matches("pub ")
+                .strip_prefix("mod ")
+                .and_then(|rest| rest.strip_suffix(';'));
+            if let Some(name) = declared {
+                gated.push(match path_attribute {
+                    Some(named) => (named, true),
+                    None => (format!("{name}.rs"), false),
+                });
+            }
+            if head.trim_end().ends_with('{') {
+                let indent = &head[..head.len() - head.trim_start().len()];
+                let close = format!("{indent}}}");
+                while let Some(body) = lines.get(at) {
+                    at += 1;
+                    let body = body.trim_end();
+                    if body == close || body == format!("{close};") {
+                        break;
+                    }
+                }
+            }
+            // One empty line per removed line, so a line number in the release
+            // text is the same line in the file.
+            for _ in start..at {
+                kept.push('\n');
+            }
+        }
+        (kept, gated)
+    }
+
+    /// Every `.rs` file under `dir`, recursively, in path order.
+    fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every `.rs` file under `dir` that a release build compiles, with its
+    /// `#[cfg(test)]` items removed: not a `*_tests.rs` or `tests.rs` file,
+    /// not one opening `#![cfg(test)]`, not one a parent declares only under
+    /// `#[cfg(test)]`, and nothing beneath such a file's own module directory.
+    pub(crate) fn release_sources(dir: &Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        let mut files = Vec::new();
+        rust_files(dir, &mut files);
+        let mut test_only: Vec<std::path::PathBuf> = Vec::new();
+        let mut kept = Vec::new();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (release, gated) = split_release(&text);
+            let parent = path.parent().unwrap_or(dir);
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let children = if matches!(name, "lib.rs" | "main.rs" | "mod.rs") {
+                parent.to_path_buf()
+            } else {
+                path.with_extension("")
+            };
+            for (module, attributed) in gated {
+                if attributed {
+                    // `#[path]` is relative to the declaring file's directory.
+                    test_only.push(parent.join(module));
+                } else {
+                    test_only.push(children.join(&module));
+                    test_only.push(children.join(module.trim_end_matches(".rs")).join("mod.rs"));
+                }
+            }
+            let whole_file_test = name.ends_with("_tests.rs")
+                || name == "tests.rs"
+                || text.lines().take(40).any(|l| l.trim() == "#![cfg(test)]");
+            if !whole_file_test {
+                kept.push((path, release));
+            }
+        }
+        for (path, release) in kept {
+            let gated = test_only.iter().any(|test| {
+                *test == path
+                    || path.starts_with(test.with_extension(""))
+                    || (test.ends_with("mod.rs")
+                        && test.parent().is_some_and(|module| path.starts_with(module)))
+            });
+            if !gated {
+                out.push((path, release));
+            }
+        }
+    }
+
+    /// Whether the `OpenOptions` built at `at` cannot wait in `open(2)`: handed to
+    /// `regular`, opened read-write (`.read(true)` with `.write(true)` or
+    /// `.append(true)`, which `a_read_write_open_of_a_fifo_never_waits` shows a
+    /// FIFO admits at once), or given `custom_flags` naming a non-blocking flag
+    /// -- directly, or through a `const` of this file whose value names one --
+    /// before the first `.open(` after it.
+    fn waits_for_nothing(text: &str, at: usize) -> bool {
+        let before = text
+            .get(..at)
+            .unwrap_or("")
+            .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':')
+            .trim_end();
+        if before.ends_with("regular(") {
+            return true;
+        }
+        let rest = text.get(at..).unwrap_or("");
+        let end = rest
+            .find(".open(")
+            .map_or(rest.len(), |open| open + ".open(".len());
+        let window = rest.get(..end.min(2_000)).unwrap_or(rest);
+        if window.contains("readonly_file::regular(") {
+            return true;
+        }
+        if window.contains(".read(true)")
+            && (window.contains(".write(true)") || window.contains(".append(true)"))
+        {
+            return true;
+        }
+        let Some(flags) = window.find("custom_flags(") else {
+            return false;
+        };
+        if window.contains("NONBLOCK") {
+            return true;
+        }
+        let argument = window
+            .get(flags + "custom_flags(".len()..)
+            .and_then(|tail| tail.split(')').next())
+            .unwrap_or("")
+            .trim();
+        text.split(&format!("const {argument}: i32 ="))
+            .nth(1)
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.contains("NONBLOCK"))
+    }
+
+    /// G5-2 (D-4732): no read, write or directory open a `cli` or `api`
+    /// release build compiles can wait on a FIFO or socket peer. `File::open`
+    /// and `File::create` set no `O_NONBLOCK` and are refused outright; every
+    /// `OpenOptions` must reach `readonly_file::regular` or carry a
+    /// non-blocking custom flag. D-1743 fixed five doors under a heading that
+    /// claimed every ledger, and six HTTP readers kept the blocking open; this
+    /// walks every source file, so a new door cannot slip past by not being
+    /// listed.
+    #[test]
+    fn no_cli_or_api_open_can_wait_for_a_fifo_peer() {
+        let cli = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("../api/src");
+        let mut sources = Vec::new();
+        release_sources(&cli, &mut sources);
+        let cli_files = sources.len();
+        release_sources(&api, &mut sources);
+        assert!(
+            cli_files > 100 && sources.len() > cli_files + 40,
+            "premise: both crates were walked ({cli_files} cli, {} total)",
+            sources.len()
+        );
+        let lib = sources
+            .iter()
+            .find(|(path, _)| path.ends_with("cli/src/lib.rs"))
+            .map(|(_, text)| text.lines().filter(|line| !line.trim().is_empty()).count());
+        assert!(
+            lib.is_some_and(|lines| lines > 10_000),
+            "premise: lib.rs is read past its first test module ({lib:?} lines)"
+        );
+        let mut waiting = Vec::new();
+        for (path, text) in &sources {
+            for pattern in ["File::open(", "File::create("] {
+                for (at, _) in text.match_indices(pattern) {
+                    let named = text
+                        .get(..at)
+                        .and_then(|head| head.chars().next_back())
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    if !named {
+                        waiting.push(format!("{}: {pattern}", path.display()));
+                    }
+                }
+            }
+            for (at, _) in text.match_indices("OpenOptions::new()") {
+                if !waits_for_nothing(text, at) {
+                    let line = text.get(..at).map_or(0, |head| head.lines().count());
+                    waiting.push(format!("{}:{line}: OpenOptions", path.display()));
+                }
+            }
+        }
+        assert!(
+            waiting.is_empty(),
+            "{} open(s) can wait for a FIFO peer:\n{}",
+            waiting.len(),
+            waiting.join("\n")
+        );
     }
 }

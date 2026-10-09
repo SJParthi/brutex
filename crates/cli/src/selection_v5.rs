@@ -100,7 +100,7 @@ const LOCK_FILE: &str = "global-selection-v5.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(MAX_TOP == REQUESTED_TOP);
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == SELECTION_V5_ROW_BYTES);
@@ -2907,7 +2907,7 @@ fn open_root_directory(
             root.display()
         )
     })?;
-    let file = File::open(&canonical).map_err(|why| {
+    let file = crate::readonly_file::directory(&canonical).map_err(|why| {
         format!(
             "cannot hold Selection V5 root {}: {why}",
             canonical.display()
@@ -2941,7 +2941,7 @@ fn open_child(path: &Path, writable: bool, created: &mut bool) -> Result<File, S
         options.write(true).create(true).truncate(false);
     }
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|why| format!("cannot open Selection V5 child {}: {why}", path.display()))?;

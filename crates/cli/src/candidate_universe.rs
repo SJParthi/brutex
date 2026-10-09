@@ -6610,12 +6610,11 @@ fn scan_orphan(
 }
 
 fn open_file(path: &Path, writable: bool, create: bool) -> Result<File, CandidateUniverseRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(writable)
-        .create(create)
-        .open(path)
-        .map_err(|why| format!("cannot open candidate file {}: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new().read(true).write(writable).create(create),
+        path,
+    )
+    .map_err(|why| format!("cannot open candidate file {}: {why}", path.display()))
 }
 
 fn file_generation(file: &File, path: &Path) -> Result<FileGenerationV1, CandidateUniverseRefusal> {

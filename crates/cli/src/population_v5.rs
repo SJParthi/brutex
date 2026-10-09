@@ -87,7 +87,7 @@ const LOCK_FILE: &str = "population-v5.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_V5_ROW_BYTES);
 const _: () = assert!(COMPLETION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_V5_COMPLETION_BYTES);
@@ -3524,7 +3524,7 @@ fn open_root_directory(
         )
     })?;
     require_not_symlink(&canonical, false)?;
-    let file = File::open(&canonical).map_err(|why| {
+    let file = crate::readonly_file::directory(&canonical).map_err(|why| {
         format!(
             "cannot hold Population V5 root {}: {why}",
             canonical.display()
@@ -3566,7 +3566,7 @@ fn open_child(
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-        options.custom_flags(O_NOFOLLOW_FLAG);
+        options.custom_flags(NOFOLLOW_NONBLOCK);
         match options.open(path) {
             Ok(file) => {
                 require_regular_file(&file, path)?;
@@ -3585,7 +3585,7 @@ fn open_child(
     let mut options = OpenOptions::new();
     options.read(true).write(writable).truncate(false);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|why| format!("cannot open Population V5 file {}: {why}", path.display()))?;

@@ -91,7 +91,7 @@ const READ_CHUNK_BYTES: usize = 16 * 1_024;
 const LOCK_FILE_MAX_BYTES: u64 = 0;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 
@@ -2888,7 +2888,7 @@ fn sync_parent(path: &Path) -> Result<(), PopulationStatisticsV3Refusal> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    File::open(parent)
+    crate::readonly_file::directory(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| format!("cannot sync {}: {why}", parent.display()))
 }
@@ -2984,7 +2984,7 @@ fn open_file(
         .create(create)
         .truncate(false);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|why| format!("cannot open {}: {why}", path.display()))?;

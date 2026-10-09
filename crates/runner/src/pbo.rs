@@ -157,9 +157,12 @@ impl AnchoredWalkForwardBottomHalfRateV1 {
 /// One pass plus one sort of display projections: `O(folds log folds)` time
 /// and `O(folds)` temporary space. No bench row measures it yet.
 ///
-/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it;
-/// only this module's tests call it. `docs/07-plan.md` names no surface for it,
-/// so wiring it would be a design this crate does not have.
+/// **Production caller: `cli`'s `overfitting_of` (D-1724).** The stored audit's
+/// overfitting row is this aggregate over each walk-forward fold's exact
+/// [`place_v1`] placement; it replaced the legacy [`place`] adapter there,
+/// which rounded an exact half-rank toward the better half. D-1544's "no
+/// production caller" held until D-1724 wired it, and is retired by G3-3
+/// (D-4737).
 #[must_use]
 pub fn anchored_walk_forward_bottom_half_rate_v1(
     placements: &[PlacementV1],

@@ -109,7 +109,7 @@ const EVIDENCE_STATISTICS_OFFSET: usize = RUNNER_HEADER_BYTES + EVIDENCE_BASE_VA
 const EVIDENCE_WALK_OFFSET: usize = 800;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () =
     assert!(DECISION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_ADMISSION_V3_DECISION_BYTES);
@@ -4679,7 +4679,7 @@ fn open_root_directory(
         )
     })?;
     require_not_symlink(&canonical, false)?;
-    let file = File::open(&canonical).map_err(|why| {
+    let file = crate::readonly_file::directory(&canonical).map_err(|why| {
         format!(
             "cannot hold Admission V3 root {}: {why}",
             canonical.display()
@@ -4702,7 +4702,7 @@ fn open_root_directory(
 
 fn named_root_identity(root: &Path) -> Result<PlatformIdentity, PopulationAdmissionV3Refusal> {
     require_not_symlink(root, false)?;
-    let file = File::open(root).map_err(|why| {
+    let file = crate::readonly_file::directory(root).map_err(|why| {
         format!(
             "cannot reopen named Admission V3 root {}: {why}",
             root.display()
@@ -4733,7 +4733,7 @@ fn open_child(
         let mut create_options = OpenOptions::new();
         create_options.read(true).write(true).create_new(true);
         #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-        create_options.custom_flags(O_NOFOLLOW_FLAG);
+        create_options.custom_flags(NOFOLLOW_NONBLOCK);
         match create_options.open(path) {
             Ok(file) => {
                 require_regular_file(&file, path)?;
@@ -4752,7 +4752,7 @@ fn open_child(
     let mut options = OpenOptions::new();
     options.read(true).write(writable).truncate(false);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|why| format!("cannot open Admission V3 file {}: {why}", path.display()))?;

@@ -116,7 +116,7 @@ const LOCK_FILE: &str = "population-finalization-v2.lock";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
+const NOFOLLOW_NONBLOCK: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 const _: () = assert!(PAYLOAD_BYTES + SEAL_BYTES == POPULATION_FINALIZATION_V2_RECORD_BYTES);
 
@@ -2535,7 +2535,7 @@ fn open_root_directory(root: &Path) -> Result<File, PopulationFinalizationV2Refu
         ));
     }
     require_not_symlink(root, false)?;
-    let root_file = File::open(root).map_err(|why| {
+    let root_file = crate::readonly_file::directory(root).map_err(|why| {
         format!(
             "Finalization V2 root {} must already exist: {why}",
             root.display()
@@ -2614,7 +2614,7 @@ fn open_ledger_file(
         .create(create)
         .truncate(false);
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
-    options.custom_flags(O_NOFOLLOW_FLAG);
+    options.custom_flags(NOFOLLOW_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|why| format!("cannot open Finalization V2 file {}: {why}", path.display()))?;
@@ -2855,7 +2855,7 @@ fn directory_generation(
             path.display()
         )
     })?;
-    let named = File::open(path).map_err(|why| {
+    let named = crate::readonly_file::directory(path).map_err(|why| {
         format!(
             "cannot reopen named Finalization V2 root {}: {why}",
             path.display()
@@ -2927,7 +2927,7 @@ fn file_generation(
             held_before.len()
         ));
     }
-    let mut named = File::open(path).map_err(|why| {
+    let mut named = crate::readonly_file::read(path).map_err(|why| {
         format!(
             "cannot reopen named Finalization V2 file {}: {why}",
             path.display()

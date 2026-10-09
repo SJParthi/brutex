@@ -2074,7 +2074,7 @@ impl ExecutionDispositionLedgerV2 {
     /// refuses any missing file.
     pub fn open_read(root: &Path) -> Result<Self, ExecutionDispositionRefusalV2> {
         let lock_path = Self::lock_path(root);
-        let writer_lock = File::open(&lock_path)
+        let writer_lock = crate::readonly_file::read(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         writer_lock
             .lock_shared()
@@ -2084,15 +2084,15 @@ impl ExecutionDispositionLedgerV2 {
             let percentile_path = Self::percentile_path(root);
             let row_path = Self::row_path(root);
             let completion_path = Self::completion_path(root);
-            let parameter_file = File::open(&parameter_path).map_err(|why| {
+            let parameter_file = crate::readonly_file::read(&parameter_path).map_err(|why| {
                 format!("{} could not be opened: {why}", parameter_path.display())
             })?;
-            let percentile_file = File::open(&percentile_path).map_err(|why| {
+            let percentile_file = crate::readonly_file::read(&percentile_path).map_err(|why| {
                 format!("{} could not be opened: {why}", percentile_path.display())
             })?;
-            let row_file = File::open(&row_path)
+            let row_file = crate::readonly_file::read(&row_path)
                 .map_err(|why| format!("{} could not be opened: {why}", row_path.display()))?;
-            let completion_file = File::open(&completion_path).map_err(|why| {
+            let completion_file = crate::readonly_file::read(&completion_path).map_err(|why| {
                 format!("{} could not be opened: {why}", completion_path.display())
             })?;
             Self::from_files(
@@ -2900,13 +2900,15 @@ fn block_slice<'a, T>(
 }
 
 fn open_or_create(path: &Path) -> Result<File, ExecutionDispositionRefusalV2> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("{} could not be opened: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("{} could not be opened: {why}", path.display()))
 }
 
 fn ensure_record_header(
@@ -3080,7 +3082,7 @@ fn sync_record_file(file: &File, path: &Path) -> Result<(), ExecutionDisposition
 }
 
 fn sync_directory(path: &Path) -> Result<(), ExecutionDispositionRefusalV2> {
-    File::open(path)
+    crate::readonly_file::directory(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|why| {
             format!(

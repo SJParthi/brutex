@@ -170,7 +170,7 @@ impl Journal {
             Flock::try_lock(open_owner(&owner_path)?, owner_path.clone()).map_err(|why| {
                 format!("this exact search is already owned or cannot be locked: {why}")
             })?;
-        File::open(&directory)
+        crate::readonly_file::directory(&directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
@@ -254,17 +254,16 @@ impl Journal {
         let directory = self.directory.join(format!("{sequence:016x}"));
         fs::create_dir(&directory).map_err(error)?;
         self.entries = entries;
-        File::open(&self.directory)
+        crate::readonly_file::directory(&self.directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
         let path = directory.join("payload");
-        let mut raw = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(error)?;
+        let mut raw = crate::readonly_file::regular(
+            OpenOptions::new().read(true).write(true).create_new(true),
+            &path,
+        )
+        .map_err(error)?;
         let mut file = Flock::lock(&mut raw, path.as_path()).map_err(error)?;
         #[cfg(test)]
         tests::payload_locked(&file);
@@ -279,7 +278,7 @@ impl Journal {
             .and_then(|()| file.sync_all())
             .map_err(error)?;
         verify_acknowledged(&mut file, &path, &header, payload, seal)?;
-        File::open(&directory)
+        crate::readonly_file::directory(&directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
@@ -308,14 +307,19 @@ impl Journal {
     }
 }
 
+/// The name a completion seal is staged under before its rename (D-1740).
+/// Discovery never reads it. One constant, so the test that requires it gone
+/// after an acknowledgement checks the name this file writes (G5-1, D-4733).
+const STAGED_MARKER: &str = "complete.tmp";
+
 /// Make `complete` appear whole or not at all (D-1740). The seal is written
-/// and synced under a temporary name and only then renamed into place, then
+/// and synced under [`STAGED_MARKER`] and only then renamed into place, then
 /// the reservation directory is synced. A kill before the rename leaves at
-/// most `complete.tmp`, which discovery never reads, so the reservation is an
-/// interrupted one and the previous checkpoint stays the resume point. A
+/// most that staged file, which discovery never reads, so the reservation is
+/// an interrupted one and the previous checkpoint stays the resume point. A
 /// failure this process sees removes the temporary file and refuses.
 fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
-    let temporary = directory.join("complete.tmp");
+    let temporary = directory.join(STAGED_MARKER);
     let written = (|| {
         let mut marker = File::create_new(&temporary)?;
         #[cfg(test)]
@@ -337,7 +341,7 @@ fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
             ),
         });
     }
-    File::open(directory)
+    crate::readonly_file::directory(directory)
         .map_err(error)?
         .sync_all()
         .map_err(error)
@@ -385,7 +389,7 @@ fn open_owner(path: &Path) -> Result<File, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(store::open_flags::O_NOFOLLOW);
+        options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     // create_new never follows an existing symlink, including a dangling one.
     // The existing-file door deliberately has no create flag, so refusal can
@@ -430,7 +434,10 @@ fn regular_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
 
 fn durable_directory(parent: &Path, path: &Path) -> Result<(), String> {
     match fs::create_dir(path) {
-        Ok(()) => File::open(parent).map_err(error)?.sync_all().map_err(error),
+        Ok(()) => crate::readonly_file::directory(parent)
+            .map_err(error)?
+            .sync_all()
+            .map_err(error),
         Err(why)
             if why.kind() == std::io::ErrorKind::AlreadyExists
                 && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir()) =>
