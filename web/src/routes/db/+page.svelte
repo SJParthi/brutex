@@ -4883,6 +4883,10 @@
     oi_null_before:
       'the previous bar carries no open interest, so there is nothing to measure this one against.',
     previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.',
+    previous_close_negative:
+      'the previous close is stored as a NEGATIVE number of paisa, which no price can be: that stored value is corrupt, and no change is measured against it.',
+    previous_oi_negative:
+      'the previous open interest is stored as a negative number that is not the null sentinel: that stored value is corrupt, and no change is measured against it.',
     previous_unreadable:
       'the bar before this one failed its checksum and was not read, so there is no trusted value to measure this one against. Its own value is shown; only the change is withheld.',
     overflow:

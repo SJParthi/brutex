@@ -546,6 +546,13 @@ pub enum Build {
     },
     /// A shell is there, and no source is newer than it.
     Serving,
+    /// A shell is there and answers pages, and whether a source is newer was
+    /// NOT decided: the walk of the sources was cut short or could not read a
+    /// directory. D-3686.
+    Unchecked {
+        /// Why the walk did not see every source.
+        why: String,
+    },
 }
 
 impl Build {
@@ -557,6 +564,11 @@ impl Build {
 
     /// Reads the state of the build beside its sources.
     fn read(web: &Path, root: Option<&Path>) -> Self {
+        Self::read_bounded(web, root, Self::MAX_SOURCES)
+    }
+
+    /// [`Self::read`] with the source walk's bound given, so a test can cut it.
+    fn read_bounded(web: &Path, root: Option<&Path>, limit: u64) -> Self {
         let Some(root) = root else {
             return Self::Missing;
         };
@@ -574,25 +586,31 @@ impl Build {
         // absent comparison may not be reported as a fresh one OR as a stale
         // one. `CLAUDE.md` §3 rule 6.
         let src = web.join(SOURCES);
-        let Some((newest, at)) = newest_under(&src, Self::MAX_SOURCES) else {
-            return Self::Serving;
-        };
-        match at.duration_since(built_at) {
-            Ok(gap) if gap.as_secs() > 0 => Self::Stale {
+        let (newest, incomplete) = newest_under(&src, limit);
+        if let Some((newest, at)) = newest
+            && let Ok(gap) = at.duration_since(built_at)
+            && gap.as_secs() > 0
+        {
+            // A NEWER SOURCE FOUND IS A FACT, whether or not the walk finished.
+            return Self::Stale {
                 newer: newest.display().to_string(),
                 by_secs: gap.as_secs(),
-            },
-            // `Err` is the ordinary case: the shell is NEWER than every source,
-            // so the subtraction runs backwards. Sub-second is not staleness —
-            // a build writes its own output while the walk is running.
-            _ => Self::Serving,
+            };
         }
+        // `Err` from the subtraction is the ordinary case: the shell is NEWER
+        // than every source seen. Sub-second is not staleness, because a build
+        // writes its own output while the walk is running. But "no source
+        // newer" is only true of a walk that saw every source.
+        incomplete.map_or(Self::Serving, |why| Self::Unchecked { why })
     }
 
     /// Whether this build can answer a page.
     #[must_use]
     pub const fn serving(&self) -> bool {
-        matches!(self, Self::Serving | Self::Stale { .. })
+        matches!(
+            self,
+            Self::Serving | Self::Stale { .. } | Self::Unchecked { .. }
+        )
     }
 
     /// The word for a log field. One token, never a sentence.
@@ -603,6 +621,7 @@ impl Build {
             Self::NoShell { .. } => "no-shell",
             Self::Stale { .. } => "STALE",
             Self::Serving => "serving",
+            Self::Unchecked { .. } => "unchecked",
         }
     }
 
@@ -621,29 +640,52 @@ impl Build {
                  Run `npm run build` in web/"
             ),
             Self::Serving => "serving".to_owned(),
+            Self::Unchecked { ref why } => format!(
+                "serving, FRESHNESS UNCHECKED — {why}, so whether a source is newer than \
+                 {INDEX} was not decided"
+            ),
         }
     }
 }
 
-/// The newest file under `dir`, and when it was written.
+/// The newest file under `dir`, and when it was written, and whether the walk
+/// was incomplete.
 ///
-/// `None` when the directory is not there, holds no file, or holds none whose
-/// modification time can be read — three absences, and not one of them is a
-/// timestamp this may invent.
+/// The first half is `None` when the directory is not there, holds no file, or
+/// holds none whose modification time can be read: three absences, and not
+/// one of them is a timestamp this may invent. The second half names why the
+/// walk did NOT see everything (it stopped at `limit`, or a directory under
+/// `dir` could not be read), so a caller never reports "nothing newer" over a
+/// tree it did not finish reading (gap-audit #14, D-3686). A `dir` that does
+/// not exist is not incomplete: there is nothing to read.
 ///
 /// Iterative, bounded, and keyed on [`std::fs::DirEntry::file_type`] so a
 /// symlink is one entry rather than a descent — the same rule, and the same
 /// reason, as [`walk_within`].
-fn newest_under(dir: &Path, limit: u64) -> Option<(PathBuf, std::time::SystemTime)> {
+fn newest_under(
+    dir: &Path,
+    limit: u64,
+) -> (Option<(PathBuf, std::time::SystemTime)>, Option<String>) {
     let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut incomplete: Option<String> = None;
     let mut seen: u64 = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
         if seen >= limit {
+            incomplete = Some(format!(
+                "the walk of {} stopped at its bound of {limit} entries",
+                dir.display()
+            ));
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(why) if next == dir && why.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(why) => {
+                incomplete
+                    .get_or_insert_with(|| format!("{} could not be read — {why}", next.display()));
+                continue;
+            }
         };
         for entry in entries.flatten() {
             seen = seen.saturating_add(1);
@@ -662,7 +704,7 @@ fn newest_under(dir: &Path, limit: u64) -> Option<(PathBuf, std::time::SystemTim
             }
         }
     }
-    best
+    (best, incomplete)
 }
 
 /// The front end on disk, and everything that decides what a path answers.
@@ -1117,6 +1159,89 @@ mod tests {
     }
 
     /// A directory with a shell and one real asset.
+    /// **A source walk that did not finish never says "serving".**
+    /// Gap-audit #14, D-3686. A walk cut at its bound is incomplete; a walk
+    /// over a tree with no `web/src` is not; a newer source found before the
+    /// cut is still STALE.
+    #[test]
+    fn a_source_walk_that_did_not_finish_is_unchecked_not_serving() {
+        let root = web("walk-bound");
+        for name in ["a.svelte", "b.svelte", "c.svelte"] {
+            put(&root, name, "x");
+        }
+        let (_, incomplete) = newest_under(&root, 1);
+        assert!(
+            incomplete
+                .as_deref()
+                .is_some_and(|why| why.contains("stopped at its bound of 1")),
+            "{incomplete:?}"
+        );
+        let (_, whole) = newest_under(&root, 100);
+        assert_eq!(whole, None, "a walk that saw everything is complete");
+        let (none, absent) = newest_under(&root.join("no-such-dir"), 100);
+        assert_eq!(
+            (none, absent),
+            (None, None),
+            "no sources is not an incomplete walk"
+        );
+
+        let shell = furnished("walk-unchecked");
+        let src = shell.join(SOURCES);
+        std::fs::create_dir_all(&src).expect("mkdir");
+        std::fs::write(src.join("old.svelte"), "x").expect("a source");
+        let long_ago =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(src.join("old.svelte"))
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("an old source");
+        let bundle = shell.join(BUILD_DIR);
+        let build = Build::read_bounded(&shell, Some(bundle.as_path()), 0);
+        let Build::Unchecked { ref why } = build else {
+            panic!("a walk stopped at once decided nothing: {build:?}");
+        };
+        assert!(why.contains("bound of 0"), "{why}");
+        assert!(build.serving(), "it still answers pages");
+        assert_eq!(build.word(), "unchecked");
+        assert!(
+            build.note().contains("FRESHNESS UNCHECKED"),
+            "{}",
+            build.note()
+        );
+        assert_eq!(
+            Build::read_bounded(&shell, Some(bundle.as_path()), 100),
+            Build::Serving,
+            "the same tree walked whole is fresh"
+        );
+    }
+
+    /// **An unreadable directory under the sources is named, not skipped.**
+    /// D-3686, run where the mode bits bind (D-0995).
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_source_directory_leaves_freshness_unchecked() {
+        crate::isolated::where_permission_binds(
+            "assets::tests::an_unreadable_source_directory_leaves_freshness_unchecked",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let shell = furnished("walk-unreadable");
+                let locked = shell.join(SOURCES).join("routes");
+                std::fs::create_dir_all(&locked).expect("mkdir");
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                    .expect("chmod");
+                let bundle = shell.join(BUILD_DIR);
+                let build = Build::read_bounded(&shell, Some(bundle.as_path()), 100);
+                let _restored =
+                    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+                let Build::Unchecked { ref why } = build else {
+                    panic!("an unreadable source directory decided nothing: {build:?}");
+                };
+                assert!(why.contains("could not be read"), "{why}");
+            },
+        );
+    }
+
     fn furnished(name: &str) -> PathBuf {
         let dir = web(name);
         put(&dir, INDEX, "<!doctype html><title>shell</title>");

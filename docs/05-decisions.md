@@ -66521,3 +66521,110 @@ a hidden sibling; it never carries the final name.
 
 **Proof.** `a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands`
 in `crates/cli/src/candidate_trades/tests.rs`. FB-112.
+
+### D-3684 — A count too large for the type asks for the ceiling — 2026-10-06
+
+**Finding (gap-audit #4).** `/backtest.json` and `/logs.json` read `limit`
+with `parse::<usize>()`, which refuses a run of digits too long for the type
+exactly as it refuses `abc`. So `?limit=99999999999999999999` (an operator
+asking for everything) was answered the DEFAULT page (500, 50), and the
+backtest route logged it as "not a whole number".
+
+**Decision.** `server::whole_count` reads a count and saturates at
+`usize::MAX` only when the text is all ASCII digits and overflows; every
+caller's clamp then answers its ceiling (`MAX_RUNS`, `PAGE_LIMIT`). Anything
+else (`-1`, `1e3`, a trailing `x` after twenty digits, a leading `+`) is
+still not a count and takes the default, named as before.
+
+**Proof.** `a_whole_count_saturates_only_past_the_type` in
+`crates/api/src/server.rs`;
+`a_limit_past_usize_is_clamped_to_the_ceiling_and_not_named_unparseable` in
+`crates/api/src/backtest.rs`; `a_limit_past_usize_reads_the_page_ceiling` in
+`crates/api/src/logs.rs`. The last two fail on the unfixed code (500 for
+20000, 50 for 200). FB-113.
+
+### D-3685 — A negative previous value is not called zero — 2026-10-06
+
+**Finding (gap-audit #13).** `bars::with_change` sent every
+`Unknown::BaseNotPositive` to `previous_close_zero` / `previous_oi_zero`, so
+a corrupt negative stored close (or a negative open interest that is not the
+null sentinel) was shown as "the previous close is zero paisa".
+
+**Decision.** Zero and negative are two codes: `previous_close_zero` /
+`previous_oi_zero` for a real zero, `previous_close_negative` /
+`previous_oi_negative` for a negative stored value, each with its own
+sentence on `/db` (`BAR_WHY`), which says the stored value is corrupt.
+
+**Proof.** `a_negative_base_is_not_called_zero` in `crates/api/src/bars.rs`,
+which fails on the unfixed code (`previous_close_zero` for
+`previous_close_negative`). FB-114.
+
+### D-3686 — A source walk that did not finish never reports the build fresh — 2026-10-06
+
+**Finding (gap-audit #14).** `assets::Build::read` reported `serving` (no
+source newer than the shell) when `newest_under` stopped at its bound or
+skipped a directory it could not read, so a stale bundle could be called
+fresh over a tree the check never finished reading (§4).
+
+**Decision.** `newest_under` also returns why its walk was incomplete (the
+bound, or the first unreadable directory; a `web/src` that does not exist is
+not incomplete). A newer source found is still `Stale`; otherwise an
+incomplete walk is `Build::Unchecked { why }`, which still answers pages,
+logs the word `unchecked` and says "FRESHNESS UNCHECKED" with the reason.
+
+**Proof.** `a_source_walk_that_did_not_finish_is_unchecked_not_serving` and
+`an_unreadable_source_directory_leaves_freshness_unchecked` (uid 65534, D-0995)
+in `crates/api/src/assets.rs`. These call the new bounded reader, so on the
+unfixed code they do not compile; no standalone failing run is claimed.
+FB-115.
+
+### D-3687 — The store-format doc says what `Layout::KNOWN` holds — 2026-10-06
+
+**Finding (gap-audit #17).** `docs/02-store-format.md` §8 and the
+`Layout::OVERLAY` / `Layout::GREEKS` doc blocks said neither sidecar geometry
+is in `Layout::KNOWN`; the constant lists `[V2, V3, OVERLAY, GREEKS]`, and
+`store/tests/unit.rs` asserts it.
+
+**Decision.** The doc and the two blocks now say both are in `KNOWN` (a
+version is resolved while the header decodes) and name what keeps them from
+a bar reader: `store::file`'s per-kind `BAR_TABLE`, chosen by `table_of`.
+Documentation only; no byte on disk or line of code changes.
+
+### D-3688 — An interim `100 Continue` does not restart the head clock — 2026-10-06
+
+**Finding (gap-audit #3).** `HeadDeadline` re-armed the head deadline on
+every successful write, including hyper's interim `100 Continue`, written
+while the request it answers is still being read. The connection went back to
+awaiting a head, and a handler slower than the head timeout was cut with a
+408 "the request head did not arrive in time" for a head that had arrived.
+
+**Decision.** A write whose first bytes are a 1xx status line
+(`HTTP/1.1 1`, `HTTP/1.0 1`) does not re-arm, on both the plain and the
+vectored path (hyper writes vectored). A final response still re-arms.
+
+**Proof.** `an_interim_continue_does_not_restart_the_head_clock` in
+`crates/api/src/server.rs` (`head_deadline_tests`). It answered 408 before the
+change and 200 with the handler's body after it.
+`an_interim_write_on_either_path_keeps_the_head_delivered` drives both write
+paths directly. FB-116.
+
+### D-3689 — A client that never reads gives its connection slot back — 2026-10-06
+
+**Finding (gap-audit #2).** A client that pipelined requests and read
+nothing filled both socket buffers; hyper then waited on a write that never
+became ready, and `HeadDeadline`'s alarm was polled only on reads, so the
+connection held its slot for ever. `MAX_CONNECTIONS` (256) such clients
+stopped the server accepting, and a graceful shutdown waited on them (D-2771
+bounds that drain; nothing bounded the slot).
+
+**Decision.** `HeadDeadline::write_progress`: a write that returns `Pending`
+arms a write-stall alarm of one head timeout, and any write that completes
+clears it. The alarm is polled on the pending write, so its own timer wakes
+the task; when it fires the write fails `TimedOut`, hyper drops the
+connection and the slot is freed. A slow reader that takes ANY bytes within
+each timeout is not cut.
+
+**Proof.** `a_client_that_never_reads_cannot_hold_its_slot` in
+`crates/api/src/server.rs` (cap 1; the hog pipelines 64 requests for 1 MiB
+each and reads nothing). It fails on the unfixed code (the next client got
+nothing) and passes after. FB-117.
