@@ -207,3 +207,34 @@ checked: none uses D-36xx, and none uses FB-110..149.
   - WS4: #7 #8 #9 FIXED 181e9e42 (D-3692..3694); #15 FIXED c936e19c (D-3695).
   - WS3: #2 #3 #4 #13 #14 #17 reported done, committing.
   - WS5: #5 #6 being verified.
+
+## 2026-10-09 04:50 UTC — new account, PR #74 CI thread (session_0192cvXYTyfh6ihYTAF7UgaR)
+Usage rule now: at most 2 agents at once, no new fan-outs; a usage/rate-limit error = save here,
+check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
+
+- Run 1286 (head fbdabaec): all gates green except 46/202 Gate 18 shards -> 50 survivors
+  (MISSED + TIMEOUT). Split: cli 23, api 8, runner/store/pull/indicators 10, ordered.rs 9 TIMEOUTs.
+  Plus untested mutants left behind hung shards: cli 32, api 16, rest 43 (lists only in /tmp).
+- CLI audit-run test `generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`:
+  NOT reproducible on fbdabaec. Passes alone as root (165 s), as uid 65534 (169 s), in the full
+  cli suite as uid 65534, and under load avg ~13 (273 s, peak RSS 1.0 GB, fixture 30 MB). The only
+  recorded failure text is the Sept Mac run's 6-minute clock bound ("exceeded its 360s/8MiB bound"),
+  which D-0911 removed. The Oct 3 audit log was lost.
+- Fixer branches (pushed as backups, never to final/all-fixes):
+  - pr74/r1286-cli 14fb5394 (10 commits, D-4100.., R1286-cli-*), wt /home/claude/wt-cli
+  - pr74/r1286-api 54059a03 (6 commits, D-4130.., D-4135), wt /home/claude/wt-api
+  - pr74/r1286-rest 50bbd069 (3 commits, D-4150.., D-4152), wt /home/claude/wt-rest
+  - pr74/r1286-ord: not committed yet. Change = .config/nextest.toml priority 100 for
+    `ordered::tests::a_lane_never_waits_on_its_own_slot` and
+    `ordered::tests::turns_are_granted_in_round_then_input_order_within_a_deadline` (D-4180).
+    Proof so far: hand-applied `Turns::update -> ()` fails at test 48/2060 after ~2 min
+    (deadline test, 30 s) instead of hanging. delete-! and ready->false runs in progress.
+    Still needs D-4180 in docs/05 and an R1286-ord-01 row in docs/04.
+- Local-only trap: with `cargo mutants --in-place`, crates/cli/build_provenance.rs watches
+  .git/packed-refs and a per-worktree ref path that do not exist, so cargo rebuilds cli/api on
+  every call (test phase too). CI is unaffected: Gate 18 runs copy mode (ci.yml:4330) and
+  cargo-mutants 26.2.0 does not copy .git (copy_tree.rs:28,106). Locally, run without --in-place.
+- Next: fixers finish Part 1 only; untested pre-runs run as detached cargo-mutants jobs (no agent);
+  merge r1286-{cli,api,rest,ord} + handed-over batches on a local branch from
+  origin/final/all-fixes (merge commits), full validation (fmt, clippy, deny, tests as 65534,
+  static gates), ONE push to final/all-fixes, then watch the new run.
