@@ -11638,14 +11638,16 @@ the counts the tests assert: no bench times the fold.
   input order (in parallel until D-1701), and each rung reads the same
   one-minute span for itself.** For a rung other than
   `1min` the reads are the execution series `audit_range_kernel` loads, one
-  per attempt of every column build (inside `load_exact_minute_context`: the
-  kernel's build, and `one_rung`'s own when the support is derived), and one
-  per attempt of `exact_minute_withholding_unsourceable_days`. That is at
-  least three reads of that rung's one-minute span, four when the support is
-  derived, and the `1min` rung reads it as its own span as well. Across the
-  eight rungs that is some 24 to 32 reads of identical minutes per command,
-  O(minute bars) each, and more when withheld days force a rebuild: each
-  build retries up to 64 attempts and every attempt reads the minutes again.
+  per attempt of the column build (inside `load_exact_minute_context`: the
+  kernel's build, which a derived support shares since D-4719), and one per
+  attempt of `exact_minute_withholding_unsourceable_days`. That is at least
+  three reads of that rung's one-minute span, derived support or named (a
+  derived support paid a fourth until D-4719), and the `1min` rung reads it
+  as its own span as well. Across the eight rungs that is some 24 reads of
+  identical minutes per command, O(minute bars) each, and more when withheld
+  days force a rebuild: each build retries up to 64 attempts and every
+  attempt reads the minutes again. The census withholds every holed day it
+  can see before the first attempt, so a rebuild needs a hole it cannot.
   Loading the minute span once per command and sharing it is possible, since
   the read itself does not depend on the rung, and is not done: each context
   is derived from that rung's surviving bars and digested into its
@@ -11654,25 +11656,26 @@ the counts the tests assert: no bench times the fold.
   `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in
   `crates/cli/tests/limits_o1cli_3.rs`.
 
-## A rung loads its span twice and may build its column twice (audit o1cli-2)
+## A rung loads its span twice and builds its column once (audit o1cli-2)
 
 - **`one_rung` loads the rung's span with `stored::load_span`, and the audit
-  kernel `audit_range_kernel` then loads the same span again.** When no
-  support is named, the column is also built twice:
-  `column_withholding_unsourceable_days` for `affordable_min_hits`, then
-  `column_withholding_at_build` inside the kernel, each loading its own daily
-  and exact-minute context. So an all-rungs run pays two span loads per rung
-  always, and two column builds per rung when the support is derived, O(rung
-  bars) each. Until this audit only a comment in `stored.rs` admitted it.
-  Threading the loaded span and column into the kernel would remove the
-  second pair; it is not done because the kernel re-derives both from the
-  bars that survive its own withholding and binds them to the preparation
-  digest. Since D-1557 both loads go through one `AuditCache` per command
-  (`one_rung_cached`, and `load_audit_inputs` for the kernel), so a `descend`
-  pays the pair once for its whole ladder, not once per step; a single rung
-  still pays both. Stated from the code's shape; not timed. Held to the code
-  by `a_rungs_second_load_and_build_are_stated_and_still_paid` in
-  `crates/cli/tests/limits_o1cli_2.rs`.
+  kernel `audit_range_kernel` then loads the same span again.** The column is
+  built once per rung whether or not a support is named: both branches of
+  `one_rung_cached` read `load_audit_inputs` through the `AuditCache` the
+  audit then reads, so a derived support sizes `affordable_min_hits` on the
+  audit's own column, census and preparation digest. So an all-rungs run pays
+  two span loads per rung always, and one column build, O(rung bars) each.
+  Until D-4719 a derived support built its own column first with
+  `column_withholding_unsourceable_days`, from an empty withheld set and with
+  no minute-hole census, and the kernel built it again. Reading the row's
+  missing months and calendar exclusions off the kernel's load would remove
+  the first load; it is not done because an unstamped rung reports them
+  without preparing anything, and the kernel's load is the one its
+  preparation digest is bound to. Since D-1557 both loads go
+  through one `AuditCache` per command, so a `descend` pays them once for its
+  whole ladder, not once per step. Stated from the code's shape; not timed.
+  Held to the code by `a_rungs_second_load_and_build_are_stated_and_still_paid`
+  in `crates/cli/tests/limits_o1cli_2.rs`.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)
 
@@ -13031,10 +13034,12 @@ not:
   audit, which consumes them), the O(bars) scans that derive its horizon,
   grid rungs, floors and policy from the held bars, and its own sweep. NOT
   MEASURED.
-- **`latest_for` (D-1567).** O(runs) per call: it opens the results ledger,
-  which builds the identity index and hashes the file, before its backward
-  scan. Called once per rung of `range-all`, `pool` pass 1 and every `descend`
-  step.
+- **`latest_for` (D-1567, removed by D-1700).** No longer a cost: the
+  function is gone. Its O(runs) per call, a ledger open before a backward
+  scan once per rung of `range-all`, `pool` pass 1 and every `descend` step,
+  is history; `recorded_row` replaced it, and the first `latest_for` bullet
+  of this section states what that costs. Restated by D-4724, which found
+  this bullet still describing the removed function as current.
 ## Audit fixes — D-1480 onward, 3 October 2026
 
 **A credential watch's dead-value check is O(d), not O(1) (v3a-1, D-1482).**
@@ -15042,10 +15047,12 @@ UNVERIFIED for the rest:
 - **`api::server::form_read_bound` (D-1592).** "O(1)": four comparisons since D-1770 (two before)
   against literal paths. `api::server::form_read_bound_is_wide_only_on_the_member_routes`
   proves which route gets which bound; nothing times the call.
-- **`cli::latest_for` (D-1567).** The stated O(runs) per call (the bullet
-  above) rests on the audit's measurement (14.13x open cost for 10x rows,
-  o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
-  `Results::open`, so no tracked bench repeats it.
+- **`cli::latest_for` (D-1567, removed by D-1700).** The O(runs) per call
+  this bullet once rested on the audit's measurement (14.13x open cost for
+  10x rows, o1surface2-4) belongs to a removed function. Its replacement
+  `recorded_row` is stated from the code's shape and not timed:
+  `crates/cli/benches/ratio.rs` deliberately does not time `Results::open` or
+  the shared handle's refresh. Restated by D-4724.
 ## A rate span published slower than one permit a second keeps the old floor — D-1769, 3 October 2026
 
 `pull::rate::Window::floor_of` floors every span at one permit a second in its
@@ -15560,6 +15567,25 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   anyone should expect to reach, because a key whose envelope admits cells is
   a key whose mildest tier is likely to end the walk.
 
+- **A recorded cascade's capture: at most two screens, whatever `T` is**
+  (G2-5, D-4716, next to D-1734). The bound above is the walk's pricing; a
+  RECORDED walk also writes candidate evidence. Each captured screen is one
+  tier file and two files per candidate side, two `fsync`s each, plus
+  `2 × evaluated` acknowledgement slots of 33 bytes against the capture's
+  64 MiB budget. Until D-4716 every judged tier was captured, so a walk where
+  nothing admits paid `(1 + T) × (2 + 8C) + 2` `fsync`s and `(1 + T) × 2C`
+  replays, and the budget refused the run near `T = 64 MiB / (66 × C)`:
+  about 10,000 tiers at `C = 98` and about 100 at the default
+  `screen_cap()` (derived from the slot size, not measured). Now `walk_tiers`
+  judges every tier with no capture and captures only the tier it ends on,
+  so a cascade captures the operator's own policy and that tier: at most
+  `6 + 16C` `fsync`s, `4C` replays and `4C` slots (`C <= screen_cap()`). The
+  met tier pays one extra `tier_rows` over its cached grids,
+  `O(C × 2 × K)`. COUNTED, not timed:
+  `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
+  measures two captured screens and exactly `2 × tiers + 4 × candidates + 2`
+  `fsync`s on a 2,520-tier ladder (2,521 tiers before the fix).
+
 - **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
   number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
   `grid_rungs`, `max_stop_points`, each once), one
@@ -15587,9 +15613,12 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   map probe plus a Wilson bound.
 
 - **`cli results` and `cli top`, per request: `O(ledger rows)` reads, `O(1)`
-  retained** (W2-cli8-5, D-1729). `results_at` makes one newest-first pass
-  over every recorded run and keeps at most `LIST_ROWS` (40) records plus a
-  running best. `newest_complete` makes one pass and keeps one record. Neither
+  retained** (W2-cli8-5, D-1729). `results_at` makes one pass over every
+  recorded run, in the append order of the ledger open's own visit since
+  D-2310 (not newest first), and keeps at most `LIST_ROWS` (40) records, by
+  dropping the oldest held row before each push, plus a running best; the
+  retention is pinned by `the_results_listing_retains_a_bounded_window`
+  (D-4721). `newest_complete` makes one pass and keeps one record. Neither
   can stop early: the best complete run can be anywhere in the ledger. A
   per-request bound below the ledger would need a secondary index, which this
   append-only, path-is-the-index file does not keep. UNVERIFIED as a

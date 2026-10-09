@@ -3196,13 +3196,11 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
                 "support_ppm",
                 "a whole number of parts per million of this rung's own bars",
             )?;
-            if support_ppm == 0 {
-                return Err(Refusal::Malformed(
-                    "`support_ppm` is 0. Every combination is then frequent, \
-                     the frontier never empties and the walk has no end."
-                        .to_owned(),
-                ));
-            }
+            // `cli`'s ONE SUPPORT DOMAIN, not a copy of half of it: this
+            // refused only 0, so 100% or more ran (W2-cli8-11, D-4718).
+            cli::support_ppm_in_domain(support_ppm).map_err(|why| {
+                Refusal::Malformed(format!("`support_ppm` {support_ppm} is refused: {why}."))
+            })?;
             let max_points: i64 = whole(body, "max_points", "a whole number of index points")?;
             let top: usize = whole(body, "top", "a whole number of rows to list")?;
             // Zero is no ceiling, as at the descent door and in `cli` (D-1732).
@@ -7168,5 +7166,172 @@ mod tests {
         std::fs::create_dir(telemetry::current_path(&dir)).expect("unreadable log fixture");
         assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// W2-cli8-10, D-4717. A ZERO STOP CEILING IS NO CEILING, END TO END.
+    ///
+    /// `a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it` proved the
+    /// parse only. The command it parsed reached `cli::screen_range_in_points`,
+    /// which loaded the span and then refused zero as a ceiling that "converts
+    /// to 0 ppm, which admits nothing". This one sends the body through
+    /// `command_from` and `conduct_command` over a stored, swept NIFTY month
+    /// and requires the screen to run. In a child process: the store is named
+    /// by `BRUTEX_STORE`, which a test cannot set on itself (`crate::isolated`).
+    #[test]
+    fn a_zero_point_screen_command_runs_as_no_ceiling_end_to_end() {
+        const CHILD: &str = "BRUTEX_TEST_API_ZERO_POINT_SCREEN";
+        if std::env::var_os(CHILD).is_some() {
+            zero_point_screen_child();
+            return;
+        }
+        let root = crate::scratch::path("zero-point-screen");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the child's store root");
+        write_warmed_nifty_may(&root);
+        let logs = root.join("logs");
+        let out = crate::isolated::rerun(
+            "sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end",
+            &[
+                (CHILD, std::ffi::OsStr::new("1")),
+                ("BRUTEX_STORE", root.as_os_str()),
+                ("BRUTEX_LOG_DIR", logs.as_os_str()),
+                ("BRUTEX_VALIDATE", std::ffi::OsStr::new("0")),
+                ("BRUTEX_CEILING", std::ffi::OsStr::new("256")),
+            ],
+        );
+        assert!(out.contains("ZERO-POINT SCREEN RAN"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The child half: one screen command over the stored May 2025.
+    fn zero_point_screen_child() {
+        let asked = command_from(
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2025,"from_month":5,"to_year":2025,"to_month":5,"command":"screen","rung":"1min","support_ppm":999999,"max_points":0,"top":1}"#,
+        )
+        .expect("zero is no ceiling at the parse");
+        let progress = conduct_command(&asked, 1, 2);
+        let said = format!(
+            "{}{}",
+            progress.report.as_deref().unwrap_or(""),
+            progress.refusal.as_deref().unwrap_or("")
+        );
+        assert!(
+            !said.contains("admits nothing"),
+            "zero was read as a ceiling: {said}"
+        );
+        if cli::commit_stamp().is_none() {
+            assert!(said.contains("no verified commit stamp"), "{said}");
+        } else {
+            assert!(progress.refusal.is_none(), "{said}");
+            assert!(said.contains("RESULT RECORDED"), "{said}");
+        }
+        println!("ZERO-POINT SCREEN RAN");
+    }
+
+    /// One generated NSE session of 2025: every minute of the calendar's
+    /// windows, constant prices. Never market data.
+    fn generated_session(month: u8, date: u8) -> Vec<store::format::Bar> {
+        let civil = pull::session::Day::new(2025, month, date).expect("date");
+        let day = i64::from(civil.days_from_epoch());
+        let pull::calendar::DayKind::Open(session) = pull::calendar::kind_of(day) else {
+            return Vec::new();
+        };
+        session
+            .windows
+            .iter()
+            .take(usize::from(session.count))
+            .flat_map(|window| window.from..=window.to)
+            .map(|minute| store::format::Bar {
+                ts_micros: day * 86_400_000_000 + i64::from(minute) * 60_000_000
+                    - pull::session::IST_OFFSET_SECS * 1_000_000,
+                open: 100_000,
+                high: 110_000,
+                low: 90_000,
+                close: 101_000,
+                volume: 100,
+                open_interest: i64::MIN,
+            })
+            .collect()
+    }
+
+    /// The warmed NIFTY store `cli`'s stored fixtures use: the April 30 and
+    /// May 2 seed sessions, then May 5 to 13, at 1min, 5min and 1day.
+    fn write_warmed_nifty_may(root: &std::path::Path) {
+        use store::path::{FileKind, StorePath, Timeframe, YearMonth};
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .expect("NIFTY");
+        let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+        let symbol = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        let write = |month: u8, timeframe: Timeframe, rows: &[store::format::Bar]| {
+            let path = StorePath::for_key(
+                brutex_core::vendor::Vendor::Zerodha,
+                &key,
+                timeframe,
+                YearMonth::new(2025, month).expect("month"),
+                FileKind::Bars,
+            )
+            .expect("path");
+            store::file::BarFile::open_or_create(root, path, symbol)
+                .expect("writer")
+                .append(rows)
+                .expect("generated rows");
+        };
+        let days = [(4_u8, 30_u8), (5, 2)]
+            .into_iter()
+            .chain((5..=13).map(|day| (5, day)));
+        for (month, day) in days {
+            let rows = generated_session(month, day);
+            let Some(first) = rows.first().copied() else {
+                continue;
+            };
+            write(month, Timeframe::MINUTE_1, &rows);
+            write(month, Timeframe::DAY_1, &[first]);
+            if month == 5 {
+                let five: Vec<_> = rows.iter().step_by(5).copied().collect();
+                write(month, Timeframe::MINUTE_5, &five);
+            }
+        }
+    }
+
+    /// W2-cli8-11, D-4718. THE `screen` COMMAND'S SUPPORT DOMAIN IS `cli`'s.
+    ///
+    /// This door refused only 0, so 1,000,000 ppm (100%) or more ran and
+    /// recorded a screen that could find nothing, while argv and
+    /// `BRUTEX_SUPPORT_PPM` refused it by name (D-1722). It now asks the one
+    /// validator they ask, and names its sentence.
+    #[test]
+    fn the_screen_command_refuses_the_support_domain_cli_refuses() {
+        for (support, refusal) in [
+            (0_u64, Some("0 would disable extinction")),
+            (1, None),
+            (999_999, None),
+            (1_000_000, Some("1000000 is 100%")),
+            (1_000_001, Some("1000000 is 100%")),
+            (u64::MAX, Some("1000000 is 100%")),
+        ] {
+            let parsed = command_from(&command_body(&format!(
+                r#""command":"screen","rung":"15min","support_ppm":{support},"max_points":20,"top":25"#
+            )));
+            match refusal {
+                None => assert!(
+                    matches!(
+                        parsed,
+                        Ok(super::Command::Screen { support_ppm, .. }) if support_ppm == support
+                    ),
+                    "{support}: {parsed:?}"
+                ),
+                Some(why) => {
+                    let refused = parsed.expect_err("outside the one support domain");
+                    assert!(
+                        refused.why().contains(why) && refused.why().contains("support_ppm"),
+                        "{support}: {}",
+                        refused.why()
+                    );
+                }
+            }
+        }
     }
 }

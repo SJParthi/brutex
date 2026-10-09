@@ -37,6 +37,23 @@ publication. A callback error is latched: not-yet-started candidates and sides
 check it and skip work; a grid already executing finishes its current engine
 call. No immediate interruption inside that grid is claimed.
 
+## Which screen passes are captured (D-4716)
+
+A capture holds the screen passes the page shows, not every tier the walk
+judged. `screen_cascade` screens the operator's own policy first, and that
+pass is captured. When the walk runs, every tier is judged with no capture,
+and only the tier the walk ends on is captured: the strictest tier that
+admitted a row, or the last tier when none did. So a capture holds one or two
+tiers. Before D-4716 every judged tier was captured, `1 + T` tiers on a walk
+that admitted nothing, which spent the 64 MiB acknowledgement budget and
+refused the run on long ladders.
+
+The bytes of every file and the catalog are unchanged, and this stays
+version 1. Tier ordinals count captured passes in the order they ran, as
+before; each tier states its own policy words, so a reader never infers a
+tier's policy from its ordinal. A capture written before D-4716 reads as it
+always did.
+
 ## Paths and byte layout
 
 All files live under:

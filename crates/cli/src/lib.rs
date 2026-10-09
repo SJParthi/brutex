@@ -972,58 +972,6 @@ fn exact_minute_withholding_unsourceable_days(
     ))
 }
 
-/// Builds the anchored column, WITHHOLDING each day whose close cannot be
-/// sourced.
-///
-/// # Where the refusal actually lives
-///
-/// `MissingClosingMinute` is raised by `overlay_exact_minute_orb_and_gapfib` inside
-/// [`stored_anchored_column`] — not by `load_exact_minute_context`. The overlay
-/// loads successfully; it is the COLUMN BUILD that finds a signal bar whose
-/// close has no matching stored minute. Two fixes wrapped the load and changed
-/// nothing, because the load had already succeeded.
-///
-/// # What it does
-///
-/// Build; on a refusal that names a minute, withhold that IST day from the
-/// signal bars and rebuild — overlay and daily context included, because both
-/// are keyed to the surviving bars and reusing them would describe a span the
-/// column no longer has. Each pass removes at least one day, so it terminates.
-///
-/// It DECLINES rather than substitutes: the tests forbidding minute
-/// substitution still hold, and a hole still refuses when its day is swept.
-/// What changes is that the day is not swept, and every withheld day is emitted
-/// as telemetry so a smaller sample is never a silent one.
-fn column_withholding_unsourceable_days(
-    root: &std::path::Path,
-    vendor: brutex_core::vendor::Vendor,
-    underlying: &str,
-    span: ((u16, u8), (u16, u8)),
-    series: FoldedSeries<'_>,
-    signal_length: i64,
-    // `&str`, NOT `&'static str`. `audit_range_inner` takes its rung from the
-    // command line, so it is borrowed rather than one of `EVERY_RUNG`'s
-    // literals — and this only ever reads it to label an event.
-    rung: &str,
-) -> Result<(indicators::column::Column, [u8; 32]), String> {
-    let commit = commit_stamp().ok_or_else(|| {
-        "the build has no verified commit stamp; no stored condition preparation will run"
-            .to_owned()
-    })?;
-    column_withholding_at_build(
-        root,
-        vendor,
-        underlying,
-        span,
-        series,
-        signal_length,
-        StoredPreparationBuild {
-            rung,
-            commit: Some(commit),
-        },
-    )
-}
-
 #[derive(Clone, Copy)]
 struct StoredPreparationBuild<'a> {
     rung: &'a str,
@@ -1046,6 +994,30 @@ struct FoldedSeries<'a> {
     bars: &'a mut Vec<indicators::Candle>,
 }
 
+/// Builds the anchored column, WITHHOLDING each day whose close cannot be
+/// sourced.
+///
+/// # Where the refusal actually lives
+///
+/// `MissingClosingMinute` is raised by `overlay_exact_minute_orb_and_gapfib` inside
+/// [`stored_anchored_column`] — not by `load_exact_minute_context`. The overlay
+/// loads successfully; it is the COLUMN BUILD that finds a signal bar whose
+/// close has no matching stored minute. Two fixes wrapped the load and changed
+/// nothing, because the load had already succeeded.
+///
+/// # What it does
+///
+/// Build; on a refusal that names a minute, withhold that IST day from the
+/// signal bars and rebuild — the overlay context included, because it is keyed
+/// to the surviving bars and reusing it would describe a span the column no
+/// longer has. The daily context is derived from the whole folded series,
+/// which no pass changes, so it is read once (D-1781, D-4719). Each pass
+/// removes at least one day, so it terminates.
+///
+/// It DECLINES rather than substitutes: the tests forbidding minute
+/// substitution still hold, and a hole still refuses when its day is swept.
+/// What changes is that the day is not swept, and every withheld day is emitted
+/// as telemetry so a smaller sample is never a silent one.
 fn column_withholding_at_build(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -1068,13 +1040,15 @@ fn column_withholding_at_build(
     // ONCE, outside the retry loop: the verdict is a property of the key and
     // does not change when a day is withheld.
     let availability = stored::vwap_availability(&stored::swept_index(underlying)?);
+    // THE DAILY CONTEXT ANCHORS EVERY BAR THE FOLD STEPS, so it is derived
+    // from the whole series (D-1781), which no pass changes: read ONCE, not
+    // once per pass (W2-cli8-6, D-4719). The overlay context is derived from
+    // the swept bars it overlays, which a withheld day changes, so it is
+    // still read per pass.
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), whole)?;
     for _ in 0..ATTEMPTS {
         #[cfg(test)]
         COLUMN_BUILD_ATTEMPTS.with(|count| count.set(count.get().saturating_add(1)));
-        // THE DAILY CONTEXT ANCHORS EVERY BAR THE FOLD STEPS, so it is derived
-        // from the whole series; the overlay context from the swept bars it
-        // overlays. D-1781.
-        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), whole)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
         let digest = crate::minute_gaps::bind_withheld(
             stored_anchored_digest(whole, &exact, &daily)?,
@@ -2819,15 +2793,34 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
 ///
 /// A non-number, zero, or 1,000,000 and anything above it.
 fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
-    match text.parse::<u64>() {
-        Err(_) => Err("SUPPORT_PPM is not a whole number"),
-        Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
-        Ok(ppm) if ppm >= 1_000_000 => Err(
+    text.parse::<u64>()
+        .map_err(|_| "SUPPORT_PPM is not a whole number")
+        .and_then(support_ppm_in_domain)
+}
+
+/// `ppm` itself when it is a support [`parse_support_ppm`] admits, or the
+/// sentence that refuses it: the ONE support domain, `1..1_000_000`.
+///
+/// # Every entry asks this (W2-cli8-11, D-4718)
+///
+/// [`parse_support_ppm`] is this after the parse, so argv and
+/// `BRUTEX_SUPPORT_PPM` ask it; [`screen_range`], [`screen_range_in_points`]
+/// and the api's `screen` command take a number already parsed and ask it
+/// directly. Those three refused only zero, so 100% or more loaded a span and
+/// recorded a screen that could find nothing.
+///
+/// # Errors
+///
+/// Zero, or 1,000,000 and anything above it.
+pub const fn support_ppm_in_domain(ppm: u64) -> Result<u64, &'static str> {
+    match ppm {
+        0 => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
+        1_000_000.. => Err(
             "SUPPORT_PPM is parts per million, so 1000000 is 100%: a pattern on \
                  every bar, which D-0080 excludes, so at or above it nothing can \
                  be frequent",
         ),
-        Ok(ppm) => Ok(ppm),
+        ppm => Ok(ppm),
     }
 }
 
@@ -7528,6 +7521,9 @@ struct AuditInputs {
     /// Every day withheld from the sweep: the holed days, then any day the
     /// overlay could not source.
     withheld_days: Vec<i64>,
+    /// The digest the column's preparation attempt was recorded under, which
+    /// `one_rung`'s derived support names its probes by. D-4719.
+    preparation_digest: [u8; 32],
 }
 
 /// The inputs of the last stored range audit, or its refusal, and the raw
@@ -7581,6 +7577,9 @@ std::thread_local! {
     static AUDIT_INPUT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Test-only: how many times this thread loaded `one_rung`'s raw span. D-1557.
     static RUNG_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only: the swept count `one_rung`'s derived support was sized on,
+    /// so a test can compare it with the audit's column. W2-cli8-6, D-4719.
+    static AUTO_SUPPORT_SWEPT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// [`audit_range_kernel_cached`] with a fresh cache: one audit, one load.
@@ -7705,11 +7704,11 @@ fn load_audit_inputs(
     let mut withheld_days = holed_days;
     // THE COLUMN BUILD IS WHAT REFUSES, so the withholding wraps THAT.
     //
-    // `one_rung` guards its own support-derivation build, and this is the
-    // second build on the same span -- one hop later, unguarded, raising the
-    // identical `MissingClosingMinute`. Guarding only the first left the
-    // symptom exactly as it was, which is how a correct fix looked like no fix
-    // at all.
+    // `one_rung` once guarded only its own support-derivation build, and this
+    // was the second build on the same span -- one hop later, unguarded,
+    // raising the identical `MissingClosingMinute`. Guarding only the first
+    // left the symptom exactly as it was, which is how a correct fix looked
+    // like no fix at all. Since D-4719 that derivation reads THIS build.
     let (column, preparation_digest) = column_withholding_at_build(
         root,
         vendor,
@@ -7777,6 +7776,7 @@ fn load_audit_inputs(
         executed_digest,
         folded,
         withheld_days,
+        preparation_digest,
     })
 }
 
@@ -7816,6 +7816,7 @@ fn audit_range_kernel_cached(
         executed_digest,
         folded,
         withheld_days,
+        preparation_digest: _,
     } = cache.inputs(
         AuditKey {
             root: root.clone(),
@@ -13131,6 +13132,11 @@ where
 /// The answer is the reference walk's, `walk_ladder` with `screen` per tier,
 /// byte for byte: proven by
 /// `cli::screen_policy_tests::the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
+///
+/// A capture records only the tier the walk ENDS on: the met tier, or the last
+/// tier when none admits. Every other tier is judged with no capture, so a
+/// recorded walk writes one captured screen whatever `T` is (G2-5, D-4716):
+/// proven by `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the six slice inputs every screen takes, the ladder, and the unmet sink"
@@ -13153,11 +13159,33 @@ fn walk_tiers<'t, 'a>(
             price_grids(bars, column, by_evidence, horizon, envelope, pricing, facts)
         },
         |grids, (_, rules)| {
-            let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
-            Ok(rows
-                .iter()
-                .any(|row| row.admitted)
-                .then(|| finish_screen(rows, bars, column, horizon, *rules, facts)))
+            // JUDGED UNRECORDED; CAPTURED ONLY WHEN SHOWN (G2-5, D-4716). A
+            // tier that admits nothing is not the answer and its rows are never
+            // shown, so capturing it bought a tier file and four `fsync`s per
+            // candidate side for every one of up to 18,480 tiers, against a
+            // 64 MiB budget that then refused the whole recorded run.
+            let rows = tier_rows(
+                grids,
+                by_evidence,
+                horizon,
+                *rules,
+                Pricing {
+                    capture: None,
+                    ..pricing
+                },
+            )?;
+            if !rows.iter().any(|row| row.admitted) {
+                return Ok(None);
+            }
+            // The met tier is the answer: judged again WITH the capture. The
+            // capture only records, so these rows equal the ones above.
+            let rows = match pricing.capture {
+                Some(_) => tier_rows(grids, by_evidence, horizon, *rules, pricing)?,
+                None => rows,
+            };
+            Ok(Some(finish_screen(
+                rows, bars, column, horizon, *rules, facts,
+            )))
         },
         |grids, (_, rules)| {
             let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
@@ -13792,8 +13820,9 @@ fn tier_rows<'a>(
     rules: Rules,
     pricing: Pricing<'_>,
 ) -> Result<Vec<Screened<'a>>, String> {
-    // ONE CAPTURE TIER PER POLICY JUDGED, as when every policy priced its own
-    // grids: the capture's tier ordinals follow the walk, not the grid passes.
+    // ONE CAPTURE TIER PER CALL THAT CARRIES A CAPTURE. `walk_tiers` passes
+    // one only for the tier it ends on, so the capture's tier ordinals are the
+    // SHOWN screens, not every tier judged (G2-5, D-4716).
     let captured_tier = pricing
         .capture
         .map(|capture| {
@@ -14307,18 +14336,43 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
     (c.weakest_bp(), c.worst_day)
 }
 
-/// Measure consistency for the rows that will actually be printed.
+/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
+/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
 ///
-/// # Why the caller does not do this inline
-///
-/// Two reasons, and the first is a bug that was measured. Inline, this ran
-/// inside the screening loop -- over `screen_cap()` combinations, ten
-/// thousand by default -- and every one paid for a full trade-by-trade
-/// re-walk when only `top` are ever rendered. A single-month screen that
-/// had taken seconds stopped finishing inside 280.
-///
-/// The second is that [`screen`] was 113 lines with it, past the hundred
-/// clippy enforces.
+/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
+/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
+/// unbounded per-request cost. A thousand printed rows is a page nobody reads
+/// whole; past it the cost grows and the answer does not.
+pub(crate) const TOP_CEILING: usize = 1_000;
+
+/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
+/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
+/// unusable: zero lists nothing, and past the ceiling the measured band is an
+/// unbounded per-request cost (D-1727).
+fn top_from_knob() -> usize {
+    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
+        return 25;
+    };
+    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
+        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
+        25
+    })
+}
+
+// Every TOP the door admits is one the frontier can serve (D-1981).
+const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
+
+/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
+pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
+    if top == 0 {
+        Some("TOP must be 1 or more")
+    } else if top > TOP_CEILING {
+        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
+    } else {
+        None
+    }
+}
+
 /// How many rows get their seven-grain calendar measured, given a wanted top N.
 ///
 /// # The circularity this exists to break
@@ -14359,43 +14413,6 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
 /// what is printed, which is enough for the calendar gate to demote a measured
 /// row and still have a measured replacement, and independent of how wide the
 /// search was.
-/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
-/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
-///
-/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
-/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
-/// unbounded per-request cost. A thousand printed rows is a page nobody reads
-/// whole; past it the cost grows and the answer does not.
-pub(crate) const TOP_CEILING: usize = 1_000;
-
-/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
-/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
-/// unusable: zero lists nothing, and past the ceiling the measured band is an
-/// unbounded per-request cost (D-1727).
-fn top_from_knob() -> usize {
-    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
-        return 25;
-    };
-    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
-        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
-        25
-    })
-}
-
-// Every TOP the door admits is one the frontier can serve (D-1981).
-const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
-
-/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
-pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
-    if top == 0 {
-        Some("TOP must be 1 or more")
-    } else if top > TOP_CEILING {
-        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
-    } else {
-        None
-    }
-}
-
 const fn measured_band(top: usize) -> usize {
     const WIDEN: usize = 8;
     const FLOOR: usize = 32;
@@ -14403,6 +14420,18 @@ const fn measured_band(top: usize) -> usize {
     if widened < FLOOR { FLOOR } else { widened }
 }
 
+/// Measure consistency for the rows that will actually be printed.
+///
+/// # Why the caller does not do this inline
+///
+/// Two reasons, and the first is a bug that was measured. Inline, this ran
+/// inside the screening loop -- over `screen_cap()` combinations, ten
+/// thousand by default -- and every one paid for a full trade-by-trade
+/// re-walk when only `top` are ever rendered. A single-month screen that
+/// had taken seconds stopped finishing inside 280.
+///
+/// The second is that [`screen`] was 113 lines with it, past the hundred
+/// clippy enforces.
 fn measure_top(
     rows: &mut [Screened<'_>],
     bars: &[indicators::Candle],
@@ -14511,9 +14540,15 @@ fn measure_top(
     // one the sequential loop computed, whatever the core count. The cost is
     // `O(band x (G + 7 x trades))` -- `G` one exit grid -- divided across cores,
     // and `band` is at most `8 x TOP_CEILING`.
+    #[cfg(test)]
+    let hook = MEASURE_ROW_HOOK.with(|hook| hook.borrow().clone());
     rows.par_iter_mut()
         .take(measured_band(rules.top))
         .for_each(|row| {
+            #[cfg(test)]
+            if let Some(hook) = &hook {
+                hook();
+            }
             // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
             // was worse than opposite — it was cross-wired.
             //
@@ -14550,6 +14585,17 @@ fn measure_top(
                 bars, column, row.scored, horizon, side, &g, &row.cell, facts,
             );
         });
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: called once per measured row of [`measure_top`]'s band, so a
+    /// test can prove two rows are measured at once (W2-cli8-7, D-4722). Read
+    /// on the thread that calls `measure_top`, so no other test's measurement
+    /// sees it.
+    pub(crate) static MEASURE_ROW_HOOK: std::cell::RefCell<
+        Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
 /// The screen's ranked table: one row per printed combination, its side, its
@@ -15434,65 +15480,48 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         };
         (min_hits_for_swept(can_hit, ppm), can_hit)
     } else {
-        // A NAMED SUPPORT READS ONLY THE THREE FACTS ABOVE, so a descent's held
-        // span is never copied; the derivation withholds days from its own
-        // copy, as it always withheld them from its own load. D-1557.
-        let mut span = span.clone();
-        // THE DAILY CONTEXT AND THE OVERLAY ARE LOADED INSIDE
-        // `column_withholding_unsourceable_days`, not here.
+        // THE AUDIT'S OWN PREPARATION, read through the cache
+        // `audit_range_cached` consults next, exactly as the named branch above
+        // reads it (W2-cli8-6, G2-3, D-4719).
         //
-        // Both are keyed to the SURVIVING bars, so a day withheld between
-        // attempts changes both. Loading them once out here and reusing them
-        // across rebuilds would describe a span the column no longer has — and
-        // would pay for a full minute-series load twice besides.
-        let signal_length = match stored::rung_length_micros(rung) {
-            Ok(length) => length,
-            Err(why) => {
-                return RungRow {
-                    rung,
-                    outcome: Err(first_line(why)),
-                    missing: Vec::new(),
-                    excluded: stored::CalendarExclusion::none(),
-                    retention: None,
-                    validation: None,
-                };
-            }
+        // This branch built its own column from the raw span and an EMPTY
+        // withheld set. So it ran no minute-hole census: an edge-holed day
+        // cost a refused pass, a reloaded context and a durable preparation
+        // attempt under a digest the audit never used, and a day whose only
+        // hole is one no close demands stayed in the column while the audit
+        // withheld it. `min_hits` was then sized on a swept population the
+        // audit did not sweep, and the column was built twice. Now the census,
+        // the withholding, the one column and its preparation digest are the
+        // audit's, built once.
+        //
+        // UNSTAMPED, IT PREPARES NOTHING, as the named branch keeps an
+        // unstamped rung from writing an attempt the audit would not have
+        // written. It took its stamp from the binary, so a store the audit
+        // was about to refuse got a column, and evidence, first.
+        let Some(commit) = store.commit else {
+            return RungRow {
+                rung,
+                outcome: Err("the build has no verified commit stamp; no stored \
+                              condition preparation will run"
+                    .to_owned()),
+                missing: Vec::new(),
+                excluded: stored::CalendarExclusion::none(),
+                retention: None,
+                validation: None,
+            };
         };
-        // THE REFUSAL IS HERE, NOT AT THE LOAD, and that distinction cost two
-        // wrong fixes.
-        //
-        // `MissingClosingMinute` is raised by `overlay_exact_minute_orb_and_gapfib`
-        // INSIDE `stored_anchored_column` — the overlay LOADS fine and the
-        // column build is what cannot source a signal bar's close. Withholding
-        // around `load_exact_minute_context` therefore changed nothing: that
-        // call had already succeeded.
-        //
-        // MEASURED: one absent minute refused 15min, 10min, 5min, 3min, 2min and
-        // 1min in under half a second each, on every run today. 60min survived
-        // only because no 60-minute bar happened to close on that minute.
-        //
-        // So the day the refusal NAMES is withheld and the column rebuilt. The
-        // overlay and the daily context are rebuilt too, because both are keyed
-        // to the surviving bars — reusing them would describe a span the column
-        // no longer has.
-        // FOLDED WHOLE: a day withheld below leaves the sweep, not the fold.
-        // D-1781.
-        let folded = span.bars.clone();
-        let mut withheld_days: Vec<i64> = Vec::new();
-        let (column, digest) = match column_withholding_unsourceable_days(
-            &root,
-            vendor,
-            underlying,
-            (from, to),
-            FoldedSeries {
-                folded: &folded,
-                days: &mut withheld_days,
-                bars: &mut span.bars,
+        let inputs = match cache.inputs(
+            AuditKey {
+                root: root.clone(),
+                vendor,
+                underlying: underlying.to_owned(),
+                rung: rung.to_owned(),
+                span: (from, to),
+                commit: commit.to_owned(),
             },
-            signal_length,
-            rung,
+            || load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit),
         ) {
-            Ok(column) => column,
+            Ok(inputs) => inputs,
             Err(why) => {
                 return RungRow {
                     rung,
@@ -15504,9 +15533,16 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
                 };
             }
         };
-        let can_hit = column.census().swept;
+        let can_hit = inputs.column.census().swept;
+        #[cfg(test)]
+        AUTO_SUPPORT_SWEPT.with(|swept| swept.set(Some(can_hit)));
         let statistical = min_hits_for_swept(can_hit, statistical_support_floor(can_hit));
-        match affordable_min_hits(&column, &root, &span, digest) {
+        match affordable_min_hits(
+            &inputs.column,
+            &root,
+            &inputs.span,
+            inputs.preparation_digest,
+        ) {
             Ok(affordable) => (affordable.max(statistical), can_hit),
             Err(why) => {
                 return RungRow {
@@ -15520,7 +15556,6 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
             }
         }
     };
-
     // ENTERING THE SWEEP IS ALSO AN EVENT, AND THE SILENCE BELOW IT IS THE LONG
     // ONE.
     //
@@ -16670,11 +16705,9 @@ pub fn screen_range_in_points(
     top: usize,
 ) -> String {
     let (from, to) = span;
-    if support_ppm == 0 {
-        return "refused: a support of zero makes every combination frequent, \
-                so the frequent frontier never empties and the walk has no \
-                end.\n"
-            .to_owned();
+    // THE ONE SUPPORT DOMAIN, BEFORE ANYTHING IS READ (W2-cli8-11, D-4718).
+    if let Err(why) = support_ppm_in_domain(support_ppm) {
+        return format!("refused: {why}\n");
     }
     // ZERO IS "NO CEILING BEYOND THE SWEPT LADDER". See `elite_arm` for the
     // full argument; in short, `Rules::admits` already reads `max_mae_ppm == 0`
@@ -16711,8 +16744,12 @@ pub fn screen_range_in_points(
             );
         }
     };
-    let reference = reference_price(&span.bars);
-    let max_mae_ppm = match ceiling_in_ppm(max_points, reference) {
+    // ZERO IS NO CEILING HERE TOO (W2-cli8-10, D-4717). This converted zero
+    // with `ceiling_in_ppm`, which refused it as "0 ppm, which admits
+    // nothing" after the span had been loaded, so the api's `screen` command
+    // passed zero through (D-1732) to a refusal. `elite_ceiling_ppm` is the
+    // one zero rule `elite` already uses.
+    let max_mae_ppm = match elite_ceiling_ppm(max_points, || Ok(reference_price(&span.bars))) {
         Ok(ppm) => ppm,
         Err(why) => {
             drop(span);
@@ -17834,6 +17871,11 @@ pub fn screen_range(
     support_ppm: u64,
     policy: Policy,
 ) -> String {
+    // THE ONE SUPPORT DOMAIN (W2-cli8-11, D-4718): this refused nothing, and
+    // the kernel turned zero into a one-hit threshold.
+    if let Err(why) = support_ppm_in_domain(support_ppm) {
+        return format!("refused: {why}\n");
+    }
     match screen_range_inner(
         vendor_word,
         underlying,

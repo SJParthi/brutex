@@ -65025,3 +65025,213 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4716 — A recorded tier walk captures the screens it shows, not every tier it judges — 2026-10-09
+
+**Finding.** G2-5, medium. D-1731 made the tier walk judge every tier, and
+D-1734 kept the candidate capture recording "one tier per policy judged". So
+a recorded walk that admits nothing wrote a tier file and two files per
+candidate side for every tier of the ladder: `(1 + T) × (2 + 8C) + 2` `fsync`s and
+`T × 2C` replays, against an acknowledgement budget of 64 MiB that refuses
+the whole recorded run once it is spent. D-1734's bound did not name it, and
+its 3.2 s measurement was the unrecorded path.
+`a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
+measured it on the 8-session fixture before the fix: 2,521 captured tiers
+for a 2,520-tier ladder, where the page shows two screens.
+
+**Decision.** `walk_tiers` judges every tier with no capture (`Pricing {
+capture: None, .. }`). The tier the walk ENDS on is judged again with the
+capture: the met tier inside `judge`, or the last tier in `screen_at`. The
+capture only records, so the re-judged rows equal the unrecorded ones and the
+page, selection and priced map are unchanged byte for byte. A recorded
+cascade therefore captures at most two screens, the operator's own policy and
+the tier the walk ended on: at most `6 + 16C` `fsync`s and `4C` acknowledgement
+slots, whatever `T` is. The met tier pays one extra `tier_rows` over its
+cached grids, `O(C × 2 × K)`.
+
+**What changes in stored results.** Only candidate captures of recorded
+audits and screens whose stated policy admitted nothing and whose ladder was
+walked: their catalog now holds two tiers, not `1 + rank + 1` or `1 + T`, and
+`candidate_side_count` falls with it. Tier ordinals now count SHOWN screens.
+The bytes of every file, the catalog layout and version 1 of
+`docs/19-candidate-trades.md` are unchanged, and every reader pages by the
+tier index it is given, so no format version is cut: a capture made before
+this decision reads exactly as it did. No parent identity, ledger row,
+frontier, report or digest changes. D-1734's sentence that the capture "still
+records one tier per policy judged" is superseded by this entry.
+
+**Proof.** `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
+(recorded text equals unrecorded text; `tiers == 2`, tier 0 the operator's
+rules, tier 1 the mildest tier; `fsync`s `== 2 × tiers + 4 × candidates + 2`)
+and `a_recorded_walk_captures_only_the_tier_it_ends_on` (a met walk captures
+exactly the met tier and answers as the uncaptured cached walk). Both failed
+before the fix: `left: 2521, right: 2` and `left: 3, right: 1`.
+
+**Rejected.** Keeping one capture per judged tier and refusing up front when
+`T × 2C × 33` bytes would exceed the budget: the run would still refuse, only
+sooner, for evidence about tiers the page never shows.
+
+### D-4717 — `screen_range_in_points` reads a zero stop ceiling as no ceiling — 2026-10-09
+
+**Finding.** W2-cli8-10. D-1732 let the api's `screen` command pass
+`max_points = 0` through to `cli::screen_range_in_points` on the claim that
+`cli` reads zero as no ceiling. That function loaded the span and then
+converted zero with `ceiling_in_ppm`, which refused it as "0 ppm, which
+admits nothing". So the browser's zero-point screen was a refusal after a
+span load. G18-cli-a-33 had asked the door about an unswept instrument,
+which refuses before the ceiling is read, so nothing saw it.
+
+**Decision.** The conversion is `elite_ceiling_ppm`, the one zero rule
+`elite` already uses (D-1721): zero is `max_mae_ppm = 0`, which
+`Rules::admits` and `Levels::forced` read as no ceiling; a positive ceiling
+converts as before, now with `elite_ceiling_ppm`'s refusal sentence. The
+span is still loaded, because the policy's floors are measured off it.
+`cli screen`'s argv arm, which takes `MIN_RR` and builds its own rules, still
+refuses zero at its door by name before reading anything; that verb never
+offered zero and is unchanged.
+
+**What changes in stored results.** A zero-point api screen now runs and
+records a screen where it refused; nothing already recorded changes.
+
+**Proof.** `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`
+sends the body through `command_from` and `conduct_command` over a stored
+NIFTY May in a child; before the fix it read "converts to 0 ppm, which admits
+nothing". `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
+asks the cli door and the elite door the same over a swept index. Each
+child's proof line is declared to gate 23 beside D-0695's.
+
+### D-4718 — Every screen support entry asks the one support domain — 2026-10-09
+
+**Finding.** W2-cli8-11. D-1722 gave argv and `BRUTEX_SUPPORT_PPM` one domain,
+`1..1_000_000`, in `parse_support_ppm`. Three entries take a number already
+parsed and did not ask it: the api's `screen` command and
+`cli::screen_range_in_points` refused only zero, and `cli::screen_range`
+refused nothing, so 100% or more loaded a span and recorded a screen that
+could find nothing, and `screen_range` turned zero into a one-hit threshold.
+
+**Decision.** The domain is `cli::support_ppm_in_domain`, a public `const fn`;
+`parse_support_ppm` is the parse followed by it, so argv and the knob are
+unchanged. `screen_range`, `screen_range_in_points` and the api's `screen`
+parser ask it before anything is read, and refuse with its sentence (the api
+prefixes the field name). The descent's internal steps
+(`screen_range_for_attempt`) take supports the walk derives, not entries, and
+are not routed through it.
+
+**What changes in stored results.** A screen at 0 or at 1,000,000 ppm or more
+through those three doors is refused instead of run; nothing recorded
+changes.
+
+**Proof.** `the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
+(0, 1,000,000 and `u64::MAX` refused at the points door and `screen_range`,
+with no ledger and no attempt written; before the fix the points door's zero
+refusal lacked the domain's sentence) and
+`api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses`
+(0, 1,000,000, 1,000,001 and `u64::MAX` refused, 1 and 999,999 parsed).
+
+### D-4719 — A derived-support rung prepares through the audit's own inputs, and a build reads its daily context once — 2026-10-09
+
+**Finding.** W2-cli8-6 and G2-3. D-1662 ran the minute-hole census at every
+stored door but one: `one_rung_cached`'s derived-support branch built its own
+column through `column_withholding_unsourceable_days` from the raw span and an
+EMPTY withheld set. An edge-holed day cost a refused pass, a reloaded context
+and a durable preparation attempt under a digest the audit never used; a day
+whose only hole no close demands stayed in that column while the audit
+withheld it, so `min_hits` was sized on a population the audit did not sweep.
+The branch also stamped its preparation with the binary's stamp rather than
+the rung's, so a rung the audit was about to refuse as unstamped built and
+recorded a column first. Separately, `column_withholding_at_build` reloaded
+the daily context on every one of up to 64 passes although it is derived from
+the whole folded series (D-1781), which no pass changes.
+
+**Decision.** The derived branch reads `cache.inputs(.., load_audit_inputs)`,
+as the named branch does (D-1557): one census, one withholding, one column,
+one preparation attempt, shared with the audit that follows. `can_hit` is
+that column's swept count and `affordable_min_hits` names its probes by the
+preparation digest, now held as `AuditInputs::preparation_digest`. With no
+commit on the rung it refuses before any load, with the sentence the wrapper
+gave. `column_withholding_unsourceable_days` lost its only caller and is
+removed; its doc moved onto `column_withholding_at_build`, and G18-cli-a-24's
+test now asks that build with an admitted stamp. The daily context is read
+once, above the retry loop; the overlay context is still read per pass,
+because a withheld day changes the bars it overlays.
+
+**What changes in stored results.** On a span with no census-withheld day,
+nothing: the withheld set was empty both ways, so the column, digest,
+`AutoSearch` identities and `min_hits` are byte-identical. On a span the
+census withholds from, a derived-support rung's `AutoSearch` identities move
+with their `data_digest` (the audit's withheld set), its `min_hits` may move
+with the swept count, and so may its row; the rung no longer writes its own
+preparation attempts. Rows already recorded keep their identities.
+
+**Limits restated.** AU-O1CLI-2 and AU-O1CLI-3 described the second build as
+current. Their `docs/06-limits.md` sections now state one column build per
+rung and three minute reads per rung, derived or named; their tests are
+updated to hold the new statement, and the heading of o1cli-2 now reads
+"builds its column once".
+
+**Proof.** `a_derived_support_rung_sizes_on_the_audits_census_and_builds_once`
+(three edge-holed days and one interior gap: one build where the unfixed code
+made five, one input load, the sized population equal to the audit's swept
+count, `min_hits` equal to the larger of the floors on the audit's column),
+`an_unstamped_derived_support_rung_prepares_nothing` (no build, no load, no
+attempt; before, four builds) and
+`a_column_builds_retry_loop_reads_the_daily_context_once` (four passes, one
+daily load where there were four, and the same withholding, census and
+digest as the census path).
+
+### D-4720 — A rung's readback opens the ledger once per root — 2026-10-09
+
+**Finding.** W2-cli8-4, test gap. D-1700's `recorded_row` reads a rung's row
+through the shared ledger handle, but no test counted opens, so a fresh
+`Results::open(root)?.of_identity(..)` per rung passed every test.
+
+**Decision.** `a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung`
+reads three rungs' rows by identity in a child process (the shared handle is
+process-global) and requires `results::OPENS == 1`. With the fresh open it
+failed `left: 3, right: 1`. No production code changes; the child's proof
+line is declared to gate 23 beside D-0695's.
+
+### D-4721 — The results listing's forty-row retention is pinned — 2026-10-09
+
+**Finding.** W2-cli8-5, test gap. Deleting `ListingFold::visit`'s `pop_front`
+passed every test: `results_table` prints only `take(LIST_ROWS)`. SCB-10's
+test asserted only that `results_at` lacks the text `rows.push(record)`.
+
+**Decision.** SCB-10's test, `the_results_listing_retains_a_bounded_window`,
+now folds 500 rows (100 filtered out) and checks at every step that at most
+`LIST_ROWS` are held, then that exactly the newest 40 matching rows are held
+in order at an unchanged capacity. With `pop_front` deleted it failed "row
+50: the window grew". No production code changes.
+
+### D-4722 — The measured band's parallelism is pinned — 2026-10-09
+
+**Finding.** W2-cli8-7, test gap. `measure_top` measures its band with
+`par_iter_mut`, but a sequential loop gives the same answer, so reverting it
+passed every test.
+
+**Decision.** A test-only hook, `MEASURE_ROW_HOOK`, runs once per measured
+row. `the_measured_band_measures_two_rows_at_once` installs a rendezvous on a
+two-thread pool: it passes only when two rows are inside the hook at once
+(bounded wait of 20 s), and the band's figures equal a one-thread pool's.
+With `iter_mut` it failed "two rows of the band were never measured at the
+same moment".
+
+### D-4723 — The band docs sit on `measure_top` and `measured_band` — 2026-10-09
+
+**Finding.** G2-1. Three doc blocks ran on with no item between them, so
+`measure_top`'s and `measured_band`'s docs both attached to `TOP_CEILING`.
+
+**Decision.** Each block moved onto its own item; `TOP_CEILING` keeps only
+its own. `each_screen_band_doc_sits_on_its_own_item` reads the doc directly
+above each of the three items; it failed on `measure_top`'s empty doc.
+
+### D-4724 — Two `latest_for` limits no longer state a removed function as current — 2026-10-09
+
+**Finding.** G2-2. Two `docs/06-limits.md` bullets stated `latest_for`'s
+O(runs) per call as a current cost, while D-1700 removed the function and
+other bullets already said so.
+
+**Decision.** Both bullets now name D-1700 and `recorded_row`.
+`no_limit_states_the_removed_latest_for_as_current` requires every limit
+bullet headed by `latest_for` to name D-1700; it failed on the first stale
+bullet.

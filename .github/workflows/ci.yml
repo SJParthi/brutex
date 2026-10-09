@@ -1742,7 +1742,7 @@ jobs:
           # is not a diagnostic: nothing is wrong when it prints.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
           api/src/frontierjson.rs:println!:1
-          api/src/sweeprun.rs:println!:1
+          api/src/sweeprun.rs:println!:2
           api/src/trades.rs:println!:2
           api/src/recovery.rs:println!:1
           cli/src/boolean_candidate_tests.rs:eprintln!:2
@@ -1760,6 +1760,13 @@ jobs:
           # was degraded, so a clean run prints nothing.
           declared="$declared pull/src/csv.rs:eprintln!:1
           pull/src/masters.rs:eprintln!:1"
+          # THREE MORE STDOUT PROOF LINES, D-0695's kind (D-4717, D-4718,
+          # D-4720): api sweeprun's second child prints `ZERO-POINT SCREEN
+          # RAN` (counted in its line above), and two cli children print
+          # `POINTS SCREEN DOORS CHECKED` and `READBACK OPENS`. Each sits in a
+          # `#[cfg(test)]` module and prints only after its child passed.
+          declared="$declared cli/src/audited_stored_tests.rs:println!:1
+          cli/src/results_report_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

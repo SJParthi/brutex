@@ -1,6 +1,7 @@
 //! Exact selected-cell trades for every evaluated screen candidate and side.
 //!
-//! Each visited policy tier retains its actual cap and inputs. Immutable child
+//! Each captured screen pass retains its actual cap and inputs. A recorded
+//! tier walk captures only the tier it ends on (D-4716). Immutable child
 //! files are sealed before a catalog can publish the captured set. The catalog
 //! is prepared evidence, not an institutional admission or parent-run success.
 //!
@@ -241,7 +242,7 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     /// Test-only count of `fsync` calls issued by `write_exact` on this thread.
-    static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl<'a> Capture<'a> {
@@ -690,7 +691,8 @@ pub struct Summary {
     pub attempt: u64,
     /// Digest of the actual execution slice.
     pub execution_digest: [u8; 32],
-    /// Number of visited screen invocations, not generated policy tiers.
+    /// Number of captured screen passes, not generated policy tiers: the
+    /// operator's own policy and the tier a recorded walk ended on (D-4716).
     pub tiers: u64,
     /// Captured candidate-side outcomes, including no-cell outcomes.
     pub candidates: u64,

@@ -739,6 +739,14 @@ fn the_frontier_prefix_equals_the_full_sort_with_each_key_once() {
     assert!(first_accepted_in_order(&items, 2, |item| item.0, |_| false).is_empty());
 }
 /// W2-cli8-5. The listing retains a bounded window, not every matching row.
+///
+/// D-4721: this asserted only that `results_at` lacks the text
+/// `rows.push(record)`, so deleting the window's `pop_front` passed it, and
+/// passed every other test too, because the table prints only `LIST_ROWS`
+/// rows whatever is held. It now drives the fold: over 500 rows, 400 of them
+/// matching, `ListingFold` holds exactly `LIST_ROWS` records, the newest
+/// matching ones in append order, in the capacity it started with; a row the
+/// filter refuses is counted and never held.
 #[test]
 fn the_results_listing_retains_a_bounded_window() {
     let listing = code_of("\nfn results_at(");
@@ -746,6 +754,36 @@ fn the_results_listing_retains_a_bounded_window() {
         !listing.contains("rows.push(record)"),
         "every matching record is retained: {listing}"
     );
+    let ordinal = |record: &crate::results::Record| {
+        u32::from_le_bytes([
+            record.identity[0],
+            record.identity[1],
+            record.identity[2],
+            record.identity[3],
+        ])
+    };
+    let mut fold = ListingFold::new(Some("zerodha"), None);
+    let capacity = fold.newest.capacity();
+    assert!(capacity >= LIST_ROWS, "pre-sized to the window");
+    for at in 0..500_u32 {
+        let mut record = crate::tests::record_for_naming();
+        record.identity = [0; 32];
+        record.identity[..4].copy_from_slice(&at.to_le_bytes());
+        if at % 5 == 4 {
+            record.feed = crate::results::field("dhan");
+        }
+        fold.visit(Ok(record));
+        assert!(fold.newest.len() <= LIST_ROWS, "row {at}: the window grew");
+    }
+    assert_eq!((fold.rows, fold.matching), (500, 400));
+    assert_eq!(fold.newest.len(), LIST_ROWS, "exactly the window is held");
+    assert_eq!(fold.newest.capacity(), capacity, "and it never reallocated");
+    let held: Vec<u32> = fold.newest.iter().map(ordinal).collect();
+    let newest: Vec<u32> = (0..500_u32)
+        .filter(|at| at % 5 != 4)
+        .skip(400 - LIST_ROWS)
+        .collect();
+    assert_eq!(held, newest, "the newest matching rows, in append order");
 }
 
 /// AC-whp-o1-2. The bootstrap family builds its slice facts once, not once
@@ -1594,4 +1632,445 @@ fn the_envelope_is_each_floors_minimum_over_its_own_key() {
         (empty.min_assurance_bp, empty.min_weakest_bp),
         (i64::MAX, i64::MAX)
     );
+}
+
+// ---------------------------------------------------------------------------
+// G2-5 (D-4716): a recorded tier walk captures the screens its page shows, not
+// every tier it judged.
+// ---------------------------------------------------------------------------
+
+/// A fresh capture root under the temporary directory, removed on drop.
+struct CaptureRoot(std::path::PathBuf);
+
+impl CaptureRoot {
+    fn new(tag: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "brutex-l1fb-capture-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("a private capture root");
+        Self(path)
+    }
+
+    fn attempt(&self, tag: u8) -> crate::sweep_evidence::Attempt {
+        crate::sweep_evidence::begin(&self.0, [tag; 32], crate::sweep_evidence::Operation::Audit)
+            .expect("a durable audit attempt")
+    }
+}
+
+impl Drop for CaptureRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs `work` on a one-thread pool and returns its answer with every capture
+/// `fsync` it issued: on one worker thread the thread-local counter sees the
+/// parallel recording too.
+fn counting_syncs<T: Send>(work: impl FnOnce() -> T + Send) -> (T, u64) {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("a one-thread pool");
+    pool.install(|| {
+        candidate_trades::DURABLE_SYNCS.with(|count| count.set(0));
+        let answer = work();
+        (
+            answer,
+            candidate_trades::DURABLE_SYNCS.with(std::cell::Cell::get),
+        )
+    })
+}
+
+/// G2-5, D-4716. A RECORDED cascade whose stated rules admit nothing walks
+/// every generated tier (D-1731), and the candidate capture recorded every
+/// tier it judged: one fsynced tier file and, per candidate side, a trade
+/// replay and two fsynced files. On this fixture's 2,520-tier ladder that was
+/// 2,521 captured screens and `2 × 2,521 + 4 × 2 × 2 × 2,521` fsyncs; on an
+/// operator rung the 64 MiB acknowledgement budget refused the whole run
+/// part-way down the ladder.
+///
+/// The capture now records the two screens the page is made of: the
+/// operator's own, and the mildest tier's, whose table the page prints. Its
+/// cost is two screens whatever the ladder's length, and the answer is the
+/// unrecorded cascade's, byte for byte.
+#[test]
+fn a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder() {
+    let fixture = Ranked::of(8);
+    let by_evidence = fixture.by_evidence(2);
+    let bars = &fixture.bars;
+    let column = &fixture.run.column;
+    let facts = runner::trade::SliceFacts::of(bars, column);
+    let mut rules = Rules::elite(400, 25);
+    rules.min_trades = u64::MAX;
+    let ladder = tiers(bars, by_evidence[0].hits);
+    let mildest = ladder
+        .last()
+        .expect("a generated ladder is never empty here")
+        .rules(rules.top, reference_price(bars));
+    assert!(ladder.len() > 2, "fixture: a ladder longer than two tiers");
+
+    let root = CaptureRoot::new("nothing-admits");
+    let attempt = root.attempt(0x45);
+    let capture =
+        candidate_trades::Capture::begin(&root.0, &attempt, bars, column).expect("capture starts");
+    let ((recorded, summary), syncs) = counting_syncs(|| {
+        let recorded = screen_cascade(
+            bars,
+            column,
+            &by_evidence,
+            Horizon::DEFAULT,
+            rules,
+            Pricing {
+                recording: None,
+                capture: Some(&capture),
+            },
+            true,
+            &facts,
+        )
+        .expect("the recorded cascade runs");
+        (recorded, capture.finish().expect("the capture seals"))
+    });
+    let unrecorded = screen_cascade(
+        bars,
+        column,
+        &by_evidence,
+        Horizon::DEFAULT,
+        rules,
+        NO_PRICING,
+        true,
+        &facts,
+    )
+    .expect("the unrecorded cascade runs");
+
+    // THE ANSWER IS THE UNRECORDED ONE: recording changes no byte of it.
+    assert!(
+        recorded.text.contains("NO TIER MET, INCLUDING THE MILDEST"),
+        "fixture: nothing admits\n{}",
+        recorded.text
+    );
+    assert_eq!(recorded.text, unrecorded.text);
+    assert!(!recorded.admitted_any && !unrecorded.admitted_any);
+    assert_eq!(
+        recorded.selected.map(|chosen| chosen.cell),
+        unrecorded.selected.map(|chosen| chosen.cell)
+    );
+
+    // THE CAPTURE IS THE PAGE'S TWO SCREENS, NOT THE LADDER.
+    assert_eq!(
+        summary.tiers,
+        2,
+        "captured screens on a {}-tier ladder",
+        ladder.len()
+    );
+    let yours = candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
+        .expect("the operator's screen");
+    let shown = candidate_trades::tier(&root.0, &summary, 1, candidate_trades::DEFAULT_MAX_BYTES)
+        .expect("the shown tier's screen");
+    assert_eq!(yours.rules, rules, "tier 0 is the operator's own policy");
+    assert_eq!(
+        shown.rules, mildest,
+        "tier 1 is the mildest tier, whose table the page prints"
+    );
+    assert_eq!(
+        summary.candidates,
+        2 * (yours.evaluated + shown.evaluated),
+        "every evaluated candidate side of both screens"
+    );
+    // TWO FSYNCS PER FILE: a tier file per screen, two files per candidate
+    // side, and the catalog.
+    assert_eq!(
+        syncs,
+        2 * summary.tiers + 4 * summary.candidates + 2,
+        "the capture's whole durable cost"
+    );
+}
+
+/// G2-5, D-4716. A recorded walk that MEETS a later tier captures that tier
+/// alone: the strictest unmet tiers before it are judged and named UNMET, and
+/// none of them is recorded. Before, every tier the walk judged was captured.
+#[test]
+fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
+    let slice = Slice::of(8);
+    let none_at_39 = crafted(39, 0, 0);
+    let ladder = vec![
+        none_at_39,
+        crafted(2_000, 5_000, 0),
+        crafted(500, 0, 0),
+        crafted(2_000, 0, 0),
+    ];
+    let by_evidence = slice.fixture.by_evidence(2);
+    let root = CaptureRoot::new("met-later");
+    let attempt = root.attempt(0x46);
+    let capture = candidate_trades::Capture::begin(
+        &root.0,
+        &attempt,
+        &slice.fixture.bars,
+        &slice.fixture.run.column,
+    )
+    .expect("capture starts");
+    let mut unmet = Vec::new();
+    let recorded = walk_tiers(
+        &slice.fixture.bars,
+        &slice.fixture.run.column,
+        &by_evidence,
+        Horizon::DEFAULT,
+        Pricing {
+            recording: None,
+            capture: Some(&capture),
+        },
+        &slice.facts,
+        &ladder,
+        |rank| unmet.push(rank),
+    )
+    .map(|walk| walk_shape(&walk))
+    .expect("the recorded walk runs");
+    let summary = capture.finish().expect("the capture seals");
+    let (unrecorded, unrecorded_unmet, _) = slice.cached(&ladder, 2);
+    assert!(recorded.starts_with("met 2"), "fixture: tier 2 meets");
+    assert_eq!(recorded, unrecorded, "recording changes no answer");
+    assert_eq!(unmet, unrecorded_unmet);
+    assert_eq!(unmet, [0, 1]);
+    assert_eq!(summary.tiers, 1, "only the tier the walk ended on");
+    let captured =
+        candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
+            .expect("the met tier's screen");
+    assert_eq!(captured.rules, ladder[2].1, "the met tier's policy");
+    assert_eq!(summary.candidates, 2 * captured.evaluated);
+}
+
+// ---------------------------------------------------------------------------
+// W2-cli8-7 (D-4722): the measured band runs on more than one core at once.
+// ---------------------------------------------------------------------------
+
+/// Where two measured rows meet: the first to arrive waits, bounded, for a
+/// second; a second arriving while the first waits is the overlap.
+#[derive(Default)]
+struct Meeting {
+    state: std::sync::Mutex<(u32, bool, bool)>,
+    met: std::sync::Condvar,
+}
+
+impl Meeting {
+    /// One row arrives. `(waiting, overlapped, gave_up)`.
+    fn arrive(&self) {
+        let mut state = self.state.lock().expect("meeting lock");
+        if state.0 > 0 {
+            state.1 = true;
+            self.met.notify_all();
+            return;
+        }
+        if state.1 || state.2 {
+            return;
+        }
+        state.0 += 1;
+        let (mut state, waited) = self
+            .met
+            .wait_timeout_while(state, std::time::Duration::from_secs(20), |state| !state.1)
+            .expect("meeting wait");
+        state.0 -= 1;
+        if waited.timed_out() {
+            state.2 = true;
+        }
+    }
+
+    fn overlapped(&self) -> bool {
+        self.state.lock().expect("meeting lock").1
+    }
+}
+
+/// The band fixture `the_parallel_band_matches_a_sequential_measurement` uses:
+/// up to forty priced rows of the eight-session slice, Long side.
+fn band_rows<'a>(fixture: &'a Ranked, facts: &runner::trade::SliceFacts) -> Vec<Screened<'a>> {
+    let bars = &fixture.bars;
+    let column = &fixture.run.column;
+    let horizon = Horizon::DEFAULT;
+    let stops = stop_ladder_ppm(bars, horizon.as_bars() as usize);
+    let levels = grid::Levels {
+        rungs: grid_rungs(bars),
+        step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
+        forced: None,
+        ratios: true,
+        stops_ppm: &stops,
+    };
+    fixture
+        .run
+        .ranked
+        .top
+        .iter()
+        .take(40)
+        .enumerate()
+        .filter_map(|(rank, scored)| {
+            let g = grid::evaluate_over(
+                bars,
+                column,
+                &scored.mask,
+                horizon,
+                side_of_direction(Direction::Long),
+                levels,
+                facts,
+            );
+            let cell = g.best().copied()?;
+            Some(Screened {
+                side: Direction::Long,
+                scored,
+                rank,
+                cell,
+                tightest: None,
+                admitted: false,
+                consistency: None,
+                steady: true,
+                calendar_unmeasured: false,
+            })
+        })
+        .collect()
+}
+
+/// W2-cli8-7, D-4722. THE BAND IS MEASURED IN PARALLEL, observed rather than
+/// read off the source. On a two-thread pool each measured row checks in at a
+/// meeting point; the first waits (bounded, 20 s) for a second, and a second
+/// arriving while the first still waits proves two rows were being measured
+/// at the same moment. A sequential loop cannot produce that: its first row
+/// waits alone, gives up, and every later row arrives with nobody waiting.
+/// The figures are still the sequential ones, row for row.
+#[test]
+fn the_measured_band_measures_two_rows_at_once() {
+    let fixture = Ranked::of(8);
+    let facts = runner::trade::SliceFacts::of(&fixture.bars, &fixture.run.column);
+    let mut rules = Rules::elite(0, 25);
+    rules.top = 1;
+    let mut parallel = band_rows(&fixture, &facts);
+    let mut sequential = band_rows(&fixture, &facts);
+    assert!(parallel.len() > 2, "fixture: rows to measure");
+    let meeting = std::sync::Arc::new(Meeting::default());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("a two-thread pool");
+    pool.install(|| {
+        let arrive = std::sync::Arc::clone(&meeting);
+        MEASURE_ROW_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(std::sync::Arc::new(move || arrive.arrive()));
+        });
+        measure_top(
+            &mut parallel,
+            &fixture.bars,
+            &fixture.run.column,
+            Horizon::DEFAULT,
+            rules,
+            &facts,
+        );
+        MEASURE_ROW_HOOK.with(|hook| *hook.borrow_mut() = None);
+    });
+    assert!(
+        meeting.overlapped(),
+        "two rows of the band were never measured at the same moment"
+    );
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("a one-thread pool");
+    one.install(|| {
+        measure_top(
+            &mut sequential,
+            &fixture.bars,
+            &fixture.run.column,
+            Horizon::DEFAULT,
+            rules,
+            &facts,
+        );
+    });
+    assert_eq!(
+        parallel
+            .iter()
+            .map(|row| row.consistency.clone())
+            .collect::<Vec<_>>(),
+        sequential
+            .iter()
+            .map(|row| row.consistency.clone())
+            .collect::<Vec<_>>(),
+        "the parallel band is the sequential band, row for row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G2-1 (D-4723) and G2-2 (D-4724): documentation attached to its own item, and
+// no limit describing a removed function as current.
+// ---------------------------------------------------------------------------
+
+/// The `///` lines directly above the item that starts at `head` in `lib.rs`.
+fn doc_above(head: &str) -> String {
+    let source = include_str!("lib.rs");
+    let (before, _) = source
+        .split_once(head)
+        .unwrap_or_else(|| panic!("{head} is no longer in lib.rs"));
+    let mut doc: Vec<&str> = before
+        .lines()
+        .rev()
+        .take_while(|line| line.trim_start().starts_with("///"))
+        .collect();
+    doc.reverse();
+    doc.join("\n")
+}
+
+/// G2-1, D-4723. Commit b489169 (D-1727) inserted `TOP_CEILING` between three
+/// doc blocks and their items, so `measure_top`'s and `measured_band`'s docs
+/// both attached to the constant and the two functions carried none. Each doc
+/// now sits on its own item.
+#[test]
+fn each_screen_band_doc_sits_on_its_own_item() {
+    const MEASURE: &str = "Measure consistency for the rows that will actually be printed";
+    const BAND: &str = "How many rows get their seven-grain calendar measured";
+    const CEILING: &str = "The most rows one listing may ask to print";
+    let measure = doc_above("\nfn measure_top(");
+    let band = doc_above("\nconst fn measured_band(");
+    let ceiling = doc_above("\npub(crate) const TOP_CEILING");
+    assert!(measure.contains(MEASURE), "measure_top's doc:\n{measure}");
+    assert!(
+        !measure.contains(BAND) && !measure.contains(CEILING),
+        "{measure}"
+    );
+    assert!(band.contains(BAND), "measured_band's doc:\n{band}");
+    assert!(!band.contains(MEASURE) && !band.contains(CEILING), "{band}");
+    assert!(
+        ceiling.trim_start().starts_with(&format!("/// {CEILING}")),
+        "TOP_CEILING's doc:\n{ceiling}"
+    );
+    assert!(
+        !ceiling.contains(MEASURE) && !ceiling.contains(BAND),
+        "{ceiling}"
+    );
+}
+
+/// G2-2, D-4724. `latest_for` was removed by D-1700. Two bullets of
+/// `docs/06-limits.md` still stated its O(runs) cost as current beside the
+/// corrected copies; every bullet naming it must say it is gone.
+#[test]
+fn no_limit_states_the_removed_latest_for_as_current() {
+    let limits = include_str!("../../../docs/06-limits.md");
+    let bullets: Vec<&str> = limits
+        .split("\n- ")
+        .skip(1)
+        .map(|bullet| {
+            let paragraph = bullet.split_once("\n\n").map_or(bullet, |(head, _)| head);
+            paragraph
+                .split_once("\n#")
+                .map_or(paragraph, |(head, _)| head)
+        })
+        .filter(|bullet| {
+            bullet
+                .lines()
+                .next()
+                .is_some_and(|head| head.contains("latest_for`"))
+        })
+        .collect();
+    assert!(bullets.len() >= 2, "the corrected bullets remain");
+    for bullet in bullets {
+        assert!(
+            bullet.contains("D-1700"),
+            "a bullet still states `latest_for` as current:\n{bullet}"
+        );
+    }
 }
