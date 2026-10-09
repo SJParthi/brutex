@@ -312,8 +312,11 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             if path.is_dir() {
                 stack.push(path);
             } else {
-                let bytes = std::fs::read(&path).unwrap();
-                out.insert(path.strip_prefix(dir).unwrap().to_path_buf(), bytes);
+                // ADAPTED (D-3317 item 4): the journal less what names its
+                // runs, which carry the second each started.
+                let rel = path.strip_prefix(dir).unwrap().to_path_buf();
+                let bytes = crate::gdfl_fixtures::as_compared(&rel, std::fs::read(&path).unwrap());
+                out.insert(rel, bytes);
             }
         }
     }
@@ -664,8 +667,22 @@ struct Want {
     failures: Vec<(String, &'static str)>,
     /// Each contract's bars in the store, in day order.
     series: BTreeMap<(String, String), Vec<Bar>>,
-    /// Days journalled `done` (no failure).
+    /// Days journalled `done`: no failure, or (ADAPTED, D-3317) done with
+    /// refusals — at least one file read clean and every failure the
+    /// vendor's own bytes, so a re-run skips the day.
     clean_days: usize,
+}
+
+/// ADAPTED (D-3317): whether a day with `failures` and `read_clean` files
+/// read closes `done`, as the reference sees it. Every refusal this world
+/// makes is the vendor's own bytes or names except a quantity past `i64`,
+/// which this import refuses (`Stage::File`).
+fn closes(failures: &[(String, &'static str)], read_clean: bool) -> bool {
+    failures.is_empty()
+        || (read_clean
+            && failures
+                .iter()
+                .all(|(_, why)| *why != "does not fit an i64"))
 }
 
 /// The reference for one world under the filter `only`: which entries are
@@ -775,6 +792,7 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                 }
             }
         }
+        let read_clean = !files.is_empty();
         for (opt, expect) in files {
             want.totals.file(&expect, *on);
             let kept: Vec<Bar> = expect
@@ -788,7 +806,7 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                 .extend(kept);
         }
         want.failures.extend(late_failures);
-        if want.failures.len() == before {
+        if closes(want.failures.get(before..).unwrap_or_default(), read_clean) {
             want.clean_days += 1;
         }
     }

@@ -209,3 +209,30 @@ pub(crate) fn put(root: &Path, rel: &str, bytes: &[u8]) -> PathBuf {
     std::fs::write(&path, bytes).expect("the file");
     path
 }
+
+/// An import journal's text with every `run` line and every `run=` field
+/// taken out (D-3317 item 4): what two runs over one input write alike. A
+/// `run` line carries the wall-clock second its run started, so two runs
+/// agree, byte for byte, on everything but it.
+pub(crate) fn unrun(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines().filter(|line| !line.starts_with("run ")) {
+        let kept: Vec<&str> = line
+            .split(' ')
+            .filter(|field| !field.starts_with("run="))
+            .collect();
+        out.push_str(&kept.join(" "));
+        out.push('\n');
+    }
+    out
+}
+
+/// `bytes` as a store tree holds them at `rel`, the import journal less what
+/// names its runs ([`unrun`]): every other file as it is.
+pub(crate) fn as_compared(rel: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    if rel == Path::new("imports/gdfl.journal") {
+        unrun(&String::from_utf8_lossy(&bytes)).into_bytes()
+    } else {
+        bytes
+    }
+}
