@@ -65025,3 +65025,71 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4100 — The `cli` survivors of run 1286 are killed by tests alone — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 (head `fbdabaec`) reported these
+`cli` mutants MISSED. Each changes live behaviour that no test asserted:
+
+- `selection_v6_read::read_blocks`, `shown > 0` → `>=`. A page past the end
+  then computed its byte offset anyway, and a `from` whose offset overflows a
+  `u64` was refused instead of read as an empty page. The paging test only
+  asked for `from = 5`, whose offset fits.
+- `range_over_inner`'s `rungs_not_cancelled` → `Ok(())`. Under a stop every
+  rung's month loader already refuses with `CANCELLED`, so the page fell
+  through to the every-rung-refused summary, which also contains
+  `CANCELLED`. The test asserted only `contains`.
+- `expression_search::priced` → `0` and → `1`. The P8-03 exit-code table
+  covered `expression-search-stored` and not the priced verb beside it.
+- `pool_oos::judge_walked`, `||` → `&&` in its empty-family guard. `judge`
+  makes the same check before it walks, so its test never reached this one.
+- `pool_oos::per_session`, every mutant (→ 0, 1, -1; `> 0` → `==`, `<`,
+  `>=`; `/` → `%`, `*`). Nothing pinned the two printed ppm columns.
+- `Results::open_with`, `writable && lock.is_some()` → `||`. On the read door
+  that calls `heal_torn_tail` on a read-only handle. Its `set_len` then fails,
+  and that refusal also named the orphan count and a `2`, which was all the
+  test asked.
+- `refuse_retired_v2_ledger`'s `NotFound` guard → `true`. Only an existing
+  file and a dangling link were driven; the documented third refusal, a
+  probe that cannot answer, was not.
+- `window_withholding`, `>` and `<` each → `==`, the opposite comparison, and
+  the non-strict one. No test called it on a window with withheld days on
+  both sides.
+- `AnchoredSearchLineageV4Ledger::require_append_capacity` → `Ok(())`. No
+  test appended past the pair bound.
+
+**Decided.** One test per behaviour, each asserting the exact value or
+sentence the mutant changes (R1286-cli-01, -03 to -10). No production line
+changed. The probe test makes its two unanswerable probes without
+privilege, so it holds as root and as an unprivileged user: a root that is a
+regular file (`ENOTDIR`) and a path of 21 two-hundred-byte components (longer
+than the kernel resolves). The stop test pins the whole refusal, including
+`the N rung(s) of NIFTY on zerodha`, for one rung and for two. The window
+test checks six windows of a five-session series with sessions 2 and 4
+withheld.
+
+**Rejected.** Raising the mutation timeout or adding a test filter; neither
+kills a mutant.
+
+### D-4101 — Pass 2's priced cell is a function of its own — 2026-10-08
+
+**What was observed.** `price_all`'s `.filter(|cell| cell.trades > 0)`
+survived `>` → `>=`. `shown_cell` falls back to `Grid::best`, which does not
+ask whether a cell traded, and a grid can hold a cell that did not:
+`runner::grid`'s replay names the case where one refused path blocks every
+clean entry behind it. But a candidate that never fires has no cell at all:
+`evaluate_timed` returns an empty grid when the walk took no trade.
+Measured on the generated store: a long mask requiring bit 383, past the
+vocabulary's 370 rows, gave `shown_cell` = `None` at 5min. So a pricing
+fixture that simply never fires does not reach the filter with a zero-trade
+cell.
+
+**Decided.** The filter is `pool::priced_cell(g, rules)`, called once per
+candidate as before. A test hands it plain grids (R1286-cli-02): a zero-trade
+cell beside a cell that traded once and lost 500 prices as `None`, though
+`shown_cell` shows the zero cell; the losing cell alone prices as itself; an
+empty grid prices as `None`. This is D-2008's precedent for `best_shown`.
+
+**Rejected.** A store fixture with a refused path inside a candidate's
+occupancy. It would test the grid's replay, which `runner` already owns,
+rather than this filter.
