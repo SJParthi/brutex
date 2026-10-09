@@ -386,3 +386,148 @@ fn a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campa
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// **The qualified campaign route walks its whole history on every GET once,
+/// not twice over, and that is stated.** W1-api1-4, D-1444, D-2284.
+///
+/// No cache is added: the route serves a mutable latest snapshot and states
+/// its history checked for this answer. The bullet must name the walk, its
+/// bound and the absence of a cache, and the source must still be the uncached
+/// open the bullet describes, without the closing second re-read.
+#[test]
+fn the_qualified_campaign_history_walk_per_request_is_stated() {
+    let bullet = crate::booleanjson::tests::d0951_bullet("W1-api1-4");
+    for word in [
+        "booleancampaignjson::render_qualified",
+        "QualifiedCampaign",
+        "O(H)",
+        "2H decodes",
+        "DIRECTORY_LIMIT",
+        "1,000,000",
+        "detail::MAX_SCAN_BYTES",
+        "no cache",
+        "Since D-2284",
+        "2H reads, not 3H",
+        "`\"history_checked\":true`",
+    ] {
+        assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+    }
+    let source = include_str!("booleancampaignjson.rs");
+    let body = source.split_once("\nfn render_qualified(").unwrap().1;
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(body.contains("cli::boolean_evidence::QualifiedCampaign::open(root,asked.identity,crate::detail::MAX_SCAN_BYTES)"));
+    assert!(!source.contains("static CACHE"), "the route holds no cache");
+    assert!(
+        !body.contains("require_current()"),
+        "open already ends in the re-verification; the route does not repeat it"
+    );
+    assert!(
+        include_str!("../../cli/src/boolean_qualified_observer.rs")
+            .contains("        reader.require_current()?;\n        Ok(reader)\n"),
+        "and `open` still ends in it, so the page's history is checked once per GET"
+    );
+}
+
+/// A waiting qualified campaign whose history is `h` acknowledged snapshots,
+/// each naming the one before it, in the bytes the checkpoint reader admits.
+/// Returns the identity and the newest snapshot's pin.
+fn save_qualified_history(root: &Path, h: u64) -> ([u8; 32], [u8; 32]) {
+    use std::fs;
+    let descriptor = [91; 32];
+    let units: [[u8; 32]; 8] = std::array::from_fn(|index| [u8::try_from(index + 1).unwrap(); 32]);
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(b"brutex.qualified-eight-slot-campaign.v1\0");
+    hasher.update(&descriptor);
+    for unit in units {
+        hasher.update(&unit);
+    }
+    let identity = hasher.finalize();
+    let directory = root
+        .join("boolean-qualified-campaign-v1")
+        .join(crate::server::hex32(identity));
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("owner.lock"), []).unwrap();
+    let mut previous = (0_u64, [0_u8; 32]);
+    for sequence in 1..=h {
+        let mut body = b"BRQCAM01".to_vec();
+        body.extend_from_slice(&identity);
+        body.extend_from_slice(&descriptor);
+        body.extend_from_slice(&previous.0.to_le_bytes());
+        body.extend_from_slice(&previous.1);
+        for unit in units {
+            body.extend_from_slice(&unit);
+            body.extend_from_slice(&[0; 1104]);
+        }
+        let mut bytes = b"BTXCHK01".to_vec();
+        bytes.extend_from_slice(&identity);
+        bytes.extend_from_slice(&sequence.to_le_bytes());
+        bytes.extend_from_slice(&9200_u64.to_le_bytes());
+        bytes.extend_from_slice(&[0; 8]);
+        bytes.extend_from_slice(&body);
+        let pin = brutex_core::blake3::hash(&bytes);
+        bytes.extend_from_slice(&pin);
+        let at = directory.join(format!("{sequence:016x}"));
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join("payload"), bytes).unwrap();
+        fs::write(at.join("complete"), pin).unwrap();
+        previous = (sequence, pin);
+    }
+    (identity, previous.1)
+}
+
+/// **Every acknowledged record of the history is read for every answer, and
+/// a record damaged anywhere in it refuses the page.** W1-api1-4, D-4440.
+#[test]
+fn a_qualified_history_of_h_records_is_read_whole_for_every_answer() {
+    let root = crate::scratch::path("qualified-history-walk");
+    let _ = std::fs::remove_dir_all(&root);
+    let (identity, pin) = save_qualified_history(&root, 40);
+    let asked = Asked {
+        identity,
+        pin: Some(pin),
+    };
+    let value = render_qualified(&root, &asked).unwrap();
+    assert_eq!(value["history_records"], "40", "{value}");
+    assert_eq!(value["history_checked"], true);
+    // The OLDEST record, which no cache keyed on the newest could see.
+    let oldest = root
+        .join("boolean-qualified-campaign-v1")
+        .join(crate::server::hex32(identity))
+        .join(format!("{:016x}", 1))
+        .join("payload");
+    let mut bytes = std::fs::read(&oldest).unwrap();
+    bytes[200] ^= 1;
+    std::fs::write(&oldest, &bytes).unwrap();
+    assert!(
+        render_qualified(&root, &asked).is_err(),
+        "a rotted record refuses"
+    );
+    bytes[200] ^= 1;
+    std::fs::write(&oldest, &bytes).unwrap();
+    assert_eq!(render_qualified(&root, &asked).unwrap(), value);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// What one `/boolean-qualified-campaign.json` answer costs at H = 1, 100,
+/// 1,000 and 7,000 acknowledged records; 7,000 is just under the history
+/// admission `QualifiedCampaign::open` charges against
+/// `detail::MAX_SCAN_BYTES`. A measurement, run on purpose; the numbers are in
+/// `docs/06-limits.md`'s D-1444 section. W1-api1-4, D-4440.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_qualified_campaign_by_history_length() {
+    for h in [1_u64, 100, 1_000, 7_000] {
+        let root = crate::scratch::path(&format!("qualified-history-latency-{h}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let (identity, pin) = save_qualified_history(&root, h);
+        let asked = Asked {
+            identity,
+            pin: Some(pin),
+        };
+        let n = if h >= 1_000 { 20 } else { 200 };
+        let timed =
+            crate::latency::Timed::run(n, || render_qualified(&root, &asked).map(drop)).unwrap();
+        println!("{}", timed.line(&format!("qualified campaign, H = {h}")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -163,6 +163,23 @@ fn credential_config_absent_halts() {
     assert_eq!(empty, ConfigError::MissingKey { key: "org" });
 }
 
+/// CE-77, D-1780: a byte-order mark is refused by name, before line 1 is read.
+/// The same text without it parses, so the mark alone is the reason.
+#[test]
+fn a_byte_order_mark_is_refused_by_name() {
+    let marked = format!("\u{feff}{CONFIG}");
+    assert_eq!(
+        CredentialConfig::parse(&marked),
+        Err(ConfigError::ByteOrderMark)
+    );
+    assert!(CredentialConfig::parse(CONFIG).is_ok());
+    assert!(
+        ConfigError::ByteOrderMark
+            .to_string()
+            .contains("byte-order mark")
+    );
+}
+
 /// P-08 — the configuration supplies path segments only.
 #[test]
 fn credential_config_rejects_secret_value() {
@@ -316,9 +333,39 @@ fn the_only_path_is_the_one_the_configuration_assembles() {
 
     // The impls this type carries are exercised, so the coverage gate is
     // measuring them rather than reporting on code nothing calls.
+    // Each equality is checked against an independently built value AND
+    // against one that differs in a single segment, so an impl that always
+    // answers the same way fails one of the pair. GAP14-65.
     let twin = config.clone();
     assert_eq!(config, twin);
-    assert_eq!(path, path);
+    let reparsed = CredentialConfig::parse(CONFIG).expect("the reference config parses");
+    assert_eq!(
+        config, reparsed,
+        "the same text parses to an equal configuration"
+    );
+    let other_org = CredentialConfig::parse(&config_without(
+        r#"org    = "orgone""#,
+        r#"org    = "vendortwo""#,
+    ))
+    .expect("a one-segment variant parses");
+    assert_ne!(
+        config, other_org,
+        "one segment apart is a different configuration"
+    );
+    assert_eq!(
+        path,
+        reparsed
+            .path_for(Vendor::Groww, "fieldtwo")
+            .expect("a configured field"),
+        "the same segments assemble an equal path"
+    );
+    assert_ne!(
+        path,
+        config
+            .path_for(Vendor::Groww, "fieldone")
+            .expect("a configured field"),
+        "one field apart is a different path"
+    );
 }
 
 /// P-18 — no formatter renders a path segment. `Debug` is a redaction on the
@@ -609,6 +656,16 @@ fn a_missing_table_or_key_is_a_halt() {
         }),
         "and the one it does not is refused BY NAME where it is used"
     );
+    // AND `path_for` REACHES THE SAME REFUSAL. Its own comment said `parse`
+    // refuses a config missing any vendor, so this arm was "unreachable by any
+    // input". It is reachable by exactly this input. D-1394.
+    assert_eq!(
+        one_broker.path_for(Vendor::Dhan, "fieldthree"),
+        Err(ConfigError::MissingVendor {
+            vendor: Vendor::Dhan.as_str()
+        }),
+        "an unconfigured vendor's path is refused by name, never assembled"
+    );
     assert_eq!(
         CredentialConfig::parse(&config_without(
             "[vendor.dhan]",
@@ -783,6 +840,7 @@ fn every_config_error_prints_something_distinct() {
         },
         ConfigError::TooLarge { at_least: 1 },
         ConfigError::LineTooLong { line: 1, len: 2 },
+        ConfigError::ByteOrderMark,
         ConfigError::Unparseable { line: 1 },
         ConfigError::UnknownTable { line: 1 },
         ConfigError::UnknownVendor { line: 1 },
@@ -826,16 +884,16 @@ fn every_config_error_prints_something_distinct() {
 // Reading the credential — part 2
 // ===========================================================================
 
-/// A secret source that records every read and **panics** on any write.
+/// A secret source that records every read.
 ///
-/// This is the whole of P-05's proof. The real SSM client offers
-/// `put_parameter`; this double offers one too, and it cannot be called without
-/// failing the test. So "no write happens" is not asserted from the absence of
-/// a line in the source — it is asserted from a process that would have died.
+/// It carried a `put_parameter` that panicked and a `writes` counter that
+/// `readonly_credentials` asserted was zero. That method was inherent on this
+/// double, not on [`ParameterStore`], so no production code could ever name it
+/// and the assertion was true by the type system (P1-14-05). P-05's proof is
+/// now the shape of the port itself, read by `readonly_credentials`.
 struct Double {
     answers: RefCell<VecDeque<Result<String, SecretError>>>,
     reads: Cell<usize>,
-    writes: Cell<usize>,
     decrypted: Cell<bool>,
     last_name: RefCell<String>,
 }
@@ -845,17 +903,27 @@ impl Double {
         Self {
             answers: RefCell::new(answers.into()),
             reads: Cell::new(0),
-            writes: Cell::new(0),
             decrypted: Cell::new(false),
             last_name: RefCell::new(String::new()),
         }
     }
+}
 
-    /// The write the real client offers and this repository never calls.
-    fn put_parameter(&self, _name: &str, _value: &str) -> ! {
-        self.writes.set(self.writes.get() + 1);
-        panic!("a write reached the parameter store; this repository never mints a token");
-    }
+/// The method signatures declared inside `pub trait {name} {` in `source`,
+/// with comments dropped, through the trait's closing brace.
+fn trait_methods(source: &str, name: &str) -> Vec<String> {
+    let (_, rest) = source
+        .split_once(&format!("\npub trait {name} {{\n"))
+        .unwrap_or_else(|| panic!("the trait {name} is declared at the top level"));
+    let (body, _) = rest
+        .split_once("\n}\n")
+        .unwrap_or_else(|| panic!("the trait {name} closes"));
+    body.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//"))
+        .filter(|line| line.starts_with("fn ") || line.contains(" fn "))
+        .map(str::to_owned)
+        .collect()
 }
 
 impl ParameterStore for Double {
@@ -888,20 +956,29 @@ fn readonly_credentials() {
 
     let double = reader.source().client();
     assert_eq!(double.reads.get(), 1, "exactly one read");
-    assert_eq!(
-        double.writes.get(),
-        0,
-        "a whole credential read reached the store without one write"
-    );
 
-    // And the double is not a no-op: calling its write really does fail, so
-    // the assertion above is a statement about the code and not about a stub
-    // that would have passed either way.
-    let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        double.put_parameter("anything", "anything");
-    }));
-    assert!(attempted.is_err(), "the double must panic on a write");
-    assert_eq!(double.writes.get(), 1, "the write it panicked on was seen");
+    // THE PORT OFFERS NO WRITE, READ FROM ITS SOURCE (P1-14-05). This asserted
+    // `writes == 0` on a double whose write was an inherent method no
+    // production code could name, so it could not fail. What actually keeps a
+    // write out is that neither port declares one: `SsmSecretSource` is generic
+    // over `ParameterStore` and can call nothing else. So each trait must
+    // declare exactly its one read, and adding a second method fails here.
+    let secret_rs = include_str!("../src/secret.rs");
+    assert_eq!(
+        trait_methods(secret_rs, "ParameterStore"),
+        vec![
+            "fn get_parameter(&self, name: &str, with_decryption: bool) -> Result<String, SecretError>;"
+                .to_owned()
+        ],
+        "the Parameter Store port is one read and nothing else"
+    );
+    assert_eq!(
+        trait_methods(secret_rs, "SecretSource"),
+        vec![
+            "fn read(&self, path: &CredentialPath<'_>) -> Result<Secret, SecretError>;".to_owned()
+        ],
+        "the secret source is one read and nothing else"
+    );
 }
 
 /// P-06 — an auth failure halts the pull loudly rather than degrading.
@@ -957,7 +1034,6 @@ fn a_dead_token_is_re_read_once_and_then_halts() {
         })
     );
     assert_eq!(reader.source().client().reads.get(), 1);
-    assert_eq!(reader.source().client().writes.get(), 0);
 
     // The rotation did land: the fresh value is returned and nothing halts.
     let reader = CredentialReader::new(SsmSecretSource::new(
@@ -1039,6 +1115,8 @@ fn every_secret_error_prints_something_distinct() {
         SecretError::NotFound,
         SecretError::Empty,
         SecretError::Unreachable,
+        // P1-19-01, D-2525.
+        SecretError::Padded,
     ];
     let rendered: HashSet<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(rendered.len(), errors.len());
@@ -1151,11 +1229,24 @@ fn an_entry_round_trips_through_its_image() {
         assert_eq!(Entry::decode(&image), Ok(original));
     }
 
-    // The derived impls this type carries are exercised.
+    // The derived impls this type carries are exercised — each equality
+    // against an independently built value and against one differing in a
+    // single field, so an impl that always answers the same way fails one of
+    // the pair. GAP14-65.
     let one = entry("NIFTY", 2024, 1, 1, 0, 0);
-    assert_eq!(one, one);
+    assert_eq!(one, entry("NIFTY", 2024, 1, 1, 0, 0));
+    assert_ne!(one, entry("NIFTY", 2024, 1, 2, 0, 0), "rows differ");
     assert!(format!("{one:?}").contains("NIFTY"));
-    assert_eq!(one.key, one.key);
+    assert_eq!(
+        one.key,
+        entry("NIFTY", 2024, 1, 9, 9, 9).key,
+        "the key ignores the counts"
+    );
+    assert_ne!(
+        one.key,
+        entry("NIFTY", 2024, 2, 1, 0, 0).key,
+        "month differs"
+    );
     assert!(format!("{:?}", one.key).contains("Nse"));
     assert!(one.key < entry("NIFTY", 2024, 2, 1, 0, 0).key);
 }
@@ -1495,7 +1586,22 @@ fn a_manifest_round_trips_through_its_regions() {
     assert_eq!(genesis.slot, 0);
     assert_eq!(genesis.offset, 0);
     assert_eq!(genesis.durable_through, HEADER_LEN);
-    assert_eq!(genesis, genesis);
+    // Against an independent build and against another vendor's genesis, so
+    // an impl that always answers the same way fails one of the pair.
+    // GAP14-65.
+    assert_eq!(
+        genesis,
+        ManifestHeader::genesis(Vendor::Dhan)
+            .commit()
+            .expect("genesis")
+    );
+    assert_ne!(
+        genesis,
+        ManifestHeader::genesis(Vendor::Groww)
+            .commit()
+            .expect("genesis"),
+        "another vendor's genesis is another commit"
+    );
     assert!(format!("{genesis:?}").contains("Dhan"));
 }
 
@@ -2151,7 +2257,23 @@ fn a_short_or_misplaced_header_region_is_refused() {
     assert_eq!(read.newest(), ManifestHeader::genesis(Vendor::Groww));
     assert_eq!(read.older(), None, "one commit is one generation");
     assert_eq!(read.stepped_over(), None, "and nothing was stepped over");
-    assert_eq!(read, read);
+    // Against an independent read of the same region and a read of another
+    // vendor's, so an impl that always answers the same way fails one of the
+    // pair. GAP14-65.
+    assert_eq!(
+        read,
+        ManifestHeader::read_region(&region(&[genesis]), &[], Vendor::Groww)
+            .expect("the genesis commit")
+    );
+    let dhan = ManifestHeader::genesis(Vendor::Dhan)
+        .commit()
+        .expect("genesis");
+    assert_ne!(
+        read,
+        ManifestHeader::read_region(&region(&[dhan]), &[], Vendor::Dhan)
+            .expect("another vendor's genesis commit"),
+        "another vendor's newest header is another read"
+    );
     assert!(format!("{read:?}").contains("Groww"));
     // Nothing at all: no slot decodes, and none gave a specific reason.
     assert_eq!(
@@ -2733,6 +2855,100 @@ fn a_refusal_steps_down_every_allowance_and_drains_every_bucket() {
             wait_micros: MICROS_PER_DAY.div_ceil(day_permits),
         }
     );
+}
+
+/// CE-28 — refusals floor every span at one permit a second, never at one per
+/// span.
+///
+/// Each refusal steps every span down by `ceiling / BACKOFF_STEPS`, and the
+/// floor was one for all of them, so Dhan's 100,000/day window reached ONE
+/// after exactly 32 refusals and the next permit was a day away: measured at
+/// 86,390 s, and 172,790 s for the next one queued. A day of sleep behind no
+/// bound and no refusal. The floor is now the rate the second span already
+/// floors at, in each span's own length (D-1769).
+#[test]
+fn ce28_a_day_span_never_floors_below_one_permit_a_second() {
+    let mut governor =
+        Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("within bounds");
+    for _ in 0..1_000 {
+        governor.record_throttled();
+    }
+    assert_eq!(governor.permitted(WindowSpan::Second), Some(1));
+    assert_eq!(governor.permitted(WindowSpan::Day), Some(86_400));
+    // The drained buckets clear in one second, not one day.
+    match governor.admit(0) {
+        Verdict::Deny { wait_micros, .. } => assert!(
+            wait_micros <= MICROS_PER_SECOND,
+            "a floored governor waits at most a second, waited {wait_micros} µs"
+        ),
+        Verdict::Admit => panic!("a drained bucket admits nothing at once"),
+    }
+    // A minute span floors at sixty, the same rate.
+    let mut minute = only(WindowSpan::Minute, 500);
+    for _ in 0..1_000 {
+        minute.record_throttled();
+    }
+    assert_eq!(minute.permitted(WindowSpan::Minute), Some(60));
+}
+
+/// Every span every live feed publishes is faster than a permit a second, so
+/// every one floors at exactly that rate and no refusal can make a permit wait
+/// longer than a second on any span (CE-28, D-1769).
+#[test]
+fn every_live_rate_span_floors_at_one_permit_per_second() {
+    let mut seen = 0;
+    for feed in pull::vendor::Feed::ALL {
+        let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+            continue;
+        };
+        let mut governor = Governor::new(
+            spec.budget.per_second,
+            spec.budget.per_minute,
+            spec.budget.per_day,
+        )
+        .expect("a live budget is within bounds");
+        for _ in 0..10_000 {
+            governor.record_throttled();
+        }
+        for span in WindowSpan::ALL {
+            let Some(left) = governor.permitted(span) else {
+                continue;
+            };
+            seen += 1;
+            assert_eq!(
+                u64::from(left),
+                span.len_micros() / MICROS_PER_SECOND,
+                "{feed:?} {span} floored at {left}"
+            );
+        }
+    }
+    assert!(seen >= 4, "only {seen} live spans were checked");
+}
+
+/// A span published SLOWER than a permit a second keeps a floor of one step,
+/// because one a second would sit above its own ceiling and a refusal would
+/// narrow nothing (D-1769).
+#[test]
+fn a_span_published_slower_than_one_a_second_floors_at_one_step() {
+    for (span, ceiling, floor) in [
+        (WindowSpan::Minute, 30, 1),
+        (WindowSpan::Minute, 60, 1),
+        (WindowSpan::Minute, 61, 60),
+        (WindowSpan::Day, 3_200, 100),
+        (WindowSpan::Day, 86_400, 2_700),
+        (WindowSpan::Day, 86_401, 86_400),
+    ] {
+        let mut governor = only(span, ceiling);
+        governor.record_throttled();
+        assert!(
+            governor.permitted(span) < Some(ceiling),
+            "{span} {ceiling} must narrow"
+        );
+        for _ in 0..10_000 {
+            governor.record_throttled();
+        }
+        assert_eq!(governor.permitted(span), Some(floor), "{span} {ceiling}");
+    }
 }
 
 /// **A REFUSED DAY SPAN COSTS LITTLE AND RECOVERS IN A BOUNDED NUMBER OF
@@ -4444,8 +4660,18 @@ fn the_four_seconds_that_define_the_session_window() {
 
 /// The whole Saturday, second by second: exactly 375 minute-bars survive, and
 /// the count is the charter's number rather than a coincidence.
+///
+/// # What this replaced (D-2673)
+///
+/// It was `a_saturday_is_a_full_session_because_there_is_no_weekend_rule`, and
+/// it asserted that EVERY day of the week of 2025-01-26..31 held 375 bars —
+/// the absence of any calendar, Sunday 2025-01-26 (Republic Day) included.
+/// That absence is gone: `pull::calendar::kind_of` records 2025-01-26 closed,
+/// and `Window::verdict` drops a bar on it (P-03, `calendar_filter` below). The
+/// half that still holds is kept and is the point: the WEEKDAY decides nothing.
+/// 2025-02-01 is a Saturday the calendar records open, so it is a full session.
 #[test]
-fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
+fn a_saturday_session_is_full_because_the_calendar_not_the_weekday_decides() {
     let saturday = d(2025, 2, 1);
     let window = Window::new(saturday, saturday).expect("one day");
     let midnight = ist_epoch(2025, 2, 1, 0, 0, 0);
@@ -4470,12 +4696,13 @@ fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
     );
     assert_eq!(census.of(DropReason::BeforeSessionOpen), 555);
     assert_eq!(census.of(DropReason::AtOrAfterSessionClose), 1_440 - 930);
+    assert_eq!(census.of(DropReason::OnClosedDay), 0);
     assert_eq!(census.total(), 1_440 - 375);
     assert_eq!(census.total() + kept_minutes, 1_440);
 
-    // And every day of that week behaves identically — Sunday included. If a
-    // weekday were consulted anywhere, these seven would not agree.
-    for day_of_month in 26..=31_u8 {
+    // And the five weekdays before it are the same shape — the weekday is
+    // not consulted, the calendar is, and it records all five open.
+    for day_of_month in 27..=31_u8 {
         let day = d(2025, 1, day_of_month);
         let one = Window::new(day, day).expect("one day");
         let base = ist_epoch(2025, 1, day_of_month, 0, 0, 0);
@@ -4491,6 +4718,106 @@ fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
             "2025-01-{day_of_month:02} is not the same shape as every other day"
         );
     }
+}
+
+/// **P-03: A BAR ON A NON-TRADING DATE IS DROPPED AND COUNTED** (D-2673).
+///
+/// The filter is `Window::verdict` reading `pull::calendar::kind_of`, the
+/// measured NSE calendar. A bar on a day it records closed — a weekend or a
+/// holiday — is dropped as `OnClosedDay` and counted, at minute AND daily
+/// cadence, on every venue; a bar on a trading day is kept, Saturday budget
+/// session included; and a bar on a day the calendar has not measured is
+/// neither dropped nor silently kept: it is kept and counted by name.
+#[test]
+fn calendar_filter() {
+    let closed = [
+        (2025, 1, 25), // Saturday
+        (2025, 1, 26), // Sunday, Republic Day
+        (2024, 8, 15), // Thursday, Independence Day
+        (2024, 1, 22), // Monday, a one-off closure
+    ];
+    for (y, m, dd) in closed {
+        let day = d(y, m, dd);
+        assert_eq!(
+            pull::calendar::kind_of(i64::from(day.days_from_epoch())),
+            pull::calendar::DayKind::Closed,
+            "the premise: {day} is closed in the calendar"
+        );
+        let window = Window::new(day, day).expect("one day");
+        for venue in Venue::ALL {
+            let mut census = DropCensus::new();
+            let mut stored = 0_u32;
+            // A whole session's worth of minute bars plus one daily bar.
+            for minute in 0..375_i64 {
+                let secs = ist_epoch(y, m, dd, 9, 15, 0) + minute * SECS_PER_MINUTE;
+                match window.verdict(secs, Cadence::Minute, venue).expect("real") {
+                    None => stored += 1,
+                    Some(why) => census.count(why),
+                }
+            }
+            match window
+                .verdict(ist_epoch(y, m, dd, 0, 0, 0), Cadence::Daily, venue)
+                .expect("real")
+            {
+                None => stored += 1,
+                Some(why) => census.count(why),
+            }
+            assert_eq!(stored, 0, "{venue} {day}: a closed day stores nothing");
+            assert_eq!(census.of(DropReason::OnClosedDay), 376, "{venue} {day}");
+            assert_eq!(census.total(), 376, "{venue} {day}: every drop is counted");
+            assert_eq!(census.unclassified_kept(), 0);
+        }
+    }
+    assert_eq!(
+        DropReason::OnClosedDay.to_string(),
+        "on a day the exchange calendar records closed"
+    );
+
+    // A trading day is kept: an ordinary weekday and a Saturday session.
+    for (y, m, dd) in [(2024, 8, 14), (2025, 2, 1)] {
+        let day = d(y, m, dd);
+        let window = Window::new(day, day).expect("one day");
+        let at = ist_epoch(y, m, dd, 10, 0, 0);
+        assert_eq!(
+            window.verdict(at, Cadence::Minute, Venue::NseIndex),
+            Ok(None),
+            "{day} traded"
+        );
+        assert!(!pull::session::on_unclassified_day(at), "{day} is measured");
+    }
+
+    // The window is still asked first: a closed day outside the window is
+    // `BeforeWindow`, not `OnClosedDay`.
+    let later = Window::new(d(2024, 8, 16), d(2024, 8, 16)).expect("one day");
+    assert_eq!(
+        later.verdict(
+            ist_epoch(2024, 8, 15, 10, 0, 0),
+            Cadence::Minute,
+            Venue::NseIndex
+        ),
+        Ok(Some(DropReason::BeforeWindow))
+    );
+
+    // A day past the calendar's measured range: kept, never guessed closed,
+    // and flagged so the caller counts it by name.
+    let unmeasured = d(2026, 9, 7);
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(unmeasured.days_from_epoch())),
+        pull::calendar::DayKind::Unmeasured
+    );
+    let at = ist_epoch(2026, 9, 7, 10, 0, 0);
+    assert_eq!(
+        Window::new(unmeasured, unmeasured)
+            .expect("one day")
+            .verdict(at, Cadence::Minute, Venue::NseIndex),
+        Ok(None)
+    );
+    assert!(pull::session::on_unclassified_day(at));
+    assert!(!pull::session::on_unclassified_day(i64::MIN));
+    let mut census = DropCensus::new();
+    census.count_unclassified_kept();
+    assert_eq!(census.unclassified_kept(), 1);
+    assert_eq!(census.total(), 0, "a kept bar is not a drop");
 }
 
 /// Every second of one day is classified, and the classification changes at
@@ -5242,7 +5569,10 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
         volume: 1,
         open_interest: None,
     };
-    let raw = RawWindow { rows: vec![row] };
+    let raw = RawWindow {
+        rows: vec![row],
+        skipped: pull::fetch::DecodeSkips::default(),
+    };
     let day = Day::new(2026, 8, 7).expect("a real date");
     let mut schedule = pull::cash_auction::Schedule::default();
     schedule
@@ -5307,6 +5637,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
     let at = ist(day, 9, 15, 0);
 
     let cheap = RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: at,
             open: 250,
@@ -5332,6 +5663,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
     );
 
     let huge = RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: at,
             open: i64::MAX,
@@ -5427,7 +5759,10 @@ fn every_row_is_either_a_bar_or_a_counted_drop() {
         .collect();
 
     let landed = land(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Paisa,
@@ -7276,6 +7611,40 @@ fn rebuilding_a_census_from_the_same_rows_is_byte_identical() {
     );
 }
 
+/// M-29, DB-03 — the vendor field is all eight bytes of 48..56, for every
+/// vendor, and the reserved runs beside it stay zero.
+#[test]
+fn every_vendor_owns_all_eight_bytes_of_the_manifest_vendor_field() {
+    // THE VENDOR FIELD IS ALL EIGHT BYTES, not five. `groww` alone cannot tell
+    // a 48..54 vendor from a 48..56 one; `truedata` fills the field and
+    // `zerodha` reaches byte 54, so every vendor is imaged and read back here.
+    // tests-docs-security-pass14 P14-01, D-1959.
+    for vendor in Vendor::ALL {
+        let slot = ManifestHeader::genesis(vendor).image();
+        let mut field = [0u8; 8];
+        let name = vendor.as_str().as_bytes();
+        field[..name.len()].copy_from_slice(name);
+        assert_eq!(&slot[48..56], &field, "{vendor:?} owns all of 48..56");
+        assert!(
+            slot[12..16].iter().chain(&slot[56..60]).all(|b| *b == 0),
+            "{vendor:?} wrote into a reserved run"
+        );
+        assert_eq!(
+            ManifestHeader::decode(&slot).map(|h| h.vendor),
+            Ok(vendor),
+            "{vendor:?} reads back as itself"
+        );
+    }
+    assert_eq!(
+        &ManifestHeader::genesis(Vendor::TrueData).image()[48..56],
+        b"truedata"
+    );
+    assert_eq!(
+        &ManifestHeader::genesis(Vendor::Zerodha).image()[48..56],
+        b"zerodha\0"
+    );
+}
+
 /// M-29 — the stride and the header are the geometry the format document
 /// states.
 ///
@@ -7320,6 +7689,26 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
         "version 1's magic keeps meaning version 1"
     );
     assert_eq!(MAGIC_V2, *b"BRUTEXM2");
+    assert_eq!(
+        Layout::V3.magic(),
+        MAGIC_V2,
+        "version 3 keeps the geometry's magic"
+    );
+
+    // AND THE DOCUMENT SAYS VERSION 3 (P1-16-01, D-1763): §11 described only
+    // versions 1 and 2 and said this build wrote version 2.
+    let doc = include_str!("../../../docs/02-store-format.md");
+    let census = doc
+        .split_once("## 11. The census file")
+        .expect("§11 exists")
+        .1
+        .split_once("\n## 12.")
+        .expect("§12 follows")
+        .0;
+    assert!(census.starts_with(" — `BRUTEXM`, versions 1, 2 and 3"));
+    assert!(census.contains("This build **writes** version 3 only"));
+    assert!(census.contains("| 80 | 24 | `contract` |"));
+    assert!(census.contains("| 104 | 1 | `contract_len` |"));
 
     // The header slot's fields sit where the document puts them, and the
     // stride is READ from the file rather than assumed.
@@ -7338,12 +7727,15 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
     assert_eq!(&slot[24..32], &7u64.to_le_bytes());
     assert_eq!(&slot[32..40], &5u64.to_le_bytes());
     assert_eq!(&slot[40..48], &51_184u64.to_le_bytes());
-    assert_eq!(&slot[48..54], b"groww\0");
+    assert_eq!(&slot[48..56], b"groww\0\0\0");
     assert_eq!(&slot[60..64], &crc32c(&slot[..60]).to_le_bytes());
     assert!(
-        slot[54..60].iter().all(|b| *b == 0),
+        slot[12..16].iter().chain(&slot[56..60]).all(|b| *b == 0),
         "reserved bytes are zero and stay zero"
     );
+    assert!(census.contains("| 12 | 4 | reserved | written zero |"));
+    assert!(census.contains("| 48 | 8 | `vendor` |"));
+    assert!(census.contains("| 56 | 4 | reserved | written zero |"));
 
     // The entry's two halves, and the reserved run in the second one.
     let held = Held::new(
@@ -7840,4 +8232,275 @@ fn absorbed_throttle_is_counted_rather_than_discarded() {
         "and it ACCUMULATES -- a counter that only held the last wait would \
          report a run throttled a thousand times as one throttled once"
     );
+}
+
+// ===========================================================================
+// pull::rate::Governor::reserve — one call per acquire, granted in order.
+// o1api-54, D-1203.
+// ===========================================================================
+
+/// **A RESERVATION IS ONE CALL, AND THE SCHEDULE IS EXACTLY WHAT `admit`
+/// WOULD HAVE ALLOWED.**
+///
+/// The transport and the server used to loop `admit`-and-sleep: waiters that
+/// slept the same named wait woke together and raced for one permit. A
+/// reservation is granted in the order callers take the lock and is never
+/// asked twice. Twelve callers arriving at the same instant against Dhan's
+/// 5/s get the first five permits now and the rest one per 200 ms, in order;
+/// replaying those instants through `admit` on a fresh governor admits every
+/// one, so the reservation never spends a permit the bucket had not earned.
+#[test]
+fn a_reservation_is_one_call_and_never_outruns_admit() {
+    let fresh = || Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("dhan");
+    let mut governor = fresh();
+    let at: Vec<Option<u64>> = (0..12).map(|_| governor.reserve(0)).collect();
+    let step = MICROS_PER_SECOND / u64::from(DHAN_PER_SECOND);
+    let want: Vec<Option<u64>> = (0..12_u64)
+        .map(|k| Some(k.saturating_sub(4) * step))
+        .collect();
+    assert_eq!(
+        at, want,
+        "five now, then one per {step} µs, in arrival order"
+    );
+    assert_eq!(governor.cursor_micros(), 7 * step);
+    assert!(
+        at.windows(2).all(|pair| pair[0] <= pair[1]),
+        "first come, first served"
+    );
+
+    let mut replay = fresh();
+    for (k, instant) in at.iter().enumerate() {
+        assert_eq!(
+            replay.admit(instant.expect("Granted")),
+            Verdict::Admit,
+            "reservation {k} at {instant:?}"
+        );
+    }
+    assert_eq!(
+        replay.credit_micro_permits(WindowSpan::Second),
+        governor.credit_micro_permits(WindowSpan::Second),
+        "the same permits spent by either path"
+    );
+    assert_eq!(
+        replay.credit_micro_permits(WindowSpan::Day),
+        governor.credit_micro_permits(WindowSpan::Day)
+    );
+
+    // A CALLER WHOSE READING IS BEHIND THE CURSOR QUEUES BEHIND IT. Its own
+    // clock is older than the reservations already granted, so it is served
+    // after them rather than handed a permit they hold.
+    assert_eq!(governor.reserve(1), Some(8 * step));
+    // AN IDLE BUCKET REFILLS. Ten seconds later the bucket is full again and
+    // the permit is good at the caller's own instant.
+    let later = 10 * MICROS_PER_SECOND;
+    assert_eq!(governor.reserve(later), Some(later));
+    assert_eq!(
+        governor.credit_micro_permits(WindowSpan::Second),
+        Some(u64::from(DHAN_PER_SECOND - 1) * MICROS_PER_SECOND)
+    );
+}
+
+/// **THE LONGEST WAIT BINDS, AND A SPAN WITH NO BOUND NEVER WAITS.**
+#[test]
+fn a_reservation_waits_for_the_binding_span_and_an_unbounded_governor_never_waits() {
+    let mut both = Governor::new(Some(5), None, Some(2)).expect("five a second, two a day");
+    let half_day = MICROS_PER_DAY / 2;
+    let at: Vec<Option<u64>> = (0..4).map(|_| both.reserve(0)).collect();
+    assert_eq!(
+        at,
+        vec![Some(0), Some(0), Some(half_day), Some(2 * half_day)],
+        "the day span binds"
+    );
+
+    let mut open = Governor::new(None, None, None).expect("no bound at all");
+    for now in [0, 1, 1, 7, u64::MAX - 1, u64::MAX] {
+        assert_eq!(open.reserve(now), Some(now), "nothing to wait for at {now}");
+    }
+    // A READING BELOW THE CURSOR WITH NOTHING TO WAIT FOR GOES NOW. The cursor
+    // stays where it was (forward only); only the answer is the caller's own
+    // instant rather than the cursor's.
+    assert_eq!(open.reserve(3), Some(3));
+    assert_eq!(open.cursor_micros(), u64::MAX);
+}
+
+/// **A REFUSAL DRAINS THE BUCKET FOR EVERY LATER RESERVATION.**
+///
+/// One step down on the second span (5 → 4) and an empty bucket: the next
+/// reservation waits a full quarter-second, not the fifth it waited before.
+/// Per-second only, because a refusal drains the day span too and its wait
+/// would bind instead.
+#[test]
+fn a_reservation_after_a_refusal_waits_for_the_reduced_allowance() {
+    let mut governor = Governor::new(Some(DHAN_PER_SECOND), None, None).expect("dhan");
+    assert_eq!(governor.reserve(0), Some(0));
+    governor.record_throttled();
+    assert_eq!(
+        governor.permitted(WindowSpan::Second),
+        Some(DHAN_PER_SECOND - 1)
+    );
+    assert_eq!(governor.reserve(0), Some(MICROS_PER_SECOND / 4));
+    assert_eq!(governor.reserve(0), Some(2 * (MICROS_PER_SECOND / 4)));
+}
+
+/// **AT THE FAR END OF THE CLOCK NOTHING IS CHARGED.**
+///
+/// An instant past `u64::MAX` does not exist, so the bucket could never earn
+/// the permit; charging it anyway would subtract a cost never earned. The
+/// answer is `None`, a refusal each caller names — not `u64::MAX`, which a
+/// caller would sleep toward forever (the fix to D-1203) — and every credit is
+/// left as it was.
+#[test]
+fn a_reservation_past_the_end_of_the_clock_charges_nothing() {
+    let mut governor =
+        Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("dhan");
+    for _ in 0..DHAN_PER_SECOND {
+        assert_eq!(governor.reserve(u64::MAX), Some(u64::MAX), "affordable now");
+    }
+    let second = governor.credit_micro_permits(WindowSpan::Second);
+    let day = governor.credit_micro_permits(WindowSpan::Day);
+    assert_eq!(second, Some(0));
+    for _ in 0..3 {
+        assert_eq!(governor.reserve(u64::MAX), None);
+        assert_eq!(governor.credit_micro_permits(WindowSpan::Second), second);
+        assert_eq!(governor.credit_micro_permits(WindowSpan::Day), day);
+    }
+    // One step short of the end, the wait still fits and is charged.
+    let mut near = Governor::new(Some(1), None, None).expect("one a second");
+    let edge = u64::MAX - MICROS_PER_SECOND;
+    assert_eq!(near.reserve(edge), Some(edge));
+    assert_eq!(
+        near.reserve(edge),
+        Some(u64::MAX),
+        "exactly a second later fits"
+    );
+    assert_eq!(near.credit_micro_permits(WindowSpan::Second), Some(0));
+    assert_eq!(near.reserve(edge), None, "and the next does not");
+    assert_eq!(near.credit_micro_permits(WindowSpan::Second), Some(0));
+}
+
+/// **A CURSOR AHEAD OF THE CLOCK WITH A PERMIT FREE MEANS GO NOW.** The fix
+/// to D-1203.
+///
+/// The cursor is forward-only, so it can stand far ahead of a caller's
+/// reading: a governor pinned with `admit(u64::MAX)` (as
+/// `api::fno_boundary_tests::rolling_requests_spend_one_shared_permit_per_network_attempt`
+/// pins one), or any reading behind the highest seen. With no window short,
+/// `reserve` answered `cursor + 0` — `u64::MAX` here — and the caller slept the
+/// whole gap with a permit already free. It now answers the caller's own
+/// instant and charges exactly one permit; only a SHORTFALL is measured from
+/// the cursor, and one that would pass the end of the clock is `None`.
+#[test]
+fn a_reservation_with_the_cursor_ahead_and_no_shortfall_goes_now() {
+    let mut governor =
+        Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("dhan");
+    assert_eq!(governor.admit(u64::MAX), Verdict::Admit);
+    assert_eq!(governor.cursor_micros(), u64::MAX);
+    for now in [0, 1, 5, 1_000_000, u64::MAX / 2] {
+        let second = governor.credit_micro_permits(WindowSpan::Second);
+        let day = governor.credit_micro_permits(WindowSpan::Day);
+        if second < Some(MICROS_PER_SECOND) {
+            break;
+        }
+        assert_eq!(governor.reserve(now), Some(now), "go now at {now}");
+        assert_eq!(
+            governor.credit_micro_permits(WindowSpan::Second),
+            second.map(|c| c - MICROS_PER_SECOND),
+            "one permit charged at {now}"
+        );
+        assert_eq!(
+            governor.credit_micro_permits(WindowSpan::Day),
+            day.map(|c| c - WindowSpan::Day.len_micros())
+        );
+        assert_eq!(
+            governor.cursor_micros(),
+            u64::MAX,
+            "the cursor never steps back"
+        );
+    }
+    // Spend what is left of the second, so the next has a shortfall.
+    while governor.credit_micro_permits(WindowSpan::Second) >= Some(MICROS_PER_SECOND) {
+        assert_eq!(governor.reserve(7), Some(7));
+    }
+    let second = governor.credit_micro_permits(WindowSpan::Second);
+    // A SHORTFALL FROM A CURSOR AT THE END OF THE CLOCK IS A REFUSAL, NOT A
+    // SLEEP TOWARD `u64::MAX`, and charges nothing.
+    for now in [0, 7, u64::MAX - 1, u64::MAX] {
+        assert_eq!(governor.reserve(now), None, "saturated at {now}");
+        assert_eq!(governor.credit_micro_permits(WindowSpan::Second), second);
+    }
+
+    // THE SAME WITHOUT A PIN: a cursor a minute ahead of the caller, a permit
+    // free, and the answer is the caller's instant, not the cursor's.
+    let mut ahead = Governor::new(Some(1), None, None).expect("one a second");
+    let minute = 60 * MICROS_PER_SECOND;
+    assert_eq!(ahead.reserve(minute), Some(minute));
+    assert_eq!(ahead.reserve(2 * minute), Some(2 * minute));
+    // The bucket is empty at the cursor now: a caller behind it queues.
+    assert_eq!(ahead.reserve(minute), Some(2 * minute + MICROS_PER_SECOND));
+}
+
+/// **THE CLOCK BOTH CALLERS READ NEVER STEPS BACK.**
+#[test]
+fn the_governor_clock_is_monotonic() {
+    let mut last = pull::rate::monotonic_micros();
+    for _ in 0..1_000 {
+        let now = pull::rate::monotonic_micros();
+        assert!(now >= last, "{now} after {last}");
+        last = now;
+    }
+}
+
+/// **AND IT MOVES.** A clock that never steps back is satisfied by a constant;
+/// the governor needs one that advances by the time that actually passed, or
+/// every reservation is made at one frozen instant. Bracketed by an
+/// [`std::time::Instant`] measurement, the reading's advance is at least the
+/// measured interval, less one microsecond for each reading's truncation.
+#[test]
+fn the_governor_clock_advances_by_the_time_that_passed() {
+    let before = pull::rate::monotonic_micros();
+    let measured = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let elapsed = u64::try_from(measured.elapsed().as_micros()).expect("a few milliseconds");
+    let after = pull::rate::monotonic_micros();
+    assert!(elapsed >= 3_000, "slept {elapsed} us");
+    let advanced = after.checked_sub(before).expect("never steps back");
+    assert!(
+        advanced.saturating_add(1) >= elapsed,
+        "clock advanced {advanced} us across a measured {elapsed} us ({before} -> {after})"
+    );
+}
+
+/// **No manifest doc calls a hash probe a worst-case constant.** v4-1, D-1488.
+///
+/// `Manifest::entry`, `Manifest::closes` and `Manifest::record` are each one
+/// probe or insert into a `HashMap`, which is expected O(1) and not an
+/// adversarial worst-case bound (`CLAUDE.md` §3 rule 4). Four doc sentences
+/// said "O(1) worst case"; api's `merge.rs` had the same claim and
+/// `no_comment_claims_a_worst_case_constant_probe` removed it there. This reads
+/// the source, flattened, so a re-wrapped copy is caught as well. It reads
+/// text and times nothing: the probe's cost is **UNVERIFIED as a measurement**
+/// here, and C-12 in `crates/pull/benches/ratio.rs` is what measures it.
+#[test]
+fn no_manifest_doc_claims_a_worst_case_constant_probe() {
+    let source = include_str!("../src/manifest.rs")
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let source = source.replace("/// ", "").replace("//! ", "");
+    for claim in ["o(1) worst case", "lookup — o(1) worst"] {
+        assert!(
+            !source.contains(claim),
+            "manifest.rs claims {claim:?} again"
+        );
+    }
+    for kept in [
+        "lookup — expected o(1).",
+        "**expected o(1)**, the same bound",
+    ] {
+        assert!(
+            source.contains(kept),
+            "the expected-cost statement {kept:?} is kept"
+        );
+    }
 }

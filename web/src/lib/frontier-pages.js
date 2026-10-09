@@ -1,3 +1,5 @@
+import { refusalFrom } from './refusal.js';
+
 /**
  * Assemble the complete committed frontier before either ranking surface sees it.
  * These transport ceilings mirror api::detail: at most 4,096 rows, 256 per page.
@@ -22,8 +24,22 @@ function sameRules(left, right) {
 }
 
 /**
+ * The served `admission` lists (which rules `meets.all` conjoins) must be the
+ * same on every page: they come from `cli::frontier::VERDICT_CHECKED` and
+ * `VERDICT_UNCHECKED`, so a change between pages is two server builds. D-1810.
+ *
+ * @param {any} left @param {any} right
+ */
+function sameAdmission(left, right) {
+  const names = (/** @type {any} */ value, /** @type {string} */ key) =>
+    value && typeof value === 'object' && Array.isArray(value[key]) ? value[key].join('\u0000') : null;
+  return names(left, 'checked') === names(right, 'checked') &&
+    names(left, 'unchecked') === names(right, 'unchecked');
+}
+
+/**
  * @param {string} identity
- * @param {(url: string) => Promise<{ok: boolean, status: number, json: () => Promise<any>}>} request
+ * @param {(url: string) => Promise<{ok: boolean, status: number, json: () => Promise<any>, text?: () => Promise<string>}>} request
  * @returns {Promise<any>}
  */
 export async function fetchCompleteFrontier(identity, request) {
@@ -41,7 +57,9 @@ export async function fetchCompleteFrontier(identity, request) {
       `/frontier.json?identity=${encodeURIComponent(identity)}&page=${page}&limit=${FRONTIER_PAGE_ROWS}`
     );
     if (!response.ok || (response.status !== 200 && response.status !== 206)) {
-      throw new Error(`/frontier.json answered ${response.status} on page ${page}.`);
+      // THE SERVER'S `refusal`, NOT THE STATUS ALONE (W3, D-3213). Every
+      // refusal this route writes names itself in the body.
+      throw new Error(`Frontier page ${page} refused: ${await refusalFrom('/frontier.json', /** @type {Response} */ (response))}`);
     }
     const body = await response.json();
     const refuse = (/** @type {string} */ why) => {
@@ -61,8 +79,9 @@ export async function fetchCompleteFrontier(identity, request) {
       refuse('total_admitted is not a valid result count.');
     }
     if (first && (body.total_count !== first.total_count ||
-        body.total_admitted !== first.total_admitted || !sameRules(first.rules, body.rules))) {
-      refuse('result counts or recorded rules changed between pages.');
+        body.total_admitted !== first.total_admitted || !sameRules(first.rules, body.rules) ||
+        !sameAdmission(first.admission, body.admission))) {
+      refuse('result counts, recorded rules or admission lists changed between pages.');
     }
     const offset = page * FRONTIER_PAGE_ROWS;
     const expectedCount = Math.min(FRONTIER_PAGE_ROWS, body.total_count - offset);

@@ -13,6 +13,17 @@ const MAGIC: &[u8; 8] = b"BTXCHK01";
 const HEADER: usize = 64;
 pub(crate) const DIRECTORY_LIMIT: usize = 1_000_000;
 
+/// The namespace entry ceiling discovery admits: `DIRECTORY_LIMIT`, except
+/// that a test on its own thread may lower it so the limit is reachable with
+/// real directories rather than a million of them.
+fn directory_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = tests::LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    DIRECTORY_LIMIT
+}
+
 /// An exclusively owned search checkpoint namespace.
 ///
 /// Every advisory lock this type takes is released by an explicit unlock,
@@ -28,6 +39,10 @@ pub(crate) struct Journal {
     latest: Option<u64>,
     interrupted: u64,
     acknowledged: u64,
+    /// Namespace entries (owner.lock plus every reservation) counted by the
+    /// opening discovery and advanced by each reservation this writer makes,
+    /// so a publication can refuse before discovery would.
+    entries: usize,
     poisoned: bool,
 }
 
@@ -79,6 +94,7 @@ impl Snapshot {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"
@@ -115,7 +131,7 @@ impl Snapshot {
         };
         let after = crate::result_set::file_generation(&owner, &owner_path)?;
         crate::result_set::require_generation_unchanged(before, after, &owner_path)?;
-        let (_, latest, interrupted, acknowledged) = discover_through(&directory, through)?;
+        let (_, latest, interrupted, acknowledged, _) = discover_through(&directory, through)?;
         Ok(Some(Self {
             directory,
             identity,
@@ -135,6 +151,7 @@ impl Journal {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"
@@ -149,15 +166,37 @@ impl Journal {
         let directory = base.join(hex(&identity));
         durable_directory(&base, &directory)?;
         let owner_path = directory.join("owner.lock");
-        let owner =
-            Flock::try_lock(open_owner(&owner_path)?, owner_path.clone()).map_err(|why| {
-                format!("this exact search is already owned or cannot be locked: {why}")
-            })?;
+        // A SNAPSHOT PROBE IS NOT AN OWNER (expr-1, D-2620). `Snapshot::open`
+        // takes this lock shared for an instant to see whether a writer is
+        // live, and the api does that on every poll; one `try_lock` refused a
+        // real start or resume after its attempt was already appended. The
+        // lock is asked again for a bounded second through a `try_clone` of
+        // one open description; a real owner holds it for its whole run and
+        // is still refused, now named as held past the wait.
+        let opened = open_owner(&owner_path)?;
+        let owner = crate::lock_wait::patiently(|| {
+            Flock::try_lock(
+                opened.try_clone().map_err(std::fs::TryLockError::Error)?,
+                owner_path.clone(),
+            )
+        })
+        .map_err(|why| {
+            let held = matches!(why, std::fs::TryLockError::WouldBlock);
+            format!(
+                "this exact search is already owned or cannot be locked: {why}{}",
+                if held {
+                    " (held past the one-second wait a reader's probe is given)"
+                } else {
+                    ""
+                }
+            )
+        })?;
+        drop(opened);
         File::open(&directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
-        let (next, latest, interrupted, acknowledged) = discover(&directory)?;
+        let (next, latest, interrupted, acknowledged, entries) = discover(&directory)?;
         Ok(Self {
             directory,
             identity,
@@ -166,6 +205,7 @@ impl Journal {
             latest,
             interrupted,
             acknowledged,
+            entries,
             poisoned: false,
         })
     }
@@ -220,6 +260,14 @@ impl Journal {
         if length.checked_add(96).is_none_or(|n| n > max_bytes) {
             return Err("checkpoint publication exceeds its byte admission".to_owned());
         }
+        // Discovery admits at most `directory_limit()` entries. A reservation
+        // that would make one more is refused here, before it exists, so no
+        // acknowledged checkpoint can leave the namespace unreopenable (D-1740).
+        let entries = self
+            .entries
+            .checked_add(1)
+            .filter(|entries| *entries <= directory_limit())
+            .ok_or("checkpoint namespace reached its directory admission limit")?;
         let sequence = self.next;
         self.next = self
             .next
@@ -227,21 +275,19 @@ impl Journal {
             .ok_or("checkpoint sequence exhausted")?;
         let directory = self.directory.join(format!("{sequence:016x}"));
         fs::create_dir(&directory).map_err(error)?;
+        self.entries = entries;
         File::open(&self.directory)
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
         let path = directory.join("payload");
-        let mut file = Flock::lock(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(error)?,
-            path.as_path(),
-        )
-        .map_err(error)?;
+        let mut raw = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(error)?;
+        let mut file = Flock::lock(&mut raw, path.as_path()).map_err(error)?;
         #[cfg(test)]
         tests::payload_locked(&file);
         let header = header_of(self.identity, sequence, length);
@@ -259,31 +305,64 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
-        let mut marker = File::create_new(directory.join("complete")).map_err(error)?;
-        marker
-            .write_all(&seal)
-            .and_then(|()| marker.sync_all())
-            .map_err(error)?;
-        File::open(&directory)
-            .map_err(error)?
-            .sync_all()
-            .map_err(error)?;
-        verify_acknowledged(&mut file, &path, &header, payload, seal)?;
+        // RELEASED BEFORE THE MARKER EXISTS (locks-3, D-1913). The payload is
+        // whole, verified and durable here, and the marker is what makes it
+        // discoverable. Held until after the marker, every reader that found
+        // the new sequence in that window was refused "checkpoint payload is
+        // busy" for bytes already published, through two fsyncs and a full
+        // re-read. Released by name, not by closing: a duplicate a spawned
+        // child still carried kept a closed descriptor's lock alive (D-0693).
+        // A refused release leaves `latest` and `acknowledged` unadvanced and
+        // poisons the writer through `publish`.
+        file.release().map_err(|u| u.to_string())?;
+        publish_marker(&directory, seal)?;
+        #[cfg(test)]
+        tests::marker_visible();
+        verify_acknowledged(&mut raw, &path, &header, payload, seal)?;
         if regular_bytes(&directory.join("complete"), 32)? != seal {
             return Err("checkpoint marker changed before acknowledgment".to_owned());
         }
-        // The payload lock is released by name before the publication is
-        // acknowledged. Closing the descriptor alone left it held by any
-        // duplicate a spawned child still carried, and `latest` then refused
-        // this very checkpoint as busy. A refused release leaves `latest` and
-        // `acknowledged` unadvanced and poisons the writer through `publish`.
-        file.release().map_err(|u| u.to_string())?;
         // Only this acknowledged publication updates the cached latest position.
         // A later reopen validates the marker and all bytes again.
         self.latest = Some(sequence);
         self.acknowledged = acknowledged;
         Ok((sequence, seal))
     }
+}
+
+/// Make `complete` appear whole or not at all (D-1740). The seal is written
+/// and synced under a temporary name and only then renamed into place, then
+/// the reservation directory is synced. A kill before the rename leaves at
+/// most `complete.tmp`, which discovery never reads, so the reservation is an
+/// interrupted one and the previous checkpoint stays the resume point. A
+/// failure this process sees removes the temporary file and refuses.
+fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
+    let temporary = directory.join("complete.tmp");
+    let written = (|| {
+        let mut marker = File::create_new(&temporary)?;
+        #[cfg(test)]
+        tests::marker_created(directory.parent().unwrap_or(directory));
+        marker.write_all(&seal)?;
+        marker.sync_all()?;
+        #[cfg(test)]
+        tests::marker_staged(&temporary)?;
+        fs::rename(&temporary, directory.join("complete"))
+    })();
+    if let Err(why) = written {
+        return Err(match fs::remove_file(&temporary) {
+            Ok(()) => format!("checkpoint marker was not published: {why}"),
+            Err(left) if left.kind() == std::io::ErrorKind::NotFound => {
+                format!("checkpoint marker was not published: {why}")
+            }
+            Err(left) => format!(
+                "checkpoint marker was not published: {why}; its temporary file also could not be removed: {left}"
+            ),
+        });
+    }
+    File::open(directory)
+        .map_err(error)?
+        .sync_all()
+        .map_err(error)
 }
 
 fn verify_acknowledged(
@@ -328,10 +407,7 @@ fn open_owner(path: &Path) -> Result<File, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100);
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20_000);
+        options.custom_flags(store::open_flags::O_NOFOLLOW);
     }
     // create_new never follows an existing symlink, including a dangling one.
     // The existing-file door deliberately has no create flag, so refusal can
@@ -417,21 +493,29 @@ fn error(why: impl std::fmt::Display) -> String {
 #[path = "search_checkpoint_tests.rs"]
 pub(crate) mod tests;
 
-fn discover(directory: &Path) -> Result<(u64, Option<u64>, u64, u64), String> {
+/// Finder's `.DS_Store` and the `._<name>` `AppleDouble` files a copy to a
+/// non-HFS volume writes: operating-system litter, never a reservation.
+fn is_os_litter(name: &str) -> bool {
+    name == ".DS_Store" || name.starts_with("._")
+}
+
+/// `(next, latest, interrupted, acknowledged, entries)`.
+type Discovered = (u64, Option<u64>, u64, u64, usize);
+
+fn discover(directory: &Path) -> Result<Discovered, String> {
     discover_through(directory, None)
 }
-fn discover_through(
-    directory: &Path,
-    through: Option<u64>,
-) -> Result<(u64, Option<u64>, u64, u64), String> {
+fn discover_through(directory: &Path, through: Option<u64>) -> Result<Discovered, String> {
+    let mut entries = 0_usize;
     let mut next = 1;
     let mut latest = None;
     let mut interrupted = 0_u64;
     let mut acknowledged = 0_u64;
     for (index, entry) in fs::read_dir(directory).map_err(error)?.enumerate() {
-        if index == DIRECTORY_LIMIT {
+        if index == directory_limit() {
             return Err("checkpoint directory admission limit exceeded".to_owned());
         }
+        entries = index + 1;
         let entry = entry.map_err(error)?;
         let name = entry
             .file_name()
@@ -440,13 +524,29 @@ fn discover_through(
         if name == "owner.lock" {
             continue;
         }
-        let sequence = u64::from_str_radix(&name, 16)
-            .map_err(|_| "invalid checkpoint reservation name".to_owned())?;
+        // MACOS LITTER IS NOT A RESERVATION, AND A STRANGER IS NAMED. Finder
+        // writes `.DS_Store` into a folder it opens, and a copy to a non-HFS
+        // volume writes `._<name>` beside each file; either one refused every
+        // start, resume and dashboard read of this search with a sentence that
+        // named no file (CE-34, D-1769). Those two, as plain files, are passed
+        // over; anything else still refuses, now by its name.
+        if is_os_litter(&name) && entry.file_type().map_err(error)?.is_file() {
+            continue;
+        }
+        let sequence = u64::from_str_radix(&name, 16).map_err(|_| {
+            format!(
+                "invalid checkpoint reservation name {name:?} in {}",
+                directory.display()
+            )
+        })?;
         if sequence == 0
             || name != format!("{sequence:016x}")
             || !entry.file_type().map_err(error)?.is_dir()
         {
-            return Err("invalid checkpoint reservation type or sequence".to_owned());
+            return Err(format!(
+                "invalid checkpoint reservation type or sequence {name:?} in {}",
+                directory.display()
+            ));
         }
         next = next.max(
             sequence
@@ -457,6 +557,17 @@ fn discover_through(
             continue;
         }
         match fs::symlink_metadata(entry.path().join("complete")) {
+            // AN EMPTY MARKER IS A TORN CREATE, not an acknowledgment (CE-3,
+            // D-1909): the pre-D-1740 protocol created `complete` and then
+            // wrote its seal, and a kill between the two left 0 bytes. Counted
+            // as interrupted, so `latest` is the newest WHOLE checkpoint. Since
+            // D-1740 a marker appears only by rename, whole, so a SHORT
+            // NON-EMPTY one is damage and `read` refuses it (D-1934).
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {
+                interrupted = interrupted
+                    .checked_add(1)
+                    .ok_or("checkpoint interruption counter exhausted")?;
+            }
             Ok(metadata) if metadata.file_type().is_file() => {
                 acknowledged = acknowledged
                     .checked_add(1)
@@ -475,7 +586,7 @@ fn discover_through(
         }
     }
 
-    Ok((next, latest, interrupted, acknowledged))
+    Ok((next, latest, interrupted, acknowledged, entries))
 }
 fn read_saved(
     base: &Path,

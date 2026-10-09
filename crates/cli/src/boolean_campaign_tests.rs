@@ -523,3 +523,134 @@ fn refused_publication_callback(root: &Path) {
     assert!(!output.join("boolean-statistics-v1").exists());
     assert!(!output.join("boolean-admission-v1").exists());
 }
+
+/// **A resume prices a rung's families again even where their completion pins
+/// are recorded.** W2-cli2-8, recorded and not fixed (D-0713).
+///
+/// The 1min rung is refused after its Families stage was published, by a
+/// regular file where the statistics namespace must be created, so its row is
+/// saved Refused with the family's pin and no statistics link. With the file
+/// gone, the same campaign resumes and completes the rung under the same pin,
+/// and the family's latest candidate attempt is a newer one than the attempt
+/// that produced the pin: the pinned family was priced again, not reopened.
+#[test]
+fn a_resumed_refused_rung_prices_its_pinned_family_again() {
+    const CHILD: &str = "BRUTEX_BOOLEAN_CAMPAIGN_RESUME_FIXTURE";
+    if let Some(root) = std::env::var_os(CHILD) {
+        resumed_refused_rung(&PathBuf::from(root));
+        return;
+    }
+    let fixture = candidate::tests::Fixture::new().unwrap();
+    fixture.prepare("NIFTY").unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--exact",
+        "boolean_campaign::tests::a_resumed_refused_rung_prices_its_pinned_family_again",
+        "--nocapture",
+    ]);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("BRUTEX_") {
+            command.env_remove(name);
+        }
+    }
+    let result = command
+        .env(CHILD, &fixture.root)
+        .env("BRUTEX_STORE", &fixture.root)
+        .env("BRUTEX_CHECKSUM_RECEIPTS", &fixture.root)
+        .env("BRUTEX_CHECKSUM_MAX_BYTES", "67108864")
+        .env("BRUTEX_CHECKSUM_MAX_RECORDS", "3000000")
+        .env(
+            "BRUTEX_ADMISSION_POLICY_FILE",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/intraday-research-v1.toml"),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+}
+
+fn one_rung_prepared(root: &Path, output: &Path, out: &mut String) -> Prepared {
+    let programs = vec![Expression::parse("30 & !30").unwrap()];
+    let prepared = generated_prepared(
+        &Request {
+            rungs: RungScope::new(&["1min"]).unwrap(),
+            vendor: "zerodha",
+            symbols: "NIFTY",
+            from: (2025, 7),
+            to: (2025, 8),
+            programs: &programs,
+            horizon: Horizon::bars(5).unwrap(),
+            max_points: 50,
+            output,
+            max_rung_jobs: 8,
+        },
+        out,
+    )
+    .unwrap();
+    assert_eq!(prepared.input.source, fs::canonicalize(root).unwrap());
+    prepared
+}
+
+fn resumed_refused_rung(root: &Path) {
+    const EVIDENCE: u64 = 1 << 20;
+    let output = root.join("campaign-resume-output");
+    fs::create_dir(&output).unwrap();
+    let blocker = output.join("boolean-statistics-v1");
+    fs::write(&blocker, b"not a directory").unwrap();
+    let mut out = String::new();
+    let first = one_rung_prepared(root, &output, &mut out);
+    let id = first.identity();
+    assert!(run_prepared(first, &mut out).is_err());
+    let view = Reader::open(&output, id, MAX_SNAPSHOT).unwrap();
+    let row = view.rows().first().unwrap();
+    assert_eq!((row.rung, row.status), ("1min", Status::Refused));
+    assert_eq!(row.statistics, None, "refused after the Families stage");
+    let catalog = row.catalogs.first().unwrap();
+    let pin = catalog.completion.unwrap();
+    let priced = crate::sweep_evidence::read(&output, catalog.expected, EVIDENCE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        priced.completion,
+        crate::sweep_evidence::Completion::Completed
+    );
+
+    fs::remove_file(&blocker).unwrap();
+    let resumed = run_prepared(one_rung_prepared(root, &output, &mut out), &mut out).unwrap();
+    resumed.require_complete().unwrap();
+    let view = Reader::open(&output, id, MAX_SNAPSHOT).unwrap();
+    let row = view.rows().first().unwrap();
+    assert_eq!(row.status, Status::Completed);
+    assert_eq!(row.catalogs.first().unwrap().completion, Some(pin));
+    let again = crate::sweep_evidence::read(&output, catalog.expected, EVIDENCE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        again.completion,
+        crate::sweep_evidence::Completion::Completed
+    );
+    assert!(
+        again.attempt > priced.attempt,
+        "the pinned family was priced again: attempt {} after {}",
+        again.attempt,
+        priced.attempt
+    );
+}
+
+/// G18-cli-a-03, D-2002: an argument list this build does not understand
+/// exits `MISUSED` with the usage -- never `OK`, never `FAILED`.
+#[test]
+fn a_short_argument_list_exits_misused_with_the_usage() {
+    let mut out = String::new();
+    assert_eq!(command(&[], &mut out), crate::MISUSED);
+    assert!(
+        out.contains("boolean-campaign-stored requires its 11 explicit arguments"),
+        "{out}"
+    );
+    assert!(out.contains(crate::USAGE), "{out}");
+}

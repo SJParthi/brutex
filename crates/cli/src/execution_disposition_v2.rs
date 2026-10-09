@@ -1987,7 +1987,7 @@ impl ExecutionDispositionLedgerV2 {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        crate::population::population_write_lock(root)
     }
 
     /// Creates missing V2 files and fully validates every sealed record and
@@ -2982,7 +2982,13 @@ fn check_record_file(
             path.display()
         ));
     }
-    if decoder.u32()? != expected_stride {
+    let read_stride = decoder.u32()?;
+    if read_stride != expected_stride {
+        if let Some(why) =
+            crate::execution_capability::retired_parameter_stride(read_stride, stride)
+        {
+            return Err(format!("{} {why}", path.display()));
+        }
         return Err(format!(
             "{} has a different execution-disposition record stride",
             path.display()
@@ -3425,7 +3431,7 @@ pub(crate) mod v2_tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridPolicyV1,
         ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1,
-        ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+        ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
     };
     use runner::identity::{Direction, Params, Run};
     use runner::outcome::Horizon;
@@ -3519,7 +3525,7 @@ pub(crate) mod v2_tests {
             RatioLimitsV1::new(1, 100_000, 64).expect("fixture ratio limits"),
             10_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             1_000,
             1_000,
@@ -4025,6 +4031,192 @@ pub(crate) mod v2_tests {
                 &self.training,
             )
             .expect("fixture retains its exact training-series identity")
+        }
+    }
+
+    /// W3-runner2-2, D-1838: Global Replay V1 and V2 price each stream's
+    /// TRAINING grid through one `TrainingAttestationsV1`, which attests a
+    /// slice once per distinct resolution, borrowed series, column and
+    /// horizon, not once per stream, and answers every stream exactly as the
+    /// per-call `evaluate_training_grid_attested` door does. Equal content
+    /// at another address is attested again, never trusted by value.
+    #[test]
+    fn a_replay_attests_each_shared_training_slice_once() {
+        let training = runner::synthetic::sessions(8);
+        let instrument = integration_instrument(InstrumentFamilyV1::Nifty);
+        let column = integration_column(&training, Thresholds::CLASSICAL);
+        let twin = integration_column(&training, Thresholds::CLASSICAL);
+        let (mask_words, _) = strongest_live_mask(&column);
+        let (long_series, long_grid) = resolve_grid(
+            Side::Long,
+            RangeResolutionV1::PpmCeiling,
+            &instrument,
+            &training,
+        );
+        let (short_series, short_grid) = resolve_grid(
+            Side::Short,
+            RangeResolutionV1::PpmCeiling,
+            &instrument,
+            &training,
+        );
+        let run_of = |series: ExecutionSeriesV1<'_>, direction: Direction| {
+            let run = Run {
+                mask: runner::replay_mask::from_stored_words(mask_words)
+                    .expect("fixture mask is canonical and live"),
+                direction,
+                instrument: series.instrument(),
+                timeframe: "1min",
+                params: run_params(),
+                data_digest: runner::identity::data_digest(&training),
+                commit: TEST_COMMIT,
+                feed: TEST_FEED,
+            };
+            ExecutionRunV1::new(&run, &training, None).expect("canonical execution run")
+        };
+        let long_run = run_of(long_series, Direction::Long);
+        let short_run = run_of(short_series, Direction::Short);
+        let expected_long = long_grid
+            .evaluate_training_grid_attested(long_series, &column, execution_horizon(), long_run)
+            .expect("per-call door evaluates");
+        let expected_short = short_grid
+            .evaluate_training_grid_attested(short_series, &column, execution_horizon(), short_run)
+            .expect("per-call door evaluates");
+
+        let mut attestations = crate::execution_capability::TrainingAttestationsV1::new();
+        assert_eq!(attestations.attested(), 0);
+        for _ in 0..25 {
+            let long = attestations
+                .evaluate(
+                    &long_grid,
+                    long_series,
+                    &column,
+                    execution_horizon(),
+                    long_run,
+                )
+                .expect("cached long evaluation");
+            assert_eq!(long, expected_long);
+        }
+        assert_eq!(attestations.attested(), 1, "25 long streams, one slice");
+        for _ in 0..25 {
+            let short = attestations
+                .evaluate(
+                    &short_grid,
+                    short_series,
+                    &column,
+                    execution_horizon(),
+                    short_run,
+                )
+                .expect("cached short evaluation");
+            assert_eq!(short, expected_short);
+        }
+        assert_eq!(
+            attestations.attested(),
+            2,
+            "another resolution attests again"
+        );
+        let twin_long = attestations
+            .evaluate(
+                &long_grid,
+                long_series,
+                &twin,
+                execution_horizon(),
+                long_run,
+            )
+            .expect("an equal column at another address evaluates");
+        assert_eq!(twin_long, expected_long);
+        assert_eq!(
+            attestations.attested(),
+            3,
+            "another column address attests again"
+        );
+        let copy = training.clone();
+        let (copied_series, _) = resolve_grid(
+            Side::Long,
+            RangeResolutionV1::PpmCeiling,
+            &instrument,
+            &copy,
+        );
+        attestations
+            .evaluate(
+                &long_grid,
+                copied_series,
+                &column,
+                execution_horizon(),
+                long_run,
+            )
+            .expect("equal bytes at another address evaluate");
+        assert_eq!(
+            attestations.attested(),
+            4,
+            "another series address attests again"
+        );
+        let refused = attestations
+            .evaluate(
+                &short_grid,
+                short_series,
+                &column,
+                execution_horizon(),
+                long_run,
+            )
+            .expect_err("a run of the other side is refused through the cache");
+        assert_eq!(
+            Err(refused),
+            short_grid.evaluate_training_grid_attested(
+                short_series,
+                &column,
+                execution_horizon(),
+                long_run,
+            ),
+            "a refusal is the per-call door's refusal",
+        );
+        assert_eq!(
+            attestations.attested(),
+            4,
+            "a refused run attests nothing new"
+        );
+    }
+
+    /// W3-runner2-2, D-1838: neither global replay re-attests its TRAINING
+    /// slice per stream. Each holds one cache across its stream loop and
+    /// prices every stream through it; the per-call door is gone from both.
+    #[test]
+    fn both_global_replays_price_their_streams_through_one_attestation_cache() {
+        for (name, source) in [
+            ("global_replay.rs", include_str!("global_replay.rs")),
+            ("global_replay_v2.rs", include_str!("global_replay_v2.rs")),
+            (
+                "execution_capability.rs",
+                include_str!("execution_capability.rs"),
+            ),
+        ] {
+            let production = source.split("\nmod tests {").next().expect("production");
+            assert!(
+                !production.contains("evaluate_training_grid_attested("),
+                "{name} still attests per stream"
+            );
+        }
+        for (name, source) in [
+            ("global_replay.rs", include_str!("global_replay.rs")),
+            ("global_replay_v2.rs", include_str!("global_replay_v2.rs")),
+        ] {
+            let production = source.split("\nmod tests {").next().expect("production");
+            assert_eq!(
+                production.matches("TrainingAttestationsV1::new()").count(),
+                1,
+                "{name} holds one cache"
+            );
+            let held = production
+                .find("TrainingAttestationsV1::new()")
+                .expect("cache");
+            let first_loop = production
+                .get(held..)
+                .and_then(|after| after.find("for (selection_index"))
+                .expect("the stream loop follows the cache");
+            assert!(first_loop > 0, "{name} builds the cache before its loop");
+            assert!(
+                production.contains("&mut attestations,"),
+                "{name} passes it"
+            );
         }
     }
 

@@ -103,9 +103,19 @@ pub struct Progress {
     /// When it ended, or [`None`] while it is still going.
     pub finished_micros: Option<i64>,
     /// The report `cli` produced, once there is one.
-    pub report: Option<String>,
-    /// Why it could not run, when that is the answer.
-    pub refusal: Option<String>,
+    ///
+    /// SHARED, NOT OWNED: every `/backtest/run.json` poll clones the whole
+    /// [`Progress`] while it holds the slot's std mutex on an async worker, and
+    /// a `sweep-all` report grows by a line per instrument-month. As a `String`
+    /// that clone copied every byte of the report under the lock on every poll;
+    /// as an `Arc<str>` it is one reference-count increment whatever the
+    /// report's length, as
+    /// `api::sweeprun::a_poll_snapshot_shares_the_report_and_refusal_bytes_with_the_slot`
+    /// shows. W1-api6-1, D-0954.
+    pub report: Option<std::sync::Arc<str>>,
+    /// Why it could not run, when that is the answer. Shared for the reason
+    /// [`Self::report`] is: a refusal can carry the report it replaced.
+    pub refusal: Option<std::sync::Arc<str>>,
     /// Exact declared Boolean request and journal observations, when applicable.
     pub boolean_search: Option<Box<crate::booleanlaunch::Status>>,
     /// Additive single-stop request and pinned journal progress, when applicable.
@@ -738,6 +748,129 @@ fn knobs_in(body: &WireBody) -> Vec<(&'static str, String)> {
     out
 }
 
+/// Every member [`WireBody`] declares except `screen_budget_ms`, which
+/// [`refuse_screen_budget`] refuses on every route before this list is read.
+///
+/// # Why a route refuses a KNOWN field it does not read -- P3-01-02, D-1972
+///
+/// [`WireBody`] is the union of three routes' bodies, so every route decoded
+/// every member and read only its own. `{"rung":"5min"}` on `/backtest/run`,
+/// which reads `rungs`, swept all eight rungs; `"validate":"0"` on a descent,
+/// which applies no knob, was validated and dropped. Each route now names the
+/// members it reads and refuses any other KNOWN member by name, as
+/// [`strict_knobs`] already did for its one word. Unknown members stay ignored
+/// for compatibility (BE-03, D-0685): they are not settings anyone here offers.
+const WIRE_FIELDS: [&str; 26] = [
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rungs",
+    "command",
+    "rung",
+    "min_hits",
+    "max_points",
+    "support_ppm",
+    "ceiling",
+    "screen_cap",
+    "top",
+    "validate",
+    "horizon_bars",
+    "grid_rungs",
+    "grid_resolution",
+    "sizing_rate_bp",
+    "min_rr_bp",
+    "min_win_rate_bp",
+    "min_trades",
+    "min_ret_over_dd_bp",
+    "min_weakest_bp",
+    "max_mae_ppm",
+];
+
+/// What a span-taking command word reads: its word, feed, instrument, span and
+/// one rung.
+const COMMAND_SPAN_RUNG: [&str; 8] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+];
+
+/// [`COMMAND_SPAN_RUNG`] and a `min_hits` count.
+const COMMAND_SPAN_RUNG_HITS: [&str; 9] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+    "min_hits",
+];
+
+/// What `screen` reads: [`COMMAND_SPAN_RUNG`] and its three own numbers.
+const COMMAND_SCREEN: [&str; 11] = [
+    "command",
+    "feed",
+    "underlying",
+    "from_year",
+    "from_month",
+    "to_year",
+    "to_month",
+    "rung",
+    "support_ppm",
+    "max_points",
+    "top",
+];
+
+/// What `sweep-all` reads. `cli sweep-all VENDOR RUNG MIN_HITS` takes no
+/// instrument and no span, so a body naming either is refused: a scoped-looking
+/// request must not become a whole-store batch (P3-02-06, D-1972).
+const COMMAND_SWEEP_ALL: [&str; 4] = ["command", "feed", "rung", "min_hits"];
+
+/// Whether a route applies the [`KNOBS`] it is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knobs {
+    /// Every [`KNOBS`] member is read (and validated by the route's own rule).
+    Applied,
+    /// None is read beyond the members the route names itself.
+    NotApplied,
+}
+
+/// Refuses, by name, the first known member `route` does not read.
+///
+/// `reads` lists the members the route consumes; with [`Knobs::Applied`] every
+/// [`KNOBS`] member is read as well. See [`WIRE_FIELDS`] for why. D-1972.
+fn refuse_unread(
+    body: &WireBody,
+    route: &str,
+    reads: &[&str],
+    knobs: Knobs,
+) -> Result<(), Refusal> {
+    for name in WIRE_FIELDS {
+        let present = body.string(name).is_some()
+            || body.scalar(name).is_some()
+            || list_field(body, name).is_some();
+        let read = reads.contains(&name)
+            || (knobs == Knobs::Applied && KNOBS.iter().any(|&(knob, _)| knob == name));
+        if present && !read {
+            return Err(Refusal::Malformed(format!(
+                "`{name}` is not read by {route}, so it is refused rather than \
+                 dropped: a setting that silently did nothing would be the \
+                 fallback CLAUDE.md §4 bans. Omit it. No setting was ignored."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// What one `POST /backtest/descend` body asked for.
 ///
 /// # Three fields the sweep does not take, and why each is a FACT and not a knob
@@ -768,7 +901,7 @@ pub struct AskedDescent {
     pub from: (u16, u8),
     /// Last month of the span.
     pub to: (u16, u8),
-    /// The stop ceiling, in whole index points.
+    /// The stop ceiling, in whole index points. Zero is no ceiling (D-1732).
     pub max_points: i64,
     /// How many rows the listing shows.
     pub top: usize,
@@ -889,12 +1022,28 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     // line runs. The budget itself decodes as any value, so it is never the
     // field that fails the decode. D-0695.
     refuse_screen_budget(&body)?;
+    // `rung` (singular) is descend's and command's member: read here it was
+    // dropped and the run swept all eight rungs. D-1972.
+    refuse_unread(
+        &body,
+        "`POST /backtest/run`",
+        &[
+            "feed",
+            "underlying",
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "rungs",
+        ],
+        Knobs::Applied,
+    )?;
     asked_from_wire(&body)
 }
 
-/// [`asked_from`] after the strict JSON boundary has been crossed once.
-fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
-    let feed = field(body, "feed")
+/// The feed every body names, or the refusal that says why it is required.
+fn feed_from(body: &WireBody) -> Result<String, Refusal> {
+    field(body, "feed")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             Refusal::Malformed(
@@ -903,7 +1052,12 @@ fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
              it cannot be defaulted."
                     .to_owned(),
             )
-        })?;
+        })
+}
+
+/// [`asked_from`] after the strict JSON boundary has been crossed once.
+fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
+    let feed = feed_from(body)?;
     let underlying = field(body, "underlying")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Refusal::Malformed("no `underlying` in the request.".to_owned()))?;
@@ -918,7 +1072,7 @@ fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
     let to_year = num("to_year")?;
     let to_month = num("to_month")?;
 
-    let month_ok = |m: u64| (1..=12).contains(&m);
+    let month_ok = |m: u64| matches!(m, 1..=12);
     if !month_ok(from_month) || !month_ok(to_month) {
         return Err(Refusal::Span(format!(
             "months must be 1..=12; this asked for {from_month} and {to_month}."
@@ -1059,13 +1213,33 @@ pub use cli::EVERY_RUNG;
 /// # Errors
 ///
 /// Everything [`asked_from`] refuses, plus a rung that is not one of the eight,
-/// a stop ceiling below one point, and a listing bound of zero.
+/// a negative stop ceiling, and a listing bound of zero. A ceiling of zero is
+/// no ceiling (D-1732).
 pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
     let body = wire_body(body)?;
     // A DESCENT RECORDS AND ITS WALK PRICES THE SCREEN, so a budget named in its
     // body is refused by name here, as [`asked_from`] refuses it, rather than
     // decoded and dropped. D-0685.
     refuse_screen_budget(&body)?;
+    // A DESCENT APPLIES NO KNOB. `AskedDescent` has no field for one and
+    // `conduct_descent` sets none, so a typed `validate` or `screen_cap` is
+    // refused here rather than validated and dropped. D-1972.
+    refuse_unread(
+        &body,
+        "`POST /backtest/descend`",
+        &[
+            "feed",
+            "underlying",
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "rung",
+            "max_points",
+            "top",
+        ],
+        Knobs::NotApplied,
+    )?;
     descent_from_wire(&body)
 }
 
@@ -1094,9 +1268,15 @@ fn descent_from_wire(body: &WireBody) -> Result<AskedDescent, Refusal> {
         )));
     }
 
-    // A CEILING IS A DISTANCE, SO IT IS PARSED AS ONE AND REFUSED AT ZERO.
+    // A CEILING IS A DISTANCE, SO IT IS PARSED AS ONE AND REFUSED BELOW ZERO.
     // `cli` converts it against the midpoint of the span's own bars; this side
     // never sees a ppm, which is the whole reason that entry point exists.
+    //
+    // ZERO IS NO CEILING, NOT A REFUSAL (D-1732). This once refused zero as "a
+    // ceiling of zero admits no trade". That is false: `Rules::admits` reads a
+    // zero `max_mae_ppm` as no ceiling, `grid::Levels::forced` forces nothing
+    // at zero, and `cli`'s `USAGE` documents `MAX_POINTS = 0` that way. The
+    // browser could not ask for the run the command line offers.
     let max_points = field(body, "max_points")
         .and_then(|text| text.parse::<i64>().ok())
         .ok_or_else(|| {
@@ -1106,10 +1286,10 @@ fn descent_from_wire(body: &WireBody) -> Result<AskedDescent, Refusal> {
                     .to_owned(),
             )
         })?;
-    if max_points <= 0 {
+    if max_points < 0 {
         return Err(Refusal::Malformed(format!(
-            "`max_points` is {max_points}. A ceiling of zero admits no trade \
-             and a negative one is not a distance."
+            "`max_points` is {max_points}. A negative ceiling is not a \
+             distance; 0 means no ceiling beyond the ladder the bars derive."
         )));
     }
 
@@ -1166,7 +1346,10 @@ const ABNORMAL_END: &str = "the engine task stopped abnormally before it recorde
 /// Constructing this guard before the closure is handed to Tokio covers both
 /// failure windows: a panic while the closure runs, and a runtime shutdown that
 /// drops a queued closure before it starts. In either case the captured guard
-/// is dropped and an in-flight slot becomes a visible refusal.
+/// is dropped and an in-flight slot becomes a visible refusal. The panic window
+/// exists only where a panic unwinds (`dev`, `test`); `release` sets
+/// `panic = "abort"`, so there a panic ends the process instead (poison-1,
+/// D-1771).
 ///
 /// # Why normal completion disarms rather than relying on the slot
 ///
@@ -1184,6 +1367,36 @@ struct TaskFinisher {
     audit: Option<cli::operation_audit::Attempt>,
     /// Excludes cooperating CLI/HTTP writers until this guard is dropped.
     lease: Option<cli::execution_lease::Lease>,
+    /// This task's place in [`engine_tasks_running`], given back on drop.
+    _counted: EngineTaskCount,
+}
+
+/// How many [`TaskFinisher`]s exist: engine tasks queued or running on a
+/// blocking thread. audit-20261003 hunt-api-2, D-1582: the stopping process
+/// reads it to bound and to name what it abandons
+/// ([`crate::server::end_runtime`]).
+static ENGINE_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Engine tasks (sweeps, descents, commands) not yet finished.
+pub(crate) fn engine_tasks_running() -> usize {
+    ENGINE_TASKS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// One count in [`ENGINE_TASKS`], held for exactly as long as its finisher.
+#[derive(Debug)]
+struct EngineTaskCount;
+
+impl EngineTaskCount {
+    fn take() -> Self {
+        ENGINE_TASKS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for EngineTaskCount {
+    fn drop(&mut self) {
+        ENGINE_TASKS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl TaskFinisher {
@@ -1191,6 +1404,7 @@ impl TaskFinisher {
     #[cfg(test)]
     fn new(site: crate::server::Loaded) -> Self {
         Self {
+            _counted: EngineTaskCount::take(),
             site,
             armed: true,
             audit: None,
@@ -1200,6 +1414,7 @@ impl TaskFinisher {
 
     fn audited(site: crate::server::Loaded, audit: cli::operation_audit::Attempt) -> Self {
         Self {
+            _counted: EngineTaskCount::take(),
             site,
             armed: true,
             audit: Some(audit),
@@ -1219,12 +1434,28 @@ impl TaskFinisher {
         }
     }
 
+    /// Runs one engine task's work and, when the process was asked to stop
+    /// while it ran, answers with the cancellation instead of its output.
+    ///
+    /// audit-20261003 hunt-api-2, D-1551. The work itself stops at its next
+    /// structural boundary (`cli::cancel`), and a cancelled `cli` answer
+    /// already names itself. This covers the rest: work whose last boundary
+    /// passed before the stop, or a command whose own refusal hid the
+    /// cancelled one. Either way its output is not presented as a complete
+    /// result, and its slot and invocation audit say CANCELLED.
+    fn conduct(&self, work: impl FnOnce() -> Progress) -> Progress {
+        let mut done = self.enter(work);
+        cancelled_at_stop(&mut done);
+        done
+    }
+
     /// Installs a normal result and prevents `Drop` from painting over it.
     fn finish(mut self, mut done: Progress) {
         use cli::operation_audit::Phase;
         let phase = match completion_audit(&done).outcome {
             "report" => Phase::Completed,
             "refused" => Phase::Refused,
+            "cancelled" => Phase::Cancelled,
             _ => Phase::Failed,
         };
         if let Some(audit) = self.audit.as_mut()
@@ -1232,13 +1463,22 @@ impl TaskFinisher {
         {
             let original = done.refusal.take().or_else(|| done.report.take());
             done.report = None;
-            done.refusal = Some(format!(
-                "refused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed.\n{}",
-                original
-                    .as_deref()
-                    .unwrap_or("No final report was returned.")
-            ));
+            done.refusal = Some(
+                format!(
+                    "refused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed.\n{}",
+                    original
+                        .as_deref()
+                        .unwrap_or("No final report was returned.")
+                )
+                .into(),
+            );
         }
+        // THE LEASE IS GIVEN BACK BEFORE THE SLOT SAYS FINISHED. The other
+        // order published `in_flight == false` while this task still owned
+        // the store's execution lease, so a press admitted in that gap passed
+        // the slot check and was refused `Busy` by a run that had ended.
+        // conc:runs-2, D-2778.
+        drop(self.lease.take());
         let mut slot = self
             .site
             .sweep
@@ -1262,6 +1502,8 @@ impl Drop for TaskFinisher {
             };
             audit.finish(phase, 0).err()
         });
+        // Given back before the slot says ended, as in `finish` (D-2778).
+        drop(self.lease.take());
         let mut slot = self
             .site
             .sweep
@@ -1272,8 +1514,30 @@ impl Drop for TaskFinisher {
         };
         progress.finished_micros = Some(now_micros());
         progress.report = None;
-        progress.refusal = Some(audit_failure.map_or_else(|| ABNORMAL_END.to_owned(), |why| format!("{ABNORMAL_END}\nThe required terminal invocation audit is also unconfirmed: {why}")));
+        progress.refusal = Some(audit_failure.map_or_else(|| ABNORMAL_END.into(), |why| format!("{ABNORMAL_END}\nThe required terminal invocation audit is also unconfirmed: {why}").into()));
     }
+}
+
+/// Replaces an engine answer with the named cancellation once a stop was asked.
+///
+/// Leaves an answer that already names [`cli::cancel::CANCELLED`] as it is.
+fn cancelled_at_stop(done: &mut Progress) {
+    if !cli::cancel::requested()
+        || done
+            .refusal
+            .as_deref()
+            .is_some_and(|why| why.contains(cli::cancel::CANCELLED))
+    {
+        return;
+    }
+    done.report = None;
+    done.refusal = Some(
+        format!(
+            "{REFUSED}: {} Stopped at: the end of the task, before its answer was recorded.",
+            cli::cancel::CANCELLED
+        )
+        .into(),
+    );
 }
 
 /// Files `cli`'s answer under the field that describes it, and ends the run.
@@ -1299,9 +1563,9 @@ impl Drop for TaskFinisher {
 /// shaped to provoke it. This takes the text and is total over both shapes.
 fn settle(progress: &mut Progress, text: String, finished_micros: i64) {
     if text.starts_with(REFUSED) {
-        progress.refusal = Some(text);
+        progress.refusal = Some(text.into());
     } else {
-        progress.report = Some(text);
+        progress.report = Some(text.into());
     }
     progress.finished_micros = Some(finished_micros);
 }
@@ -1326,6 +1590,14 @@ fn completion_audit(progress: &Progress) -> CompletionAudit<'_> {
             level: telemetry::Level::Info,
             outcome: "report",
             why: "",
+        },
+        // A STOP IS NOT A REFUSAL OF THE REQUEST: it is named as its own
+        // outcome so the log and the invocation audit say the run was
+        // cancelled, not that it was judged and refused (hunt-api-2, D-1551).
+        (None, Some(why)) if why.contains(cli::cancel::CANCELLED) => CompletionAudit {
+            level: telemetry::Level::Error,
+            outcome: "cancelled",
+            why,
         },
         (None, Some(why)) => CompletionAudit {
             level: telemetry::Level::Warn,
@@ -1352,9 +1624,13 @@ fn completion_audit(progress: &Progress) -> CompletionAudit<'_> {
 pub(crate) fn emit_completion(
     progress: &Progress,
     operation: &str,
-    elapsed_micros: u64,
+    began: std::time::Instant,
 ) -> telemetry::Emitted {
     let audit = completion_audit(progress);
+    // A duration taken from `Instant`, never from two wall-clock reads: a
+    // backward clock step used to record "took 0 µs" through `.max(0)`, a
+    // measurement nobody took (`CLAUDE.md` §3 rule 6). D-2754 (CE-86).
+    let elapsed_micros = u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX);
     telemetry::emit_for_run(
         progress.attempt,
         &telemetry::Event::new(audit.level, "api.sweep", "an engine task finished")
@@ -1364,7 +1640,8 @@ pub(crate) fn emit_completion(
             .with("underlying", progress.underlying.as_str())
             .with("outcome", audit.outcome)
             .with("why", audit.why)
-            .with("elapsed_micros", elapsed_micros),
+            .with("elapsed_micros", elapsed_micros)
+            .with("elapsed_basis", "monotonic"),
     )
 }
 
@@ -1438,8 +1715,10 @@ pub fn apply_knobs(asked: &Asked) -> Applied {
 /// screen cap, support floor and validation setting. A run steered by settings
 /// nobody chose, with an audit line naming a different request's.
 ///
-/// `Drop` runs during unwinding, so this holds on every exit: normal return,
-/// early return, and panic.
+/// `Drop` runs on normal and early return in every build, and during unwinding
+/// where a panic unwinds (`dev`, `test`). `release` sets `panic = "abort"`, so
+/// there a panic ends the process and no later request exists to inherit the
+/// knobs (poison-1, D-1771).
 #[must_use = "the guard must be held for the run, not dropped immediately"]
 pub struct Applied;
 
@@ -1560,6 +1839,13 @@ pub fn now_micros() -> i64 {
         .unwrap_or(0)
 }
 
+/// [`now_micros`] in whole milliseconds, the unit the rolling log stamps
+/// records in. One function, so the two observation paths cannot divide
+/// differently and a test pins the unit against the system clock. G18-api-22.
+fn now_millis() -> i64 {
+    now_micros() / 1_000
+}
+
 /// Reserves one exact attempt token.
 ///
 /// The append-only invocation index owns the durable sequence space, so a
@@ -1629,6 +1915,68 @@ fn marker_refusal(outcome: telemetry::Emitted) -> Option<Refusal> {
 /// The JSON content type both routes answer with.
 type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 
+/// One route answer, as [`refused`] and the handlers build it.
+type Answer = (axum::http::StatusCode, JsonHeaders, String);
+
+/// Admits one run: refuses while one is in flight, prepares it with the slot
+/// UNLOCKED, and installs it.
+///
+/// `prepare` does every fallible, I/O-bound admission step and returns the
+/// accepted [`Progress`] with whatever the caller keeps. Under the site's
+/// admission lock nothing else installs into the slot between the busy check and the install,
+/// and a [`TaskFinisher`] only writes a slot whose run is in flight, which the
+/// busy check has just ruled out. A refusal from `prepare` leaves the slot as
+/// it was. The slot's own lock is taken twice, each time for O(1) work:
+/// `api::sweeprun::admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`.
+///
+/// # The admission lock serialises browser ADMISSIONS, so the slot's own mutex never has to
+///
+/// Admission does file-system work no constant bounds: two canonicalizations,
+/// the execution lease, an external-log walk of up to 8 MiB, a launch
+/// preparation, a durable audit `begin` with its syncs, and a telemetry marker.
+/// All three POST handlers used to do it while holding `site.sweep`, and
+/// `run_json` takes that same std mutex ON AN ASYNC WORKER for every poll, so a
+/// poll waited out a stranger's admission I/O with a Tokio worker blocked
+/// (W1-api6-2, D-0954). Admissions still exclude each other, which is what the
+/// slot lock was doing there; the slot itself is now held only for one read
+/// and one write.
+///
+/// `try_lock`, NOT `lock`: refused rather than queued. Each POST holds one of
+/// the four shared `detail::run` permits before it gets here, so a press that
+/// WAITED for another admission parked a permit for that admission's whole
+/// I/O, and three such presses answered `Saturated` on every unrelated
+/// `detail::run` route, the run's own status poll included. A press that
+/// meets another admission is refused as `Busy` at once, as it would be by the
+/// run that admission is about to install. The lock is per `Site`
+/// ([`crate::server::Site::sweep_admission`]), so two test sites admitting at
+/// once never refuse each other. conc:runs-4, D-2776.
+fn admit<T>(
+    site: &crate::server::Loaded,
+    busy: impl FnOnce() -> Answer,
+    prepare: impl FnOnce() -> Result<(Progress, T), Answer>,
+) -> Result<T, Answer> {
+    let _admitting = match site.sweep_admission.try_lock() {
+        Ok(admitting) => admitting,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(busy()),
+    };
+    let in_flight = site
+        .sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(Progress::in_flight);
+    if in_flight {
+        return Err(busy());
+    }
+    let (accepted, kept) = prepare()?;
+    *site
+        .sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(accepted);
+    Ok(kept)
+}
+
 fn json_headers() -> JsonHeaders {
     [(
         axum::http::header::CONTENT_TYPE,
@@ -1680,6 +2028,70 @@ fn refused(why: &Refusal) -> (axum::http::StatusCode, JsonHeaders, String) {
     )
 }
 
+/// [`refused`], said first: one `api.sweep` Warn event carrying `message` and
+/// the refusal's own sentence as `why`.
+///
+/// conc13-3, D-2595. The refusals at the budget environment, the stamp of a
+/// descent or command, the busy slot of a descent or command, the execution
+/// lease, the invocation journal, a command's launch preparation and the
+/// start marker returned [`refused`] with no event, so `/logs` held only the
+/// middleware's `served ... 503` with no reason, while the page told the
+/// operator to read the logs. Every refusal arm of the three routes now says
+/// why, once, at the route's own boundary (gate 17 does not cover `api`).
+///
+/// EXCEPT THE TWO ABOUT THIS SERVER. The unstamped build and the environment
+/// budget were closed by both sides at once — conc13-3 through this helper,
+/// sobs-9 (D-4447) through [`refused_for_this_server`], which also names the
+/// route — so each of those arms wrote two lines. They go through that one
+/// writer on all three routes; every other arm stays here. D-4627.
+fn refuse_logged(
+    message: &'static str,
+    why: &Refusal,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(telemetry::Level::Warn, "api.sweep", message)
+            .with("why", telemetry::Value::Str(why.why())),
+    );
+    refused(why)
+}
+
+/// The three launch routes, as the `route` field of a refusal names them.
+const RUN_ROUTE: &str = "/backtest/run";
+/// See [`RUN_ROUTE`].
+const DESCEND_ROUTE: &str = "/backtest/descend";
+/// See [`RUN_ROUTE`].
+const COMMAND_ROUTE: &str = "/engine/command";
+
+/// A launch refused for a fact about THIS SERVER, logged once, on every route.
+///
+/// # What was silent (sobs-9, D-4447)
+///
+/// An unstamped build and a screen budget in the server's own environment are
+/// decided before any request arrives, and each refuses every launch. Only
+/// `/backtest/run`'s unstamped arm wrote an event; `/backtest/descend` and
+/// `/engine/command` refused both silently, and no route logged the budget, so
+/// `/logs` showed `api.request` 503s with no reason beside them. One event per
+/// refused press, carrying the route and the refusal's own sentence, before
+/// anything is claimed. The message keeps `/backtest/run`'s wording so a
+/// reader filtering on it finds every route.
+fn refused_for_this_server(
+    route: &str,
+    why: &Refusal,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let _ = telemetry::emit_if!(
+        telemetry::Level::Warn,
+        "api.sweep",
+        if matches!(why, Refusal::Unstamped(_)) {
+            "a sweep was refused because this build carries no commit stamp"
+        } else {
+            "a sweep was refused because this server's environment sets a screen budget"
+        },
+        "route" => telemetry::Value::Str(route),
+        "why" => telemetry::Value::Str(why.why()),
+    );
+    refused(why)
+}
+
 /// The same physical store is claimed before the start audit and before spawn.
 /// A positive GET snapshot never substitutes for this atomic POST admission.
 fn claim_execution(
@@ -1698,12 +2110,7 @@ fn claim_execution(
         }
     })?;
     if let Some(dir) = crate::logs::cli_log_dir() {
-        let observed = observe_elsewhere(&dir, now_micros() / 1_000);
-        if !observed.launch_clear {
-            return Err(Refusal::Unobservable(
-                "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
-            ));
-        }
+        admit_external(&site.store_root, &observe_elsewhere(&dir, now_millis()))?;
     }
     Ok(lease)
 }
@@ -1763,50 +2170,37 @@ pub(crate) fn run_with(
     // slot first would make this route answer 409 `Busy` to a second press
     // while the first was busy failing for a reason no wait can fix.
     if let Some(why) = stamp_refusal(stamp) {
-        let _ = telemetry::emit_if!(
-            telemetry::Level::Warn,
-            "api.sweep",
-            "a sweep was refused because this build carries no commit stamp",
-            "why" => telemetry::Value::Str(why.why()),
-        );
-        return refused(&why);
+        return refused_for_this_server(RUN_ROUTE, &why);
     }
 
     // BEFORE THE SLOT FOR THE SAME REASON: a budget in the server's own
     // environment refuses every rung this run could sweep. D-0685.
+    // One writer for this arm, with the route (D-4447; D-4627).
     if let Some(why) = environment_budget_refusal() {
-        return refused(&why);
+        return refused_for_this_server(RUN_ROUTE, &why);
     }
 
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
     // Holding a std mutex across an await is the deadlock this pattern exists
     // to avoid, so the guard is dropped before anything is spawned.
-    let (started, attempt, audit, lease) = {
-        let mut held = match site.sweep.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if held.as_ref().is_some_and(Progress::in_flight) {
-            let why = "a sweep is already running in this process. It appends to the same \
-                       append-only ledger, and two of them finishing together can interleave \
-                       two records, so the second press is refused rather than queued."
-                .to_owned();
-            let _ = telemetry::emit_if!(
-                telemetry::Level::Warn,
-                "api.sweep",
-                "a second sweep was refused while one was in flight",
-                "why" => telemetry::Value::Str(&why),
-            );
-            return refused(&Refusal::Busy(why));
-        }
-        let lease = match claim_execution(site, true) {
-            Ok(lease) => lease,
-            Err(why) => return refused(&why),
-        };
-        let mut audit = match reserve_invocation(site, "sweep") {
-            Ok(audit) => audit,
-            Err(why) => return refused(&why),
-        };
+    let busy = || {
+        let why = "a sweep is already running in this process. It appends to the same \
+                   append-only ledger, and two of them finishing together can interleave \
+                   two records, so the second press is refused rather than queued."
+            .to_owned();
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            "api.sweep",
+            "a second sweep was refused while one was in flight",
+            "why" => telemetry::Value::Str(&why),
+        );
+        refused(&Refusal::Busy(why))
+    };
+    let admitted = admit(site, busy, || {
+        let lease = claim_execution(site, true)
+            .map_err(|why| refuse_logged("a sweep was refused at its execution lease", &why))?;
+        let mut audit = reserve_invocation(site, "sweep")
+            .map_err(|why| refuse_logged("a sweep was refused at its invocation journal", &why))?;
         let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
@@ -1820,10 +2214,16 @@ pub(crate) fn run_with(
         );
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return refused(&why);
+            return Err(refuse_logged(
+                "a sweep was refused because its start could not be recorded",
+                &why,
+            ));
         }
-        *held = Some(accepted.clone());
-        (started, attempt, audit, lease)
+        Ok((accepted, (started, attempt, audit, lease)))
+    });
+    let (started, attempt, audit, lease) = match admitted {
+        Ok(admitted) => admitted,
+        Err(answer) => return answer,
     };
 
     // ONE EVENT PER RUN, NOT ONE PER BAR. Gate 17 silences `vocab engine
@@ -1852,11 +2252,14 @@ pub(crate) fn run_with(
     // ARMED BEFORE SPAWN. If Tokio drops a queued closure during shutdown, the
     // captured guard still releases the slot even though the closure body never
     // begins. A guard constructed inside the closure would miss that window.
+    // MONOTONIC, for the duration only: `started` stays the wall-clock stamp
+    // the page shows, and an NTP step during the run cannot make the recorded
+    // `elapsed_micros` a clamped 0 or an inflated figure. D-2754 (CE-86).
+    let began = std::time::Instant::now();
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
-        let finished = guard.enter(|| conduct(&asked, started, attempt));
-        let elapsed = now_micros().saturating_sub(started);
-        let _outcome = emit_completion(&finished, "sweep", elapsed.max(0).unsigned_abs());
+        let finished = guard.conduct(|| conduct(&asked, started, attempt));
+        let _outcome = emit_completion(&finished, "sweep", began);
         let mut done = finished;
         done.finished_micros = Some(now_micros());
         guard.finish(done);
@@ -1932,36 +2335,34 @@ pub(crate) fn descend_with(
         }
     };
 
+    // Both server refusals: one writer each, with the route (D-4447; D-4627).
     if let Some(why) = stamp_refusal(stamp) {
-        return refused(&why);
+        return refused_for_this_server(DESCEND_ROUTE, &why);
     }
     // A descent's first step is `cli::one_rung`, which refuses a server budget;
     // refused here instead, before the slot, as `run_with` does. D-0685.
     if let Some(why) = environment_budget_refusal() {
-        return refused(&why);
+        return refused_for_this_server(DESCEND_ROUTE, &why);
     }
 
-    let (started, attempt, audit, lease) = {
-        let mut held = match site.sweep.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if held.as_ref().is_some_and(Progress::in_flight) {
-            let why = "a sweep or descent is already running in this process. \
-                       Both append to the same append-only ledger, and two of \
-                       them finishing together can interleave two records, so \
-                       the second press is refused rather than queued."
-                .to_owned();
-            return refused(&Refusal::Busy(why));
-        }
-        let lease = match claim_execution(site, true) {
-            Ok(lease) => lease,
-            Err(why) => return refused(&why),
-        };
-        let mut audit = match reserve_invocation(site, "descent") {
-            Ok(audit) => audit,
-            Err(why) => return refused(&why),
-        };
+    let busy = || {
+        refuse_logged(
+            "a descent was refused while a run was in flight",
+            &Refusal::Busy(
+                "a sweep or descent is already running in this process. \
+                 Both append to the same append-only ledger, and two of \
+                 them finishing together can interleave two records, so \
+                 the second press is refused rather than queued."
+                    .to_owned(),
+            ),
+        )
+    };
+    let admitted = admit(site, busy, || {
+        let lease = claim_execution(site, true)
+            .map_err(|why| refuse_logged("a descent was refused at its execution lease", &why))?;
+        let mut audit = reserve_invocation(site, "descent").map_err(|why| {
+            refuse_logged("a descent was refused at its invocation journal", &why)
+        })?;
         let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
@@ -1976,10 +2377,16 @@ pub(crate) fn descend_with(
         .of_kind(Kind::Descent);
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return refused(&why);
+            return Err(refuse_logged(
+                "a descent was refused because its start could not be recorded",
+                &why,
+            ));
         }
-        *held = Some(accepted.clone());
-        (started, attempt, audit, lease)
+        Ok((accepted, (started, attempt, audit, lease)))
+    });
+    let (started, attempt, audit, lease) = match admitted {
+        Ok(admitted) => admitted,
+        Err(answer) => return answer,
     };
 
     let _ = telemetry::emit_if!(
@@ -1993,11 +2400,14 @@ pub(crate) fn descend_with(
         "attempt" => telemetry::Value::Uint(attempt),
     );
 
+    // MONOTONIC, for the duration only: `started` stays the wall-clock stamp
+    // the page shows, and an NTP step during the run cannot make the recorded
+    // `elapsed_micros` a clamped 0 or an inflated figure. D-2754 (CE-86).
+    let began = std::time::Instant::now();
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
-        let finished = guard.enter(|| conduct_descent(&asked, started, attempt));
-        let elapsed = now_micros().saturating_sub(started);
-        let _outcome = emit_completion(&finished, "descent", elapsed.max(0).unsigned_abs());
+        let finished = guard.conduct(|| conduct_descent(&asked, started, attempt));
+        let _outcome = emit_completion(&finished, "descent", began);
         let mut done = finished;
         done.finished_micros = Some(now_micros());
         guard.finish(done);
@@ -2090,7 +2500,7 @@ pub async fn run_json(
     let dir = crate::logs::cli_log_dir();
     let root = site.store_root.clone();
     match crate::detail::run(move || {
-        observed_status_with_admission(&root, local.as_ref(), dir.as_deref(), now_micros() / 1_000)
+        observed_status_with_admission(&root, local.as_ref(), dir.as_deref(), now_millis())
     })
     .await
     {
@@ -2152,7 +2562,7 @@ fn browser_attempt_unknown(attempt: Option<u64>, why: &str) -> String {
 
 fn external_observation(dir: Option<&std::path::Path>, now: i64) -> ExternalObservation {
     dir.map_or_else(
-        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
+        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, unterminated: None, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
         |dir| observe_elsewhere(dir, now),
     )
 }
@@ -2179,7 +2589,10 @@ fn observed_status_with_admission(
     let external = external_observation(dir, now);
     let (available, why) = match cli::execution_lease::probe(root) {
         Err(why) => (false, why.to_string()),
-        Ok(()) if !external.launch_clear => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+        Ok(()) if !external.launch_clear => match ended_without_terminal(root, &external) {
+            None => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+            Some(ended) => (true, format!("The store execution lease is currently free, and the newest external sweep marker names CLI invocation {ended}, which ended without its terminal marker: it held this lease while it ran, so it is not running now. How it ended is not known. A launch rechecks and claims the lease atomically.")),
+        },
         Ok(()) => (true, "The store execution lease is currently free. A launch rechecks and claims it atomically. Historical status is separate; this does not establish that older binaries or bypassing callers are idle.".to_owned()),
     };
     let mut body = observed_status(local, external);
@@ -2200,6 +2613,11 @@ struct ExternalObservation {
     in_flight: bool,
     /// Healthy history without an unresolved sweep marker does not own a lease.
     launch_clear: bool,
+    /// The newest marker is a named sweep's `command started` under a durable
+    /// invocation id (`cli::operation_audit::ID_BASE` and above), with no
+    /// terminal marker after it: that id and the command word. Only a caller
+    /// HOLDING the store's execution lease may act on it. D-2764.
+    unterminated: Option<(u64, String)>,
     body: String,
 }
 
@@ -2265,10 +2683,43 @@ fn status_tail(
     } else {
         query
     };
-    telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query)
+    settled_tail(|| telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query))
+}
+
+/// One read, and one more only when the first ended on a partial line.
+///
+/// A partial last line is what a reader sees while the CLI is inside the
+/// `write` of its newest record. Counted as damage on one read, it refused a
+/// browser launch and turned `/backtest/run.json` to `unknown` for no fault at
+/// all (conc9-2, D-1774). A torn line left by a writer that DIED is still
+/// there on the second read (only the next writer to open terminates it), so
+/// it still refuses: that fragment may be a newer marker, which is why
+/// `partial_tail` is a fault. The second read narrows the window to a write
+/// that spans both reads; it does not close it, and no lock is taken to close
+/// it, because probing `events.lock` would refuse a CLI that opens its sink at
+/// that instant. At most two bounded reads.
+fn settled_tail(read: impl Fn() -> telemetry::Tail) -> telemetry::Tail {
+    let first = read();
+    if first.partial_tail { read() } else { first }
 }
 
 fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
+    tail_fault_unless_answered(tail, false)
+}
+
+/// [`tail_fault`], for a caller that already holds the record it searched for.
+///
+/// THE SCAN CAP IS A FAULT ONLY WHEN THE ANSWER WAS NOT FOUND. The walk runs
+/// newest first, so a record it returned is the newest of its kind whatever
+/// lies past the cap: the cap says older bytes went unread, and nothing older
+/// can outrank what was found. Treating it as damage regardless made every
+/// browser launch refuse, and `/backtest/run.json` say `unknown`, whenever the
+/// newest 4 MiB of a healthy CLI log held fewer than 256 lifecycle records, a
+/// sweep's own marker among them (W1-api6-4, D-0954). Every other fault —
+/// unreadable files, malformed or clipped records, a partial tail — still
+/// counts, answered or not, because each can hide a record NEWER than the one
+/// found.
+fn tail_fault_unless_answered(tail: &telemetry::Tail, answered: bool) -> Option<String> {
     let clipped = tail
         .records
         .iter()
@@ -2276,7 +2727,7 @@ fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
     if !tail.errors.is_empty()
         || tail.malformed > 0
         || tail.partial_tail
-        || tail.hit_scan_cap
+        || (tail.hit_scan_cap && !answered)
         || clipped
     {
         Some(format!(
@@ -2293,22 +2744,42 @@ fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
     }
 }
 
-fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
-    // Durable run/probe evidence uses this same target. Its completion cannot
-    // replace a whole-command marker, nor can its uncorrelated token refresh
-    // that command's activity. Search a bounded retained window explicitly.
-    let lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
-    if let Some(why) = tail_fault(&lifecycle) {
-        return ExternalObservation {
-            at_millis: None,
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
+/// Damaged or unanswerable evidence: never clears a launch.
+fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservation {
+    ExternalObservation {
+        at_millis,
+        uncertain: true,
+        in_flight: false,
+        launch_clear: false,
+        unterminated: None,
+        body: unknown_status(why),
     }
-    let Some(marker) = lifecycle.records.iter().find(|record| {
-        matches!(
+}
+
+/// The bounded lifecycle window and the index of its newest sweep-command
+/// marker, the window trimmed to end at that marker when damage behind it is
+/// all that would otherwise refuse (CE-11, D-1914).
+fn newest_sweep_marker(dir: &std::path::Path) -> (telemetry::Tail, Option<usize>) {
+    marker_window(|limit| status_tail(dir, "cli.lifecycle", None, limit))
+}
+
+/// [`newest_sweep_marker`] over the bounded read it makes at most twice:
+/// `read(limit)` answers the newest `limit` lifecycle records of the log.
+///
+/// A PARAMETER SO THE RACE IT GUARDS CAN BE STAGED. The same-record check below
+/// exists for a CLI that appends a lifecycle record BETWEEN the window read and
+/// the trimmed re-read. No single-threaded fixture lands a record there, so
+/// with the read hard-wired no test could reach the check, and a mutant that
+/// let any trimmed walk through survived (R1286-api-01, D-4130). Production
+/// passes the same `status_tail` call the body used to make; nothing changed
+/// about what is read or how often.
+fn marker_window(
+    mut read: impl FnMut(usize) -> telemetry::Tail,
+) -> (telemetry::Tail, Option<usize>) {
+    let mut lifecycle = read(256);
+    let mut found = None;
+    for (index, record) in lifecycle.records.iter().enumerate() {
+        let is_marker = matches!(
             record.message.as_str(),
             "command started" | "command finished"
         ) && match record.field("command") {
@@ -2317,8 +2788,45 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             // Retain it so status becomes unknown instead of borrowing an
             // older sweep's successful completion.
             _ => true,
+        };
+        if is_marker {
+            found = Some(index);
+            break;
         }
-    }) else {
+    }
+    // ONLY DAMAGE NEWER THAN THE MARKER CAN HIDE A NEWER MARKER (CE-11,
+    // D-1914). File order is sequence order, so a line torn by a killed CLI
+    // command and stepped over BEHIND the newest marker cannot outrank it, yet
+    // it blocked every browser launch until ~128 further commands pushed it out
+    // of the window. The window is re-walked to stop exactly at the marker, so
+    // only what lies between it and the newest end is judged. A walk that no
+    // longer ends on the same record (a newer one landed in between) keeps the
+    // whole window's verdict.
+    if let Some(index) = found
+        && tail_fault_unless_answered(&lifecycle, true).is_some()
+    {
+        let through = read(index.saturating_add(1));
+        let same = |tail: &telemetry::Tail| tail.records.get(index).map(|record| record.seq);
+        if same(&through).is_some() && same(&through) == same(&lifecycle) {
+            lifecycle = through;
+        }
+    }
+    (lifecycle, found)
+}
+
+fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
+    // Durable run/probe evidence uses this same target. Its completion cannot
+    // replace a whole-command marker, nor can its uncorrelated token refresh
+    // that command's activity. Search a bounded retained window explicitly.
+    let (lifecycle, found) = newest_sweep_marker(dir);
+    let marker = found.and_then(|index| lifecycle.records.get(index));
+    // A marker found inside the scanned window is the newest one, so the scan
+    // cap cannot hide a newer one. With no marker found the cap is still the
+    // answer: the latest sweep's marker may lie in the bytes it left unread.
+    if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
+        return uncertain_observation(None, &why);
+    }
+    let Some(marker) = marker else {
         let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
         let fault = tail_fault(&legacy);
         let launch_clear = fault.is_none();
@@ -2330,18 +2838,18 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             uncertain: why.is_some(),
             in_flight: false,
             launch_clear,
+            unterminated: None,
             body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
         };
     };
     let activity = status_tail(dir, CLI_SWEEP_TARGET, Some(marker.run), 1);
-    if let Some(why) = tail_fault(&activity) {
-        return ExternalObservation {
-            at_millis: Some(marker.at_unix_millis),
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
+    // ANSWERED BY THE MARKER when the walk found no activity. The marker lies
+    // inside the window this walk also reads from its newest end, and a run's
+    // activity follows its `command started`, so any activity newer than the
+    // marker is found before the cap. Reaching the cap empty-handed means none
+    // is newer, and `last` falls back to the marker, the newest fact there is.
+    if let Some(why) = tail_fault_unless_answered(&activity, true) {
+        return uncertain_observation(Some(marker.at_unix_millis), &why);
     }
     let last = activity.records.first().unwrap_or(marker);
     let phase = match marker.field("phase") {
@@ -2349,8 +2857,22 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
         _ => "unknown",
     };
     let named_sweep = matches!(marker.field("command"), Some(telemetry::OwnedValue::Str(command)) if cli::is_sweep_command(command));
-    let age = now.saturating_sub(last.at_unix_millis).max(0);
+    // SIGNED. The CLI's sink clamps stamps up to a floor it resumes from disk,
+    // so after a backward clock step its events can be stamped AHEAD of this
+    // clock. `.max(0)` used to read that as "age 0", and a dead CLI stayed
+    // "running" for the size of the step. A negative age is now named as an
+    // unageable one. D-2755 (CE-87).
+    let age = now.saturating_sub(last.at_unix_millis);
+    let ahead = (age < 0).then(|| {
+        format!(
+            "the newest CLI event is stamped {} ms ahead of this server's clock, so its activity cannot be aged; silence is not completion",
+            age.unsigned_abs()
+        )
+    });
     let (status, why) = match (marker.message.as_str(), phase) {
+        ("command started", "running") if ahead.is_some() && marker.run > 0 && named_sweep => {
+            ("unknown", ahead.as_deref().unwrap_or_default())
+        }
         ("command started", "running")
             if age <= STALE_AFTER_MILLIS && marker.run > 0 && named_sweep =>
         {
@@ -2389,13 +2911,77 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             "null".to_owned()
         }
     );
+    let unterminated = unterminated_marker(marker, named_sweep);
     ExternalObservation {
         at_millis: Some(last.at_unix_millis),
         uncertain: status == "unknown",
         in_flight: status == "running",
         launch_clear: matches!(status, "completed" | "refused"),
+        unterminated,
         body,
     }
+}
+
+/// A named sweep's newest `command started` under a durable invocation id,
+/// as `(id, command)`; anything else is `None`. D-2764.
+fn unterminated_marker(marker: &telemetry::Record, named_sweep: bool) -> Option<(u64, String)> {
+    match marker.field("command") {
+        Some(telemetry::OwnedValue::Str(command))
+            if marker.message == "command started"
+                && named_sweep
+                && marker.run > cli::operation_audit::ID_BASE =>
+        {
+            Some((marker.run, command.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The durable invocation a lease holder may prove is not running, if any.
+///
+/// # Why holding the lease is the proof
+///
+/// `cli::run_durable` takes the store's execution lease BEFORE it begins its
+/// durable invocation, writes `command started` inside it, and releases the
+/// lease only after the invocation's terminal is written. The kernel releases
+/// the flock when its holder dies. So a caller that holds THIS store's lease,
+/// and finds the newest marker to be a `command started` whose durable id names
+/// a CLI invocation of the same command in THIS store's audit, has found a
+/// command that cannot be running here: a Ctrl-C, a kill, an OOM or a panic
+/// ended it without its `command finished`. Before D-2764 that marker refused
+/// every browser launch forever, while the lease the refusal guarded was free.
+///
+/// Everything short of that proof keeps refusing: a legacy run id outside the
+/// durable namespace (older binaries, bypassing callers), an id this store's
+/// audit does not hold, a different origin or command word, and any audit read
+/// that fails. It claims nothing about HOW the command ended and rewrites no
+/// history: the status document still reports what the log shows. D-2764.
+fn ended_without_terminal(root: &std::path::Path, observed: &ExternalObservation) -> Option<u64> {
+    let (run, command) = observed.unterminated.as_ref()?;
+    match cli::operation_audit::read(root, *run) {
+        Ok(Some(record))
+            if record.origin == cli::operation_audit::Origin::Cli && record.label == *command =>
+        {
+            Some(*run)
+        }
+        _ => None,
+    }
+}
+
+/// The external-evidence half of admission, for a caller that HOLDS `root`'s
+/// execution lease. D-2764.
+fn admit_external(root: &std::path::Path, observed: &ExternalObservation) -> Result<(), Refusal> {
+    if observed.launch_clear {
+        return Ok(());
+    }
+    // NOT SILENT: the status poll's `admission.why` names the invocation it
+    // found ended, and the log and the invocation audit are left as they are.
+    if ended_without_terminal(root, observed).is_none() {
+        return Err(Refusal::Unobservable(
+            "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /* ==================================================================
@@ -2720,6 +3306,10 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
         )));
     }
 
+    if let Some((reads, knobs)) = command_reads(&word) {
+        refuse_unread(body, &format!("the `{word}` command"), reads, knobs)?;
+    }
+
     match word.as_str() {
         "audit-range" => Ok(Command::AuditRange {
             span: rung_from(body)?,
@@ -2745,10 +3335,11 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             }
             let max_points: i64 = whole(body, "max_points", "a whole number of index points")?;
             let top: usize = whole(body, "top", "a whole number of rows to list")?;
-            if max_points <= 0 || top == 0 {
+            // Zero is no ceiling, as at the descent door and in `cli` (D-1732).
+            if max_points < 0 || top == 0 {
                 return Err(Refusal::Malformed(
-                    "`max_points` must be 1 index point or more and `top` must \
-                     be 1 row or more."
+                    "`max_points` must be 0 (no ceiling) or more index points \
+                     and `top` must be 1 row or more."
                         .to_owned(),
                 ));
             }
@@ -2767,7 +3358,10 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             min_hits: positive_min_hits(body)?,
         }),
         "sweep-all" => {
-            let asked = asked_from_wire(body)?;
+            // THE FEED ALONE. This called `asked_from_wire`, which REQUIRED an
+            // instrument and a span that `cli sweep-all` does not take, then
+            // kept only the feed. Naming either is refused above. D-1972.
+            let feed = feed_from(body)?;
             let rung = field(body, "rung")
                 .filter(|s| EVERY_RUNG.contains(&s.as_str()))
                 .ok_or_else(|| {
@@ -2777,7 +3371,7 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
                     ))
                 })?;
             Ok(Command::SweepAll {
-                feed: asked.feed,
+                feed,
                 rung,
                 min_hits: positive_min_hits(body)?,
             })
@@ -2786,6 +3380,20 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
             "`{other}` is not a command this route runs. It accepts: {}.",
             EVERY_COMMAND.join(", ")
         ))),
+    }
+}
+
+/// The members an ordinary command word reads, or `None` for a word
+/// [`command_from_wire`] refuses on its own. See [`WIRE_FIELDS`]. D-1972.
+fn command_reads(word: &str) -> Option<(&'static [&'static str], Knobs)> {
+    match word {
+        "audit-range" | "sweep-stored" => Some((&COMMAND_SPAN_RUNG_HITS, Knobs::NotApplied)),
+        // `strict_knobs` validates every knob and refuses its two by name.
+        "audit-audited-range" => Some((&COMMAND_SPAN_RUNG_HITS, Knobs::Applied)),
+        "screen" => Some((&COMMAND_SCREEN, Knobs::NotApplied)),
+        "auto-stored" => Some((&COMMAND_SPAN_RUNG, Knobs::NotApplied)),
+        "sweep-all" => Some((&COMMAND_SWEEP_ALL, Knobs::NotApplied)),
+        _ => None,
     }
 }
 
@@ -2910,7 +3518,8 @@ pub async fn command(
 
 /// [`command`], with the build's commit stamp passed in.
 ///
-/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why/// that reason survived `build.rs` changing which arm is the reachable one.
+/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why
+/// that reason survived `build.rs` changing which arm is the reachable one.
 pub(crate) fn command_with(
     site: &crate::server::Loaded,
     body: &str,
@@ -2954,15 +3563,16 @@ fn command_with_configuration(
         }
     };
 
+    // Both server refusals: one writer each, with the route (D-4447; D-4627).
     if let Some(why) = stamp_refusal(stamp) {
-        return refused(&why);
+        return refused_for_this_server(COMMAND_ROUTE, &why);
     }
     // Only the words whose run prices the screen; the strict word refuses the
     // budget at every value through `validate_runtime` below. D-0685.
     if asked.prices_a_screen()
         && let Some(why) = environment_budget_refusal()
     {
-        return refused(&why);
+        return refused_for_this_server(COMMAND_ROUTE, &why);
     }
 
     // Resolve only the explicit strict command, once, before claiming a slot or
@@ -2979,30 +3589,27 @@ fn command_with_configuration(
         None
     };
 
-    let (started, attempt, audit, launch, lease) = {
-        let mut held = match site.sweep.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if held.as_ref().is_some_and(Progress::in_flight) {
-            return refused(&Refusal::Busy(
+    let busy = || {
+        refuse_logged(
+            "a command was refused while a run was in flight",
+            &Refusal::Busy(
                 "a sweep, descent or command is already running in this \
                  process. All of them append to the same append-only ledger, \
                  and two finishing together can interleave two records, so the \
                  second press is refused rather than queued."
                     .to_owned(),
-            ));
-        }
+            ),
+        )
+    };
+    let admitted = admit(site, busy, || {
         let uses_configured_store = !matches!(
             asked,
             Command::AuditAuditedRange { .. }
                 | Command::BooleanQualifiedSearch { .. }
                 | Command::IndexStopQualifiedSearch { .. }
         );
-        let lease = match claim_execution(site, uses_configured_store) {
-            Ok(lease) => lease,
-            Err(why) => return refused(&why),
-        };
+        let lease = claim_execution(site, uses_configured_store)
+            .map_err(|why| refuse_logged("a command was refused at its execution lease", &why))?;
         let launch = match &asked {
             Command::BooleanQualifiedSearch { request } => {
                 crate::booleanlaunch::prepare(request, &site.store_root)
@@ -3013,16 +3620,17 @@ fn command_with_configuration(
                     .map(|value| Some(PreparedCommand::IndexStop(value)))
             }
             _ => Ok(None),
-        };
-        let launch = match launch {
-            Ok(value) => value,
-            Err(why) => return refused(&Refusal::Unobservable(why)),
-        };
+        }
+        .map_err(|why| {
+            refuse_logged(
+                "a command was refused while preparing its launch",
+                &Refusal::Unobservable(why),
+            )
+        })?;
         let (from, to) = asked.window();
-        let mut audit = match reserve_invocation(site, asked.word()) {
-            Ok(audit) => audit,
-            Err(why) => return refused(&why),
-        };
+        let mut audit = reserve_invocation(site, asked.word()).map_err(|why| {
+            refuse_logged("a command was refused at its invocation journal", &why)
+        })?;
         let attempt = audit.id();
         let started = now_micros();
         let mut accepted = Progress::started(
@@ -3043,10 +3651,16 @@ fn command_with_configuration(
         }
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return refused(&why);
+            return Err(refuse_logged(
+                "a command was refused because its start could not be recorded",
+                &why,
+            ));
         }
-        *held = Some(accepted.clone());
-        (started, attempt, audit, launch, lease)
+        Ok((accepted, (started, attempt, audit, launch, lease)))
+    });
+    let (started, attempt, audit, launch, lease) = match admitted {
+        Ok(admitted) => admitted,
+        Err(answer) => return answer,
     };
 
     let _ = telemetry::emit_if!(
@@ -3059,11 +3673,15 @@ fn command_with_configuration(
         "attempt" => telemetry::Value::Uint(attempt),
     );
 
+    // MONOTONIC, for the duration only: `started` stays the wall-clock stamp
+    // the page shows, and an NTP step during the run cannot make the recorded
+    // `elapsed_micros` a clamped 0 or an inflated figure. D-2754 (CE-86).
+    let began = std::time::Instant::now();
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     let store_root = site.store_root.clone();
     let launch_site = std::sync::Arc::clone(site);
     tokio::task::spawn_blocking(move || {
-        let finished = guard.enter(|| match (launch, &asked) {
+        let finished = guard.conduct(|| match (launch, &asked) {
             (
                 Some(PreparedCommand::Boolean(admission)),
                 Command::BooleanQualifiedSearch { request },
@@ -3081,8 +3699,7 @@ fn command_with_configuration(
                 None => conduct_command(&asked, started, attempt),
             },
         });
-        let elapsed = now_micros().saturating_sub(started);
-        let emitted = emit_completion(&finished, asked.word(), elapsed.max(0).unsigned_abs());
+        let emitted = emit_completion(&finished, asked.word(), began);
         let mut done = finished;
         command_terminal_audit(&asked, &mut done, emitted);
         done.finished_micros = Some(now_micros());
@@ -3128,12 +3745,15 @@ fn strict_terminal_audit(progress: &mut Progress, emitted: telemetry::Emitted) {
     };
     let original = progress.refusal.take().or_else(|| progress.report.take());
     progress.report = None;
-    progress.refusal = Some(format!(
-        "refused: strict command terminal audit is missing: {reason}. Existing result evidence was not removed. This refusal is visible in this process; it cannot assert a durable terminal event.\n{}",
-        original
-            .as_deref()
-            .unwrap_or("No computation report or refusal was returned.")
-    ));
+    progress.refusal = Some(
+        format!(
+            "refused: strict command terminal audit is missing: {reason}. Existing result evidence was not removed. This refusal is visible in this process; it cannot assert a durable terminal event.\n{}",
+            original
+                .as_deref()
+                .unwrap_or("No computation report or refusal was returned.")
+        )
+        .into(),
+    );
 }
 
 fn strict_configuration_refused(
@@ -3281,8 +3901,8 @@ fn settle_strict_result(progress: &mut Progress, result: Result<String, String>,
     progress.report = None;
     progress.refusal = None;
     match result {
-        Ok(report) => progress.report = Some(report),
-        Err(why) => progress.refusal = Some(format!("refused: {why}")),
+        Ok(report) => progress.report = Some(report.into()),
+        Err(why) => progress.refusal = Some(format!("refused: {why}").into()),
     }
     progress.finished_micros = Some(finished);
 }
@@ -3315,8 +3935,508 @@ mod tests {
     use super::{
         ABNORMAL_END, Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, KNOBS, Kind, Progress,
         Refusal, TaskFinisher, asked_from, attempt_started_event, command_from, completion_audit,
-        conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
+        conduct_command, descent_from, marker_refusal, now_micros, now_millis, settle,
+        stamp_refusal, unterminated_marker,
     };
+
+    /// **THE OBSERVATION CLOCK IS THE SYSTEM CLOCK IN MILLISECONDS.** Read
+    /// between two system-clock readings, it lies between them. G18-api-22.
+    #[test]
+    fn the_observation_clock_is_unix_milliseconds() {
+        let wall = || {
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("after the epoch")
+                    .as_millis(),
+            )
+            .expect("fits")
+        };
+        let before = wall();
+        let got = now_millis();
+        let after = wall();
+        assert!(
+            before <= got && got <= after,
+            "{before} <= {got} <= {after}"
+        );
+    }
+
+    /// **ONLY A NAMED SWEEP'S `command started` UNDER A DURABLE ID IS AN
+    /// UNTERMINATED MARKER.** Each of the three conditions is necessary on its
+    /// own: another message, an unnamed sweep, or a run id at or below
+    /// `ID_BASE` answers `None`. G18-api-23.
+    #[test]
+    fn an_unterminated_marker_needs_all_three_conditions() {
+        let durable = cli::operation_audit::ID_BASE + 7;
+        let marker = |message: &str, run: u64| telemetry::Record {
+            seq: 0,
+            run,
+            at_unix_millis: 0,
+            at_utc: String::new(),
+            level: telemetry::Level::Info,
+            target: "cli.command".to_owned(),
+            message: message.to_owned(),
+            fields: vec![(
+                "command".to_owned(),
+                telemetry::OwnedValue::Str("sweep-all".to_owned()),
+            )],
+            cut: false,
+            dropped_fields: 0,
+        };
+        assert_eq!(
+            unterminated_marker(&marker("command started", durable), true),
+            Some((durable, "sweep-all".to_owned()))
+        );
+        assert_eq!(
+            unterminated_marker(&marker("command finished", durable), true),
+            None
+        );
+        assert_eq!(
+            unterminated_marker(&marker("command started", durable), false),
+            None
+        );
+        assert_eq!(
+            unterminated_marker(
+                &marker("command started", cli::operation_audit::ID_BASE),
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            unterminated_marker(&marker("command started", 3), true),
+            None
+        );
+    }
+
+    /// SF-13 (P12-02, D-1791): a derived threshold reaches the wire as
+    /// `null`, never as a magic zero, and a fixed one as its number.
+    #[test]
+    fn a_derived_threshold_is_null_on_the_wire_and_never_a_zero() {
+        let at = |support| {
+            Progress::started("zerodha", "NIFTY", (2024, 1), (2024, 1), support, 0, 1).to_json()
+        };
+        let derived = at(None);
+        assert!(
+            derived.contains(r#","support_ppm":null,"started_micros""#),
+            "{derived}"
+        );
+        let fixed = at(Some(47_000));
+        assert!(
+            fixed.contains(r#","support_ppm":47000,"started_micros""#),
+            "{fixed}"
+        );
+    }
+
+    /// SW-14 (P12-02, D-1791): THE COMMIT GATE RUNS BEFORE THE SLOT IS
+    /// CLAIMED. Two unstamped presses are both refused 503 for the build, the
+    /// second is never answered 409 `Busy`, and the slot is still empty after
+    /// both. Claiming first would make the second press a conflict with a run
+    /// that was only ever going to fail.
+    #[test]
+    fn an_unstamped_press_is_refused_before_the_slot_and_never_reads_as_busy() {
+        let site = finisher_site("sw14-unstamped");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN}}}"#);
+        for press in ["first", "second"] {
+            let (status, _headers, body) = super::run_with(&site, &run, None);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{press}: {body}"
+            );
+            assert!(body.contains("\"accepted\":false"), "{press}: {body}");
+        }
+        assert!(
+            site.sweep.lock().expect("private slot").is_none(),
+            "an unstamped build claimed the slot"
+        );
+    }
+
+    /// sobs-9, D-4447: AN UNSTAMPED BUILD IS LOGGED ON EVERY LAUNCH ROUTE, not
+    /// only on `/backtest/run`. One `api.sweep` Warn per press, naming the
+    /// route and carrying the refusal's sentence, read back from the binary's
+    /// installed sink. (The environment-budget arm is proven in the child of
+    /// `a_usable_server_budget_is_refused_before_the_slot_and_writes_nothing`,
+    /// the one process here whose environment may carry a budget.)
+    #[test]
+    fn an_unstamped_build_is_logged_on_every_launch_route() {
+        let _installed = crate::emitted::sink();
+        let site = finisher_site("sobs9-unstamped-routes");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN}}}"#);
+        let descent = descent_body(r#""rung":"15min","max_points":20,"top":25"#);
+        let audit = command_body(r#""command":"audit-range","rung":"15min","min_hits":500"#);
+        let presses: [(&str, Route<'_>); 3] = [
+            (super::RUN_ROUTE, &|| super::run_with(&site, &run, None)),
+            (super::DESCEND_ROUTE, &|| {
+                super::descend_with(&site, &descent, None)
+            }),
+            (super::COMMAND_ROUTE, &|| {
+                super::command_with(&site, &audit, None)
+            }),
+        ];
+        for (route, press) in presses {
+            let from = crate::emitted::mark();
+            let (status, _, body) = press();
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{route}: {body}"
+            );
+            let lines: Vec<telemetry::Record> = crate::emitted::landed(
+                from,
+                "api.sweep",
+                "a sweep was refused because this build carries no commit stamp",
+            )
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "route", route))
+            .collect();
+            assert_eq!(lines.len(), 1, "{route}: one line per press: {lines:?}");
+            let line = lines.first().expect("the one line");
+            assert_eq!(line.level, telemetry::Level::Warn, "{route}");
+            assert!(
+                crate::emitted::says(line, "why", "BRUTEX_COMMIT"),
+                "{route}: the refusal's own sentence: {line:?}"
+            );
+        }
+        assert!(site.sweep.lock().expect("private slot").is_none());
+    }
+
+    /// audit-20261003 hunt-api-2, D-1582: CTRL-C ENDS THE PROCESS WHILE A
+    /// SWEEP RUNS. A blocking task holding an engine-task count sleeps far past
+    /// the grace; dropping a runtime would wait for all of it (tokio's
+    /// documented `Drop`), while `end_runtime` returns within the grace and
+    /// names at least that one task as abandoned.
+    #[test]
+    fn stopping_does_not_wait_out_a_running_engine_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let _sweep = runtime.spawn_blocking(move || {
+            let _counted = super::EngineTaskCount::take();
+            let _told = started.send(());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        running
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the task started");
+        assert!(super::engine_tasks_running() >= 1);
+        let began = std::time::Instant::now();
+        let abandoned =
+            crate::server::wait_then_end(runtime, std::time::Duration::from_millis(300));
+        let took = began.elapsed();
+        assert!(abandoned >= 1, "the running sweep was not named");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "shutdown waited {took:?} for a sweep"
+        );
+        assert!(took >= std::time::Duration::from_millis(250), "{took:?}");
+        assert!(crate::server::SHUTDOWN_GRACE <= std::time::Duration::from_secs(30));
+    }
+
+    /// audit-20261003 hunt-api-2, D-1551: SHUTDOWN DURING A SWEEP CANCELS IT,
+    /// PROMPTLY AND BY NAME. In a child process, because the stop is
+    /// process-wide and never withdrawn. A finisher-guarded task walks
+    /// generated months through the real `cli::cancel` boundary and would run
+    /// for a minute; `end_runtime` stops it within two seconds with nothing
+    /// abandoned, the slot answers CANCELLED naming the month it stopped at,
+    /// no report survives, and the invocation audit is `Cancelled`. A task that
+    /// passed its last boundary before the stop is answered CANCELLED too,
+    /// never as a complete result.
+    #[test]
+    fn shutdown_during_a_sweep_cancels_it_promptly_and_names_the_cancellation() {
+        const CHILD: &str = "BRUTEX_TEST_SHUTDOWN_CANCELS_SWEEP";
+        if std::env::var_os(CHILD).is_none() {
+            assert!(!cli::cancel::requested(), "the stop leaked into the parent");
+            let result = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "sweeprun::tests::shutdown_during_a_sweep_cancels_it_promptly_and_names_the_cancellation",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "child")
+                .output()
+                .expect("child test ran");
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(
+                result.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            return;
+        }
+        let (site, id, guard) = durable_finisher("shutdown-cancels-sweep");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let _sweep = runtime.spawn_blocking(move || {
+            let done = guard.conduct(|| {
+                let mut progress =
+                    Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, id);
+                let _told = started.send(());
+                let mut month = 0_u32;
+                let text = loop {
+                    month += 1;
+                    if let Err(why) = cli::cancel::check(|| format!("generated month {month}")) {
+                        break format!("refused: {why}");
+                    }
+                    if month > 3_000 {
+                        break "a complete report the stop never reached".to_owned();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                settle(&mut progress, text, now_micros());
+                progress
+            });
+            guard.finish(done);
+        });
+        running
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the sweep started");
+        let began = std::time::Instant::now();
+        let abandoned = crate::server::end_runtime(runtime, crate::server::SHUTDOWN_GRACE);
+        let took = began.elapsed();
+        assert_eq!(abandoned, 0, "the sweep was abandoned, not cancelled");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "cancellation took {took:?}"
+        );
+        assert!(cli::cancel::observed() >= 1);
+        let slot = site.sweep.lock().expect("slot").clone().expect("finished");
+        assert!(slot.report.is_none(), "a cancelled sweep kept a report");
+        let why = slot.refusal.expect("the cancellation is the answer");
+        assert!(why.starts_with("refused: "), "{why}");
+        assert!(why.contains(cli::cancel::CANCELLED), "{why}");
+        assert!(why.contains("Stopped at: generated month"), "{why}");
+        assert_eq!(completion_audit(&slot_of(&site)).outcome, "cancelled");
+        let saved = cli::operation_audit::read(&site.store_root, id)
+            .expect("read exact")
+            .expect("saved");
+        assert_eq!(saved.phase, cli::operation_audit::Phase::Cancelled);
+
+        // Work whose last boundary passed before the stop: its finished report
+        // is still not presented as complete.
+        let (late, late_id, late_guard) = durable_finisher("shutdown-cancels-late");
+        let done = late_guard.conduct(|| {
+            let mut progress =
+                Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, late_id);
+            settle(&mut progress, "a finished table".to_owned(), now_micros());
+            progress
+        });
+        assert!(done.report.is_none());
+        let why = done.refusal.clone().expect("cancelled");
+        assert!(why.contains(cli::cancel::CANCELLED), "{why}");
+        assert!(why.contains("before its answer was recorded"), "{why}");
+        late_guard.finish(done);
+        let saved = cli::operation_audit::read(&late.store_root, late_id)
+            .expect("read exact")
+            .expect("saved");
+        assert_eq!(saved.phase, cli::operation_audit::Phase::Cancelled);
+        let _ = std::fs::remove_dir_all(&site.store_root);
+        let _ = std::fs::remove_dir_all(&late.store_root);
+    }
+
+    fn slot_of(site: &crate::server::Loaded) -> Progress {
+        site.sweep.lock().expect("slot").clone().expect("finished")
+    }
+
+    /// **Admission I/O runs with the slot UNLOCKED, and admissions still
+    /// exclude each other.** W1-api6-2, D-0954.
+    ///
+    /// A first admission is parked inside its `prepare`, where the lease, the
+    /// log walk, the audit `begin` and the marker run. While it is parked: a
+    /// poll takes the slot at once (it used to wait out the whole admission on
+    /// an async worker); a second admission does not reach its own `prepare`
+    /// and is refused `Busy` at once rather than queued behind the first,
+    /// because admissions are still one at a time and a queued one parked a
+    /// shared `detail::run` permit (conc:runs-4, D-2776). Released, the first
+    /// installs its in-flight run. A refusing `prepare` leaves
+    /// a finished slot exactly as it was, and a busy slot never runs `prepare`.
+    #[test]
+    fn admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let site = finisher_site("admission-unlocked");
+        let running =
+            |attempt| Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 1, attempt);
+        let busy = || super::refused(&Refusal::Busy("busy".to_owned()));
+        let (parked, parked_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let second_prepared = AtomicBool::new(false);
+        let first_busy = AtomicBool::new(false);
+        let (site_ref, first_busy_ref) = (&site, &first_busy);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(move || {
+                super::admit(
+                    site_ref,
+                    || {
+                        first_busy_ref.store(true, Ordering::SeqCst);
+                        busy()
+                    },
+                    || {
+                        parked.send(()).expect("the test is listening");
+                        release_rx.recv().expect("the test releases");
+                        Ok((running(1), "first"))
+                    },
+                )
+            });
+            parked_rx
+                .recv()
+                .expect("the first admission is inside prepare");
+            let polled = site.sweep.try_lock().map(|slot| slot.clone());
+            assert!(
+                polled.is_ok_and(|slot| slot.is_none()),
+                "a poll during admission I/O must take the slot at once and see no run yet"
+            );
+            // REFUSED, NOT QUEUED (conc:runs-4, D-2776). A second admission
+            // that waited parked a shared `detail::run` permit for the
+            // first's whole I/O. The bound only turns a regression (a wait)
+            // into a failure rather than a hang; the fixed path never meets it.
+            let (answered, answer) = std::sync::mpsc::channel();
+            let second_prepared = &second_prepared;
+            let second = scope.spawn(move || {
+                let refused = super::admit(site_ref, busy, || {
+                    second_prepared.store(true, Ordering::SeqCst);
+                    Ok((running(2), "second"))
+                });
+                answered.send(()).expect("the test is listening");
+                refused
+            });
+            let refused_at_once = answer
+                .recv_timeout(std::time::Duration::from_mins(1))
+                .is_ok();
+            release.send(()).expect("the first admission is waiting");
+            assert_eq!(first.join().expect("first").ok(), Some("first"));
+            let (status, _, body) = second
+                .join()
+                .expect("second")
+                .expect_err("another admission is in progress");
+            assert!(
+                refused_at_once,
+                "a second admission is refused while the first is admitting, not queued"
+            );
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+        });
+        assert!(!first_busy.load(Ordering::SeqCst));
+        assert!(
+            !second_prepared.load(Ordering::SeqCst),
+            "Busy never prepares"
+        );
+        let installed = site.sweep.lock().expect("slot").clone().expect("installed");
+        assert!(installed.in_flight() && installed.attempt == 1);
+
+        let mut finished = running(3);
+        finished.finished_micros = Some(9);
+        finished.report = Some("kept".to_owned().into());
+        *site.sweep.lock().expect("slot") = Some(finished);
+        let refusal = super::admit(&site, busy, || {
+            Err::<(Progress, ()), _>(super::refused(&Refusal::Unobservable(
+                "no lease".to_owned(),
+            )))
+        })
+        .expect_err("prepare refused");
+        assert_eq!(refusal.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let kept = site.sweep.lock().expect("slot").clone().expect("kept");
+        assert_eq!(
+            (kept.attempt, kept.finished_micros, kept.report.as_deref()),
+            (3, Some(9), Some("kept"))
+        );
+    }
+
+    /// **No POST handler holds the slot across admission.** W1-api6-2, D-0954.
+    ///
+    /// `run_with`, `descend_with` and `command_with_configuration` each took
+    /// `site.sweep.lock()` and kept it through every admission step. Each body
+    /// must now name `admit(` and must not lock the slot itself, so a fourth
+    /// copy of the old block fails here, not in a poll that hangs.
+    #[test]
+    fn no_post_handler_locks_the_slot_across_its_admission() {
+        let production = include_str!("sweeprun.rs")
+            .split_once("\nmod tests {")
+            .expect("this file declares its tests module")
+            .0;
+        for name in [
+            "pub(crate) fn run_with(",
+            "pub(crate) fn descend_with(",
+            "fn command_with_configuration(",
+        ] {
+            let body = production
+                .split_once(name)
+                .expect("the handler exists")
+                .1
+                .split_once("\n}\n")
+                .expect("the handler ends")
+                .0;
+            assert!(
+                body.contains("admit(site,"),
+                "{name} admits through `admit`"
+            );
+            assert!(
+                !body.contains("sweep.lock()") && !body.contains(".sweep\n"),
+                "{name} locks the slot itself"
+            );
+        }
+    }
+
+    /// **A poll's snapshot of the slot shares the report; it does not copy
+    /// it.** W1-api6-1, D-0954.
+    ///
+    /// `run_json` clones the whole `Progress` while it holds the slot's std
+    /// mutex on an async worker. With the report a `String` that clone copied
+    /// every byte of it on every poll, and a `sweep-all` report grows by a line
+    /// per instrument-month. An 8 MiB report and an 8 MiB refusal, each with a
+    /// quote, a backslash, a newline and a multibyte character at its ends,
+    /// are cloned the way the poll clones them: both clones point at the SAME
+    /// bytes as the slot, and the serialised status is byte-identical to the
+    /// slot's own, so sharing changed nothing a reader sees.
+    #[test]
+    fn a_poll_snapshot_shares_the_report_and_refusal_bytes_with_the_slot() {
+        let edge = |fill: char| {
+            let mut text = String::from("\"\\\n\u{20b9}");
+            text.extend(std::iter::repeat_n(fill, 8 << 20));
+            text.push_str("\u{20b9}\n\\\"");
+            text
+        };
+        let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 12), None, 1, 7);
+        done.finished_micros = Some(2);
+        done.report = Some(edge('r').into());
+        done.refusal = Some(edge('f').into());
+        let slot = std::sync::Mutex::new(Some(done));
+        let snapshot = slot.lock().expect("private slot").clone();
+        let held = slot.lock().expect("private slot");
+        let (held, snapshot) = (
+            held.as_ref().expect("held"),
+            snapshot.as_ref().expect("snapshot"),
+        );
+        for (name, slot_text, poll_text) in [
+            ("report", held.report.as_deref(), snapshot.report.as_deref()),
+            (
+                "refusal",
+                held.refusal.as_deref(),
+                snapshot.refusal.as_deref(),
+            ),
+        ] {
+            let (slot_text, poll_text) = (slot_text.expect(name), poll_text.expect(name));
+            assert_eq!(poll_text.len(), slot_text.len(), "{name}");
+            assert!(
+                std::ptr::eq(slot_text.as_ptr(), poll_text.as_ptr()),
+                "{name}: the poll's snapshot copied {} bytes under the slot lock",
+                poll_text.len()
+            );
+        }
+        assert_eq!(snapshot.to_json(), held.to_json());
+        let json: serde_json::Value =
+            serde_json::from_str(&held.to_json()).expect("a valid status");
+        assert_eq!(
+            json.get("report").and_then(serde_json::Value::as_str),
+            held.report.as_deref()
+        );
+    }
 
     fn elsewhere_over(dir: &std::path::Path, now_millis: i64) -> String {
         super::observe_elsewhere(dir, now_millis).body
@@ -3370,6 +4490,66 @@ mod tests {
         let slot = site.sweep.lock().expect("private slot");
         assert!(slot.as_ref().expect("completed").report.is_some());
         drop(slot);
+        std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
+    }
+
+    /// **A finished task gives its execution lease back before its slot says
+    /// finished.** conc:runs-2, D-2778.
+    ///
+    /// The slot was written with `in_flight == false` while the finisher still
+    /// owned the lease, so a press admitted in that gap passed the slot check
+    /// and was refused `Busy` by a run that had ended. The test holds the slot
+    /// lock, so `finish` stops exactly where it publishes; the lease must
+    /// already be free there. The bound only turns a regression (a lease held
+    /// until the slot is written) into a failure rather than a hang.
+    #[test]
+    fn a_finished_task_frees_the_execution_lease_before_its_slot_says_finished() {
+        let (site, _id, guard) = durable_finisher("durable-task-lease-first");
+        let lease = cli::execution_lease::Lease::acquire(&site.store_root).expect("a free store");
+        let guard = guard.with_lease(lease);
+        guard.enter(cli::operation_audit::completed_boundary);
+        let mut done = site
+            .sweep
+            .lock()
+            .expect("private slot")
+            .clone()
+            .expect("started");
+        settle(&mut done, "private lease-order fixture".to_owned(), 10);
+        let slot = site.sweep.lock().expect("private slot");
+        std::thread::scope(|scope| {
+            let finishing = scope.spawn(move || guard.finish(done));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+            let freed = loop {
+                match cli::execution_lease::Lease::acquire(&site.store_root) {
+                    Ok(next) => break Some(next),
+                    Err(cli::execution_lease::Refusal::Busy)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(_) => break None,
+                }
+            };
+            assert!(
+                slot.as_ref().is_some_and(Progress::in_flight),
+                "the premise: the slot has not been published yet"
+            );
+            drop(slot);
+            finishing.join().expect("finish");
+            assert!(
+                freed.is_some(),
+                "the lease is free while the finished run is still being published"
+            );
+        });
+        assert!(
+            !site
+                .sweep
+                .lock()
+                .expect("private slot")
+                .as_ref()
+                .expect("published")
+                .in_flight()
+        );
         std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
     }
 
@@ -4181,6 +5361,12 @@ mod tests {
         assert!(body.contains("BRUTEX_COMMIT"), "{body}");
         assert!(!body.contains("BRUTEX_SCREEN_BUDGET_MS"), "{body}");
         assert_eq!(listing(&store), before, "unstamped descend wrote");
+        // sobs-9, D-4447: THE BUDGET'S REFUSAL REACHES THIS CHILD'S LOG, once
+        // per route and naming it, beside the unstamped one above.
+        assert!(
+            budget_refusals(root).is_empty(),
+            "nothing refused for a budget yet"
+        );
 
         // ONE ROUTE AT A TIME, each checked before the next is called, so a
         // route that writes is the one named.
@@ -4214,6 +5400,16 @@ mod tests {
             );
             assert_eq!(listing(&store), before, "{route} wrote into the store");
         }
+        assert_eq!(
+            budget_refusal_routes(&budget_refusals(root)),
+            [
+                super::RUN_ROUTE,
+                super::DESCEND_ROUTE,
+                super::COMMAND_ROUTE,
+                super::COMMAND_ROUTE
+            ],
+            "one budget refusal per press, naming its route"
+        );
 
         // THE ENVIRONMENT'S OWN SPELLING, WITH NO KNOB SET, READ BY THE ENGINE
         // TOO. This child's value may be padded; only here does the rule's trim
@@ -4242,28 +5438,7 @@ mod tests {
             1,
         ));
 
-        // THE WORDS WHOSE RUN PRICES NO SCREEN ARE NOT REFUSED FOR ONE, at the
-        // ROUTE and not only in `prices_a_screen`: nothing asked whether
-        // `command_with_configuration` consults the predicate at all, and with
-        // the guard applied to every word this suite stayed green. D-0695. The
-        // strict word refuses the budget through its own admission, in its own
-        // words and before the slot, and never with this route's sentence.
-        for words in &ORDINARY_WORDS[2..] {
-            let (status, _, body) = super::command_with(&site, &command_body(words), Some(STAMP));
-            assert!(
-                !body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
-                "{words} was refused a budget its run never prices: {body}"
-            );
-            if words.contains("audit-audited-range") {
-                assert!(
-                    body.contains("strict_runtime_settings_invalid")
-                        && body.contains("BRUTEX_SCREEN_BUDGET_MS"),
-                    "the strict word names the budget through its own admission: {body}"
-                );
-            } else {
-                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{words}: {body}");
-            }
-        }
+        the_unpriced_words_are_not_refused_a_budget(&site, STAMP);
 
         // A VALUE THE BUDGET READER CANNOT USE REFUSES NO ROUTE: it is no
         // budget, and `cli` names it under KNOB REFUSED and runs without one.
@@ -4279,6 +5454,75 @@ mod tests {
         }
         cli::knobs::clear_all();
         println!("SERVER-BUDGET refused 4 routes");
+    }
+
+    /// Every screen-budget refusal in [`server_budget_child`]'s own log,
+    /// newest first, as `tail` answers.
+    fn budget_refusals(root: &std::path::Path) -> Vec<telemetry::Record> {
+        telemetry::tail(
+            &root.join("logs"),
+            telemetry::global()
+                .expect("this child's one sink")
+                .keep_files(),
+            &telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.sweep"),
+        )
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.message
+                == "a sweep was refused because this server's environment sets a screen budget"
+        })
+        .collect()
+    }
+
+    /// The route each budget refusal names, in the order the presses were
+    /// made, each line checked to be a `Warn` carrying the refusal's sentence.
+    fn budget_refusal_routes(lines: &[telemetry::Record]) -> Vec<String> {
+        // `tail` answers newest first; the presses are listed in the order made.
+        lines
+            .iter()
+            .rev()
+            .map(|record| {
+                assert!(
+                    record
+                        .field("why")
+                        .and_then(telemetry::OwnedValue::as_str)
+                        .is_some_and(|why| why.contains("BRUTEX_SCREEN_BUDGET_MS is set")),
+                    "the refusal's own sentence rides on the line: {record:?}"
+                );
+                assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+                record
+                    .field("route")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// THE WORDS WHOSE RUN PRICES NO SCREEN ARE NOT REFUSED FOR ONE, at the
+    /// ROUTE and not only in `prices_a_screen`: nothing asked whether
+    /// `command_with_configuration` consults the predicate at all, and with
+    /// the guard applied to every word this suite stayed green. D-0695. The
+    /// strict word refuses the budget through its own admission, in its own
+    /// words and before the slot, and never with this route's sentence.
+    fn the_unpriced_words_are_not_refused_a_budget(site: &crate::server::Loaded, stamp: &str) {
+        for words in ORDINARY_WORDS.iter().skip(2) {
+            let (status, _, body) = super::command_with(site, &command_body(words), Some(stamp));
+            assert!(
+                !body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
+                "{words} was refused a budget its run never prices: {body}"
+            );
+            if words.contains("audit-audited-range") {
+                assert!(
+                    body.contains("strict_runtime_settings_invalid")
+                        && body.contains("BRUTEX_SCREEN_BUDGET_MS"),
+                    "the strict word names the budget through its own admission: {body}"
+                );
+            } else {
+                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{words}: {body}");
+            }
+        }
     }
 
     /// The server-budget refusal through the request journal the production
@@ -4836,7 +6080,7 @@ mod tests {
 
         let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, 70);
         done.finished_micros = Some(8);
-        done.report = Some("STORED_PROVENANCE\ncomplete".to_owned());
+        done.report = Some("STORED_PROVENANCE\ncomplete".into());
         TaskFinisher::new(std::sync::Arc::clone(&site)).finish(done);
 
         {
@@ -4883,7 +6127,7 @@ mod tests {
         let site = finisher_site("already-finished");
         let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, 70);
         done.finished_micros = Some(8);
-        done.refusal = Some("the engine gave its own refusal".to_owned());
+        done.refusal = Some("the engine gave its own refusal".into());
         *site
             .sweep
             .lock()
@@ -5032,7 +6276,7 @@ mod tests {
     fn a_finished_run_carries_its_report_and_its_stamp() {
         let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1, 2);
         p.finished_micros = Some(500);
-        p.report = Some("STORED_PROVENANCE\nrows".to_owned());
+        p.report = Some("STORED_PROVENANCE\nrows".into());
         let json = p.to_json();
         assert!(json.contains(r#""in_flight":false"#), "{json}");
         assert!(json.contains(r#""finished_micros":500"#), "{json}");
@@ -5044,7 +6288,7 @@ mod tests {
     #[test]
     fn a_refusal_reaches_the_progress_json_as_a_sentence() {
         let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1, 2);
-        p.refusal = Some("the store held no bars".to_owned());
+        p.refusal = Some("the store held no bars".into());
         assert!(p.to_json().contains("the store held no bars"));
     }
 
@@ -5184,7 +6428,7 @@ mod tests {
     #[test]
     fn contradictory_or_missing_completion_state_is_an_error() {
         let mut both = settled(REPORT);
-        both.refusal = Some(REFUSAL.to_owned());
+        both.refusal = Some(REFUSAL.into());
         let contradiction = completion_audit(&both);
         assert_eq!(contradiction.level, telemetry::Level::Error);
         assert_eq!(contradiction.outcome, "invalid");
@@ -5389,17 +6633,36 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with() {
-        for points in ["0", "-20"] {
+    fn a_negative_stop_ceiling_is_refused_rather_than_swept_with() {
+        for points in ["-1", "-20"] {
             let why = descent_from(&descent_body(&format!(
                 r#""rung":"15min","max_points":{points},"top":25"#
             )))
-            .expect_err("a ceiling of zero admits no trade");
+            .expect_err("a negative ceiling is not a distance");
             assert!(why.why().contains("max_points"), "{}", why.why());
         }
         // AND A MISSING ONE IS NOT ZERO. Defaulting it would pick the
         // operator's risk for them, silently.
         assert!(descent_from(&descent_body(r#""rung":"15min","top":25"#)).is_err());
+    }
+
+    /// D-1732. `cli` and `Rules::admits` read a zero ceiling as NO ceiling,
+    /// and `USAGE` documents it so. The api refused it at both doors with "a
+    /// ceiling of zero admits no trade", which is false: the browser could not
+    /// ask for the run the command line offers.
+    #[test]
+    fn a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it() {
+        let asked = descent_from(&descent_body(r#""rung":"15min","max_points":0,"top":25"#))
+            .expect("zero is no ceiling, not a refusal");
+        assert_eq!(asked.max_points, 0);
+        let screen = command_from(&command_body(
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":0,"top":25"#,
+        ))
+        .expect("the screen door reads zero the same way");
+        assert!(
+            matches!(screen, super::Command::Screen { max_points: 0, .. }),
+            "{screen:?}"
+        );
     }
 
     #[test]
@@ -5480,8 +6743,143 @@ mod tests {
 
     /* ==================== the command dispatcher ==================== */
 
+    /// A good body for `extra`'s word. `sweep-all` takes no instrument and no
+    /// span, and naming either is refused (D-1972), so it gets neither.
     fn command_body(extra: &str) -> String {
+        if extra.contains(r#""command":"sweep-all""#) {
+            return format!(r#"{{"feed":"zerodha",{extra}}}"#);
+        }
         format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#)
+    }
+
+    /// P3-01-02 and P3-02-06, D-1972. Every route refuses, BY NAME, a known
+    /// member it does not read, instead of decoding it and dropping it.
+    #[test]
+    fn every_route_refuses_a_known_field_it_does_not_read_by_name() {
+        // `/backtest/run` reads `rungs`; a singular `rung` swept all eight.
+        let why = asked_from(&body_with("zerodha", SPAN, r#","rung":"5min""#))
+            .expect_err("rung is descend's member");
+        assert!(
+            why.why()
+                .contains("`rung` is not read by `POST /backtest/run`"),
+            "{}",
+            why.why()
+        );
+        assert!(
+            why.why().contains("No setting was ignored"),
+            "{}",
+            why.why()
+        );
+        let why = asked_from(&body_with("zerodha", SPAN, r#","max_points":50"#))
+            .expect_err("a sweep has no stop ceiling");
+        assert!(why.why().contains("`max_points`"), "{}", why.why());
+        // ...while every knob it applies is still taken.
+        assert!(
+            asked_from(&body_with(
+                "zerodha",
+                SPAN,
+                r#","validate":"0","screen_cap":7"#
+            ))
+            .is_ok()
+        );
+
+        // A descent applies no knob.
+        let descent = |extra: &str| {
+            descent_from(&format!(
+                r#"{{"feed":"dhan","underlying":"NIFTY",{SPAN},"rung":"5min","max_points":50,"top":5{extra}}}"#
+            ))
+        };
+        assert!(descent("").is_ok());
+        for (extra, name) in [
+            (r#","validate":"0""#, "validate"),
+            (r#","screen_cap":7"#, "screen_cap"),
+            (r#","support_ppm":100"#, "support_ppm"),
+            (r#","rungs":["5min"]"#, "rungs"),
+            (r#","min_hits":5"#, "min_hits"),
+        ] {
+            let why = descent(extra).expect_err("a descent applies no knob");
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by `POST /backtest/descend`")),
+                "{}",
+                why.why()
+            );
+        }
+
+        // The ordinary command words, each with a member it does not read.
+        for (words, name) in [
+            (
+                r#""command":"audit-range","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+            (
+                r#""command":"sweep-stored","rung":"15min","min_hits":5,"screen_cap":7"#,
+                "screen_cap",
+            ),
+            (
+                r#""command":"auto-stored","rung":"1min","min_hits":5"#,
+                "min_hits",
+            ),
+            (
+                r#""command":"screen","rung":"15min","support_ppm":5,"max_points":2,"top":2,"ceiling":3"#,
+                "ceiling",
+            ),
+            (
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"rungs":["5min"]"#,
+                "rungs",
+            ),
+            (
+                r#""command":"sweep-all","rung":"15min","min_hits":5,"validate":"0""#,
+                "validate",
+            ),
+        ] {
+            let why = command_from(&command_body(words)).expect_err(words);
+            assert!(
+                why.why()
+                    .contains(&format!("`{name}` is not read by the `")),
+                "{words}: {}",
+                why.why()
+            );
+        }
+        // The strict word still takes its knobs.
+        assert!(
+            command_from(&command_body(
+                r#""command":"audit-audited-range","rung":"5min","min_hits":5,"validate":"0""#
+            ))
+            .is_ok()
+        );
+    }
+
+    /// P3-02-06, D-1972. `sweep-all` takes what `cli sweep-all VENDOR RUNG
+    /// MIN_HITS` takes. A body naming an instrument or a span is refused,
+    /// because it would otherwise become a whole-store batch.
+    #[test]
+    fn sweep_all_takes_no_instrument_and_no_span() {
+        let documented =
+            r#"{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500}"#;
+        let batch = command_from(documented).expect("the documented shape parses");
+        assert_eq!(batch.word(), "sweep-all");
+        assert_eq!(batch.feed(), "zerodha");
+        for extra in [
+            r#","underlying":"BANKNIFTY""#,
+            r#","from_year":2024"#,
+            r#","from_month":1"#,
+            r#","to_year":2024"#,
+            r#","to_month":1"#,
+        ] {
+            let body = format!(
+                r#"{{"command":"sweep-all","feed":"zerodha","rung":"15min","min_hits":500{extra}}}"#
+            );
+            let why = command_from(&body).expect_err("a scoped-looking batch");
+            assert!(
+                why.why().contains("is not read by the `sweep-all` command"),
+                "{}",
+                why.why()
+            );
+        }
+        let why = command_from(r#"{"command":"sweep-all","rung":"15min","min_hits":500}"#)
+            .expect_err("the feed is still required");
+        assert!(why.why().contains("no `feed`"), "{}", why.why());
     }
 
     #[test]
@@ -5569,7 +6967,7 @@ mod tests {
         for extra in [
             r#""command":"screen","rung":"15min","max_points":20,"top":25"#,
             r#""command":"screen","rung":"15min","support_ppm":0,"max_points":20,"top":25"#,
-            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":0,"top":25"#,
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":-1,"top":25"#,
             r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":0"#,
         ] {
             assert!(
@@ -5582,11 +6980,16 @@ mod tests {
     #[test]
     fn a_command_needing_a_rung_is_refused_without_one() {
         for word in ["audit-range", "auto-stored", "sweep-stored", "sweep-all"] {
-            let why = command_from(&command_body(&format!(
-                r#""command":"{word}","min_hits":500"#
-            )))
-            .expect_err("{word} needs a rung");
-            assert!(why.why().contains("rung"), "{}", why.why());
+            // `auto-stored` reads no `min_hits`, and naming it is refused
+            // (D-1972), so its body omits the field.
+            let hits = if word == "auto-stored" {
+                ""
+            } else {
+                r#","min_hits":500"#
+            };
+            let why = command_from(&command_body(&format!(r#""command":"{word}"{hits}"#)))
+                .expect_err("{word} needs a rung");
+            assert!(why.why().contains("`rung`"), "{}", why.why());
         }
     }
 
@@ -5707,13 +7110,23 @@ mod tests {
             "the window is reported so the page decides, not this: {json}"
         );
 
-        // A CLOCK BEHIND THE STORE'S must not read as a sweep in the future.
+        // A CLOCK BEHIND THE STORE'S cannot age the newest event, so it is
+        // neither a sweep in the future nor a live one: CE-87 / D-2755. The
+        // age is reported signed, and the status names the clock.
         let skewed = elsewhere_over(&dir, 0);
         assert!(
-            skewed.contains(r#""age_millis":0"#),
-            "age is clamped at zero under clock skew: {skewed}"
+            skewed.contains(r#""age_millis":-"#),
+            "a stamp ahead of this clock is reported as a negative age: {skewed}"
         );
-        assert!(skewed.contains(r#""status":"running""#));
+        assert!(skewed.contains(r#""status":"unknown""#), "{skewed}");
+        assert!(
+            skewed.contains("ahead of this server's clock"),
+            "the reason names the clock: {skewed}"
+        );
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"running""#),
+            "the same marker, aged by a clock that is not behind it, is running"
+        );
         assert!(
             json.contains(r#""status":"unknown""#),
             "stale is not completed"
@@ -5727,7 +7140,7 @@ mod tests {
         let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
         let mut local = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 1, 1);
         local.finished_micros = Some(2);
-        local.report = Some("old completed browser run".to_owned());
+        local.report = Some("old completed browser run".into());
         let emit = |message, phase| {
             assert_eq!(
                 sink.emit_for_run(
@@ -5740,16 +7153,20 @@ mod tests {
             );
         };
         emit("command started", "running");
-        let status =
-            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0));
+        let status = super::observed_status(
+            Some(&local),
+            super::external_observation(Some(&dir), super::now_micros() / 1_000),
+        );
         assert!(
             status.contains(r#""attempt":44"#),
             "new CLI attempt replaces finished browser slot: {status}"
         );
         assert!(status.contains(r#""status":"running""#));
         local.finished_micros = Some(i64::MAX);
-        let overlapping =
-            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0));
+        let overlapping = super::observed_status(
+            Some(&local),
+            super::external_observation(Some(&dir), super::now_micros() / 1_000),
+        );
         assert!(
             overlapping.contains(r#""status":"running""#),
             "a CLI command that started before browser completion remains active: {overlapping}"
@@ -5757,7 +7174,7 @@ mod tests {
         local.finished_micros = Some(2);
         let _ = sink.emit_for_run(44, &telemetry::Event::info("cli.audit", "rung finished"));
         assert!(
-            elsewhere_over(&dir, 0).contains(r#""status":"running""#),
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"running""#),
             "rung completion does not finish its command"
         );
         emit("command finished", "completed");
@@ -5765,13 +7182,16 @@ mod tests {
         assert!(completed.contains(r#""status":"completed""#));
         assert!(completed.contains(r#""in_flight":false"#));
         emit("command finished", "refused");
-        let refused = elsewhere_over(&dir, 0);
+        let refused = elsewhere_over(&dir, super::now_micros() / 1_000);
         assert!(refused.contains(r#""status":"refused""#));
         assert!(!refused.contains(r#""refusal":null"#));
         local.finished_micros = Some(i64::MAX);
         assert!(
-            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0))
-                .contains("old completed browser run")
+            super::observed_status(
+                Some(&local),
+                super::external_observation(Some(&dir), super::now_micros() / 1_000)
+            )
+            .contains("old completed browser run")
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5791,12 +7211,12 @@ mod tests {
         for _ in 0..255 {
             assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
         }
-        let observed = elsewhere_over(&dir, 0);
+        let observed = elsewhere_over(&dir, super::now_micros() / 1_000);
         assert!(observed.contains(r#""status":"running""#), "{observed}");
         assert!(observed.contains(r#""attempt":91"#), "{observed}");
         assert!(!observed.contains(r#""attempt":92"#), "{observed}");
         assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
-        let capped = elsewhere_over(&dir, 0);
+        let capped = elsewhere_over(&dir, super::now_micros() / 1_000);
         assert!(capped.contains(r#""status":"unknown""#), "{capped}");
         let finished = telemetry::Event::info("cli.lifecycle", "command finished")
             .with("phase", "completed")
@@ -5831,7 +7251,7 @@ mod tests {
                 sink.emit_for_run(102, &inspected),
                 telemetry::Emitted::Written
             );
-            let observed = elsewhere_over(&dir, 0);
+            let observed = elsewhere_over(&dir, super::now_micros() / 1_000);
             assert!(
                 observed.contains(r#""status":"running""#),
                 "{command}: {observed}"
@@ -5847,7 +7267,9 @@ mod tests {
             sink.emit_for_run(103, &malformed),
             telemetry::Emitted::Written
         );
-        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
+        );
         let mut tail = super::status_tail(&dir, "cli.lifecycle", None, 1);
         assert!(super::tail_fault(&tail).is_none());
         tail.records.first_mut().expect("latest fixture record").cut = true;
@@ -5856,6 +7278,284 @@ mod tests {
         latest.cut = false;
         latest.dropped_fields = 1;
         assert!(super::tail_fault(&tail).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// conc9-2: a partial last line seen once is re-read, and only one still
+    /// there on the second read counts as damage.
+    #[test]
+    fn a_line_being_written_is_reread_and_a_torn_one_still_refuses() {
+        let partial = telemetry::Tail {
+            partial_tail: true,
+            ..telemetry::Tail::default()
+        };
+        let whole = telemetry::Tail::default();
+        let reads = std::cell::Cell::new(0_u8);
+        let settled = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                partial.clone()
+            } else {
+                whole.clone()
+            }
+        });
+        assert_eq!(reads.get(), 2, "a partial tail is read once more");
+        assert!(
+            super::tail_fault(&settled).is_none(),
+            "the finished write is no fault"
+        );
+
+        reads.set(0);
+        let torn = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            partial.clone()
+        });
+        assert_eq!(reads.get(), 2);
+        assert!(
+            super::tail_fault(&torn).is_some(),
+            "a torn tail still refuses"
+        );
+
+        reads.set(0);
+        let clean = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            whole.clone()
+        });
+        assert_eq!(reads.get(), 1, "a whole tail is read once");
+        assert!(super::tail_fault(&clean).is_none());
+    }
+
+    /// **A sweep marker inside the scanned window is the answer, however large
+    /// the log behind it.** W1-api6-4, D-0954.
+    ///
+    /// The lifecycle walk asks for 256 records under a 4 MiB scan cap, and a
+    /// healthy log whose newest 4 MiB held fewer than 256 lifecycle records
+    /// hit the cap every time. The cap was read as damage, so every browser
+    /// run, descent and command refused and the status said `unknown`, even
+    /// with the newest sweep's own terminal marker in hand. Driven over 5 MiB
+    /// of other targets' records: a newest `command finished` is `completed`
+    /// and clears launch; a newest `command started` with no activity is
+    /// `running` (the activity walk's own cap is answered by the marker) and
+    /// blocks launch; then the boundaries that must stay refused: a marker
+    /// pushed past the window by 5 MiB of newer records is `unknown` and blocks
+    /// launch, and a malformed line inside the window still blocks launch
+    /// with the marker found.
+    #[test]
+    fn a_marker_inside_the_scan_window_answers_however_large_the_log_behind_it() {
+        let dir = crate::scratch::path("sweep-external-scan-cap");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let pad = "P".repeat(500);
+        let fill = |bytes: u64| {
+            let mut written = 0_u64;
+            while written < bytes {
+                let mut event = telemetry::Event::info("api.serve", "unrelated traffic");
+                for key in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+                    event = event.with(key, pad.as_str());
+                }
+                assert_eq!(sink.emit(&event), telemetry::Emitted::Written);
+                written += 8 * 500;
+            }
+        };
+        let marker = |message, phase| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(61, &event), telemetry::Emitted::Written);
+        };
+        let over_cap = crate::logs::SCAN_BYTES + (1 << 20);
+        fill(over_cap);
+        marker("command finished", "completed");
+        let tail = super::status_tail(&dir, "cli.lifecycle", None, 256);
+        assert!(tail.hit_scan_cap, "premise: the walk reaches the cap");
+        assert_eq!(
+            tail.records.len(),
+            1,
+            "premise: one lifecycle record in the window"
+        );
+        let done = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            done.body.contains(r#""status":"completed""#),
+            "{}",
+            done.body
+        );
+        assert!(
+            done.launch_clear && !done.uncertain && !done.in_flight,
+            "{}",
+            done.body
+        );
+
+        marker("command started", "running");
+        let running = super::observe_elsewhere(&dir, super::now_micros() / 1_000);
+        assert!(
+            running.body.contains(r#""status":"running""#),
+            "{}",
+            running.body
+        );
+        assert!(running.body.contains(r#""attempt":61"#), "{}", running.body);
+        assert!(
+            running.in_flight && !running.launch_clear,
+            "{}",
+            running.body
+        );
+
+        // PAST THE WINDOW: newer traffic pushes the marker out of the newest
+        // 4 MiB, and no marker found means the cap still answers `unknown`.
+        fill(over_cap);
+        let lost = super::observe_elsewhere(&dir, super::now_micros() / 1_000);
+        assert!(lost.body.contains(r#""status":"unknown""#), "{}", lost.body);
+        assert!(lost.body.contains("scan cap true"), "{}", lost.body);
+        assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
+
+        // OTHER DAMAGE STILL COUNTS WITH THE MARKER FOUND: a malformed line
+        // could be a newer marker this reader cannot decode.
+        marker("command finished", "completed");
+        assert!(super::observe_elsewhere(&dir, i64::MAX).launch_clear);
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::current_path(&dir))
+                .expect("the current log"),
+            b"not a record\n",
+        )
+        .expect("one malformed line");
+        let damaged = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            damaged.body.contains(r#""status":"unknown""#),
+            "{}",
+            damaged.body
+        );
+        assert!(
+            damaged.body.contains("1 malformed records"),
+            "{}",
+            damaged.body
+        );
+        assert!(!damaged.launch_clear, "{}", damaged.body);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// CE-11, D-1914: a line torn by a killed CLI command, OLDER than the
+    /// newest sweep marker, no longer blocks launch; the same damage NEWER
+    /// than the marker still does.
+    #[test]
+    fn damage_older_than_the_newest_marker_does_not_block_launch() {
+        let dir = crate::scratch::path("sweep-external-old-tear");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let marker = |message, phase| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(62, &event), telemetry::Emitted::Written);
+        };
+        let tear = || {
+            std::io::Write::write_all(
+                &mut std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(telemetry::current_path(&dir))
+                    .expect("the current log"),
+                b"{\"torn\n",
+            )
+            .expect("one malformed line");
+        };
+        marker("command started", "running");
+        tear();
+        marker("command started", "running");
+        marker("command finished", "completed");
+        let premise = super::status_tail(&dir, "cli.lifecycle", None, 256);
+        assert_eq!(
+            premise.malformed, 1,
+            "premise: the torn line is in the window"
+        );
+        let clear = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            clear.body.contains(r#""status":"completed""#),
+            "{}",
+            clear.body
+        );
+        assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
+        tear();
+        let newer = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(newer.body.contains("1 malformed records"), "{}", newer.body);
+        assert!(!newer.launch_clear, "{}", newer.body);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// R1286-api-01, D-4130: a lifecycle record that lands BETWEEN the window
+    /// read and the trimmed re-read moves every newest-first index by one, so
+    /// the trimmed walk no longer ends on the marker. The whole window is kept,
+    /// torn line and all, and `found` still names the marker in it. Taking the
+    /// trimmed walk instead would hand the caller a clean window whose `found`
+    /// index names the newcomer, and a launch cleared on a marker it never read.
+    #[test]
+    fn a_record_landing_between_the_two_reads_keeps_the_whole_window() {
+        let dir = crate::scratch::path("sweep-external-landed-between");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let marker = |message, phase, run| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(run, &event), telemetry::Emitted::Written);
+        };
+        marker("command started", "running", 63);
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::current_path(&dir))
+                .expect("the current log"),
+            b"{\"torn\n",
+        )
+        .expect("one malformed line");
+        marker("command started", "running", 64);
+        marker("command finished", "completed", 64);
+
+        // PREMISE: with nothing landing in between, the walk is trimmed to end
+        // at the marker, so the torn line behind it is out of the window.
+        let (quiet, found) = super::newest_sweep_marker(&dir);
+        assert_eq!(found, Some(0), "the newest record is the marker");
+        assert_eq!(quiet.records.len(), 1, "trimmed to the marker");
+        assert_eq!(quiet.malformed, 0, "the torn line is behind the marker");
+        let newest = quiet.records.first().expect("the marker");
+        assert_eq!(newest.message, "command finished");
+        let finished = newest.seq;
+
+        // THE RACE: a newer sweep starts between the two reads.
+        let mut reads = Vec::new();
+        let (raced, found) = super::marker_window(|limit| {
+            if !reads.is_empty() {
+                marker("command started", "running", 65);
+            }
+            reads.push(limit);
+            super::status_tail(&dir, "cli.lifecycle", None, limit)
+        });
+        assert_eq!(reads, vec![256, 1], "the window, then the trimmed re-read");
+        assert_eq!(found, Some(0));
+        assert_eq!(raced.records.len(), 3, "the whole first window is kept");
+        assert_eq!(raced.malformed, 1, "with its torn line");
+        assert_eq!(
+            raced.records.first().map(|record| record.seq),
+            Some(finished),
+            "`found` still names the marker the walk found"
+        );
+        assert!(
+            super::tail_fault_unless_answered(&raced, true).is_some(),
+            "the damage the trimmed walk would have hidden still refuses"
+        );
+
+        // The landed record is real: a fresh look reads the newer sweep, not
+        // the finished one, and does not clear a launch over it.
+        let now = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(now.body.contains(r#""run":65"#), "{}", now.body);
+        assert!(
+            !now.body.contains(r#""status":"completed""#),
+            "{}",
+            now.body
+        );
+        assert!(!now.launch_clear, "{}", now.body);
+        drop(sink);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5885,14 +7585,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
         let _ = sink.emit_for_run(45, &telemetry::Event::info("cli.audit", "rung finished"));
-        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
+        );
         assert!(
             super::observed_status(None, super::external_observation(None, 0))
                 .contains(r#""status":"unknown""#)
         );
         std::fs::remove_file(telemetry::current_path(&dir)).expect("remove fixture log");
         std::fs::create_dir(telemetry::current_path(&dir)).expect("unreadable log fixture");
-        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
+        );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// conc13-3, D-2595. On the old code a sweep refused at its execution
+    /// lease answered 409/503 with no event at all: `/logs` held only the
+    /// middleware's `served` line. The lease is held here (and the CLI's own
+    /// store differs from this scratch store too), so the press is refused at
+    /// `claim_execution` whichever check fires, and one `api.sweep` Warn
+    /// carrying the same sentence as the body must land. No run can start.
+    #[test]
+    fn a_lease_refusal_is_logged_with_its_reason() {
+        const STAMP: &str = "0123456789abcdef0123456789abcdef01234567";
+        let _sink = crate::emitted::sink();
+        let site = finisher_site("conc13-3-lease");
+        std::fs::create_dir_all(&site.store_root).expect("private store");
+        let _held = cli::execution_lease::Lease::acquire(&site.store_root)
+            .expect("the test owns this private store's lease");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"rungs":["5min"]}}"#);
+        let from = crate::emitted::mark();
+        let (status, _, body) = super::run_with(&site, &run, Some(STAMP));
+        assert_ne!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+        assert!(body.contains(r#""accepted":false"#), "{body}");
+        assert!(site.sweep.lock().expect("slot").is_none(), "no run started");
+        // Other tests in this binary may press concurrently, so the event is
+        // found by its sentence, which is this press's own body.
+        let said = crate::emitted::landed(
+            from,
+            "api.sweep",
+            "a sweep was refused at its execution lease",
+        );
+        let mut ours = 0;
+        for record in &said {
+            let why = record
+                .field("why")
+                .and_then(telemetry::OwnedValue::as_str)
+                .unwrap_or("");
+            if !why.is_empty() && body.contains(&crate::render::json_string(why)) {
+                ours += 1;
+                assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+            }
+        }
+        assert!(
+            ours >= 1,
+            "the refusal is logged with its reason: {said:?} / {body}"
+        );
+        // And the helper itself, for every refusal class: one Warn, its
+        // sentence, and the same answer `refused` gives.
+        for why in [
+            Refusal::Malformed("m".to_owned()),
+            Refusal::Span("s".to_owned()),
+            Refusal::Busy("b".to_owned()),
+            Refusal::Unstamped("u".to_owned()),
+            Refusal::Unobservable("o".to_owned()),
+            Refusal::Environment("e".to_owned()),
+        ] {
+            let from = crate::emitted::mark();
+            let logged = super::refuse_logged("conc13-3 helper probe", &why);
+            assert_eq!(logged, super::refused(&why));
+            let said = crate::emitted::landed(from, "api.sweep", "conc13-3 helper probe");
+            let mut matched = 0;
+            for record in &said {
+                if crate::emitted::says(record, "why", why.why()) {
+                    matched += 1;
+                    assert_eq!(record.level, telemetry::Level::Warn, "{why:?}");
+                }
+            }
+            assert_eq!(matched, 1, "{why:?}: {said:?}");
+        }
+        let _ = std::fs::remove_dir_all(&site.store_root);
     }
 }

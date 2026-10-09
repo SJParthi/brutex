@@ -64,7 +64,7 @@ fn dispatch_refusals() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = words.iter().map(ToString::to_string).collect();
         let mut page = String::new();
         let status = crate::dispatch(&args, &mut page);
-        assert_eq!(status, crate::MISUSED, "{words:?}: {page}");
+        assert_eq!(status, crate::FAILED, "{words:?}: {page}");
         assert!(page.starts_with("refused: "), "{page}");
         assert!(crate::carries_refusal(&page), "{page}");
         assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
@@ -104,7 +104,7 @@ fn dispatch_refusals() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(status, crate::OK, "a feed with no holdings: {page}");
             assert!(!crate::carries_refusal(&page), "{page}");
         } else {
-            assert_eq!(status, crate::MISUSED, "{page}");
+            assert_eq!(status, crate::FAILED, "{page}");
             assert!(page.starts_with("refused: this build carries no verified commit stamp"));
         }
     }
@@ -127,5 +127,62 @@ fn sweep_all_keeps_the_column_zero_refusal_and_dispatch_status() {
         arm.contains("let text = batch::sweep_all(vendor, rung, h);"),
         "{arm}"
     );
-    assert!(arm.contains("let refused = carries_refusal(&text);\n            out.push_str(&text);\n            if refused { MISUSED } else { OK }"), "{arm}");
+    // conc13-7 (D-2643): a refused month fails the walk's exit; otherwise the
+    // page's own refusal rule decides.
+    assert!(
+        arm.contains(
+            "let code = if batch::refused_months(&text) > 0 {\n                FAILED\n            } else {\n                work_exit(&text)\n            };\n            out.push_str(&text);\n            code"
+        ),
+        "{arm}"
+    );
+}
+
+/// conc13-7 (D-2643): the tally line is read at column zero, its refused
+/// count only; an indented or forged line, prose, or a page with no tally
+/// reads as zero.
+#[test]
+fn refused_months_reads_the_tally_line_only() {
+    use crate::batch::refused_months;
+    assert_eq!(
+        refused_months("1 swept · 2 refused · 10 bars · 3 combinations kept\n"),
+        2
+    );
+    assert_eq!(
+        refused_months("0 swept · 0 refused · 0 bars · 0 combinations kept"),
+        0
+    );
+    assert_eq!(
+        refused_months(&format!(
+            "{} swept · {} refused · 0 bars",
+            u64::MAX,
+            u64::MAX
+        )),
+        u64::MAX
+    );
+    assert_eq!(
+        refused_months("  1 swept · 2 refused · 0 bars"),
+        0,
+        "indented"
+    );
+    assert_eq!(
+        refused_months("x1 swept · 2 refused · 0 bars"),
+        0,
+        "not a count"
+    );
+    assert_eq!(refused_months(" swept · 2 refused · 0 bars"), 0, "no count");
+    assert_eq!(
+        refused_months("1 swept · -2 refused · 0 bars"),
+        0,
+        "negative"
+    );
+    assert_eq!(
+        refused_months("1 swept · 2 refused"),
+        0,
+        "no trailing tally"
+    );
+    assert_eq!(
+        refused_months("  REFUSED  zerodha NIFTY 1min 2025-05  — torn\n"),
+        0
+    );
+    assert_eq!(refused_months(""), 0);
 }

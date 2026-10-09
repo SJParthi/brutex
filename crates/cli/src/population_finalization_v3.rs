@@ -31,11 +31,6 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "the append-only successor exposes authenticated projection fields reserved for the downstream integration still blocked on Population V4"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -52,6 +47,11 @@ use crate::population_admission_v3::{
     AdmissionV3Family, AdmissionV3Status, PopulationAdmissionV3Authority,
     PopulationAdmissionV3DecisionProjection,
 };
+
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Finalization V3 fixed record";
 
 /// Bytes in one canonical Population Finalization V3 row.
 pub(crate) const POPULATION_FINALIZATION_V3_ROW_BYTES: usize = 2_048;
@@ -85,10 +85,8 @@ const LOCK_FILE: &str = "population-finalization-v3.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_FINALIZATION_V3_ROW_BYTES);
 const _: () =
@@ -1168,10 +1166,27 @@ impl PopulationFinalizationV3Authority {
 
     /// Reads one canonical row from the retained authenticated ledger.
     ///
+    /// # Cost
+    ///
+    /// Each call runs the ledger's generation check twice, before and after
+    /// its one fixed-offset read, and each check hashes the lock, row and
+    /// Completion files whole, each of them twice. One row read therefore
+    /// hashes the row file and the Completion file four times each:
+    /// O(row-file bytes + Completion-file bytes) per row, not O(1), and
+    /// O(R × those bytes) for R rows read one at a time.
+    /// `ordered_row_projections` reads a whole block between one such pair
+    /// instead. `docs/06-limits.md`, "Four ledger calls that rehash or rescan
+    /// whole files per call". `crates/cli/tests/ledger_scan_costs.rs` counts
+    /// the calls that make this cost.
+    ///
     /// # Errors
     ///
     /// Refuses an out-of-range ordinal or any stale, replaced, corrupt,
     /// reordered or crosswired retained source.
+    // TEST-ONLY SINCE D-1845 (W2-cli11-1, W2-cli12-3): no production path
+    // reads one row this way, so the per-row whole-file cost the limit states
+    // cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn row_projection(
         &mut self,
         global_sequence: u64,
@@ -1960,6 +1975,21 @@ impl PopulationFinalizationV3Ledger {
             if named_root_identity(&root_path)? != root_identity {
                 return Err("Finalization V3 root changed while child files opened".to_owned());
             }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock. Receipt-last, so bytes past the last whole
+                // record were never acknowledged; a whole record is never cut.
+                for (file, path, stride) in [
+                    (&row_file, &row_path, POPULATION_FINALIZATION_V3_ROW_BYTES),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        POPULATION_FINALIZATION_V3_COMPLETION_BYTES,
+                    ),
+                ] {
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride as u64, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let row_generation = file_generation(&row_file, &row_path, bounds.max_row_bytes())?;
             let completion_generation = file_generation(
@@ -2128,6 +2158,14 @@ impl PopulationFinalizationV3Ledger {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     fn authenticated_row(
         &mut self,
         receipt: PopulationFinalizationV3StructuralReceipt,
@@ -2314,6 +2352,7 @@ impl PopulationFinalizationV3Ledger {
         }
         self.require_append_bound(count, 1)?;
         let first = self.row_records;
+        let block = crate::fixed_tail::start(&mut self.row_file, &self.row_path.display())?;
         for (offset, row) in prepared.rows.iter().enumerate() {
             let physical = first
                 .checked_add(
@@ -2321,11 +2360,20 @@ impl PopulationFinalizationV3Ledger {
                         .map_err(|_| "Finalization V3 append offset does not fit u64".to_owned())?,
                 )
                 .ok_or_else(|| "Finalization V3 append physical row overflowed".to_owned())?;
-            append_raw(&mut self.row_file, &encode_row(row, physical)?)?;
+            append_raw(
+                &mut self.row_file,
+                &self.row_path,
+                block,
+                &encode_row(row, physical)?,
+            )?;
         }
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 rows: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 rows: {why}"))?;
         self.row_records = self
             .row_records
             .checked_add(count)
@@ -2333,10 +2381,21 @@ impl PopulationFinalizationV3Ledger {
         self.refresh_row_generation()?;
         self.require_unchanged()?;
         let completion = prepared.expected_completion(self.completion_records, first)?;
-        append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 Completion: {why}"))?;
+        let block =
+            crate::fixed_tail::start(&mut self.completion_file, &self.completion_path.display())?;
+        append_raw(
+            &mut self.completion_file,
+            &self.completion_path,
+            block,
+            &encode_completion(&completion)?,
+        )?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2400,24 +2459,73 @@ impl PopulationFinalizationV3Ledger {
         prepared: &PreparedPopulationFinalizationV3,
         trailing: &TrailingRowsV3,
     ) -> Result<PopulationFinalizationV3StructuralCommit, PopulationFinalizationV3Refusal> {
-        if trailing.finalization_id != prepared.finalization_id || trailing.rows != prepared.rows {
+        // Rows are appended one at a time and synced once, so a crash can
+        // leave any whole-row prefix of the block with no Completion. The
+        // exact retry completes that prefix; any other retry refuses.
+        if trailing.finalization_id != prepared.finalization_id
+            || !prepared.rows.starts_with(&trailing.rows)
+        {
             return Err(format!(
                 "Finalization V3 trailing block {} is not exact retry {}",
                 hex32(trailing.finalization_id),
                 hex32(prepared.finalization_id)
             ));
         }
-        self.require_append_bound(0, 1)?;
+        let kept = trailing.rows.len();
+        let missing = prepared
+            .rows
+            .len()
+            .checked_sub(kept)
+            .and_then(|missing| u64::try_from(missing).ok())
+            .ok_or_else(|| "Finalization V3 missing row count is invalid".to_owned())?;
+        self.require_append_bound(missing, 1)?;
         self.require_unchanged()?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 retry rows: {why}"))?;
+        let block = crate::fixed_tail::start(&mut self.row_file, &self.row_path.display())?;
+        for (offset, row) in prepared.rows.iter().enumerate().skip(kept) {
+            let physical = trailing
+                .first_row_record
+                .checked_add(
+                    u64::try_from(offset)
+                        .map_err(|_| "Finalization V3 retry offset does not fit u64".to_owned())?,
+                )
+                .ok_or_else(|| "Finalization V3 retry physical row overflowed".to_owned())?;
+            append_raw(
+                &mut self.row_file,
+                &self.row_path,
+                block,
+                &encode_row(row, physical)?,
+            )?;
+        }
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 retry rows: {why}"))?;
+        self.row_records = self
+            .row_records
+            .checked_add(missing)
+            .ok_or_else(|| "Finalization V3 retry row count overflowed".to_owned())?;
+        self.refresh_row_generation()?;
+        self.require_unchanged()?;
         let completion =
             prepared.expected_completion(self.completion_records, trailing.first_row_record)?;
-        append_raw(&mut self.completion_file, &encode_completion(&completion)?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Finalization V3 retry Completion: {why}"))?;
+        let block =
+            crate::fixed_tail::start(&mut self.completion_file, &self.completion_path.display())?;
+        append_raw(
+            &mut self.completion_file,
+            &self.completion_path,
+            block,
+            &encode_completion(&completion)?,
+        )?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            block,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Finalization V3 retry Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2815,10 +2923,17 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
-fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationFinalizationV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Finalization V3 fixed record: {why}"))
+/// Appends one record of the block that began at `block`. A write error cuts
+/// the file back to `block`, so no ragged tail survives it (D-1900).
+fn append_raw(
+    file: &mut File,
+    path: &Path,
+    block: u64,
+    raw: &[u8],
+) -> Result<(), PopulationFinalizationV3Refusal> {
+    crate::fixed_tail::write_at_end(file, &path.display(), block, raw, |file, raw| {
+        file.write_all(raw)
+    })
 }
 
 fn open_root_directory(
@@ -3583,6 +3698,52 @@ mod tests {
         );
     }
 
+    /// slice24-F1, D-1900: a short write or failed barrier on either file is
+    /// cut back to the last whole record; the ledger opens read-only and the
+    /// exact rerun commits.
+    #[test]
+    fn a_failed_write_or_barrier_in_either_file_is_cut_and_the_rerun_commits() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let limits = bounds();
+        let value = prepared();
+        let half = POPULATION_FINALIZATION_V3_ROW_BYTES / 2;
+        for (case, (file, kind, skip)) in [
+            (ROW_FILE, Kind::Write { keep: half }, 0),
+            (ROW_FILE, Kind::Write { keep: half }, 2),
+            (ROW_FILE, Kind::Sync, 0),
+            (COMPLETION_FILE, Kind::Write { keep: half }, 0),
+            (COMPLETION_FILE, Kind::Sync, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = TestRoot::new("fault");
+            let armed = Armed::arm_after(file, kind, skip);
+            let refusal = persist_population_finalization_v3(root.path(), limits, &value)
+                .err()
+                .unwrap_or_default();
+            assert!(!Armed::pending(), "case {case} fired");
+            drop(armed);
+            assert!(refusal.contains("injected"), "case {case}: {refusal}");
+            for (name, stride) in [
+                (ROW_FILE, POPULATION_FINALIZATION_V3_ROW_BYTES),
+                (COMPLETION_FILE, POPULATION_FINALIZATION_V3_COMPLETION_BYTES),
+            ] {
+                let len = std::fs::metadata(root.path().join(name))
+                    .expect("stat fault file")
+                    .len();
+                assert_eq!(len % stride as u64, 0, "case {case} {name} is whole");
+            }
+            PopulationFinalizationV3Ledger::open_read(root.path(), limits)
+                .expect("the cut ledger opens read-only");
+            assert!(matches!(
+                persist_population_finalization_v3(root.path(), limits, &value)
+                    .expect("the exact rerun commits"),
+                PopulationFinalizationV3Commit::Written(_)
+            ));
+        }
+    }
+
     #[test]
     fn full_orphan_exact_retry_completes_once_and_foreign_retry_refuses() {
         let limits = bounds();
@@ -3618,6 +3779,36 @@ mod tests {
         assert_eq!(
             std::fs::read(foreign_root.path().join(ROW_FILE)).expect("reread foreign rows"),
             before
+        );
+    }
+
+    /// rnew-1, D-4460: a process killed while writing a row or the Completion
+    /// leaves a sub-record tail. A reader still refuses it; the next writer
+    /// cuts it, says so once, and keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_in_either_file_is_cut_by_the_writer_and_history_kept() {
+        let limits = bounds();
+        let root = TestRoot::new("kill-torn");
+        let value = prepared();
+        persist_population_finalization_v3(root.path(), limits, &value).expect("seed ledger");
+        let rows = root.path().join(ROW_FILE);
+        let completions = root.path().join(COMPLETION_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[
+                (rows.as_path(), POPULATION_FINALIZATION_V3_ROW_BYTES as u64),
+                (
+                    completions.as_path(),
+                    POPULATION_FINALIZATION_V3_COMPLETION_BYTES as u64,
+                ),
+            ],
+            &mut || {
+                let opened = PopulationFinalizationV3Ledger::open_read(root.path(), limits)?;
+                Ok(format!(
+                    "{:?}",
+                    opened.reopen_structural_receipt(&value.finalization_id)?
+                ))
+            },
+            &mut || PopulationFinalizationV3Ledger::open_write(root.path(), limits).map(drop),
         );
     }
 
@@ -3929,6 +4120,131 @@ mod tests {
         assert_eq!(
             std::fs::read(external.path()).expect("reread external target"),
             before
+        );
+    }
+
+    fn truncate_rows(root: &Path, kept: usize) {
+        OpenOptions::new()
+            .write(true)
+            .open(root.join(ROW_FILE))
+            .expect("open partial rows")
+            .set_len(
+                u64::try_from(kept).expect("kept rows fit u64")
+                    * POPULATION_FINALIZATION_V3_ROW_BYTES as u64,
+            )
+            .expect("truncate to whole-row prefix");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let limits = bounds();
+        let value = prepared();
+        let full = TestRoot::new("rollback-reference");
+        write_block(full.path(), &value, true);
+        let root = TestRoot::new("append-rollback");
+        write_block(root.path(), &value, false);
+        truncate_rows(root.path(), 1);
+        for (name, width) in [
+            (ROW_FILE, POPULATION_FINALIZATION_V3_ROW_BYTES),
+            (COMPLETION_FILE, POPULATION_FINALIZATION_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let commit = persist_population_finalization_v3(root.path(), limits, &value)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(commit, PopulationFinalizationV3Commit::Written(_)));
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            assert_eq!(
+                std::fs::read(root.path().join(name)).expect("read recovered file"),
+                std::fs::read(full.path().join(name)).expect("read reference file"),
+                "{name} must equal the uncrashed bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn every_exact_partial_row_prefix_without_completion_recovers_on_exact_retry() {
+        let limits = bounds();
+        let value = prepared();
+        let full = TestRoot::new("full-reference");
+        write_block(full.path(), &value, true);
+        let full_rows = std::fs::read(full.path().join(ROW_FILE)).expect("read full rows");
+        let full_completion =
+            std::fs::read(full.path().join(COMPLETION_FILE)).expect("read full Completion");
+        for kept in 1..value.rows.len() {
+            let root = TestRoot::new("partial-prefix");
+            write_block(root.path(), &value, false);
+            truncate_rows(root.path(), kept);
+            let commit = persist_population_finalization_v3(root.path(), limits, &value)
+                .unwrap_or_else(|why| panic!("exact retry over {kept} rows must recover: {why}"));
+            assert!(matches!(commit, PopulationFinalizationV3Commit::Written(_)));
+            assert_eq!(
+                std::fs::read(root.path().join(ROW_FILE)).expect("reread recovered rows"),
+                full_rows,
+                "prefix of {kept} rows must complete to the exact uncrashed rows"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(COMPLETION_FILE))
+                    .expect("reread recovered Completion"),
+                full_completion
+            );
+            let reused = persist_population_finalization_v3(root.path(), limits, &value)
+                .expect("second rerun reuses");
+            assert!(matches!(reused, PopulationFinalizationV3Commit::Reused(_)));
+
+            let foreign = TestRoot::new("partial-foreign");
+            write_block(foreign.path(), &value, false);
+            truncate_rows(foreign.path(), kept);
+            let before = std::fs::read(foreign.path().join(ROW_FILE)).expect("read foreign");
+            assert_refuses(
+                persist_population_finalization_v3(
+                    foreign.path(),
+                    limits,
+                    &altered_prepared(93_000),
+                ),
+                "not exact retry",
+            );
+            assert_eq!(
+                std::fs::read(foreign.path().join(ROW_FILE)).expect("reread foreign"),
+                before
+            );
+        }
+    }
+
+    /// A receipt-less block carrying the retry's own Finalization identity
+    /// but other row bytes is not the exact retry: identity alone must not
+    /// let the retry complete it, and nothing may be written.
+    /// G18-cli-b-14, D-2024.
+    #[test]
+    fn a_same_identity_trailing_block_with_other_rows_refuses_without_writing() {
+        let limits = bounds();
+        let value = prepared();
+        let mut forged = prepared();
+        forged.rows[0].candidate_row_digest = digest(95_000);
+        forged.rows[0].row_id = forged.rows[0].derive_row_id().expect("rederive forged row");
+        assert_eq!(forged.finalization_id, value.finalization_id);
+        assert_eq!(forged.rows[0].finalization_id, value.finalization_id);
+        assert_ne!(forged.rows[0], value.rows[0]);
+        let root = TestRoot::new("same-identity-foreign");
+        write_block(root.path(), &forged, false);
+        let before = std::fs::read(root.path().join(ROW_FILE)).expect("read forged rows");
+        assert_refuses(
+            persist_population_finalization_v3(root.path(), limits, &value),
+            "not exact retry",
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(ROW_FILE)).expect("reread forged rows"),
+            before
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join(COMPLETION_FILE))
+                .expect("stat Completion file")
+                .len(),
+            0
         );
     }
 }

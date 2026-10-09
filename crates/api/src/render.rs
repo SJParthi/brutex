@@ -307,6 +307,7 @@ svg.share rect.r0{fill:var(--acc)}\
 svg.share rect.r1{fill:var(--acc2)}\
 svg.share rect.r2{fill:var(--warn)}\
 svg.share rect.r3{fill:var(--bad)}\
+svg.share rect.r4{fill:var(--dim)}\
 svg.share rect.none{fill:var(--line)}\
 .legend{display:flex;gap:15px;flex-wrap:wrap;align-items:center;color:var(--dim);\
 font-size:11.5px;margin:12px 0 0}\
@@ -314,6 +315,7 @@ font-size:11.5px;margin:12px 0 0}\
 .key{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px}\
 .key.r0{background:var(--acc)}.key.r1{background:var(--acc2)}\
 .key.r2{background:var(--warn)}.key.r3{background:var(--bad)}\
+.key.r4{background:var(--dim)}\
 td.when{font-variant-numeric:tabular-nums;color:var(--dim);font-size:12.5px}\
 td.verdict{font-weight:820;font-size:11px;letter-spacing:.7px}\
 td.verdict.loud{color:var(--bad)}\
@@ -514,12 +516,20 @@ fn kind_cells(kind: Kind) -> String {
         } => {
             // Strike is paisa; a human reads rupees. core owns the split so the
             // browser and the server cannot disagree about it.
+            //
+            // THE SIGN IS WRITTEN ON ITS OWN. `rupees_trunc()` of -5 paisa is
+            // 0, which has no sign to print, so the old `{}.{:02}` rendered -5
+            // paisa as "0.05": a negative strike shown as a positive one. Every
+            // strike constructor refuses <= 0 today (D-1311), so this was
+            // latent; the page no longer leans on that. `unsigned_abs` because
+            // `i64::MIN.abs()` overflows. apir-3, D-2585.
             format!(
-                "<td>Option {}</td><td>{}</td><td class=\"num\">{}.{:02}</td>",
+                "<td>Option {}</td><td>{}</td><td class=\"num\">{}{}.{:02}</td>",
                 side.as_str(),
                 expiry,
-                strike.rupees_trunc(),
-                strike.paisa_part().abs()
+                if strike.raw() < 0 { "-" } else { "" },
+                strike.rupees_trunc().unsigned_abs(),
+                strike.paisa_part().unsigned_abs()
             )
         }
     }
@@ -900,7 +910,7 @@ pub(crate) fn nav(current: &str) -> String {
         // is the defect the `/logs` line below already records once. D-0312.
         ("/masters", "Masters", true),
         ("/pull", "Ingest", true),
-        ("/audit", "Audit", true),
+        ("/audit/page", "Audit", true),
         ("/store", "Store", true),
         // THE LOG, REACHABLE WITHOUT KNOWING THE URL. `crate::logs` existed
         // before this line did, which made it a page only somebody who had
@@ -1357,9 +1367,10 @@ fn coverage_strip(held: &[bool]) -> String {
 
 /// One stacked bar: each drop reason's share of the total, in integer percent.
 ///
-/// Percentages are computed against the total and the last segment takes
-/// whatever rounding left over, so the four always add to the width and the bar
-/// never shows a gap that is really a division remainder.
+/// Percentages are computed against the total and the last segment WITH A DROP
+/// takes whatever rounding left over, so the segments always add to the width,
+/// the bar never shows a gap that is really a division remainder, and a reason
+/// with no drops draws nothing (apir-2, D-2585).
 fn share_bar(drops: Drops) -> String {
     let total = drops.total();
     if total == 0 {
@@ -1373,10 +1384,24 @@ fn share_bar(drops: Drops) -> String {
         "<svg class=\"share\" viewBox=\"0 0 100 10\" preserveAspectRatio=\"none\" role=\"img\" \
          aria-label=\"each drop reason's share\">",
     );
+    // THE REMAINDER GOES TO THE LAST REASON THAT HAS A DROP, not to the last
+    // reason in order. It went to the last in order, so a zero-count
+    // `OnClosedDay` still drew a slice titled ": 0" carrying the other reasons'
+    // rounding residue: a colour on the bar for a reason nothing was dropped
+    // for. `total > 0` here and `total` is the sum over `DROP_REASONS`, so at
+    // least one reason is non-zero. apir-2, D-2585.
+    let mut last_nonzero = 0usize;
+    for (i, reason) in DROP_REASONS.into_iter().enumerate() {
+        if drops.of(reason) > 0 {
+            last_nonzero = i;
+        }
+    }
     let mut at = 0u64;
     for (i, reason) in DROP_REASONS.into_iter().enumerate() {
-        let last = i + 1 == DROP_REASONS.len();
-        let width = if last {
+        let last = i == last_nonzero;
+        let width = if drops.of(reason) == 0 {
+            0
+        } else if last {
             100u64.saturating_sub(at)
         } else {
             drops.of(reason).saturating_mul(100) / total
@@ -2001,7 +2026,9 @@ fn capture_panel(capture: Option<Capture<'_>>, absent: &str) -> String {
         "<table><thead><tr><th>Dropped because</th><th>Rows</th><th>Share</th></tr></thead><tbody>",
     );
     for reason in DROP_REASONS {
-        let n = drops.map(|d| d.of(reason));
+        // `recorded`, not `of`: a version-1 record never counted the
+        // closed-day reason, and its row says "not measured" rather than 0.
+        let n = drops.and_then(|d| d.recorded(reason));
         let bar = n.map_or_else(String::new, |v| {
             format!(
                 "<div class=\"cbar\"><span style=\"width:{}%\"></span></div>",
@@ -2051,7 +2078,7 @@ fn journal_note(note: JournalNote<'_>) -> String {
         escape(note.path),
         if note.present {
             format!(
-                "{} record(s), {} byte(s) so far. <a href=\"/audit\">Read them</a>.",
+                "{} record(s), {} byte(s) so far. <a href=\"/audit/page\">Read them</a>.",
                 note.records, note.bytes
             )
         } else {
@@ -2173,7 +2200,7 @@ pub fn receipt_page(receipt: &Receipt<'_>) -> String {
     let _ = write!(
         body,
         "<p class=\"fine\">{} <a href=\"/pull\">Back to the forms</a> · \
-         <a href=\"/audit\">the record of every run</a>.</p>",
+         <a href=\"/audit/page\">the record of every run</a>.</p>",
         escape(receipt.footnote)
     );
     body.push_str("</div></section>");
@@ -2275,6 +2302,39 @@ fn store_filter_bar(filter: &crate::census::StoreFilter, held_only: bool) -> Str
         escape(symbol)
     );
 
+    // ---- BAR LENGTH -----------------------------------------------------
+    // From the store's own rung list, so a rung added there is offered here.
+    // Rendered from the parsed filter like every other control: the store
+    // holds more than one rung, and a narrowing the URL applied but the bar did
+    // not show was the silent filter this bar exists to refuse (D-1765).
+    out.push_str(
+        "<div class=\"fgroup\"><span class=\"flabel\">Bar length</span><div class=\"pills\">",
+    );
+    let all = if filter.timeframe.is_none() {
+        " checked"
+    } else {
+        ""
+    };
+    let _ = write!(
+        out,
+        "<input type=\"radio\" name=\"timeframe\" id=\"t-all\" value=\"\"{all}>\
+         <label for=\"t-all\">All</label>"
+    );
+    for rung in store::path::Timeframe::KNOWN {
+        let value = rung.as_str();
+        let checked = if filter.timeframe == Some(*rung) {
+            " checked"
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            "<input type=\"radio\" name=\"timeframe\" id=\"t-{value}\" value=\"{value}\"{checked}>\
+             <label for=\"t-{value}\">{value}</label>"
+        );
+    }
+    out.push_str("</div></div>");
+
     // ---- MONTHS ---------------------------------------------------------
     // Typed as YYYY-MM. A month is not a date and the calendar picker would be
     // the wrong control: it offers 31 days the store has no opinion about.
@@ -2346,16 +2406,23 @@ fn census_cards(censuses: &[&VendorCensus]) -> String {
 ///
 /// The swatch shades are quartiles of **the page**, not of an invented ideal.
 /// Nobody knows how many one-minute bars a month "should" hold without a
-/// trading calendar, and `crates/pull/src/session.rs` says the calendar filter
-/// does not exist yet (`docs/04-invariants.md` P-03). Shading against a made-up
+/// trading calendar. One now exists (`pull::calendar`, and the closed-day filter
+/// of `docs/04-invariants.md` P-03, D-2673), but this page does not read it yet.
+/// Shading against a made-up
 /// denominator would be exactly the invention `CLAUDE.md` §3 rule 1 forbids, so
 /// the scale is stated on the page as what it is: relative to the fullest month
 /// shown.
-fn page_peak(rows: &[Coverage]) -> u64 {
+///
+/// **Of the feed this page shows, and of no other.** It maxed over every vendor
+/// in `row.rows` while the table draws only `feed`'s column, so a page showing
+/// Groww's 10-row months shaded them against Dhan's 100 and said "quartiles of
+/// 100", a number that appears nowhere on the page. apir-1, D-2585.
+fn page_peak(rows: &[Coverage], feed: Vendor) -> u64 {
     let mut peak = 1u64;
     for row in rows {
-        for &(_, n) in &row.rows {
-            if let Some(v) = n
+        for &(vendor, n) in &row.rows {
+            if vendor == feed
+                && let Some(v) = n
                 && v > peak
             {
                 peak = v;
@@ -2371,7 +2438,7 @@ fn page_peak(rows: &[Coverage]) -> u64 {
 /// differ in shape before they differ in digits, and the row is tinted by which
 /// it is. That is the whole change: a grid of numbers is a grid nobody scans.
 fn coverage_table(view: &StoreView<'_>) -> String {
-    let peak = page_peak(view.rows);
+    let peak = page_peak(view.rows, view.feed);
     let mut out = String::with_capacity(768 + view.rows.len() * 320);
     let held: Vec<bool> = view.rows.iter().map(Coverage::is_held).collect();
     let filled = held.iter().filter(|h| **h).count();
@@ -2916,7 +2983,7 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
     // stays reachable. The footer already carries the visible half — "Rendered
     // on the server. No JavaScript" — and this is the half a tab, a bookmark and
     // a history entry can show.
-    let mut body = open("brutex · audit · server-rendered", "/audit");
+    let mut body = open("brutex · audit · server-rendered", "/audit/page");
     body.push_str(&hero(
         "EVERY PULL · ON DISK · SURVIVES A RESTART",
         "What was asked,<br>and what it did.",
@@ -2974,7 +3041,7 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
         body.push_str(&share_legend());
         body.push_str("</section>");
     }
-    body.push_str(&pager("/audit", view.page, view.last_page));
+    body.push_str(&pager("/audit/page", view.page, view.last_page));
     body.push_str(&notes_block(view.notes));
     body.push_str(FOOT);
     body
@@ -3046,9 +3113,23 @@ fn folder_input(suggestions: &[String]) -> String {
         let _ = write!(out, "<option value=\"{}\">", escape(f));
     }
     out.push_str("</datalist>");
-    if !archive_suggestions_enabled() {
-        out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS=0). No discovery scan was performed; explicit folder imports remain available.</p>");
-        return out;
+    match archive_suggestions(std::env::var_os(ARCHIVE_SWITCH).as_deref()) {
+        Ok(true) => {}
+        Ok(false) => {
+            out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS is off). No discovery scan was performed; explicit folder imports remain available.</p>");
+            return out;
+        }
+        // A WORD THE SWITCH DOES NOT TAKE TURNS THE WALK OFF AND SAYS SO. It
+        // used to leave the walk running for anything but a literal `0`, so
+        // `false`, `off` and `no` silently did nothing (CE-39, D-1769).
+        Err(why) => {
+            let _ = write!(
+                out,
+                "<p class=\"fine\">Automatic CSV-folder suggestions are off: {}. No discovery scan was performed; explicit folder imports remain available.</p>",
+                escape(&why)
+            );
+            return out;
+        }
     }
     let _ = write!(
         out,
@@ -3075,32 +3156,54 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 ///
 /// # Call this at startup and nowhere else
 ///
-/// This is the only `read_dir` in shipping code under `crates/api` — `bars.rs`
-/// has one behind `#[cfg(test)]`, which ships nowhere — and it is O(entries
-/// under `$HOME/Downloads`), unbounded by anything this repository controls.
+/// It is not the only `read_dir` in shipping code under `crates/api` (D-3304):
+/// `assets.rs` walks the front-end bundle at startup, and `server.rs`'s
+/// `archive_ready` lists one feed's archive directory per `/feeds.json`
+/// request, reading at most one entry of it. This one is O(entries under
+/// `$HOME/Downloads`), unbounded by anything this repository controls.
 /// `server::Site::new` calls it once and holds the result for the process's
 /// lifetime, which is the same bargain D-0039 struck for the instrument master
 /// and `census::held_series` strikes for the coverage axis. Calling it from a
 /// request handler is the defect this function was extracted to make visible.
 ///
 /// `docs/06-limits.md` §34 records the cost and what is not bounded about it.
+///
+/// `var` is the environment lookup, `std::env::var_os` in production. It is a
+/// parameter so a test can hand the walk a `HOME` and a switch of its own
+/// without mutating the process environment, which `unsafe_code` forbids and
+/// which would race every other test reading it. G18-api-12.
 #[must_use]
-pub fn folder_suggestions() -> Vec<String> {
-    folders_when(archive_suggestions_enabled(), discover_folders)
+pub fn folder_suggestions(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<String> {
+    folders_when(
+        archive_suggestions(var(ARCHIVE_SWITCH).as_deref()) == Ok(true),
+        || discover_folders(var("HOME")),
+    )
 }
 
-fn archive_suggestions_enabled() -> bool {
-    std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS").as_deref() != Some(std::ffi::OsStr::new("0"))
+/// The switch that turns the folder walk off.
+const ARCHIVE_SWITCH: &str = "BRUTEX_ARCHIVE_SUGGESTIONS";
+
+/// `BRUTEX_ARCHIVE_SUGGESTIONS`, read by the shared switch: on unless turned
+/// off, and a word it does not take refused by name (CE-39, D-1769). `raw` is
+/// the variable's value, read by the caller.
+fn archive_suggestions(raw: Option<&std::ffi::OsStr>) -> Result<bool, String> {
+    brutex_core::knob::switch(
+        ARCHIVE_SWITCH,
+        raw.map(|value| value.to_str().unwrap_or("\u{fffd}")),
+        true,
+    )
 }
 
 fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<String> {
     if enabled { discover() } else { Vec::new() }
 }
 
-fn discover_folders() -> Vec<String> {
+fn discover_folders(home: Option<std::ffi::OsString>) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::PathBuf::from(home);
+    // AN EMPTY OR RELATIVE HOME WALKS NOTHING. It used to walk the working
+    // directory's `Downloads` (CE-38, D-1769); a convenience list has no
+    // refusal to give, so it is simply empty.
+    if let Ok(home) = brutex_core::knob::home(home) {
         for root in [
             home.join("Downloads"),
             home.join(".brutex").join("vendor-data"),
@@ -3132,15 +3235,79 @@ mod archive_suggestion_tests {
         assert!(called);
         assert_eq!(found, vec!["fixture".to_owned()]);
     }
+
+    /// **THE WALK FINDS EXACTLY THE CSV FOLDERS UNDER BOTH ROOTS, AND ONLY
+    /// WHEN THE SWITCH IS ON.** A scratch `HOME` holds one CSV folder under each
+    /// root and one folder of plain text, which is not offered. Unset, the
+    /// switch is on and the list is exact and sorted; `off` and an unreadable
+    /// word both leave it empty without walking. G18-api-12.
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot be written is a failed test, not a case"
+    )]
+    fn folder_suggestions_list_exactly_the_csv_folders_under_home_when_switched_on() {
+        let home = crate::scratch::path("folder-suggestions-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let csv = home.join("Downloads").join("a");
+        let text = home.join("Downloads").join("b");
+        let vendor = home.join(".brutex").join("vendor-data").join("c");
+        for dir in [&csv, &text, &vendor] {
+            std::fs::create_dir_all(dir).expect("fixture folder");
+        }
+        std::fs::write(csv.join("x.csv"), "a\n").expect("csv");
+        std::fs::write(text.join("notes.txt"), "a\n").expect("text");
+        std::fs::write(vendor.join("y.csv"), "a\n").expect("csv");
+        let env = |switch: Option<&'static str>| {
+            let home = home.clone();
+            move |name: &str| match name {
+                "HOME" => Some(home.clone().into_os_string()),
+                ARCHIVE_SWITCH => switch.map(std::ffi::OsString::from),
+                _ => None,
+            }
+        };
+        let expected = vec![
+            vendor.to_string_lossy().into_owned(),
+            csv.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(folder_suggestions(env(None)), expected);
+        assert_eq!(folder_suggestions(env(Some("on"))), expected);
+        assert!(folder_suggestions(env(Some("off"))).is_empty());
+        assert!(folder_suggestions(env(Some("maybe"))).is_empty());
+        assert_eq!(archive_suggestions(None), Ok(true));
+        assert_eq!(archive_suggestions(Some("0".as_ref())), Ok(false));
+        assert!(archive_suggestions(Some("maybe".as_ref())).is_err());
+        // No HOME, or a relative one, walks nothing.
+        assert!(discover_folders(None).is_empty());
+        assert!(discover_folders(Some("relative/home".into())).is_empty());
+        assert_eq!(
+            discover_folders(Some(home.clone().into_os_string())),
+            expected
+        );
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
 }
 
 /// Directories at or under `dir` that directly contain a `.csv`.
 ///
 /// Depth-limited and allocation-bounded. `depth` counts down, so the recursion
-/// cannot outlive the number it was given — there is no cycle check because
-/// there is no cycle a bounded depth can complete.
+/// cannot outlive the number it was given. A linked directory below the root
+/// is not followed, so a link back to an ancestor cannot multiply the walk
+/// (CE-35, D-1769); the depth bound remains the backstop.
 fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
-    if depth == 0 || out.len() >= MAX_FOLDER_SUGGESTIONS || !dir.is_dir() {
+    // ONE PAST THE CAP, SO THE PAGE CAN TELL A FULL LIST FROM A CAPPED ONE.
+    // The walk stopped at exactly `MAX_FOLDER_SUGGESTIONS`, and `folder_input`
+    // states the cap only when it holds MORE than that — so the notice could
+    // never print and a capped list read as complete (CE-32, D-1769). The one
+    // extra folder is collected and never offered.
+    //
+    // AND A LINK IS NOT A FOLDER TO WALK. `is_dir` followed symlinks, so
+    // `~/Downloads/loop -> ~/Downloads` re-walked the whole tree at every level
+    // to depth six before the server started (CE-35, D-1769). A linked child
+    // directory is now skipped, as `assets` and `store::catalog` already do.
+    // The ROOT may still be a link — `~/Downloads` on an external drive is an
+    // ordinary setup — because a root is followed once, not at every level.
+    if depth == 0 || out.len() > MAX_FOLDER_SUGGESTIONS || !dir.is_dir() {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -3160,15 +3327,27 @@ fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) 
         {
             continue;
         }
-        if p.is_dir() {
+        let Ok(kind) = e.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
             children.push(p);
-        } else if p.extension().is_some_and(|x| x == "csv") {
+        } else if !kind.is_symlink() && p.extension().is_some_and(|x| x == "csv") {
             has_csv = true;
         }
     }
     if has_csv {
         out.push(dir.to_string_lossy().into_owned());
     }
+    // CHILDREN IN NAME ORDER, SO A CAPPED WALK TAKES THE SAME FOLDERS ON EVERY
+    // MACHINE. `read_dir` order is the filesystem's — hashed on one, creation
+    // order on another — and the walk stops one past the cap, so WHICH sixty-one
+    // folders it kept depended on it; `discover_folders` sorted only after the
+    // truncation had already chosen (§3 rule 5; determinism-1, D-2571). Sorted,
+    // the kept set is the first sixty-one in lexical depth-first order. The
+    // sort is O(c log c) in one directory's children, inside a walk that is
+    // already O(entries) and startup-only (`docs/06-limits.md` §34).
+    children.sort();
     for c in children {
         collect_csv_dirs(&c, depth - 1, out);
     }
@@ -3190,6 +3369,152 @@ mod tests {
     // holds `Drops`, which is the same four counts as a value, because a
     // record read back off disk cannot rebuild a counter without counting.
     use pull::session::{DropCensus, DropReason};
+
+    /// A directory link is not walked, so a link back to an ancestor cannot
+    /// multiply the startup walk (CE-35, D-1769).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_directory_is_not_walked() {
+        let root = std::env::temp_dir().join(format!("brutex-ce35-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("x.csv"), "a\n").unwrap();
+        std::os::unix::fs::symlink(&root, data.join("loop")).unwrap();
+        let mut found = Vec::new();
+        collect_csv_dirs(&root, 6, &mut found);
+        // A root that is itself a link is followed once, and the link inside
+        // it is still not walked.
+        let mut through_link = Vec::new();
+        collect_csv_dirs(&data.join("loop"), 6, &mut through_link);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, vec![data.to_string_lossy().into_owned()]);
+        assert_eq!(through_link.len(), 1, "{through_link:?}");
+    }
+
+    /// A tree holding more CSV folders than the cap is walked one past it, so
+    /// the picker offers sixty and SAYS it was capped; a tree holding exactly
+    /// sixty is offered whole with no notice (CE-32, D-1769).
+    #[test]
+    fn a_capped_folder_walk_is_stated_and_an_exact_one_is_not() {
+        for (made, capped) in [
+            (MAX_FOLDER_SUGGESTIONS + 5, true),
+            (MAX_FOLDER_SUGGESTIONS, false),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("brutex-ce32-{}-{made}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for i in 0..made {
+                let d = root.join(format!("f{i:03}"));
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("x.csv"), "a\n").unwrap();
+            }
+            let mut found = Vec::new();
+            collect_csv_dirs(&root, 6, &mut found);
+            let html = folder_input(&found);
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(found.len(), made.min(MAX_FOLDER_SUGGESTIONS + 1));
+            assert_eq!(
+                html.matches("<option value=").count(),
+                made.min(MAX_FOLDER_SUGGESTIONS)
+            );
+            if archive_suggestions(std::env::var_os(ARCHIVE_SWITCH).as_deref()) == Ok(true) {
+                assert_eq!(
+                    html.contains(&format!("capped at {MAX_FOLDER_SUGGESTIONS}")),
+                    capped,
+                    "{html}"
+                );
+            }
+        }
+    }
+
+    /// determinism-1, D-2571: a walk past the cap keeps the SAME folders
+    /// whatever order the filesystem lists them in. Two trees of seventy CSV
+    /// folders, one created in ascending and one in descending name order, both
+    /// keep exactly the lexically first sixty-one. On the old walk (children
+    /// recursed in raw `read_dir` order) at least one of the two fails on any
+    /// filesystem whose listing follows creation order, and a hashed listing
+    /// fails both. A nested tree pins the depth-first shape; a tree holding
+    /// exactly the cap, one past it, and none pins the boundaries.
+    #[test]
+    fn a_capped_folder_walk_offers_the_same_folders_whatever_the_directory_order() {
+        let made = 70;
+        let keep = MAX_FOLDER_SUGGESTIONS + 1;
+        for descending in [false, true] {
+            let root = std::env::temp_dir()
+                .join(format!("brutex-det1-{}-{descending}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let order: Vec<usize> = if descending {
+                (0..made).rev().collect()
+            } else {
+                (0..made).collect()
+            };
+            for i in order {
+                let d = root.join(format!("f{i:03}"));
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("x.csv"), "a\n").unwrap();
+            }
+            let mut found = Vec::new();
+            collect_csv_dirs(&root, 6, &mut found);
+            let expected: Vec<String> = (0..keep)
+                .map(|i| root.join(format!("f{i:03}")).to_string_lossy().into_owned())
+                .collect();
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(found, expected, "descending={descending}");
+        }
+        // Depth-first in name order: a parent before its children, and `a/z`
+        // before `b`, whatever was created first.
+        let root = std::env::temp_dir().join(format!("brutex-det1-nest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in ["b", "a/z", "a", "a/m/q"] {
+            let d = root.join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("x.csv"), "a\n").unwrap();
+        }
+        let mut found = Vec::new();
+        collect_csv_dirs(&root, 6, &mut found);
+        let expected: Vec<String> = ["a", "a/m/q", "a/z", "b"]
+            .iter()
+            .map(|rel| root.join(rel).to_string_lossy().into_owned())
+            .collect();
+        // Boundaries: an empty tree keeps nothing; depth 0 walks nothing.
+        let mut none = Vec::new();
+        collect_csv_dirs(&root.join("absent"), 6, &mut none);
+        let mut zero = Vec::new();
+        collect_csv_dirs(&root, 0, &mut zero);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, expected);
+        assert!(none.is_empty());
+        assert!(zero.is_empty());
+    }
+
+    /// The store filter bar shows the bar length it was given, one pill per
+    /// rung the store knows, and "All" only when no rung narrows the view
+    /// (P1-02-05, D-1765).
+    #[test]
+    fn the_store_filter_bar_shows_the_bar_length_that_was_applied() {
+        let filter = |timeframe| crate::census::StoreFilter {
+            segment: None,
+            symbol: None,
+            timeframe,
+            from: None,
+            to: None,
+        };
+        let day = store_filter_bar(&filter(Some(store::path::Timeframe::DAY_1)), true);
+        assert!(
+            day.contains(r#"id="t-1day" value="1day" checked>"#),
+            "{day}"
+        );
+        assert!(day.contains(r#"id="t-all" value="">"#), "{day}");
+        for rung in store::path::Timeframe::KNOWN {
+            let pill = format!(r#"name="timeframe" id="t-{0}" value="{0}""#, rung.as_str());
+            assert!(day.contains(&pill), "{pill}");
+        }
+        let all = store_filter_bar(&filter(None), true);
+        assert!(all.contains(r#"id="t-all" value="" checked>"#), "{all}");
+        assert!(!all.contains(r#"value="1day" checked"#), "{all}");
+    }
 
     fn nifty() -> InstrumentKey {
         InstrumentKey::index(Exchange::Nse, "NIFTY").expect("valid")
@@ -4032,8 +4357,8 @@ mod tests {
         }
         assert_eq!(
             DROP_REASONS.len(),
-            4,
-            "a fifth reason must be added to the panel, not silently counted"
+            5,
+            "a sixth reason must be added to the panel, not silently counted"
         );
 
         for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
@@ -4054,7 +4379,7 @@ mod tests {
         assert!(html.contains("/tmp/store/audit/pull.journal"), "{html}");
         assert!(html.contains("3 record(s), 768 byte(s)"), "{html}");
         assert!(
-            html.contains("href=\"/audit\""),
+            html.contains("href=\"/audit/page\""),
             "and a way to read it: {html}"
         );
 
@@ -4145,6 +4470,7 @@ mod tests {
             after_window: 1,
             before_open: 1,
             after_close: 0,
+            ..Drops::default()
         };
         let svg = share_bar(drops);
         let total: u64 = svg
@@ -4161,6 +4487,123 @@ mod tests {
         assert!(none.contains("class=\"none\""), "{none}");
         assert!(none.contains("nothing was dropped"), "{none}");
         assert_eq!(none.matches("<rect").count(), 1, "{none}");
+    }
+
+    /// The widths of every segment a share bar draws, and the classes.
+    fn share_segments(svg: &str) -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        for part in svg.split("<rect class=\"").skip(1) {
+            let class = part.split('"').next().expect("a class").to_owned();
+            let width = part
+                .split("width=\"")
+                .nth(1)
+                .and_then(|w| w.split('"').next())
+                .and_then(|w| w.parse::<u64>().ok())
+                .expect("a width");
+            out.push((class, width));
+        }
+        out
+    }
+
+    /// apir-2, D-2585. On the old code the LAST reason in order took
+    /// `100 - at` whatever its own count, so `{1, 1, 1, 0, 0}` drew a 1-wide
+    /// `r4` slice titled "on a closed day: 0". Every assignment of 0..=3 to
+    /// the five reasons is enumerated (4^5 = 1024 bars): a zero reason never
+    /// draws, a non-zero one always does, and the bar always fills 100.
+    #[test]
+    fn a_reason_with_no_drops_draws_no_slice() {
+        let svg = share_bar(Drops {
+            before_window: 1,
+            after_window: 1,
+            before_open: 1,
+            after_close: 0,
+            ..Drops::default()
+        });
+        assert!(!svg.contains("class=\"r3\""), "{svg}");
+        assert!(!svg.contains("class=\"r4\""), "{svg}");
+        assert!(!svg.contains(": 0<"), "no slice is titled with zero: {svg}");
+        for code in 0u32..1024 {
+            let c = |k: u32| u64::from((code >> (2 * k)) & 3);
+            let drops = Drops {
+                before_window: c(0),
+                after_window: c(1),
+                before_open: c(2),
+                after_close: c(3),
+                on_closed_day: Some(c(4)),
+                unclassified_kept: Some(0),
+            };
+            let svg = share_bar(drops);
+            if drops.total() == 0 {
+                assert!(svg.contains("nothing was dropped"), "{code}: {svg}");
+                continue;
+            }
+            let segments = share_segments(&svg);
+            let sum: u64 = segments.iter().map(|(_, w)| *w).sum();
+            assert_eq!(sum, 100, "{code}: {svg}");
+            for (i, reason) in DROP_REASONS.into_iter().enumerate() {
+                let drawn = segments.iter().any(|(class, _)| *class == format!("r{i}"));
+                assert_eq!(drawn, drops.of(reason) > 0, "{code} r{i}: {svg}");
+            }
+        }
+        // The extremes: one reason at u64::MAX is the whole bar.
+        let svg = share_bar(Drops {
+            before_open: u64::MAX,
+            ..Drops::default()
+        });
+        assert_eq!(share_segments(&svg), vec![("r2".to_owned(), 100)], "{svg}");
+    }
+
+    /// apir-1, D-2585. On the old code the scale was the largest count of ANY
+    /// vendor, so the Groww page below said "quartiles of 100" (Dhan's count,
+    /// never drawn) and shaded Groww's 10 as q1.
+    #[test]
+    fn the_store_grid_scales_its_swatches_to_the_feed_it_shows() {
+        let series = crate::census::Series {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new("NIFTY").expect("valid"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let row = |groww: Option<u64>, dhan: Option<u64>| Coverage {
+            series,
+            month: store::path::YearMonth::new(2026, 7).expect("valid"),
+            rows: vec![(Vendor::Groww, groww), (Vendor::Dhan, dhan)],
+        };
+        assert_eq!(page_peak(&[row(Some(10), Some(100))], Vendor::Groww), 10);
+        assert_eq!(page_peak(&[row(Some(10), Some(100))], Vendor::Dhan), 100);
+        assert_eq!(page_peak(&[row(None, Some(100))], Vendor::Groww), 1);
+        assert_eq!(page_peak(&[row(Some(0), Some(100))], Vendor::Groww), 1);
+        assert_eq!(page_peak(&[], Vendor::Groww), 1);
+        assert_eq!(
+            page_peak(&[row(Some(u64::MAX), None)], Vendor::Groww),
+            u64::MAX
+        );
+        assert_eq!(
+            page_peak(
+                &[row(Some(3), Some(100)), row(Some(7), Some(1))],
+                Vendor::Groww
+            ),
+            7,
+            "the largest of the shown feed across rows"
+        );
+        let rows = [row(Some(10), Some(100))];
+        let html = store_page(&StoreView {
+            feed: Vendor::Groww,
+            today: d(2026, 8, 7),
+            censuses: &[],
+            rows: &rows,
+            page: 0,
+            last_page: 0,
+            total: 1,
+            notes: &Notes::build(&["store root: /tmp/x".to_owned()]),
+            filter: None,
+            held: 1,
+            held_only: false,
+        });
+        assert!(html.contains("quartiles of 10 "), "{html}");
+        assert!(!html.contains("quartiles of 100"), "{html}");
+        assert!(html.contains("class=\"sw q4\""), "{html}");
     }
 
     #[test]
@@ -4208,6 +4651,7 @@ mod tests {
                 after_close: 170,
                 before_window: 0,
                 after_window: 0,
+                ..Drops::default()
             },
             failures: u64::from(loud),
             took_micros: 4_512_903,
@@ -4386,7 +4830,7 @@ mod tests {
         assert!(html.contains("Nothing here was written to the store"));
         assert!(html.contains("href=\"/pull\""), "a way back: {html}");
         assert!(
-            html.contains("href=\"/audit\""),
+            html.contains("href=\"/audit/page\""),
             "and to the record: {html}"
         );
         assert!(html.contains("badge bad"), "nothing ran: {html}");
@@ -4661,6 +5105,47 @@ mod tests {
         });
         assert!(put.contains("Option PE"));
         assert!(put.contains("27000.50"), "the paisa part must not be lost");
+    }
+
+    /// apir-3, D-2585. On the old `{}.{:02}` with `rupees_trunc()` and
+    /// `paisa_part().abs()`, -5 paisa rendered "0.05" (the sign lived only in
+    /// the rupee part, which truncates to 0), and `i64::MIN` panicked on
+    /// `abs()` in a debug build. Every boundary is enumerated.
+    #[test]
+    fn a_negative_strike_keeps_its_sign_on_the_page() {
+        let cell = |raw: i64| {
+            kind_cells(Kind::Option {
+                expiry: Expiry::new(2026, 8, 4).expect("valid"),
+                strike: Paisa::from_raw(raw),
+                side: OptionSide::Call,
+            })
+        };
+        for (raw, shown) in [
+            (-5, ">-0.05<"),
+            (-1, ">-0.01<"),
+            (-99, ">-0.99<"),
+            (-100, ">-1.00<"),
+            (-101, ">-1.01<"),
+            (-2_700_050, ">-27000.50<"),
+            (0, ">0.00<"),
+            (1, ">0.01<"),
+            (5, ">0.05<"),
+            (100, ">1.00<"),
+            (i64::MAX, ">92233720368547758.07<"),
+            (i64::MIN, ">-92233720368547758.08<"),
+        ] {
+            let html = cell(raw);
+            assert!(
+                html.contains(shown),
+                "{raw} paisa must read {shown}: {html}"
+            );
+            assert_eq!(
+                html.matches('-').count(),
+                usize::from(raw < 0) + 2,
+                "exactly one sign for a negative strike, none for a positive \
+                 one (the expiry carries two dashes): {raw}: {html}"
+            );
+        }
     }
 
     #[test]

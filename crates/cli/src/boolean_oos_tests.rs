@@ -443,3 +443,100 @@ fn optional_fold_proof_refuses_foreign_month_partitions_and_additional_memory_bo
     );
     Ok(())
 }
+
+/// D-1188 (o1runner-2), source shape: the later-period loop checks, hashes and
+/// fold-indexes the later series once, before it iterates, and every program
+/// and side is priced and bound over that one slice and map. The answers are
+/// byte-identical either way (`runner`'s
+/// `one_later_slice_prices_every_program_as_the_per_call_path_does` and
+/// `one_fold_map_binds_every_program_exactly_as_bind_does`), so only the
+/// source tells the two apart.
+#[test]
+fn the_later_loop_attests_its_slice_and_fold_index_once() {
+    let source = include_str!("boolean_oos_v1.rs");
+    let body = source
+        .split_once("fn compute(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    let (before, inside) = body
+        .split_once("for (group, anchor) in training.anchors.iter().enumerate() {")
+        .unwrap_or_default();
+    assert!(before.contains("LaterExpressionSliceV1::new(series, &column)"));
+    assert!(before.contains("LaterFoldMapV1::new("));
+    assert!(inside.contains("evaluate_expression_oos_on(anchor, &later, &run)"));
+    assert!(inside.contains("plan.bind_with(&evaluated, map,"));
+    assert!(!inside.contains("evaluate_expression_oos(") && !inside.contains("plan.bind(&"));
+}
+
+/// cli's own pass over a later comparison's source: one
+/// [`super::super::slice_digests`] digest across these three programs' six
+/// groups, where cli used to hash the three streams afresh for each group. It
+/// attests nothing through [`super::super::PricedSide`]. W2-cli2-3.
+///
+/// Since D-1831 this one pass is also the only one: each group's run is sealed
+/// with `ExpressionExecutionRunV1::with_digests` against it, so the runner no
+/// longer hashes the three streams per group (W3-runner2-3), and the later
+/// bars are hashed once by `LaterExpressionSliceV1::new` (W3-runner2-4).
+#[test]
+fn cli_digests_a_later_comparisons_source_once() -> Result<(), String> {
+    use super::super::tests::{passes, programs};
+    let fixture = Fixture::new()?;
+    let training = fixture.produce("NIFTY", &programs()?)?;
+    let inputs = config(&fixture)?;
+    let before = passes();
+    let observed = produce_identified(
+        &training,
+        later(&fixture, &inputs),
+        "generated-boolean-candidate-fixture",
+    )?;
+    let after = passes();
+    assert_eq!(training.anchors.len(), 6, "three programs, both sides");
+    assert_eq!(observed.rows().len(), training.rows().len());
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
+    Ok(())
+}
+
+/// **The later comparison seals every group's run without the runner hashing
+/// a stream again (W3-runner2-3, W3-runner2-5, D-1831).** Each of the six
+/// groups used to mint its run through
+/// `ExpressionExecutionRunV1::new_with_daily_reference`, which hashed the
+/// signal, minute-context and daily streams, searched the minute context for
+/// the evaluated slice (a separately loaded `Vec`, so never a view and always
+/// the linear path) and hashed the execution bars: O(S + M + D + E) per
+/// program × side. The loop now takes the slice digests once, through the same
+/// `slice_digests` the TRAINING family uses, and seals each run with
+/// `ExpressionExecutionRunV1::with_digests`, which reads no bar.
+///
+/// The count is the measurement: cli's one pass is still exactly one per
+/// comparison (`cli_digests_a_later_comparisons_source_once`), and this pins
+/// that no runner pass remains inside the loop.
+#[test]
+fn the_later_loop_seals_each_run_against_digests_taken_once() {
+    let source = include_str!("boolean_oos_v1.rs");
+    let body = source
+        .split_once("fn compute(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    let (before, inside) = body
+        .split_once("for (group, anchor) in training.anchors.iter().enumerate() {")
+        .unwrap_or_default();
+    assert!(before.contains("let mut hoisted = None;"));
+    assert!(inside.contains("let digests = slice_digests(\n            &mut hoisted,"));
+    assert!(inside.contains("\"Boolean later daily identity:\""));
+    assert!(inside.contains("execution_run(") && inside.contains("            &digests,\n"));
+    let mint = source
+        .split_once("fn execution_run(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    assert!(mint.contains("ExpressionExecutionRunV1::with_digests("));
+    for hashing in [
+        "new_with_daily_reference(",
+        "data_digest_with_daily_reference(",
+        "SourceDigest",
+    ] {
+        assert!(
+            !body.contains(hashing) && !mint.contains(hashing),
+            "the later loop must not call {hashing}"
+        );
+    }
+}

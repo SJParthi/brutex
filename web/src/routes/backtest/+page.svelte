@@ -82,6 +82,10 @@
   import { page as routePage } from '$app/state';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
+  import { censusFailure } from '$lib/store-census.js';
+  import { barsPerMonth } from '$lib/presets.js';
+  import { commandReply, headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
+  import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
      is a different thing entirely. One name for one value. */
@@ -121,6 +125,8 @@
   import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
+  import { holdPeriods as holdPeriodsOf, returnHistogram as returnHistogramOf } from '$lib/hold-series.js';
+  import { chargeScope, coverScope, isSweptIndex } from '$lib/charge-scope.js';
   import {
     compareRuns,
     exactIntegerDelta,
@@ -135,7 +141,8 @@
   import { decodeMaskWords } from '$lib/mask.js';
   import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
-  import { liveAttemptKey, reduceLiveProgress } from '$lib/live-progress';
+  import { foldLiveProgress, liveAttemptKey, liveLogsPath } from '$lib/live-progress';
+  import { liveWinShare } from '$lib/live-win.js';
   import {
     TIME_GRAINS,
     equityMaxDrawdown,
@@ -279,37 +286,65 @@
    * The cast sits INSIDE `$state(...)` for the reason the block above gives.
    */
   let liveTop = $state(
-    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number, stale: boolean, why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number | null, stale: boolean | null, why: string, identity: string }} */ ({
       phase: 'idle',
       rows: [],
       trials: 0,
       barMilli: 0,
       idleSecs: 0,
       stale: false,
-      why: ''
+      why: '',
+      identity: ''
     })
   );
+  /** Latest-request-wins generation for `/live.json`. conc18-4. */
+  let liveTopSeq = 0;
 
   /**
    * Read `/live.json` and keep the newest non-stale run's rows.
    *
-   * Latest-request-wins is unnecessary here: the endpoint is a whole-file read
-   * of at most `keep` rows and the poll interval is 2 s, so a late reply can
-   * only carry an older heap of the same run — which is what the next tick
-   * replaces anyway. A refusal is NAMED and never rendered as "no rows".
+   * LATEST REQUEST WINS, AND ONLY FOR THE SWEEP THAT ASKED. This said a
+   * token was unnecessary because a late reply "can only carry an older heap of
+   * the same run". It cannot be relied on: the call is fire-and-forget on a 2 s
+   * poll with a 15 s ceiling, so a slow reply can land after a newer one, and
+   * after the sweep that asked has been replaced. Each call now takes a
+   * sequence number and the status run's key, and publishes only while both
+   * are still current. `invalidateLive(true)` clears the panel when the run
+   * changes, so a new sweep does not open on the previous one's rows. conc18-4.
+   *
+   * A refusal is NAMED and never rendered as "no rows".
    */
+  /**
+   * What the panel may say about the heap's age (F3, D-3219). `/live.json`
+   * sends `idle_secs` and `stale` as null when the heap file cannot be dated
+   * (`crates/api/src/livejson.rs`); that is said as such, never as "0s ago".
+   * `warn` is the pill's text, or null for none.
+   * @param {{ idleSecs: number | null, stale: boolean | null }} top
+   */
+  function liveFreshness(top) {
+    if (top.idleSecs === null) return { text: 'age unknown: /live.json could not date this heap', warn: 'undated' };
+    const ago = top.idleSecs < 60 ? `${top.idleSecs}s` : `${Math.floor(top.idleSecs / 60)}m`;
+    return { text: `updated ${ago} ago`, warn: top.stale === true || top.idleSecs > 120 ? 'not moving' : null };
+  }
+
   async function fetchLiveTop() {
+    const seq = ++liveTopSeq;
+    const runKey = liveRunKey(sweep.run);
+    const current = () => seq === liveTopSeq && liveRunKey(sweep.run) === runKey;
     try {
       const response = await ask_('/live.json', { cache: 'no-store' });
+      if (!current()) return;
       if (!response.ok) {
-        liveTop = {
-          ...liveTop,
-          phase: 'failed',
-          why: `/live.json answered ${response.status}. The heap is still being written to the store — this page could not read it back.`
-        };
+        // THE SERVER'S `refusal`, NOT A GUESS (W4, D-3214). This said "the heap
+        // is still being written to the store" whatever the route refused for --
+        // saturation, an unreadable live directory, an unset store root.
+        const why = await refusalFrom('/live.json', response);
+        if (!current()) return;
+        liveTop = { ...liveTop, phase: 'failed', why };
         return;
       }
       const body = await response.json();
+      if (!current()) return;
       const runs = Array.isArray(body?.runs) ? body.runs : [];
       // THE FRESHEST RUN BY `idle_secs`, NOT THE FIRST ONE THAT IS NOT STALE.
       //
@@ -337,10 +372,17 @@
       // Undated now sorts last. A run with no rows is also dropped: a freshly
       // started sweep whose heap is still empty would otherwise blank the panel
       // while an older run with real rows sat right behind it.
-      const freshness = (/** @type {any} */ r) => {
-        const idle = Number(r?.idle_secs);
-        return Number.isFinite(idle) ? idle : Number.MAX_SAFE_INTEGER;
+      //
+      // AND IT DID NOT, UNTIL F3 (D-3219). The fix above still read
+      // `Number(r?.idle_secs)`, and `Number(null)` is 0 -- finite -- so an
+      // undated run kept sorting FIRST, and was then shown "updated 0s ago"
+      // with no pill. An age is only a non-negative finite JSON number; null,
+      // a string or a negative is no age, held as null and rendered as such.
+      const idleOf = (/** @type {any} */ r) => {
+        const idle = r?.idle_secs;
+        return typeof idle === 'number' && Number.isFinite(idle) && idle >= 0 ? idle : null;
       };
+      const freshness = (/** @type {any} */ r) => idleOf(r) ?? Number.MAX_SAFE_INTEGER;
       const fresh = runs
         .filter(
           (/** @type {any} */ r) => r && Array.isArray(r.rows) && r.rows.length > 0
@@ -359,7 +401,8 @@
           barMilli: 0,
           idleSecs: 0,
           stale: false,
-          why: ''
+          why: '',
+          identity: ''
         };
         return;
       }
@@ -370,11 +413,18 @@
         barMilli: Number(best.bar_milli) || 0,
         // RENDERED, NOT JUST USED TO CHOOSE. A reader has to be able to see
         // that these rows are seconds old rather than trust that they are.
-        idleSecs: Number(best.idle_secs) || 0,
-        stale: best.stale === true,
-        why: ''
+        idleSecs: idleOf(best),
+        // `true`, `false` or null (undated), as `/live.json` sends it. null is
+        // not `false`: `liveFreshness` says the heap is undated instead.
+        stale: typeof best.stale === 'boolean' ? best.stale : null,
+        why: '',
+        // WHOSE HEAP THIS IS. `/live.json` names each heap by its run identity
+        // and the sweep status names none, so the page cannot prove the heap is
+        // this sweep's; it shows which one it is instead of claiming so.
+        identity: typeof best.identity === 'string' ? best.identity : ''
       };
     } catch (error) {
+      if (!current()) return;
       liveTop = {
         ...liveTop,
         phase: 'failed',
@@ -802,12 +852,19 @@
    *
    * `gross_win` and `gross_loss` are the two sums `/frontier.json` began sending
    * when v3 stored them; before that this criterion was not computable at all.
-   * `null` when nothing was won, because a ratio with no base is undefined —
-   * never `0`, which `norm` would read as "measured, and best".
+   * NOTHING WON AND SOMETHING LOST IS THE WORST RATIO THERE IS, NOT AN
+   * UNKNOWN ONE. This returned `null` whenever `gross_win` was 0, and `norm`
+   * scores `null` as the midpoint, so a row that only ever lost beat every
+   * measured row in the lower half on "less losing ratio". It is `Infinity`
+   * now, which `norm` places at the top of the range and the inverted term
+   * scores 0. `null` remains only when neither side moved: then the ratio
+   * really has no reading. p14num-2, D-2750.
    *
    * @param {any} r
+   * @returns {number|null}
    */
-  const lossRatio = (r) => (r.gross_win > 0 ? -r.gross_loss / r.gross_win : null);
+  const lossRatio = (r) =>
+    r.gross_win > 0 ? -r.gross_loss / r.gross_win : r.gross_loss < 0 ? Infinity : null;
 
   /**
    * Which measurements separate nothing across this set of rows.
@@ -930,8 +987,14 @@
     // An unmeasurable value takes the same 0.5: it is neither evidence for the
     // row nor against it, and any other number would be an opinion the data
     // does not support. `lo === Infinity` means NOTHING was measurable.
+    //
+    // AN UNBOUNDED VALUE IS NOT UNMEASURED. `+Infinity` is past every measured
+    // value, so it sits at the top of the range (1) and `-Infinity` at the
+    // bottom (0); only `null`, `undefined` and `NaN` take the midpoint. D-2750.
     /** @param {number|null|undefined} v @param {{ lo: number, hi: number }} range */
     const norm = (v, { lo, hi }) => {
+      if (v === Infinity) return 1;
+      if (v === -Infinity) return 0;
       if (v === null || v === undefined || !Number.isFinite(v)) return 0.5;
       if (!Number.isFinite(lo) || hi === lo) return 0.5;
       return (v - lo) / (hi - lo);
@@ -965,7 +1028,12 @@
         w.profit * norm(r.pessimistic, ranges.profit) +
         w.winningTrades * norm(r.wins, ranges.winningTrades) +
         w.winRate * norm(r.win_rate_bp, ranges.winRate) +
-        w.rewardRisk * norm(r.reward_to_risk_bp, ranges.rewardRisk) +
+        // A NEVER-LOST ROW IS UNTESTED, NOT MIDDLING. `/frontier.json` sends
+        // `null` here only for `i64::MAX`, the cell with no losing trade, and
+        // `cli::ranked` demotes exactly that sentinel to last in all four
+        // server ranking keys. The midpoint put it above every measured row in
+        // the lower half, against the `rank` this sort breaks ties on. D-2750.
+        w.rewardRisk * (r.reward_to_risk_bp === null ? 0 : norm(r.reward_to_risk_bp, ranges.rewardRisk)) +
         w.avgWin * norm(r.avg_win, ranges.avgWin) +
         w.avgLoss * norm(r.avg_loss, ranges.avgLoss);
       return { ...r, score };
@@ -1285,14 +1353,20 @@
       /** @type {any} */
       let body = null;
       let response = null;
+      // THE STATUS BEFORE THE BODY (F2, D-3220). This parsed every reply as
+      // JSON first, so a plain-text refusal became a parse error, and a JSON
+      // one was shown as its bare `refusal` with neither route nor status.
+      /** @type {string | null} */
+      let refused = null;
       let page = 0;
       for (let hop = 0; hop < PAGE_GUARD; hop += 1) {
         response = await ask_(
           `/trades.json?identity=${encodeURIComponent(identity)}&page=${page}`
         );
-        body = await response.json();
+        if (response.ok) body = await response.json();
+        else refused = await refusalFrom('/trades.json', response);
         if (!tradeGate.admits(ticket, openRun?.identity)) return;
-        if (!response.ok) break;
+        if (refused !== null) break;
         if (!Array.isArray(body?.trades)) break;
         pagedRows.push(...body.trades);
         const next = body.next_page;
@@ -1300,14 +1374,14 @@
         page = Number(next);
         if (!Number.isSafeInteger(page) || page < 0) break;
       }
-      if (!response || !response.ok) {
+      if (!response || refused !== null) {
         tradeList = {
           phase: 'failed',
           rows: [],
           periods: null,
           policy: null,
           direction: null,
-          why: body?.refusal ?? `/trades.json answered ${response?.status ?? 'nothing'}`
+          why: refused ?? '/trades.json was not asked'
         };
         return;
       }
@@ -1907,6 +1981,16 @@
   /** Latest-request-wins generation for the independent live-event stream. */
   let liveSeq = 0;
 
+  /**
+   * The fold carried between polls, for exactly one run key (P1-06-02,
+   * D-2662). `/logs.json?run=` holds the newest 200 events and a validated
+   * sweep emits about 36 a rung, so the start marker leaves the window near
+   * rung six; the fold needs it once, then continues from the last event it
+   * folded, and refuses if a window no longer reaches that event.
+   * @type {{ key: string, carry: import('$lib/live-progress').LiveCarry | null }}
+   */
+  let liveCarry = { key: '', carry: null };
+
   /** @param {any} run */
   function liveRunKey(run) {
     return JSON.stringify([
@@ -1924,7 +2008,12 @@
   /** Revoke every pending live request, optionally clearing the prior attempt. */
   function invalidateLive(clear = false) {
     liveSeq += 1;
-    if (clear) live = { phase: 'idle', attempt: null, rungs: [], why: '' };
+    if (clear) {
+      live = { phase: 'idle', attempt: null, rungs: [], why: '' };
+      // AND THE RANKED HEAP, which belonged to the run being replaced.
+      liveTopSeq += 1;
+      liveTop = { phase: 'idle', rows: [], trials: 0, barMilli: 0, idleSecs: 0, stale: false, why: '', identity: '' };
+    }
   }
 
   /**
@@ -1967,22 +2056,28 @@
     }
     try {
       const response = await ask_(
-        `/logs.json?limit=200&run=${encodeURIComponent(attempt)}`,
+        liveLogsPath(attempt, run),
         { cache: 'no-store' }
       );
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
       if (!response.ok) {
+        // The body's reason is read, not dropped (CE-83, D-1789).
+        const refused = await refusalFrom('/logs.json', response);
+        if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
         publishLive(seq, run, {
           phase: 'failed',
           attempt,
           rungs: [],
-          why: `/logs.json answered ${response.status} for exact attempt ${attempt}.`
+          why: `${refused} — for exact attempt ${attempt}.`
         });
         return;
       }
       const body = await response.json();
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
-      publishLive(seq, run, reduceLiveProgress(run, body));
+      const key = liveRunKey(run);
+      const step = foldLiveProgress(liveCarry.key === key ? liveCarry.carry : null, run, body);
+      liveCarry = { key, carry: step.carry };
+      publishLive(seq, run, step.progress);
     } catch (why) {
       publishLive(seq, run, {
         phase: 'failed',
@@ -2074,12 +2169,14 @@
         // NAMED, NOT SWALLOWED. Without the table the page can still show the
         // raw words, and it must say WHY it is showing numbers instead of
         // names rather than looking like a run with no conditions.
+        // WITH THE BODY'S REASON, not the status alone (F2, D-3220).
+        const refused = await refusalFrom('/vocab.json', response);
         vocab = {
           phase: 'failed',
           version: 0,
           bits: new Map(),
           why:
-            `/vocab.json answered ${response.status}. Masks below are shown as raw ` +
+            `${refused}. Masks below are shown as raw ` +
             `words because the condition table could not be read. A 404 means this ` +
             `page is newer than the running binary — the page comes off disk and the ` +
             `route does not.`
@@ -2144,17 +2241,27 @@
         `/engine/top.json?feed=${encodeURIComponent(feed)}` +
           `&underlying=${encodeURIComponent(underlying)}`
       );
-      const body = await response.json();
-      if (!response.ok || !body.report) {
+      // THE STATUS BEFORE THE BODY (F2, D-3220): a refusal is read for its
+      // reason by `refusalFrom`, not parsed as a report and lost to a parse
+      // error or shown without its route and status.
+      if (!response.ok) {
         top = {
           phase: 'failed',
           report: '',
           why:
-            body.refusal ??
-            `/engine/top.json answered ${response.status}. The ranked ` +
-              `evidence could not be read; this response does not establish ` +
-              `whether it committed. A 404 means the running binary is ` +
-              `older than this page.`
+            `${await refusalFrom('/engine/top.json', response)}. The ranked ` +
+            `evidence could not be read; this response does not establish ` +
+            `whether it committed. A 404 means the running binary is ` +
+            `older than this page.`
+        };
+        return;
+      }
+      const body = await response.json();
+      if (!body?.report) {
+        top = {
+          phase: 'failed',
+          report: '',
+          why: body?.refusal ?? '/engine/top.json answered with neither a report nor a refusal.'
         };
         return;
       }
@@ -2207,6 +2314,12 @@
         // hours, every rebuild of this page reached them instantly, and none
         // of the route did. The message said "the API refused the request",
         // which is true and useless. It now names the cause and the fix.
+        //
+        // ANY OTHER STATUS IS NAMED WITH THE BODY'S REASON (F2, D-3220). This
+        // said "answered 429" alone, and `/backtest.json` is an audited route:
+        // the audit layer's busy 429 names its refusal and whether the handler
+        // ran (`crates/api/src/operation_audit.rs` `failure`).
+        const refused = response.status === 404 ? '' : await refusalFrom('/backtest.json', response);
         if (seq !== ledgerSeq) return;
         load = {
           phase: 'failed',
@@ -2217,21 +2330,36 @@
                 `does not provide the ordinary sweep ledger at this address. Check the app ` +
                 `address and configured result store. This response alone does not establish ` +
                 `whether results exist, which binary is running, or whether a restart will help.`
-              : `/backtest.json answered ${response.status}. That is the API refusing the ` +
+              : `${refused}. That is the API refusing the ` +
                 `request itself, not the ledger being empty — the two are different facts ` +
                 `and only one of them is fixable by sweeping something.`
         };
         return;
       }
-      const body = await response.json();
+      // A 503 IS READ AS TEXT, THEN PARSED (F2, D-3220). The ledger route's own
+      // 503 keeps the ledger shape (`crates/api/src/backtest.rs` `respond`) and
+      // is admitted below like any ledger. Anything else answered 503 -- the
+      // audit layer's envelope, a proxy page -- is not a ledger, and its reason
+      // is named rather than reported as "`runs` is not an array" or as a JSON
+      // parse error. A 200 that is not JSON still throws, as it always did.
+      const text = await response.text();
       if (seq !== ledgerSeq) return;
+      /** @type {unknown} */
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch (error) {
+        if (response.ok) throw error;
+      }
       const checked = validateLedgerPayload(body);
       if (!checked.ok) {
         if (seq !== ledgerSeq) return;
         load = {
           phase: 'failed',
           body: null,
-          why: `${checked.why} Nothing from it was ranked or opened.`
+          why: response.ok
+            ? `${checked.why} Nothing from it was ranked or opened.`
+            : `${refusalSentence('/backtest.json', response.status, reasonOfText(text))}. Nothing from it was ranked or opened.`
         };
         return;
       }
@@ -2298,7 +2426,20 @@
   let unconfirmedSubmission = $state(false);
   let submittedAttempt = $state('');
   const launchStop = $derived(sweepLaunchStop(sweep, launchAdmission, unconfirmedSubmission));
-  const statusRequests = createPageRequests();
+  // A HIDDEN TAB DOES NOT POLL (conc17-2, D-2567). Every running tick of this
+  // owner reads `/backtest/run.json` and `/live.json`, and the server journals
+  // each as one audited invocation -- so a background tab left open through an
+  // hours-long sweep wrote two journal files every two seconds for nobody. A
+  // timer that comes due while hidden now parks its read, and the first
+  // `visibilitychange` back to visible runs it at once. `ssr = false`
+  // (`routes/+layout.js`), so `document` exists when this runs.
+  const statusRequests = createPageRequests({
+    visible: () => document.visibilityState === 'visible',
+    listen: (wake) => {
+      document.addEventListener('visibilitychange', wake);
+      return () => document.removeEventListener('visibilitychange', wake);
+    }
+  });
 
   /**
    * `YYYY-MM` as the two numbers the route wants, or null.
@@ -2385,10 +2526,11 @@
       const response = await ask_('/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
       if (!response.ok) {
+        // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+        const why = await refusalFrom('/backtest/run.json', response);
+        if (!ticket.current()) return;
         launchAdmission = { available: false, why: 'The execution status could not be read. Rechecking before another launch.' };
-        adoptWhy =
-          `/backtest/run.json answered ${response.status}, so this page cannot say whether a ` +
-          `sweep is running. Execution state is unknown; retrying.`;
+        adoptWhy = `${why}. This page cannot say whether a sweep is running; retrying.`;
         sweep = { phase: 'unknown', run: null, why: adoptWhy };
         statusRequests.schedule(pollSweep, 2000);
         return;
@@ -2433,9 +2575,12 @@
       const response = await ask_(submittedAttempt ? `/backtest/run.json?attempt=${submittedAttempt}` : '/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
       if (!response.ok) {
+        // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+        const why = await refusalFrom('/backtest/run.json', response);
+        if (!ticket.current()) return;
         launchAdmission = { available: false, why: 'The execution status could not be read. Rechecking before another launch.' };
         invalidateLive();
-        sweep = { phase: 'unknown', run: sweep.run, why: `/backtest/run.json answered ${response.status}; execution state is unknown. Retrying.` };
+        sweep = { phase: 'unknown', run: sweep.run, why: `${why}. Execution state is unknown; retrying.` };
         statusRequests.schedule(pollSweep, 2000);
         return;
       }
@@ -2580,7 +2725,9 @@
           ...engineKnobs
         })
       });
-      applySweepSubmission(response.status, await response.json().catch(() => null));
+      // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222).
+      const { body, reason } = await commandReply(response);
+      applySweepSubmission('/backtest/run', response.status, body, reason);
     } catch (error) {
       sweep = {
         phase: 'unknown',
@@ -2591,9 +2738,9 @@
     }
   }
 
-  /** @param {number} status @param {any} body */
-  function applySweepSubmission(status, body) {
-    const outcome = sweepSubmission(status, body);
+  /** @param {string} route @param {number} status @param {any} body @param {string | null} reason */
+  function applySweepSubmission(route, status, body, reason) {
+    const outcome = sweepSubmission(status, body, reason, route);
     unconfirmedSubmission = !outcome.confirmed;
     submittedAttempt = outcome.attempt;
     sweep = { phase: /** @type {'running'|'failed'|'unknown'} */ (outcome.phase), run: null, why: outcome.why };
@@ -2608,7 +2755,7 @@
     try {
       const response = await ask_('/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!response.ok) throw new Error(`The execution check answered ${response.status}.`);
+      if (!response.ok) throw new Error(`The execution check failed: ${await refusalFrom('/backtest/run.json', response)}`);
       const body = await response.json();
       if (!ticket.current()) return;
       observedRunning(body);
@@ -2860,7 +3007,8 @@
           top: listRows
         })
       });
-      applySweepSubmission(response.status, await response.json().catch(() => null));
+      const { body, reason } = await commandReply(response);
+      applySweepSubmission('/backtest/descend', response.status, body, reason);
     } catch (error) {
       sweep = {
         phase: 'unknown',
@@ -2927,6 +3075,10 @@
    * is the reader's own statement that a build may not send it.
    * @property {number[]} [exit_rungs]
    * @property {string[]} mask_words
+   * The server's gross-of-every-charge note, sent on a cash-equity run only
+   * (`crates/api/src/backtest.rs`). OPTIONAL: an index run carries no key.
+   * `$lib/charge-scope.js` reads it. D-0946.
+   * @property {string} [equity_note]
    */
 
   /**
@@ -2944,6 +3096,7 @@
    * @property {boolean} halted
    * @property {number} unsealed
    * @property {number | null} best_complete
+   * @property {string} [in_sample] the ledger's in-sample, validation-unrecorded statement (D-2792)
    * @property {string[]} signal_rungs exact `cli::EVERY_RUNG` values published by the server
    * @property {string | null} refusal
    * @property {Run[]} runs
@@ -3181,7 +3334,15 @@
    * F&O membership is not the engine surface, and a rule that is right by
    * coincidence is the invention §3 rule 1 forbids.
    *
-   * @type {{ label: string, note: string, matched: number } | null}
+   * `matched` IS NULL WHEN THE SERVER DID NOT COUNT. A feed that publishes no
+   * instrument master is answered `"counted_from":"no master"` with every count
+   * `null` (`crates/api/src/coverage.rs`, `target_json`); this read that null as
+   * `Number(null ?? 0)` and the cover sentence said "0 of N are swept" -- a
+   * measurement of a file the feed does not have. A refused or failed read set
+   * the whole surface to null and dropped the server's reason. Both are kept
+   * now: `countedFrom` is the server's own word, `why` the refusal (W1, D-3211).
+   *
+   * @type {{ label: string, note: string, matched: number | null, countedFrom: string | null, why: string } | null}
    */
   let sweptSurface = $state(null);
 
@@ -3254,8 +3415,7 @@
    * question.
    */
   const sweepSymbol = $derived([...pickedSymbols][0] ?? '');
-  const indexWorkflow = $derived(pickedSymbols.size === 0 || [...pickedSymbols].some(symbol =>
-    ['NIFTY', 'BANKNIFTY', 'NSE-NIFTY', 'NSE-BANKNIFTY'].includes(symbol)));
+  const indexWorkflow = $derived(pickedSymbols.size === 0 || [...pickedSymbols].some(isSweptIndex));
 
   /**
    * Toggle one key in a chosen set.
@@ -3312,7 +3472,7 @@
         catalog = {
           phase: 'failed',
           why:
-            `/store.json answered ${response.status}, so this form cannot say what the store ` +
+            `${censusFailure(response)} — so this form cannot say what the store ` +
             `holds. The span and the instrument are two of the nine terms in a run's identity, ` +
             `so neither is defaulted — naming a run after a guess is the invention §3 rule 1 forbids.`,
           held: []
@@ -3325,10 +3485,11 @@
       for (const row of rows ?? []) {
         const full = String(row.instrument ?? '');
         // The census names an instrument `NSE-INDEX-NIFTY`; the ledger and
-        // the run route both name it `NIFTY`. Matching on the LAST segment
-        // is what joins them without this page holding an exchange or a
-        // segment literal — the same join `loadRungs` already makes.
-        const leaf = full.split('-').pop() ?? '';
+        // the run route both name it `NIFTY`. The symbol is everything after
+        // the exchange and segment, NOT the last `-` segment: `BAJAJ-AUTO`
+        // and `NAM-INDIA` are sweepable shares and were offered as `AUTO`
+        // and `INDIA`, a name the engine refuses (P3-02-02, D-1769).
+        const leaf = sweptSymbolOf(full) ?? '';
         const month = String(row.month ?? '');
         const rung = String(row.timeframe ?? '');
         if (!leaf || !month || !rung) continue;
@@ -3414,7 +3575,12 @@
       });
       if (!catalogGate.admits(ticket, activeFeed)) return;
       if (!response.ok) {
-        sweptSurface = null;
+        // THE SERVER'S REASON, NOT A SILENT GAP. A refusal costs the count and
+        // nothing else -- the span, the rungs and the run all still work -- but
+        // the sentence says why the count is missing (W1, D-3211).
+        const why = await refusalFrom('/universes.json', response);
+        if (!catalogGate.admits(ticket, activeFeed)) return;
+        sweptSurface = { label: 'Swept', note: '', matched: null, countedFrom: null, why };
         return;
       }
       const body = await response.json();
@@ -3422,19 +3588,30 @@
       const target = (body?.targets ?? []).find(
         (/** @type {{ target?: string } | null | undefined} */ t) => t?.target === 'swept'
       );
+      const matched = target?.matched;
       sweptSurface = target
         ? {
             label: String(target.label ?? 'Swept'),
             note: String(target.note ?? ''),
-            matched: Number(target.matched ?? 0)
+            // A COUNT OR NOTHING. `null` is "not counted" on the wire and stays
+            // so here; only an exact non-negative integer is a measurement.
+            matched: Number.isSafeInteger(matched) && matched >= 0 ? matched : null,
+            countedFrom: typeof target.counted_from === 'string' && target.counted_from.trim()
+              ? target.counted_from.trim()
+              : null,
+            why: ''
           }
         : null;
-    } catch {
+    } catch (error) {
       if (!catalogGate.admits(ticket, activeFeed)) return;
-      // An absent surface costs the SENTENCE and nothing else. The span, the
-      // rungs and the run all still work, and the route still refuses what it
-      // will not sweep.
-      sweptSurface = null;
+      // A failed read costs the count, and the sentence says so by name.
+      sweptSurface = {
+        label: 'Swept',
+        note: '',
+        matched: null,
+        countedFrom: null,
+        why: error instanceof Error ? error.message : String(error)
+      };
     }
   }
 
@@ -3614,7 +3791,7 @@
     if (!heldNow) return '';
     const parts = [
       `${exact(sweepMonths)} months on the intraday timeframes`,
-      'spot indices only'
+      coverScope(pickedSymbols)
     ];
     if (heldNow.daily.length > 0) {
       parts.push(
@@ -3622,7 +3799,12 @@
       );
     }
     if (sweptSurface) {
-      parts.push(`${exact(sweptSurface.matched)} of ${exact(catalog.held.length)} are swept`);
+      // NOT MEASURED IS SAID, NEVER DRAWN AS ZERO (W1, D-3211).
+      parts.push(
+        sweptSurface.matched === null
+          ? `swept count not measured (${sweptSurface.why || sweptSurface.countedFrom || 'the server sent no count'})`
+          : `${exact(sweptSurface.matched)} of ${exact(catalog.held.length)} are swept`
+      );
     }
     return parts.join(' · ');
   });
@@ -3911,6 +4093,9 @@
           // COUNTED APART, because they disqualify a rung for different
           // reasons and the operator's next move differs: a halted rung
           // wants a larger budget, an unsealed one wants the run repeated.
+          // ONE INSTRUMENT PER GROUP, so one charge statement: a stock's rung
+          // leader is a ranked equity total and says it is gross (CE-94).
+          charges: chargeScope(present[0]),
           haltedCount: present.filter((r) => r.halted).length,
           unsealedCount: present.filter((r) => !trustworthy(r)).length
         };
@@ -4096,6 +4281,45 @@
      and `matched` is the narrowest set that covers both. Not `sorted`: that
      would couple the drill to the sort order for nothing. */
   const openRun = $derived(matched.find((r) => r.index === openIndex) ?? null);
+  /**
+   * What the open run's figures are gross of. Zero levies only for a swept
+   * spot index the server did not mark with `equity_note`; a stock run is
+   * labelled gross of every charge and shows the server's note verbatim
+   * (`CLAUDE.md` §1). D-0946.
+   */
+  const openCharges = $derived(chargeScope(openRun));
+  /**
+   * THE HEADLINE SAYS WHAT ITS FIGURES ARE MADE OF (CE-94). The crown ranks
+   * across instruments, so a cash equity crowned here carries the gross-of-
+   * every-charge statement CLAUDE.md §1 requires of every ranked equity
+   * report, not only after "Drill in". Same `chargeScope` the drill-down uses.
+   */
+  const bestCharges = $derived(chargeScope(best));
+  /**
+   * The ledger table lists every run, and a stock row's totals are gross
+   * (CE-94): one statement above the table when any listed run is.
+   */
+  const ledgerChargeNote = $derived(
+    runs.some((run) => chargeScope(run).gross) ? chargeScope(null).note : null
+  );
+  /** The first gross statement among the rows the comparison board ranks. */
+  const boardChargeNote = $derived.by(() => {
+    for (const run of rankableRuns) {
+      const scope = chargeScope(run);
+      if (scope.gross) return scope.serverNote ?? scope.note;
+    }
+    return null;
+  });
+  /**
+   * The ledger's own in-sample statement (CE-93, D-2792): every recorded run
+   * is the best of its search, scored on the bars it was chosen on, and the
+   * ledger records no validation verdict. Shown above the crown and the board.
+   */
+  const ledgerInSample = $derived(
+    typeof ledger?.in_sample === 'string' && ledger.in_sample.trim() !== ''
+      ? ledger.in_sample.trim()
+      : null
+  );
 
   /**
    * Did the open run never open a trade?
@@ -4601,13 +4825,17 @@
          impossible, defeated one layer lower at the fetch. */
       if (seq !== seriesSeq) return;
       if (!response.ok) {
+        // THE ROUTE'S `error`, NOT THE STATUS ALONE (F2, D-3220): the window
+        // route answers a bad span or rung 400 with `{"error":…}`.
+        const refused = await refusalFrom('/bars/window.json', response);
+        if (seq !== seriesSeq) return;
         series = {
           phase: 'failed',
           bars: [],
           total: 0,
           months_read: 0,
           months_missing: 0,
-          why: `The bar window answered ${response.status}. The run's own figures above are unaffected — they were computed when the sweep ran, not now.`
+          why: `${refused}. The run's own figures above are unaffected — they were computed when the sweep ran, not now.`
         };
         return;
       }
@@ -4658,11 +4886,13 @@
     if (!run) {
       rungsSeq += 1;
       storeRungs = [];
+      rungsWhy = '';
       return;
     }
     untrack(() => {
       chartRung = run.timeframe;
       storeRungs = [];
+      rungsWhy = '';
       loadRungs(run);
     });
   });
@@ -4734,6 +4964,8 @@
    * @type {{ name: string, months: number }[]}
    */
   let storeRungs = $state([]);
+  /** Why the rung switcher is absent, when `/store.json` refused (F2, D-3220). */
+  let rungsWhy = $state('');
 
   /**
    * The rungs the store actually holds for one instrument.
@@ -4759,16 +4991,25 @@
         ms: 30_000
       });
       if (seq !== rungsSeq) return;
-      if (!response.ok) return;
+      if (!response.ok) {
+        // SAID, NOT SILENT (F2, D-3220). This returned with the switcher
+        // already cleared, so a refused census -- unreadable, an unknown feed,
+        // the master UNAVAILABLE -- left no switcher and no reason.
+        // `/store.json` names an unreadable census in its headers, so the
+        // header helper reads them before the body.
+        const refused = await headerRefusalFrom('/store.json', response);
+        if (seq !== rungsSeq) return;
+        rungsWhy = refused;
+        return;
+      }
       const rows = await response.json();
       if (seq !== rungsSeq) return;
       /** @type {Map<string, number>} */
       const months = new Map();
       for (const row of rows ?? []) {
         // The census names an instrument `NSE-INDEX-NIFTY`; the ledger names
-        // it `NIFTY`. Matching on the LAST segment is what joins them without
-        // this page holding an exchange or a segment literal.
-        const leaf = String(row.instrument ?? '').split('-').pop();
+        // it `NIFTY`. The symbol may itself hold a `-` (P3-02-02, D-1769).
+        const leaf = sweptSymbolOf(String(row.instrument ?? ''));
         if (leaf !== run.underlying) continue;
         months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
       }
@@ -4790,11 +5031,13 @@
         .filter(([name]) => /min$/.test(name) || name === own)
         .map(([name, count]) => ({ name, months: count }))
         .sort((a, b) => byRung(a.name, b.name));
-    } catch {
+    } catch (error) {
       if (seq !== rungsSeq) return;
       // A census that will not load costs the SWITCHER and nothing else: the
       // chart still draws the run's own rung, which is the one that matters.
+      // The reason is still said where the switcher would be.
       storeRungs = [];
+      rungsWhy = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -4865,13 +5108,23 @@
       ]);
       if (seq !== benchSeq) return;
       if (!firstResponse.ok || !lastResponse.ok) {
+        // EACH REFUSED ENDPOINT WITH ITS OWN REASON (F2, D-3220). This printed
+        // "answered 400/200": two statuses, no `error`, and no word on which
+        // of the two had refused.
+        const [firstWhy, lastWhy] = await Promise.all([
+          firstResponse.ok ? null : refusalFrom('/bars/window.json', firstResponse),
+          lastResponse.ok ? null : refusalFrom('/bars/window.json', lastResponse)
+        ]);
+        if (seq !== benchSeq) return;
+        const named = [
+          firstWhy === null ? null : `The first span endpoint: ${firstWhy}`,
+          lastWhy === null ? null : `${firstWhy === null ? 'The' : 'the'} last span endpoint: ${lastWhy}`
+        ].filter((part) => part !== null);
         bench = {
           phase: 'failed',
           open: 0,
           close: 0,
-          why:
-            `The span endpoints answered ${firstResponse.status}/${lastResponse.status}, ` +
-            'so the current-store buy-and-hold reference has no price pair.'
+          why: `${named.join('; ')}. The current-store buy-and-hold reference has no price pair.`
         };
         return;
       }
@@ -4957,40 +5210,15 @@
   });
 
   /**
-   * The bars bucketed by the selected period, each bucket's close-to-close
-   * change in paisa.
-   *
-   * Buckets are keyed by a STRING derived from the bar's IST date, so a
-   * week that straddles a month or a year stays one bucket. Ordered by first
-   * appearance, which is chronological because the bars are.
+   * The bars bucketed by the selected period, each bucket's change from the
+   * PREVIOUS bucket's close (the first bucket's from its first open), in paisa,
+   * keyed by the IST `YYYY-MM-DD` with its year. The arithmetic lives in
+   * `$lib/hold-series.js` so `web/tests/hold-series.test.js` drives it (CE-70,
+   * D-2730): it was each bucket's last close minus its own first close, which
+   * dropped every gap between buckets, and its `d/m` key folded the same day of
+   * different years into one bucket.
    */
-  const holdPeriods = $derived.by(() => {
-    const bars = series.bars;
-    if (bars.length < 2) return [];
-    /** @param {number} t */
-    const key = (t) => {
-      // `t` is epoch seconds on the wire. Shift only for calendar projection;
-      // the stored instant remains unchanged and timezone neutral.
-      const d = new Date(t * 1000 + 19_800_000);
-      const y = d.getUTCFullYear();
-      if (periodScale === 'yearly') return `${y}`;
-      if (periodScale === 'quarterly') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(y).slice(2)}`;
-      if (periodScale === 'daily') return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
-      // Weekly: the Monday that starts the bar's week.
-      const monday = new Date(d);
-      monday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
-      return `${monday.getUTCDate()}/${monday.getUTCMonth() + 1}`;
-    };
-    /** @type {Map<string, {label: string, first: number, last: number}>} */
-    const buckets = new Map();
-    for (const b of bars) {
-      const k = key(b.t);
-      const at = buckets.get(k);
-      if (at) at.last = b.c;
-      else buckets.set(k, { label: k, first: b.c, last: b.c });
-    }
-    return [...buckets.values()].map((x) => ({ label: x.label, v: x.last - x.first }));
-  });
+  const holdPeriods = $derived.by(() => holdPeriodsOf(series.bars, periodScale));
 
   /**
    * The distribution of per-bar returns, in basis points, bucketed.
@@ -4998,55 +5226,13 @@
    * Per BAR, not per trade — the ledger has no trades to distribute. Said on
    * the chart, because a histogram labelled "returns" that is silently a
    * different population is exactly the quiet substitution this page refuses.
+   *
+   * Nothing to distribute is `null`, not a histogram with half its fields. Each
+   * return is `basisPoints` — the engine's half-away-from-zero rule — not
+   * `Math.round` on a float ratio, which put a gain and its mirror-image loss in
+   * asymmetric bins and counted a sub-half-bp loss as flat (CE-73, D-2731).
    */
-  const returnHistogram = $derived.by(() => {
-    const bars = series.bars;
-    /* NOTHING TO DISTRIBUTE IS `null`, NOT A HISTOGRAM WITH HALF ITS FIELDS.
-       These two arms returned `{bins: [], max: 0, avgLoss: null, avgGain:
-       null}` — no `lo`, no `hi`, no `losers`, no `winners` — so the value's
-       type was a union in which the range was sometimes absent, and the panel
-       that reads `h.lo` was only correct because its caller happened to guard
-       on `bins.length`. An empty set of returns HAS no range: `lo: 0` would be
-       a measurement nobody took. One value for "there is no distribution" says
-       that, and the guard at the render site becomes the same question. */
-    if (bars.length < 2) return null;
-    const rets = [];
-    for (const b of bars) {
-      if (b.o > 0) rets.push(Math.round(((b.c - b.o) / b.o) * 10_000));
-    }
-    if (rets.length === 0) return null;
-    const lo = Math.min(...rets);
-    const hi = Math.max(...rets);
-    const width = Math.max(1, Math.ceil((hi - lo) / 18));
-    /** @type {Map<number, number>} */
-    const counts = new Map();
-    for (const r of rets) {
-      const slot = Math.floor((r - lo) / width);
-      counts.set(slot, (counts.get(slot) ?? 0) + 1);
-    }
-    const bins = [];
-    for (let i = 0; i <= Math.floor((hi - lo) / width); i += 1) {
-      const from = lo + i * width;
-      bins.push({ from, mid: from + width / 2, n: counts.get(i) ?? 0 });
-    }
-    const losses = rets.filter((r) => r < 0);
-    const gains = rets.filter((r) => r > 0);
-    /** @param {number[]} xs */
-    const mean = (xs) =>
-      xs.length === 0 ? null : Math.round(xs.reduce((a, b) => a + b, 0) / xs.length);
-    return {
-      bins,
-      max: Math.max(1, ...bins.map((b) => b.n)),
-      lo,
-      hi,
-      avgLoss: mean(losses),
-      avgGain: mean(gains),
-      losers: losses.length,
-      winners: gains.length,
-      flat: rets.length - losses.length - gains.length,
-      total: rets.length
-    };
-  });
+  const returnHistogram = $derived(returnHistogramOf(series.bars));
 
   /**
    * Alternating run-up and drawdown segments of the hold curve.
@@ -5592,17 +5778,15 @@
   /**
    * The presets, in bars, derived from the rung's own length.
    *
-   * A month is a different number of bars at every rung — roughly 1,375 at
-   * 30-minute and 21 at daily — so a preset list in BARS would mean a
-   * different span at each rung. These are computed from the rung's seconds
-   * against a 6.25-hour session, so "3M" is three months whatever the rung.
+   * A month is a different number of bars at every rung — 273 at 30-minute
+   * and 21 at daily — so a preset list in BARS would mean a different span at
+   * each rung. `barsPerMonth` computes them from the rung's seconds against a
+   * 375-minute session, so "3M" is three months whatever the rung (D-3514).
    */
   const presets = $derived.by(() => {
     const secs = rungSeconds(chartRung || openRun?.timeframe || '');
     if (!secs) return [];
-    // 555 minutes of session, 21 sessions a month — the same 555 the store's
-    // own alignment notes use.
-    const perMonth = secs >= 86_400 ? 21 : Math.max(1, Math.round((555 * 60) / secs) * 21);
+    const perMonth = Math.max(1, barsPerMonth(secs));
     return [
       { label: '1M', bars: perMonth },
       { label: '3M', bars: perMonth * 3 },
@@ -6054,19 +6238,22 @@
     <span class="vp vp-unpriced" title="Never met an exit grid — screen_cap cut it before pricing."
       >unpriced</span
     >
-  {:else if meets.all}
-    <span class="vp vp-pass" title="Five historical rules met. This verdict does not prove worst adverse excursion, protective exits, fill headroom, average payoff, period consistency or institutional admission.">5 rules pass</span>
   {:else}
-    {@const failed = [
-      !meets.win_rate && 'win rate',
-      !meets.reward_to_risk && 'reward:risk',
-      !meets.return_over_drawdown && 'return/drawdown',
-      !meets.trades && 'trade count',
-      !meets.assurance && 'assurance'
-    ].filter(Boolean)}
-    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. This is only the five-rule historical verdict."
-      >FAIL <i>{failed.length}</i></span
-    >
+    {@const answered = Object.keys(meets).filter((k) => k !== 'all' && k !== 'priced' && !k.endsWith('_unchecked'))}
+    {@const unanswered = Object.keys(meets).filter((k) => k.endsWith('_unchecked')).map((k) => k.slice(0, -'_unchecked'.length).replaceAll('_', ' '))}
+    {@const failed = answered.filter((k) => meets[k] === false).map((k) => k.replaceAll('_', ' '))}
+    <!-- THE RULE NAMES ARE THE SERVER'S (D-1810). Every `meets` member other
+         than `all` and the `*_unchecked` flags is a rule `cli` answered, and
+         `validateFrontierPayload` has already required that set to equal the
+         served `admission.checked` list. Nothing here lists the rules, so a
+         rule added in `cli` is counted and named without an edit. -->
+    {#if meets.all}
+      <span class="vp vp-pass" title="{answered.length} historical rules met. This verdict does not answer: {unanswered.join(', ')}; nor period consistency or institutional admission.">{answered.length} rules pass</span>
+    {:else}
+      <span class="vp vp-fail" title="Fails: {failed.join(', ')}. This is only the {answered.length}-rule historical verdict; it does not answer: {unanswered.join(', ')}."
+        >FAIL <i>{failed.length}</i></span
+      >
+    {/if}
   {/if}
 {/snippet}
 
@@ -6210,6 +6397,9 @@
       <li class="dash"><span class="cf-sw dashed"></span>Average profit<b>{h.avgGain === null ? '—' : pctOf(h.avgGain)}</b></li>
     </ul>
     <p class="cf-note">{note}</p>
+    {#if h.overflowed > 0}
+      <p class="cf-note">{exact(h.overflowed)} {h.overflowed === 1 ? 'bar is' : 'bars are'} left out: the move scaled to basis points exceeds what a browser number holds exactly, the same overflow the engine refuses.</p>
+    {/if}
   </div>
 {/snippet}
 
@@ -7155,12 +7345,12 @@
             {#each live.rungs as r (r.key)}
               <tr>
                 <td><b>{r.rung}</b>{#if r.validating} <span class="dim">validation</span>{/if}</td>
-                <td class="num">{r.bars ? r.bars.toLocaleString() : '—'}</td>
-                <td class="num">{r.minHits ? r.minHits.toLocaleString() : '—'}</td>
+                <td class="num">{r.bars ? group(r.bars) : '—'}</td>
+                <td class="num">{r.minHits ? group(r.minHits) : '—'}</td>
                 <td class="num">
                   {r.bars && r.minHits ? `${((r.minHits / r.bars) * 100).toFixed(2)}%` : '—'}
                 </td>
-                <td class="num">{r.candidates ? r.candidates.toLocaleString() : '—'}</td>
+                <td class="num">{r.candidates ? group(r.candidates) : '—'}</td>
                 <td>
                   <!--
                     FIVE STATES, NOT TWO. This read `recorded / refused /
@@ -7173,7 +7363,7 @@
                   {#if r.done && r.recorded}<span class="ok">recorded</span>
                   {:else if r.done}<span class="warnish">refused — {r.why || 'no reason given'}</span>
                   {:else if r.phase === 'priced'}<span class="dim"
-                      >priced {r.priced.toLocaleString()} — validating…</span
+                      >priced {group(r.priced)} — validating…</span
                     >
                   {:else if r.phase === 'pricing'}<span class="dim">pricing the exit grid…</span>
                   {:else}<span class="dim">sweeping…</span>{/if}
@@ -7240,6 +7430,8 @@
            the markup they describe failed the build outright. -->
       {@const lead = liveTop.rows[0]}
       {@const leadT = Math.abs(lead?.t_milli ?? 0) / 1000}
+      {@const leadWin = liveWinShare(lead)}
+      {@const freshness = liveFreshness(liveTop)}
       <div class="livetop">
         <!-- THE PLAIN-ENGLISH ANSWER FIRST, THEN THE EVIDENCE.
              This block first rendered a nine-column table of |t|, mean paisa and
@@ -7251,11 +7443,15 @@
         <p class="livetop-head">
           <b>Best combinations so far</b>
           <span class="dim">
-            · {exact(liveTop.trials)} tested · updated {liveTop.idleSecs < 60
-              ? `${liveTop.idleSecs}s`
-              : `${Math.floor(liveTop.idleSecs / 60)}m`} ago
-            {#if liveTop.stale || liveTop.idleSecs > 120}
-              <span class="pill warn">not moving</span>
+            · {exact(liveTop.trials)} tested · {freshness.text}
+            {#if freshness.warn}
+              <span class="pill warn">{freshness.warn}</span>
+            {/if}
+            {#if liveTop.identity}
+              · heap <code
+                title="The run identity /live.json names this heap by. The sweep status carries no identity, so this is the freshest heap on the server, which is not proved to be this sweep's."
+                >{liveTop.identity.slice(0, 12)}</code
+              >
             {/if}
           </span>
         </p>
@@ -7276,11 +7472,17 @@
           </div>
           <div class="keystat">
             <p class="k">Winning trades</p>
-            <p class="v">
-              {lead?.n > 0 ? ((lead.edge_wins / lead.n) * 100).toFixed(2) : '0.00'}%<span class="u">
-                {exact(lead?.edge_wins ?? 0)}/{exact(lead?.n ?? 0)}</span
-              >
-            </p>
+            <!-- SIDE-AWARE, OR NOT SHOWN. `edge_wins` counts UP moves, which
+                 are a sell's losing trades; see `$lib/live-win.js` (p14num-1). -->
+            {#if leadWin.known}
+              <p class="v">
+                {(leadWin.share * 100).toFixed(2)}%<span class="u">
+                  {exact(leadWin.wins)}/{exact(leadWin.n)}</span
+                >
+              </p>
+            {:else}
+              <p class="v" title={leadWin.why}>—<span class="u"> not served for a sell</span></p>
+            {/if}
           </div>
           <div class="keystat">
             <p class="k">Evidence</p>
@@ -7298,7 +7500,7 @@
         <p class="livetop-verdict {proved > 0 ? 'yes' : 'not-yet'}">
           {#if proved > 0}
             <b>{proved} of {liveTop.rows.length} have proved themselves.</b> They beat the evidence
-            bar of {bar.toFixed(2)} for this run, so they are real patterns rather than luck.
+            bar of {bar.toFixed(2)} for the run this heap belongs to, so they are real patterns rather than luck.
           {:else}
             <b>None have proved themselves yet.</b> Each needs an evidence score above
             <b>{bar.toFixed(2)}</b>, and the best so far is {leadT.toFixed(2)}. That bar rises as
@@ -7322,7 +7524,7 @@
             {@const t = Math.abs(Number(row.t_milli) || 0) / 1000}
             {@const move = Math.abs(Number(row.mean_milli_paisa) || 0) / 1000}
             {@const n = Number(row.n) || 0}
-            {@const wins = Number(row.edge_wins) || 0}
+            {@const win = liveWinShare(row)}
             <!-- Declared here and not beside the markup they describe: Svelte
                  requires `{@const}` to be the immediate child of a block. -->
             {@const decoded = decodeMaskWords(row.mask_words)}
@@ -7366,7 +7568,11 @@
               </div>
               <div class="liverow-facts">
                 <span><b>{exact(n)}</b> trades</span>
-                <span><b>{n > 0 ? Math.round((wins / n) * 100) : 0}%</b> won</span>
+                {#if win.known}
+                  <span><b>{Math.round(win.share * 100)}%</b> won</span>
+                {:else}
+                  <span title={win.why}>won: <b>not served</b></span>
+                {/if}
                 <span>fires on <b>{exact(row.hits)}</b> bars</span>
                 <span>evidence <b>{t.toFixed(2)}</b> of {bar.toFixed(2)}</span>
               </div>
@@ -7852,6 +8058,14 @@
                 <b>{money(best.fillGap)}</b> higher, which is how much of
                 the headline is fill assumption rather than edge.
               </p>
+              {#if bestCharges.gross}
+                <p class="crown-note equity-note" data-crown-charges>
+                  {bestCharges.serverNote ?? bestCharges.note}
+                </p>
+              {/if}
+              {#if ledgerInSample}
+                <p class="crown-note in-sample-note" data-crown-in-sample>{ledgerInSample}</p>
+              {/if}
             </div>
             <button class="btn ghost sm" onclick={(event) => toggle(best, event.currentTarget)}>
               {openIndex === best.index ? 'Close' : 'Drill in'}
@@ -7912,6 +8126,12 @@
             {exact(comparedRuns.length)} shown
           </span>
         </div>
+        {#if boardChargeNote}
+          <p class="inline-note equity-note" data-board-charges>{boardChargeNote}</p>
+        {/if}
+        {#if ledgerInSample}
+          <p class="inline-note in-sample-note" data-board-in-sample>{ledgerInSample}</p>
+        {/if}
 
         {#if rankableRunCount > 0}
           <div
@@ -8181,6 +8401,11 @@
               {#if g.haltedCount > 0}
                 <span class="pill warn">{g.haltedCount} halted</span>
               {/if}
+              {#if g.charges.gross}
+                <span class="pill warn" data-rung-charges
+                  >{g.charges.note}</span
+                >
+              {/if}
               {#if g.unsealedCount > 0}
                 <span class="pill seal">{g.unsealedCount} unsealed</span>
               {/if}
@@ -8423,10 +8648,11 @@
                 drawdown outranks every real one.
                 <b>This ordering is complete only within those {exact(g.priced)} priced rows.</b>
                 {#if g.rules}
-                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet the five displayed rules</b>
+                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet every rule the server checked</b>
                   — win rate ≥ {(g.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
                   {(g.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
-                  {(g.rules.min_ret_over_dd_bp / 100).toFixed(2)}×.
+                  {(g.rules.min_ret_over_dd_bp / 100).toFixed(2)}×, average win over average loss ≥
+                  {(g.rules.min_avg_rr_bp / 100).toFixed(2)}× (0 or less: not required).
                 {/if}
               </p>
             {:else}
@@ -8464,6 +8690,11 @@
           />
           <span class="count">{exact(sorted.length)} of {exact(runs.length)} shown</span>
         </div>
+        {#if ledgerChargeNote}
+          <p class="inline-note equity-note" data-ledger-charges>
+            Rows that are not a swept spot index: {ledgerChargeNote}
+          </p>
+        {/if}
 
         {#if sorted.length === 0}
           <p class="inline-note">
@@ -8679,6 +8910,8 @@
                     </button>
                   {/each}
                 </div>
+              {:else if rungsWhy}
+                <span class="dim" role="status">Timeframe switcher unavailable: {rungsWhy}</span>
               {/if}
             </div>
 
@@ -9276,11 +9509,17 @@
                          TRUE, and its own doc says why: a spot index is not
                          tradeable and no order is placed, so there is no
                          brokerage, no STT, no stamp duty and no GST to charge.
-                         `crates/runner/src/audit.rs` states the same. The
-                         engine sweeps exactly two instruments, both spot
-                         indices (CLAUDE.md §1), so zero is the right answer and
-                         `costs::trip` having no caller on this path is the
-                         right shape — not a gap.
+                         `crates/runner/src/audit.rs` states the same. For a
+                         spot-index run zero is the right answer.
+
+                         FOR A CASH-EQUITY RUN IT IS NOT. D-0506 widened the
+                         sweep to the F&O cash equities, and a share trade pays
+                         every charge; CLAUDE.md §1 requires every such report
+                         to state it is gross of every charge. This line used to
+                         print `0.00%` for every run, a RELIANCE run included.
+                         `openCharges` (`$lib/charge-scope.js`) now prints zero
+                         only for a swept index the server did not mark with
+                         `equity_note`, and the gross label otherwise. D-0946.
 
                          What IS absent is the SPREAD, which is a fill-model
                          question and not a levy. `trade.rs`' own measured table
@@ -9290,8 +9529,11 @@
                          visible. -->
                     <div class="tt-q">
                       <span class="tt-k">Commission load</span>
-                      <span class="tt-qv">0.00%</span>
-                      <span class="tt-note">statutory charges are zero for spot indices · spread is not modeled</span>
+                      <span class="tt-qv" class:dim={openCharges.gross}>{openCharges.load}</span>
+                      <span class="tt-note">{openCharges.note}</span>
+                      {#if openCharges.serverNote}
+                        <span class="tt-note equity-note">{openCharges.serverNote}</span>
+                      {/if}
                     </div>
                   </div>
 
@@ -9489,7 +9731,7 @@
                   <h4 class="tt-h5">Margin utilization</h4>
                   <div class="tt-unavailable-panel not-applicable">
                     <span>
-                      <b>Not applicable.</b> The engine computes one-unit spot-index totals with no
+                      <b>Not applicable.</b> The engine computes one-unit totals with no
                       account, position size or broker, so there is no capital, margin call or
                       liquidation to measure.
                     </span>
@@ -10197,9 +10439,11 @@
                   One trade keeps its entry/exit times and bar positions, duration, worst-fill and
                   best-fill P&amp;L, cumulative worst-fill result, selected direction, and exact MAE/MFE
                   in paisa and ppm. Entry/exit prices and the exit-cause tag are not recorded, so
-                  those are not invented. Statutory charges are zero for this spot-index sweep;
-                  spread remains unmodeled.
+                  those are not invented. {openCharges.trades}
                 </p>
+                {#if openCharges.serverNote}
+                  <p class="tt-note2 equity-note">{openCharges.serverNote}</p>
+                {/if}
                 {#if tradeRowsWindow.total > 0}
                   <div class="series-nav trade-pages" aria-label="Trade pages">
                     <button
@@ -10364,9 +10608,11 @@
                       — win rate ≥ {(combos.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
                       {(combos.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
                       {(combos.rules.min_ret_over_dd_bp / 100).toFixed(2)}×, at least
-                      {exact(combos.rules.min_trades)} trades.
-                      <b>The stop rule is not checked here</b> — it is judged on the worst adverse
-                      excursion across every trade, and a ranked row does not store that.
+                      {exact(combos.rules.min_trades)} trades, average win over average loss ≥
+                      {(combos.rules.min_avg_rr_bp / 100).toFixed(2)}× (0 or less: not required).
+                      <b>The stop, protective-exit and fill-headroom rules are not checked here</b> — a
+                      ranked row stores none of the worst adverse excursion, the exit shape or the
+                      best-fill total they are judged on.
                     {/if}
                     {#if combos.rows.filter((r) => !r.priced).length > 0}
                       <b>{combos.rows.filter((r) => !r.priced).length} excluded as never priced</b> —
@@ -14326,6 +14572,11 @@
     font-size: 12px;
     color: var(--tv-muted);
     line-height: 1.55;
+  }
+  /* The server's `equity_note` keeps its own line breaks (D-0946). */
+  .tester .equity-note {
+    display: block;
+    white-space: pre-wrap;
   }
   .tester .tt-note2 b {
     color: var(--tv-label);

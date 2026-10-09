@@ -55,7 +55,14 @@ const ROUTES = [
 	// it reports one gap per run, so a green suite after adding an entry is not
 	// evidence the list is complete.
 	'/indexmap.json',
+	// THE SELECTION V6 READER `web/src/lib/selection-v6.js` calls. Served by
+	// `crates/api/src/server.rs` and missing here, so `npm run dev` answered
+	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
+	'/selection-v6.json',
 	'/store.json',
+	// THE SCRUB the `/db` panel runs on request (sobs-10, D-4454): the census
+	// checked against the files it counts. JSON only; no page of its own.
+	'/verify.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when
@@ -109,6 +116,14 @@ const ROUTES = [
 	'/engine/index-stop-launch.json',
 	'/index-stop.json',
 	'/index-stop-qualification.json',
+	// Five readers in `$lib` reached through an injected `request`, which the
+	// drift test could not see until P2-02-01 (D-1766) widened it to every
+	// absolute `.json` literal. Each is served by `crates/api`.
+	'/index-stop-vix.json',
+	'/index-stop-candles.json',
+	'/index-stop-ranking.json',
+	'/candidate-trades.json',
+	'/expression-search.json',
 	// ONE RUN'S ROUND TRIPS. The per-trade table on the backtest page rendered
 	// a padlock in every cell, because nothing wrote the file it reads and no
 	// route served it. `cli::trades` writes it now and `/trades.json` serves it,
@@ -159,8 +174,11 @@ const ROUTES = [
 	// The collision was real: both surfaces wanted the same path, and the
 	// Svelte one had no other source of data. `/audit.json` is what removed
 	// that — see `crates/api/src/audit_json.rs`. The page now owns `/audit`
-	// here, the Rust page still answers `/audit` on the API's own port, and
-	// nothing renders differently depending on how the operator arrived.
+	// here AND on the API's own port: removing it from this proxy fixed only
+	// development, because the binary registered `/audit` ahead of its
+	// front-end fallback and a reload there still got Rust (P3-02-01). The
+	// Rust page now answers `/audit/page` instead (D-1971), so nothing renders
+	// differently depending on how the operator arrived, in either place.
 	'/pull',
 	// THE AUTOPILOT. Four entries and NOT the `/autopilot` prefix, deliberately:
 	// `/autopilot` is a PAGE this app renders, and proxying that prefix would

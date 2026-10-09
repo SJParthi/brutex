@@ -113,14 +113,32 @@ struct Asked {
     target: String,
     /// The run the reader narrowed to, or zero for every run.
     run: u64,
+    /// The oldest instant the reader asked for, in Unix milliseconds,
+    /// inclusive. It ENDS the walk at the first older record rather than
+    /// filtering past it (`telemetry::Query::since`), which is what lets a
+    /// run-filtered poll stop at the run's own start instead of reading a
+    /// half's unrelated history to its scan cap (OBSV-05, D-3204).
+    since: Option<i64>,
+    /// Each filter the request carried that could not be read, by name, with
+    /// what it said. Such a filter is no narrowing, and the answer says so in
+    /// its JSON and with one Warn, rather than passing the unfiltered tail off
+    /// as the filtered one (P1-01-02, D-1765).
+    ignored: Vec<(&'static str, String)>,
 }
 
 /// Reads the query string into a bounded [`telemetry::Query`].
 ///
 /// Every parameter is **clamped rather than refused**. A log viewer that
 /// answers a mangled bookmark with a 400 is a log viewer an operator stops
-/// reaching for, and unlike a pull request nothing here can be made wrong by a
-/// bad number — the worst a bad `limit` can do is show a different count.
+/// reaching for, and the worst a bad `limit` can do is show a different count.
+///
+/// **A bad `level` or `run` is not a count.** It drops a narrowing, so the
+/// unfiltered tail would arrive looking like the filtered one. Each is still
+/// answered rather than refused, but it is NAMED: listed under `ignored` in the
+/// JSON, beside the filters that were applied, and reported by one
+/// `api.logs filter ignored` Warn — the bargain `audit_json`'s `page ignored`
+/// strikes (P1-01-02, D-1765). `run` must be a canonical unsigned integer;
+/// `+3`, `03` and `3.0` are not quietly read as some run.
 fn asked(raw: &str) -> Asked {
     // NOT THROUGH `render::query_value`. That is a percent-ENCODER, and
     // `param` has already decoded; encoding a decoded value and then parsing it
@@ -128,17 +146,56 @@ fn asked(raw: &str) -> Asked {
     // digit is in the unreserved set — and would have turned any other input
     // into a `%XX` soup that parses to the default, which is the same answer for
     // the wrong reason.
-    let limit = crate::server::param(raw, "limit")
-        .parse::<usize>()
+    //
+    // ONE SCAN for all five fields (o1api-4, D-4436), and the limit is still
+    // read as a whole count, so a run of digits past `usize` asks for the
+    // ceiling rather than the default (gap-audit #4, D-3684). D-4623.
+    let fields = crate::server::Query::parse(raw);
+    let limit = crate::server::whole_count(&fields.param("limit"))
         .unwrap_or(50)
         .clamp(1, PAGE_LIMIT);
-    let level_word = crate::server::param(raw, "level");
+    let level_word = fields.param("level");
     let level = telemetry::Level::of_label(&level_word.to_ascii_lowercase());
-    let target = crate::server::param(raw, "target");
+    let target = fields.param("target");
     // ZERO IS "EVERY RUN", not run zero. An event outside a backfill omits the
     // key entirely, so there is no run zero to ask for and the value is free to
     // mean the absence of a filter.
-    let run = crate::server::param(raw, "run").parse::<u64>().unwrap_or(0);
+    let run_word = fields.param("run");
+    let run = run_word
+        .parse::<u64>()
+        .ok()
+        .filter(|run| run.to_string() == run_word)
+        .unwrap_or(0);
+    // `since` is a canonical non-negative integer of milliseconds no larger
+    // than `i64::MAX`, read the way `run` is: `+3`, `03` and `3.0` are not
+    // quietly read as some instant, and an unreadable one is NAMED.
+    let since_word = fields.param("since");
+    let since = since_word
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| ms.to_string() == since_word)
+        .and_then(|ms| i64::try_from(ms).ok());
+    let mut ignored = Vec::new();
+    if since.is_none() && !since_word.is_empty() {
+        ignored.push(("since", since_word));
+    }
+    if level.is_none() && !level_word.is_empty() {
+        ignored.push(("level", level_word));
+    }
+    if run == 0 && !run_word.is_empty() && run_word != "0" {
+        ignored.push(("run", run_word));
+    }
+    for (param, word) in &ignored {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.logs", "filter ignored")
+                .with("param", telemetry::Value::Str(param))
+                .with("asked", telemetry::Value::Str(word))
+                .with(
+                    "why",
+                    telemetry::Value::Str("not a value this filter reads; answered without it"),
+                ),
+        );
+    }
 
     let mut query = telemetry::Query::last(limit);
     query.max_scan_bytes = SCAN_BYTES;
@@ -151,12 +208,17 @@ fn asked(raw: &str) -> Asked {
     if run != 0 {
         query = query.from_run(run);
     }
+    if let Some(ms) = since {
+        query = query.since(ms);
+    }
     Asked {
         query,
         limit,
         level,
         target,
         run,
+        since,
+        ignored,
     }
 }
 
@@ -193,11 +255,29 @@ pub async fn logs_json(
         );
     };
     let asked = asked(uri.query().unwrap_or(""));
-    (
-        axum::http::StatusCode::OK,
-        json,
-        json_over(&dir, second.as_deref(), &asked, sink_health().as_ref()),
-    )
+    let health = sink_health();
+    // OFF THE ASYNC WORKERS, AND ADMITTED. `json_over` walks up to two
+    // `SCAN_BYTES` halves and decodes every line it reads, and it ran inline
+    // on a Tokio worker with nothing capping how many did so at once -- while
+    // the backtest page polls this route every two seconds per running sweep
+    // with a `run=` filter one half can never match, so that half is read to
+    // its cap on every poll. It now runs in `detail`'s log-read pool, and a
+    // full pool is a named 429, never a queue. log-3, P1-04-02, D-2327.
+    match crate::detail::run_log_read(move || {
+        json_over(&dir, second.as_deref(), &asked, health.as_ref())
+    })
+    .await
+    {
+        Ok(body) => (axum::http::StatusCode::OK, json, body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "log read",
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+                &why,
+            );
+            (status, json, body)
+        }
+    }
 }
 
 /// The JSON body, over a directory a caller names.
@@ -334,7 +414,16 @@ fn both_halves(
     let ran = cli_dir.map_or_else(telemetry::Tail::default, |d| {
         telemetry::tail(d, telemetry::DEFAULT_KEEP_FILES, query)
     });
+    merged(served, ran, query.limit)
+}
 
+/// The union of two walked halves, and the completeness flags merged in the
+/// direction that cannot over-promise (LG-05).
+///
+/// Split from [`both_halves`] so a test can hand it two walks it cannot cause
+/// from real files, such as a half that hit its scan cap beside one that did
+/// not (P12-02, D-1791). Behaviour is unchanged.
+fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> telemetry::Tail {
     let mut records = served.records;
     records.extend(ran.records);
     records.sort_by(|left, right| {
@@ -346,7 +435,13 @@ fn both_halves(
     // THE LIMIT APPLIES TO THE UNION. Each half already honoured it, so without
     // this the page would return up to twice what was asked for -- and the
     // caller's `limit` is what bounds the response, not a suggestion.
-    records.truncate(query.limit);
+    //
+    // A CUT IS AN UNREACHED OLDEST. Records dropped here were read, so they
+    // exist and are not on the page, which is exactly what `reached_oldest`
+    // false means -- one half alone says the same when its own limit stops it
+    // short (OBSV-01, D-3200).
+    let cut = records.len() > limit;
+    records.truncate(limit);
 
     telemetry::Tail {
         records,
@@ -364,7 +459,7 @@ fn both_halves(
         // the merged answer down. Checked rather than assumed: the same field
         // was once `false` on ordinary full pages, which is the defect its own
         // doc records.
-        reached_oldest: served.reached_oldest && ran.reached_oldest,
+        reached_oldest: served.reached_oldest && ran.reached_oldest && !cut,
         partial_tail: served.partial_tail || ran.partial_tail,
         errors: {
             let mut errors = served.errors;
@@ -462,10 +557,58 @@ fn json_of(
         }
         out.push_str(&render::json_string(why));
     }
+    // THE FILTERS THIS ANSWER APPLIED, AND THE ONES IT COULD NOT. Without them
+    // `?level=eror` and no level at all answered byte-identically (D-1765).
+    // The run twice, as each record carries it: a number, and the exact
+    // decimal a JavaScript reader cannot round.
+    let (run, run_key) = if asked.run == 0 {
+        ("null".to_owned(), "null".to_owned())
+    } else {
+        (asked.run.to_string(), format!("\"{}\"", asked.run))
+    };
+    let _ = write!(
+        out,
+        r#"],"level":{},"target":{},"run":{run},"run_key":{run_key},"since":{},"ignored":["#,
+        asked.level.map_or_else(
+            || "null".to_owned(),
+            |level| render::json_string(level.label())
+        ),
+        if asked.target.is_empty() {
+            "null".to_owned()
+        } else {
+            render::json_string(&asked.target)
+        },
+        asked
+            .since
+            .map_or_else(|| "null".to_owned(), |ms| ms.to_string()),
+    );
+    for (n, (param, word)) in asked.ignored.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"param":{},"asked":{}}}"#,
+            render::json_string(param),
+            render::json_string(word)
+        );
+    }
     out.push_str("],\"sink\":");
     out.push_str(&sink_json(health));
     out.push('}');
     out
+}
+
+/// Whether the banner and `/logs.json`'s `loud` must speak.
+///
+/// Wider than [`telemetry::Health::is_loud`], which stays "were events lost"
+/// because the dropped-events note keys on it. A held clock and a standing
+/// `last_error` lose no event, but each is something the operator must be told:
+/// `clock_held` was counted and rendered nowhere, so after a clock jump every
+/// event kept a frozen time while the page said "Sink healthy", and
+/// `last_error` was shown only beside a loss (conc9-3, D-1774).
+const fn banner_is_loud(h: &telemetry::Health) -> bool {
+    h.is_loud() || h.clock_held > 0 || h.last_error.is_some()
 }
 
 /// The WRITE side of the log, as JSON. `null` when this process has no sink.
@@ -476,14 +619,15 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"loud":{},"last_error":{}}}"#,
+        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"clock_held":{},"loud":{},"last_error":{}}}"#,
         h.written,
         h.dropped,
         h.rotations,
         h.rotation_failures,
         h.current_bytes,
         h.next_seq,
-        h.is_loud(),
+        h.clock_held,
+        banner_is_loud(h),
         h.last_error
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
@@ -492,9 +636,11 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
 }
 
 /// `GET /logs` — the same tail, as a page.
-pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
+pub async fn logs_page(
+    uri: axum::http::Uri,
+) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let raw = uri.query().unwrap_or("");
-    let asked = asked(raw);
+    let asked = std::sync::Arc::new(asked(raw));
     // THE SECOND HALF IS RESOLVED FROM THE STORE, exactly as `logs_json` does
     // it. Bound to a local rather than written inline so the `Option<PathBuf>`
     // it borrows from plainly outlives the call -- and named `cli_dir` rather
@@ -525,19 +671,43 @@ pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
         (None, None) => (None, None),
     };
     let Some(dir) = first else {
-        return axum::response::Html(page_shell(
-            &asked,
-            "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
-             process and no store log directory could be resolved, so there is \
-             nothing to read. The server names the reason on stdout at startup.</p>",
-        ));
+        return (
+            axum::http::StatusCode::OK,
+            axum::response::Html(page_shell(
+                &asked,
+                "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
+                 process and no store log directory could be resolved, so there is \
+                 nothing to read. The server names the reason on stdout at startup.</p>",
+            )),
+        );
     };
-    axum::response::Html(page_over(
-        &dir,
-        second.as_deref(),
-        &asked,
-        sink_health().as_ref(),
-    ))
+    let health = sink_health();
+    let inside = std::sync::Arc::clone(&asked);
+    // OFF THE ASYNC WORKERS, AND ADMITTED, for the reason `logs_json` gives:
+    // the page runs the same two-half walk. A full pool is a 429 page that
+    // says so in words, with the form still on it. log-3, P1-04-02, D-2327.
+    match crate::detail::run_log_read(move || {
+        page_over(&dir, second.as_deref(), &inside, health.as_ref())
+    })
+    .await
+    {
+        Ok(page) => (axum::http::StatusCode::OK, axum::response::Html(page)),
+        Err(why) => {
+            let (status, _json) = crate::detail::admission_refused(
+                "log read",
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+                &why,
+            );
+            let halt = format!(
+                "<p class=\"halt\"><b>Not admitted</b>This log read was refused \
+                 before it ran ({}): at most {} log reads run at once, off the \
+                 async workers. Nothing below was read; reload to retry.</p>",
+                render::escape(&format!("{why:?}")),
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+            );
+            (status, axum::response::Html(page_shell(&asked, &halt)))
+        }
+    }
 }
 
 /// The page body, over the directories a caller names — split for the reason
@@ -793,14 +963,30 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
                 server names the reason on stdout at startup.</p>"
             .to_owned();
     };
-    if !h.is_loud() {
+    if !banner_is_loud(h) {
         return format!(
             "<p class=\"lead\">Sink healthy · {} written · 0 dropped · {} \
              rotation(s) · {} byte(s) in the current file.</p>",
             h.written, h.rotations, h.current_bytes,
         );
     }
-    let mut out = String::from("<p class=\"halt\"><b>The log is incomplete</b>");
+    let mut out = String::from(if h.is_loud() {
+        "<p class=\"halt\"><b>The log is incomplete</b>"
+    } else if h.clock_held > 0 {
+        "<p class=\"halt\"><b>The log's clock is held</b>"
+    } else {
+        "<p class=\"halt\"><b>The sink reported a failure</b>"
+    });
+    if h.clock_held > 0 {
+        let _ = write!(
+            out,
+            "{} event(s) read a clock BEHIND the last one written and were \
+             stamped at that later instant instead, so their times on this page \
+             are not when they happened, and a stale-run check reading them \
+             may see a dead run as live. ",
+            h.clock_held,
+        );
+    }
     if h.dropped > 0 {
         let _ = write!(
             out,
@@ -812,8 +998,18 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
     if h.rotation_failures > 0 {
         let _ = write!(
             out,
-            "{} roll(s) failed, so the current file is past its bound and the \
-             oldest events may already have been overwritten. ",
+            // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
+            // rotating (`Sink::rotation_broken`), so nothing is overwritten
+            // after the failure: the file GROWS. It looks again once the file
+            // has grown one more bound and the directory accepts a probe, a
+            // bounded number of times, unless the failed roll had already
+            // moved a file (CE-41, D-1769, D-2509).
+            "{} roll(s) failed, so rotation is paused: the current file is \
+             growing past its bound and no later event overwrites an older one. \
+             The failed roll itself may have removed the oldest retained file. \
+             Rotation is retried by itself, a bounded number of times, once the \
+             directory accepts writes again; if it stays paused, fix the cause \
+             named below and restart the server. ",
             h.rotation_failures,
         );
     }
@@ -922,6 +1118,9 @@ fn json_query(asked: &Asked) -> String {
     if asked.run != 0 {
         let _ = write!(q, "&run={}", asked.run);
     }
+    if let Some(ms) = asked.since {
+        let _ = write!(q, "&since={ms}");
+    }
     q
 }
 
@@ -973,6 +1172,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
          <label>Level<select name=\"level\"><option value=\"\">every level</option>{levels}</select></label>\
          <label>Target<input type=\"text\" name=\"target\" value=\"{target}\" placeholder=\"pull, pull.member, api.serve\"></label>\
          <label>Run<input type=\"text\" name=\"run\" value=\"{run}\" placeholder=\"every run\"></label>\
+         <label>Since<input type=\"text\" name=\"since\" value=\"{since}\" placeholder=\"Unix ms, inclusive\"></label>\
          <label>Limit<input type=\"number\" name=\"limit\" min=\"1\" max=\"{max}\" value=\"{limit}\"></label>\
          <button type=\"submit\">Show</button>\
          <a href=\"/logs.json{q}\">as JSON</a>\
@@ -984,6 +1184,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
         } else {
             asked.run.to_string()
         },
+        since = asked.since.map_or_else(String::new, |ms| ms.to_string()),
         limit = asked.limit,
         max = PAGE_LIMIT,
         q = json_query(asked),
@@ -1018,9 +1219,11 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
 pub async fn note_request(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let from_another_site = cross_site(request.headers());
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     let started = std::time::Instant::now();
@@ -1035,6 +1238,39 @@ pub async fn note_request(
     } else {
         telemetry::Level::Debug
     };
+    // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
+    // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
+    if rationed(level) {
+        let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
+        // THE SITE'S RATIONS, not a process static (P16-04, D-2590).
+        let admit = site
+            .failed_lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(from_another_site, now);
+        if let Some(suppressed) = admit.summary {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Warn,
+                    "api.request",
+                    suppression_message(from_another_site),
+                )
+                .with("suppressed", telemetry::Value::Uint(suppressed))
+                .with(
+                    "origin",
+                    telemetry::Value::Str(if from_another_site {
+                        "cross-site"
+                    } else {
+                        "same-origin"
+                    }),
+                )
+                .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
+            );
+        }
+        if !admit.write {
+            return response;
+        }
+    }
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(level, "api.request", "served")
             .with("method", telemetry::Value::Str(&method))
@@ -1045,12 +1281,286 @@ pub async fn note_request(
     response
 }
 
+/// Whether an `api.request` line at `level` is held to the failed-line ration.
+///
+/// The two levels a failed answer is written at are; the `Debug` line of an
+/// ordinary answer is not, so a flood of successes never spends the budget a
+/// failure needs. A function rather than an inline `!=` so the decision is
+/// pinned by a test without a flood of served requests. G18-api-09.
+fn rationed(level: telemetry::Level) -> bool {
+    level != telemetry::Level::Debug
+}
+
+/// How many `api.request` lines at `Warn` or `Error` one window may write.
+///
+/// audit-20261003 hunt-api-3, D-1583. Every answer ≥ 400 was written, and a
+/// cross-site GET with a local `Host` is admitted to every non-journaled route
+/// by design — so any page the operator had open could loop `fetch(…,
+/// {mode:'no-cors'})` and roll the whole 64 MiB window away (100,000 requests
+/// in 29 s evicted a sentinel). Cross-site failures ([`cross_site`]) are now
+/// rationed per window, and what
+/// was held back is COUNTED and said in one line by the first failed request
+/// of a later window, so a flood is still visible as a flood. Honest limit: a
+/// count is said only once another cross-site request fails; a flood followed by silence
+/// until shutdown leaves its last window's count unsaid.
+///
+/// Bound: at most this many lines plus one summary per window, ~620 bytes
+/// each — about 1.8 MB an hour at the worst, against a 64 MiB retained log.
+pub const FAILED_LINES_PER_WINDOW: u64 = 50;
+
+/// How many failed-request lines the operator's own pages and local tools may
+/// write in one window.
+///
+/// audit-20261003 hunt-api-3, D-1552. D-1583 rationed only requests another
+/// site sent, so a same-origin client (a page of this console stuck in a
+/// retry loop, a local script) still wrote one line per failed request and
+/// could roll the whole 64 MiB window away exactly as the cross-site flood
+/// did. This path now has its own ration, four times the cross-site one
+/// because it is the operator's own traffic, with the same counted summary:
+/// what is held back is said in one Warn line carrying `suppressed` = N, never
+/// dropped silently. A separate count, so a local flood cannot spend the
+/// cross-site lines and a cross-site flood cannot silence the operator's own
+/// failures.
+///
+/// Bound: at most this many lines plus one summary per window, ~620 bytes
+/// each, about 7.4 MB an hour at the worst; with the cross-site ration, about
+/// 9.3 MB an hour, so a sustained flood of both still takes some seven hours
+/// to roll the 64 MiB retained log (`docs/06-limits.md`).
+pub const LOCAL_FAILED_LINES_PER_WINDOW: u64 = 200;
+
+/// The summary line's message for one origin class.
+pub(crate) const fn suppression_message(from_another_site: bool) -> &'static str {
+    if from_another_site {
+        "cross-site failed-request lines suppressed in the previous window"
+    } else {
+        "same-origin failed-request lines suppressed in the previous window"
+    }
+}
+
+/// Whether a request came from another site, by the browser's own
+/// `Sec-Fetch-Site`: anything but absent, `same-origin` or `none` (typed or
+/// bookmarked). These failed requests draw on [`FAILED_LINES_PER_WINDOW`];
+/// the operator's own pages and local tools draw on the separate
+/// [`LOCAL_FAILED_LINES_PER_WINDOW`] (D-1552). Every browser that sends a
+/// `no-cors` fetch sends this header with it.
+pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| !matches!(value.as_bytes(), b"same-origin" | b"none"))
+}
+
+/// The length of one rationing window, in milliseconds.
+pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
+
+/// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
+#[derive(Debug)]
+pub(crate) struct Rations {
+    /// Failed requests another site sent.
+    cross: Ration,
+    /// Failed requests from this console's own pages and local tools.
+    local: Ration,
+}
+
+impl Rations {
+    pub(crate) const fn new() -> Self {
+        Self {
+            cross: Ration::new(FAILED_LINES_PER_WINDOW),
+            local: Ration::new(LOCAL_FAILED_LINES_PER_WINDOW),
+        }
+    }
+
+    /// Accounts one failed request of its origin class at `now_ms`.
+    pub(crate) fn admit(&mut self, from_another_site: bool, now_ms: u64) -> Admit {
+        if from_another_site {
+            self.cross.admit(now_ms)
+        } else {
+            self.local.admit(now_ms)
+        }
+    }
+}
+
+/// A fixed-window count of failed-request lines. O(1) per request: three
+/// counters and no loop. The bound on lines written per window is proven by
+/// `api::logs::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`;
+/// the per-request time is by construction and UNVERIFIED by any measurement
+/// (`docs/06-limits.md`, D-1459).
+#[derive(Debug)]
+pub(crate) struct Ration {
+    /// When the current window opened.
+    opened_ms: u64,
+    /// Lines written in it.
+    written: u64,
+    /// Lines held back in it.
+    suppressed: u64,
+    /// Lines one window may write.
+    limit: u64,
+}
+
+/// What one failed request may write.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Admit {
+    /// Whether its own line is written.
+    pub(crate) write: bool,
+    /// How many lines the window that just closed held back, when non-zero.
+    pub(crate) summary: Option<u64>,
+}
+
+impl Ration {
+    pub(crate) const fn new(limit: u64) -> Self {
+        Self {
+            opened_ms: 0,
+            written: 0,
+            suppressed: 0,
+            limit,
+        }
+    }
+
+    /// Accounts one failed request at `now_ms`.
+    pub(crate) fn admit(&mut self, now_ms: u64) -> Admit {
+        let mut summary = None;
+        if now_ms.saturating_sub(self.opened_ms) >= FAILED_LINE_WINDOW_MS || now_ms < self.opened_ms
+        {
+            if self.suppressed > 0 {
+                summary = Some(self.suppressed);
+            }
+            self.opened_ms = now_ms;
+            self.written = 0;
+            self.suppressed = 0;
+        }
+        let write = self.written < self.limit;
+        if write {
+            self.written = self.written.saturating_add(1);
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+        }
+        Admit { write, summary }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     // The same exceptions every test module in this workspace takes.
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+
+    /// Exactly the two levels `note_request` writes a failed answer at are
+    /// rationed, and the level it writes an ordinary answer at is not.
+    /// G18-api-09.
+    #[test]
+    fn only_a_failed_answers_line_is_rationed() {
+        assert!(super::rationed(telemetry::Level::Error));
+        assert!(super::rationed(telemetry::Level::Warn));
+        assert!(!super::rationed(telemetry::Level::Debug));
+    }
+
+    /// **A `limit` past `usize` asks for the page ceiling, not the default.**
+    /// Gap-audit #4, D-3684.
+    #[test]
+    fn a_limit_past_usize_reads_the_page_ceiling() {
+        assert_eq!(
+            super::asked("limit=99999999999999999999").limit,
+            super::PAGE_LIMIT
+        );
+        assert_eq!(super::asked("limit=nope").limit, 50);
+        assert_eq!(super::asked("limit=7").limit, 7);
+    }
+
+    /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
+    /// WIPE THE LOG. 100,000 failed requests inside one window write at most
+    /// the ration, and the next window opens with one line counting the rest.
+    #[test]
+    fn a_flood_of_failed_requests_writes_a_bounded_number_of_lines() {
+        let mut ration = Ration::new(FAILED_LINES_PER_WINDOW);
+        let start = 1_000_000_u64;
+        let mut written = 0_u64;
+        for i in 0..100_000_u64 {
+            let admit = ration.admit(start + i / 10);
+            assert_eq!(admit.summary, None);
+            if admit.write {
+                written += 1;
+            }
+        }
+        assert_eq!(written, FAILED_LINES_PER_WINDOW);
+        let next = ration.admit(start + FAILED_LINE_WINDOW_MS);
+        assert!(next.write, "a new window writes again");
+        assert_eq!(
+            next.summary,
+            Some(100_000 - FAILED_LINES_PER_WINDOW),
+            "what was held back is counted, not lost"
+        );
+        // A quiet window that held nothing back says nothing extra.
+        let quiet = ration.admit(start + 3 * FAILED_LINE_WINDOW_MS);
+        assert_eq!(
+            quiet,
+            Admit {
+                write: true,
+                summary: None
+            }
+        );
+        // A clock that stepped backwards opens a window rather than wedging.
+        let back = ration.admit(start);
+        assert!(back.write);
+        // Only another site's requests are rationed.
+        let with = |value: &'static str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                "sec-fetch-site",
+                axum::http::HeaderValue::from_static(value),
+            );
+            cross_site(&headers)
+        };
+        assert!(with("cross-site") && with("same-site"));
+        assert!(!with("same-origin") && !with("none"));
+        assert!(!cross_site(&axum::http::HeaderMap::new()));
+    }
+
+    /// audit-20261003 hunt-api-3, D-1552: A SAME-ORIGIN FLOOD IS BOUNDED TOO,
+    /// AND COUNTED. 100,000 failed same-origin requests in one window write at
+    /// most [`LOCAL_FAILED_LINES_PER_WINDOW`] lines and the next window names
+    /// the rest; the two classes draw on separate counts, so a same-origin
+    /// flood leaves the cross-site lines intact and the reverse.
+    #[test]
+    fn a_same_origin_flood_is_bounded_and_counted_separately_from_cross_site() {
+        let mut rations = Rations::new();
+        let start = 5_000_000_u64;
+        let mut local = 0_u64;
+        for i in 0..100_000_u64 {
+            let admit = rations.admit(false, start + i / 10);
+            assert_eq!(admit.summary, None);
+            if admit.write {
+                local += 1;
+            }
+        }
+        assert_eq!(local, LOCAL_FAILED_LINES_PER_WINDOW);
+        // The cross-site lines of the same window were not spent by it.
+        let mut cross = 0_u64;
+        for i in 0..1_000_u64 {
+            if rations.admit(true, start + i).write {
+                cross += 1;
+            }
+        }
+        assert_eq!(cross, FAILED_LINES_PER_WINDOW);
+        let next_local = rations.admit(false, start + FAILED_LINE_WINDOW_MS);
+        assert!(next_local.write);
+        assert_eq!(
+            next_local.summary,
+            Some(100_000 - LOCAL_FAILED_LINES_PER_WINDOW),
+            "the same-origin lines held back are counted, not lost"
+        );
+        let next_cross = rations.admit(true, start + FAILED_LINE_WINDOW_MS);
+        assert_eq!(next_cross.summary, Some(1_000 - FAILED_LINES_PER_WINDOW));
+        // The summary line names its class and its count.
+        assert_eq!(
+            suppression_message(false),
+            "same-origin failed-request lines suppressed in the previous window"
+        );
+        assert_eq!(
+            suppression_message(true),
+            "cross-site failed-request lines suppressed in the previous window"
+        );
+    }
 
     /// A sink of our own, in a scratch directory — never the process global.
     ///
@@ -1378,6 +1888,48 @@ mod tests {
         }
     }
 
+    /// LG-05 (P12-02, D-1791): the completeness flags of two halves merge in
+    /// the direction that cannot over-promise. `hit_scan_cap` and
+    /// `partial_tail` OR, `reached_oldest` ANDs, and `missing` sums, with a
+    /// half that answers `None` contributing nothing rather than a zero. Every
+    /// one of the four input combinations of each flag is walked.
+    #[test]
+    fn completeness_flags_merge_in_the_direction_that_cannot_over_promise() {
+        let half = |cap: bool, torn: bool, oldest: bool, missing: Option<u64>| telemetry::Tail {
+            hit_scan_cap: cap,
+            partial_tail: torn,
+            reached_oldest: oldest,
+            missing,
+            ..telemetry::Tail::default()
+        };
+        for left in [false, true] {
+            for right in [false, true] {
+                let both = super::merged(
+                    half(left, left, left, None),
+                    half(right, right, right, None),
+                    10,
+                );
+                assert_eq!(both.hit_scan_cap, left || right, "cap {left} {right}");
+                assert_eq!(both.partial_tail, left || right, "torn {left} {right}");
+                assert_eq!(both.reached_oldest, left && right, "oldest {left} {right}");
+            }
+        }
+        for (served, ran, want) in [
+            (Some(2), Some(3), Some(5)),
+            (Some(2), None, Some(2)),
+            (None, Some(3), Some(3)),
+            (None, None, None),
+            (Some(u64::MAX), Some(1), Some(u64::MAX)),
+        ] {
+            let both = super::merged(
+                half(false, false, true, served),
+                half(false, false, true, ran),
+                10,
+            );
+            assert_eq!(both.missing, want, "{served:?} + {ran:?}");
+        }
+    }
+
     #[test]
     fn the_limit_bounds_the_union_and_not_each_half() {
         // Each half already honours the limit, so without a truncation on the
@@ -1402,6 +1954,157 @@ mod tests {
             &asked("limit=4").query,
         );
         assert_eq!(tail.records.len(), 4, "the union is what the limit bounds");
+    }
+
+    /// OBSV-05 (D-3204): a run-filtered read can be bounded to the run's own
+    /// start. Without `since` the walk could not stop at it -- `run=` is a
+    /// skip-filter -- so it read every older line: a torn fragment left by
+    /// an earlier crash counted as `malformed`, and a half bigger than the cap
+    /// set `hit_scan_cap`, and the backtest page's live view refuses on
+    /// either, for a run that had nothing to do with them. With `since` the
+    /// walk ends at the first record older than the run, so neither is read.
+    #[test]
+    fn since_bounds_a_run_poll_to_the_run_and_off_older_damage() {
+        let (dir, sink) = sink_in("since-bound");
+        for _ in 0..40 {
+            let _ = sink.emit(&telemetry::Event::info(
+                "api.serve",
+                "older unrelated history",
+            ));
+        }
+        drop(sink);
+        // A crash fragment: no newline. The next open terminates it into a
+        // standing malformed line (`terminate_torn_tail`).
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.ndjson"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, br#"{"seq":41,"ms""#))
+            .expect("a torn tail");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("reopens");
+        let _ = sink.emit(&telemetry::Event::info("api.serve", "after the restart"));
+        let before = telemetry::now_millis();
+        while telemetry::now_millis() == before {
+            std::hint::spin_loop();
+        }
+        let since = telemetry::now_millis();
+        for _ in 0..5 {
+            let _ = sink.emit_for_run(77, &telemetry::Event::info("cli.audit", "rung sweeping"));
+        }
+        let cli = dir.join(super::CLI_SUBDIR);
+
+        let unbounded = asked("limit=200&run=77");
+        assert!(unbounded.ignored.is_empty());
+        let walked = super::both_halves(
+            &dir,
+            Some(&cli),
+            &unbounded.query.clone().scanning_at_most(1024),
+        );
+        assert!(
+            walked.malformed == 1 || walked.hit_scan_cap,
+            "the unbounded poll reads the older damage or its cap: {walked:?}"
+        );
+        let whole = super::both_halves(&dir, Some(&cli), &unbounded.query);
+        assert_eq!(whole.malformed, 1, "the torn line is in the unbounded walk");
+
+        let bounded = asked(&format!("limit=200&run=77&since={since}"));
+        assert!(bounded.ignored.is_empty(), "{:?}", bounded.ignored);
+        assert_eq!(bounded.since, Some(since));
+        let tail = super::both_halves(
+            &dir,
+            Some(&cli),
+            &bounded.query.clone().scanning_at_most(1024),
+        );
+        assert_eq!(tail.records.len(), 5, "every event of the run");
+        assert_eq!(tail.malformed, 0, "the older torn line is never read");
+        assert!(
+            !tail.hit_scan_cap,
+            "the walk ended at the run's start: {tail:?}"
+        );
+        let json = json_over(&dir, Some(&cli), &bounded, None);
+        assert!(json.contains(&format!(r#""since":{since},"#)), "{json}");
+        assert!(json.contains(r#""malformed":0,"#), "{json}");
+        assert!(page_shell(&bounded, "").contains(&format!(r#"name="since" value="{since}""#)));
+        assert!(
+            page_shell(&bounded, "").contains(&format!("&amp;since={since}"))
+                || page_shell(&bounded, "").contains(&format!("&since={since}"))
+        );
+    }
+
+    /// OBSV-05: `since` is read the way `run` is -- canonical digits only, at
+    /// most `i64::MAX` -- and anything else is NAMED, never read as some other
+    /// instant and never silently dropped.
+    #[test]
+    fn an_unreadable_since_is_named_and_not_applied() {
+        // `+` is a space on the wire, so a literal plus arrives as `%2B`.
+        for (wire, bad) in [
+            ("-1", "-1"),
+            ("%2B5", "+5"),
+            ("05", "05"),
+            ("1.0", "1.0"),
+            ("x", "x"),
+            ("9223372036854775808", "9223372036854775808"),
+            ("18446744073709551616", "18446744073709551616"),
+        ] {
+            let asked = asked(&format!("since={wire}"));
+            assert_eq!(asked.since, None, "{bad}");
+            assert_eq!(asked.query.since_unix_millis, None, "{bad}");
+            assert_eq!(asked.ignored, vec![("since", bad.to_owned())], "{bad}");
+        }
+        for (good, ms) in [
+            ("0", 0_i64),
+            ("1786197791427", 1_786_197_791_427),
+            ("9223372036854775807", i64::MAX),
+        ] {
+            let asked = asked(&format!("since={good}"));
+            assert_eq!(asked.since, Some(ms), "{good}");
+            assert_eq!(asked.query.since_unix_millis, Some(ms), "{good}");
+            assert!(asked.ignored.is_empty(), "{good}");
+        }
+        let none = asked("");
+        assert_eq!(none.since, None);
+        assert!(!json_query(&none).contains("since"));
+    }
+
+    /// OBSV-01 (D-3200): the union's truncation drops records that WERE read,
+    /// so a page cut by it has older events not on it. Each half below reads
+    /// its whole file -- three lines under a limit of four -- and reports
+    /// `reached_oldest`, yet two of the six read are not served. The merged
+    /// flag said `true` and the page withheld "Older events exist".
+    #[test]
+    fn a_union_cut_by_the_limit_has_not_reached_the_oldest() {
+        let (dir, served) = sink_in("merge-cut");
+        let cli_dir = dir.join(super::CLI_SUBDIR);
+        std::fs::create_dir_all(&cli_dir).expect("the cli half");
+        let ran = telemetry::Sink::open(
+            &telemetry::Config::new(&cli_dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        for _ in 0..3 {
+            let _ = ran.emit(&telemetry::Event::info("cli.sweep", "older cli line"));
+        }
+        for _ in 0..3 {
+            let _ = served.emit(&telemetry::Event::info("api.serve", "server line"));
+        }
+        let query = asked("limit=4").query;
+        let alone = telemetry::tail(&cli_dir, telemetry::DEFAULT_KEEP_FILES, &query);
+        assert!(alone.reached_oldest, "each half on its own read everything");
+
+        let tail = super::both_halves(&dir, Some(&cli_dir), &query);
+        assert_eq!(tail.records.len(), 4, "two read records were cut");
+        assert!(
+            !tail.reached_oldest,
+            "a page missing two read events must not claim the oldest was reached"
+        );
+        let json = json_over(&dir, Some(&cli_dir), &asked("limit=4"), None);
+        assert!(json.contains(r#""reached_oldest":false"#), "{json}");
+
+        // Exactly at the limit nothing is cut and the flag stays honest-true.
+        let exact = super::both_halves(&dir, Some(&cli_dir), &asked("limit=6").query);
+        assert_eq!(exact.records.len(), 6);
+        assert!(exact.reached_oldest, "nothing was cut at limit 6");
     }
 
     #[test]
@@ -1627,6 +2330,57 @@ mod tests {
         );
     }
 
+    /// CE-41, D-1769: after a failed roll the banner says rotation STOPPED
+    /// and the file is growing, never that events were overwritten, and that a
+    /// restart resumes it.
+    #[test]
+    fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
+        let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(page.contains("rotation is paused"), "{page}");
+        assert!(
+            page.contains("Rotation is retried by itself") && page.contains("restart the server"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("may already have been overwritten"),
+            "{page}"
+        );
+        assert!(page.contains("rename refused"), "{page}");
+    }
+
+    /// conc9-3: a held clock and a standing last error each make the banner
+    /// and `/logs.json` speak, though no event was lost.
+    #[test]
+    fn a_held_clock_and_a_standing_error_are_shown() {
+        let mut held = health(0, 0, None);
+        held.clock_held = 3;
+        let page = health_banner(Some(&held));
+        assert!(
+            page.contains("clock is held") && page.contains("3 event(s)"),
+            "{page}"
+        );
+        assert!(!page.contains("Sink healthy"), "{page}");
+        let json = sink_json(Some(&held));
+        assert!(
+            json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
+            "{json}"
+        );
+
+        let erred = health(0, 0, Some("floor resumed ahead of the clock"));
+        let page = health_banner(Some(&erred));
+        assert!(page.contains("reported a failure"), "{page}");
+        assert!(page.contains("floor resumed ahead of the clock"), "{page}");
+        // A loud banner with NO held clock says nothing about one: the clock
+        // sentence is gated on `clock_held > 0`, not on the banner being loud.
+        // G18-api-08.
+        assert!(!page.contains("clock BEHIND"), "{page}");
+        assert!(!page.contains("0 event(s) read a clock"), "{page}");
+
+        let quiet = health(0, 0, None);
+        assert!(health_banner(Some(&quiet)).contains("Sink healthy"));
+        assert!(sink_json(Some(&quiet)).contains(r#""loud":false"#));
+    }
+
     fn health(dropped: u64, rotation_failures: u64, last_error: Option<&str>) -> telemetry::Health {
         telemetry::Health {
             path: std::path::PathBuf::from("events.ndjson"),
@@ -1637,6 +2391,7 @@ mod tests {
             last_error: last_error.map(str::to_owned),
             current_bytes: 4_096,
             next_seq: 1_201,
+            clock_held: 0,
         }
     }
 
@@ -1881,6 +2636,55 @@ mod tests {
         );
     }
 
+    /// A filter that could not be read is named in the answer, and the filters
+    /// that were applied are echoed, so `?level=eror&run=12x` no longer answers
+    /// byte-identically to no filter at all (P1-01-02, D-1765).
+    #[test]
+    fn an_unreadable_filter_is_named_and_the_applied_ones_are_echoed() {
+        let bad = asked("level=eror&run=12x");
+        assert_eq!(bad.level, None);
+        assert_eq!(bad.run, 0);
+        assert_eq!(
+            bad.ignored,
+            vec![("level", "eror".to_owned()), ("run", "12x".to_owned())]
+        );
+        // `+` is a space on the wire, so a literal plus arrives as `%2B`.
+        for (wire, word) in [("%2B3", "+3"), ("03", "03"), ("3.0", "3.0"), ("-3", "-3")] {
+            let one = asked(&format!("run={wire}"));
+            assert_eq!(one.run, 0, "{word}");
+            assert_eq!(one.ignored, vec![("run", word.to_owned())], "{word}");
+        }
+        let json = json_of(
+            &walk(Vec::new()),
+            &bad,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":null,"target":null,"run":null,"run_key":null,"since":null,"ignored":[{"param":"level","asked":"eror"},{"param":"run","asked":"12x"}],"sink":"#
+            ),
+            "{json}"
+        );
+
+        let good = asked("level=WARN&target=api.backtest&run=18446744073709551615");
+        assert!(good.ignored.is_empty());
+        let json = json_of(
+            &walk(Vec::new()),
+            &good,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":"warn","target":"api.backtest","run":18446744073709551615,"run_key":"18446744073709551615","since":null,"ignored":[],"sink":"#
+            ),
+            "{json}"
+        );
+        // Zero is "every run" and is not a mistake.
+        assert!(asked("run=0").ignored.is_empty());
+    }
+
     /// **EVERY WALK FLAG REACHES THE PAGE, AND EACH ONE ALONE.**
     ///
     /// `walk_notes` had six surviving mutants — including `-> vec![]`, which is
@@ -2122,6 +2926,8 @@ mod tests {
     /// an owner for its process global.
     #[tokio::test]
     async fn the_handlers_answer_over_the_installed_sink_and_carry_their_content_type() {
+        // Not while a test holds every log-read slot: that test expects 429s.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let sink = crate::emitted::sink();
         assert!(
             sink.emit(
@@ -2157,7 +2963,9 @@ mod tests {
         let uri: axum::http::Uri = "/logs?limit=50&target=api.handler&level=error"
             .parse()
             .expect("a legal uri");
-        let page = logs_page(uri).await.0;
+        let (status, page) = logs_page(uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let page = page.0;
         assert!(page.contains("handler-probe-marker"), "{page}");
         assert!(
             page.contains("<title>brutex · logs</title>"),
@@ -2177,6 +2985,7 @@ mod tests {
     /// `asked`, never through the door an operator's browser knocks on.
     #[tokio::test]
     async fn a_mangled_query_string_still_gets_an_answer_from_the_handler() {
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let _sink = crate::emitted::sink();
         let uri: axum::http::Uri = "/logs.json?limit=-9999999&level=NOPE&target="
             .parse()
@@ -2193,7 +3002,7 @@ mod tests {
         );
 
         let uri: axum::http::Uri = "/logs?limit=99999999".parse().expect("a legal uri");
-        let page = logs_page(uri).await.0;
+        let page = logs_page(uri).await.1.0;
         assert!(
             page.contains(&format!("value=\"{PAGE_LIMIT}\"")),
             "a limit past the page ceiling is clamped to it, and the form shows \
@@ -2323,5 +3132,49 @@ mod tests {
             page_shell(&asked(""), "").contains(r#"name="run" value=""#),
             "and is empty when every run is shown"
         );
+    }
+
+    /// **THE LOG ROUTES ARE ADMITTED, AND A FULL POOL IS A NAMED REFUSAL.**
+    /// log-3, P1-04-02, D-2327. Both handlers ran their two-half walk inline
+    /// on a Tokio worker with no admission, so they answered 200 whatever else
+    /// was walking. With every log-read slot held, each now answers 429 and
+    /// says which pool refused it and its bound, before reading a byte; with
+    /// the slots released, the same requests are answered again. A 429 can only
+    /// come from `crate::detail::run_log_read`, so this also proves both
+    /// handlers go through it.
+    #[tokio::test]
+    async fn the_log_routes_refuse_by_name_when_every_log_read_slot_is_held() {
+        let _sink = crate::emitted::sink();
+        let apart = crate::detail::apart_from_slot_owners().await;
+        let held = crate::detail::take_every_log_read_slot(&apart);
+        assert_eq!(held.len(), 4, "this test owns every log-read slot");
+
+        let uri: axum::http::Uri = "/logs.json?limit=5".parse().expect("a legal uri");
+        let (status, headers, body) = logs_json(uri).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        assert!(
+            body.contains("log read not admitted (Saturated): at most 4"),
+            "{body}"
+        );
+        assert!(!body.contains("records"), "nothing was read: {body}");
+
+        let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
+        let (status, page) = logs_page(uri).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(page.0.contains("<b>Not admitted</b>"), "{}", page.0);
+        assert!(page.0.contains("Saturated"), "{}", page.0);
+        assert!(page.0.contains("at most 4 log reads"), "{}", page.0);
+        assert!(
+            page.0.contains("<title>brutex · logs</title>"),
+            "the refusal is a whole page with its form"
+        );
+
+        drop(held);
+        let uri: axum::http::Uri = "/logs.json?limit=5".parse().expect("a legal uri");
+        let (status, _headers, body) = logs_json(uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
+        assert_eq!(logs_page(uri).await.0, axum::http::StatusCode::OK);
     }
 }

@@ -246,18 +246,29 @@ fn conditions_line(mask: &ConditionMask) -> String {
     names.join(" · ")
 }
 
-/// Observations below which a normal-quantile bar cannot rule on a t-statistic.
+/// Observations below which a row is not judged at all.
 ///
-/// `Edge::t` is Student-t with `n - 1` degrees of freedom; every threshold in
-/// `crate::significance` is a NORMAL quantile. They converge as `n` grows and
-/// diverge sharply below about thirty: an audit measured the bar understated by
-/// 4.89 at `n = 13`, which spends 729x the family-wise budget on one row.
+/// `Edge::t` is Student-t with `n - 1` degrees of freedom. This floor was
+/// introduced when every row was judged against the NORMAL Bonferroni quantile,
+/// on the claim that the two "converge by about thirty" -- an audit had
+/// measured the bar understated by 4.89 at `n = 13`, 729x the family-wise
+/// budget on one row.
 ///
-/// Thirty is the conventional crossing point and it is a stated convention, not
-/// a derivation. Below it the report refuses a verdict rather than issuing one
-/// across two distributions -- `CLAUDE.md` §4 prefers a named refusal to a
-/// confident wrong answer.
-const MIN_OBSERVATIONS: u64 = 30;
+/// **That claim holds at a 5% tail and not at a Bonferroni tail.** At
+/// `0.05 / (2N)` the two quantiles at 29 degrees of freedom still differ by
+/// 0.87 at N = 3,689 (4.351 against 5.225, eleven times the budget) and by
+/// 2.78 at N = 61,125,295 (p8num-1, D-2725). So the floor does NOT make the
+/// normal bar valid, and the verdict no longer relies on it: each judgeable
+/// row is also held to `crate::significance::clears_bonferroni`, the Student-t
+/// tail at its own `n - 1` degrees of freedom.
+///
+/// The floor remains as a sample-size convention, not a derivation: below
+/// thirty observations the report refuses a verdict, and `/live.json` with it.
+///
+/// Public because `/live.json` serves a `clears_bar` for the same rows and must
+/// refuse it under the same floor; it called a five-observation row clear while
+/// this report called it TOO FEW (xcut-1, D-1991).
+pub const MIN_OBSERVATIONS: u64 = 30;
 
 /// Column width for the label side of every row.
 const LABEL: usize = 34;
@@ -325,6 +336,40 @@ pub fn render_ranked(outcome: &RankedOutcome, id: Option<&RunId>) -> String {
     out
 }
 
+/// The threshold rows below two distinct tests; `true` when it rendered them.
+///
+/// At one test there is no best-of-many luck floor, but FINDINGS still judges
+/// every row against `bonferroni_t(1)` = 1.96, so this block prints that bar
+/// rather than saying there is none (p2run-1, D-2619). At zero tests nothing
+/// was judged and the threshold is `-`.
+fn few_hypotheses(out: &mut String, n: u64) -> bool {
+    match n {
+        0 => row(
+            out,
+            "threshold",
+            "-",
+            "too few hypotheses to have a noise floor",
+        ),
+        1 => {
+            row(
+                out,
+                "best t-stat by luck alone",
+                "-",
+                "one test has no best-of-many luck to beat",
+            );
+            row(
+                out,
+                "t required (Bonferroni 5%)",
+                &format!("{:.2}", crate::significance::bonferroni_t(1)),
+                "the bar FINDINGS judges this one test against",
+            );
+        }
+        _ => return false,
+    }
+    let _ = writeln!(out);
+    true
+}
+
 /// The significance block from exact raw and duplicate-deflated counts.
 fn significance_counts(out: &mut String, raw: u64, effective: u64) {
     let _ = writeln!(out, "SIGNIFICANCE");
@@ -340,14 +385,7 @@ fn significance_counts(out: &mut String, raw: u64, effective: u64) {
         &effective.to_string(),
         "exact duplicates removed -- same support, same test",
     );
-    if effective < 2 {
-        row(
-            out,
-            "threshold",
-            "-",
-            "too few hypotheses to have a noise floor",
-        );
-        let _ = writeln!(out);
+    if few_hypotheses(out, effective) {
         return;
     }
     row(
@@ -399,14 +437,7 @@ fn significance(out: &mut String, sweep: &Sweep) {
         &n.to_string(),
         "exact duplicates removed -- same support, same test",
     );
-    if n < 2 {
-        row(
-            out,
-            "threshold",
-            "-",
-            "too few hypotheses to have a noise floor",
-        );
-        let _ = writeln!(out);
+    if few_hypotheses(out, n) {
         return;
     }
     row(
@@ -486,7 +517,13 @@ fn paisa(mean: f64) -> i64 {
 #[must_use]
 pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     let rows: Vec<&crate::rank::Scored> = ranked.top.iter().collect();
-    render_findings_of(&rows, ranked.considered, sweep)
+    render_findings_at(
+        &rows,
+        ranked.considered,
+        crate::significance::effective_trials(sweep),
+        crate::rank::Lens::Detectability,
+        ranked.inexact(),
+    )
 }
 
 /// [`render_findings`] for the streamed ranked path, using the exact trial
@@ -499,6 +536,7 @@ pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> Strin
         ranked.considered,
         outcome.effective_trials,
         ranked.lens,
+        ranked.inexact(),
     )
 }
 
@@ -531,6 +569,10 @@ pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> Strin
 /// Recomputing it from the rows would make the report say the search found as
 /// many combinations as it kept, which is the distinction `Ranked::considered`
 /// exists to protect.
+///
+/// A filtered list carries no ranking, so it carries no refusal count: the
+/// rows are whatever the caller kept. A caller holding a [`Ranked`] reaches
+/// [`render_findings`] instead, which prints `Ranked::inexact` (D-4486).
 #[must_use]
 pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep: &Sweep) -> String {
     render_findings_at(
@@ -538,15 +580,48 @@ pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep:
         considered,
         crate::significance::effective_trials(sweep),
         crate::rank::Lens::Detectability,
+        0,
     )
 }
 
+/// The two bar rows of the FINDINGS header: the normal figure, and the
+/// Student-t one a row at the observation floor is actually held to.
+///
+/// THE BAR A ROW IS ACTUALLY HELD TO, at the smallest n that is judged. Every
+/// row clears the Student-t Bonferroni bar at its own n - 1 degrees of
+/// freedom, which is above the normal figure and falls toward it as n grows;
+/// printing only the normal figure let a reader take it for the bar a
+/// thirty-observation row had to clear (p8num-1, D-2725).
+fn bar_rows(out: &mut String, bar: f64, trials: u64) {
+    row(
+        out,
+        "bar every row must clear",
+        &format!("{bar:.2}"),
+        "Bonferroni 5% on this run's own trial count; normal limit",
+    );
+    row(
+        out,
+        &format!("  at the {MIN_OBSERVATIONS}-observation floor"),
+        &format!(
+            "{:.2}",
+            crate::significance::bonferroni_t_student(trials, MIN_OBSERVATIONS.saturating_sub(1))
+        ),
+        "Student-t; each row is judged at its own n - 1 df",
+    );
+}
+
 /// Findings with the trial count and ranking lens already resolved.
+///
+/// `inexact` is `Ranked::inexact`: rows refused because a money total reached
+/// 2^53 paisa (GAP16-26, D-4486). Printed when it is not zero, so every report
+/// of an ordinary series is byte-identical to the one before that refusal
+/// existed, and a report that lost rows to it says how many and why.
 fn render_findings_at(
     rows: &[&crate::rank::Scored],
     considered: u64,
     n: u64,
     lens: crate::rank::Lens,
+    inexact: u64,
 ) -> String {
     let mut out = String::with_capacity(1_024);
     // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
@@ -575,12 +650,15 @@ fn render_findings_at(
             }
         },
     );
-    row(
-        &mut out,
-        "bar every row must clear",
-        &format!("{bar:.2}"),
-        "Bonferroni 5% on this run's own trial count",
-    );
+    if inexact > 0 {
+        row(
+            &mut out,
+            "REFUSED, money inexact",
+            &inexact.to_string(),
+            "a money total at or past 2^53 paisa, past the integers a double holds exactly",
+        );
+    }
+    bar_rows(&mut out, bar, n);
     let _ = writeln!(out);
 
     if rows.is_empty() {
@@ -595,14 +673,16 @@ fn render_findings_at(
         "rank", "hits", "n", "mean paisa", "t"
     );
     for (index, s) in rows.iter().enumerate() {
-        // A t-statistic from n observations is Student-t, and the bar is a
-        // NORMAL quantile. The two converge as n grows and diverge sharply
-        // below about thirty -- an audit measured the bar understated by 4.89
-        // at n = 13, which is 729 times the family-wise budget. Rather than
-        // compare across distributions, a row with too few observations is not
-        // judged at all.
+        // A t-statistic from n observations is Student-t, and `bar` is a
+        // NORMAL quantile. A row below the floor is not judged at all; a row
+        // above it is judged against the Student-t tail at its own n - 1
+        // degrees of freedom, because at a Bonferroni tail the two still
+        // differ badly at n = 30 (p8num-1, D-2725). The normal comparison is
+        // kept: the Student-t rule implies it, and it is the figure printed.
         let judgeable = s.edge.n >= MIN_OBSERVATIONS;
-        let clears = judgeable && s.edge.t.abs() >= bar;
+        let clears = judgeable
+            && s.edge.t.abs() >= bar
+            && crate::significance::clears_bonferroni(s.edge.t, s.edge.n, n);
         let _ = writeln!(
             out,
             "  {:<6}{:>10}{:>10}{:>14}{:>9.2}  {}",
@@ -631,7 +711,7 @@ fn render_findings_at(
                 "MISPAIRED — the forward outcomes belong to other bars; \
                  this row's mean and t mean nothing"
             } else if !judgeable {
-                "TOO FEW OBSERVATIONS to judge -- a normal bar cannot rule on a t"
+                "TOO FEW OBSERVATIONS to judge -- below the 30-observation floor"
             } else if clears {
                 "clears"
             } else {
@@ -1038,7 +1118,10 @@ pub fn names_from_words(words: [u64; vocab::mask::WORDS]) -> Vec<String> {
               instrumented, so it leaves no uncoverable region behind."
 )]
 mod tests {
-    use super::{Outcome, condition_names, conditions_line, permille, render, render_auto};
+    use super::{
+        Outcome, condition_names, conditions_line, permille, render, render_auto,
+        significance_counts,
+    };
     use crate::identity::{Direction, Params, Run, data_digest, identity};
     use crate::{Sweeper, synthetic};
     use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -1502,6 +1585,27 @@ mod tests {
         assert_eq!(cell(&text, "threshold"), "-");
     }
 
+    /// p2run-1 / D-2619: at ONE distinct test FINDINGS judges every row against
+    /// `bonferroni_t(1)`, so SIGNIFICANCE prints that bar instead of saying
+    /// there is no threshold; zero tests still print `-`.
+    #[test]
+    fn one_distinct_test_prints_the_bar_findings_judges_it_against() {
+        let mut one = String::new();
+        significance_counts(&mut one, 3, 1);
+        assert_eq!(cell(&one, "t required (Bonferroni 5%)"), "1.96", "{one}");
+        assert_eq!(
+            cell(&one, "t required (Bonferroni 5%)"),
+            format!("{:.2}", crate::significance::bonferroni_t(1))
+        );
+        assert!(!one.contains("too few hypotheses"), "{one}");
+        assert_eq!(cell(&one, "best t-stat by luck alone"), "-", "{one}");
+
+        let mut none = String::new();
+        significance_counts(&mut none, 0, 0);
+        assert_eq!(cell(&none, "threshold"), "-", "{none}");
+        assert!(!none.contains("Bonferroni"), "{none}");
+    }
+
     #[test]
     fn every_finding_is_printed_beside_the_bar_it_had_to_clear() {
         // The failure this guards: a reader sees t = 4.1, remembers that three
@@ -1645,6 +1749,48 @@ mod tests {
             "two sections of one report printed different bars: {from_significance} \
              and {from_findings}"
         );
+    }
+
+    /// A THIRTY-OBSERVATION ROW IS JUDGED ON ITS OWN STUDENT-T TAIL. p8num-1, D-2725.
+    ///
+    /// At 3,689 trials the normal bar is 4.35 and the Student-t bar at 29
+    /// degrees of freedom is 5.23. A row with n = 30 and t = 5.0 printed
+    /// `clears`; it is now below the bar, and the same t at n = 1,000 clears.
+    /// The page also prints the Student-t bar at the floor beside the normal
+    /// figure, so the number a reader compares against is the one applied.
+    #[test]
+    fn a_thirty_observation_row_is_judged_on_its_own_student_t_tail() {
+        let scored = |n: u64, t: f64, bit: u32| crate::rank::Scored {
+            mask: vocab::ConditionMask::default().with_bit(bit),
+            hits: n,
+            edge: crate::outcome::Edge {
+                n,
+                mismatched: 0,
+                refused: 0,
+                mean_paisa: 50.0,
+                t,
+                ..crate::outcome::Edge::default()
+            },
+        };
+        let thin = scored(30, 5.0, 7);
+        let wide = scored(1_000, 5.0, 8);
+        let strong = scored(30, 5.3, 9);
+        let verdicts = |row: &crate::rank::Scored| {
+            crate::report::render_findings_at(
+                &[row],
+                3_689,
+                3_689,
+                crate::rank::Lens::Detectability,
+                0,
+            )
+        };
+        let text = verdicts(&thin);
+        assert!(5.0 > crate::significance::bonferroni_t(3_689));
+        assert!(text.contains("BELOW THE BAR"), "{text}");
+        assert!(!text.contains("  clears"), "{text}");
+        assert!(verdicts(&wide).contains("  clears"));
+        assert!(verdicts(&strong).contains("  clears"));
+        assert_eq!(cell(&text, "at the 30-observation floor"), "5.23", "{text}");
     }
 
     #[test]

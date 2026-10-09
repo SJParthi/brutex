@@ -38,12 +38,54 @@
 //!
 //! # Cost
 //!
-//! One pass per line, splitting on a byte. No allocation per row: fields are
-//! borrowed from the input and parsed into integers in place. The row vector is
-//! reserved from a caller-supplied bound — `docs/07-o1-architecture.md` law 2.
+//! One pass per line, splitting on a byte. **No allocation per row:** a row's
+//! fields are borrowed from the input into a fixed [`MAX_FIELDS`]-slot array by
+//! [`fields_of`], however many commas the line holds, and parsed into integers
+//! in place. Until D-0721 this paragraph said the same while every row collected
+//! its fields into a vector sized to its commas, before the field count was
+//! checked. Held by counting the allocator's calls, in
+//! `crates/pull/tests/allocation.rs`:
+//! `pull::allocation::twice_the_rows_cost_no_allocation_per_row` decodes 4,096
+//! and then 8,192 rows and allows the second at most four more allocating
+//! calls, and
+//! `pull::allocation::a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`
+//! refuses such a line having allocated fewer bytes than the line holds. The
+//! array itself is held by
+//! `pull::csv::a_lines_fields_land_in_a_fixed_array_and_are_counted_whole`.
+//! D-0724.
+//!
+//! **A row costs time linear in its line's bytes, and no line-length cap
+//! exists.** `body.lines()` finds the line's end and `line.split(',')` in
+//! [`fields_of`] counts every field, so each reads the whole line. A line may be
+//! as long as its member, and `crate::archive` reads a member whole, with
+//! `fs::read` and no byte cap. `docs/06-limits.md` records both.
+//!
+//! **The row vector is reserved ONCE, before the first line**, from a bound
+//! the body itself supplies — one more than its newline count, capped at
+//! [`MAX_ROWS`] — so a decode that succeeds never reallocates it
+//! (`docs/07-o1-architecture.md` law 2). Until o1api-34 (D-1203) this
+//! paragraph said the vector was unreserved, after an earlier version claimed a
+//! caller-supplied bound no caller supplied. Counting the body's newlines is one
+//! extra linear pass over bytes already in memory, the same order as the decode
+//! pass it sizes. Held by `pull::csv::the_row_vector_is_reserved_once_from_the_body`.
 
 use crate::fetch::{FetchError, MAX_ROWS, RawRow};
 use crate::vendor::DateFormat;
+
+/// GDFL's observed header row, character for character —
+/// `docs/08-vendor-samples.md`, the `GFDLNFO_TICK_01072025` sample.
+///
+/// The one copy. `crate::vendor`'s GDFL descriptor names this constant rather
+/// than spelling the row a second time, so the descriptor's `HeaderRow` and
+/// the decoder's check cannot drift apart.
+pub const GDFL_HEADER: &str =
+    "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
+
+/// The ticker suffix of a GDFL index row: `docs/00-charter.md` measured
+/// `<NAME>.NSE_IDX.csv` files whose rows carry `NIFTY 50.NSE_IDX` and
+/// `NIFTY BANK.NSE_IDX`. A GDFL row with it is an index level; every other
+/// GDFL row (futures, options, equity) is a traded instrument.
+pub const GDFL_INDEX_SUFFIX: &str = ".NSE_IDX";
 
 /// Which columns a vendor's CSV carries, in order.
 ///
@@ -56,7 +98,8 @@ pub enum Columns {
     ///
     /// `TrueData`'s index layout. Volume and open interest are present in the
     /// row and always zero, because an index has neither. Observed:
-    /// `20221003,09:07:41,38444.90,0,0`.
+    /// `20221003,09:07:41,38444.90,0,0`. The open interest decodes absent,
+    /// never as a measured zero (D-2689).
     TrueDataIndex,
     /// `date, time, price, volume, open_interest, …` — nine fields.
     ///
@@ -67,7 +110,9 @@ pub enum Columns {
     /// OpenInterest` — ten fields, with a header row.
     ///
     /// GDFL's layout for both options and futures. `LTQ` is `0` on most rows:
-    /// those are **quote** updates, not trades.
+    /// those are **quote** updates, not trades, and on a traded instrument
+    /// they are skipped and counted (D-2688). GDFL index files share the
+    /// layout; their rows are kept and their open interest is absent (D-2689).
     Gdfl,
     /// Plain `TrueData` F&O: `date, time, price, volume, open_interest`.
     /// Five fields, no header, no bid/ask columns. The observed row and vendor
@@ -76,6 +121,20 @@ pub enum Columns {
     /// Selected explicitly; [`Self::TrueDataFutures`] remains nine-field only.
     TrueDataFno,
 }
+
+/// The widest row any [`Columns`] layout carries — GDFL's ten.
+///
+/// The decoder splits each line into a fixed array of this many slots rather
+/// than a `Vec`, so no row allocates. Pinned to every layout's
+/// [`Columns::count`] at compile time below.
+pub const MAX_FIELDS: usize = 10;
+
+const _: () = assert!(
+    Columns::TrueDataIndex.count() <= MAX_FIELDS
+        && Columns::TrueDataFutures.count() <= MAX_FIELDS
+        && Columns::Gdfl.count() <= MAX_FIELDS
+        && Columns::TrueDataFno.count() <= MAX_FIELDS
+);
 
 impl Columns {
     /// How many fields a row of this shape has.
@@ -91,7 +150,36 @@ impl Columns {
     /// Whether the file opens with a header row naming the columns.
     #[must_use]
     pub const fn has_header(self) -> bool {
-        matches!(self, Self::Gdfl)
+        self.header().is_some()
+    }
+
+    /// The header row this shape opens with, character for character, or
+    /// `None` for a shape whose first line is already data.
+    ///
+    /// The decoder compares line one against this and refuses the file when
+    /// they differ. It used to skip line one unread, so a GDFL member that
+    /// arrived without its header silently lost its first trade, and a header
+    /// naming the same ten columns in another order would have been decoded
+    /// against the wrong offsets. D-1360.
+    #[must_use]
+    pub const fn header(self) -> Option<&'static str> {
+        match self {
+            Self::Gdfl => Some(GDFL_HEADER),
+            Self::TrueDataIndex | Self::TrueDataFutures | Self::TrueDataFno => None,
+        }
+    }
+
+    /// Whether a row of this shape is an index level: `TrueData`'s index
+    /// layout, or a GDFL row whose ticker ends in [`GDFL_INDEX_SUFFIX`].
+    /// D-2688, D-2689.
+    fn is_index_row(self, fields: &[&str]) -> bool {
+        match self {
+            Self::TrueDataIndex => true,
+            Self::Gdfl => fields
+                .first()
+                .is_some_and(|ticker| ticker.trim().ends_with(GDFL_INDEX_SUFFIX)),
+            Self::TrueDataFutures | Self::TrueDataFno => false,
+        }
     }
 
     /// The date format this shape carries.
@@ -202,6 +290,18 @@ pub enum CsvError {
         /// What was there, as the file spells it.
         got: String,
     },
+    /// Line one is not the header row the declared shape opens with.
+    ///
+    /// Refused rather than skipped: a file without its header would lose its
+    /// first data row as if it were one, and a header naming the declared
+    /// columns in another order would be decoded against the wrong offsets —
+    /// plausible numbers in the wrong fields. D-1360.
+    HeaderMismatch {
+        /// Line one as the file spells it, trimmed.
+        got: String,
+        /// The header the declared shape carries.
+        want: &'static str,
+    },
     /// More rows than [`MAX_ROWS`].
     TooManyRows {
         /// How many were found before stopping.
@@ -237,6 +337,13 @@ impl core::fmt::Display for CsvError {
                  `CLAUDE.md` §7 spends i64::MIN on an ABSENT open interest, so \
                  a vendor that sends it could not be told apart from one that \
                  sent no open interest at all"
+            ),
+            Self::HeaderMismatch { ref got, want } => write!(
+                f,
+                "line 1: header {got:?} is not the declared header {want:?}. \
+                 A file without its header would lose its first row, and one \
+                 naming the columns in another order would be read against \
+                 the wrong offsets, so the file is refused"
             ),
             Self::TooManyRows { rows, cap } => {
                 write!(f, "the file holds at least {rows} rows; the cap is {cap}")
@@ -282,8 +389,10 @@ pub fn is_ghost(member: &str) -> bool {
 ///
 /// Rejects a third decimal place rather than rounding it: the tick grid is two
 /// places (`CLAUDE.md` §7), so a third digit is the vendor sending something
-/// this build does not understand, and rounding it here would be a second
-/// snapping site competing with the one at the write boundary.
+/// this build does not understand. The JSON decoders snap a third decimal
+/// half-up instead, through `Paisa::from_rupee_text_half_up` (D-0321), because
+/// there it is measured vendor float error; this reader is for archive text and
+/// for counts, where it is not, so the two rules differ on purpose (D-1494).
 pub(crate) fn paisa(text: &str) -> Option<i64> {
     let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
     if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
@@ -305,6 +414,20 @@ pub(crate) fn paisa(text: &str) -> Option<i64> {
     Some(if negative { -total } else { total })
 }
 
+/// A date or clock field that is ASCII digits and nothing else, parsed.
+///
+/// `str::parse` for an integer accepts a leading `+`, and for a signed one a
+/// leading `-`, so a two-byte field `-9` or `+1` used to pass a length check
+/// and be read as a number. A time of `-9:15:00` was stored as 15:15 on the
+/// previous day (probestore-1, D-1201). Every byte is checked first; the
+/// callers hand it two- or four-byte fields only.
+fn digits<T: core::str::FromStr>(text: &str) -> Option<T> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// Seconds since IST midnight, from `HH:MM:SS`.
 fn ist_seconds(text: &str) -> Option<i64> {
     let mut parts = text.split(':');
@@ -312,11 +435,18 @@ fn ist_seconds(text: &str) -> Option<i64> {
     if parts.next().is_some() || h.len() != 2 || m.len() != 2 || s.len() != 2 {
         return None;
     }
-    let (h, m, s): (i64, i64, i64) = (h.parse().ok()?, m.parse().ok()?, s.parse().ok()?);
+    let (h, m, s): (i64, i64, i64) = (digits(h)?, digits(m)?, digits(s)?);
     if h > 23 || m > 59 || s > 59 {
         return None;
     }
     Some(h * 3_600 + m * 60 + s)
+}
+
+/// Whether `text` is `len` bytes long with exactly `separator` at both `at`
+/// offsets. The digit fields between them are checked by [`digits`].
+fn separated(text: &str, len: usize, at: [usize; 2], separator: u8) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == len && at.iter().all(|&i| bytes.get(i) == Some(&separator))
 }
 
 /// A calendar date from a vendor's date field.
@@ -324,27 +454,29 @@ fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
     let (y, m, d) = match format {
         // `20221003`
         DateFormat::CompactYmd if text.len() == 8 => (
-            text.get(0..4)?.parse().ok()?,
-            text.get(4..6)?.parse().ok()?,
-            text.get(6..8)?.parse().ok()?,
+            digits(text.get(0..4)?)?,
+            digits(text.get(4..6)?)?,
+            digits(text.get(6..8)?)?,
         ),
-        // `2022-10-03`
-        DateFormat::DashedYmd if text.len() == 10 => (
-            text.get(0..4)?.parse().ok()?,
-            text.get(5..7)?.parse().ok()?,
-            text.get(8..10)?.parse().ok()?,
+        // `2022-10-03`. The separators are bytes too, checked exactly: the
+        // digit fields alone accepted `2022x10x03` (v53-1, D-1483).
+        DateFormat::DashedYmd if separated(text, 10, [4, 7], b'-') => (
+            digits(text.get(0..4)?)?,
+            digits(text.get(5..7)?)?,
+            digits(text.get(8..10)?)?,
         ),
         // `01/07/2025` — DAY first. 1 July, not 7 January.
-        DateFormat::SlashedDmy if text.len() == 10 => (
-            text.get(6..10)?.parse().ok()?,
-            text.get(3..5)?.parse().ok()?,
-            text.get(0..2)?.parse().ok()?,
+        // `01-07-2025` and `01x07x2025` were read as 1 July too (v53-1).
+        DateFormat::SlashedDmy if separated(text, 10, [2, 5], b'/') => (
+            digits(text.get(6..10)?)?,
+            digits(text.get(3..5)?)?,
+            digits(text.get(0..2)?)?,
         ),
         // `01072025`
         DateFormat::CompactDmy if text.len() == 8 => (
-            text.get(4..8)?.parse().ok()?,
-            text.get(2..4)?.parse().ok()?,
-            text.get(0..2)?.parse().ok()?,
+            digits(text.get(4..8)?)?,
+            digits(text.get(2..4)?)?,
+            digits(text.get(0..2)?)?,
         ),
         _ => return None,
     };
@@ -412,6 +544,29 @@ struct Tally {
     /// stating something impossible, and writing `0` beside it would be
     /// asserting no trade in a minute we have no reading for.
     negative_volume: u64,
+    /// Rows whose open-interest field parsed as a NEGATIVE count and were
+    /// skipped.
+    ///
+    /// An open interest counts contracts, so `-5` is not a quantity. It used
+    /// to decode as `Some(-5)` and die at `store::file::survey` as
+    /// `ImpossibleCount`, costing the whole member and its derived rungs and
+    /// naming a batch index rather than a line (CE-59). D-1490's rule for the
+    /// JSON shapes is the rule here: skip the row and count it. `i64::MIN`
+    /// stays a refusal, because it is spelled exactly like the null.
+    /// D-2683.
+    negative_open_interest: u64,
+    /// GDFL rows on a traded instrument (futures, options, equity) whose
+    /// `LTQ` is zero, skipped because they are quote updates, not trades.
+    ///
+    /// `docs/08-vendor-samples.md`: "`LTQ` is `0` on most rows — those are
+    /// **quote** updates, not trades." Such a row's `LTP` is the last traded
+    /// price, possibly from an earlier minute, so folding it put an earlier
+    /// trade into a bar's open, high or low and stored a bar with volume 0 for
+    /// a minute that traded nothing (p10num-1, D-2688). Not a degrade — it is
+    /// most rows of an ordinary file — so it is counted by name on the "file
+    /// decoded" line without raising its level. An index file keeps every row:
+    /// every column after `LTP` is zero there (`docs/00-charter.md`).
+    quote_rows: u64,
 }
 
 /// One decoded file, on the rolling log.
@@ -441,37 +596,83 @@ struct Tally {
 /// index and plain F&O share that physical shape. The caller supplies the
 /// segment and product; the decoder does not infer them from row values.
 fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::debug("pull.csv", "file decoded")
-            .with("rows_in", telemetry::Value::Uint(tally.lines))
-            .with("rows", telemetry::Value::Uint(rows as u64))
-            .with("skipped", telemetry::Value::Uint(tally.skipped))
-            .with("fields", telemetry::Value::Uint(columns.count() as u64))
-            .with("header", telemetry::Value::Bool(columns.has_header()))
-            // THE SUBSTITUTIONS, ON THE SAME LINE AS THE COUNTS THEY QUALIFY. A
-            // `rows` figure that includes rows whose volume this build invented
-            // is not the same fact as one where every field was read, and until
-            // these two appeared there was no way to tell those apart from
-            // outside -- which is the silence §4 forbids, not the substitution
-            // itself.
-            .with(
-                "unreadable_volume",
-                telemetry::Value::Uint(tally.unreadable_volume),
-            )
-            .with(
-                "unreadable_oi",
-                telemetry::Value::Uint(tally.unreadable_open_interest),
-            )
-            // SKIPPED ROWS ARE NOT SUBSTITUTIONS AND GET THEIR OWN FIELD. The
-            // two above qualify a `rows` figure that still counts them; this
-            // one explains why `rows` is SHORT of `rows_in`, which is a
-            // different question and an operator asking it should not have to
-            // subtract the other two to answer it.
-            .with(
-                "negative_volume",
-                telemetry::Value::Uint(tally.negative_volume),
-            ),
-    );
+    let _dropped_when_filtered = telemetry::emit(&decoded_event(columns, tally, rows));
+    // AND ON STDERR WHEN SOMETHING WAS DEGRADED, the same pair the JSON
+    // decoders' `note_negative_volume_bars` writes (CE-57, D-2681).
+    if degraded(tally) {
+        let _printed = telemetry::stderr_line(format_args!(
+            "brutex: a {}-field CSV file decoded {rows} row(s) with {} unreadable \
+             volume(s) stored as 0, {} unreadable open interest(s) stored absent, \
+             and {} negative volume(s) and {} negative open interest(s) skipped",
+            columns.count(),
+            tally.unreadable_volume,
+            tally.unreadable_open_interest,
+            tally.negative_volume,
+            tally.negative_open_interest
+        ));
+    }
+}
+
+/// Whether the pass substituted or skipped anything.
+const fn degraded(tally: Tally) -> bool {
+    tally.unreadable_volume != 0
+        || tally.unreadable_open_interest != 0
+        || tally.negative_volume != 0
+        || tally.negative_open_interest != 0
+}
+
+/// [`note_decoded`]'s event, built apart from the emit so its level and its
+/// fields can be asserted without installing the process-wide sink.
+///
+/// # `Warn` when anything was degraded, `Debug` when nothing was
+///
+/// The degrade counts rode only on a `Debug` line, and the default floor is
+/// `Info`, so a default run kept no trace of a zero-filled volume or a skipped
+/// row. A file with any degrade is now reported at `Warn`; a clean one stays
+/// at `Debug`, so the line does not fire on every ordinary member (CE-57,
+/// D-2681).
+fn decoded_event(columns: Columns, tally: Tally, rows: usize) -> telemetry::Event<'static> {
+    let level = if degraded(tally) {
+        telemetry::Level::Warn
+    } else {
+        telemetry::Level::Debug
+    };
+    telemetry::Event::new(level, "pull.csv", "file decoded")
+        .with("rows_in", telemetry::Value::Uint(tally.lines))
+        .with("rows", telemetry::Value::Uint(rows as u64))
+        .with("skipped", telemetry::Value::Uint(tally.skipped))
+        .with("fields", telemetry::Value::Uint(columns.count() as u64))
+        .with("header", telemetry::Value::Bool(columns.has_header()))
+        // THE SUBSTITUTIONS, ON THE SAME LINE AS THE COUNTS THEY QUALIFY. A
+        // `rows` figure that includes rows whose volume this build invented
+        // is not the same fact as one where every field was read, and until
+        // these two appeared there was no way to tell those apart from
+        // outside -- which is the silence §4 forbids, not the substitution
+        // itself.
+        .with(
+            "unreadable_volume",
+            telemetry::Value::Uint(tally.unreadable_volume),
+        )
+        .with(
+            "unreadable_oi",
+            telemetry::Value::Uint(tally.unreadable_open_interest),
+        )
+        // SKIPPED ROWS ARE NOT SUBSTITUTIONS AND GET THEIR OWN FIELD. The
+        // two above qualify a `rows` figure that still counts them; this
+        // one explains why `rows` is SHORT of `rows_in`, which is a
+        // different question and an operator asking it should not have to
+        // subtract the other two to answer it.
+        .with(
+            "negative_volume",
+            telemetry::Value::Uint(tally.negative_volume),
+        )
+        .with(
+            "negative_oi",
+            telemetry::Value::Uint(tally.negative_open_interest),
+        )
+        // NOT A DEGRADE, AND NOT SILENT: the GDFL quote rows a traded
+        // instrument's file carried and the decoder left out (D-2688).
+        .with("quote_rows", telemetry::Value::Uint(tally.quote_rows))
 }
 
 /// One file that did not decode, on the rolling log — at `Warn`.
@@ -528,12 +729,35 @@ fn note_refused(columns: Columns, tally: Tally, why: &CsvError) {
 /// # Ok::<(), pull::csv::CsvError>(())
 /// ```
 pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
+    decode_counted(body, columns).map(|(rows, _skipped)| rows)
+}
+
+/// [`decode`], and the rows it skipped, by reason.
+///
+/// A row whose volume parses negative is skipped rather than refused or
+/// zeroed (see the volume read in the row pass). It is still a row the file
+/// OFFERED, so the receipt must count it: [`crate::archive::read_dir`] carries
+/// these into [`crate::archive::Member::skipped`], and `ingest` adds them to
+/// `Ingested::rows_read` and `Ingested::decoder_skips` exactly as the HTTP
+/// decoders' skips have been since D-3122. Before this the count reached only
+/// a log event and a run balanced over rows that were on no line of its
+/// receipt. D-3125.
+///
+/// # Errors
+///
+/// Those of [`decode`].
+pub fn decode_counted(
+    body: &str,
+    columns: Columns,
+) -> Result<(Vec<RawRow>, crate::fetch::DecodeSkips), CsvError> {
     let mut tally = Tally {
         lines: 0,
         skipped: 0,
         unreadable_volume: 0,
         unreadable_open_interest: 0,
         negative_volume: 0,
+        negative_open_interest: 0,
+        quote_rows: 0,
     };
     // ONE EVENT PER FILE, ON EITHER OUTCOME. The pass below is per row and
     // logs nothing; this is where its two counters are read. A file that
@@ -542,12 +766,90 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
     match decode_rows(body, columns, &mut tally) {
         Ok(rows) => {
             note_decoded(columns, tally, rows.len());
-            Ok(rows)
+            // BOTH ROW SKIPS, NOT ONE (D-3133). A negative open interest
+            // skips its row exactly as a negative volume does (D-2683); only
+            // the volume reached the receipt until D-3133.
+            let skipped = crate::fetch::DecodeSkips {
+                negative_volume: usize::try_from(tally.negative_volume).unwrap_or(usize::MAX),
+                negative_open_interest: usize::try_from(tally.negative_open_interest)
+                    .unwrap_or(usize::MAX),
+                ..crate::fetch::DecodeSkips::default()
+            };
+            Ok((rows, skipped))
         }
         Err(why) => {
             note_refused(columns, tally, &why);
             Err(why)
         }
+    }
+}
+
+/// One line's fields, borrowed into a fixed array, when it has exactly `want`
+/// of them; otherwise how many it has.
+///
+/// Every field is counted, so a refusal reports the line's true width, the
+/// count [`CsvError::FieldCount`] has always carried. Only the first
+/// [`MAX_FIELDS`] are kept, and nothing is allocated for the rest. A `want`
+/// wider than the array is refused rather than read short, because the slots
+/// past the tenth would read as empty fields.
+///
+/// # Errors
+///
+/// The line's field count, when it is not `want` or `want` does not fit.
+fn fields_of(line: &str, want: usize) -> Result<[&str; MAX_FIELDS], usize> {
+    let mut fields = [""; MAX_FIELDS];
+    let mut got: usize = 0;
+    for field in line.split(',') {
+        if let Some(slot) = fields.get_mut(got) {
+            *slot = field;
+        }
+        got = got.saturating_add(1);
+    }
+    if got == want && want <= MAX_FIELDS {
+        Ok(fields)
+    } else {
+        Err(got)
+    }
+}
+
+/// What one open-interest cell does to its row.
+enum Interest {
+    /// Keep the row, with this open interest (`None` for an unreadable cell,
+    /// which is counted).
+    Keep(Option<i64>),
+    /// Skip the row: a negative count, counted (D-1490's rule for the JSON
+    /// shapes, CE-59, D-2683).
+    Skip,
+}
+
+/// One open-interest cell of a traded instrument's row, or the refusal of the
+/// file for `i64::MIN`, which is spelled exactly like the §7 null.
+fn open_interest_of(text: &str, line: usize, tally: &mut Tally) -> Result<Interest, CsvError> {
+    let parsed = text.trim().parse::<i64>().ok();
+    if parsed == Some(i64::MIN) {
+        return Err(CsvError::OpenInterestSentinel {
+            line,
+            got: text.trim().to_owned(),
+        });
+    }
+    if parsed.is_none() {
+        tally.unreadable_open_interest = tally.unreadable_open_interest.saturating_add(1);
+    }
+    if parsed.is_some_and(|count| count < 0) {
+        tally.negative_open_interest = tally.negative_open_interest.saturating_add(1);
+        return Ok(Interest::Skip);
+    }
+    Ok(Interest::Keep(parsed))
+}
+
+/// Line one against the header the shape declares, already trimmed. D-1360.
+fn check_header(columns: Columns, line: &str) -> Result<(), CsvError> {
+    match columns.header() {
+        Some(want) if line != want => Err(CsvError::HeaderMismatch {
+            got: line.to_owned(),
+            want,
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -560,7 +862,17 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
 fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<RawRow>, CsvError> {
     let at = columns.offsets();
     let want = columns.count();
-    let mut rows: Vec<RawRow> = Vec::new();
+    // RESERVED ONCE, FROM THE BODY. Every row is one line, so the line count
+    // bounds the row count; `lines()` yields at most one more line than there
+    // are newlines. Capped at `MAX_ROWS`, the most this decoder ever keeps
+    // before it refuses, so a huge body cannot reserve past the refusal.
+    let bound = body
+        .bytes()
+        .filter(|&byte| byte == b'\n')
+        .count()
+        .saturating_add(1)
+        .min(MAX_ROWS);
+    let mut rows: Vec<RawRow> = Vec::with_capacity(bound);
 
     for (i, raw_line) in body.lines().enumerate() {
         let line_no = i + 1;
@@ -570,11 +882,15 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         // turns the last field into a number that will not parse. Observed in
         // vendor files, so trimmed rather than assumed absent.
         let line = raw_line.trim_end_matches('\r').trim();
-        if line.is_empty() {
+        // THE HEADER IS READ, NOT MERELY SKIPPED, and it is checked before the
+        // blank-line skip so that a blank line one is not mistaken for a file
+        // whose header simply moved down a line. D-1360.
+        if i == 0 && columns.has_header() {
+            check_header(columns, line)?;
             tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
-        if i == 0 && columns.has_header() {
+        if line.is_empty() {
             tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
@@ -585,14 +901,15 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             });
         }
 
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() != want {
-            return Err(CsvError::FieldCount {
-                line: line_no,
-                got: fields.len(),
-                want,
-            });
-        }
+        // A FIXED ARRAY, NOT A VECTOR PER ROW. D-0721: this collected every
+        // line into a vector of string slices sized to its commas before the
+        // count was checked, one heap allocation per row as large as the line
+        // made it. o1api-34 (D-1203) found the same defect; one fix holds both.
+        let fields = fields_of(line, want).map_err(|got| CsvError::FieldCount {
+            line: line_no,
+            got,
+            want,
+        })?;
 
         let date_text = fields.get(at.date).copied().unwrap_or_default();
         let day =
@@ -673,9 +990,11 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         //
         // It also closes the single hole in a rule already written down. D-0148
         // (`store::format::Bar::counts_are_sane`) refuses every negative open
-        // interest EXCEPT `OI_NULL`, so a vendor sending -5 is caught at the
-        // store's survey; `i64::MIN` is the one negative value that walks past
-        // that check, precisely because it is spelled exactly like the null.
+        // interest EXCEPT `OI_NULL`; `i64::MIN` is the one negative value that
+        // walks past that check, precisely because it is spelled exactly like
+        // the null. Every other negative is skipped and counted below rather
+        // than left for the store's survey, where it cost the whole member
+        // (CE-59, D-2683).
         //
         // WHAT THIS DOES NOT FIX. Rows that reach `fetch::land` by the HTTP
         // path build `open_interest` from a `Vec<i64>` rather than from this
@@ -684,19 +1003,22 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         // and is not this module's to place. Nor does this make an open
         // interest OF `i64::MIN` storable — §7 has spent that value, and an
         // open interest is a contract count, which is never negative at all.
-        let open_interest = {
+        //
+        // AN INDEX ROW: `TrueData`'s index layout, or a GDFL row whose ticker
+        // carries the `.NSE_IDX` suffix `docs/00-charter.md` measured
+        // (`NIFTY 50.NSE_IDX`). Every column after the level is zero on an
+        // index, so its open interest is absent rather than measured
+        // (p10num-2, D-2689) and its zero `LTQ` is the norm, not a quote
+        // (p10num-1, D-2688).
+        let index_row = columns.is_index_row(&fields);
+        let open_interest = if index_row {
+            None
+        } else {
             let text = fields.get(at.open_interest).copied().unwrap_or_default();
-            let parsed = text.trim().parse::<i64>().ok();
-            if parsed == Some(i64::MIN) {
-                return Err(CsvError::OpenInterestSentinel {
-                    line: line_no,
-                    got: text.trim().to_owned(),
-                });
+            match open_interest_of(text, line_no, tally)? {
+                Interest::Keep(read) => read,
+                Interest::Skip => continue,
             }
-            if parsed.is_none() {
-                tally.unreadable_open_interest = tally.unreadable_open_interest.saturating_add(1);
-            }
-            parsed
         };
 
         // VOLUME IS READ HERE AND NOT IN THE LITERAL BELOW, for the reason open
@@ -714,6 +1036,12 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             match text.trim().parse::<i64>() {
                 Ok(n) if n < 0 => {
                     tally.negative_volume = tally.negative_volume.saturating_add(1);
+                    continue;
+                }
+                // A GDFL QUOTE ROW ON A TRADED INSTRUMENT IS NOT A TRADE, so it
+                // contributes no price and no bar (p10num-1, D-2688).
+                Ok(0) if columns == Columns::Gdfl && !index_row => {
+                    tally.quote_rows = tally.quote_rows.saturating_add(1);
                     continue;
                 }
                 Ok(n) => n,
@@ -1028,6 +1356,115 @@ mod tests {
         }
     }
 
+    /// **A SIGN IS NOT A DIGIT.** probestore-1, D-1201.
+    ///
+    /// `str::parse` reads a leading `+`, and `-` for a signed type, so a
+    /// two-byte field `-9` passed the length check. On main
+    /// `20240103,-9:15:00,...` decoded to 2024-01-02 15:15 IST, a bar on the
+    /// previous day that the window filter then kept. Every clock field and
+    /// every date field, either sign, through `decode` as well as directly.
+    #[test]
+    fn a_signed_clock_or_date_field_is_refused_not_shifted() {
+        let rows = |line: &str| decode(&format!("{line}\n"), Columns::TrueDataIndex);
+        assert!(rows("20240103,09:15:00,100.00,5,0").is_ok(), "the control");
+        for time in [
+            "-9:15:00", "+9:15:00", "09:-5:00", "09:+5:00", "09:15:-1", "09:15:+1", "-0:00:00",
+            "+0:00:00", "00:-0:00", "00:00:-0", " 9:15:00", "09:15: 1", "-1:-1:-1",
+        ] {
+            assert_eq!(ist_seconds(time), None, "{time:?} carries a sign");
+            assert_eq!(
+                rows(&format!("20240103,{time},100.00,5,0")),
+                Err(CsvError::TimeMalformed {
+                    line: 1,
+                    got: time.to_owned(),
+                }),
+                "{time:?} is refused, never stored on another minute or day"
+            );
+        }
+        for (format, text) in [
+            (DateFormat::CompactYmd, "2024+103"),
+            (DateFormat::CompactYmd, "202401+3"),
+            (DateFormat::CompactYmd, "+0240103"),
+            (DateFormat::DashedYmd, "2024-+1-03"),
+            (DateFormat::DashedYmd, "2024-01-+3"),
+            (DateFormat::DashedYmd, "+024-01-03"),
+            (DateFormat::SlashedDmy, "+3/01/2024"),
+            (DateFormat::SlashedDmy, "03/+1/2024"),
+            (DateFormat::SlashedDmy, "03/01/+024"),
+            (DateFormat::CompactDmy, "+3012024"),
+            (DateFormat::CompactDmy, "03+12024"),
+            (DateFormat::CompactDmy, "0301+024"),
+        ] {
+            assert_eq!(day_of(text, format), None, "{text:?} as {format:?}");
+        }
+        assert_eq!(
+            rows("2024+103,09:15:00,100.00,5,0"),
+            Err(CsvError::DateMalformed {
+                line: 1,
+                got: "2024+103".to_owned(),
+                format: DateFormat::CompactYmd,
+            })
+        );
+        // The digits helper itself, at its edges.
+        assert_eq!(digits::<u8>(""), None);
+        assert_eq!(digits::<u8>("+"), None);
+        assert_eq!(digits::<i64>("-0"), None);
+        assert_eq!(
+            digits::<u8>(&(u16::from(u8::MAX) + 1).to_string()),
+            None,
+            "all digits and still no u8"
+        );
+        assert_eq!(digits::<u8>(&format!("{:02}", 0)), Some(0));
+        assert_eq!(digits::<u16>("9999"), Some(9_999));
+    }
+
+    /// **A separated date's separators are bytes that are checked.** v53-1,
+    /// D-1483. The digit fields were checked and the bytes between them were
+    /// never read, so a GDFL date `01-07-2025` or `01x07x2025` was stored as
+    /// 1 July 2025 and a Dhan-shaped `2025/07/01` as the same day. Every byte
+    /// a separator may not be, at each separator offset, in both separated
+    /// formats, directly and through `decode`.
+    #[test]
+    fn a_date_whose_separator_is_not_the_declared_byte_is_refused() {
+        for (format, wanted, at) in [
+            (DateFormat::DashedYmd, b'-', [4, 7]),
+            (DateFormat::SlashedDmy, b'/', [2, 5]),
+        ] {
+            let whole = rendered(2025, 7, 1, format);
+            assert!(day_of(&whole, format).is_some(), "the control: {whole}");
+            for offset in at {
+                for byte in (0..=0x7f_u8).filter(|&byte| byte != wanted) {
+                    let mut bytes = whole.clone().into_bytes();
+                    bytes[offset] = byte;
+                    let text = String::from_utf8(bytes).expect("ASCII");
+                    assert_eq!(day_of(&text, format), None, "{text:?} as {format:?}");
+                }
+            }
+            // Both separators swapped for the other format's.
+            let other = if wanted == b'-' { '/' } else { '-' };
+            let swapped = whole.replace(char::from(wanted), &other.to_string());
+            assert_eq!(day_of(&swapped, format), None, "{swapped:?} as {format:?}");
+        }
+        for (first, second) in [('-', '-'), ('x', 'x'), ('+', '+'), ('/', '-'), ('.', '/')] {
+            let date = format!("01{first}07{second}2025");
+            let line = format!("{GDFL_HEADER}\nNIFTY,{date},09:15:00,100.00,0,0,0,0,5,0\n");
+            assert_eq!(
+                decode(&line, Columns::Gdfl),
+                Err(CsvError::DateMalformed {
+                    line: 2,
+                    got: date.clone(),
+                    format: DateFormat::SlashedDmy,
+                }),
+                "{date:?} is refused, never read as 1 July"
+            );
+        }
+        // The helper itself at its edges: a wrong length is refused before an
+        // offset is read, and an offset past the end is never a match.
+        assert!(!separated(&format!("{}-0", "2025-07"), 10, [4, 7], b'-'));
+        assert!(!separated("2025-07", 7, [4, 7], b'-'));
+        assert!(separated("2025-07-01", 10, [4, 7], b'-'));
+    }
+
     /// The byte ranges each format reads its year, month and day from, in the
     /// order [`day_of`] evaluates them.
     const fn ranges(format: DateFormat) -> [(usize, usize); 3] {
@@ -1133,24 +1570,23 @@ mod tests {
         // THE HAPPY PATH FIRST, so that what refuses below is the value and not
         // the fixture. An ordinary contract count decodes and stays a
         // measurement.
-        let ordinary = decode(&row(&2_000.to_string()), Columns::TrueDataIndex)
+        let ordinary = decode(&row(&2_000.to_string()), Columns::TrueDataFno)
             .expect("an ordinary contract count is not a sentinel");
         assert_eq!(ordinary.len(), 1);
         assert_eq!(ordinary[0].open_interest, Some(2_000));
         assert_eq!(ordinary[0].volume, 250, "and the volume beside it");
 
-        // ONE PAST THE SENTINEL IS AN ORDINARY NUMBER HERE. The guard is the
-        // single value §7 spends, never a range near it: an absurd count is the
-        // store's business — D-0148 refuses a negative one at `survey` — and
-        // not this decoder's to widen into.
-        let near = decode(&row(&(i64::MIN + 1).to_string()), Columns::TrueDataIndex)
+        // ONE PAST THE SENTINEL IS A NEGATIVE COUNT, NOT A REFUSAL. The
+        // refusal is the single value §7 spends; every other negative skips
+        // its row and is counted (CE-59, D-2683), so the file still decodes.
+        let near = decode(&row(&(i64::MIN + 1).to_string()), Columns::TrueDataFno)
             .expect("only the sentinel itself is refused at this boundary");
-        assert_eq!(near[0].open_interest, Some(i64::MIN + 1));
+        assert!(near.is_empty(), "a negative count skips its row: {near:?}");
 
         // THE COLLISION. Stored, this row would reach the bar as exactly the
         // value `unwrap_or(i64::MIN)` produces for a field that was never sent.
         let sentinel = i64::MIN.to_string();
-        let refused = decode(&row(&sentinel), Columns::TrueDataIndex)
+        let refused = decode(&row(&sentinel), Columns::TrueDataFno)
             .expect_err("the null sentinel is not a measurement");
         assert_eq!(
             refused,
@@ -1174,7 +1610,7 @@ mod tests {
         // parse at all is still ABSENT and still counted: "this build could not
         // read it" and "the vendor sent the null" are different claims, and
         // only the second would be a lie on disk.
-        let unreadable = decode(&row("NOT A COUNT"), Columns::TrueDataIndex)
+        let unreadable = decode(&row("NOT A COUNT"), Columns::TrueDataFno)
             .expect("an unreadable count degrades rather than refusing the file");
         assert_eq!(unreadable[0].open_interest, None);
         assert_eq!(
@@ -1237,8 +1673,14 @@ mod tests {
         let sentinel = i64::MIN.to_string();
         let ordinary = 2_000.to_string();
 
+        // AN INDEX LAYOUT READS NO OPEN INTEREST AT ALL (D-2689): an index has
+        // none, so even the sentinel in that column decodes absent.
+        let (index_row, _) = one_row(Columns::TrueDataIndex, &ordinary, &sentinel);
+        assert_eq!(
+            decode(&index_row, Columns::TrueDataIndex).map(|rows| rows[0].open_interest),
+            Ok(None)
+        );
         for columns in [
-            Columns::TrueDataIndex,
             Columns::TrueDataFutures,
             Columns::TrueDataFno,
             Columns::Gdfl,
@@ -1326,7 +1768,7 @@ mod tests {
         // against, so a truncated answer cannot pass for a correct one.
         let clean: String = (1..=4).map(|second| row(second, &ordinary)).collect();
         assert_eq!(
-            decode(&clean, Columns::TrueDataIndex).map(|rows| rows.len()),
+            decode(&clean, Columns::TrueDataFno).map(|rows| rows.len()),
             Ok(4),
             "every row of the fixture reads before one of them is poisoned"
         );
@@ -1335,7 +1777,7 @@ mod tests {
             .map(|second| row(second, if second == 3 { &sentinel } else { &ordinary }))
             .collect();
         assert_eq!(
-            decode(&poisoned, Columns::TrueDataIndex),
+            decode(&poisoned, Columns::TrueDataFno),
             Err(CsvError::OpenInterestSentinel {
                 line: 3,
                 got: sentinel.clone(),
@@ -1369,7 +1811,7 @@ mod tests {
         let leading_zero = format!("-0{}", i64::MIN.unsigned_abs());
 
         for spelling in [bare.clone(), format!("  {bare} "), leading_zero] {
-            let refused = decode(&row(&spelling), Columns::TrueDataIndex)
+            let refused = decode(&row(&spelling), Columns::TrueDataFno)
                 .expect_err("every spelling of the null sentinel is the null sentinel");
             assert_eq!(
                 refused,
@@ -1382,5 +1824,451 @@ mod tests {
                  can be found again"
             );
         }
+    }
+
+    /// **A LINE'S FIELDS LAND IN A FIXED ARRAY, AND ARE COUNTED WHOLE.**
+    /// D-0721.
+    ///
+    /// The count is what `CsvError::FieldCount` reports, so it must still be
+    /// the line's true width however wide the line is. What is kept is the
+    /// first `MAX_FIELDS`, and a layout wider than that is refused rather than
+    /// read with empty fields past the tenth.
+    ///
+    /// The kept fields are compared by joining them back into the line, not
+    /// against an array of one-character literals: Gate 1d reads every quoted
+    /// lower-case token in `crates/pull` as a possible path segment, and the
+    /// join checks the same thing, every field in its own slot and in order.
+    #[test]
+    fn a_lines_fields_land_in_a_fixed_array_and_are_counted_whole() {
+        let line = "a,b,c,d,e";
+        let five = fields_of(line, 5).expect("five fields for five");
+        assert_eq!(five.len(), MAX_FIELDS, "the array is the fixed width");
+        assert_eq!(
+            five.get(..5).map(|kept| kept.join(",")),
+            Some(line.to_owned()),
+            "each field in its own slot, in order"
+        );
+        assert!(
+            five.iter().skip(5).all(|field| field.is_empty()),
+            "the slots past the count stay empty"
+        );
+        assert_eq!(fields_of("a,b,c,d", 5), Err(4), "one short");
+        assert_eq!(fields_of("a,b,c,d,e,f", 5), Err(6), "one long");
+        assert_eq!(fields_of("", 1).map(|f| f.len()), Ok(MAX_FIELDS));
+        assert_eq!(
+            fields_of(&",".repeat(1_000_000), 5),
+            Err(1_000_001),
+            "a line of a million commas is counted whole"
+        );
+
+        // THE FULL WIDTH, and one past it.
+        let ten = "0,1,2,3,4,5,6,7,8,9";
+        let all = fields_of(ten, MAX_FIELDS).expect("ten fields fill the array");
+        assert_eq!(all.join(","), ten, "every slot holds its own field");
+        assert!(
+            all.iter().all(|field| field.len() == 1),
+            "one field per slot, none merged with its neighbour"
+        );
+        assert_eq!(
+            fields_of("0,1,2,3,4,5,6,7,8,9,10", MAX_FIELDS + 1),
+            Err(11),
+            "a layout wider than the array is refused, never read short"
+        );
+        assert_eq!(fields_of(ten, MAX_FIELDS + 1), Err(10));
+    }
+
+    /// Every layout this decoder reads fits the fixed field array, and the
+    /// widest fills it. D-0721.
+    ///
+    /// **THE LAYOUTS ARE WALKED THROUGH A MATCH, NOT LISTED BY HAND.** A list
+    /// written here would not grow when `Columns` did, and a fifth layout
+    /// wider than `MAX_FIELDS` would have every row refused as a
+    /// `FieldCount` whose `got` equals its `want`. `after` matches every
+    /// variant with no wildcard arm, so a variant added to `Columns` does not
+    /// compile until `after` gives it an arm. `Columns` is
+    /// `#[non_exhaustive]`, which binds other crates and not this one.
+    ///
+    /// The walk also checks each layout's discriminant against its place, so
+    /// a variant declared anywhere but last and left off the walk shifts a
+    /// discriminant and fails here. One declared last whose predecessor's arm
+    /// still returns `None` is not walked; its own `None` arm, beside
+    /// another, is what shows it.
+    #[test]
+    fn every_layout_fits_the_fixed_field_array() {
+        /// The layout declared after `columns`, or `None` after the last.
+        const fn after(columns: Columns) -> Option<Columns> {
+            match columns {
+                Columns::TrueDataIndex => Some(Columns::TrueDataFutures),
+                Columns::TrueDataFutures => Some(Columns::Gdfl),
+                Columns::Gdfl => Some(Columns::TrueDataFno),
+                Columns::TrueDataFno => None,
+            }
+        }
+
+        let mut widest = 0;
+        let mut place: usize = 0;
+        let mut next = Some(Columns::TrueDataIndex);
+        while let Some(columns) = next {
+            assert_eq!(
+                columns as usize, place,
+                "{columns:?} is walked in the order it is declared"
+            );
+            assert!(
+                columns.count() <= MAX_FIELDS,
+                "{columns:?} has {} fields and the array holds {MAX_FIELDS}",
+                columns.count()
+            );
+            widest = widest.max(columns.count());
+            place = place.saturating_add(1);
+            next = after(columns);
+        }
+        assert_eq!(widest, MAX_FIELDS, "the widest layout fills it");
+    }
+
+    /// THE HEADER ROW IS READ, NOT MERELY SKIPPED.
+    ///
+    /// `Columns::Gdfl` declares a header, and the decoder used to drop line one
+    /// without looking at it. A GDFL member that arrived WITHOUT its header
+    /// therefore lost its first trade in silence — `Ok` with one row short —
+    /// and a member whose header named the same ten columns in another order
+    /// would have read `OpenInterest` as `LTQ` with nothing objecting. D-1360.
+    #[test]
+    fn a_gdfl_header_that_is_not_the_declared_one_refuses_the_file() {
+        let dmy = rendered(2025, 7, 1, DateFormat::SlashedDmy);
+        let first = format!("FINNIFTY-III.NFO,{dmy},09:16:16,27674,0,0,0,0,65,65");
+        let second = format!("FINNIFTY-III.NFO,{dmy},09:16:17,27675,0,0,0,0,10,65");
+
+        // The declared header, as observed: both rows land.
+        let good = format!("{GDFL_HEADER}\n{first}\n{second}\n");
+        assert_eq!(decode(&good, Columns::Gdfl).unwrap().len(), 2);
+        // CRLF and surrounding blanks on the header line are tolerated exactly
+        // as they are on a data line.
+        let crlf = format!("{GDFL_HEADER}\r\n{first}\r\n{second}\r\n");
+        assert_eq!(decode(&crlf, Columns::Gdfl).unwrap().len(), 2);
+
+        // No header at all: the first DATA row used to be dropped as one.
+        let headless = format!("{first}\n{second}\n");
+        assert_eq!(
+            decode(&headless, Columns::Gdfl),
+            Err(CsvError::HeaderMismatch {
+                got: first.clone(),
+                want: GDFL_HEADER,
+            }),
+            "a missing header is a refusal, never a silently lost first row"
+        );
+
+        // The same ten names with LTQ and OpenInterest swapped.
+        let swapped = GDFL_HEADER.replace("LTQ,OpenInterest", "OpenInterest,LTQ");
+        let body = format!("{swapped}\n{first}\n");
+        assert!(
+            matches!(
+                decode(&body, Columns::Gdfl),
+                Err(CsvError::HeaderMismatch { ref got, .. }) if *got == swapped
+            ),
+            "a header naming the declared columns in another order is refused"
+        );
+
+        // A blank first line is not the header either.
+        let blank_first = format!("\n{GDFL_HEADER}\n{first}\n");
+        assert!(matches!(
+            decode(&blank_first, Columns::Gdfl),
+            Err(CsvError::HeaderMismatch { ref got, .. }) if got.is_empty()
+        ));
+
+        // An empty body has no header to check and no rows: unchanged.
+        assert_eq!(decode("", Columns::Gdfl), Ok(Vec::new()));
+
+        // Headerless layouts are untouched: their line one is data.
+        assert_eq!(Columns::TrueDataIndex.header(), None);
+        assert_eq!(Columns::TrueDataFno.header(), None);
+        assert_eq!(Columns::TrueDataFutures.header(), None);
+        assert_eq!(Columns::Gdfl.header(), Some(GDFL_HEADER));
+        let refusal = CsvError::HeaderMismatch {
+            got: "x".to_owned(),
+            want: GDFL_HEADER,
+        }
+        .to_string();
+        assert!(refusal.starts_with("line 1: header"), "{refusal}");
+        assert!(refusal.contains(GDFL_HEADER), "{refusal}");
+    }
+
+    /// **THE ROW VECTOR IS RESERVED ONCE, FROM THE BODY.** o1api-34, D-1203.
+    ///
+    /// The module header said the vector was reserved from a bound; the code
+    /// started it empty and doubled. `Vec::with_capacity` documents that it
+    /// produces EXACTLY the requested capacity for a non-zero-sized element, so
+    /// the capacity is the observable proof: one more than the newline count,
+    /// where doubling would show a power of two. On main 1,000 rows came back
+    /// with capacity 1,024 and an empty body with capacity 0.
+    #[test]
+    fn the_row_vector_is_reserved_once_from_the_body() {
+        let line = |n: u32| format!("20240103,09:{:02}:{:02},100.00,5,0", 15 + n / 60, n % 60);
+        for count in [1_u32, 2, 3, 7, 64, 1_000] {
+            let mut body = String::new();
+            for n in 0..count {
+                body.push_str(&line(n));
+                body.push('\n');
+            }
+            let rows = decode(&body, Columns::TrueDataIndex).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(
+                rows.capacity(),
+                count as usize + 1,
+                "{count} newline-terminated rows reserve {count} + 1, once"
+            );
+            // No trailing newline: one fewer newline, the same rows, an exact fit.
+            let rows = decode(body.trim_end(), Columns::TrueDataIndex).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(rows.capacity(), count as usize);
+        }
+        // EMPTY. Zero newlines reserve one slot and keep nothing.
+        let rows = decode("", Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, 1));
+        // BLANK LINES ARE COUNTED IN THE BOUND AND SKIPPED IN THE DECODE.
+        let rows = decode(&"\n".repeat(9), Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, 10));
+        // THE CAP. A body with more newlines than `MAX_ROWS` reserves exactly
+        // `MAX_ROWS`, the most the decoder keeps before it refuses.
+        let rows = decode(&"\n".repeat(MAX_ROWS + 5), Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, MAX_ROWS));
+    }
+
+    /// **A LINE WIDER THAN EVERY LAYOUT IS COUNTED, NOT STORED.** o1api-34.
+    ///
+    /// The fields now land in a fixed [`MAX_FIELDS`]-slot array. A line past
+    /// that width must still be refused with the number of fields it really
+    /// carried, or the refusal would misreport the very column count it is
+    /// about.
+    #[test]
+    fn a_line_wider_than_the_field_array_reports_its_true_width() {
+        for (columns, got) in [
+            (Columns::TrueDataIndex, 1_usize),
+            (Columns::TrueDataIndex, 4),
+            (Columns::TrueDataIndex, 6),
+            (Columns::TrueDataIndex, MAX_FIELDS),
+            (Columns::TrueDataIndex, MAX_FIELDS + 1),
+            (Columns::TrueDataIndex, 64),
+            (Columns::TrueDataFutures, MAX_FIELDS + 1),
+            (Columns::TrueDataFno, 9),
+        ] {
+            let line = vec!["X"; got].join(",");
+            assert_eq!(
+                decode(&format!("{line}\n"), columns),
+                Err(CsvError::FieldCount {
+                    line: 1,
+                    got,
+                    want: columns.count(),
+                }),
+                "{got} fields for {columns:?}"
+            );
+        }
+        // GDFL, the widest layout, one past it: the header is line 1.
+        let wide = ["X"; MAX_FIELDS + 1].join(",");
+        assert_eq!(
+            decode(&format!("{GDFL_HEADER}\n{wide}\n"), Columns::Gdfl),
+            Err(CsvError::FieldCount {
+                line: 2,
+                got: MAX_FIELDS + 1,
+                want: MAX_FIELDS,
+            })
+        );
+        assert_eq!(Columns::Gdfl.count(), MAX_FIELDS, "GDFL is the widest");
+    }
+
+    /// **NO ROW ALLOCATES A FIELD LIST.** o1api-34, D-1203.
+    ///
+    /// The per-row `Vec<&str>` has no observable output to assert on, so its
+    /// absence is asserted on the source of [`decode_rows`]. The needles are
+    /// assembled at run time so this test cannot match its own text.
+    #[test]
+    fn the_decode_loop_collects_no_field_vector() {
+        let source = include_str!("csv.rs");
+        let start = source
+            .find(&format!("{}{}", "fn decode_", "rows("))
+            .expect("decode_rows exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("decode_rows ends")];
+        for needle in [
+            format!("{}{}", "Vec<&", "str>"),
+            format!("{}{}", ".coll", "ect()"),
+            format!("{}{}", "Vec::", "new()"),
+        ] {
+            assert!(
+                !body.contains(&needle),
+                "decode_rows holds {needle:?}: a per-row allocation or an \
+                 unreserved row vector is back"
+            );
+        }
+        assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
+    }
+
+    /// **CE-59. A NEGATIVE OPEN INTEREST SKIPS ITS ROW, NOT THE MEMBER.**
+    ///
+    /// An open interest counts contracts, so `-5` is not a quantity. It used to
+    /// decode as `Some(-5)` and die at the store's survey as `ImpossibleCount`,
+    /// taking the whole member and its derived rungs with it and naming a
+    /// batch index rather than a line. D-1490's rule for the JSON shapes is
+    /// the rule here: skip the row and count it.
+    #[test]
+    fn a_negative_open_interest_skips_its_row_and_keeps_the_rest() {
+        let body = "20221003,09:15:01,38445.65,0,-5\n20221003,09:15:02,38419.40,0,7\n";
+        let rows = decode(body, Columns::TrueDataFno).expect("one bad row is not a bad file");
+        assert_eq!(rows.len(), 1, "the -5 row is skipped: {rows:?}");
+        assert_eq!(rows[0].open_interest, Some(7), "and the next row is kept");
+    }
+
+    /// **CE-57. A DEGRADE IS LOGGED WHERE AN OPERATOR SEES IT.**
+    ///
+    /// The three degrade counts rode only on the `Debug` "file decoded" line,
+    /// and the default floor is `Info`, so a default run kept no trace of a
+    /// zero-filled volume or a skipped row. A file with any degrade now says
+    /// so at `Warn`; a clean file stays at `Debug`, so the line does not fire
+    /// on every ordinary member.
+    #[test]
+    fn a_decoded_file_with_a_degrade_is_reported_at_warn_and_a_clean_one_is_not() {
+        let clean = Tally {
+            lines: 3,
+            skipped: 0,
+            unreadable_volume: 0,
+            unreadable_open_interest: 0,
+            negative_volume: 0,
+            negative_open_interest: 0,
+            quote_rows: 0,
+        };
+        assert_eq!(
+            decoded_event(Columns::TrueDataFno, clean, 3).level(),
+            telemetry::Level::Debug
+        );
+        for tally in [
+            Tally {
+                unreadable_volume: 1,
+                ..clean
+            },
+            Tally {
+                unreadable_open_interest: 1,
+                ..clean
+            },
+            Tally {
+                negative_volume: 1,
+                ..clean
+            },
+            Tally {
+                negative_open_interest: 1,
+                ..clean
+            },
+        ] {
+            let event = decoded_event(Columns::TrueDataFno, tally, 2);
+            assert_eq!(event.level(), telemetry::Level::Warn, "{tally:?}");
+        }
+        // AND THE COUNT IS ON THE LINE, BY NAME, through the shipped decoder.
+        let mut tally = clean;
+        let rows = decode_rows(
+            "20221003,09:15:01,38445.65,abc,0\n20221003,09:15:02,38419.40,0,-5\n",
+            Columns::TrueDataFno,
+            &mut tally,
+        )
+        .expect("both degrades are rows, not refusals");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (tally.unreadable_volume, tally.negative_open_interest),
+            (1, 1)
+        );
+    }
+
+    /// **p10num-1. A GDFL QUOTE ROW (LTQ 0) IS NOT A TRADE, AND ON A FUTURES,
+    /// OPTIONS OR EQUITY FILE IT CONTRIBUTES NO PRICE AND NO BAR.**
+    ///
+    /// `docs/08-vendor-samples.md`: "`LTQ` is `0` on most rows — those are
+    /// **quote** updates, not trades." Its `LTP` is the LAST traded price,
+    /// possibly from an earlier minute, and folding it put a 09:19 trade into
+    /// the 09:20 bar's open and low and stored a 09:21 bar with volume 0 for a
+    /// minute that traded nothing. The report's five rows.
+    #[test]
+    fn a_gdfl_quote_row_contributes_no_price_and_no_bar_on_a_traded_instrument() {
+        let row = |time: &str, ltp: &str, ltq: u32| {
+            format!("FINNIFTY-III.NFO,01/07/2025,{time},{ltp},0,0,0,0,{ltq},65\n")
+        };
+        let mut body = format!("{GDFL_HEADER}\n");
+        for (time, ltp, ltq) in [
+            ("09:19:58", "100.00", 25),
+            ("09:20:00", "100.00", 0),
+            ("09:20:05", "102.00", 50),
+            ("09:20:40", "103.00", 10),
+            ("09:21:10", "103.00", 0),
+        ] {
+            body.push_str(&row(time, ltp, ltq));
+        }
+        let mut tally = Tally {
+            lines: 0,
+            skipped: 0,
+            unreadable_volume: 0,
+            unreadable_open_interest: 0,
+            negative_volume: 0,
+            negative_open_interest: 0,
+            quote_rows: 0,
+        };
+        let rows = decode_rows(&body, Columns::Gdfl, &mut tally).expect("five rows decode");
+        assert_eq!(rows.len(), 3, "the two quote rows are not trades: {rows:?}");
+        assert_eq!(tally.quote_rows, 2, "and they are counted, by name");
+
+        let bars: Vec<store::format::Bar> = rows
+            .iter()
+            .map(|row| store::format::Bar {
+                ts_micros: row.timestamp * 1_000_000,
+                open: row.open,
+                high: row.high,
+                low: row.low,
+                close: row.close,
+                volume: row.volume,
+                open_interest: row.open_interest.unwrap_or(store::format::OI_NULL),
+            })
+            .collect();
+        let folded = crate::fold::fold(&bars, crate::fold::Bucket::MINUTE).expect("folds");
+        assert_eq!(folded.len(), 2, "09:19 and 09:20; nothing traded at 09:21");
+        let at_0920 = folded[1];
+        assert_eq!(
+            (
+                at_0920.open,
+                at_0920.high,
+                at_0920.low,
+                at_0920.close,
+                at_0920.volume
+            ),
+            (10_200, 10_300, 10_200, 10_300, 60),
+            "the 09:20 bar is the trades inside 09:20 and nothing else"
+        );
+    }
+
+    /// **p10num-1, the other half. AN INDEX FILE KEEPS EVERY ROW**: every
+    /// column after `LTP` is zero on an index (`docs/00-charter.md`), so `LTQ`
+    /// 0 is the norm there and `LTP` is the index level.
+    #[test]
+    fn a_gdfl_index_row_is_kept_though_its_ltq_is_zero() {
+        let body =
+            format!("{GDFL_HEADER}\nNIFTY 50.NSE_IDX,26/05/2026,09:15:00,24000.00,0,0,0,0,0,0\n");
+        let rows = decode(&body, Columns::Gdfl).expect("an index row decodes");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].close, 2_400_000);
+    }
+
+    /// **p10num-2. AN INDEX HAS NO OPEN INTEREST, SO ITS ZERO COLUMN IS ABSENT,
+    /// NOT A MEASURED ZERO.** `CLAUDE.md` §7 spends `i64::MIN` on absence and
+    /// says zero means zero; `docs/08-vendor-samples.md` says an index's volume
+    /// and open interest are "structurally absent rather than zero". The
+    /// `TrueData` index layout and GDFL's `.NSE_IDX` rows both decode `None`.
+    #[test]
+    fn an_index_row_decodes_its_open_interest_as_absent() {
+        let rows = decode("20221003,09:15:00,100.00,0,0\n", Columns::TrueDataIndex)
+            .expect("an index row decodes");
+        assert_eq!(rows[0].open_interest, None);
+        let body =
+            format!("{GDFL_HEADER}\nNIFTY BANK.NSE_IDX,26/05/2026,09:15:00,52000.00,0,0,0,0,0,0\n");
+        let rows = decode(&body, Columns::Gdfl).expect("an index row decodes");
+        assert_eq!(rows[0].open_interest, None);
+        // A traded instrument's zero stays a measured zero.
+        let body =
+            format!("{GDFL_HEADER}\nFINNIFTY-III.NFO,01/07/2025,09:16:16,27674,0,0,0,0,65,0\n");
+        let rows = decode(&body, Columns::Gdfl).expect("a traded row decodes");
+        assert_eq!(rows[0].open_interest, Some(0));
     }
 }

@@ -5,7 +5,8 @@
 //! `docs/07-o1-architecture.md`: *"A layer is not built because the code looks
 //! right. It is built when a test asserts the bound as a number."* Layer 13 is
 //! "counters, never scans", and the two numbers that make it real are here:
-//! reading the census costs the same whatever the census holds, and it beats
+//! reading the census for one cached key costs the same whatever the census
+//! holds (random keys are O1P-05, which is not flat in time at 10^5), and it beats
 //! re-deriving the same answer from the entries by a wide margin, measured in
 //! the same process.
 //!
@@ -40,9 +41,10 @@
 //!
 //! Not measured either: residency. A probe into a 100,000-entry map that has
 //! fallen out of cache costs more than one into a map that has not, and that is
-//! layer 7's subject rather than layer 3's. These measurements probe one key
+//! layer 7's subject rather than layer 3's. C-11, C-12 and C-26 probe one key
 //! repeatedly, so what they report is the **probe count** — which is what "no
-//! rehash, one probe" claims — and not the machine's memory hierarchy.
+//! rehash, one probe" claims — and not the machine's memory hierarchy. O1P-05,
+//! below, does measure it: random keys past the cache (D-3307).
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -313,7 +315,8 @@ fn census_beats_the_scan_it_replaces() -> bool {
     ok
 }
 
-/// C-12 — one entry lookup costs the same at 1×, 10× and 100× the census.
+/// C-12 — one REPEATED entry lookup costs the same at 1×, 10× and 100× the
+/// census. It probes one cached key; random keys are O1P-05 (D-3307).
 ///
 /// The map is reserved from the entry count known before the load walk begins,
 /// so it never rehashes: `docs/07-o1-architecture.md` layer 3, O(1) **worst
@@ -407,6 +410,101 @@ fn entry_lookup_is_flat() -> bool {
     let d = ratio("C-12 absent lookup, 100x census", base, miss(&hundred));
 
     a && b && c && d
+}
+
+/// O1P-05 — one manifest entry lookup is flat AT p99, over RANDOM present
+/// keys, from 10^3 to 10^5 months in the census (D-3306, D-3309).
+///
+/// C-12 looks up `key(7)` twenty thousand times: one bucket, already in the
+/// cache, measured as a minimum of means. A table whose probe sequences grew
+/// with its load, or a key whose hash collided with the census, would stay
+/// green there. This looks up a different, uniformly drawn, present key on
+/// every operation, 32 per sample, 5 rounds of 10,000 samples, and gates the
+/// smallest round p99 against the 10^3 one under [`CEILING_PERMILLE`] at 10^4
+/// and prints it at 10^5, where the map leaves the cache (D-3307).
+///
+/// 10^5 is the largest size because this harness can name only 289,080
+/// distinct keys; a real census's size is UNVERIFIED (`docs/06-limits.md`).
+/// Every key of the census is built before the timer and read in a spread
+/// order, so the timed work is the lookup over the whole map.
+fn entry_lookup_is_flat_at_p99() -> bool {
+    /// A fixed-seed spread of the lookup number. `SplitMix64`'s finaliser.
+    fn spread(at: usize) -> usize {
+        let mut z = (at as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        usize::try_from(z ^ (z >> 31)).unwrap_or(0)
+    }
+    /// Samples per round, rounds, and lookups per sample.
+    const SAMPLES: usize = 10_000;
+    const ROUNDS: usize = 5;
+    const BATCH: usize = 32;
+    let mut ok = true;
+    let mut base = 0u128;
+    for (step, count) in [1_000_u32, 10_000, 100_000].into_iter().enumerate() {
+        let (m, _keep) = census(count);
+        // EVERY key of the census, built before the timer and read in a
+        // pseudo-random order, so the lookups touch the whole map rather
+        // than a cached subset of it.
+        let keys: Vec<EntryKey> = (0..count).map(key).collect();
+        let width = keys.len().max(1);
+        let mut ns: Vec<u128> = Vec::with_capacity(SAMPLES);
+        let (mut p50, mut p99, mut max) = (u128::MAX, u128::MAX, 0u128);
+        let mut next = 0usize;
+        for _ in 0..ROUNDS {
+            ns.clear();
+            for _ in 0..SAMPLES {
+                let start = Instant::now();
+                for _ in 0..BATCH {
+                    let k = keys.get(spread(next) % width);
+                    next = next.wrapping_add(1);
+                    if let Some(k) = k {
+                        black_box(black_box(&m).entry(black_box(k)));
+                    }
+                }
+                ns.push(start.elapsed().as_nanos());
+            }
+            ns.sort_unstable();
+            let at = |q: usize| ns.get((ns.len() * q / 1_000).min(ns.len() - 1)).copied();
+            p50 = p50.min(at(500).unwrap_or(0));
+            p99 = p99.min(at(990).unwrap_or(0));
+            max = max.max(ns.last().copied().unwrap_or(0));
+        }
+        if keys.iter().any(|k| m.entry(k).is_none()) {
+            refuse("O1P-05: a key is absent from the census it was built from");
+        }
+        println!(
+            "  {:<44} n={count:>9}  p50 {p50:>6} ns  p99 {p99:>6} ns  max {max:>8} ns  per {BATCH}",
+            "O1P-05 manifest entry lookup"
+        );
+        if step == 0 {
+            base = p99;
+            continue;
+        }
+        // GATED AT 10^4, PRINTED AT 10^5 (D-3307, D-3309). At 10^5 months
+        // the map is tens of MiB, a random key's slot is a cache miss, and
+        // p99 measured 4.62x to 5.91x the 10^3 one over three runs while
+        // C-12's one cached key read 0.90x to 1.04x on the same tables. The probe count
+        // does not grow — the reservation keeps the load factor the same at
+        // every size — the memory a probe touches does. `docs/06-limits.md`
+        // names it rather than this row hiding it behind a looser ceiling.
+        if count > 10_000 {
+            let permille = p99.saturating_mul(1_000) / base.max(1);
+            println!(
+                "  O1P-05 entry lookup p99, {count} against 1000: ratio {}.{:03}x  REPORTED, not gated",
+                permille / 1_000,
+                permille % 1_000
+            );
+            continue;
+        }
+        // `ratio` prints picoseconds; the samples are nanoseconds.
+        ok &= ratio(
+            &format!("O1P-05 entry lookup p99, {count} against 1000"),
+            base.saturating_mul(1_000),
+            p99.saturating_mul(1_000),
+        );
+    }
+    ok
 }
 
 /// New keys appended inside one timed region.
@@ -541,13 +639,172 @@ fn append_after_load_is_flat() -> bool {
     ok
 }
 
+/// One July-2025 session of one-minute rows, as `crates/pull/tests/derive.rs`
+/// builds them: `day` is the day of the month.
+fn session_member(day: u8) -> pull::archive::Member {
+    // 2025-07-01 09:15:00 IST as a UTC epoch second.
+    const OPEN_UTC: i64 = 1_751_341_500;
+    let open = OPEN_UTC + (i64::from(day) - 1) * 86_400;
+    let rows = (0..375_i64)
+        .map(|m| {
+            let base = 2_550_000 + ((m * 37) % 211 - 105) * 25;
+            pull::fetch::RawRow {
+                timestamp: open + m * 60,
+                open: base,
+                high: base + 40,
+                low: base - 35,
+                close: base + 10,
+                volume: 400 + m,
+                open_interest: Some(500_000 + m * 3),
+            }
+        })
+        .collect();
+    pull::archive::Member {
+        path: std::path::PathBuf::from("/bought/NIFTY.csv"),
+        instrument: "NIFTY".to_owned(),
+        rows,
+        // A clean session skips nothing (D-3125's field; D-4620).
+        skipped: pull::fetch::DecodeSkips::default(),
+    }
+}
+
+/// The July-2025 days the canonical calendar holds as full sessions.
+fn full_sessions() -> Vec<u8> {
+    (1..=31_u8)
+        .filter(|&day| {
+            pull::session::Day::new(2025, 7, day).is_ok_and(|date| {
+                matches!(
+                    pull::calendar::kind_of(i64::from(date.days_from_epoch())),
+                    pull::calendar::DayKind::Open(session) if session.bars() == 375
+                )
+            })
+        })
+        .collect()
+}
+
+/// The `s`-th order statistic of `samples` at `permille` (p50 = 500).
+fn quantile(samples: &mut [u128], permille: usize) -> u128 {
+    samples.sort_unstable();
+    let at = (samples.len().saturating_sub(1) * permille) / 1_000;
+    samples.get(at).copied().unwrap_or(0)
+}
+
+/// ET-bars-candles-store-1, -8 and rederive, D-2240: **MEASURED**.
+///
+/// `derive_all` re-reads and re-folds the whole month on every batch, so the
+/// cost of ingesting the s-th session of a month grows with s. This fills a
+/// fresh store's July 2025 one session per `from_members` call, as an
+/// operator filling a month day by day does, `ROUNDS` times, and prints
+/// p50, p99 and max of one call's wall time at the first, middle and last
+/// session. The bound it asserts is the one `docs/06-limits.md` states: the
+/// per-call cost grows at most linearly in s, so the last call costs no more
+/// than `CEILING_PERMILLE` thousandths of s times the first (a call that
+/// re-derived more than the month would breach it). It does not assert that
+/// the growth is absent: that would be the incremental fold the store format
+/// cannot resume (D-0955).
+fn a_month_filled_session_by_session_rederives_linearly() -> bool {
+    const ROUNDS: usize = 9;
+    let days = full_sessions();
+    let sessions = days.len();
+    let mut per_session: Vec<Vec<u128>> = vec![Vec::with_capacity(ROUNDS); sessions];
+    for round in 0..ROUNDS {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-pull-bench-rederive-{}-{round}",
+            std::process::id()
+        ));
+        let _fresh = std::fs::remove_dir_all(&root);
+        if std::fs::create_dir_all(&root).is_err() {
+            println!("BREACH rederive: no scratch root");
+            return false;
+        }
+        for (at, &day) in days.iter().enumerate() {
+            let Ok(date) = pull::session::Day::new(2025, 7, day) else {
+                return false;
+            };
+            let Ok(window) = pull::session::Window::new(date, date) else {
+                return false;
+            };
+            let request = pull::fetch::BarRequest {
+                instrument_id: String::new(),
+                listing: pull::vendor::Listing::Index,
+                window,
+                granularity: pull::vendor::Granularity::Minute1,
+            };
+            let plan = pull::ingest::Plan {
+                calendar: pull::calendar::Runtime::default(),
+                cash_schedule: None,
+                columns: pull::csv::Columns::TrueDataIndex,
+                request: &request,
+                encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
+                scale: pull::vendor::PriceScale::Paisa,
+                vendor: Vendor::TrueData,
+                exchange: "NSE",
+                segment: "INDEX",
+                contract: None,
+            };
+            let member = session_member(day);
+            let start = Instant::now();
+            let done = black_box(pull::ingest::from_members(
+                std::slice::from_ref(&member),
+                &root,
+                plan,
+            ));
+            let took = start.elapsed().as_nanos();
+            if !done.failures.is_empty() {
+                println!(
+                    "BREACH rederive: session {day} refused: {:?}",
+                    done.failures
+                );
+                return false;
+            }
+            if let Some(samples) = per_session.get_mut(at) {
+                samples.push(took);
+            }
+        }
+        let _cleanup = std::fs::remove_dir_all(&root);
+    }
+    let mut report = |at: usize| {
+        let samples = per_session
+            .get_mut(at)
+            .map_or(&mut [][..], Vec::as_mut_slice);
+        let (p50, p99, max) = (
+            quantile(samples, 500),
+            quantile(samples, 990),
+            quantile(samples, 1_000),
+        );
+        println!(
+            "rederive: session {:>2} of {sessions}: p50 {:>9} ns, p99 {:>9} ns, max {:>9} ns",
+            at + 1,
+            p50,
+            p99,
+            max
+        );
+        p50
+    };
+    let first = report(0);
+    let _middle = report(sessions / 2);
+    let last = report(sessions.saturating_sub(1));
+    let envelope = first
+        .saturating_mul(u128::try_from(sessions).unwrap_or(u128::MAX))
+        .saturating_mul(CEILING_PERMILLE)
+        / 1_000;
+    let ok = sessions > 1 && last <= envelope;
+    println!(
+        "rederive: last p50 {last} ns against a linear envelope of {envelope} ns ({})",
+        if ok { "WITHIN" } else { "BREACH" }
+    );
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();
+    ok &= entry_lookup_is_flat_at_p99();
     ok &= append_after_load_is_flat();
+    ok &= a_month_filled_session_by_session_rederives_linearly();
     if ok {
         println!("all ratios within the ceiling");
     } else {

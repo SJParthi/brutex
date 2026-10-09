@@ -1,10 +1,10 @@
 //! Indian F&O statutory rates: the dated regime table, and the refusal that
 //! stands where a rate was never verified.
 //!
-//! This is stage 1 of the cost calculator: **the rates and the refusal
-//! contract**. It answers "what rate was in force" and "is that rate
-//! citation-grounded". It does not yet compute a charge, a GST total or a
-//! net P&L — those are later stages, and nothing here guesses at them.
+//! Stage 1 of the cost calculator is **the rates and the refusal contract**:
+//! "what rate was in force" and "is that rate citation-grounded". Stages two
+//! and three, below, compute the charges, the GST total and the net P&L on top
+//! of it (`trip::price`, `trip::charge_stack`); nothing guesses at a rate.
 //!
 //! # The one idea this crate exists to preserve
 //!
@@ -23,6 +23,13 @@
 //! `Rate::Verified` row, because [`rate::BpsX100`]'s constructor is
 //! crate-private and every table in this crate is a `const` item this crate
 //! owns. `CLAUDE.md` §4: degrade loudly and name the reason, or refuse.
+//!
+//! **One public value is not from a `Rate::Verified` row: `BpsX100::ZERO`,
+//! a measured zero.** Holding it outside this crate is harmless only because
+//! nothing outside this crate can build a [`trip::Rates`] from it:
+//! `Rates::new` is crate-private and [`trip::Rates::resolve`], a dated lookup
+//! that refuses, is the one public constructor. Until Z1-slice10-F1 (D-2538)
+//! `Rates::new` was public and this paragraph's "no fall-back" had one.
 //!
 //! # Constant per-operation cost
 //!
@@ -62,7 +69,7 @@
 //! language without exception, and `deny.toml` lists `pyo3` by name. The
 //! arithmetic was lifted; the binding was left behind.
 //!
-//! See `docs/05-decisions.md` D-0039.
+//! See `docs/05-decisions.md` D-0041.
 //!
 //! # Stage two: the option arithmetic
 //!

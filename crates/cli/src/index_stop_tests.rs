@@ -72,11 +72,29 @@ impl Drop for Group {
     }
 }
 
-/// What the ungrouped producer at 759ba45a wrote for `pinned_programs`.
+/// What the ungrouped producer at 759ba45a wrote for `pinned_programs`, re-taken
+/// once for D-1542 and D-1543. `pinned_programs` reads positions 0 to 4, the
+/// EMA rows, so the evaluated conditions moved with the SMA seed and the
+/// classical candlestick shapes. With `trend.rs` and `pattern.rs` restored to
+/// their previous bytes this test passed on the previous pins, so nothing else
+/// moved them. The grouped and ungrouped producers still agree.
+///
+/// Re-taken again for D-1571: the fixture's bar months are now born at store
+/// format version 3, and the cold checksum audit's full-file digest hashes the
+/// header image, whose `magic` and `format_version` changed. Evaluated
+/// conditions and terminals did not move; the identity that names the source
+/// bytes did. At the tree before D-1571 was merged this test passed on the
+/// previous pins.
+// RE-TAKEN for D-2612 and D-2613 (ind1-1, ind1-2, Z1-slice09-F1). The
+// catalog is a function of the condition bits the evaluator folds, and those
+// decisions decide the VWAP sides and bands, the EMA steps and the gap-mid
+// sides exactly, so the evaluated rows change. Reverting `indicators` alone
+// restores the previous pins (d155210e..., 733a085e..., 7065fe29...); the
+// grouped and ungrouped producers still agree with each other below.
 const PINS: [&str; 3] = [
-    "35da362a7e9447ce690104094bc4581d63c66ee440cffea0ec72bde465a35fc1",
-    "b244ecba43067e3a89a68a9e46f262428089684faa7d17f1f59d6c40efaff63d",
-    "8106fa46e8728158036905540dca8ae37e0419454057e909aa560d1e9f888802",
+    "982d7e874e72165d7f0129c0bd5f7bcbe0ab699de750983dbb63ec2714dfc776",
+    "f51a53dcc67bd8b81ff16e10093a182783cd76dc07504c177e049dff8d5bff62",
+    "28330b7210d51aadc9b92eabae1f3bcbde5d737c96ac620f839d5325b3413f7b",
 ];
 
 fn body_hex(fixture: &Fixture, identity: [u8; 32]) -> Result<String, String> {

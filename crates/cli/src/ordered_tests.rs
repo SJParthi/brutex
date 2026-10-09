@@ -1,0 +1,404 @@
+#![cfg(test)]
+//! The shared journal and ledger order of an `ordered::map` fan-out is a
+//! function of the inputs. audit-20261003 hunt-conc-1 and hunt-conc-2, D-1556.
+#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use crate::sweep_evidence::{self, Completion, Operation};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+struct Scratch(PathBuf);
+impl Scratch {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "brutex-ordered-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("scratch root");
+        Self(path)
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const WORKERS: u8 = 12;
+
+fn id(worker: u8, step: u8) -> [u8; 32] {
+    let mut id = [0; 32];
+    id[0] = worker;
+    id[1] = step;
+    id[31] = 0x5A;
+    id
+}
+
+/// One whole-command worker: a data-dependent number of attempts, each begun
+/// and finished in the shared journal, and one shared ledger row between them.
+/// `pause` is how long each step computes, so the caller decides which worker
+/// would finish first.
+fn worker(root: &Path, worker: u8, pause: Duration) -> Result<u8, String> {
+    let outer = sweep_evidence::begin(root, id(worker, 0), Operation::Sweep)?;
+    std::thread::sleep(pause);
+    for step in 0..worker % 3 {
+        let probe = sweep_evidence::begin(root, id(worker, step + 1), Operation::AutoProbe)?;
+        std::thread::sleep(pause);
+        probe.finish(Completion::Completed)?;
+    }
+    let mut record = crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES]);
+    record.identity = id(worker, 0);
+    record.feed = crate::results::field("zerodha");
+    record.underlying = crate::results::field("NIFTY");
+    record.timeframe = crate::results::field("5min");
+    crate::results::with_shared_writer(root, |ledger| ledger.append(&record))?;
+    std::thread::sleep(pause);
+    outer.finish(Completion::Completed)?;
+    Ok(worker)
+}
+
+/// Journal rows without their wall-clock stamps, and the ledger identities.
+fn durable_order(root: &Path) -> (Vec<Vec<u8>>, Vec<[u8; 32]>) {
+    let journal = std::fs::read(
+        root.join("results")
+            .join("sweep-evidence-v1")
+            .join("attempts.bin"),
+    )
+    .expect("the shared journal");
+    let rows = journal[16..]
+        .chunks(96)
+        .map(|row| [&row[..40], &row[56..58]].concat())
+        .collect();
+    let mut ledger = crate::results::Results::open_read(root).expect("the shared ledger");
+    let filed = (0..ledger.len().expect("rows"))
+        .map(|index| ledger.read(index).expect("row").identity)
+        .collect();
+    (rows, filed)
+}
+
+fn fan_out(threads: usize, pause: impl Fn(u8) -> Duration + Sync) -> (Vec<Vec<u8>>, Vec<[u8; 32]>) {
+    let scratch = Scratch::new();
+    let workers: Vec<u8> = (0..WORKERS).collect();
+    let done = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("a pool")
+        .install(|| crate::ordered::map(&workers, |w| worker(&scratch.0, *w, pause(*w))))
+        .expect("every lane starts");
+    let done: Vec<u8> = done.into_iter().map(|w| w.expect("worker")).collect();
+    assert_eq!(done, workers, "results come back in input order");
+    durable_order(&scratch.0)
+}
+
+/// **The journal and the ledger hold the same rows in the same order whatever
+/// the thread count and whichever worker computes fastest.**
+///
+/// Before D-1556 the fan-out was an indexed parallel map, so the report came
+/// back in input order while every durable write landed in completion order:
+/// one thread filed workers 0, 1, 2…; many threads with the earliest workers
+/// slowest filed them roughly backwards.
+#[test]
+fn shared_durable_writes_follow_the_inputs_not_the_schedule() {
+    let one = fan_out(1, |_| Duration::from_millis(2));
+    let first_slowest = fan_out(WORKERS.into(), |w| {
+        Duration::from_millis(u64::from(WORKERS - w) * 6)
+    });
+    let last_slowest = fan_out(3, |w| Duration::from_millis(u64::from(w) * 6));
+    assert_eq!(one.0.len(), first_slowest.0.len());
+    assert_eq!(one.1.len(), usize::from(WORKERS));
+    assert_eq!(first_slowest, one, "a fast late worker reordered the store");
+    assert_eq!(last_slowest, one, "the thread count reordered the store");
+    let rerun = fan_out(WORKERS.into(), |w| {
+        Duration::from_millis(u64::from(WORKERS - w) * 6)
+    });
+    assert_eq!(rerun, one, "a rerun reordered the store");
+}
+
+/// The order the module doc states, derived from [`worker`]'s own program
+/// order rather than from a run: every lane's shared writes are its events
+/// `1, 2, 3, …`, a window's events land sorted by `(k, i)`, and windows land
+/// one after another. Returns the journal identities and the ledger identities.
+fn stated_order() -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    let workers: Vec<u8> = (0..WORKERS).collect();
+    let mut journal = Vec::new();
+    let mut ledger = Vec::new();
+    for window in workers.chunks(crate::ordered::WINDOW) {
+        // (round, lane, is the ledger row, identity)
+        let mut events = Vec::new();
+        for (lane, &w) in window.iter().enumerate() {
+            let mut lane_events = vec![(false, id(w, 0))];
+            for step in 0..w % 3 {
+                lane_events.push((false, id(w, step + 1)));
+                lane_events.push((false, id(w, step + 1)));
+            }
+            lane_events.push((true, id(w, 0)));
+            lane_events.push((false, id(w, 0)));
+            for (round, (to_ledger, identity)) in lane_events.into_iter().enumerate() {
+                events.push((round, lane, to_ledger, identity));
+            }
+        }
+        events.sort_by_key(|&(round, lane, _, _)| (round, lane));
+        for (_, _, to_ledger, identity) in events {
+            if to_ledger {
+                ledger.push(identity);
+            } else {
+                journal.push(identity);
+            }
+        }
+    }
+    (journal, ledger)
+}
+
+/// **The order is the INPUT order, not merely a repeatable one.** The test
+/// above compares runs only with each other, so lanes that each waited on the
+/// HIGHER lanes instead (`other < at` mutated to `other > at` in
+/// `Turns::ready`) would land every round in reverse input order, the same on
+/// every run, and pass it. P10-02.
+#[test]
+fn shared_durable_writes_land_round_by_round_in_input_order() {
+    let (journal, ledger) = fan_out(WORKERS.into(), |w| {
+        Duration::from_millis(u64::from(WORKERS - w) * 3)
+    });
+    let (stated_journal, stated_ledger) = stated_order();
+    assert_eq!(ledger, stated_ledger, "the ledger is not in (k, i) order");
+    let identities: Vec<[u8; 32]> = journal
+        .iter()
+        .map(|row| row[8..40].try_into().expect("32 bytes"))
+        .collect();
+    assert_eq!(
+        identities, stated_journal,
+        "the journal is not in (k, i) order"
+    );
+    // Round one of the first window is every lane's outer begin, lane 0 first.
+    let first: Vec<[u8; 32]> = (0..WORKERS)
+        .take(crate::ordered::WINDOW)
+        .map(|w| id(w, 0))
+        .collect();
+    assert_eq!(identities[..first.len()], first[..]);
+}
+
+/// The body of `fn name` in `source`, up to the next item at column zero.
+fn body<'a>(source: &'a str, name: &str) -> &'a str {
+    let start = source.find(name).unwrap_or_else(|| panic!("{name} exists"));
+    let rest = &source[start..];
+    let end = rest.find("\n}\n").expect("the item closes");
+    &rest[..end]
+}
+
+/// **Every whole-command fan-out that writes the shared journal or ledger
+/// writes in input order: the Boolean family pools as ordered lanes (D-1556),
+/// `range-all` and pool pass 1 one call at a time through `in_input_order`
+/// (D-1701, kept over D-1556 for those two by D-1709).** None is an indexed
+/// parallel map or a private thread pool.
+#[test]
+fn every_whole_command_fan_out_writes_in_input_order() {
+    for (file, source, name, shape) in [
+        (
+            "lib.rs",
+            include_str!("lib.rs"),
+            "fn sweep_rungs(",
+            "in_input_order(rungs,",
+        ),
+        (
+            "pool.rs",
+            include_str!("pool.rs"),
+            "fn run_under(",
+            "crate::in_input_order(&surface,",
+        ),
+        (
+            "boolean_catalog_prepared.rs",
+            include_str!("boolean_catalog_prepared.rs"),
+            "pub(crate) fn run(",
+            "ordered::map(",
+        ),
+        (
+            "boolean_oos_command.rs",
+            include_str!("boolean_oos_command.rs"),
+            "fn execute(",
+            "ordered::map(",
+        ),
+    ] {
+        let body = body(source, name);
+        assert!(body.contains(shape), "{file} {name}");
+        assert!(!body.contains("ThreadPoolBuilder"), "{file} {name}");
+        let pass_one = body.split("PASS 2").next().unwrap_or(body);
+        assert!(!pass_one.contains("par_iter"), "{file} {name}");
+    }
+}
+
+/// A turn outside any lane, and a turn nested inside one held, return at once.
+#[test]
+fn a_turn_outside_a_lane_or_inside_a_held_one_never_waits() {
+    let outer = crate::ordered::turn();
+    let inner = crate::ordered::turn();
+    drop(inner);
+    drop(outer);
+    let nested = crate::ordered::map(&[0_u8, 1], |lane| {
+        let _outer = crate::ordered::turn();
+        let _inner = crate::ordered::turn();
+        *lane
+    })
+    .expect("both lanes start");
+    assert_eq!(nested, vec![0, 1]);
+}
+
+/// **A lane's own slot never blocks it, and a lower lane must be a round
+/// ahead.** G18-cli-b-02, D-2021.
+///
+/// Fails fast where the fan-out tests would hang: a lane that compared its own
+/// slot as a LOWER one (`other < at` widened to `other <= at`) would wait for
+/// itself forever. Checked on the pure rule, no thread involved.
+#[test]
+fn a_lane_never_waits_on_its_own_slot() {
+    use super::{Lane, Turns};
+    let idle = Lane {
+        performed: 0,
+        finished: false,
+    };
+    assert!(Turns::ready(&[idle], 0), "a lone lane goes");
+    assert!(Turns::ready(&[idle, idle], 0), "lane 0 leads round 1");
+    assert!(
+        !Turns::ready(&[idle, idle], 1),
+        "lane 1 waits for lane 0's round 1"
+    );
+    let ahead = Lane {
+        performed: 1,
+        finished: false,
+    };
+    assert!(Turns::ready(&[ahead, idle], 1), "lane 0 has done round 1");
+    assert!(
+        !Turns::ready(&[ahead, idle], 0),
+        "lane 0's round 2 waits for lane 1's round 1"
+    );
+    let saturated = Lane {
+        performed: u64::MAX,
+        finished: false,
+    };
+    assert!(
+        Turns::ready(&[saturated], 0),
+        "a saturated count still goes"
+    );
+    assert!(
+        Turns::ready(&[idle, idle], 2),
+        "a lane past the end is not held"
+    );
+}
+
+/// **Every lane gets its turns in round-then-input order, and a lane that
+/// finishes early never holds the others, within a deadline.**
+/// G18-cli-b-26, D-2033.
+///
+/// The fan-out runs on its own thread and its answer is awaited with
+/// `recv_timeout`, so a turn that never comes (an update that changes nothing,
+/// a finished lane never marked finished, a wait taken when ready) fails this
+/// test at the deadline instead of hanging the suite.
+#[test]
+fn turns_are_granted_in_round_then_input_order_within_a_deadline() {
+    use std::sync::{Arc, Mutex, mpsc};
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (send, receive) = mpsc::channel();
+    let lanes = Arc::clone(&log);
+    std::thread::spawn(move || {
+        // Lane 0 takes one turn and finishes; lanes 1-3 take three each.
+        let items: Vec<u8> = (0..4).collect();
+        let done = crate::ordered::map(&items, |lane| {
+            let rounds = if *lane == 0 { 1 } else { 3 };
+            for round in 0..rounds {
+                let _turn = crate::ordered::turn();
+                lanes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((round, *lane));
+            }
+            *lane
+        });
+        let _ = send.send(done);
+    });
+    let done = receive
+        .recv_timeout(Duration::from_secs(30))
+        .expect("every lane was granted its turns before the deadline")
+        .expect("every lane starts");
+    assert_eq!(done, [0, 1, 2, 3], "results come back in input order");
+    let log = log
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        log,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+        ],
+        "round by round, lanes in input order"
+    );
+}
+
+/// **The two turn tests above are in the test order's front band, by name.**
+/// D-4180.
+///
+/// Under one test thread and fail-fast, a mutant that leaves a turn ungranted
+/// is caught only if one of these runs before any test that waits on a turn
+/// with no deadline. `.config/nextest.toml` gives both `priority = 100` by
+/// exact name, beside run 1286's other kill tests, so both run ahead of every
+/// priority-0 test that drives `ordered::map` (measured at positions 47 and 48
+/// of the cli binary, D-4180). No test in that band may itself drive
+/// `ordered::map` without a deadline. nextest does not complain when a filter matches
+/// nothing, so a rename or a move would silently put the hang back. The two
+/// function pointers below stop compiling on a rename; the filter is built
+/// from this module's own path, so a move changes the name the config must
+/// carry; and the name must sit in an active override's `filter` whose
+/// `priority` is 100, not merely somewhere in the file.
+#[test]
+fn the_d_4180_priority_names_both_turn_tests() {
+    let _: fn() = a_lane_never_waits_on_its_own_slot;
+    let _: fn() = turns_are_granted_in_round_then_input_order_within_a_deadline;
+    let config = include_str!("../../../.config/nextest.toml");
+    // `cli::ordered::tests` is `ordered::tests` to nextest, which names a test
+    // by its path inside the crate.
+    let here = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, inside)| inside);
+    assert_eq!(here, "ordered::tests", "premise: the path nextest prints");
+    // Each override, cut at the next table header, without its comment lines.
+    let overrides: Vec<Vec<&str>> = config
+        .split("[[profile.default.overrides]]")
+        .skip(1)
+        .map(|block| {
+            block
+                .lines()
+                .map(str::trim)
+                .take_while(|line| !line.starts_with('['))
+                .filter(|line| !line.starts_with('#'))
+                .collect()
+        })
+        .collect();
+    for name in [
+        "a_lane_never_waits_on_its_own_slot",
+        "turns_are_granted_in_round_then_input_order_within_a_deadline",
+    ] {
+        let filter = format!("test(={here}::{name})");
+        let banded = overrides.iter().any(|lines| {
+            lines
+                .iter()
+                .any(|line| line.starts_with("filter") && line.contains(&filter))
+                && lines.contains(&"priority = 100")
+        });
+        assert!(
+            banded,
+            "`.config/nextest.toml` must give {filter} priority 100 in an active override (D-4180)"
+        );
+    }
+}

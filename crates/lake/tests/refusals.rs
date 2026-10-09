@@ -395,13 +395,19 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
     // same answer it gives a chunk that is genuinely finished.
     let sound = multi_page_cash_file(ROWS, 200);
     let full = footer_chunk_len(&sound, OI);
-    for pages in [1_i64, 2, 4, 8, 12] {
+    // COUNTED (P1-14-07): every iteration could `continue` -- a helper whose
+    // page-header read stopped matching the writer's layout answers `None` for
+    // every cut -- and the half below would be green having run nothing.
+    let mut boundary_cases = 0_usize;
+    let cuts = [1_i64, 2, 4, 8, 12];
+    for pages in cuts {
         let Some(len) = exact_page_prefix(&sound, OI, pages) else {
             continue;
         };
         if len >= full {
             continue;
         }
+        boundary_cases += 1;
         let cut = patch_footer(&sound, |meta| {
             meta.row_groups[0].columns[OI]
                 .meta_data
@@ -435,6 +441,12 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
             }
         }
     }
+    assert_eq!(
+        boundary_cases,
+        cuts.len(),
+        "every exact page-boundary cut must reach `read_row_group`; the fixture \
+         holds more pages than the largest cut"
+    );
 
     assert!(
         fabricated.is_empty(),
@@ -1257,5 +1269,584 @@ fn a_short_chunk_on_a_required_column_names_the_shortfall_not_a_phantom_null() {
     assert!(
         !text.contains("is null at row"),
         "the old message said the file has a null here, which is the wrong fault: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT probestore-7 — a STORED open-interest sentinel is refused by name, and
+// the values this reader does not judge are stated, not implied.
+// ---------------------------------------------------------------------------
+
+/// One cash row as the seven leaves hold it; `None` open interest is a null.
+#[derive(Clone, Copy)]
+struct Row {
+    timestamp: i64,
+    ohlc: [f64; 4],
+    volume: i64,
+    open_interest: Option<i64>,
+}
+
+/// A one-group, seven-column cash file holding exactly `rows`.
+fn cash_file_of(rows: &[Row]) -> Vec<u8> {
+    let fields: Vec<Arc<Type>> = CASH
+        .iter()
+        .map(|(name, ty)| {
+            Arc::new(
+                Type::primitive_type_builder(name, *ty)
+                    .with_repetition(Repetition::OPTIONAL)
+                    .build()
+                    .expect("field"),
+            )
+        })
+        .collect();
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let all = vec![1_i16; rows.len()];
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        let mut at = 0_usize;
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => match at {
+                    0 => {
+                        let v: Vec<i64> = rows.iter().map(|r| r.timestamp).collect();
+                        typed.write_batch(&v, Some(&all), None).expect("timestamp");
+                    }
+                    5 => {
+                        let v: Vec<i64> = rows.iter().map(|r| r.volume).collect();
+                        typed.write_batch(&v, Some(&all), None).expect("volume");
+                    }
+                    _ => {
+                        let v: Vec<i64> = rows.iter().filter_map(|r| r.open_interest).collect();
+                        let defs: Vec<i16> = rows
+                            .iter()
+                            .map(|r| i16::from(r.open_interest.is_some()))
+                            .collect();
+                        typed
+                            .write_batch(&v, Some(&defs), None)
+                            .expect("open interest");
+                    }
+                },
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    let v: Vec<f64> = rows.iter().map(|r| r.ohlc[at - 1]).collect();
+                    typed.write_batch(&v, Some(&all), None).expect("price");
+                }
+                _ => panic!("the cash layout has no other physical type"),
+            }
+            column.close().expect("close column");
+            at += 1;
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// A plain, sane row carrying `open_interest`.
+const fn sane(open_interest: Option<i64>) -> Row {
+    Row {
+        timestamp: 1_584_685_680_000_000,
+        ohlc: [100.0, 101.0, 99.0, 100.5],
+        volume: 5,
+        open_interest,
+    }
+}
+
+/// Opens `bytes` from a private file and reads group 0.
+fn read_back(name: &str, bytes: &[u8]) -> Result<lake::batch::Batch, LakeError> {
+    let path = std::env::temp_dir().join(format!(
+        "brutex-lake-sentinel-{name}-{}.parquet",
+        std::process::id()
+    ));
+    std::fs::write(&path, bytes).expect("the scratch file is writable");
+    let file = LakeFile::open(&path).expect("a well-formed cash file opens");
+    let read = file.read_row_group(0);
+    let _ = std::fs::remove_file(&path);
+    read
+}
+
+/// A STORED `i64::MIN` OPEN INTEREST IS REFUSED, NAMING ITS ROW.
+///
+/// The reader maps a null to `i64::MIN`, so a file storing `i64::MIN` read
+/// back as "the vendor reported none": a null the file never held. It is
+/// refused at the first, a middle and the last row; one above it, zero, a
+/// negative and a real null still read, the null as `None` and zero as zero.
+#[test]
+fn a_stored_open_interest_sentinel_is_refused_by_row() {
+    for (name, at) in [("first", 0), ("middle", 2), ("last", 4)] {
+        let mut rows = [sane(Some(7)); 5];
+        rows[at].open_interest = Some(i64::MIN);
+        let read = read_back(name, &cash_file_of(&rows)).map(|b| b.len());
+        assert!(
+            matches!(
+                read,
+                Err(LakeError::OpenInterestIsNullSentinel { row }) if row == at
+            ),
+            "a stored sentinel at row {at}: {read:?}"
+        );
+    }
+    let rows = [
+        sane(Some(i64::MIN + 1)),
+        sane(Some(0)),
+        sane(None),
+        sane(Some(-1)),
+        sane(Some(i64::MAX)),
+    ];
+    let batch = read_back("edges", &cash_file_of(&rows)).expect("no stored sentinel");
+    let got: Vec<Option<i64>> = (0..5)
+        .map(|i| batch.row(i).expect("five rows").open_interest())
+        .collect();
+    assert_eq!(
+        got,
+        [Some(i64::MIN + 1), Some(0), None, Some(-1), Some(i64::MAX)]
+    );
+}
+
+/// WHAT THIS READER DOES NOT JUDGE DECODES AS WRITTEN, AS ITS DOC NOW SAYS.
+///
+/// The crate header said every bad thing is refused, and an extreme
+/// timestamp, a `low` above the `high`, an `open` outside the range, a
+/// negative price, volume and open interest all decoded silently. They still
+/// decode, because judging a bar is the consumer's job, and the header and
+/// `read_row_group` now say so; this pins that statement to the behaviour.
+#[test]
+fn values_the_reader_does_not_judge_decode_as_written() {
+    let row = Row {
+        timestamp: i64::MIN,
+        ohlc: [100.0, 1.0, 200.0, -3.0],
+        volume: -7,
+        open_interest: Some(-9),
+    };
+    let batch = read_back("unjudged", &cash_file_of(&[row])).expect("not judged, so read");
+    let bar = batch.row(0).expect("one row");
+    assert_eq!(bar.timestamp_micros, i64::MIN);
+    assert_eq!(
+        [
+            bar.open.raw(),
+            bar.high.raw(),
+            bar.low.raw(),
+            bar.close.raw()
+        ],
+        [10_000, 100, 20_000, -300]
+    );
+    assert_eq!((bar.volume, bar.open_interest()), (-7, Some(-9)));
+    let header = include_str!("../src/lib.rs");
+    assert!(header.contains("not every implausible\n//! value in it."));
+    let reader = include_str!("../src/reader.rs");
+    assert!(reader.contains("/// # What is NOT checked"));
+}
+
+/// One cash file whose `timestamp` leaf declares `logical`, three rows.
+fn cash_file_with_timestamp(logical: Option<&parquet::basic::LogicalType>) -> Vec<u8> {
+    let mut fields: Vec<Arc<Type>> = Vec::new();
+    for (name, ty) in CASH {
+        let mut leaf = Type::primitive_type_builder(name, ty).with_repetition(Repetition::OPTIONAL);
+        if name == "timestamp" {
+            leaf = leaf.with_logical_type(logical.cloned());
+        }
+        fields.push(Arc::new(leaf.build().expect("leaf")));
+    }
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1_i64, 2, 3], Some(&[1, 1, 1]), None)
+                        .expect("i64");
+                }
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1.0_f64, 2.0, 3.0], Some(&[1, 1, 1]), None)
+                        .expect("f64");
+                }
+                _ => panic!("the cash layout has no other physical type"),
+            }
+            column.close().expect("close column");
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// audit-20261003 hunt-store-5 (D-1528). The `timestamp` leaf's LOGICAL type
+/// was never checked, so a NANOS or MILLIS timestamp, or a MICROS one that is
+/// not adjusted to UTC (a wall clock), decoded silently as "microseconds since
+/// the epoch, UTC": off by ×1000, ÷1000 or +5h30. Each is now refused by name
+/// at the schema gate. An undeclared INT64 and a UTC MICROS timestamp still
+/// open.
+#[test]
+fn a_timestamp_in_another_unit_or_not_in_utc_is_refused_by_name() {
+    use parquet::basic::{LogicalType, TimeUnit};
+    let stamp = |unit, utc| Some(LogicalType::timestamp(utc, unit));
+    for (logical, said) in [
+        (stamp(TimeUnit::NANOS, true), "NANOS"),
+        (stamp(TimeUnit::MILLIS, true), "MILLIS"),
+        (stamp(TimeUnit::MICROS, false), "not adjusted to UTC"),
+    ] {
+        match LakeFile::from_bytes(cash_file_with_timestamp(logical.as_ref())) {
+            Err(LakeError::UnsupportedTimestamp { declared }) => {
+                assert!(declared.contains(said), "{said}: {declared}");
+            }
+            Err(other) => panic!("{said}: refused as the wrong thing: {other:?}"),
+            Ok(_) => panic!("{said}: a timestamp this reader would misread was opened"),
+        }
+    }
+    for clean in [None, stamp(TimeUnit::MICROS, true)] {
+        assert!(
+            LakeFile::from_bytes(cash_file_with_timestamp(clean.as_ref())).is_ok(),
+            "{clean:?} is what this reader decodes"
+        );
+    }
+}
+
+/// One cash file whose leaf `leaf` is declared with `physical`, `converted`
+/// and `logical`, three rows. Every other leaf is plain.
+///
+/// The parquet writer records exactly what it is handed: a leaf given only a
+/// converted type is written with no logical type, which is what a legacy
+/// writer (parquet-mr, older pyarrow) emits.
+fn cash_file_annotated(
+    leaf: &str,
+    physical: PhysicalType,
+    converted: parquet::basic::ConvertedType,
+    mut logical: Option<parquet::basic::LogicalType>,
+) -> Vec<u8> {
+    let mut fields: Vec<Arc<Type>> = Vec::new();
+    for (name, ty) in CASH {
+        let mut built =
+            Type::primitive_type_builder(name, ty).with_repetition(Repetition::OPTIONAL);
+        if name == leaf {
+            built = Type::primitive_type_builder(name, physical)
+                .with_repetition(Repetition::OPTIONAL)
+                .with_converted_type(converted)
+                .with_logical_type(logical.take());
+        }
+        fields.push(Arc::new(built.build().expect("leaf")));
+    }
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => {
+                    // 2024-01-01 09:15 IST in MILLISECONDS, then two more.
+                    typed
+                        .write_batch(
+                            &[1_704_080_700_000_i64, 1_704_080_760_000, 1_704_080_820_000],
+                            Some(&[1, 1, 1]),
+                            None,
+                        )
+                        .expect("i64");
+                }
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1.0_f64, 2.0, 3.0], Some(&[1, 1, 1]), None)
+                        .expect("f64");
+                }
+                ColumnWriter::Int96ColumnWriter(typed) => {
+                    let one = parquet::data_type::Int96::from(vec![1_u32, 2, 3]);
+                    typed
+                        .write_batch(&[one, one, one], Some(&[1, 1, 1]), None)
+                        .expect("i96");
+                }
+                ColumnWriter::Int32ColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1_i32, 2, 3], Some(&[1, 1, 1]), None)
+                        .expect("i32");
+                }
+                _ => panic!("this fixture writes no other physical type"),
+            }
+            column.close().expect("close column");
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// audit-20261004 h-pull-1 (D-2270). D-1528 read only the LOGICAL type, so a
+/// `timestamp` leaf carrying only the legacy CONVERTED type `TIMESTAMP_MILLIS`
+/// opened, and its milliseconds decoded as microseconds: 1000x too small,
+/// January 1970, no refusal. Every converted type but `NONE` and
+/// `TIMESTAMP_MICROS` is now refused by name, a logical type that disagrees
+/// with its converted type is refused, and an INT96 timestamp still fails the
+/// physical-type check.
+#[test]
+fn a_timestamp_declared_only_by_a_legacy_converted_type_is_refused_unless_it_is_micros() {
+    use parquet::basic::{ConvertedType, LogicalType, TimeUnit};
+
+    let millis = cash_file_annotated(
+        "timestamp",
+        PhysicalType::INT64,
+        ConvertedType::TIMESTAMP_MILLIS,
+        None,
+    );
+    match LakeFile::from_bytes(millis) {
+        Err(LakeError::UnsupportedTimestamp { declared }) => {
+            assert!(declared.contains("TIMESTAMP_MILLIS"), "{declared}");
+        }
+        Err(other) => panic!("refused as the wrong thing: {other:?}"),
+        Ok(_) => panic!("a MILLIS timestamp opened and would decode as micros"),
+    }
+    // Every other converted type parquet lets annotate an INT64 means
+    // something this reader does not decode as a UTC microsecond.
+    for other in [
+        ConvertedType::INT_64,
+        ConvertedType::UINT_64,
+        ConvertedType::TIME_MICROS,
+    ] {
+        match LakeFile::from_bytes(cash_file_annotated(
+            "timestamp",
+            PhysicalType::INT64,
+            other,
+            None,
+        )) {
+            Err(LakeError::UnsupportedTimestamp { declared }) => {
+                assert!(declared.contains(&other.to_string()), "{declared}");
+            }
+            Err(wrong) => panic!("{other}: refused as the wrong thing: {wrong:?}"),
+            Ok(_) => panic!("{other}: a timestamp this reader would misread was opened"),
+        }
+    }
+    // The legacy spelling of what the reader decodes still opens, and so do
+    // the two spellings D-1528 already accepted.
+    for (converted, logical) in [
+        (ConvertedType::TIMESTAMP_MICROS, None),
+        (ConvertedType::NONE, None),
+        (
+            ConvertedType::TIMESTAMP_MICROS,
+            Some(LogicalType::timestamp(true, TimeUnit::MICROS)),
+        ),
+    ] {
+        assert!(
+            LakeFile::from_bytes(cash_file_annotated(
+                "timestamp",
+                PhysicalType::INT64,
+                converted,
+                logical.clone(),
+            ))
+            .is_ok(),
+            "{converted} {logical:?} is what this reader decodes"
+        );
+    }
+    // A logical MICROS (UTC) leaf whose converted type was rewritten to
+    // MILLIS: the two disagree, and the file never opens.
+    let disagreeing = patch_footer(
+        &cash_file_annotated(
+            "timestamp",
+            PhysicalType::INT64,
+            ConvertedType::NONE,
+            Some(LogicalType::timestamp(true, TimeUnit::MICROS)),
+        ),
+        |meta| {
+            meta.schema[1].converted_type =
+                Some(parquet_format_safe::ConvertedType::TIMESTAMP_MILLIS);
+        },
+    );
+    assert!(
+        LakeFile::from_bytes(disagreeing).is_err(),
+        "a logical MICROS with a converted MILLIS is refused"
+    );
+    // INT96, the other physical encoding of a timestamp, is not INT64.
+    match LakeFile::from_bytes(cash_file_annotated(
+        "timestamp",
+        PhysicalType::INT96,
+        ConvertedType::NONE,
+        None,
+    )) {
+        Err(LakeError::ColumnTypeMismatch { name, .. }) => assert_eq!(name, "timestamp"),
+        Err(other) => panic!("INT96 refused as the wrong thing: {other:?}"),
+        Ok(_) => panic!("an INT96 timestamp opened"),
+    }
+}
+
+/// audit-20261004 h-pull-1 (D-2270). The integer count columns had no
+/// annotation check at all: an unsigned 64-bit `volume` reads values past
+/// `i64::MAX` as negative, and a DECIMAL or TIME annotation is a different
+/// quantity under the right name. Only a signed integer annotation, or none,
+/// decodes as the plain integer the reader returns.
+#[test]
+fn an_integer_column_annotated_as_anything_but_a_signed_integer_is_refused_by_name() {
+    use parquet::basic::{ConvertedType, LogicalType};
+
+    for (leaf, converted, logical, said) in [
+        ("volume", ConvertedType::UINT_64, None, "UINT_64"),
+        (
+            "open_interest",
+            ConvertedType::TIME_MICROS,
+            None,
+            "TIME_MICROS",
+        ),
+        (
+            "volume",
+            ConvertedType::TIMESTAMP_MICROS,
+            None,
+            "TIMESTAMP_MICROS",
+        ),
+        (
+            "open_interest",
+            ConvertedType::NONE,
+            Some(LogicalType::integer(64, false)),
+            "is_signed: false",
+        ),
+        (
+            "volume",
+            ConvertedType::NONE,
+            Some(LogicalType::Unknown),
+            "Unknown",
+        ),
+    ] {
+        match LakeFile::from_bytes(cash_file_annotated(
+            leaf,
+            PhysicalType::INT64,
+            converted,
+            logical.clone(),
+        )) {
+            Err(LakeError::UnsupportedIntegerAnnotation { name, declared }) => {
+                assert_eq!(name, leaf, "{said}");
+                assert!(declared.contains(said), "{said}: {declared}");
+            }
+            Err(other) => panic!("{said}: refused as the wrong thing: {other:?}"),
+            Ok(_) => panic!("{said}: an integer column this reader would misread was opened"),
+        }
+    }
+    for (converted, logical) in [
+        (ConvertedType::NONE, None),
+        (ConvertedType::INT_64, None),
+        (ConvertedType::NONE, Some(LogicalType::integer(64, true))),
+    ] {
+        for leaf in ["volume", "open_interest"] {
+            assert!(
+                LakeFile::from_bytes(cash_file_annotated(
+                    leaf,
+                    PhysicalType::INT64,
+                    converted,
+                    logical.clone(),
+                ))
+                .is_ok(),
+                "{leaf} {converted} {logical:?} decodes as a signed integer"
+            );
+        }
+    }
+}
+
+/// A DICTIONARY-ENCODED CHUNK WHOSE FOOTER LOST ITS DICTIONARY OFFSET IS
+/// REFUSED BY NAME, NOT PANICKED ON. satk-9, D-4415.
+///
+/// The reader starts a chunk at `dictionary_page_offset`, or at
+/// `data_page_offset` when the footer has none. A footer that lost the
+/// dictionary offset therefore starts the chunk at its data page, past the
+/// dictionary, and `parquet`'s value decoder then `expect`s a dictionary it was
+/// never given — "Decoder for dict should have been set", a panic that the
+/// release profile's `panic = "abort"` turns into a dead process. The audit
+/// reached it with one flipped footer byte (P28: byte 1,646 xor 0x80). This
+/// drops the offset through `patch_footer`, on `volume` and `open_interest`
+/// separately, and wants the read to come back as a named refusal.
+#[test]
+fn a_dictionary_chunk_whose_footer_lost_its_dictionary_offset_is_refused_not_panicked() {
+    let good = dictionary_cash_file(100);
+    // The control: the same file, footer untouched, reads all of its rows.
+    let batch = read_back("dict-control", &good).expect("the unedited file reads");
+    assert_eq!(batch.len(), 100);
+
+    for (leaf, column) in [(5, "volume"), (OI, "open_interest")] {
+        let cut = patch_footer(&good, |meta| {
+            let chunk = &mut meta.row_groups[0].columns[leaf];
+            let held = chunk.meta_data.as_mut().expect("chunk metadata");
+            assert!(
+                held.dictionary_page_offset.is_some(),
+                "the writer dictionary-encoded {column}, so it has an offset to lose"
+            );
+            held.dictionary_page_offset = None;
+        });
+        let read = std::panic::catch_unwind(|| read_back(&format!("dict-cut-{leaf}"), &cut));
+        let Ok(read) = read else {
+            panic!("{column}: the reader panicked on a missing dictionary offset");
+        };
+        match read {
+            Err(LakeError::PageDecode {
+                column: named,
+                reason,
+            }) => {
+                assert_eq!(named, column, "the refusal names the chunk");
+                assert!(
+                    reason.contains("no dictionary page before it"),
+                    "{column}: {reason}"
+                );
+            }
+            other => panic!("{column}: wanted a named page refusal, got {other:?}"),
+        }
+    }
+}
+
+/// NO SINGLE FLIPPED BYTE ANYWHERE IN A DICTIONARY-ENCODED FILE PANICS THE
+/// READER. satk-9, D-4415.
+///
+/// The audit's probe P27, kept: every byte of a dictionary-encoded file
+/// flipped by three masks, each copy opened and read in full. A refusal is
+/// fine and expected; a read that succeeds is fine (a flipped statistic or an
+/// unused byte changes nothing the reader judges); a panic is the failure,
+/// because in a release build it is an abort. Eight of the audit's flips
+/// panicked before the dictionary check.
+#[test]
+fn no_single_flipped_byte_in_a_dictionary_file_panics_the_reader() {
+    let good = dictionary_cash_file(100);
+    let mut panicked = Vec::new();
+    for at in 0..good.len() {
+        for mask in [0x01_u8, 0x80, 0xff] {
+            let mut bad = good.clone();
+            bad[at] ^= mask;
+            let read = std::panic::catch_unwind(move || {
+                LakeFile::from_bytes(bad).and_then(|file| file.read_all())
+            });
+            if read.is_err() {
+                panicked.push((at, mask));
+            }
+        }
+    }
+    assert!(
+        panicked.is_empty(),
+        "{} of {} flips panicked the reader, first at {:?}",
+        panicked.len(),
+        good.len() * 3,
+        panicked.first()
     );
 }

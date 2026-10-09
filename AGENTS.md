@@ -52,7 +52,7 @@ that the workspace builds with the front end moved aside — is untouched by it.
 Exactly one tracked file uses it, `.claude/launch.json`, which carries the two
 run configurations `docs/07-plan.md` §0 names. It was written into gate 1 and
 gate 1b first and into this list second; gate 1's own comment refused to close
-the gap on its own, in these words: *"Resolving that is a `AGENTS.md` edit and a
+the gap on its own, in these words: *"Resolving that is a CLAUDE.md edit and a
 `docs/05-decisions.md` entry, which a CI gate must not make on its own — a gate
 that widens the law to match the tree is the shape this whole file exists to
 refuse."* D-0210 is that entry, and this sentence is that edit.
@@ -204,8 +204,9 @@ both declared on 2026-09-01: D-0453 drew `pull` here and in
 `docs/01-architecture.md`, but not in `CLAUDE.md`, and its own list left out
 `vocab`, which D-0683 adds to all three. Gates 9 and 9b pin one arrow each, and
 `core/tests/graph.rs` checks the table in `docs/01-architecture.md` against all
-thirteen manifests; **nothing parses this block as a whole**, so check it
-against that gate and the manifests rather than trusting it.
+thirteen manifests, and since D-3502 it parses this block and `CLAUDE.md`'s
+copy as a whole (`the_law_pictures_of_the_graph_are_the_manifests`), every
+member and every arrow, both ways.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
 of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot
@@ -273,9 +274,14 @@ any kind — not the file it opened, not the bars it read, not a refusal — so 
 `/logs` page covered the pull half of the data path and nothing of the read half.
 Gate 17 silences `vocab engine indicators runner`, because those hold the loops
 and its rule is not "each call is cheap" but "the innermost loop calls nothing at
-all". `cli` holds no loop over bars and none over candidates: it is the
-structural boundary, one event per run and one per instrument-month, which is the
-granularity gate 17's own comment prescribes as the affordable one. D-0226.
+all". `cli` is not on that list, and it is NOT loop-free: it walks bars (for
+example `window_range_percentile`) and `screen` walks every candidate in
+`by_evidence.par_iter()`, calling `GridProgress::tick` per candidate — one
+relaxed `fetch_add`, with an event only on every `stride`-th candidate. Its
+events are emitted at structural boundaries — per run, per instrument-month, and
+that `stride` — which is the granularity gate 17's own comment prescribes as the
+affordable one. This said `cli` held no loop over bars or candidates until
+D-1448 corrected it. D-0226.
 
 `cli` once deliberately had no `store` arrow, on the reasoning that the
 operator's standing rule forbade both a vendor pull and the bars already on
@@ -291,7 +297,7 @@ What survives from that reasoning is the half about gate 22, and it is the half
 that carries the rule: `cli` declines to be a *swept* crate, not to be a caller.
 
 It is **not** on gate 22's list and must never be added to one: clause A pins
-`vocab`, `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
+`vocab` to no dependency at all and `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
 as `runner` is.
 
 Every report it renders is led by a **provenance banner, and there are two of
@@ -402,9 +408,19 @@ Report failures plainly. Do not paper over a red gate.
 
 **The table was eight rows while fourteen documents existed**, so six carried no
 stated authority at all and a reader had no way to know whether they bound
-anything. All fourteen are listed now. Two numbers are used twice — `07-` and
-`09-` — which is a naming defect, not two documents pretending to be one; both
-of each pair are named above and neither is authoritative over the other.
+anything. The fourteen above are the documents with authority. Two numbers are
+used twice among them — `07-` and `09-` — which is a naming defect, not two
+documents pretending to be one; both of each pair are named above and neither
+is authoritative over the other.
+
+**`docs/12-` to `docs/35-` and `docs/research-policy/` hold no authority.** They
+are audit, readiness, research and integration reports: evidence of what was
+measured or decided at the time, cited by the decisions that act on them. Where
+one disagrees with a document in the table, the table's document wins and the
+report is the stale copy. `22-` is used twice (`22-expression-search.md`,
+`22-research-policy.md`), the same naming defect as `07-` and `09-`. This
+paragraph said "all fourteen are listed now" while 25 more documents existed
+(P1-15-02, D-1764).
 
 If this file and a document disagree, **this file wins** and the document is
 the stale copy to fix — **with one caveat that has already bitten.** That rule

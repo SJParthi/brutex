@@ -43,8 +43,14 @@
 //! The fourth row of that table is the one that was missing: a slot that is
 //! **whole but unsupported**, because the records it counts never reached the
 //! disk. [`Header::read_region`] falls back to the previous generation for
-//! that case too, instead of condemning the file — see
-//! `store::fault::kill_between_write_and_commit`.
+//! that case too, instead of returning an error for the region; see
+//! `store::fault::kill_between_write_and_commit`. That is this function's
+//! answer, not the file's: `BarFile::validated`, which every open door calls,
+//! refuses the file as `FormatError::CounterExceedsFile` when a slot that
+//! still decodes claims more records than the generation chosen here, and
+//! `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
+//! asserts it. This paragraph used to end at "instead of condemning the file".
+//! D-0792.
 //!
 //! # Why not the alternatives
 //!
@@ -89,7 +95,12 @@
 //!    a name in the path type ([`crate::path::FileKind::Lock`]), and the gap
 //!    is reported as a limit rather than implied away.
 //!
-//! # It is still a read-only mapping plus `pwrite`
+//! # Positional reads plus `pwrite`, and no mapping
+//!
+//! No crate maps a bar file: [`crate::file`] reads the header region and each
+//! record through `read_fully`, a positional read (`FileExt::read_at`). This
+//! heading used to say "a read-only mapping plus `pwrite`", which no build has
+//! done. D-0790.
 //!
 //! Nothing here writes. [`Header::commit`] returns a [`Commit`] — one offset
 //! and one 64-byte buffer — which a writer hands to a single positional write.
@@ -247,7 +258,13 @@ impl Header {
     ) -> Self {
         // THE STRIDE COMES FROM THE LAYOUT, not from a constant beside it, so
         // the two cannot disagree about one file.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "every Layout is built through Layout::declared or \
+                      Layout::declare, and both refuse a record_stride above \
+                      u16::MAX (layout.rs degenerate_field), so this narrowing \
+                      is lossless; `const fn` rules out u16::try_from here"
+        )]
         let record_stride = layout.record_stride() as u16;
         Self {
             format_version: layout.version(),
@@ -362,8 +379,9 @@ impl Header {
     /// [`FormatError::UnknownVersion`] or [`FormatError::RetiredVersion`] if
     /// this header names a version this build cannot write,
     /// [`FormatError::StrideMismatch`] if it names a stride its own version
-    /// does not define, or [`FormatError::OffsetOverflow`] if the counter puts
-    /// the end of the data past `u64`.
+    /// does not define, [`FormatError::UnknownFlags`] if it sets a flag bit
+    /// the version does not define, or [`FormatError::OffsetOverflow`] if the
+    /// counter puts the end of the data past `u64`.
     pub fn commit(&self) -> Result<Commit, FormatError> {
         self.commit_image()
             .inspect_err(|&refusal| note_commit_refused(self, refusal))
@@ -377,6 +395,15 @@ impl Header {
         let layout = Layout::for_version(self.format_version)?;
         if u64::from(self.record_stride) != layout.record_stride() {
             return Err(FormatError::StrideMismatch(self.record_stride));
+        }
+        // A slot this build writes must be one this build reads. D-1354.
+        if self.flags & !FLAG_CHECKSUMS != 0 {
+            return Err(FormatError::UnknownFlags(self.flags));
+        }
+        // A VERSION THAT REQUIRES CHECKSUMS IS NEVER COMMITTED WITHOUT THEM, so
+        // no slot this build writes can reach the read-side refusal. D-1571.
+        if layout.requires_checksums() && !self.checksums_present() {
+            return Err(FormatError::ChecksumsRequired(self.format_version));
         }
         Ok(Commit {
             slot: self.generation % layout.slot_count(),
@@ -432,8 +459,9 @@ impl Header {
     ///
     /// [`FormatError::SlotTooShort`], [`FormatError::NotABarFile`],
     /// [`FormatError::UnknownVersion`], [`FormatError::RetiredVersion`],
-    /// [`FormatError::MagicVersionMismatch`], [`FormatError::SlotChecksum`] or
-    /// [`FormatError::StrideMismatch`] — checked in that order, so the most
+    /// [`FormatError::MagicVersionMismatch`], [`FormatError::SlotChecksum`],
+    /// [`FormatError::StrideMismatch`], [`FormatError::ReservedNotZero`] or
+    /// [`FormatError::UnknownFlags`] — checked in that order, so the most
     /// basic disagreement is the one reported.
     pub fn decode(slot: &[u8]) -> Result<Self, FormatError> {
         Self::decode_parts(slot).map(|(header, _)| header)
@@ -478,11 +506,30 @@ impl Header {
         if u64::from(record_stride) != layout.record_stride() {
             return Err(FormatError::StrideMismatch(record_stride));
         }
+        // THE RESERVED TAIL AND THE UNDEFINED FLAG BITS ARE READ, not skipped.
+        // Both are covered by the checksum, so a slot that fails here was
+        // written that way, and decoding it would read a slot whose meaning the
+        // format does not give. `docs/02-store-format.md` §2. D-1353, D-1354.
+        let reserved = u32::from_le_bytes(le_bytes(&image, OFF_RESERVED));
+        if reserved != 0 {
+            return Err(FormatError::ReservedNotZero(reserved));
+        }
+        let flags = u32::from_le_bytes(le_bytes(&image, OFF_FLAGS));
+        if flags & !FLAG_CHECKSUMS != 0 {
+            return Err(FormatError::UnknownFlags(flags));
+        }
+        // VERSION 3 IS SEALED BY DEFINITION. Clearing the flag in both slots
+        // and recomputing their CRCs used to turn block verification off for a
+        // sealed month, the `.crc` beside it ignored (audit-20261003
+        // attackdata-8). At version 3 that slot is refused by name. D-1571.
+        if layout.requires_checksums() && flags & FLAG_CHECKSUMS == 0 {
+            return Err(FormatError::ChecksumsRequired(format_version));
+        }
         Ok((
             Self {
                 format_version,
                 record_stride,
-                flags: u32::from_le_bytes(le_bytes(&image, OFF_FLAGS)),
+                flags,
                 generation: u64::from_le_bytes(le_bytes(&image, OFF_GENERATION)),
                 n_valid: u64::from_le_bytes(le_bytes(&image, OFF_N_VALID)),
                 first_ts_micros: i64::from_le_bytes(le_bytes(&image, OFF_FIRST_TS)),
@@ -531,10 +578,10 @@ impl Header {
     /// # Examples
     ///
     /// ```
-    /// # use store::{format::FormatError, header::Header};
+    /// # use store::{format::{FLAG_CHECKSUMS, FormatError}, header::Header};
     /// // An empty file: a zeroed header region, then the genesis commit.
     /// let mut region = vec![0u8; 32_768];
-    /// let genesis = Header::genesis(1, 60, 0).commit()?;
+    /// let genesis = Header::genesis(1, 60, FLAG_CHECKSUMS).commit()?;
     /// assert_eq!(genesis.offset, 0);
     /// assert_eq!(genesis.durable_through, 32_768);
     /// region
@@ -585,8 +632,9 @@ impl Header {
 /// The committed header, the newest generation any slot claimed, and the
 /// refusal that stood between the two.
 ///
-/// This is [`Header::read_region`]'s search, moved out of it whole and
-/// unchanged. It is split off for one reason: the search can end in three
+/// This is [`Header::read_region`]'s search, moved out of it whole; D-1515
+/// later made it keep the newest refusal rather than the last one. It is split
+/// off for one reason: the search can end in three
 /// different places — no candidate at all, a region too short for the version,
 /// and every candidate refused in turn — and three `return Err` statements
 /// would need three copies of the same emit. One of them would eventually be
@@ -616,21 +664,32 @@ fn committed(region: &[u8], file_len: u64) -> Result<(Header, u64, FormatError),
     // is the one failure a test suite cannot report.
     let claimed = header.generation;
     let mut newest = Some((header, layout));
-    let mut refusal = FormatError::NoValidHeader;
+    // The FIRST refusal is kept: candidates arrive newest first, so it is the
+    // newest decoded slot's, which is what `read_region` documents. An older
+    // slot's different reason must not overwrite it (W3-store1-9, D-1515).
+    let mut refusal: Option<FormatError> = None;
     for _ in 0..MAX_SLOTS {
         let Some((candidate, geometry)) = newest else {
-            return Err(refusal);
+            return Err(refusal.unwrap_or(FormatError::NoValidHeader));
         };
         match candidate.validate(geometry, file_len) {
-            Ok(()) => return Ok((candidate, claimed, refusal)),
-            Err(refused) => refusal = refused,
+            Ok(()) => {
+                return Ok((
+                    candidate,
+                    claimed,
+                    refusal.unwrap_or(FormatError::NoValidHeader),
+                ));
+            }
+            Err(refused) => {
+                refusal.get_or_insert(refused);
+            }
         }
         // The "no older candidate" error is dropped on purpose: the
         // refusal from the newest slot that decoded says more about the
         // file than "nothing else was there".
         newest = best_candidate(region, Some(candidate.generation)).ok();
     }
-    Err(refusal)
+    Err(refusal.unwrap_or(FormatError::NoValidHeader))
 }
 
 /// A header region that yielded no usable commit, on the rolling log.

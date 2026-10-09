@@ -25,6 +25,8 @@
     clippy::indexing_slicing
 )]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,8 +34,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use brutex_core::vendor::Vendor;
 
 use store::crc::crc32c;
-use store::file::{Action, Appended, BarFile, StoreError};
-use store::format::{Bar, FormatError, HEADER_LEN, OI_NULL, RECORD_LEN, RECORD_STRIDE};
+use store::file::{Action, Appended, BarFile, Conflict, StoreError};
+use store::format::{
+    Bar, FLAG_CHECKSUMS, FormatError, HEADER_LEN, OI_NULL, RECORD_LEN, RECORD_STRIDE,
+};
 use store::header::Header;
 use store::layout::Layout;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
@@ -157,7 +161,7 @@ fn a_fresh_month_lands_a_two_slot_header_region() {
     assert_eq!(file.header().generation, 0);
     assert_eq!(file.header().symbol_id, SYMBOL);
     assert_eq!(file.header().timeframe_secs, 60);
-    assert_eq!(file.layout(), Layout::V2);
+    assert_eq!(file.layout(), Layout::V3, "born at version 3 since D-1571");
     assert_eq!(file.path(), bars_path().to_path_buf(scratch.root()));
 
     let bytes = image(scratch.root());
@@ -166,7 +170,11 @@ fn a_fresh_month_lands_a_two_slot_header_region() {
         HEADER_LEN,
         "the whole header region is materialised, not left as a hole"
     );
-    assert_eq!(&bytes[0..8], b"BRUTEXB2", "magic at byte 0");
+    assert_eq!(
+        &bytes[0..8],
+        b"BRUTEXB3",
+        "magic at byte 0: version 3 since D-1571"
+    );
     assert!(
         bytes[64..16_384].iter().all(|b| *b == 0),
         "the rest of slot 0's span is reserved and zero"
@@ -464,12 +472,11 @@ fn an_overlapping_batch_with_different_bars_is_refused() {
     altered[0].close += 1;
     assert_eq!(
         file.append(&altered),
-        Err(StoreError::Format {
+        Err(StoreError::OverlapDisagrees {
             path: file.path().to_path_buf(),
-            source: FormatError::TimestampsOutOfOrder {
-                previous: T0 + 9 * MINUTE,
-                next: T0 + 5 * MINUTE,
-            },
+            at: 0,
+            ts_micros: T0 + 5 * MINUTE,
+            conflict: Conflict::Restated,
         }),
         "a re-pull landing on top of committed bars with different values"
     );
@@ -617,6 +624,47 @@ fn a_second_writer_is_refused_while_the_month_is_held() {
     assert!(lock_path.is_file(), "the lock file itself is not deleted");
 }
 
+/// barflow-1, D-2552: a writer refused by READERS is told a reader holds the
+/// month, never "another writer"; a real second writer is still `Locked`;
+/// and once the readers close the writer opens. Two readers and one reader
+/// both count as readers.
+#[test]
+fn a_reader_holding_the_month_is_named_as_a_reader_not_a_writer() {
+    let scratch = Scratch::new("reader-holds");
+    drop(open(scratch.root()).expect("create"));
+    let lock_path = bars_path()
+        .with_file(FileKind::Lock)
+        .to_path_buf(scratch.root());
+    let reader = BarFile::open_existing(scratch.root(), bars_path(), SYMBOL).expect("a reader");
+    let another = BarFile::open_existing(scratch.root(), bars_path(), SYMBOL).expect("a second");
+    let refused = outcome(open(scratch.root()));
+    assert_eq!(
+        refused,
+        Err(StoreError::ReaderHolds {
+            path: lock_path.clone()
+        })
+    );
+    let said = refused.unwrap_err().to_string();
+    assert!(said.contains("a reader holds"), "{said}");
+    assert!(!said.contains("writer holds"), "{said}");
+    drop(another);
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::ReaderHolds {
+            path: lock_path.clone()
+        }),
+        "one reader left is still a reader"
+    );
+    drop(reader);
+    let writer = open(scratch.root()).expect("the readers closed");
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::Locked { path: lock_path }),
+        "a second writer is still a writer"
+    );
+    drop(writer);
+}
+
 // ===========================================================================
 // What the host refuses
 // ===========================================================================
@@ -658,6 +706,20 @@ fn a_file_where_a_directory_belongs_is_named() {
     let scratch = Scratch::new("notdir");
     let root = scratch.root().join("plain");
     fs::write(&root, b"not a directory").unwrap();
+    // A ROOT that is a file is refused naming the root, before anything below
+    // it is attempted (D-1522).
+    assert_eq!(
+        outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL)),
+        Err(StoreError::NotADirectory {
+            path: root.clone(),
+            action: Action::Open,
+        })
+    );
+    // A file where a directory BELOW the root belongs is refused naming the
+    // directory that could not be created.
+    let root = scratch.root().join("mounted");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("bars"), b"not a directory").unwrap();
     let refusal = outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL));
     assert_eq!(
         refusal,
@@ -674,6 +736,14 @@ fn a_file_where_a_directory_belongs_is_named() {
 
 #[test]
 fn a_directory_that_refuses_a_write_is_named() {
+    support::where_permission_binds(
+        "a_directory_that_refuses_a_write_is_named",
+        a_directory_that_refuses_a_write_is_named_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_directory_that_refuses_a_write_is_named_body() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = Scratch::new("denied");
@@ -949,7 +1019,9 @@ fn a_file_shorter_than_its_header_region_is_refused() {
     // A genuine, checksum-valid slot 0 in a file with no room for slot 1.
     // Returning the commit that happened to fit would silently lose every
     // record committed since, so it is refused instead.
-    let commit = Header::genesis(SYMBOL, 60, 0).commit().expect("genesis");
+    let commit = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
+        .commit()
+        .expect("genesis");
     let mut stub = vec![0u8; 100];
     stub[..commit.bytes.len()].copy_from_slice(&commit.bytes);
     fs::write(&bars, &stub).unwrap();
@@ -1005,9 +1077,10 @@ fn a_truncation_under_an_open_handle_is_a_short_read() {
         "a block that cannot be verified is not served, even where its bytes survive"
     );
     // AND A RECORD THAT IS GONE REFUSES EARLIER, at its own offset rather than
-    // the block's. Reads verify AFTER fetching the record, deliberately, to
-    // keep the blast radius small — so record 9's bytes are missed first and
-    // the block seal is never reached. Two different refusals for two different
+    // the block's. Since D-1433 a read fetches the whole block in one `pread`
+    // and, when that comes up short, re-reads the record alone to name it —
+    // so record 9's own missing bytes are what is reported, and the block seal
+    // is never reached. Two different refusals for two different
     // facts: "this record is not there" and "this block cannot be checked".
     assert_eq!(
         file.read_record(9),
@@ -1075,7 +1148,9 @@ fn a_file_written_at_another_timeframe_is_refused() {
 
     // A well-formed header region for five-minute bars, written through the
     // same public commit the writer uses.
-    let commit = Header::genesis(SYMBOL, 300, 0).commit().expect("genesis");
+    let commit = Header::genesis(SYMBOL, 300, FLAG_CHECKSUMS)
+        .commit()
+        .expect("genesis");
     let mut region = vec![0u8; usize::try_from(HEADER_LEN).unwrap()];
     let at = usize::try_from(commit.offset).unwrap();
     region[at..at + commit.bytes.len()].copy_from_slice(&commit.bytes);
@@ -1149,6 +1224,10 @@ fn every_host_refusal_names_the_file_and_the_operation() {
             ".ovl",
         ),
         (StoreError::Locked { path: path.clone() }, "another writer"),
+        (
+            StoreError::ReaderHolds { path: path.clone() },
+            "a reader holds",
+        ),
         (
             StoreError::DiskFull {
                 path: path.clone(),
@@ -1337,7 +1416,11 @@ fn the_reader_door_opens_what_the_writer_wrote_and_refuses_exactly_what_it_refus
     let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("opens what was written");
     assert_eq!(reader.records(), 3, "the reader sees the committed records");
     assert_eq!(reader.header().symbol_id, SYMBOL);
-    assert_eq!(reader.layout(), Layout::V2);
+    assert_eq!(
+        reader.layout(),
+        Layout::V3,
+        "born at version 3 since D-1571"
+    );
     drop(reader);
 
     // ─── AND THE READER CREATES NO SIDECAR, WHICH IS THE HALF THAT WAS FALSE
@@ -1442,21 +1525,21 @@ fn an_overlay_is_written_and_read_back_through_the_bar_writer() {
 
     let rows = [
         Overlay {
-            ts_micros: 1_700_000_000_000_000,
+            ts_micros: T0, // inside the 2024-06 the path names (D-0915)
             spot: 2_465_005,
             iv_micros: 125_000,
         },
         // ONE OF EACH SENTINEL, because a vendor answering a spot without a
         // volatility is ordinary and the record must survive it.
         Overlay {
-            ts_micros: 1_700_000_060_000_000,
+            ts_micros: T0 + MINUTE,
             spot: 2_465_100,
             iv_micros: OI_NULL,
         },
         // AND A GENUINE ZERO, which must NOT come back as absent. A deep
         // out-of-the-money option prints exactly this late in its life.
         Overlay {
-            ts_micros: 1_700_000_120_000_000,
+            ts_micros: T0 + 2 * MINUTE,
             spot: 0,
             iv_micros: 0,
         },
@@ -1479,5 +1562,520 @@ fn an_overlay_is_written_and_read_back_through_the_bar_writer() {
         again.records(),
         3,
         "the same three rows, not six — a rerun stores nothing new"
+    );
+}
+
+// ===========================================================================
+// audit-20261003: the writer's repair and creation doors
+// ===========================================================================
+
+/// attackdata-1 (D-1520). A month that HAD committed bars and was truncated
+/// to nothing, or zeroed back to its header region, is refused by the writer
+/// door, not silently rebuilt as an empty month.
+///
+/// The `.crc` sidecar beside it is the proof: it is written only by an append,
+/// after the records and before the header slot, so a non-empty sidecar beside
+/// a header region of zeros means records were committed and are gone. The
+/// read door already refused the same file; the two doors now agree.
+#[test]
+fn a_truncated_month_whose_sidecar_proves_records_is_refused_not_reinitialised() {
+    for truncated_to in [0_usize, 32_768] {
+        let scratch = Scratch::new(&format!("truncated{truncated_to}"));
+        let mut file = open(scratch.root()).expect("create");
+        file.append(&batch(0, 3)).expect("three bars commit");
+        drop(file);
+
+        let on_disk = bars_path().to_path_buf(scratch.root());
+        let sidecar = bars_path()
+            .with_file(FileKind::Checksums)
+            .to_path_buf(scratch.root());
+        let sealed = fs::read(&sidecar).expect("the sidecar the append sealed");
+        assert!(!sealed.is_empty(), "the premise: the append sealed a block");
+        fs::write(&on_disk, vec![0u8; truncated_to]).expect("the truncation");
+
+        let refused = outcome(open(scratch.root()));
+        assert_eq!(
+            refused,
+            Err(StoreError::CommittedRecordsLost {
+                path: on_disk.clone(),
+                sidecar: sidecar.clone(),
+                sidecar_len: u64::try_from(sealed.len()).expect("fits"),
+            }),
+            "{truncated_to}: a month whose sidecar proves committed records \
+             must be refused by name, not reopened empty"
+        );
+        let text = refused.expect_err("refused").to_string();
+        assert!(
+            text.contains(&on_disk.display().to_string()) && text.contains("committed"),
+            "the refusal names the file and why: {text}"
+        );
+        assert_eq!(
+            fs::read(&on_disk).expect("the bar file").len(),
+            truncated_to,
+            "{truncated_to}: the refusal leaves the bar file as it was found"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar"),
+            sealed,
+            "{truncated_to}: and the sidecar that proves the loss untouched"
+        );
+    }
+}
+
+/// D-1520's boundary. A month file DELETED whole, its sidecar left behind, is
+/// created again as before: only a file that existed can have been truncated or
+/// zeroed, and a deletion is an explicit act the refusal does not second-guess.
+/// Stated in `docs/06-limits.md`.
+#[test]
+fn a_deleted_month_file_is_created_again_despite_its_sidecar() {
+    let scratch = Scratch::new("deleted-month");
+    let mut file = open(scratch.root()).expect("create");
+    file.append(&batch(0, 3)).expect("three bars commit");
+    drop(file);
+    let on_disk = bars_path().to_path_buf(scratch.root());
+    fs::remove_file(&on_disk).expect("the deletion");
+    let reopened = open(scratch.root()).expect("a deleted month is created again");
+    assert_eq!(reopened.header().n_valid, 0, "and it starts empty");
+}
+
+/// hunt-store-2 (D-1521). A genesis slot write that tore — the zero fill
+/// landed and only part of the 64-byte slot did — leaves a file that cannot
+/// hold a record and has no committed header. With no sidecar entry beside it
+/// nothing was ever appended, so the writer repairs it exactly as it repairs
+/// an all-zero region, instead of refusing it on every open forever.
+#[test]
+fn a_torn_genesis_slot_with_nothing_committed_is_repaired() {
+    for torn_at in [1_usize, 8, 32, 63] {
+        let scratch = Scratch::new(&format!("tornslot{torn_at}"));
+        let on_disk = bars_path().to_path_buf(scratch.root());
+        let dir = on_disk.parent().expect("a parent").to_path_buf();
+        fs::create_dir_all(&dir).expect("the month directory");
+
+        // The genesis image a real initialise writes, torn after `torn_at`
+        // bytes of its first slot.
+        let donor = Scratch::new(&format!("tornslotdonor{torn_at}"));
+        drop(open(donor.root()).expect("a healthy empty month"));
+        let healthy = image(donor.root());
+        let mut torn = vec![0u8; 32_768];
+        torn[..torn_at].copy_from_slice(&healthy[..torn_at]);
+        fs::write(&on_disk, &torn).expect("the torn file");
+
+        let opened = open(scratch.root()).unwrap_or_else(|why| {
+            panic!("{torn_at}: a torn genesis slot holds nothing and must be repaired: {why}")
+        });
+        assert_eq!(opened.records(), 0, "{torn_at}: repaired to an empty month");
+        drop(opened);
+        assert_eq!(
+            image(scratch.root()),
+            healthy,
+            "{torn_at}: the repair writes the genesis region a fresh month has"
+        );
+    }
+}
+
+/// The other half of D-1520's proof: a sidecar that EXISTS but is EMPTY proves
+/// nothing was committed, which is the state an append leaves when it creates
+/// the `.crc` and dies before writing an entry. Beside a torn genesis slot it
+/// must be repaired like an absent one, not refused for ever. P10-03: `> 0`
+/// mutated to `>= 0` in `refuse_if_sealed` wedged exactly this month and no
+/// test noticed, because every other fixture's sidecar is absent or non-empty.
+#[test]
+fn a_torn_genesis_slot_beside_an_empty_sidecar_is_repaired() {
+    for torn_at in [1_usize, 63] {
+        let scratch = Scratch::new(&format!("tornslotemptycrc{torn_at}"));
+        let on_disk = bars_path().to_path_buf(scratch.root());
+        let sidecar = bars_path()
+            .with_file(FileKind::Checksums)
+            .to_path_buf(scratch.root());
+        fs::create_dir_all(on_disk.parent().expect("a parent")).expect("the month directory");
+
+        let donor = Scratch::new(&format!("tornslotemptycrcdonor{torn_at}"));
+        drop(open(donor.root()).expect("a healthy empty month"));
+        let healthy = image(donor.root());
+        let mut torn = vec![0u8; 32_768];
+        torn[..torn_at].copy_from_slice(&healthy[..torn_at]);
+        fs::write(&on_disk, &torn).expect("the torn file");
+        fs::write(&sidecar, []).expect("the empty sidecar");
+        assert_eq!(
+            fs::metadata(&sidecar)
+                .expect("the premise: it exists")
+                .len(),
+            0,
+            "the premise: it is empty"
+        );
+
+        let opened = open(scratch.root()).unwrap_or_else(|why| {
+            panic!(
+                "{torn_at}: an empty sidecar proves nothing and the month must be repaired: {why}"
+            )
+        });
+        assert_eq!(opened.records(), 0, "{torn_at}: repaired to an empty month");
+        drop(opened);
+        assert_eq!(
+            image(scratch.root()),
+            healthy,
+            "{torn_at}: the repair writes the genesis region a fresh month has"
+        );
+    }
+}
+
+/// hunt-store-2's restraint: a slot that DECODES is a commit, not a tear, and
+/// a file whose region holds anything outside the first slot is not the shape
+/// a torn genesis can leave. Neither is re-initialised.
+#[test]
+fn a_region_with_bytes_a_torn_genesis_cannot_leave_is_still_refused() {
+    let scratch = Scratch::new("tornslotfar");
+    let on_disk = bars_path().to_path_buf(scratch.root());
+    fs::create_dir_all(on_disk.parent().expect("a parent")).expect("the month directory");
+    let mut damaged = vec![0u8; 32_768];
+    damaged[0] = b'B';
+    damaged[16_384 + 3] = 0x01;
+    fs::write(&on_disk, &damaged).expect("the damaged file");
+    assert!(
+        open(scratch.root()).is_err(),
+        "a byte in the second slot is not a torn genesis and must be refused"
+    );
+    assert_eq!(fs::read(&on_disk).expect("the file"), damaged, "untouched");
+}
+
+/// hunt-store-3 (D-1522). The writer does not recreate a missing store root.
+///
+/// A store on an unmounted volume would otherwise get a fresh root on the
+/// parent filesystem and bars would land there, splitting append-only history
+/// across two devices. The month's own directories below an existing root are
+/// still created.
+#[test]
+fn a_missing_store_root_is_refused_not_recreated() {
+    let scratch = Scratch::new("noroot");
+    let root = scratch.root().join("unmounted");
+    assert!(!root.exists(), "the premise: the root is absent");
+
+    let refused = outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL));
+    assert_eq!(
+        refused,
+        Err(StoreError::Missing {
+            path: root.clone(),
+            action: Action::Open,
+        }),
+        "a missing store root is refused by name"
+    );
+    assert!(!root.exists(), "and it was not created");
+
+    // Below an existing root, the month's directories are still made.
+    fs::create_dir_all(&root).expect("the root, mounted");
+    assert_eq!(
+        outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL)),
+        Ok(0)
+    );
+}
+
+/// hunt-store-1 (D-1523). The ordinary bar door refuses an overlay file put at
+/// a `.bin` name instead of serving its 24-byte records as 56-byte bars.
+#[test]
+fn the_bar_door_refuses_an_overlay_or_greeks_file_at_a_bar_name() {
+    use store::format::{Greek, Overlay};
+
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let scratch = Scratch::new(&format!("wronggeometry{kind:?}"));
+        let path = StorePath::new(parts(kind)).expect("a legal path");
+        let mut file = BarFile::open_or_create(scratch.root(), path, SYMBOL).expect("opens");
+        let version = if kind == FileKind::Overlay {
+            let rows: Vec<Overlay> = (0..5)
+                .map(|index| Overlay {
+                    ts_micros: T0 + index * MINUTE,
+                    spot: 2_310_955,
+                    iv_micros: 125_000,
+                })
+                .collect();
+            file.append(&rows).expect("overlay rows");
+            Layout::OVERLAY.version()
+        } else {
+            let rows: Vec<Greek> = (0..5)
+                .map(|index| Greek {
+                    ts_micros: T0 + index * MINUTE,
+                    spot: 2_400_000,
+                    volatility: 0.25,
+                    delta: 0.5,
+                    gamma: 0.125,
+                    vega: 1.0,
+                    theta: -1.0,
+                    rho: 2.0,
+                    rate: 0.0,
+                    provenance: 0,
+                })
+                .collect();
+            file.append(&rows).expect("greeks rows");
+            Layout::GREEKS.version()
+        };
+        drop(file);
+
+        let sidecar_kind = kind.checksums().expect("a record kind has a sidecar");
+        fs::copy(
+            path.to_path_buf(scratch.root()),
+            bars_path().to_path_buf(scratch.root()),
+        )
+        .expect("the file at a bar name");
+        fs::copy(
+            path.with_file(sidecar_kind).to_path_buf(scratch.root()),
+            bars_path()
+                .with_file(FileKind::Checksums)
+                .to_path_buf(scratch.root()),
+        )
+        .expect("its sidecar at the bar sidecar's name");
+
+        for refused in [
+            outcome(BarFile::open_existing(scratch.root(), bars_path(), SYMBOL)),
+            outcome(BarFile::open_or_create(scratch.root(), bars_path(), SYMBOL)),
+        ] {
+            assert_eq!(
+                refused,
+                Err(StoreError::Format {
+                    path: bars_path().to_path_buf(scratch.root()),
+                    source: FormatError::UnknownVersion(version),
+                }),
+                "{kind:?}: a bar path is offered only the bar geometries"
+            );
+        }
+    }
+}
+
+/// attackdata-2 (D-1524). A greeks re-run is compared byte for byte, not by
+/// `f64` equality: a row whose delta is `-0.0` where the held row's is `0.0`
+/// has different bytes, so it is not "already present" — it is a restatement,
+/// refused by name.
+#[test]
+fn a_greek_rerun_with_a_negative_zero_is_not_already_present() {
+    use store::format::Greek;
+
+    let scratch = Scratch::new("greekzero");
+    let path = StorePath::new(parts(FileKind::Greeks)).expect("a legal path");
+    let mut file = BarFile::open_or_create(scratch.root(), path, SYMBOL).expect("opens");
+    let held = Greek {
+        ts_micros: T0,
+        spot: 2_400_000,
+        volatility: 0.25,
+        delta: 0.0,
+        gamma: 0.125,
+        vega: 1.0,
+        theta: -1.0,
+        rho: 2.0,
+        rate: 0.0,
+        provenance: 0,
+    };
+    file.append(&[held]).expect("the held row");
+    let rerun = Greek {
+        delta: -0.0,
+        ..held
+    };
+    assert_ne!(held.image(), rerun.image(), "the premise: the bytes differ");
+    assert_eq!(
+        file.append(&[rerun]),
+        Err(StoreError::OverlapDisagrees {
+            path: path.to_path_buf(scratch.root()),
+            at: 0,
+            ts_micros: T0,
+            conflict: Conflict::Restated,
+        }),
+        "different bytes are not the bytes already stored"
+    );
+    assert_eq!(
+        file.append(&[held]),
+        Ok(Appended::AlreadyPresent {
+            first_index: 0,
+            n_valid: 1
+        }),
+        "and the identical bytes still are"
+    );
+}
+
+/// attackdata-7 (D-1525). A batch whose overlap disagrees with what the month
+/// holds is refused with the real diagnosis, not as "timestamps out of order":
+/// a held bar restated with different values, a bar at a stamp inside the held
+/// range that the month never held, and a batch that skips a held bar.
+#[test]
+fn an_overlap_that_disagrees_is_refused_with_the_real_diagnosis() {
+    let scratch = Scratch::new("diagnosis");
+    let mut file = open(scratch.root()).expect("create");
+    // Held: minutes 0, 2, 4, 6, 8 — a month with holes, so a stamp inside the
+    // held range can be absent.
+    let held: Vec<Bar> = [0, 2, 4, 6, 8].into_iter().map(bar).collect();
+    file.append(&held).expect("held");
+    let on_disk = bars_path().to_path_buf(scratch.root());
+    let before = image(scratch.root());
+
+    // A restatement: minute 4 offered with a different close.
+    let mut restated = vec![bar(4), bar(6), bar(8), bar(9)];
+    restated[0].close += 1;
+    assert_eq!(
+        file.append(&restated),
+        Err(StoreError::OverlapDisagrees {
+            path: on_disk.clone(),
+            at: 0,
+            ts_micros: T0 + 4 * MINUTE,
+            conflict: Conflict::Restated,
+        })
+    );
+
+    // A stamp the month never held: minute 5 sits between held 4 and 6.
+    assert_eq!(
+        file.append(&[bar(4), bar(5), bar(6), bar(8), bar(9)]),
+        Err(StoreError::OverlapDisagrees {
+            path: on_disk.clone(),
+            at: 1,
+            ts_micros: T0 + 5 * MINUTE,
+            conflict: Conflict::NotHeld,
+        })
+    );
+
+    // A batch that skips held minute 6, naming the held stamp it skipped.
+    assert_eq!(
+        file.append(&[bar(4), bar(8), bar(9)]),
+        Err(StoreError::OverlapDisagrees {
+            path: on_disk.clone(),
+            at: 1,
+            ts_micros: T0 + 6 * MINUTE,
+            conflict: Conflict::Skipped,
+        })
+    );
+    let text = StoreError::OverlapDisagrees {
+        path: on_disk,
+        at: 0,
+        ts_micros: T0,
+        conflict: Conflict::Restated,
+    }
+    .to_string();
+    assert!(
+        text.contains("restate"),
+        "the message names the restatement: {text}"
+    );
+    assert_eq!(image(scratch.root()), before, "and nothing was written");
+}
+
+// ===========================================================================
+// A header is checked against its month (CE-61, CE-63, CE-62)
+// ===========================================================================
+
+/// Ten real bars, then a newer header slot carrying `forge`'s changes and a
+/// file long enough for whatever counter it names. The slot is CRC-valid: it
+/// is written through the same public `Header::commit` the writer uses.
+fn forged(tag: &str, forge: impl Fn(&mut Header)) -> (Scratch, PathBuf) {
+    use std::os::unix::fs::FileExt as _;
+    let scratch = Scratch::new(tag);
+    let mut header = {
+        let mut file = open(scratch.root()).expect("create");
+        assert!(file.append(&batch(0, 10)).is_ok());
+        file.header()
+    };
+    header.generation += 1;
+    forge(&mut header);
+    let commit = header.commit().expect("a committable forged header");
+    let bars = bars_path().to_path_buf(scratch.root());
+    let handle = fs::OpenOptions::new().write(true).open(&bars).unwrap();
+    handle
+        .set_len(HEADER_LEN + header.n_valid * RECORD_STRIDE)
+        .unwrap();
+    handle.write_at(&commit.bytes, commit.offset).unwrap();
+    drop(handle);
+    (scratch, bars)
+}
+
+/// **CE-61. A COUNTER PAST WHAT THE MONTH CAN HOLD IS REFUSED AT OPEN.**
+///
+/// The only bound on `n_valid` was the file's length, so a sparse file and a
+/// CRC-valid slot opened, and every reader that sized a vector or a loop from
+/// the counter did so from a number the writer could never have committed:
+/// the api aborted on the allocation. June at one minute holds 43,200 grid
+/// slots; 43,201 is refused, by name, at both doors.
+#[test]
+fn a_header_counting_more_records_than_its_month_holds_is_refused() {
+    let (scratch, bars) = forged("counter-past-month", |header| header.n_valid = 43_201);
+    let refused = Err(StoreError::Format {
+        path: bars.clone(),
+        source: FormatError::CounterExceedsMonth {
+            n_valid: 43_201,
+            slots: 43_200,
+        },
+    });
+    assert_eq!(outcome(open(scratch.root())), refused);
+    assert_eq!(
+        outcome(BarFile::open_existing(scratch.root(), bars_path(), SYMBOL)),
+        refused,
+        "the read door refuses the same file"
+    );
+
+    // EXACTLY THE MONTH IS LEGAL: the bound is the grid, not a guess below it.
+    let (full, _) = forged("counter-at-month", |header| header.n_valid = 43_200);
+    assert_eq!(
+        outcome(BarFile::open_existing(full.root(), bars_path(), SYMBOL)),
+        Ok(43_200)
+    );
+}
+
+/// **CE-63. A HEADER WHOSE RANGE LEAVES ITS MONTH IS REFUSED AS A HEADER
+/// FAULT,** not discovered later as an overlap that names the wrong batch.
+#[test]
+fn a_header_whose_timestamps_leave_its_month_is_refused() {
+    // 2034-06-03, ten years past the month, and 2024-05-31, the day before it.
+    let late = T0 + 3_652 * 86_400_000_000;
+    let early = T0 - 3 * 86_400_000_000;
+    for (tag, first, last) in [
+        ("range-late", T0, late),
+        ("range-early", early, T0 + 9 * MINUTE),
+    ] {
+        let (scratch, bars) = forged(tag, |header| {
+            header.first_ts_micros = first;
+            header.last_ts_micros = last;
+        });
+        assert_eq!(
+            outcome(BarFile::open_existing(scratch.root(), bars_path(), SYMBOL)),
+            Err(StoreError::Format {
+                path: bars,
+                source: FormatError::RangeOutsideMonth {
+                    first_ts_micros: first,
+                    last_ts_micros: last,
+                },
+            }),
+            "{tag}"
+        );
+    }
+}
+
+/// **CE-62. THE WRITER DOES NOT FOLLOW A SYMLINK** at the month file or at a
+/// directory below the store root: an append through one lands in whatever
+/// file the link names, another vendor's month among them. Refused by the
+/// linked component's name, and nothing is written through it.
+#[test]
+fn the_writer_refuses_a_symlinked_month_file_or_directory() {
+    let scratch = Scratch::new("symlink-leaf");
+    let elsewhere = scratch.root().join("elsewhere.bin");
+    fs::write(&elsewhere, b"").unwrap();
+    let bars = bars_path().to_path_buf(scratch.root());
+    fs::create_dir_all(bars.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &bars).unwrap();
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::Symlinked { path: bars.clone() })
+    );
+    assert_eq!(
+        fs::read(&elsewhere).unwrap(),
+        b"",
+        "nothing written through it"
+    );
+
+    let scratch = Scratch::new("symlink-dir");
+    let real = scratch.root().join("real-month");
+    fs::create_dir_all(&real).unwrap();
+    let bars = bars_path().to_path_buf(scratch.root());
+    let month_dir = bars.parent().unwrap().to_path_buf();
+    fs::create_dir_all(month_dir.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &month_dir).unwrap();
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::Symlinked { path: month_dir })
+    );
+    assert_eq!(
+        fs::read_dir(&real).unwrap().count(),
+        0,
+        "nothing created through the linked directory"
     );
 }

@@ -149,6 +149,28 @@ export function liveAttemptKey(run: unknown): string | null {
   return object(run) ? exactToken(run, 'attempt', 'attempt_key') : null;
 }
 
+/**
+ * The event-feed request for one attempt, bounded to the attempt's own start.
+ *
+ * OBSV-05, D-3204. `run=` is a skip-filter: it cannot end the server's walk,
+ * so an attempt with fewer than `limit` events had every older line of both
+ * log halves read -- to the 4 MiB scan cap, or through a torn line an earlier
+ * crash left behind -- and `recordsOf` refuses on `hit_scan_cap` and on any
+ * `malformed` count. A healthy run's live view died for history it had no
+ * part in. `since` ends the walk at the first record older than the attempt:
+ * the start marker is emitted after `started_micros` is read, and the sink
+ * stamps each line no earlier than the clock, so nothing of this attempt is
+ * older than `floor(started_micros / 1000)`. Without a usable start the
+ * request is the unbounded one it always was, never a guessed bound.
+ */
+export function liveLogsPath(attempt: string, run: unknown): string {
+  const base = `/logs.json?limit=200&run=${encodeURIComponent(attempt)}`;
+  if (!object(run)) return base;
+  const started = run.started_micros;
+  if (!safeInteger(started) || started < 0) return base;
+  return `${base}&since=${Math.floor(started / 1000)}`;
+}
+
 const nonempty = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 
@@ -293,74 +315,66 @@ function requireCount(fields: JsonObject, name: string): number | null {
 }
 
 /**
- * Reduce one event-feed response for exactly one status-endpoint attempt.
+ * The fold's state, carried from one poll to the next (P1-06-02, D-2662).
  *
- * Foreign attempts are ignored, which makes an unfiltered/interleaved feed
- * safe. A live event that claims the active attempt in either token location
- * is not foreign: both tokens and every run-context field must then agree or
- * the complete response is refused.
+ * `/logs.json?run=` answers with at most the newest 200 events of an attempt,
+ * and a validated sweep emits about 36 events a rung -- 288 for eight rungs.
+ * The fold used to re-require the attempt's start marker in EVERY window, so
+ * past roughly rung six the marker fell out of the only window the page can
+ * ask for and every later poll was refused: the progress view died exactly on
+ * the long runs it exists for, over a feed that was healthy. Now the marker is
+ * required once; after that the page folds only the events newer than the last
+ * one it already folded, and refuses -- loudly, never by guessing -- if the new
+ * window no longer reaches that event, because then events were missed.
  */
-export function reduceLiveProgress(activeRun: unknown, payload: unknown): LiveProgress {
-  const admittedContext = contextOf(activeRun);
-  if (!admittedContext.ok) return refused(admittedContext.why);
-  const context = admittedContext.value;
-  const admittedRecords = recordsOf(payload);
-  if (!admittedRecords.ok) return refused(admittedRecords.why, context.attempt);
+interface FoldState {
+  instances: LiveRung[];
+  activeByRung: Map<string, LiveRung>;
+  activity: Map<string, number>;
+  tick: number;
+}
 
-  const matching: LogRecord[] = [];
-  for (const record of admittedRecords.records) {
-    if (record.target !== TARGET || !LIVE_MESSAGES.has(record.message)) continue;
-    const fieldAttempt = exactToken(record.fields, 'attempt', 'attempt_key');
-    if (fieldAttempt === null) {
-      return refused(`A ${record.message} event has no consistent exact field attempt token.`, context.attempt);
-    }
-    const claimsCurrent = record.run === context.attempt || fieldAttempt === context.attempt;
-    if (!claimsCurrent) continue;
-    if (record.run !== context.attempt || fieldAttempt !== context.attempt) {
-      return refused(
-        `A ${record.message} event carries only one of the active attempt's two tokens.`,
-        context.attempt
-      );
-    }
-    const mismatch = sameContext(record.fields, context, record.message === START);
-    if (mismatch !== null) {
-      return refused(
-        `A ${record.message} event disagrees with the active run's ${mismatch}.`,
-        context.attempt
-      );
-    }
-    matching.push(record);
-  }
+export interface LiveCarry {
+  readonly attempt: string;
+  readonly lastSeq: number;
+  readonly lastTs: number;
+  readonly state: FoldState;
+}
 
-  const markers = matching.filter((record) => record.message === START);
-  if (markers.length !== 1) {
-    return refused(
-      markers.length === 0
-        ? 'The event feed does not contain this attempt\'s start marker.'
-        : 'The event feed contains more than one start marker for this attempt.',
-      context.attempt
-    );
-  }
+function emptyState(): FoldState {
+  return { instances: [], activeByRung: new Map(), activity: new Map(), tick: 0 };
+}
 
-  const chronological = [...matching].reverse();
-  if (chronological[0] !== markers[0]) {
-    return refused('An event for this attempt predates its start marker.', context.attempt);
-  }
-
+/** A deep copy, so a refused poll can never damage the carried state. */
+function cloneState(source: FoldState): FoldState {
+  const copies = new Map<string, LiveRung>();
+  const instances = source.instances.map((rung) => {
+    const copy = { ...rung };
+    copies.set(rung.key, copy);
+    return copy;
+  });
   const activeByRung = new Map<string, LiveRung>();
-  const instances: LiveRung[] = [];
-  const activity = new Map<string, number>();
-  for (let index = 1; index < chronological.length; index += 1) {
-    const record = chronological[index];
+  for (const [rung, held] of source.activeByRung) {
+    const copy = copies.get(held.key);
+    if (copy !== undefined) activeByRung.set(rung, copy);
+  }
+  return { instances, activeByRung, activity: new Map(source.activity), tick: source.tick };
+}
+
+/** Fold events, oldest first, onto `state`. Returns a refusal or null. */
+function applyRecords(state: FoldState, records: LogRecord[]): string | null {
+  for (const record of records) {
+    state.tick += 1;
+    const index = state.tick;
     const rung = rungOf(record.fields);
     if (rung === null) {
-      return refused(`A ${record.message} event has no valid rung.`, context.attempt);
+      return `A ${record.message} event has no valid rung.`;
     }
-    const held = activeByRung.get(rung);
+    const held = state.activeByRung.get(rung);
 
     if (record.message === SWEEPING) {
       if (held !== undefined && !held.done) {
-        return refused(`Rung ${rung} restarted before its prior step finished.`, context.attempt);
+        return `Rung ${rung} restarted before its prior step finished.`;
       }
       const bars = requireCount(record.fields, 'bars');
       const minHits = requireCount(record.fields, 'min_hits');
@@ -372,7 +386,7 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
         bars === 0 ||
         minHits === 0
       ) {
-        return refused(`Rung ${rung} has invalid bars, min_hits, or support_ppm.`, context.attempt);
+        return `Rung ${rung} has invalid bars, min_hits, or support_ppm.`;
       }
       const started: LiveRung = {
         key: `${rung}:${record.seq}`,
@@ -387,22 +401,22 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
         candidates: 0,
         priced: 0
       };
-      instances.push(started);
-      activeByRung.set(rung, started);
-      activity.set(started.key, index);
+      state.instances.push(started);
+      state.activeByRung.set(rung, started);
+      state.activity.set(started.key, index);
       continue;
     }
 
     if (held === undefined) {
-      return refused(`${record.message} arrived before rung ${rung} started.`, context.attempt);
+      return `${record.message} arrived before rung ${rung} started.`;
     }
     if (held.done) {
-      return refused(`${record.message} arrived after rung ${rung} finished.`, context.attempt);
+      return `${record.message} arrived after rung ${rung} finished.`;
     }
 
     if (record.message === GRID_ENTERED) {
       if (held.phase !== 'loading') {
-        return refused(`Rung ${rung} entered the exit grid out of order.`, context.attempt);
+        return `Rung ${rung} entered the exit grid out of order.`;
       }
       // This is deliberately NOT compared with `held.bars`. The sweeping
       // count is the signal rung (for example 100 x 60-minute bars), while the
@@ -418,14 +432,14 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
         candidates === 0 ||
         (validate !== 0 && validate !== 1)
       ) {
-        return refused(`Rung ${rung} entered the exit grid with inconsistent counts.`, context.attempt);
+        return `Rung ${rung} entered the exit grid with inconsistent counts.`;
       }
       held.phase = 'pricing';
       held.candidates = candidates;
       held.validating = validate === 1;
     } else if (record.message === GRID_PROGRESS) {
       if (held.phase !== 'pricing') {
-        return refused(`Rung ${rung} reported exit-grid progress out of order.`, context.attempt);
+        return `Rung ${rung} reported exit-grid progress out of order.`;
       }
       const candidates = requireCount(record.fields, 'candidates');
       const priced = requireCount(record.fields, 'priced');
@@ -442,7 +456,7 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
         priced > candidates ||
         priced < held.priced
       ) {
-        return refused(`Rung ${rung} reported inconsistent exit-grid progress.`, context.attempt);
+        return `Rung ${rung} reported inconsistent exit-grid progress.`;
       }
       held.priced = priced;
     } else if (record.message === VALIDATION_ENTERED || record.message === VALIDATION_FINISHED) {
@@ -453,11 +467,11 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
       // that a run is alive during the stretch that used to be silent, without
       // inventing a phase the engine does not report.
       if (held.phase !== 'priced' && held.phase !== 'pricing') {
-        return refused(`Rung ${rung} reported a validation stage out of order.`, context.attempt);
+        return `Rung ${rung} reported a validation stage out of order.`;
       }
     } else if (record.message === GRID_FINISHED) {
       if (held.phase !== 'pricing') {
-        return refused(`Rung ${rung} finished the exit grid out of order.`, context.attempt);
+        return `Rung ${rung} finished the exit grid out of order.`;
       }
       const candidates = requireCount(record.fields, 'candidates');
       const priced = requireCount(record.fields, 'priced');
@@ -467,7 +481,7 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
         priced === null ||
         priced > candidates
       ) {
-        return refused(`Rung ${rung} finished the exit grid with inconsistent counts.`, context.attempt);
+        return `Rung ${rung} finished the exit grid with inconsistent counts.`;
       }
       held.phase = 'priced';
       held.priced = priced;
@@ -484,25 +498,118 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
         (recorded !== 0 && recorded !== 1) ||
         typeof why !== 'string'
       ) {
-        return refused(`Rung ${rung} finished with an invalid outcome.`, context.attempt);
+        return `Rung ${rung} finished with an invalid outcome.`;
       }
       if (recorded === 1 && (held.phase !== 'priced' || why !== '')) {
-        return refused(`Rung ${rung} claims a recorded result without a completed grid.`, context.attempt);
+        return `Rung ${rung} claims a recorded result without a completed grid.`;
       }
       if (recorded === 0 && why.trim().length === 0) {
-        return refused(`Rung ${rung} refused without a reason.`, context.attempt);
+        return `Rung ${rung} refused without a reason.`;
       }
       held.done = true;
       held.phase = 'done';
       held.recorded = recorded === 1;
       held.why = why;
     }
-    activity.set(held.key, index);
+    state.activity.set(held.key, index);
   }
+  return null;
+}
 
-  const rungs = instances.sort((left, right) => {
-    const recent = (activity.get(right.key) ?? -1) - (activity.get(left.key) ?? -1);
+function readyOf(context: RunContext, state: FoldState): LiveProgress {
+  const rungs = [...state.instances].sort((left, right) => {
+    const recent = (state.activity.get(right.key) ?? -1) - (state.activity.get(left.key) ?? -1);
     return recent || left.rung.localeCompare(right.rung);
   });
   return { phase: 'ready', attempt: context.attempt, rungs, why: '' };
+}
+
+/**
+ * Fold one event-feed response for exactly one status-endpoint attempt,
+ * continuing from `carry` when the window no longer holds the start marker.
+ *
+ * Foreign attempts are ignored, which makes an unfiltered/interleaved feed
+ * safe. A live event that claims the active attempt in either token location
+ * is not foreign: both tokens and every run-context field must then agree or
+ * the complete response is refused. A refusal returns no carry, so the next
+ * poll starts again from a start marker or is refused again.
+ */
+export function foldLiveProgress(
+  carry: LiveCarry | null,
+  activeRun: unknown,
+  payload: unknown
+): { progress: LiveProgress; carry: LiveCarry | null } {
+  const admittedContext = contextOf(activeRun);
+  if (!admittedContext.ok) return { progress: refused(admittedContext.why), carry: null };
+  const context = admittedContext.value;
+  const fail = (why: string) => ({ progress: refused(why, context.attempt), carry: null });
+  const admittedRecords = recordsOf(payload);
+  if (!admittedRecords.ok) return fail(admittedRecords.why);
+
+  const matching: LogRecord[] = [];
+  for (const record of admittedRecords.records) {
+    if (record.target !== TARGET || !LIVE_MESSAGES.has(record.message)) continue;
+    const fieldAttempt = exactToken(record.fields, 'attempt', 'attempt_key');
+    if (fieldAttempt === null) {
+      return fail(`A ${record.message} event has no consistent exact field attempt token.`);
+    }
+    const claimsCurrent = record.run === context.attempt || fieldAttempt === context.attempt;
+    if (!claimsCurrent) continue;
+    if (record.run !== context.attempt || fieldAttempt !== context.attempt) {
+      return fail(
+        `A ${record.message} event carries only one of the active attempt's two tokens.`
+      );
+    }
+    const mismatch = sameContext(record.fields, context, record.message === START);
+    if (mismatch !== null) {
+      return fail(
+        `A ${record.message} event disagrees with the active run's ${mismatch}.`
+      );
+    }
+    matching.push(record);
+  }
+
+  const markers = matching.filter((record) => record.message === START);
+  if (markers.length > 1) {
+    return fail('The event feed contains more than one start marker for this attempt.');
+  }
+  const chronological = [...matching].reverse();
+  let state: FoldState;
+  let fresh: LogRecord[];
+  if (markers.length === 1) {
+    if (chronological[0] !== markers[0]) {
+      return fail('An event for this attempt predates its start marker.');
+    }
+    state = emptyState();
+    fresh = chronological.slice(1);
+  } else {
+    if (carry === null || carry.attempt !== context.attempt) {
+      return fail('The event feed does not contain this attempt\'s start marker.');
+    }
+    const prior = carry;
+    // THE NEW WINDOW MUST REACH THE LAST EVENT ALREADY FOLDED. If it does
+    // not, more events arrived between two polls than one window holds, and
+    // folding what is left would skip them silently.
+    if (!admittedRecords.records.some((r) => r.seq === prior.lastSeq && r.ts === prior.lastTs)) {
+      return fail(
+        'The event feed no longer reaches the last event this page folded, so events between two polls were missed. Progress is refused rather than guessed.'
+      );
+    }
+    state = cloneState(prior.state);
+    fresh = chronological.filter(
+      (r) => r.ts > prior.lastTs || (r.ts === prior.lastTs && r.seq > prior.lastSeq)
+    );
+  }
+  const why = applyRecords(state, fresh);
+  if (why !== null) return fail(why);
+  const newest = matching[0];
+  return {
+    progress: readyOf(context, state),
+    carry: { attempt: context.attempt, lastSeq: newest.seq, lastTs: newest.ts, state }
+  };
+}
+
+/** One response, no carry: the start marker must be in this window. */
+export function reduceLiveProgress(activeRun: unknown, payload: unknown): LiveProgress {
+  return foldLiveProgress(null, activeRun, payload).progress;
 }

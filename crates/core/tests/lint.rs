@@ -64,11 +64,12 @@ const PRICE: &str = include_str!("../src/price.rs");
 /// Listed by hand because `include_str!` takes a literal, and checked against
 /// `lib.rs` by [`the_module_list_is_the_whole_crate`] so the hand-written part
 /// cannot fall behind the crate.
-const OTHERS: [(&str, &str); 7] = [
+const OTHERS: [(&str, &str); 8] = [
     ("blake3.rs", include_str!("../src/blake3.rs")),
     ("error.rs", include_str!("../src/error.rs")),
     ("instrument.rs", include_str!("../src/instrument.rs")),
     ("isin.rs", include_str!("../src/isin.rs")),
+    ("knob.rs", include_str!("../src/knob.rs")),
     ("symbol.rs", include_str!("../src/symbol.rs")),
     ("universe.rs", include_str!("../src/universe.rs")),
     ("vendor.rs", include_str!("../src/vendor.rs")),

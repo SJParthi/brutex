@@ -425,23 +425,41 @@ fn from_join(join: &TierJoin, ids: &[VendorId], published: usize) -> Covered {
 /// this target name, and does this vendor's master give each of them an id".
 fn from_master(merged: &Merged, vendor: Vendor, target: SpotTarget) -> Covered {
     let mut matched = 0usize;
-    let mut missing: Vec<String> = Vec::new();
+    // `(listed, symbol)`: `true` for a name a master lists without this
+    // vendor's id, `false` for a roster name no master lists at all, so the
+    // one sort below puts the unlisted names first and each group in name
+    // order.
+    let mut missing: Vec<(bool, String)> = Vec::new();
+    let mut named = std::collections::HashSet::with_capacity(merged.by_key.len());
     for (key, entry) in &merged.by_key {
         if !target.names(key, entry.universe) {
             continue;
         }
+        named.insert(key.underlying.as_str());
         // ONE ARRAY INDEX PER ROW. `ids` is indexed by the vendor's own
         // discriminant, which is what makes "does this feed list it" a constant
         // rather than a lookup.
         if entry.ids.get(vendor as usize).copied().flatten().is_some() {
             matched = matched.saturating_add(1);
         } else {
-            missing.push(key.underlying.to_string());
+            missing.push((true, key.underlying.to_string()));
         }
     }
+    // A ROSTER NAME NO LOADED MASTER LISTS AT ALL. Only `Swept` reaches here
+    // with a roster: it is the engine surface, a compile-time list, and a name
+    // the masters dropped (an NSE rename, a refresh that lost a row) used to be
+    // in neither `matched` nor `lacks`, so the line read N of N. D-2759.
+    missing.extend(
+        target
+            .expected()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| !named.contains(name))
+            .map(|name| (false, name.to_owned())),
+    );
     // SORTED, because a `HashMap` walk is not ordered and a reason list that
     // reshuffles between restarts is a list an operator cannot diff.
-    // `CLAUDE.md` §3 rule 5.
+    // `CLAUDE.md` §3 rule 5. One sort over both kinds of lacking name (D-2796).
     missing.sort_unstable();
     Covered {
         matched,
@@ -458,15 +476,21 @@ fn from_master(merged: &Merged, vendor: Vendor, target: SpotTarget) -> Covered {
         published: None,
         unresolved: missing
             .into_iter()
-            .map(|symbol| Unresolved {
+            .map(|(listed, symbol)| Unresolved {
                 symbol,
                 bucket: Bucket::Lacks,
-                why: format!(
-                    "{}'s instrument master lists no id for it, so a request cannot \
-                     name it and this build refuses rather than sending another \
-                     vendor's id",
-                    vendor.as_str()
-                ),
+                why: if listed {
+                    format!(
+                        "{}'s instrument master lists no id for it, so a request cannot \
+                         name it and this build refuses rather than sending another \
+                         vendor's id",
+                        vendor.as_str()
+                    )
+                } else {
+                    "no loaded master lists this symbol at all (renamed or delisted?), \
+                     so the swept surface names an instrument no request can reach"
+                        .to_owned()
+                },
             })
             .collect(),
     }
@@ -483,8 +507,8 @@ fn target_json(covered: Option<&Covered>, target: SpotTarget) -> String {
         render::json_string(target.slug()),
         render::json_string(target.label()),
         render::json_string(target.note()),
-        // THE BIT, NOT THE SET. `Swept` is `is_sweepable` — two pairs — and its
-        // universe accessor answers `INDEX`, which is a wider set than the
+        // THE BIT, NOT THE SET. `Swept` is `is_sweepable` — 210 keys, D-3507 —
+        // and its universe accessor answers `INDEX`, which is a wider set than the
         // target names. Emitting that token would tell a page these two rows
         // count the same instruments, so a target whose definition is not a
         // single bit says so with a null.
@@ -835,16 +859,30 @@ mod tests {
             groww.matched, 5,
             "Groww lists both indices and three of the four F&O underlyings"
         );
-        assert_eq!(groww.lacks, 1);
+        // CE-92 / D-2759: the swept surface is a compile-time roster of 210
+        // names, and the six this fixture's masters list are all any master
+        // lists. The other 204 are counted as lacking and named, not dropped.
+        let roster = SpotTarget::Swept.expected().expect("a roster").len();
+        assert_eq!(roster, 210, "NIFTY, BANKNIFTY and the 208 F&O shares");
+        let unlisted = roster - 6;
+        assert_eq!(groww.lacks, 1 + unlisted);
         assert_eq!(
-            groww
-                .unresolved
-                .iter()
-                .map(|u| u.symbol.as_str())
-                .collect::<Vec<_>>(),
-            vec!["INFY"],
-            "the F&O underlying only Dhan lists is named, not counted"
+            groww.matched + groww.lacks,
+            roster,
+            "N of the roster, not N of N"
         );
+        let infy = groww
+            .unresolved
+            .iter()
+            .find(|u| u.symbol == "INFY")
+            .expect("the F&O underlying only Dhan lists is named, not counted");
+        assert!(infy.why.contains("lists no id"), "{}", infy.why);
+        let abb = groww
+            .unresolved
+            .iter()
+            .find(|u| u.symbol == "ABB")
+            .expect("a swept share no master lists is named");
+        assert!(abb.why.contains("no loaded master lists"), "{}", abb.why);
         let dhan = coverage
             .of(Vendor::Dhan, SpotTarget::Swept)
             .expect("Dhan publishes a master");
@@ -852,14 +890,12 @@ mod tests {
             dhan.matched, 5,
             "Dhan lists NIFTY and all four F&O underlyings, and not BANKNIFTY"
         );
-        assert_eq!(dhan.lacks, 1);
-        assert_eq!(
+        assert_eq!(dhan.lacks, 1 + unlisted);
+        assert!(
             dhan.unresolved
                 .iter()
-                .map(|u| u.symbol.as_str())
-                .collect::<Vec<_>>(),
-            vec!["BANKNIFTY"],
-            "so a swept run on this feed is five instruments, and it says which is missing"
+                .any(|u| u.symbol == "BANKNIFTY" && u.why.contains("lists no id")),
+            "so a swept run on this feed says which listed instrument is missing"
         );
     }
 

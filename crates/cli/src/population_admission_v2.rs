@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -76,10 +76,8 @@ const COMPLETION_FILE: &str = "population-admission-completions-v2.bin";
 const LOCK_FILE: &str = "population-admission-v2.lock";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () =
     assert!(DECISION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_ADMISSION_V2_DECISION_BYTES);
@@ -1963,6 +1961,26 @@ impl PopulationAdmissionV2Ledger {
             if root_identity_after != root_identity {
                 return Err("Admission V2 root changed while child files opened".to_owned());
             }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock (as D-1910's ledgers do). Receipt-last, so the
+                // bytes past the last whole record were never acknowledged; a
+                // whole record is never cut. Readers still refuse the tail.
+                for (file, path, stride) in [
+                    (
+                        &decision_file,
+                        &decision_path,
+                        POPULATION_ADMISSION_V2_DECISION_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        POPULATION_ADMISSION_V2_COMPLETION_BYTES,
+                    ),
+                ] {
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride as u64, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, bounds.completion_bytes)?;
             let decision_generation =
                 file_generation(&decision_file, &decision_path, bounds.decision_bytes)?;
@@ -2749,10 +2767,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Admission V2 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationAdmissionV2Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Admission V2 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root_directory(
@@ -3007,6 +3026,7 @@ fn hash_file(
 )]
 mod tests {
     use super::*;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -3467,6 +3487,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestRoot::new("append-rollback");
+        initialize_empty(root.path());
+        let value = prepared();
+        write_decisions(root.path(), &value.decisions);
+        for (name, width) in [
+            (DECISION_FILE, POPULATION_ADMISSION_V2_DECISION_BYTES),
+            (COMPLETION_FILE, POPULATION_ADMISSION_V2_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let committed = persist_population_admission_v2(root.path(), bounds(), &value)
+            .expect("the next append completes the exact orphan after the rollback");
+        assert!(matches!(committed, PopulationAdmissionV2Commit::Written(_)));
+        PopulationAdmissionV2Ledger::open_read(root.path(), bounds())
+            .expect("the ledger stays readable");
+    }
+
+    #[test]
     fn orphan_decisions_accept_only_exact_retry_then_completion() {
         let root = TestRoot::new("orphan");
         initialize_empty(root.path());
@@ -3546,6 +3589,36 @@ mod tests {
         assert_refuses(
             PopulationAdmissionV2Ledger::open_read(torn.path(), bounds()),
             "torn",
+        );
+    }
+
+    /// rnew-1, D-4460: a process killed while writing a decision or the
+    /// Completion leaves a sub-record tail. A reader still refuses it; the
+    /// next writer cuts it, says so once, and keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_in_either_file_is_cut_by_the_writer_and_history_kept() {
+        let root = TestRoot::new("kill-torn");
+        let value = prepared();
+        persist_population_admission_v2(root.path(), bounds(), &value).expect("persist fixture");
+        let block = value.source.block_id;
+        let decisions = root.path().join(DECISION_FILE);
+        let completions = root.path().join(COMPLETION_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[
+                (
+                    decisions.as_path(),
+                    POPULATION_ADMISSION_V2_DECISION_BYTES as u64,
+                ),
+                (
+                    completions.as_path(),
+                    POPULATION_ADMISSION_V2_COMPLETION_BYTES as u64,
+                ),
+            ],
+            &mut || {
+                let ledger = PopulationAdmissionV2Ledger::open_read(root.path(), bounds())?;
+                Ok(format!("{:?}", ledger.reopen_structural_receipt(&block)?))
+            },
+            &mut || PopulationAdmissionV2Ledger::open_write(root.path(), bounds()).map(drop),
         );
     }
 

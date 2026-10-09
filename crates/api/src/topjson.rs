@@ -1,5 +1,14 @@
 //! Bounded top report reader. Cold selection indexes O(history); refresh folds
-//! only appended ledger records. Selected frontier verification remains O(rows).
+//! only appended ledger records, after the ledger handle re-hashes its indexed
+//! prefix when another writer grew it (D-1560, D-3320). Selected frontier verification remains O(rows).
+//!
+//! A damaged ledger record stalls the selection at that record instead of
+//! dropping the handle: every later request refreshes the handle (constant
+//! metadata checks when the file is unchanged) and reads that one record
+//! again, so the refusal is re-proven from the bytes each time at O(1) rather
+//! than by a cold O(history) walk. A repair moves the file's generation, the
+//! refresh refuses, and the next request opens cold (W1-api6-3, D-4433). JR-07
+//! proves it: `api::topjson::tests::a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +26,10 @@ struct Selection {
     processed: u64,
     best: Option<cli::results::Record>,
     pairs: BTreeMap<(String, String), cli::results::Record>,
+    /// Why record `processed` would not read, when it would not. The fold
+    /// stops there, and [`Selection::get`] answers this refusal; the next
+    /// [`Selection::refresh`] reads that one record again (W1-api6-3, D-4433).
+    stalled: Option<String>,
 }
 
 impl Selection {
@@ -26,6 +39,7 @@ impl Selection {
             processed: 0,
             best: None,
             pairs: BTreeMap::new(),
+            stalled: None,
         };
         selected.extend()?;
         Ok(selected)
@@ -36,10 +50,23 @@ impl Selection {
         self.extend()
     }
 
+    /// Folds records `processed..len`, stopping at the first that will not
+    /// read. A stop is not an `Err`: the handle stays cached with the refusal
+    /// in [`Selection::stalled`], so the next request resumes at that record
+    /// and pays one read to prove it is still damaged, not a cold walk of the
+    /// whole ledger (W1-api6-3, D-4433). `Err` is only the length read.
     fn extend(&mut self) -> Result<(), String> {
         let end = self.ledger.len()?;
+        self.stalled = None;
         for at in self.processed..end {
-            let row = self.ledger.read(at)?;
+            let row = match self.ledger.read(at) {
+                Ok(row) => row,
+                Err(why) => {
+                    self.processed = at;
+                    self.stalled = Some(why);
+                    return Ok(());
+                }
+            };
             if !row.has_complete_trade_total() {
                 continue;
             }
@@ -66,12 +93,31 @@ impl Selection {
         Ok(())
     }
 
-    fn get(&self, pair: Option<&(String, String)>) -> Option<cli::results::Record> {
-        pair.map_or(self.best, |pair| self.pairs.get(pair).copied())
+    /// The best complete run, for every instrument or for one feed and
+    /// underlying, or the refusal of the record the fold stopped at.
+    fn get(&self, pair: Option<&(String, String)>) -> Result<Option<cli::results::Record>, String> {
+        if let Some(why) = &self.stalled {
+            return Err(why.clone());
+        }
+        Ok(pair.map_or(self.best, |pair| self.pairs.get(pair).copied()))
     }
 }
 
 static SELECTION: Cached<Selection> = Cached::new();
+
+/// [`Selection::get`] through `cache`, opening `root`'s ledger cold only when
+/// no handle is held or its refresh refused. `report` passes [`SELECTION`];
+/// a test passes its own slot and counts the opens.
+fn selected(
+    cache: &Cached<Selection>,
+    root: &Path,
+    pair: Option<&(String, String)>,
+    open: impl FnOnce() -> Result<Selection, String>,
+) -> Result<Option<cli::results::Record>, String> {
+    cache.with_verified(root, open, Selection::refresh, |selection| {
+        selection.get(pair)
+    })?
+}
 
 /// Render the terminal's canonical top report without occupying an async worker.
 pub async fn top_json(uri: axum::http::Uri) -> Response {
@@ -108,7 +154,17 @@ fn parse(query: &str) -> Result<Option<(String, String)>, String> {
     let underlying = crate::server::param(query, "underlying");
     match (feed.is_empty(), underlying.is_empty()) {
         (true, true) if seen.is_empty() => Ok(None),
-        (false, false) => Ok(Some((feed, underlying))),
+        // THE FEED IS READ, NOT COPIED. The ledger keys runs by the feed's
+        // wire name, so `Zerodha` or a typo used to miss every row and answer
+        // 200 with a sentence about runs that halted or traded nothing --
+        // runs that do not exist. Parsed the way every other route parses a
+        // feed and looked up by its wire name (P1-02-06, D-1765).
+        (false, false) => match crate::ingest::parse_feed(&feed) {
+            Some(named) => Ok(Some((named.wire().to_owned(), underlying))),
+            None => Err(format!(
+                "{feed:?} is not a feed this build has; the top run is looked up by feed"
+            )),
+        },
         _ => Err(
             "`feed` and `underlying` filter together: give both nonempty values or neither"
                 .to_owned(),
@@ -147,13 +203,7 @@ fn report(root: &Path, pair: Option<&(String, String)>) -> Result<String, String
         ),
         ("frontier", cli::frontier::Frontier::path(root).as_path()),
     ])?;
-    let selected = SELECTION.with_verified(
-        root,
-        || Selection::open(root),
-        Selection::refresh,
-        |selection| selection.get(pair),
-    );
-    let row = match selected {
+    let row = match selected(&SELECTION, root, pair, || Selection::open(root)) {
         Ok(Some(row)) => row,
         Ok(None) => return Ok("  NO COMPLETE RUN matches. Every matching row halted on a budget or traded nothing, or nothing has been recorded yet — `cli results` lists what is there.\n".to_owned()),
         Err(why) if why.contains("nothing was created") || why.contains("nothing was written") => return Ok("  NO RUN HAS BEEN RECORDED YET. The ledger does not exist or holds nothing — sweep something and it appears here.\n".to_owned()),
@@ -211,7 +261,7 @@ fn refusal(status: axum::http::StatusCode, why: &str) -> Response {
     reason = "tests fail through assertions"
 )]
 mod tests {
-    use super::{Selection, parse, report, respond};
+    use super::{Selection, parse, report, respond, selected};
 
     fn row(id: u8, symbol: &str, profit: i64) -> cli::results::Record {
         cli::results::Record {
@@ -255,9 +305,15 @@ mod tests {
             .expect("other instrument");
         let mut cache = Selection::open(&dir).expect("bounded selection");
         assert_eq!(cache.processed, 2);
-        assert_eq!(cache.get(None).expect("global best").identity, [1; 32]);
+        assert_eq!(
+            cache.get(None).unwrap().expect("global best").identity,
+            [1; 32]
+        );
         let pair = ("zerodha".to_owned(), "BANKNIFTY".to_owned());
-        assert_eq!(cache.get(Some(&pair)).expect("pair best").identity, [2; 32]);
+        assert_eq!(
+            cache.get(Some(&pair)).unwrap().expect("pair best").identity,
+            [2; 32]
+        );
         let mut halted = row(3, "NIFTY", 1_000);
         halted.halted = 1;
         writer.append(&halted).expect("partial run");
@@ -266,7 +322,10 @@ mod tests {
             .expect("newer tied result");
         cache.refresh().expect("incremental refresh");
         assert_eq!(cache.processed, 4);
-        assert_eq!(cache.get(None).expect("newer tie wins").identity, [4; 32]);
+        assert_eq!(
+            cache.get(None).unwrap().expect("newer tie wins").identity,
+            [4; 32]
+        );
         cache.refresh().expect("unchanged refresh");
         assert_eq!(cache.processed, 4);
         std::fs::OpenOptions::new()
@@ -304,8 +363,8 @@ mod tests {
         let mut cache = Selection::open(&dir).expect("cold selection");
         let pair = ("zerodha".to_owned(), "NIFTY".to_owned());
         assert_eq!(cache.processed, 1);
-        assert_eq!(cache.get(None), None);
-        assert_eq!(cache.get(Some(&pair)), None);
+        assert_eq!(cache.get(None), Ok(None));
+        assert_eq!(cache.get(Some(&pair)), Ok(None));
         let empty_report = report(&dir, None).expect("unpriced report");
         assert_eq!(empty_report, cli::top_at(&dir, None, None));
         assert!(empty_report.contains("NO COMPLETE RUN"), "{empty_report}");
@@ -314,8 +373,8 @@ mod tests {
         let loss = row(21, "NIFTY", -100);
         ledger.append(&loss).expect("completed losing trade");
         cache.refresh().expect("incremental loss");
-        assert_eq!(cache.get(None), Some(loss));
-        assert_eq!(cache.get(Some(&pair)), Some(loss));
+        assert_eq!(cache.get(None), Ok(Some(loss)));
+        assert_eq!(cache.get(Some(&pair)), Ok(Some(loss)));
         ledger
             .append(&cli::results::Record {
                 identity: [22; 32],
@@ -330,15 +389,15 @@ mod tests {
             .expect("later halted total");
         cache.refresh().expect("ineligible rows are processed");
         assert_eq!(cache.processed, 4);
-        assert_eq!(cache.get(None), Some(loss));
-        assert_eq!(cache.get(Some(&pair)), Some(loss));
+        assert_eq!(cache.get(None), Ok(Some(loss)));
+        assert_eq!(cache.get(Some(&pair)), Ok(Some(loss)));
         let newer = row(24, "NIFTY", -100);
         ledger.append(&newer).expect("later equal trade total");
         let path = cli::results::Results::path(&dir);
         let before = std::fs::read(&path).expect("original bytes");
         cache.refresh().expect("newest tie");
-        assert_eq!(cache.get(None), Some(newer));
-        assert_eq!(cache.get(Some(&pair)), Some(newer));
+        assert_eq!(cache.get(None), Ok(Some(newer)));
+        assert_eq!(cache.get(Some(&pair)), Ok(Some(newer)));
         assert_eq!(cache.processed, 5);
         assert_eq!(std::fs::read(path).expect("unchanged bytes"), before);
     }
@@ -359,6 +418,29 @@ mod tests {
         assert_eq!(
             parse("feed=zerodha&underlying=NIFTY"),
             Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
+        );
+        // A feed is canonicalised to the wire name the ledger keys by, and a
+        // feed this build does not have is refused rather than answered with
+        // a sentence about runs that do not exist (P1-02-06, D-1765).
+        assert_eq!(
+            parse("feed=Zerodha&underlying=NIFTY"),
+            Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
+        );
+        // NAMED BUT EMPTY IS NOT ABSENT. `feed=&underlying=` gave both keys
+        // and no value: a filter asked for and left blank is refused, never
+        // read as the unfiltered page. G18-api-24.
+        for blank in ["feed=&underlying=", "feed=", "underlying="] {
+            let why = parse(blank);
+            assert!(
+                why.as_ref()
+                    .is_err_and(|why| why.contains("filter together")),
+                "{blank}: {why:?}"
+            );
+        }
+        let typo = parse("feed=zerodah&underlying=NIFTY");
+        assert!(
+            typo.as_ref().is_err_and(|why| why.contains("zerodah")),
+            "{typo:?}"
         );
         let dir = crate::scratch::path("top-absent-store");
         let _ = std::fs::remove_dir_all(&dir);
@@ -416,5 +498,112 @@ mod tests {
         assert_eq!(report(&dir, None), Ok(canonical.clone()));
         assert_eq!(report(&dir, None), Ok(canonical));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A damaged record that persists is re-proven by one read per request,
+    /// not by a cold walk (W1-api6-3, D-4433).**
+    ///
+    /// Three runs, the middle record's payload flipped on disk. The first
+    /// request opens cold and stalls at record 1; the next 100 requests through
+    /// the same slot open nothing and each answers record 1's own refusal,
+    /// which `refresh` re-reads from the bytes. A refusal is never served from
+    /// memory: putting the byte back moves the file's generation, the next
+    /// refresh refuses, the handle is dropped, and the request after it opens
+    /// cold and is served the best run. A stall is cleared, not kept, when the
+    /// same record reads again.
+    #[test]
+    fn a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen() {
+        use std::os::unix::fs::FileExt as _;
+        let dir = crate::scratch::path("top-persistent-refusal");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = cli::results::Results::path(&dir);
+        let mut ledger = cli::results::Results::open(&dir).expect("ledger");
+        let lengths = [(1, 100), (2, 300), (3, 200)].map(|(id, profit)| {
+            ledger.append(&row(id, "NIFTY", profit)).expect("append");
+            std::fs::metadata(&path).expect("measured").len()
+        });
+        drop(ledger);
+        let stride = lengths[2] - lengths[1];
+        // Inside record 1's payload, well clear of its seal.
+        let damaged = lengths[0] + stride / 2;
+        let flip = |at: u64| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("fixture");
+            let mut byte = [0u8];
+            file.read_exact_at(&mut byte, at).expect("read");
+            file.write_all_at(&[byte[0] ^ 0x5a], at).expect("flip");
+        };
+        flip(damaged);
+
+        let held = Selection::open(&dir).expect("a stall is not an open failure");
+        assert_eq!(held.processed, 1, "the fold stopped at the damaged record");
+        let why = held.get(None).expect_err("a stalled selection refuses");
+        assert!(why.contains("record 1"), "{why}");
+        drop(held);
+
+        let cache = crate::detail::Cached::<Selection>::new();
+        let mut opens = 0;
+        let ask = |opens: &mut u32| {
+            selected(&cache, &dir, None, || {
+                *opens += 1;
+                Selection::open(&dir)
+            })
+        };
+        for _ in 0..101 {
+            let answer = ask(&mut opens);
+            assert!(
+                answer.as_ref().is_err_and(|why| why.contains("record 1")),
+                "{answer:?}"
+            );
+        }
+        assert_eq!(
+            opens, 1,
+            "one cold open; every later request read one record"
+        );
+
+        flip(damaged);
+        let mut served = None;
+        for _ in 0..2 {
+            if let Ok(found) = ask(&mut opens) {
+                served = found;
+                break;
+            }
+        }
+        assert_eq!(
+            served.map(|run| run.identity),
+            Some([2; 32]),
+            "a repair is seen within two requests and the best run is served"
+        );
+        assert_eq!(opens, 2, "the repair cost exactly one more cold open");
+
+        // A STALL THAT CLEARS IN PLACE: the same handle, its stalled record
+        // reading again, folds on from it.
+        let mut held = Selection::open(&dir).expect("healthy");
+        held.processed = 1;
+        held.stalled = Some("stale".to_owned());
+        held.best = None;
+        held.pairs.clear();
+        held.refresh().expect("unchanged");
+        assert_eq!(held.stalled, None);
+        assert_eq!(held.processed, 3);
+        assert_eq!(
+            held.get(None).unwrap().map(|run| run.identity),
+            Some([2; 32])
+        );
+        let _ = std::fs::remove_dir_all(dir);
+
+        let bullet = crate::booleanjson::tests::d0951_bullet("W1-api6-3");
+        for word in [
+            "topjson::report",
+            "Selection::open",
+            "stalled",
+            "Since D-4433",
+            "one record",
+        ] {
+            assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+        }
     }
 }

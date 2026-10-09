@@ -340,7 +340,7 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte() 
         .chain(selection_paths.iter().cloned())
         .collect();
     let mut original = None;
-    for written in [8, 0] {
+    for (pass, written) in [(0, 8), (1, 0), (2, 0)] {
         let population = commit_all_rung_with_verified_build_v5(
             &request,
             VerifiedBuildCommitV1(FIXTURE_COMMIT),
@@ -366,9 +366,33 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte() 
             *corrupted.last_mut().expect("actual completion") ^= 1;
             fs::write(&completion, corrupted).map_err(|why| why.to_string())?;
             assert!(selection.require_live_topology().is_err());
+            // THE REPORT REFUSES THE SAME STALE AUTHORITY, AND SAYS SO. Gate 18
+            // found `render_winners` replaceable by `Ok(())`: no test had
+            // handed it a selection, so a report that printed its heading and
+            // then claimed success over a ledger that no longer authenticated
+            // was indistinguishable from a real one. It consumes the stale
+            // capability, which this branch was about to drop anyway. D-1456.
+            let mut report = String::new();
+            let refusal = crate::ledger_all::render_winners(&mut report, selection)
+                .expect_err("a selection that no longer authenticates renders no winners");
+            assert!(!refusal.is_empty());
+            assert!(report.starts_with("\nTOP 10 BY RUNG"), "{report}");
+            assert!(!report.contains("rank"), "{report}");
             fs::write(completion, saved).map_err(|why| why.to_string())?;
             // Restoring bytes does not restore the held file's mtime/ctime
             // epoch. Drop this stale capability before the fresh retry.
+        } else if pass == 2 {
+            // ledgerall-2, D-2627: every rung legally committed
+            // `min(eligible, 25)` = 0 winners. The report renders that — its
+            // heading and no rank rows — instead of refusing a durably
+            // committed run on every rerun. On the old code `render_winners`
+            // went through `visit_canonical` and refused "requires exactly
+            // 25 winners, observed 0", so this `expect` failed.
+            let mut report = String::new();
+            crate::ledger_all::render_winners(&mut report, selection)
+                .expect("a rung with fewer than 25 winners renders what it committed");
+            assert!(report.starts_with("\nTOP 10 BY RUNG"), "{report}");
+            assert!(!report.contains("rank"), "{report}");
         } else {
             let successors = selection.into_successor_set()?;
             let mut visited = 0;

@@ -39,6 +39,7 @@
 
 #![forbid(unsafe_code)]
 
+mod answer_memo;
 pub mod assets;
 pub mod audit;
 pub mod audit_json;
@@ -64,6 +65,9 @@ pub mod catalog;
 pub mod census;
 pub mod constituents;
 pub mod coverage;
+/// `CLAUDE.md` §8 on the shipped pull: one re-read per rejection, compared by
+/// fingerprint, and a loud halt when the value did not change. D-0948.
+pub mod credential_law;
 /// The shared blocking-work, concurrency and byte/row/page bounds for result details.
 pub mod detail;
 pub mod expressionsearchjson;
@@ -99,8 +103,9 @@ pub mod master;
 ///
 /// Separate from `/pull/*` on purpose: that moves BARS and spends the vendor's
 /// quota per instrument-month; this moves four files, three of them free public
-/// CDN downloads. `Site::load` parses the masters once at startup with no reload
-/// path, so this also answers whether a restart is required. D-0308.
+/// CDN downloads. A refresh re-parses the masters in place through
+/// `Site::reparse`; this also answers whether a restart is still required.
+/// D-0308, D-1762.
 pub mod mastersrun;
 pub mod merge;
 pub mod operation_audit;
@@ -109,6 +114,7 @@ pub(crate) mod recovery;
 pub(crate) mod recovery_control;
 pub(crate) mod recovery_journal;
 pub mod render;
+pub mod selectionv6json;
 pub mod server;
 pub mod sweepevidence;
 /// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was
@@ -143,3 +149,10 @@ pub(crate) mod emitted;
 
 #[cfg(test)]
 mod saved_response_boundary_tests;
+
+/// The p50/p99/max line every `#[ignore]`d latency measurement in this crate
+/// prints, with its sample count and the host's load average. Compiled only
+/// under `cfg(test)`: the numbers are recorded in `docs/06-limits.md` and are
+/// never a gate. D-4434.
+#[cfg(test)]
+pub(crate) mod latency;

@@ -1,10 +1,15 @@
-//! Durable receipt-last authority for same-pass Base Evidence V2.
+//! Durable receipt-last authority for same-pass Base Evidence, format V3.
+//!
+//! Format V3 (D-1644) moves every magic, domain and file name from V2: a V2
+//! ledger's files stay where they are, untouched and never opened as V3.
 //!
 //! Records are the fixed 1,024-byte Phase-A records.  A separate fixed
 //! completion is appended only after the contiguous record block is synced.
 //! Opening scans and validates the bounded ledger once; after that, completion
-//! lookup and a fixed-offset record lookup are O(1) in record count.  Opening,
-//! append, exact retry comparison and fresh-reopen comparison are O(records).
+//! lookup and a fixed-offset record lookup are O(1) in record count.  Opening
+//! is O(every committed record); append, exact retry comparison and the fresh
+//! reopen after an append are O(this family's records), and the append path
+//! scans the whole ledger once, in its writer's open (W2-cli10-0, D-4467).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
 //! times this, so the shape above is read from the source rather
@@ -34,19 +39,26 @@ const COMPLETION_BYTES: usize = 512;
 const COMPLETION_PAYLOAD_BYTES: usize = COMPLETION_BYTES - 32;
 const COMPLETION_BYTES_U64: u64 = 512;
 const RECORD_BYTES_U64: u64 = 1_024;
-const HEADER_VERSION: u32 = 2;
+const HEADER_VERSION: u32 = 3;
 const RECORD_KIND: u32 = 1;
 const COMPLETION_KIND: u32 = 2;
-const RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-ROW-V2\0";
-const COMPLETION_MAGIC: [u8; 16] = *b"BTX-BASE-CMP-V2\0";
-const COMPLETION_RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-DONEV2\0";
-const HEADER_DOMAIN: &[u8] = b"brutex-base-evidence-v2-ledger-header\0";
-const COMPLETION_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-completion-id\0";
-const COMPLETION_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v2-completion-seal\0";
-const PAIR_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-nifty-banknifty-pair\0";
-const RECORD_FILE: &str = "base-evidence-records-v2.bin";
-const COMPLETION_FILE: &str = "base-evidence-completions-v2.bin";
-const LOCK_FILE: &str = "base-evidence-write-v2.lock";
+const RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-ROW-V3\0";
+const COMPLETION_MAGIC: [u8; 16] = *b"BTX-BASE-CMP-V3\0";
+const COMPLETION_RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-DONEV3\0";
+const HEADER_DOMAIN: &[u8] = b"brutex-base-evidence-v3-ledger-header\0";
+const COMPLETION_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-completion-id\0";
+const COMPLETION_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v3-completion-seal\0";
+const PAIR_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-nifty-banknifty-pair\0";
+const RECORD_FILE: &str = "base-evidence-records-v3.bin";
+const COMPLETION_FILE: &str = "base-evidence-completions-v3.bin";
+const LOCK_FILE: &str = "base-evidence-write-v3.lock";
+/// The retired format-2 file names, kept only so a root that still holds a V2
+/// ledger is refused by name rather than opened beside it as if empty
+/// (D-1644). A V2 ledger floored its max-gated rates (GAP15-17).
+const RETIRED_V2_FILES: [&str; 2] = [
+    "base-evidence-records-v2.bin",
+    "base-evidence-completions-v2.bin",
+];
 
 const _: () = assert!(BASE_EVIDENCE_RECORD_BYTES_V2 == 1_024);
 const _: () = assert!(COMPLETION_PAYLOAD_BYTES + 32 == COMPLETION_BYTES);
@@ -850,6 +862,10 @@ struct LedgerV2 {
     completion_file: File,
     bounds: BaseEvidenceLedgerBoundsV2,
     audits: HashMap<[u8; 32], BaseEvidenceReopenAuditV2>,
+    /// Each complete universe's physical completion index, so the fresh
+    /// reopen after an append reads its one completion at a fixed offset
+    /// instead of scanning every block again (W2-cli10-0, D-4467).
+    physical: HashMap<[u8; 32], u64>,
     orphan: Option<OrphanV2>,
     total_records: u64,
     lock_generation: FileGenerationV2,
@@ -879,6 +895,7 @@ impl LedgerV2 {
         writable: bool,
     ) -> Result<Self, BaseEvidenceLedgerRefusalV2> {
         let root = admit_root(root)?;
+        refuse_retired_v2_ledger(&root)?;
         let root_file =
             File::open(&root).map_err(|why| io_error("hold Base ledger root", &root, &why))?;
         if !root_file
@@ -956,6 +973,7 @@ impl LedgerV2 {
                 completion_file,
                 bounds,
                 audits: HashMap::new(),
+                physical: HashMap::new(),
                 orphan: None,
                 total_records: 0,
                 lock_generation,
@@ -976,6 +994,8 @@ impl LedgerV2 {
     }
 
     fn scan(&mut self) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+        #[cfg(test)]
+        reopen_probe::count_scan();
         verify_header(
             &mut self.record_file,
             RECORD_MAGIC,
@@ -1008,6 +1028,10 @@ impl LedgerV2 {
         self.audits.try_reserve(capacity).map_err(|why| {
             BaseEvidenceLedgerRefusalV2::Allocation(format!("completion index: {why}"))
         })?;
+        self.physical.clear();
+        self.physical.try_reserve(capacity).map_err(|why| {
+            BaseEvidenceLedgerRefusalV2::Allocation(format!("completion offsets: {why}"))
+        })?;
         let mut committed = 0_u64;
         for physical in 0..completions {
             let completion = read_completion(&mut self.completion_file, physical)?;
@@ -1038,6 +1062,8 @@ impl LedgerV2 {
                     "one Candidate universe has more than one Base completion".to_owned(),
                 ));
             }
+            self.physical
+                .insert(completion.candidate_universe_id, physical);
             committed = end;
         }
         self.orphan = scan_orphan(&mut self.record_file, committed, records)?;
@@ -1155,6 +1181,43 @@ impl LedgerV2 {
         }
     }
 
+    /// The exact retry of a universe already complete: the Base bytes must
+    /// match, and are re-synced unless this process saw their barrier fail.
+    fn reuse_complete(
+        &mut self,
+        existing: &BaseEvidenceReopenAuditV2,
+        receipt: &CandidateUniverseReceiptV1,
+        prepared: &PreparedBaseEvidenceV2,
+    ) -> Result<BaseEvidenceProductionCommitV2, BaseEvidenceLedgerRefusalV2> {
+        let expected =
+            CompletionV2::from_prepared(receipt, prepared, existing.completion.first_record)?;
+        if existing.completion != expected {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
+                "Candidate universe is complete with different Base bytes".to_owned(),
+            ));
+        }
+        compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
+        // A path whose barrier failed in this process is never confirmed
+        // by a second one (ledgers-2, D-1915).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.record_path)
+            .and_then(|()| crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path))
+            .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
+        self.record_file
+            .sync_data()
+            .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
+        self.completion_file.sync_data().map_err(|why| {
+            io_error(
+                "re-sync reused Base completion",
+                &self.completion_path,
+                &why,
+            )
+        })?;
+        sync_directory(&self.root_file, &self.root)?;
+        self.record_generation = file_generation(&self.record_file, &self.record_path)?;
+        self.completion_generation = file_generation(&self.completion_file, &self.completion_path)?;
+        Ok(BaseEvidenceProductionCommitV2::Reused(*existing))
+    }
+
     fn append_locked(
         &mut self,
         candidate: &CandidateUniverseReopenAuditV1,
@@ -1169,29 +1232,7 @@ impl LedgerV2 {
             .map_err(|_| BaseEvidenceLedgerRefusalV2::Arithmetic("offered record count"))?;
         require_bound("append records", offered, self.bounds.records)?;
         if let Some(existing) = self.audits.get(&receipt.universe_id()).copied() {
-            let expected =
-                CompletionV2::from_prepared(&receipt, prepared, existing.completion.first_record)?;
-            if existing.completion != expected {
-                return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
-                    "Candidate universe is complete with different Base bytes".to_owned(),
-                ));
-            }
-            compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
-            self.record_file
-                .sync_data()
-                .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
-            self.completion_file.sync_data().map_err(|why| {
-                io_error(
-                    "re-sync reused Base completion",
-                    &self.completion_path,
-                    &why,
-                )
-            })?;
-            sync_directory(&self.root_file, &self.root)?;
-            self.record_generation = file_generation(&self.record_file, &self.record_path)?;
-            self.completion_generation =
-                file_generation(&self.completion_file, &self.completion_path)?;
-            return Ok(BaseEvidenceProductionCommitV2::Reused(existing));
+            return self.reuse_complete(&existing, &receipt, prepared);
         }
         require_bound(
             "completion",
@@ -1224,10 +1265,22 @@ impl LedgerV2 {
                     prepared,
                     orphan.record_count,
                 )?;
-                (orphan.first_record, orphan.record_count)
+                // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915). The orphan
+                // may be the bytes of a run whose barrier failed; a barrier on
+                // this descriptor cannot prove them durable, so the block is
+                // cut back and written again whole. The bytes are identical.
+                let start = record_offset(orphan.first_record)?;
+                self.record_file
+                    .set_len(start)
+                    .and_then(|()| self.record_file.sync_all())
+                    .map_err(|why| {
+                        io_error("cut Base orphan for rewrite", &self.record_path, &why)
+                    })?;
+                (orphan.first_record, 0)
             }
             None => (self.total_records, 0),
         };
+        let block_start = record_offset(first_record)?;
         let completion = CompletionV2::from_prepared(&receipt, prepared, first_record)?;
         let new_total =
             first_record
@@ -1237,19 +1290,40 @@ impl LedgerV2 {
                 ))?;
         require_bound("records", new_total, self.bounds.records)?;
         append_prepared_records(&mut self.record_file, prepared, prefix)?;
-        self.record_file
-            .sync_data()
-            .map_err(|why| io_error("sync Base records", &self.record_path, &why))?;
+        // A failed barrier cuts the block back (ledgers-2, D-1915).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.record_file,
+            &self.record_path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         self.total_records = new_total;
         self.orphan = Some(orphan_from_completion(&completion));
         self.record_generation = file_generation(&self.record_file, &self.record_path)?;
+        let completion_start = self
+            .completion_file
+            .metadata()
+            .map_err(|why| io_error("stat Base completion", &self.completion_path, &why))?
+            .len();
         append_completion(&mut self.completion_file, &completion)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| io_error("sync Base completion", &self.completion_path, &why))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         sync_directory(&self.root_file, &self.root)?;
+        let physical = completion_start
+            .checked_sub(HEADER_BYTES_U64)
+            .map(|bytes| bytes / COMPLETION_BYTES_U64)
+            .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic(
+                "appended completion index",
+            ))?;
         let audit = BaseEvidenceReopenAuditV2 { completion };
         self.audits.insert(receipt.universe_id(), audit);
+        self.physical.insert(receipt.universe_id(), physical);
         self.orphan = None;
         self.completion_generation = file_generation(&self.completion_file, &self.completion_path)?;
         Ok(BaseEvidenceProductionCommitV2::Written(audit))
@@ -1268,6 +1342,19 @@ impl LedgerV2 {
 }
 
 /// Appends one authenticated Base family and returns only after exact fresh reopen.
+///
+/// # Cost (W2-cli10-0, D-4467)
+///
+/// The writer's open scans and validates every committed block once: O(R)
+/// in every Base record ever committed, inherent to an open that must refuse
+/// damaged history before it appends. The fresh reopen no longer scans the
+/// ledger a second time. It opens the files afresh under the shared lock,
+/// verifies both headers, requires each path to still name the file the
+/// writer appended to, reads the ONE completion at its physical index and its
+/// predecessor's end, validates that completion's block and compares it with
+/// the prepared bytes: O(this family's records). The earlier blocks are the
+/// ones the writer's open validated and its generation checks held unchanged
+/// up to its last barrier.
 pub(crate) fn append_and_reopen_base_evidence_v2(
     root: &Path,
     bounds: BaseEvidenceLedgerBoundsV2,
@@ -1277,31 +1364,199 @@ pub(crate) fn append_and_reopen_base_evidence_v2(
     let mut ledger = LedgerV2::open(root, bounds)?;
     let commit = ledger.append(candidate, prepared)?;
     let expected = commit.audit();
-    drop(ledger);
-    let mut reopened = LedgerV2::open_read(root, bounds)?;
-    let audit = reopened
-        .audit(expected.candidate_universe_id())?
+    let physical = ledger
+        .physical
+        .get(&expected.candidate_universe_id())
+        .copied()
         .ok_or_else(|| {
             BaseEvidenceLedgerRefusalV2::Reconciliation(
-                "Base completion disappeared after receipt-last append".to_owned(),
+                "the appended Base completion has no physical index".to_owned(),
             )
         })?;
+    let held = [ledger.record_generation, ledger.completion_generation];
+    drop(ledger);
+    #[cfg(test)]
+    reopen_probe::run_between(root);
+    let audit = reopen_committed(root, bounds, physical, held, prepared)?;
     if audit != expected {
         return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
             "freshly reopened Base completion differs from the exact append".to_owned(),
         ));
     }
-    compare_prepared(
-        &mut reopened.record_file,
-        audit.completion.first_record,
-        prepared,
-    )?;
     Ok(match commit {
         BaseEvidenceProductionCommitV2::Written(_) => {
             BaseEvidenceProductionCommitV2::Written(audit)
         }
         BaseEvidenceProductionCommitV2::Reused(_) => BaseEvidenceProductionCommitV2::Reused(audit),
     })
+}
+
+/// The bounded fresh reopen of the one block an append committed
+/// (W2-cli10-0, D-4467). `held` is the record and completion generation the
+/// writer measured after its last barrier.
+fn reopen_committed(
+    root: &Path,
+    bounds: BaseEvidenceLedgerBoundsV2,
+    physical: u64,
+    held: [FileGenerationV2; 2],
+    prepared: &PreparedBaseEvidenceV2,
+) -> Result<BaseEvidenceReopenAuditV2, BaseEvidenceLedgerRefusalV2> {
+    let root = admit_root(root)?;
+    refuse_retired_v2_ledger(&root)?;
+    let lock_path = root.join(LOCK_FILE);
+    let lock_file = open_file(&lock_path, false, false)?;
+    lock_file
+        .lock_shared()
+        .map_err(|why| io_error("take shared reopen lock", &lock_path, &why))?;
+    let reopened = (|| {
+        let [held_records, held_completions] = held;
+        let record_path = root.join(RECORD_FILE);
+        let completion_path = root.join(COMPLETION_FILE);
+        let mut record_file = open_file(&record_path, false, false)?;
+        let mut completion_file = open_file(&completion_path, false, false)?;
+        verify_header(
+            &mut record_file,
+            RECORD_MAGIC,
+            RECORD_KIND,
+            RECORD_BYTES_U64,
+            &record_path,
+        )?;
+        verify_header(
+            &mut completion_file,
+            COMPLETION_MAGIC,
+            COMPLETION_KIND,
+            COMPLETION_BYTES_U64,
+            &completion_path,
+        )?;
+        require_same_file(
+            held_records,
+            file_generation(&record_file, &record_path)?,
+            &record_path,
+        )?;
+        require_same_file(
+            held_completions,
+            file_generation(&completion_file, &completion_path)?,
+            &completion_path,
+        )?;
+        let records = record_count(&record_file, RECORD_BYTES_U64, bounds.records, "records")?;
+        let completions = record_count(
+            &completion_file,
+            COMPLETION_BYTES_U64,
+            bounds.completions,
+            "completions",
+        )?;
+        if physical >= completions {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
+                "Base completion disappeared after receipt-last append".to_owned(),
+            ));
+        }
+        let completion = read_completion(&mut completion_file, physical)?;
+        let cursor = match physical.checked_sub(1) {
+            None => 0,
+            Some(previous) => {
+                let before = read_completion(&mut completion_file, previous)?;
+                before
+                    .first_record
+                    .checked_add(before.base_record_count)
+                    .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic(
+                        "committed record cursor",
+                    ))?
+            }
+        };
+        if completion.first_record != cursor {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(format!(
+                "completion {} begins at {}, not contiguous cursor {cursor}",
+                hex32(completion.completion_id),
+                completion.first_record
+            )));
+        }
+        let end = cursor.checked_add(completion.base_record_count).ok_or(
+            BaseEvidenceLedgerRefusalV2::Arithmetic("committed record cursor"),
+        )?;
+        if end > records {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(format!(
+                "completion {} reaches {end}, beyond physical record count {records}",
+                hex32(completion.completion_id)
+            )));
+        }
+        validate_block(&mut record_file, &completion)?;
+        compare_prepared(&mut record_file, completion.first_record, prepared)?;
+        Ok(BaseEvidenceReopenAuditV2 { completion })
+    })();
+    let unlocked = lock_file
+        .unlock()
+        .map_err(|why| io_error("release shared reopen lock", &lock_path, &why));
+    match (reopened, unlocked) {
+        (Ok(audit), Ok(())) => Ok(audit),
+        (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+    }
+}
+
+/// Refuses a freshly opened file that is not the one the writer appended to.
+#[cfg(unix)]
+fn require_same_file(
+    held: FileGenerationV2,
+    fresh: FileGenerationV2,
+    path: &Path,
+) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+    if (held.device, held.inode) == (fresh.device, fresh.inode) {
+        Ok(())
+    } else {
+        Err(BaseEvidenceLedgerRefusalV2::Io(format!(
+            "{} no longer names the Base file this append wrote (device {} inode {}, now device {} inode {})",
+            path.display(),
+            held.device,
+            held.inode,
+            fresh.device,
+            fresh.inode
+        )))
+    }
+}
+
+/// Off unix there is no inode to compare; the block checks still run.
+#[cfg(not(unix))]
+fn require_same_file(
+    _held: FileGenerationV2,
+    _fresh: FileGenerationV2,
+    _path: &Path,
+) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+    Ok(())
+}
+
+/// Test-only probes for the Base append's scan count and the window between
+/// the writer's release and the fresh reopen (W2-cli10-0, D-4467).
+#[cfg(test)]
+pub(crate) mod reopen_probe {
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+
+    type Damage = Box<dyn FnOnce(&Path)>;
+
+    std::thread_local! {
+        static SCANS: Cell<u64> = const { Cell::new(0) };
+        static BETWEEN: RefCell<Option<Damage>> = const { RefCell::new(None) };
+    }
+
+    /// Whole-ledger scans on this thread.
+    pub(crate) fn scans() -> u64 {
+        SCANS.with(Cell::get)
+    }
+
+    pub(super) fn count_scan() {
+        SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
+    }
+
+    /// Runs `damage` once on this thread, after the next append's writer
+    /// released the ledger and before its fresh reopen.
+    pub(crate) fn between(damage: impl FnOnce(&Path) + 'static) {
+        BETWEEN.with(|slot| *slot.borrow_mut() = Some(Box::new(damage)));
+    }
+
+    pub(super) fn run_between(root: &Path) {
+        if let Some(damage) = BETWEEN.with(|slot| slot.borrow_mut().take()) {
+            damage(root);
+        }
+    }
 }
 
 fn validate_block(
@@ -1460,6 +1715,14 @@ fn compare_prepared_prefix(
     Ok(())
 }
 
+/// The byte offset of record `index` in the record file.
+fn record_offset(index: u64) -> Result<u64, BaseEvidenceLedgerRefusalV2> {
+    index
+        .checked_mul(RECORD_BYTES_U64)
+        .and_then(|bytes| bytes.checked_add(HEADER_BYTES_U64))
+        .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic("record offset"))
+}
+
 fn append_prepared_records(
     file: &mut File,
     prepared: &PreparedBaseEvidenceV2,
@@ -1615,18 +1878,23 @@ fn ensure_header(
     stride: u64,
     path: &Path,
 ) -> Result<(), BaseEvidenceLedgerRefusalV2> {
-    if file
-        .metadata()
-        .map_err(|why| io_error("stat", path, &why))?
-        .len()
-        == 0
-    {
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&header_bytes(magic, kind, stride)))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| io_error("initialize header", path, &why))?;
-    }
-    verify_header(file, magic, kind, stride, path)
+    // conc5-1 (D-2644): the shared writer header rule. A failed header write
+    // or barrier is cut back and remembered; an all-zero or torn header is
+    // re-initialised. The root is synced by the caller after first appends
+    // (D-1903).
+    crate::fixed_tail::init_or_heal_header(
+        file,
+        path,
+        &header_bytes(magic, kind, stride),
+        File::sync_data,
+    )
+    .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
+    verify_header(file, magic, kind, stride, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER_BYTES_U64, stride, &[])
+        .map(drop)
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)
 }
 
 fn verify_header(
@@ -1661,6 +1929,30 @@ fn verify_header(
             "{} has a foreign or corrupt Base header",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// Refuses a root that still holds a format-2 Base Evidence ledger (D-1644).
+///
+/// Anything but a clean "not found" refuses: a file that exists, a dangling
+/// link, or a probe that cannot answer. Opening V3 beside an unread V2 ledger
+/// would let a Population chain recorded against V2 evidence continue as
+/// though its Base evidence had never been written.
+fn refuse_retired_v2_ledger(root: &Path) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+    for name in RETIRED_V2_FILES {
+        let path = root.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(format!(
+                    "Base Evidence V2 ledger file {} refused by name: V2 floored its \
+                     max-gated rates (GAP15-17, D-1644); this build writes Base Evidence \
+                     V3 only, so rerun the Population chain in a root without V2 files",
+                    path.display()
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -2097,6 +2389,30 @@ mod projection_tests {
         ));
     }
 
+    /// ledgers-3, D-1910: a kill-torn tail in either file is refused by a
+    /// reader and cut by the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        for name in [RECORD_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new();
+            let bounds = BaseEvidenceLedgerBoundsV2::new(4, 4).expect("fixture bounds are nonzero");
+            drop(LedgerV2::open(root.ledger(), bounds).expect("headers initialize"));
+            let path = root.ledger().join(name);
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&[7; 5]))
+                .expect("torn bytes write");
+            assert!(LedgerV2::open_read(root.ledger(), bounds).is_err());
+            drop(LedgerV2::open(root.ledger(), bounds).expect("writer heals"));
+            assert_eq!(
+                std::fs::metadata(&path).expect("measure").len(),
+                HEADER_BYTES_U64
+            );
+            drop(LedgerV2::open_read(root.ledger(), bounds).expect("reader opens"));
+        }
+    }
+
     #[test]
     fn read_scope_refuses_post_action_generation_change_and_replaced_root() {
         let root = TestRoot::new();
@@ -2127,6 +2443,95 @@ mod projection_tests {
             .require_unchanged()
             .expect_err("same pathname at another inode must not retain authority");
         assert!(refused.to_string().contains("no longer names"));
+    }
+
+    /// D-1644: a root still holding either format-2 file is refused by name on
+    /// both open paths, before any V3 file is created beside it; a dangling
+    /// link counts as present. The V3 names never collide with the V2 ones.
+    #[test]
+    fn a_root_holding_a_v2_ledger_file_is_refused_by_name_before_v3_opens() {
+        let bounds = BaseEvidenceLedgerBoundsV2::new(4, 4).expect("fixture bounds are nonzero");
+        for name in RETIRED_V2_FILES {
+            assert_ne!(name, RECORD_FILE);
+            assert_ne!(name, COMPLETION_FILE);
+            for dangling in [false, true] {
+                let root = TestRoot::new();
+                let retired = root.ledger().join(name);
+                if dangling {
+                    std::os::unix::fs::symlink(root.parent.join("absent"), &retired)
+                        .expect("dangling V2 link is created");
+                } else {
+                    std::fs::write(&retired, b"v2").expect("V2 file is planted");
+                }
+                for writable in [true, false] {
+                    let refused = LedgerV2::open_inner(root.ledger(), bounds, writable)
+                        .err()
+                        .expect("a V2 ledger root is refused");
+                    let text = refused.to_string();
+                    assert!(text.contains("refused by name"), "{text}");
+                    assert!(text.contains(name), "{text}");
+                    assert!(text.contains("D-1644"), "{text}");
+                }
+                assert!(!root.ledger().join(RECORD_FILE).exists());
+                assert!(!root.ledger().join(LOCK_FILE).exists());
+            }
+        }
+        let clean = TestRoot::new();
+        drop(LedgerV2::open(clean.ledger(), bounds).expect("a root without V2 files opens"));
+        drop(LedgerV2::open_read(clean.ledger(), bounds).expect("and reads"));
+        assert_eq!(
+            (RECORD_FILE, COMPLETION_FILE, LOCK_FILE),
+            (
+                "base-evidence-records-v3.bin",
+                "base-evidence-completions-v3.bin",
+                "base-evidence-write-v3.lock"
+            )
+        );
+    }
+
+    /// **A retired-name probe that cannot answer refuses the root; only a
+    /// clean "not found" admits it.** R1286-cli-08, D-4100.
+    ///
+    /// The documented rule names three refusals -- a file, a dangling link,
+    /// and a probe that cannot answer -- and only the first two were driven.
+    /// Two probes that cannot answer are made here without privilege: a root
+    /// that is a regular file (the probe fails `ENOTDIR`) and a root whose
+    /// joined path is longer than any path the kernel resolves (it fails
+    /// before any lookup). Neither failure is an absence, so each refuses by
+    /// the first retired name, as a reconciliation refusal; the control root,
+    /// where both probes answer "not found", is admitted.
+    #[test]
+    fn a_retired_name_probe_that_cannot_answer_refuses_the_root() {
+        let root = TestRoot::new();
+        let not_a_directory = root.parent.join("plain-file");
+        std::fs::write(&not_a_directory, b"not a directory").expect("a regular file");
+        let mut too_long = root.parent.clone();
+        for _ in 0..21 {
+            too_long.push("d".repeat(200));
+        }
+        let [first, _] = RETIRED_V2_FILES;
+        for unanswerable in [not_a_directory, too_long] {
+            for name in RETIRED_V2_FILES {
+                let probe = std::fs::symlink_metadata(unanswerable.join(name))
+                    .expect_err("premise: the probe cannot answer");
+                assert_ne!(
+                    probe.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "premise: not an absence: {probe}"
+                );
+            }
+            let refused = refuse_retired_v2_ledger(&unanswerable)
+                .expect_err("a probe that cannot answer refuses");
+            assert!(
+                matches!(&refused, BaseEvidenceLedgerRefusalV2::Reconciliation(why)
+                    if why.contains("refused by name") && why.contains(first)),
+                "{refused}"
+            );
+        }
+        assert!(
+            refuse_retired_v2_ledger(root.ledger()).is_ok(),
+            "a clean absence of both names admits the root"
+        );
     }
 
     struct TestRoot {

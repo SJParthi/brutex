@@ -9,6 +9,7 @@ use super::super::{ExecutionRefusalBitsV1, SelectedExpressionExitV1};
 use super::{EvaluatedExpressionOosV1, ExpressionTrainingAnchorV1, ResearchResolvedExitGridV1};
 use crate::grid::{Chosen, TradeRow};
 use brutex_core::blake3::{Hasher, hash};
+use std::borrow::Cow;
 
 #[path = "expression_validation_codec.rs"]
 mod codec;
@@ -133,75 +134,165 @@ impl FixedTrainingFoldPlanV1 {
         later: &'a EvaluatedExpressionOosV1<'a>,
         mapping_byte_cap: u64,
     ) -> Result<BoundFixedTrainingFoldsV1<'a>, String> {
-        if later.anchor != self.anchor || later.side != self.side {
-            return Err("fixed-training folds have foreign later authority".into());
-        }
-        let bytes = later
-            .bars
-            .len()
-            .checked_mul(size_of::<usize>())
-            .and_then(|n| {
-                self.windows
-                    .len()
-                    .checked_mul(size_of::<u64>())
-                    .and_then(|m| n.checked_add(m))
-            })
-            .ok_or("fixed-training mapping byte overflow")?;
-        if u64::try_from(bytes).map_err(display)? > mapping_byte_cap {
-            return Err("fixed-training mapping exceeds byte admission".into());
-        }
-        let mut mapping = Vec::new();
-        mapping
-            .try_reserve_exact(later.bars.len())
-            .map_err(display)?;
-        let mut sessions = Vec::new();
-        sessions
-            .try_reserve_exact(self.windows.len())
-            .map_err(display)?;
-        sessions.resize(self.windows.len(), 0_u64);
-        let mut fold = 0;
-        let mut last_accepted = None;
-        for (index, bar) in later.bars.iter().enumerate() {
-            let actual = day(bar.ts_micros);
-            while self
-                .windows
-                .get(fold)
-                .is_some_and(|window| actual > window.last)
-            {
-                fold += 1;
-            }
-            let window = self
-                .windows
-                .get(fold)
-                .ok_or("later bar outside declared folds")?;
-            if actual < window.first {
-                return Err("later bar precedes declared fold".into());
-            }
-            mapping.push(fold);
-            if later.column.accepts(index) && last_accepted != Some(actual) {
-                let count = sessions.get_mut(fold).ok_or("fold session slot absent")?;
-                *count = count.checked_add(1).ok_or("fold session count overflow")?;
-                last_accepted = Some(actual);
-            }
-        }
-        if sessions.contains(&0) {
-            return Err("fixed-training fold has no accepted actual session".into());
-        }
+        self.require_later(later)?;
+        admit_mapping_bytes(later.bars.len(), self.windows.len(), mapping_byte_cap)?;
+        let (mapping, sessions) = index_folds(&self.windows, later.bars, later.column)?;
         Ok(BoundFixedTrainingFoldsV1 {
             plan: self,
             later,
-            mapping,
-            sessions,
+            replay: later.coordinate_replay(),
+            mapping: Cow::Owned(mapping),
+            sessions: Cow::Owned(sessions),
         })
     }
+
+    /// [`Self::bind`] over a fold index built once for the later run (D-1188).
+    ///
+    /// `cli`'s Boolean later-period loop binds every program and side to the
+    /// same later bars, column and windows, and `bind` rebuilt the same
+    /// bar-to-fold index each time: O(bars + folds) per program and side. The
+    /// map must have been built over this exact later bar slice and column
+    /// (pointer identity, both immutably borrowed) and this plan's windows, or
+    /// it is refused. Refusals come in `bind`'s order: foreign authority, the
+    /// byte cap, then whatever indexing the map found.
+    /// # Errors
+    /// As [`Self::bind`], plus a map built for another run or partition.
+    pub fn bind_with<'a>(
+        &'a self,
+        later: &'a EvaluatedExpressionOosV1<'a>,
+        map: &'a LaterFoldMapV1<'a>,
+        mapping_byte_cap: u64,
+    ) -> Result<BoundFixedTrainingFoldsV1<'a>, String> {
+        self.require_later(later)?;
+        admit_mapping_bytes(later.bars.len(), self.windows.len(), mapping_byte_cap)?;
+        if !std::ptr::eq(map.bars, later.bars)
+            || !std::ptr::eq(map.column, later.column)
+            || map.windows != self.windows
+        {
+            return Err("fixed-training fold map belongs to another later run or partition".into());
+        }
+        let (mapping, sessions) = map.indexed.as_ref().map_err(Clone::clone)?;
+        Ok(BoundFixedTrainingFoldsV1 {
+            plan: self,
+            later,
+            replay: later.coordinate_replay(),
+            mapping: Cow::Borrowed(mapping),
+            sessions: Cow::Borrowed(sessions),
+        })
+    }
+
+    fn require_later(&self, later: &EvaluatedExpressionOosV1<'_>) -> Result<(), String> {
+        if later.anchor != self.anchor || later.side != self.side {
+            return Err("fixed-training folds have foreign later authority".into());
+        }
+        Ok(())
+    }
+}
+
+/// The later bars' fold index, built once for every program and side bound to
+/// the same later run and windows (D-1188, audit o1runner-2).
+///
+/// It holds what [`FixedTrainingFoldPlanV1::bind`] derives from the bars, the
+/// column's acceptance and the windows, and nothing from a program or side.
+/// The indexing result is kept as found, so a bind over it refuses exactly as
+/// a bind that indexed on its own would.
+pub struct LaterFoldMapV1<'a> {
+    windows: Vec<LaterSessionWindowV1>,
+    bars: &'a [indicators::Candle],
+    column: &'a indicators::column::Column,
+    indexed: Result<(Vec<usize>, Vec<u64>), String>,
+}
+impl<'a> LaterFoldMapV1<'a> {
+    /// Index `bars` against `windows` once, under the same byte cap `bind`
+    /// applies. O(bars + folds) time and memory.
+    /// # Errors
+    /// Refuses only an allocation failure for the windows copy; an indexing
+    /// refusal or a cap breach is kept and reported by each bind.
+    pub fn new(
+        windows: &[LaterSessionWindowV1],
+        bars: &'a [indicators::Candle],
+        column: &'a indicators::column::Column,
+        mapping_byte_cap: u64,
+    ) -> Result<Self, String> {
+        let mut retained = Vec::new();
+        retained.try_reserve_exact(windows.len()).map_err(display)?;
+        retained.extend_from_slice(windows);
+        let indexed = admit_mapping_bytes(bars.len(), windows.len(), mapping_byte_cap)
+            .and_then(|()| index_folds(windows, bars, column));
+        Ok(Self {
+            windows: retained,
+            bars,
+            column,
+            indexed,
+        })
+    }
+}
+
+/// The mapping and session counts' byte admission, before any allocation.
+fn admit_mapping_bytes(bars: usize, folds: usize, cap: u64) -> Result<(), String> {
+    let bytes = bars
+        .checked_mul(size_of::<usize>())
+        .and_then(|n| {
+            folds
+                .checked_mul(size_of::<u64>())
+                .and_then(|m| n.checked_add(m))
+        })
+        .ok_or("fixed-training mapping byte overflow")?;
+    if u64::try_from(bytes).map_err(display)? > cap {
+        return Err("fixed-training mapping exceeds byte admission".into());
+    }
+    Ok(())
+}
+
+/// Every later bar's fold, and each fold's accepted-session count.
+fn index_folds(
+    windows: &[LaterSessionWindowV1],
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+) -> Result<(Vec<usize>, Vec<u64>), String> {
+    let mut mapping = Vec::new();
+    mapping.try_reserve_exact(bars.len()).map_err(display)?;
+    let mut sessions = Vec::new();
+    sessions.try_reserve_exact(windows.len()).map_err(display)?;
+    sessions.resize(windows.len(), 0_u64);
+    let mut fold = 0_usize;
+    let mut last_accepted = None;
+    for (index, bar) in bars.iter().enumerate() {
+        let actual = day(bar.ts_micros);
+        while windows.get(fold).is_some_and(|window| actual > window.last) {
+            // `saturating_add`, not `+= 1` (G18-runner, D-2066): the step is a call
+            // no mutation rewrites, so the walk always advances and ends where
+            // `windows.get` does. `*= 1` held `fold` at 0 and never returned.
+            fold = fold.saturating_add(1);
+        }
+        let window = windows
+            .get(fold)
+            .ok_or("later bar outside declared folds")?;
+        if actual < window.first {
+            return Err("later bar precedes declared fold".into());
+        }
+        mapping.push(fold);
+        if column.accepts(index) && last_accepted != Some(actual) {
+            let count = sessions.get_mut(fold).ok_or("fold session slot absent")?;
+            *count = count.checked_add(1).ok_or("fold session count overflow")?;
+            last_accepted = Some(actual);
+        }
+    }
+    if sessions.contains(&0) {
+        return Err("fixed-training fold has no accepted actual session".into());
+    }
+    Ok((mapping, sessions))
 }
 
 /// Shared mapping for all original coordinates on one immutable later run.
 pub struct BoundFixedTrainingFoldsV1<'a> {
     plan: &'a FixedTrainingFoldPlanV1,
     later: &'a EvaluatedExpressionOosV1<'a>,
-    mapping: Vec<usize>,
-    sessions: Vec<u64>,
+    /// One program walk for every coordinate this binding materializes
+    /// (D-1833), taken on the first.
+    replay: super::LaterCoordinateReplayV1<'a>,
+    mapping: Cow<'a, [usize]>,
+    sessions: Cow<'a, [u64]>,
 }
 impl BoundFixedTrainingFoldsV1<'_> {
     /// Materialize once through the existing exact exit kernel, then partition.
@@ -232,7 +323,7 @@ impl BoundFixedTrainingFoldsV1<'_> {
         if Chosen::from_cell(cell) != selected.coordinate() {
             return Err("fixed-training coordinate axes differ".into());
         }
-        let trades = self.later.materialize(ordinal)?;
+        let trades = self.replay.materialize(ordinal)?;
         let folds = partition(
             self.plan,
             &self.mapping,
@@ -529,7 +620,7 @@ fn validate_data(data: &ProjectionData) -> Result<Totals, String> {
 const fn day(stamp: i64) -> i64 {
     const DAY: i64 = 86_400_000_000;
     stamp.div_euclid(DAY)
-        + if stamp.rem_euclid(DAY) >= DAY - 19_800_000_000 {
+        + if stamp.rem_euclid(DAY) >= DAY - indicators::IST_OFFSET_MICROS {
             1
         } else {
             0

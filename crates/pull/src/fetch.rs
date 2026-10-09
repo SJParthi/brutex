@@ -88,11 +88,66 @@ pub struct RawRow {
     pub open_interest: Option<i64>,
 }
 
-/// A decoded window: rows, and nothing decided about them.
+/// Candles the vendor SENT that the decoder declined to turn into a row, by
+/// reason (D-3122).
+///
+/// # Why this travels with the window
+///
+/// `crate::http`'s decoders skip a candle with a null price, a negative volume
+/// on a traded listing, a negative open interest other than the sentinel, or
+/// OHLC that cannot have happened. Each skip was counted into a telemetry
+/// warning and then forgotten: [`RawWindow`] carried only the rows that
+/// survived, so `ingest::from_window` read a short `rows` as the whole answer
+/// and `Ingested::balances` said every offered candle was accounted for while
+/// one of them was nowhere on the receipt. On a minute index/cash pull the
+/// request-minute audit happened to name the hole; on a day pull, a contract
+/// pull, or any feed the audit does not cover, nothing did.
+///
+/// Counted here, carried in the window, summed into
+/// `ingest::Ingested::decoder_skips`, and part of the balance — so the vendor's
+/// count is `written + folded + dropped + skipped`, each by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct DecodeSkips {
+    /// A price cell was `null`: the vendor reported no trade in that interval.
+    pub null_price: usize,
+    /// A volume below zero on a listing that trades.
+    pub negative_volume: usize,
+    /// An open interest below zero that is not the null sentinel.
+    pub negative_open_interest: usize,
+    /// OHLC that cannot have happened: an ordering violation or a negative.
+    pub impossible_ohlc: usize,
+}
+
+impl DecodeSkips {
+    /// Every skipped candle, across the four reasons.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.null_price
+            .saturating_add(self.negative_volume)
+            .saturating_add(self.negative_open_interest)
+            .saturating_add(self.impossible_ohlc)
+    }
+
+    /// Adds another window's skips to these, reason by reason.
+    pub const fn absorb(&mut self, other: Self) {
+        self.null_price = self.null_price.saturating_add(other.null_price);
+        self.negative_volume = self.negative_volume.saturating_add(other.negative_volume);
+        self.negative_open_interest = self
+            .negative_open_interest
+            .saturating_add(other.negative_open_interest);
+        self.impossible_ohlc = self.impossible_ohlc.saturating_add(other.impossible_ohlc);
+    }
+}
+
+/// A decoded window: rows, and nothing decided about them — plus the count of
+/// candles the decoder declined, so the receipt can still name every one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RawWindow {
     /// The rows, in the order the vendor sent them.
     pub rows: Vec<RawRow>,
+    /// Candles the vendor sent that never became a row, by reason. See
+    /// [`DecodeSkips`].
+    pub skipped: DecodeSkips,
 }
 
 /// The seven parallel arrays, as a vendor sends them.
@@ -289,6 +344,17 @@ pub enum FetchError {
         /// booleans are the whole of what a diagnosis needs.
         given_two: bool,
     },
+    /// The assembled credential holds a byte an HTTP header cannot carry.
+    ///
+    /// Most often a newline stored with the token. Refused where the
+    /// credential arrives, before a client or a permit exists: until P1-19-01
+    /// (D-2525) it failed inside the client at send time and was reported as
+    /// [`Self::TransportFailed`], which reads as "the vendor was not reached"
+    /// and is retried like a network blip.
+    CredentialNotAHeaderValue {
+        /// The header the credential was to travel in. Never the value.
+        header: &'static str,
+    },
     /// A value resolved into a URL **path segment** cannot sit in one.
     ///
     /// # Refused, never escaped, and the reason is a real symbol
@@ -316,6 +382,17 @@ pub enum FetchError {
         /// nothing on this path can reach the token.
         value: String,
     },
+}
+
+/// [`FetchError::CredentialNotAHeaderValue`]'s sentence (P1-19-01, D-2525).
+fn write_not_a_header_value(f: &mut core::fmt::Formatter<'_>, header: &str) -> core::fmt::Result {
+    write!(
+        f,
+        "the credential for the {header} header holds a byte no HTTP \
+         header can carry, most often a newline stored with the token. \
+         Nothing was sent and no client was built. Re-store the \
+         credential without it; the value is not shown here."
+    )
 }
 
 impl core::fmt::Display for FetchError {
@@ -403,6 +480,7 @@ impl core::fmt::Display for FetchError {
                 if names_two { "two" } else { "one" },
                 if given_two { "two were" } else { "one was" }
             ),
+            Self::CredentialNotAHeaderValue { header } => write_not_a_header_value(f, header),
             Self::PathSegmentUnusable {
                 placeholder,
                 ref value,
@@ -530,7 +608,10 @@ impl RawWindow {
                 open_interest: a.open_interest.get(i).copied(),
             });
         }
-        Ok(Self { rows })
+        Ok(Self {
+            rows,
+            skipped: DecodeSkips::default(),
+        })
     }
 }
 
@@ -613,7 +694,10 @@ impl FakeSource {
     #[must_use]
     pub fn returning(rows: Vec<RawRow>) -> Self {
         Self {
-            answer: Ok(RawWindow { rows }),
+            answer: Ok(RawWindow {
+                rows,
+                skipped: DecodeSkips::default(),
+            }),
         }
     }
 
@@ -666,9 +750,12 @@ pub struct Landed {
 /// Converts a vendor price to paisa.
 ///
 /// A vendor quoting rupees is multiplied by 100; one already quoting paisa is
-/// taken as is. **There is no rounding here and that is deliberate** —
-/// `CLAUDE.md` §7 puts the single snap on the tick grid at the write boundary,
-/// and a second rounding site is a second answer.
+/// taken as is. **There is no rounding here and that is deliberate.** The
+/// single half-up snap onto the tick grid (`CLAUDE.md` §7) has already happened
+/// where the vendor's text was decoded — `http::one_price` and `rolling`'s
+/// `paisa`, through `Paisa::from_rupee_text_half_up` — and a second rounding
+/// site here would be a second answer. (This said the snap was at the write
+/// boundary until D-1494; the store's append snaps nothing.)
 const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
     match scale {
         PriceScale::Paisa => Some(raw),
@@ -744,11 +831,34 @@ pub fn land_with_cash_schedule(
     scale: PriceScale,
     cash_schedule: Option<&crate::cash_auction::Schedule>,
 ) -> Result<Landed, FetchError> {
-    let mut bars = Vec::with_capacity(raw.rows.len());
+    land_rows(&raw.rows, request, encoding, scale, cash_schedule)
+}
+
+/// [`land_with_cash_schedule`] over BORROWED rows, for a caller that holds
+/// them somewhere other than a [`RawWindow`].
+///
+/// # Why it exists
+///
+/// `crate::ingest` holds each fetched member's rows in its own `Member`, and
+/// used to clone the whole vector into a `RawWindow` only to hand this
+/// function a reference to it — one full copy of every row of every member,
+/// made and dropped within the same call. o1api-36, D-1203. Every landing path
+/// now runs through this one body, so the two entry points cannot drift.
+///
+/// # Errors
+/// Returns timestamp, price, or unresolved cash-session errors.
+pub fn land_rows(
+    rows: &[RawRow],
+    request: &BarRequest,
+    encoding: TimestampEncoding,
+    scale: PriceScale,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<Landed, FetchError> {
+    let mut bars = Vec::with_capacity(rows.len());
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
 
-    for (i, row) in raw.rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         // W1 LIVES HERE. The encoding is dispatched, never assumed. A vendor
         // stamping IST wall-clock seconds into a field read as UTC epoch
         // produced 45 bars at wrong timestamps that passed every check and
@@ -812,6 +922,12 @@ pub fn land_with_cash_schedule(
             })?;
         if verdict.is_none() {
             verdict = cash_close_verdict(epoch_utc, request, cash_schedule)?;
+        }
+        // KEPT ON A DAY THE CALENDAR CANNOT CLASSIFY, AND COUNTED BY NAME
+        // (P-03, D-2673). Dropping it would invent a closed day; keeping it
+        // uncounted would be the silent keep `CLAUDE.md` §4 bans.
+        if verdict.is_none() && crate::session::on_unclassified_day(epoch_utc) {
+            census.count_unclassified_kept();
         }
         // A SESSION-HOURS VERDICT IS COUNTED AND KEPT. A WINDOW ONE IS DROPPED.
         //
@@ -947,13 +1063,26 @@ pub fn land_with_cash_schedule(
     // pays no call per row. `DropCensus` counted every rejection in a plain
     // integer, and this is that count, once, where the window closes.
     //
-    // The four reasons are named separately rather than summed, because
+    // The reasons are named separately rather than summed, because
     // "outside the window" and "outside the session" send an operator to two
     // different places — the caller's chunking and the vendor's clock.
+    emit_landed(rows.len(), bars.len(), &census);
+    Ok(Landed {
+        bars,
+        census,
+        outside_session,
+    })
+}
+
+/// The row ledger for one landed window, as one aggregate event: rows in, bars
+/// out, and each drop reason by name, plus the bars kept on a day the exchange
+/// calendar cannot classify. Split out of [`land_rows`] so that body stays one
+/// readable loop; it emits once per window, never per row.
+fn emit_landed(rows_in: usize, bars_out: usize, census: &DropCensus) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::debug("pull.land", "window decoded")
-            .with("rows_in", telemetry::Value::Uint(raw.rows.len() as u64))
-            .with("bars_out", telemetry::Value::Uint(bars.len() as u64))
+            .with("rows_in", telemetry::Value::Uint(rows_in as u64))
+            .with("bars_out", telemetry::Value::Uint(bars_out as u64))
             .with(
                 "before_window",
                 telemetry::Value::Uint(u64::from(
@@ -977,13 +1106,18 @@ pub fn land_with_cash_schedule(
                 telemetry::Value::Uint(u64::from(
                     census.of(crate::session::DropReason::AtOrAfterSessionClose),
                 )),
+            )
+            .with(
+                "on_closed_day",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::OnClosedDay),
+                )),
+            )
+            .with(
+                "kept_unclassified_day",
+                telemetry::Value::Uint(u64::from(census.unclassified_kept())),
             ),
     );
-    Ok(Landed {
-        bars,
-        census,
-        outside_session,
-    })
 }
 
 /// Fetches one window and lands it, in one call.

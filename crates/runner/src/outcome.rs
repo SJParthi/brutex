@@ -42,13 +42,28 @@
 
 // The same exception `crates/greeks` and `crate::significance` take, for the
 // reason §7 states in one breath: prices are paisa integers, and statistical
-// values keep full precision. The RETURN in this module is an `i64` of paisa
-// throughout; only the mean and the t-statistic are floating, and both are
-// statistics rather than money.
+// values keep full precision. Each trade's RETURN is an `i64` of paisa, and
+// `edge` accumulates its sums in paisa integers (`i128`).
+//
+// **This module is NOT float-free money.** `Edge` carries money as `f64`:
+// `mean_paisa`, `win_sum`, `loss_sum`, `adverse_sum` and `favourable_sum`, each
+// converted once from an exact paisa integer by `wide` (D-1173, whose bound is
+// one rounding above 2^53 paisa), and the payoff ratio divides two of those
+// `f64` paisa magnitudes. D-1173 sanctions those fields because `cli` persists
+// their IEEE bits, and §3 rule 8 forbids changing that row in place. Since
+// D-4486 that one rounding never reaches a ranked row: `Edge::money_is_exact`
+// is false for any money field at or past 2^53, and `rank` refuses the row by
+// name rather than keep a rounded total (GAP16-26). This
+// comment and the reason below used to say "only the mean and t-statistic are
+// floating", which this file contradicted; crash-edge-pass20 CE-96, D-1958.
+// The allow is still module-wide: a NEW float price computation added here is
+// not linted, so review it as such.
 #![allow(
     clippy::float_arithmetic,
-    reason = "CLAUDE.md §7 keeps statistical values at full precision. Returns \
-              are paisa i64; only the mean and t-statistic are floating."
+    reason = "CLAUDE.md §7 keeps statistical values at full precision. Per-trade \
+              returns and the accumulators are paisa integers; the mean, the \
+              t-statistic and Edge's D-1173 money fields (paisa sums converted \
+              once to floating point) are floating."
 )]
 
 use indicators::Candle;
@@ -115,17 +130,39 @@ pub struct SessionBounds {
 impl SessionBounds {
     /// Derive the session geometry of `bars`.
     #[must_use]
+    ///
+    /// The cadence at each bar is [`prefix_median_steps_over`]'s: measured over
+    /// bars `0..=i` only, so appending later bars cannot change a boundary
+    /// already derived for an earlier one. `CLAUDE.md` §3 rule 7, D-1410.
     pub fn of(bars: &[Candle]) -> Self {
-        Self::with_step(bars, median_step_micros(bars), None)
+        let steps = prefix_median_steps_over(bars, None);
+        Self::with_steps(bars, |index| steps.get(index).copied().unwrap_or(0), None)
     }
 
-    /// Derive the session geometry with the slice's median step already known.
+    /// Derive the session geometry under ONE cadence for every bar.
     ///
-    /// This is the constructor [`crate::trade::SliceFacts`] uses so its horizon
-    /// clock and its session boundaries share one measurement and no candidate
-    /// loop can allocate the median sample again.
+    /// Test-only since D-1410: production derives a per-bar prefix cadence and
+    /// calls [`Self::with_steps`], which is also the constructor
+    /// [`crate::trade::SliceFacts`] uses so its horizon clock and its session
+    /// boundaries share one measurement.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_step(bars: &[Candle], step_micros: i64, accepted: Option<&[bool]>) -> Self {
+        Self::with_steps(bars, |_| step_micros, accepted)
+    }
+
+    /// Derive the session geometry with a cadence known PER BAR.
+    ///
+    /// `step_at(i)` must depend on bars `0..=i` only. A day's forced close is
+    /// proved with the cadence at its own 15:09 record, and a bar's
+    /// fillability with the cadence at that bar, so no boundary reads a
+    /// cadence measured on bars after the ones it describes. D-1410.
+    #[must_use]
+    pub(crate) fn with_steps(
+        bars: &[Candle],
+        step_at: impl Fn(usize) -> i64,
+        accepted: Option<&[bool]>,
+    ) -> Self {
         struct ReverseSession {
             day: i64,
             square_off: Option<i64>,
@@ -134,7 +171,6 @@ impl SessionBounds {
             day_ended: bool,
         }
 
-        let step = step_micros.max(0);
         let is_accepted = |index: usize| {
             accepted.is_none_or(|verdict| verdict.get(index).copied().unwrap_or(false))
         };
@@ -143,12 +179,23 @@ impl SessionBounds {
         // rows as well as verdicts makes a duplicate timestamp ambiguous even
         // when the evaluator accepts the first and rejects the second.
         let required_open = FORCED_EXIT_MINUTE.saturating_sub(1);
+        let is_required = |bar: &Candle| {
+            bar.ts_micros.rem_euclid(60_000_000) == 0
+                && ist_minute_of_day(bar.ts_micros) == required_open
+        };
+        // PRE-SIZED FROM AN EXACT UPPER BOUND -- D-1177. The map holds one entry
+        // per IST day that has a whole-minute 15:09 record, so it can never need
+        // more entries than there are such records. Counting them first is one
+        // pass of two integer tests per bar, and the reservation can then never
+        // be too small, whatever the slice's shape: a coarse rung, a single
+        // session, or a slice of nothing but 15:09 rows. `bars.len() / 375 + 1`
+        // would under-reserve on exactly those slices, and reserving
+        // `bars.len()` would reserve a million entries for a few hundred days.
+        let candidates = bars.iter().filter(|bar| is_required(bar)).count();
         let mut required: std::collections::HashMap<i64, (u64, Option<usize>)> =
-            std::collections::HashMap::new();
+            std::collections::HashMap::with_capacity(candidates);
         for (index, bar) in bars.iter().enumerate() {
-            if bar.ts_micros.rem_euclid(60_000_000) != 0
-                || ist_minute_of_day(bar.ts_micros) != required_open
-            {
+            if !is_required(bar) {
                 continue;
             }
             let day = exact_ist_day(bar.ts_micros);
@@ -162,12 +209,18 @@ impl SessionBounds {
                 })
                 .or_insert((1, is_accepted(index).then_some(index)));
         }
-        let proved: std::collections::HashSet<i64> = required
-            .iter()
-            .filter_map(|(&day, &(count, accepted_index))| {
-                (step == 60_000_000 && count == 1 && accepted_index.is_some()).then_some(day)
-            })
-            .collect();
+        // At most one proved day per entry of `required`, so that is its size.
+        // The cadence is read per index from `step_at` (D-1410).
+        let mut proved: std::collections::HashSet<i64> =
+            std::collections::HashSet::with_capacity(required.len());
+        proved.extend(
+            required
+                .iter()
+                .filter_map(|(&day, &(count, accepted_index))| {
+                    (count == 1 && accepted_index.is_some_and(|index| step_at(index) == 60_000_000))
+                        .then_some(day)
+                }),
+        );
         let mut stamped: Vec<BarBound> = Vec::with_capacity(bars.len());
         let mut current: Option<ReverseSession> = None;
 
@@ -211,6 +264,7 @@ impl SessionBounds {
             // A non-positive step cannot prove that even this bar's interval
             // completed. Refusing is the only answer that does not invent a
             // timeframe for an empty or one-bar slice.
+            let step = step_at(index).max(0);
             let fillable = step > 0
                 && bar.ts_micros.rem_euclid(60_000_000) == 0
                 && bar
@@ -369,6 +423,15 @@ pub struct Forward {
     /// How far price ran IN FAVOUR of the entry close over `[i+1, exit]`, in
     /// paisa, non-negative. `None` exactly where `ret` is `None`.
     favourable: Vec<Option<i64>>,
+    /// The last bar this position was exposed to: the bar its outcome was
+    /// priced on, the earlier of the horizon and that day's forced close.
+    /// `None` exactly where `ret` is `None`.
+    ///
+    /// Carried because the window `[i + 1, exit]` is what two outcomes SHARE,
+    /// and [`edge`]'s overlap correction pairs two hits only while the older
+    /// window still reaches past the newer entry. A bar-index gap cannot say
+    /// that across a session boundary -- D-1171.
+    exits: Vec<Option<usize>>,
     /// `true` at `i` when the outcome is absent because a BAR WAS REFUSED,
     /// rather than because `i` is in the tail.
     ///
@@ -386,23 +449,66 @@ pub struct Forward {
     /// landed there: `n` fell from 234 to 230 with `mismatched == 0` in both
     /// runs, and nothing anywhere said why.
     ///
-    /// One `bool` per bar. At the store's largest instrument-month that is under
+    /// # And a refused RECORD is not a MISSING MINUTE -- D-1176
+    ///
+    /// This was one `bool`, and every absence that was not the tail set it,
+    /// including a deadline minute that simply has no record and a timestamp gap
+    /// inside the held path. `Edge::refused` then told the operator that the
+    /// store handed this run a record the engine refuses, when no record existed
+    /// to refuse. The lane now names which of the two it was.
+    ///
+    /// One byte per bar. At the store's largest instrument-month that is under
     /// 1.3 MB, once per `Forward` and never per candidate.
-    refused: Vec<bool>,
+    refused: Vec<Unpriced>,
+}
+
+/// Why an outcome inside the slice could not be priced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unpriced {
+    /// Measured, or absent for a reason that is not the data's fault: the
+    /// tail, a forced-exit bar, an unproved session end.
+    No,
+    /// The path held a record the engine REFUSED.
+    Refused,
+    /// The path held no refused record, but a minute it needed has NO record:
+    /// the exact deadline minute, or a step off the cadence inside the path.
+    Missing,
+}
+
+impl Unpriced {
+    /// A refused record anywhere in `from..=to` makes the absence the store's
+    /// refusal. Otherwise the cadence broke with nothing refused, so a minute
+    /// has no record. Two prefix reads.
+    fn of(facts: &crate::trade::SliceFacts, from: usize, to: usize) -> Self {
+        if facts.refused_within(from, to) {
+            Self::Refused
+        } else {
+            Self::Missing
+        }
+    }
 }
 
 impl Forward {
-    /// Was the outcome at `i` dropped because a bar was REFUSED?
+    /// Was the outcome at `i` dropped because its path could not be priced --
+    /// a REFUSED record or a MISSING minute?
     ///
     /// `false` for the tail, for an out-of-range index, and for a bar that has a
-    /// real outcome. Only a record `Candle::check` rejected answers `true`.
+    /// real outcome. [`Self::was_missing`] says which of the two it was.
     ///
     /// Exists because [`Self::at`] returns `None` for two facts that mean
     /// opposite things — see the `refused` field — and every caller that treats
     /// them alike reports a smaller sample with no reason attached.
     #[must_use]
     pub fn was_refused(&self, i: usize) -> bool {
-        self.refused.get(i).copied().unwrap_or(false)
+        self.refused.get(i).is_some_and(|why| *why != Unpriced::No)
+    }
+
+    /// Was the outcome at `i` dropped because a minute its path needed has no
+    /// record at all, with no refused record on that path? A subset of
+    /// [`Self::was_refused`] -- D-1176.
+    #[must_use]
+    pub fn was_missing(&self, i: usize) -> bool {
+        self.refused.get(i) == Some(&Unpriced::Missing)
     }
 
     /// The forward move at caller-slice index `i`, or `None` for the tail.
@@ -424,6 +530,13 @@ impl Forward {
     #[must_use]
     pub fn favourable_at(&self, i: usize) -> Option<i64> {
         self.favourable.get(i).copied().flatten()
+    }
+
+    /// The bar the outcome at `i` was priced on, or `None` exactly where
+    /// [`Self::at`] is `None`. Always later than `i`.
+    #[must_use]
+    pub fn exit_at(&self, i: usize) -> Option<usize> {
+        self.exits.get(i).copied().flatten()
     }
 
     /// How many bars have an outcome at all.
@@ -484,88 +597,309 @@ impl Forward {
     }
 }
 
-/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
-/// Range maximum and minimum over any `[lo, hi]` in O(1), built once.
+/// Range maximum and minimum over the excursion window `[entry + 1, exit]`,
+/// answered by two monotonic deques that slide with it.
 ///
-/// # Why a sparse table and not a sliding deque
+/// # Why a sliding deque answers this window after all — D-1170
 ///
-/// The excursion window is `[entry + 1, exit]`, and `exit` is the EARLIER of the
-/// horizon and that day's forced close -- so its width varies per entry. A
-/// monotonic deque answers a fixed-width sliding window; it cannot answer a
-/// variable one without either re-walking (Θ(h) per query) or widening the
-/// window past the real exit, which would report an excursion the position was
-/// never exposed to. `CLAUDE.md` §3 rule 1 forbids the second and §3 rule 4
-/// forbids the first.
+/// This was a sparse table, under a doc that said a monotonic deque "answers a
+/// fixed-width sliding window; it cannot answer a variable one". That is true of
+/// a window whose ends may move BACKWARDS and false of this one. The window's
+/// width does vary -- `exit` is the earlier of the horizon and that day's
+/// forced close -- but both of its ends only ever move FORWARD as `forward`
+/// walks the entries in order:
 ///
-/// A sparse table answers any range in O(1) from two overlapping power-of-two
-/// blocks, because max and min are idempotent -- overlapping twice is harmless.
-/// Build is O(n log n) once per `forward`, which is per RUN, not per candidate
-/// and not per bar.
-struct RangeExtremes {
-    /// `levels[k][i]` is the extreme over `[i, i + 2^k)`. Level 0 is the bars
-    /// themselves.
-    highs: Vec<Vec<i64>>,
-    lows: Vec<Vec<i64>>,
+/// * the left end is `i + 1`, and `i` only increases;
+/// * the right end is `exit(i)`. Every accepted bar has a strictly later
+///   timestamp than the one before it, so the exact-deadline exit
+///   `ts(i) + H·step` increases with `i`; an entry whose deadline passes the
+///   forced close exits on that day's forced bar, and every later entry that
+///   day does too; and a later day's forced bar is later in the slice.
+///
+/// A deque whose two ends only advance pushes and pops each bar at most once,
+/// so a whole `forward` is O(bars) and one query is amortised O(1). The sparse
+/// table it replaces was Θ(n log n) time and two `n·log₂ n` tables of memory
+/// per `forward` -- per ranked run and per walk-forward fold, at 1,222,791 bars
+/// some 21 levels. The answers are integer maxima and minima, so they are
+/// bit-identical; `the_sliding_window_agrees_with_a_full_scan_on_every_query`
+/// checks every query against a direct scan.
+///
+/// # A query that moves backwards is still answered, at the cost it really has
+///
+/// [`Self::over`] does not TRUST the monotonicity above. **`forward` does issue
+/// a backward query** (o1eng2-1): since D-1410 the deadline is
+/// `ts(i) + step_at(i)·H` and `step_at` is a prefix median that can step DOWN,
+/// so on a slice whose median cadence flips the exit moves backwards. Such a
+/// query is answered by [`BlockExtremes`], built once per `forward` on the
+/// first one (O(n)), in at most two partial blocks of reads plus one table
+/// lookup -- O(1) -- and the deques are left as they were for the next forward
+/// query. Until D-1572 the deques were cleared and rebuilt, Θ(window) per
+/// backward query (D-1550 stated it).
+///
+/// **UNVERIFIED as a measured bound.** No bench row times `forward`; the
+/// O(bars) total is argued from the shape above. `CLAUDE.md` §3 rule 6.
+struct WindowExtremes {
+    /// Indices into the slice whose highs are strictly decreasing front to
+    /// back; the front is the window's maximum.
+    highs: std::collections::VecDeque<(usize, i64)>,
+    /// Indices whose lows are strictly increasing front to back; the front is
+    /// the window's minimum.
+    lows: std::collections::VecDeque<(usize, i64)>,
+    /// The first slice index not yet pushed.
+    next: usize,
+    /// Bars read so far, deque pushes and block scans alike: the cost a test
+    /// holds to O(1) amortised per query (o1eng2-1, D-1572).
+    /// Proved by
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    touched: u64,
+    /// The left end the deques were last popped to. A query left of it cannot
+    /// be served from them.
+    popped_to: usize,
+    /// Built on the first query the deques cannot serve. See [`BlockExtremes`].
+    blocks: Option<BlockExtremes>,
 }
 
-impl RangeExtremes {
-    fn of(bars: &[Candle]) -> Self {
-        let n = bars.len();
-        let mut highs: Vec<Vec<i64>> = vec![bars.iter().map(|b| b.high).collect()];
-        let mut lows: Vec<Vec<i64>> = vec![bars.iter().map(|b| b.low).collect()];
-        let mut width = 1_usize;
-        while width.saturating_mul(2) <= n {
-            let prev = highs.len().saturating_sub(1);
-            let span = n.saturating_sub(width.saturating_mul(2)).saturating_add(1);
-            let mut nh: Vec<i64> = Vec::with_capacity(span);
-            let mut nl: Vec<i64> = Vec::with_capacity(span);
-            for i in 0..span {
-                let (a, b) = (i, i.saturating_add(width));
-                let hi = highs
-                    .get(prev)
-                    .map_or(i64::MIN, |row| row.get(a).copied().unwrap_or(i64::MIN))
-                    .max(
-                        highs
-                            .get(prev)
-                            .map_or(i64::MIN, |row| row.get(b).copied().unwrap_or(i64::MIN)),
-                    );
-                let lo = lows
-                    .get(prev)
-                    .map_or(i64::MAX, |row| row.get(a).copied().unwrap_or(i64::MAX))
-                    .min(
-                        lows.get(prev)
-                            .map_or(i64::MAX, |row| row.get(b).copied().unwrap_or(i64::MAX)),
-                    );
-                nh.push(hi);
-                nl.push(lo);
-            }
-            highs.push(nh);
-            lows.push(nl);
-            width = width.saturating_mul(2);
+impl WindowExtremes {
+    fn new() -> Self {
+        Self {
+            highs: std::collections::VecDeque::new(),
+            lows: std::collections::VecDeque::new(),
+            next: 0,
+            touched: 0,
+            popped_to: 0,
+            blocks: None,
         }
-        Self { highs, lows }
     }
 
-    /// The highest high and lowest low over `[lo, hi]` inclusive, or `None` when
-    /// the range is empty or out of bounds.
-    fn over(&self, lo: usize, hi: usize) -> Option<(i64, i64)> {
-        if hi < lo {
+    /// The highest high and lowest low over `bars[lo..=hi]`, or `None` when the
+    /// range is empty or reaches past the slice.
+    fn over(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
+        // ONE BOUNDS CHECK, NOT TWO COMPARISONS (D-1452). `get(lo..=hi)` is
+        // `None` when `hi` reaches past the slice or `lo > hi + 1`, and the one
+        // empty `Some` is `lo == hi + 1`. The former `hi < lo || hi >= len`
+        // carried a `||` -> `&&` mutant no test could observe: every range it
+        // let through still answered `None` further down, so the operator
+        // decided only how much work a refusal cost. O(1) either way.
+        if bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty) {
             return None;
         }
-        let len = hi.saturating_sub(lo).saturating_add(1);
-        // The largest k with 2^k <= len. `usize::BITS - leading_zeros` is that
-        // exponent plus one, so one subtraction gives it without a float log.
-        let k = usize::BITS
-            .saturating_sub(len.leading_zeros())
-            .saturating_sub(1) as usize;
-        let width = 1_usize.checked_shl(u32::try_from(k).ok()?)?;
-        let second = hi.checked_sub(width)?.saturating_add(1);
-        let hr = self.highs.get(k)?;
-        let lr = self.lows.get(k)?;
+        // BACKWARDS: ANSWERED BY THE BLOCK TABLE, AND THE DEQUES ARE KEPT. A
+        // right end before the last pushed bar, `next - 1`, cannot be served
+        // by popping, and a left end before one already popped cannot either.
+        // Rebuilding the deques from `lo` cost Θ(window) per such query
+        // (o1eng2-1); the block table answers it in at most 2·EXTREME_BLOCK bar
+        // reads and one table lookup, and the deques stay valid for the next
+        // forward query. D-1572. The right-end test is `next >= hi + 2` as a
+        // `checked_sub` (D-1455): spelled `hi + 1 < next`, its `<` could
+        // become `<=` unobserved, because at `hi == next - 1` the block table
+        // and the deques give the same extremes, at different cost. `hi + 2`
+        // cannot saturate: a `hi` past the slice was refused above.
+        if self.next.checked_sub(hi.saturating_add(2)).is_some() || lo < self.popped_to {
+            return self.over_blocks(bars, lo, hi);
+        }
+        // A JUMP PAST EVERYTHING HELD: skip the bars before `lo` (D-1455).
+        // Every held index is below `next`, so below `lo`, and the front pops
+        // after the push loop discard each of them once. This was a second
+        // reset clause, `|| lo > self.next`, and Gate 18 showed its `>` could
+        // become `==` or `>=` unobserved: without the reset the skipped bars
+        // were pushed and popped again, the same answer at more cost. `max` is
+        // the skip with no operator to mutate. O(1).
+        self.next = self.next.max(lo);
+        while self.next <= hi {
+            let bar = bars.get(self.next)?;
+            self.touched = self.touched.saturating_add(1);
+            while self.highs.back().is_some_and(|&(_, h)| h <= bar.high) {
+                self.highs.pop_back();
+            }
+            self.highs.push_back((self.next, bar.high));
+            while self.lows.back().is_some_and(|&(_, l)| l >= bar.low) {
+                self.lows.pop_back();
+            }
+            self.lows.push_back((self.next, bar.low));
+            self.next = self.next.saturating_add(1);
+        }
+        while self.highs.front().is_some_and(|&(at, _)| at < lo) {
+            self.highs.pop_front();
+        }
+        while self.lows.front().is_some_and(|&(at, _)| at < lo) {
+            self.lows.pop_front();
+        }
+        self.popped_to = lo;
+        self.highs
+            .front()
+            .zip(self.lows.front())
+            .map(|(&(_, high), &(_, low))| (high, low))
+    }
+
+    /// [`Self::over`] for a query the deques cannot serve, through
+    /// [`BlockExtremes`], built once on the first such query.
+    fn over_blocks(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
+        if self.blocks.is_none() {
+            self.blocks = Some(BlockExtremes::of(bars, &mut self.touched));
+        }
+        let table = self.blocks.as_ref()?;
+        let (first, last) = (lo / EXTREME_BLOCK, hi / EXTREME_BLOCK);
+        if last <= first.saturating_add(1) {
+            return scan_extremes(bars, lo, hi, &mut self.touched);
+        }
+        let left_end = first
+            .saturating_add(1)
+            .saturating_mul(EXTREME_BLOCK)
+            .saturating_sub(1);
+        let right_start = last.saturating_mul(EXTREME_BLOCK);
+        let middle = table.over(first.saturating_add(1), last.saturating_sub(1))?;
+        let left = scan_extremes(bars, lo, left_end, &mut self.touched)?;
+        let right = scan_extremes(bars, right_start, hi, &mut self.touched)?;
         Some((
-            (*hr.get(lo)?).max(*hr.get(second)?),
-            (*lr.get(lo)?).min(*lr.get(second)?),
+            left.0.max(middle.0).max(right.0),
+            left.1.min(middle.1).min(right.1),
         ))
+    }
+}
+
+/// Bars per block of [`BlockExtremes`]. A partial block is scanned, so a
+/// backward query reads at most two of them: a constant, not the window.
+const EXTREME_BLOCK: usize = 64;
+
+/// The highest high and lowest low of `bars[lo..=hi]` by direct scan, counting
+/// the bars read. Only ever handed a range inside at most two blocks.
+fn scan_extremes(bars: &[Candle], lo: usize, hi: usize, touched: &mut u64) -> Option<(i64, i64)> {
+    let window = bars.get(lo..=hi)?;
+    *touched = touched.saturating_add(u64::try_from(window.len()).unwrap_or(u64::MAX));
+    let high = window.iter().map(|bar| bar.high).max()?;
+    let low = window.iter().map(|bar| bar.low).min()?;
+    Some((high, low))
+}
+
+/// Each block's extremes, and those of every power-of-two run of blocks
+/// (o1eng2-1, D-1572).
+///
+/// Built only when [`WindowExtremes`] meets a query its deques cannot serve,
+/// once per `forward`: one pass over the bars, then `levels` over
+/// `n / EXTREME_BLOCK` blocks. That is O(n) time and memory -- the levels hold
+/// `(n / 64)·log₂(n / 64)` pairs, under `n` for any slice that fits in memory --
+/// and every query after it is O(1). It is not the per-BAR sparse table D-1185
+/// removed, whose two `n·log₂ n` tables were 21 levels deep at 1,222,791 bars;
+/// this one is 15 levels of 19,107 pairs there, about 4.6 MB. The 4.6 MB is
+/// arithmetic, not a measurement; the O(1) query is proved by
+/// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+struct BlockExtremes {
+    /// `levels[k][b]`: the extremes of blocks `b ..= b + 2^k - 1`.
+    levels: Vec<Vec<(i64, i64)>>,
+}
+
+impl BlockExtremes {
+    fn of(bars: &[Candle], touched: &mut u64) -> Self {
+        *touched = touched.saturating_add(u64::try_from(bars.len()).unwrap_or(u64::MAX));
+        let base: Vec<(i64, i64)> = bars
+            .chunks(EXTREME_BLOCK)
+            .map(|chunk| {
+                let high = chunk.iter().map(|bar| bar.high).max().unwrap_or(i64::MIN);
+                let low = chunk.iter().map(|bar| bar.low).min().unwrap_or(i64::MAX);
+                (high, low)
+            })
+            .collect();
+        // ONLY THE LEVELS A QUERY CAN READ (D-1464). `over_blocks` hands
+        // [`Self::over`] the blocks strictly between a query's first and last,
+        // so a run is at most `blocks - 2` long and its deepest level is
+        // `ilog2(blocks - 2)`. The loop stopped at `doubled > below.len()`,
+        // which also built a top level no query reaches whenever
+        // `blocks + 1` is three times a power of two -- and Gate 18 showed its
+        // `>` could become `>=` unobserved. Bounded by the readable run
+        // instead, every level is read by some query, and
+        // `the_block_table_builds_exactly_the_levels_a_middle_run_reads`
+        // pins the count.
+        let longest_middle = base.len().saturating_sub(2);
+        let mut levels = vec![base];
+        let mut span = 1_usize;
+        while let Some(below) = levels.last() {
+            let doubled = span.saturating_mul(2);
+            if doubled > longest_middle {
+                break;
+            }
+            let level: Vec<(i64, i64)> = below
+                .iter()
+                .zip(below.iter().skip(span))
+                .map(|(&(h1, l1), &(h2, l2))| (h1.max(h2), l1.min(l2)))
+                .collect();
+            levels.push(level);
+            span = doubled;
+        }
+        Self { levels }
+    }
+
+    /// The extremes of blocks `first ..= last`: two overlapping runs, O(1).
+    /// Proved by
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    fn over(&self, first: usize, last: usize) -> Option<(i64, i64)> {
+        let count = last.checked_sub(first)?.checked_add(1)?;
+        let depth = count.ilog2();
+        let level = self.levels.get(usize::try_from(depth).ok()?)?;
+        let run = 1_usize.checked_shl(depth)?;
+        let (a, b) = (
+            level.get(first)?,
+            level.get(last.checked_add(1)?.checked_sub(run)?)?,
+        );
+        Some((a.0.max(b.0), a.1.min(b.1)))
+    }
+}
+
+/// The parallel lanes `forward` fills, one slot per offered bar in each.
+///
+/// One type so an absent outcome is ONE call that writes every lane. It was
+/// five pushes repeated at eight exits from the loop, and a lane added to seven
+/// of them would have shifted every later index of the eighth by one.
+struct Lanes {
+    ret: Vec<Option<i64>>,
+    /// WHY an outcome is absent -- see `Forward::refused`.
+    refused: Vec<Unpriced>,
+    /// `None` exactly where `ret` is `None`, so a caller cannot read an
+    /// excursion for an outcome that does not exist.
+    adverse: Vec<Option<i64>>,
+    favourable: Vec<Option<i64>>,
+    /// See `Forward::exits`.
+    exits: Vec<Option<usize>>,
+}
+
+impl Lanes {
+    fn with_capacity(bars: usize) -> Self {
+        Self {
+            ret: Vec::with_capacity(bars),
+            refused: Vec::with_capacity(bars),
+            adverse: Vec::with_capacity(bars),
+            favourable: Vec::with_capacity(bars),
+            exits: Vec::with_capacity(bars),
+        }
+    }
+
+    /// No outcome at this bar; `why` says whether the data was at fault.
+    fn absent(&mut self, why: Unpriced) {
+        self.ret.push(None);
+        self.refused.push(why);
+        self.adverse.push(None);
+        self.favourable.push(None);
+        self.exits.push(None);
+    }
+
+    /// A measured outcome, its two excursions and the bar it exited on.
+    fn measured(&mut self, moved: i64, up: Option<i64>, down: Option<i64>, exit: usize) {
+        self.ret.push(Some(moved));
+        self.refused.push(Unpriced::No);
+        self.adverse.push(down);
+        self.favourable.push(up);
+        self.exits.push(Some(exit));
+    }
+
+    fn into_forward(self, horizon: Horizon, bars_len: usize) -> Forward {
+        Forward {
+            horizon,
+            bars_len,
+            ret: self.ret,
+            refused: self.refused,
+            adverse: self.adverse,
+            favourable: self.favourable,
+            exits: self.exits,
+        }
     }
 }
 
@@ -583,30 +917,40 @@ impl RangeExtremes {
 /// measurement.
 #[must_use]
 pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
+    forward_over(bars, horizon, &crate::trade::SliceFacts::of(bars, column))
+}
+
+/// [`forward`] over slice facts the caller already built (D-1185).
+///
+/// `forward` builds [`crate::trade::SliceFacts`] on entry, an O(B) value. A
+/// caller that also walks trades on the same slice -- `crate::validate`'s
+/// training fold builds one for its candidate loop -- builds them once and
+/// passes them here, rather than paying for a second copy of the same facts
+/// (audit o1runner-5). `facts` must be [`crate::trade::SliceFacts::of`] the
+/// same `bars` and the column the outcomes are for. Facts whose verdict does
+/// not cover `bars` price nothing: every outcome is absent and refused, never
+/// read through another slice's verdict.
+#[must_use]
+pub fn forward_over(
+    bars: &[Candle],
+    horizon: Horizon,
+    facts: &crate::trade::SliceFacts,
+) -> Forward {
     let h = horizon.as_bars() as usize;
-    let facts = crate::trade::SliceFacts::of(bars, column);
-    // EXCURSIONS, BUILT ONCE. See `RangeExtremes` for why this is a sparse table
-    // and `Forward::adverse` for why the ranking stage needed it at all.
-    let extremes = RangeExtremes::of(bars);
+    let covered = facts.covers(bars);
+    // EXCURSIONS, SLID ONCE. See `WindowExtremes` for why two deques that only
+    // advance answer this window, and `Forward::adverse` for why the ranking
+    // stage needed it at all.
+    let mut extremes = WindowExtremes::new();
 
     // PASS THREE: the return, from entry to the earlier of the horizon and the
     // forced close.
-    let mut ret: Vec<Option<i64>> = Vec::with_capacity(bars.len());
-    // Parallel to `ret`, marking WHY an outcome is absent. Pre-sized for the same
-    // reason `ret` is: gate 11 rule 3 asks every collection on this path to be
-    // sized once rather than grown.
-    let mut refused: Vec<bool> = Vec::with_capacity(bars.len());
-    // THE TWO EXCURSION LANES, parallel to `ret`. `None` exactly where `ret` is
-    // `None`, so a caller cannot read an excursion for an outcome that does not
-    // exist -- the same discipline `refused` already keeps.
-    let mut adverse: Vec<Option<i64>> = Vec::with_capacity(bars.len());
-    let mut favourable: Vec<Option<i64>> = Vec::with_capacity(bars.len());
+    // Every lane pre-sized once: gate 11 rule 3 asks every collection on this
+    // path to be sized once rather than grown. See `Lanes`.
+    let mut lanes = Lanes::with_capacity(bars.len());
     for i in 0..bars.len() {
-        if !facts.accepts(i) {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+        if !covered || !facts.accepts(i) {
+            lanes.absent(Unpriced::Refused);
             continue;
         }
         // NO ENTRY ON A FORCED-EXIT BAR. At the square-off the position is being
@@ -615,21 +959,15 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // `bar_open + tf > forced_minute`, which [`SessionBounds::fillable`]
         // answers per day rather than against a fixed minute.
         let Some(square_off) = facts.exits().get(i).copied().flatten() else {
-            ret.push(None);
-            refused.push(false);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(Unpriced::No);
             continue;
         };
         let Some(start) = bars.get(i).map(|bar| bar.ts_micros) else {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(Unpriced::Refused);
             continue;
         };
         let span = i64::try_from(h).unwrap_or(i64::MAX);
-        let deadline = start.saturating_add(facts.step_micros().saturating_mul(span));
+        let deadline = start.saturating_add(facts.step_at(i).saturating_mul(span));
         let forced_stamp = bars
             .get(square_off.bar)
             .map_or(i64::MIN, |bar| bar.ts_micros);
@@ -654,25 +992,19 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             square_off.bar
         } else if deadline <= forced_stamp {
             let Some(want) = facts.at_timestamp(deadline) else {
-                ret.push(None);
-                refused.push(true);
-                adverse.push(None);
-                favourable.push(None);
+                // No accepted record at the deadline. A refused record within
+                // the `h` records after the entry is the store's fault; with
+                // none there, the minute has no record at all -- D-1176.
+                lanes.absent(Unpriced::of(facts, i, i.saturating_add(h)));
                 continue;
             };
             want
         } else {
-            ret.push(None);
-            refused.push(false);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(Unpriced::No);
             continue;
         };
         if exit <= i {
-            ret.push(None);
-            refused.push(false);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(Unpriced::No);
             continue;
         }
         // A BAR THIS RUN ALREADY REFUSED MAY NOT PRICE AN EXIT.
@@ -715,10 +1047,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // runs and nothing said why. A silent smaller sample is a quieter version
         // of the same §4 failure.
         if !facts.path_accepts(i, exit) {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(Unpriced::of(facts, i, exit));
             continue;
         }
         let Some((later, now)) = bars
@@ -726,14 +1055,10 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             .zip(bars.get(i))
             .map(|(later, now)| (later.close, now.close))
         else {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(Unpriced::Refused);
             continue;
         };
-        ret.push(Some(later.saturating_sub(now)));
-        refused.push(false);
+        let moved = later.saturating_sub(now);
         // THE EXCURSIONS OVER THE BARS THIS POSITION IS ACTUALLY EXPOSED TO.
         //
         // `[i + 1, exit]`, not `[i, i + h]`: the entry bar's own range is before
@@ -752,52 +1077,36 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // facts.
         let (up, down) =
             extremes
-                .over(i.saturating_add(1), exit)
+                .over(bars, i.saturating_add(1), exit)
                 .map_or((None, None), |(high, low)| {
                     (
                         Some(high.saturating_sub(now).max(0)),
                         Some(now.saturating_sub(low).max(0)),
                     )
                 });
-        favourable.push(up);
-        adverse.push(down);
+        lanes.measured(moved, up, down, exit);
     }
 
-    Forward {
-        horizon,
-        bars_len: bars.len(),
-        ret,
-        refused,
-        adverse,
-        favourable,
-    }
+    lanes.into_forward(horizon, bars.len())
 }
 
-/// The median positive same-session gap between consecutive bars, in
-/// microseconds.
+/// The median positive same-session gap between consecutive bars of the WHOLE
+/// slice, in microseconds.
 ///
-/// Overnight gaps are excluded outright; median and not mean keeps an intraday
-/// closure from redefining the timeframe. Zero means the slice contains no
-/// positive observed step; callers then refuse to invent one.
+/// **Test-only, and kept as the oracle the prefix cadence must end on.** It was
+/// the production cadence until D-1410, and it read bars after every trade it
+/// clocked: appending forty two-minute sessions to eight one-minute ones moved
+/// it to two minutes, and every trade and outcome the eight sessions had already
+/// produced vanished. [`prefix_median_steps_over`] replaces it; its LAST entry
+/// equals this value on every slice, which
+/// `the_prefix_cadence_ends_on_the_whole_slice_median` pins.
+#[cfg(test)]
 pub(crate) fn median_step_micros(bars: &[Candle]) -> i64 {
-    median_step_micros_over(bars, None)
-}
-
-/// [`median_step_micros`], excluding every record the execution evaluator
-/// refused. A duplicate timestamp or overflowing accumulator record may not
-/// define another trade's clock.
-pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>) -> i64 {
     let mut steps: Vec<i64> = bars
         .iter()
-        .enumerate()
-        .zip(bars.iter().enumerate().skip(1))
-        .filter(|((a_index, a), (b_index, b))| {
-            accepted.is_none_or(|verdict| {
-                verdict.get(*a_index).copied().unwrap_or(false)
-                    && verdict.get(*b_index).copied().unwrap_or(false)
-            }) && indicators::ist_day(a.ts_micros) == indicators::ist_day(b.ts_micros)
-        })
-        .map(|((_, a), (_, b))| b.ts_micros.saturating_sub(a.ts_micros))
+        .zip(bars.iter().skip(1))
+        .filter(|(a, b)| indicators::ist_day(a.ts_micros) == indicators::ist_day(b.ts_micros))
+        .map(|(a, b)| b.ts_micros.saturating_sub(a.ts_micros))
         .filter(|&step| step > 0)
         .collect();
     if steps.is_empty() {
@@ -806,6 +1115,90 @@ pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>
     let middle = steps.len() / 2;
     let (_, median, _) = steps.select_nth_unstable(middle);
     *median
+}
+
+/// The cadence at every bar, measured on bars `0..=i` ONLY.
+///
+/// Entry `i` is the upper median (sorted index `len / 2`) of every positive
+/// same-IST-day gap between adjacent rows `(j - 1, j)` with `j <= i`, both
+/// accepted by the evaluator when `accepted` is given. Before the first such
+/// gap, entry `i` is the gap `(i, i + 1)` when that one qualifies: the first
+/// step of a position opened at `i`, which that position holds before any exit.
+/// Otherwise `0`, and callers then refuse to invent a timeframe.
+///
+/// # Why per bar
+///
+/// `CLAUDE.md` §3 rule 7: at bar N the engine may read bars `0..N`. A single
+/// whole-slice median is decided by bars no trade at N could have seen, so it
+/// broke append-invariance (D-1410). Median rather than mean still keeps an
+/// intraday closure from redefining the timeframe, and overnight gaps are still
+/// excluded outright.
+///
+/// # Cost
+///
+/// One forward pass with a two-heap running median: O(log g) per bar, where
+/// `g` is the number of gaps seen so far, and O(n) memory for the heaps and the
+/// output. The former whole-slice selection was O(n) total; this is the named
+/// O(n log n) per-SLICE bound in `docs/06-limits.md`. It runs once per
+/// [`crate::trade::SliceFacts`], never per candidate.
+pub(crate) fn prefix_median_steps_over(bars: &[Candle], accepted: Option<&[bool]>) -> Vec<i64> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let qualifies =
+        |index: usize| accepted.is_none_or(|verdict| verdict.get(index).copied().unwrap_or(false));
+    // `lower` holds the smaller floor(n/2) gaps, `upper` the larger ceil(n/2);
+    // the upper median is therefore `upper`'s minimum. At most `n - 1` gaps
+    // exist, so each half is sized once for its share and no push in the bar
+    // loop reallocates (D-2308).
+    let half = bars.len().div_ceil(2);
+    let mut lower: BinaryHeap<i64> = BinaryHeap::with_capacity(half);
+    let mut upper: BinaryHeap<Reverse<i64>> = BinaryHeap::with_capacity(half);
+    let mut out: Vec<i64> = Vec::with_capacity(bars.len());
+    let mut prior: Option<(usize, &Candle)> = None;
+    for (index, bar) in bars.iter().enumerate() {
+        if let Some((prior_index, prior_bar)) = prior
+            && qualifies(prior_index)
+            && qualifies(index)
+            && indicators::ist_day(prior_bar.ts_micros) == indicators::ist_day(bar.ts_micros)
+        {
+            let step = bar.ts_micros.saturating_sub(prior_bar.ts_micros);
+            if step > 0 {
+                if upper.peek().is_some_and(|&Reverse(least)| step >= least) {
+                    upper.push(Reverse(step));
+                } else {
+                    lower.push(step);
+                }
+                if upper.len() > lower.len().saturating_add(1) {
+                    if let Some(Reverse(moved)) = upper.pop() {
+                        lower.push(moved);
+                    }
+                } else if lower.len() > upper.len()
+                    && let Some(moved) = lower.pop()
+                {
+                    upper.push(Reverse(moved));
+                }
+            }
+        }
+        out.push(upper.peek().map_or(0, |&Reverse(median)| median));
+        prior = Some((index, bar));
+    }
+    // BEFORE THE FIRST GAP, THE TRADE'S OWN FIRST STEP. Until one qualifying
+    // gap exists the prefix knows no cadence, which would leave the first bar
+    // of every slice unable to enter or measure anything. A position opened at
+    // bar `i` holds bar `i + 1` before it can exit, so that gap belongs to its
+    // own path: it is the earliest bar any completed trade from `i` reads, and
+    // no bar after its exit. `out[i] == 0` means no gap was seen through `i`,
+    // so `out[i + 1]` is exactly the gap `(i, i + 1)` or still zero.
+    for index in 0..out.len() {
+        if out.get(index) == Some(&0)
+            && let Some(&next) = out.get(index.saturating_add(1))
+            && let Some(slot) = out.get_mut(index)
+        {
+            *slot = next;
+        }
+    }
+    out
 }
 
 /// Minute of the IST day, `0..1440`.
@@ -930,6 +1323,13 @@ pub struct Edge {
     /// Zero when nothing lost — which is a real sample and not a missing one,
     /// and [`Self::worst_reward_risk_bp`] says what it does about it.
     pub max_loss_paisa: f64,
+    /// The SMALLEST losing forward move as a MAGNITUDE, in paisa. Zero when
+    /// nothing lost.
+    ///
+    /// A SHORT's smallest win, which [`Self::worst_reward_risk_bp`] needs when
+    /// the combination is traded short and which no other field can recover --
+    /// D-1178. Not persisted, like the other three extrema.
+    pub min_loss_paisa: f64,
     /// Bars whose source index lay OUTSIDE the slice the `Forward` came from.
     ///
     /// Non-zero means the caller paired a `Column` with a `Forward` built from a
@@ -942,8 +1342,9 @@ pub struct Edge {
     /// about one mask and has nowhere to put an error; `CLAUDE.md` §4 asks for
     /// the reason to be named beside the answer, and this names it.
     pub mismatched: u64,
-    /// Bars where the mask fired and the outcome was dropped because a BAR WAS
-    /// REFUSED.
+    /// Bars where the mask fired and the outcome was dropped because its path
+    /// could not be priced: a REFUSED record, or a MISSING minute. [`Self::missing`]
+    /// counts the second kind, so `refused - missing` is the refused records.
     ///
     /// # Not the tail, and it used to be indistinguishable from it
     ///
@@ -958,11 +1359,22 @@ pub struct Edge {
     /// `Edge::mismatched`"*. It was not, and this field is what makes the claim
     /// true.
     ///
-    /// **Zero on every sound slice.** Non-zero means the store handed this run a
-    /// record the engine refuses, and every figure beside it is over a smaller
-    /// sample rather than a corrected one — `CLAUDE.md` §4, degrade loudly and
-    /// name the reason.
+    /// **Zero on every sound, complete slice.** Non-zero means the store handed
+    /// this run a record the engine refuses or left a minute out, and every
+    /// figure beside it is over a smaller sample rather than a corrected one —
+    /// `CLAUDE.md` §4, degrade loudly and name the reason.
+    ///
+    /// Kept as the total, not split, because `cli` persists it in the
+    /// sweep-evidence row as the "unpriceable/refused outcome count", and
+    /// changing what that stored number means is what §3 rule 8 forbids.
     pub refused: u64,
+    /// The part of [`Self::refused`] where no record was refused: a minute the
+    /// path needed has no record at all -- D-1176.
+    ///
+    /// It was counted, unnamed, as a refused record, so a holed session read as a
+    /// corrupt store. Not persisted. It is an in-memory reason, derived again on
+    /// every run.
+    pub missing: u64,
     /// The t-statistic of that mean against zero.
     ///
     /// `mean / (sd / √n)`. Zero when fewer than two observations exist, where a
@@ -972,7 +1384,49 @@ pub struct Edge {
     pub t: f64,
 }
 
+/// 2^53, the first paisa magnitude an `f64` cannot prove it holds exactly.
+///
+/// Every integer of smaller magnitude is an `f64` exactly, and [`wide`] rounds
+/// to nearest, so a converted value strictly below this came from exactly that
+/// integer. At this value and above the conversion may have rounded: 2^53 + 1
+/// converts to 2^53. D-4486.
+pub const EXACT_PAISA_LIMIT: f64 = 9_007_199_254_740_992.0;
+
 impl Edge {
+    /// Whether every money field is the exact paisa integer it was summed as —
+    /// GAP16-26, D-4486.
+    ///
+    /// The eight money fields are [`Self::win_sum`], [`Self::loss_sum`],
+    /// [`Self::adverse_sum`], [`Self::favourable_sum`] and the four extrema.
+    /// Each is an exact `i128` or `i64` converted once by [`wide`], and each is
+    /// exact while its magnitude is below 2^53. `true` exactly when all eight
+    /// are finite and strictly below [`EXACT_PAISA_LIMIT`] in magnitude.
+    ///
+    /// **A field of exactly 2^53 answers `false` though it is exact.** The
+    /// `f64` 2^53 is also what 2^53 + 1 converts to, so from the stored value
+    /// the two cannot be told apart, and refusing both is the side of that
+    /// ambiguity §4 allows. One value, and 90 lakh crore rupees out.
+    ///
+    /// `mean_paisa` and `t` are statistics, and §7 keeps those at full float
+    /// precision; they are not money totals and are not asked. When the two
+    /// largest-move extrema are exact every move was below 2^53, so each move
+    /// the mean folded in was itself exact.
+    #[must_use]
+    pub fn money_is_exact(&self) -> bool {
+        [
+            self.win_sum,
+            self.loss_sum,
+            self.adverse_sum,
+            self.favourable_sum,
+            self.min_win_paisa,
+            self.max_win_paisa,
+            self.max_loss_paisa,
+            self.min_loss_paisa,
+        ]
+        .iter()
+        .all(|money| money.abs() < EXACT_PAISA_LIMIT)
+    }
+
     /// The SMALLEST win over the LARGEST loss, in hundredths. The operator's
     /// own rule, stated verbatim — D-0593.
     ///
@@ -990,23 +1444,48 @@ impl Edge {
     /// what to do with it, and `CLAUDE.md` §4 asks that the decision be visible
     /// rather than folded into a sentinel here.
     ///
-    /// **Nothing won.** `min_win_paisa` is zero, so the ratio is zero — the
+    /// **Fewer than two moves.** Zero, exactly as [`Self::payoff_bp`] answers: one
+    /// move has no smallest win and no largest loss to set against it (D-3407).
+    ///
+    /// **Nothing won.** The smallest win is zero, so the ratio is zero — the
     /// floor, tying with the worst. A setup that never won is not asymmetric,
     /// it is absent, and ranking it above anything would be the fallback that
     /// hides a failure §4 bans.
+    ///
+    /// # Read on the side the combination is traded -- D-1178
+    ///
+    /// `cli::side_of_evidence` trades a combination SHORT exactly when
+    /// `mean_paisa < 0`, and [`Self::payoff_bp`] already reads its side that
+    /// way. This read the LONG's figures for every combination: an ideal short
+    /// whose every move was down has no up move, scored the floor and was cut. For
+    /// a short the wins are the DOWN moves, so the ratio is the smallest down
+    /// move ([`Self::min_loss_paisa`]) over the largest up move
+    /// ([`Self::max_win_paisa`]). Moves of [-300, -300, -300, +10] score 3000,
+    /// not 3.
     #[must_use]
     pub fn worst_reward_risk_bp(&self) -> i64 {
-        if self.min_win_paisa <= 0.0 {
+        // Fewer than two observations — zero, the guard `payoff_bp` has. One move
+        // is not a distribution, and without this a single win scored `i64::MAX`
+        // above a `payoff_bp` of zero, breaking the "always at or below" this
+        // doc states and topping `rank::ByAsymmetry` (D-3407).
+        if self.n < 2 {
             return 0;
         }
-        if self.max_loss_paisa <= 0.0 {
+        let (smallest_gain, largest_giveback) = if self.mean_paisa < 0.0 {
+            (self.min_loss_paisa, self.max_win_paisa)
+        } else {
+            (self.min_win_paisa, self.max_loss_paisa)
+        };
+        if smallest_gain <= 0.0 {
+            return 0;
+        }
+        if largest_giveback <= 0.0 {
             return i64::MAX;
         }
-        // `as` is refused here for the same reason the excursion sums use
-        // `f64::from`: a ratio of two paisa magnitudes is bounded by the
-        // instrument's own range, and a value that somehow is not saturates
-        // rather than wrapping into a plausible number.
-        let ratio = self.min_win_paisa / self.max_loss_paisa * 100.0;
+        // A ratio of two paisa magnitudes is bounded by the instrument's own
+        // range, and a value that somehow is not saturates below rather than
+        // wrapping into a plausible number.
+        let ratio = smallest_gain / largest_giveback * 100.0;
         if !ratio.is_finite() || ratio <= 0.0 {
             return 0;
         }
@@ -1162,6 +1641,22 @@ impl Edge {
         clamped
     }
 
+    /// The largest single move IN THE TRADED DIRECTION, in paisa: the largest
+    /// up move for a long, the largest down move's magnitude for a short
+    /// (`mean_paisa < 0`) -- D-1178.
+    ///
+    /// `rank::ByAsymmetry` breaks ties on "how much it pays when it pays", and
+    /// read `max_win_paisa` for every combination. For a short that is its
+    /// WORST loss, so ties were broken toward the short that hurt most.
+    #[must_use]
+    pub fn largest_gain_paisa(&self) -> f64 {
+        if self.mean_paisa < 0.0 {
+            self.max_loss_paisa
+        } else {
+            self.max_win_paisa
+        }
+    }
+
     /// What the PATH offered, in hundredths: mean favourable excursion over
     /// mean adverse excursion. `300` reads 3.00.
     ///
@@ -1186,25 +1681,34 @@ impl Edge {
     /// asking. Same disclaimer `payoff_bp` carries, for the same reason.
     ///
     /// Zero adverse excursion is `i64::MAX`, not an error: a combination whose
-    /// hits never traded below their entry is the best possible shape for a
+    /// hits never traded against their entry is the best possible shape for a
     /// stop, and it is a fact about the sample rather than a promise.
+    ///
+    /// # Read on the side the combination is traded -- D-1178
+    ///
+    /// `favourable_sum` is the UP excursion and `adverse_sum` the DOWN one, which
+    /// is a long's reading. For a combination traded short (`mean_paisa < 0`,
+    /// the rule `cli::side_of_evidence` and [`Self::payoff_bp`] use) the down run
+    /// is the reward and the up run the risk, so the two are swapped. Read long
+    /// for every combination, the best short scored near the floor.
     #[must_use]
     pub fn path_ratio_bp(&self) -> i64 {
         const UNBOUNDED: f64 = 9.0e18;
+        let (reward, risk) = if self.mean_paisa < 0.0 {
+            (self.adverse_sum, self.favourable_sum)
+        } else {
+            (self.favourable_sum, self.adverse_sum)
+        };
         if self.n == 0 {
             return 0;
         }
-        if self.adverse_sum <= 0.0 {
-            // Never went against the entry at all. `favourable_sum` of zero as
-            // well means nothing moved either way, which is no ratio rather
-            // than an infinite one.
-            return if self.favourable_sum > 0.0 {
-                i64::MAX
-            } else {
-                0
-            };
+        if risk <= 0.0 {
+            // Never went against the position at all. A reward of zero as well
+            // means nothing moved either way, which is no ratio rather than an
+            // infinite one.
+            return if reward > 0.0 { i64::MAX } else { 0 };
         }
-        let ratio = self.favourable_sum / self.adverse_sum * 100.0;
+        let ratio = reward / risk * 100.0;
         if !ratio.is_finite() || ratio >= UNBOUNDED {
             return i64::MAX;
         }
@@ -1303,12 +1807,13 @@ fn milli(x: f64) -> i64 {
 ///
 /// Keeping them together also makes the ZERO rule checkable in one place rather
 /// than at each `+=`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Sides {
     /// Strictly positive observations.
     wins: u64,
-    /// Sum of the strictly positive observations.
-    win_sum: f64,
+    /// Sum of the strictly positive observations, EXACT -- D-1173. An `i128`
+    /// cannot overflow on fewer than 2^64 observations of an `i64` move.
+    win_sum: i128,
     /// Strictly negative observations.
     ///
     /// **Counted rather than derived, and that is the whole point.** It was
@@ -1324,8 +1829,8 @@ struct Sides {
     /// away. A flat forward move on a one-minute index bar is routine, so it
     /// fired constantly, and `ByPayoff` RANKS on the result.
     losses: u64,
-    /// Sum of the strictly negative observations. Negative or zero.
-    loss_sum: f64,
+    /// Sum of the strictly negative observations. Negative or zero. Exact.
+    loss_sum: i128,
     /// The SMALLEST strictly positive observation, in paisa. Zero when none.
     ///
     /// # The three order statistics, and why sums could not stand in
@@ -1337,19 +1842,23 @@ struct Sides {
     /// -- MEAN win over MEAN loss -- which is precisely the statistic the rule
     /// names and rejects, because one catastrophic loss hides behind many small
     /// ones in a denominator and one enormous win is diluted by the rest.
-    min_win: f64,
+    min_win: i64,
     /// The LARGEST strictly positive observation, in paisa. Zero when none.
     ///
     /// Carried beside `min_win` because the two answer different halves of the
     /// same objective: `min_win` decides whether the 3:1 rule HOLDS, and this
     /// decides how much the setup PAYS when it pays. A rank on the first alone
     /// prefers a setup whose wins are uniformly mediocre.
-    max_win: f64,
+    max_win: i64,
     /// The largest strictly negative observation as a MAGNITUDE, in paisa.
     ///
     /// Non-negative, and zero when nothing lost. Stored positive so the ratio
     /// against `min_win` is a division rather than a sign argument.
-    max_loss: f64,
+    /// Unsigned because the magnitude of `i64::MIN` is not an `i64`.
+    max_loss: u64,
+    /// The SMALLEST strictly negative observation as a magnitude. Zero when
+    /// nothing lost; opened by the first loss, as `min_win` is by the first win.
+    min_loss: u64,
 }
 
 impl Sides {
@@ -1357,33 +1866,69 @@ impl Sides {
     ///
     /// **Zero is neither.** A flat forward move paid nothing and cost nothing;
     /// charging it to a side would move [`Edge::payoff_bp`] by the number of
-    /// flat bars rather than by anything about the setup. A NaN is also neither
-    /// — it fails both comparisons — which is the honest handling for a value
-    /// that is not a move at all.
+    /// flat bars rather than by anything about the setup.
+    ///
+    /// # Paisa in, paisa held — D-1173
+    ///
+    /// This took the move as an `f64` and kept every sum and extremum as one, so
+    /// a move above 2^53 paisa was rounded on the way in and every sum was
+    /// rounded at every addition once it passed 2^53. A forward move is an `i64`
+    /// of paisa (§7). It is now held as one, the sums as exact `i128`, and the
+    /// float is made once, when [`edge`] assembles the [`Edge`].
     ///
     /// The three extrema are maintained here rather than derived later for the
     /// reason the field docs give: nothing downstream holds the observations.
     /// `min_win` opens at zero and is replaced by the first win rather than
     /// compared against it, because a zero sentinel would otherwise win every
     /// comparison and pin the minimum at nothing.
-    fn observe(&mut self, x: f64) {
-        if x > 0.0 {
+    fn observe(&mut self, x: i64) {
+        if x > 0 {
             self.wins = self.wins.saturating_add(1);
-            self.win_sum += x;
-            if self.min_win == 0.0 || x < self.min_win {
-                self.min_win = x;
-            }
-            if x > self.max_win {
-                self.max_win = x;
-            }
-        } else if x < 0.0 {
+            self.win_sum = self.win_sum.saturating_add(i128::from(x));
+            // `min`, not a guarded `x < self.min_win`: an equal `x` stores the
+            // same value, so that guard's `<=` was an equivalent mutant
+            // (G18-runner, D-2059). The zero test opens it on the first win.
+            self.min_win = if self.min_win == 0 {
+                x
+            } else {
+                self.min_win.min(x)
+            };
+            self.max_win = self.max_win.max(x);
+        } else if x < 0 {
             self.losses = self.losses.saturating_add(1);
-            self.loss_sum += x;
-            if -x > self.max_loss {
-                self.max_loss = -x;
-            }
+            self.loss_sum = self.loss_sum.saturating_add(i128::from(x));
+            self.max_loss = self.max_loss.max(x.unsigned_abs());
+            let magnitude = x.unsigned_abs();
+            self.min_loss = if self.min_loss == 0 {
+                magnitude
+            } else {
+                self.min_loss.min(magnitude)
+            };
         }
     }
+}
+
+/// An exact paisa integer as the `f64` [`Edge`] carries — D-1173.
+///
+/// Exact for every magnitude up to 2^53 paisa (about 90 lakh crore rupees).
+/// Above that, ONE rounding to nearest, made here, where the old path rounded at
+/// every addition. `Edge`'s money fields stay `f64` because `cli` persists their
+/// IEEE bits in the sweep-evidence row, and changing that row's meaning in place
+/// is what §3 rule 8 forbids.
+///
+/// **The rounding is made here and refused downstream (D-4486).** An `Edge` whose
+/// money field came out of this at or past 2^53 answers `false` from
+/// [`Edge::money_is_exact`], and `crate::rank` keeps no such row: it is counted
+/// in `Ranked::inexact` and the findings report names the count. So a stored or
+/// printed ranked total is always the exact integer, and the rounded one exists
+/// only in an `Edge` a caller asked `edge` for directly.
+fn wide(paisa: i128) -> f64 {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the one documented rounding, above 2^53 paisa only."
+    )]
+    let out = paisa as f64;
+    out
 }
 
 /// The Newey-West long-run sum of squares, from `edge`'s four accumulators.
@@ -1423,6 +1968,251 @@ fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c:
     2.0f64.mul_add(cross, m2)
 }
 
+/// The hits whose forward windows still share a bar with the newest one, and
+/// the Newey-West cross-sums they have contributed — O(1) amortised per hit.
+///
+/// # Why the pair loop had to go — D-1174
+///
+/// `edge` visited every queued hit for every new one: O(min(H, hits in the
+/// window)) per hit. Before D-1171 nothing bounded the queue but `H`, which the
+/// operator sets up to `u32::MAX`, so a candidate's cost reached Θ(n²) in its
+/// own hits. The session drain bounds the queue to one day, but a hit per bar
+/// over a whole session is still a few hundred visits per hit.
+///
+/// Every queued hit `o` contributes Bartlett weight `(H - (s - o)) / H` to a
+/// pair with the new hit `s`. That weight is LINEAR in `o`, so each per-hit sum
+/// factors into a few running sums over the queue:
+///
+/// * `Σ a_o y_o = (H - s)·Σ y_o + Σ o·y_o`
+/// * `Σ a_o     = (H - s)·k   + Σ o`
+///
+/// where `a_o = H - (s - o)`. A push adds a hit's terms and a pop subtracts
+/// them, so each hit costs O(1) amortised and the queue is visited by nobody.
+///
+/// # Exact, and centred on the first observation
+///
+/// The running sums are `i128` integers and so are EXACT. Pushing and popping
+/// therefore leave no rounding drift, which a floating running sum would
+/// accumulate on every pop. Offsets are taken from the hit that opened the
+/// current overlap cluster, and moves from the sample's first move:
+/// `y = x - x₀`. A cluster lies inside one day's contiguous priced minutes, so
+/// an offset is below 1,440 and `|y| < 2^64`. Every product is then below 2^108.
+/// `i128` holds that with nineteen bits to spare, so the saturating operations
+/// below cannot saturate on a priced slice.
+///
+/// Shifting by `x₀` also removes the level, which was the catastrophic
+/// cancellation the `m2 <= 0` guard in `edge` documents. The uncentred sums are
+/// formed at the scale of the SPREAD, not of the price.
+///
+/// # Each hit leaves when ITS window closes, whatever order exits come in
+///
+/// A hit `o` stops pairing at its death `d_o = min(exit_o, o + H)`: from then
+/// on no new entry shares a bar with it. The queue used to drain from the
+/// FRONT only, which is right while exits advance with entries. Since D-1410
+/// they need not (o1eng2-1): a flipping median cadence moves an exit back, and
+/// a hit whose window had closed stayed queued behind an older one whose window
+/// had not, so its pairs were counted as overlapping. Hits are now filed on a
+/// timing wheel by death, and every observation retires exactly the hits that
+/// died since the last one -- O(1) amortised per bar of the walk, since the
+/// wheel's tick only moves forward and a gap of a whole turn empties it in one
+/// sweep. D-1572.
+///
+/// **UNVERIFIED as a measured bound.** No bench row covers `edge`. The O(1)
+/// claim is argued from the code (§3 rule 6).
+struct OverlapWindow {
+    /// The horizon `H`, in bars.
+    horizon: usize,
+    /// `x₀`: the first observation, which every `y` is measured from.
+    shift: Option<i64>,
+    /// The hit that opened the current cluster. Offsets are taken from it.
+    anchor: usize,
+    /// Live and retired hits. A retired slot is reused through `free`.
+    slab: Vec<Queued>,
+    /// The first reusable slot, or `NONE`.
+    free: usize,
+    /// `wheel[d % len]`: the first live hit whose death is `d`, chained by
+    /// `Queued::next`. Never empty, so `%` is defined.
+    wheel: Vec<usize>,
+    /// The last entry observed: every hit dead by it has been retired.
+    tick: usize,
+    /// How many hits are live.
+    live: usize,
+    /// `k`, `Σ y`, `Σ o` and `Σ o·y` over the live hits, exact.
+    sums: [i128; 4],
+    /// `Σ w·y_i·y_j`, `Σ w·(y_i + y_j)` and `Σ w` over every overlapping pair.
+    cross: [f64; 3],
+}
+
+/// One hit on [`OverlapWindow`]'s wheel.
+#[derive(Clone, Copy)]
+struct Queued {
+    /// Offset from the cluster's anchor.
+    offset: i128,
+    /// `y = x - x₀`.
+    lifted: i128,
+    /// The first entry this hit no longer pairs with: `min(exit, o + H)`.
+    death: usize,
+    /// The next hit filed in the same wheel slot, or the next free slot.
+    next: usize,
+}
+
+/// The end of a chain in [`OverlapWindow`].
+const NONE: usize = usize::MAX;
+
+impl OverlapWindow {
+    fn new(horizon: usize, capacity: usize) -> Self {
+        Self {
+            horizon,
+            shift: None,
+            anchor: 0,
+            slab: Vec::with_capacity(capacity),
+            free: NONE,
+            wheel: vec![NONE; capacity.max(1)],
+            tick: 0,
+            live: 0,
+            sums: [0; 4],
+            cross: [0.0; 3],
+        }
+    }
+
+    /// Fold one measured hit: retire the hits whose windows closed by this
+    /// entry, add its pairs with every hit still live, and file it.
+    fn observe(&mut self, source: usize, moved: i64, exit: usize) {
+        let first = *self.shift.get_or_insert(moved);
+        let lifted = i128::from(moved).saturating_sub(i128::from(first));
+        // TWO WAYS OUT OF RANGE, AND THE SECOND IS THE SESSION -- D-1171. A
+        // pair at a bar gap of `H` or more shares no bar. Neither does a pair
+        // whose OLDER window had already EXITED by this entry: `forward` ends
+        // every window at the earlier of the horizon and that day's forced
+        // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
+        // apart and share nothing at any horizon. Both are one death time,
+        // and the wheel retires by it in any exit order (D-1572).
+        self.retire_through(source);
+        if self.live == 0 {
+            self.anchor = source;
+        }
+        let offset = i128::try_from(source.saturating_sub(self.anchor)).unwrap_or(i128::MAX);
+        let span = i128::try_from(self.horizon).unwrap_or(i128::MAX);
+        let [held, total_lifted, total_offset, total_product] = self.sums;
+        // `a_o = H - (s - o)` is in `1..H` for every live hit, by the death.
+        let lead = span.saturating_sub(offset);
+        let weighted = lead
+            .saturating_mul(total_lifted)
+            .saturating_add(total_product);
+        let weights = lead.saturating_mul(held).saturating_add(total_offset);
+        let both = weighted.saturating_add(lifted.saturating_mul(weights));
+        let [products, pair_sums, weight_sum] = &mut self.cross;
+        let horizon = wide(span);
+        *products += wide(lifted) * wide(weighted) / horizon;
+        *pair_sums += wide(both) / horizon;
+        *weight_sum += wide(weights) / horizon;
+        // DEATH AFTER THE ENTRY. An exit at or before the entry (`edge` passes
+        // the entry itself when `forward` has none) pairs with no later hit,
+        // which is a death at the next bar.
+        let death = exit
+            .min(source.saturating_add(self.horizon))
+            .max(source.saturating_add(1));
+        self.file(Queued {
+            offset,
+            lifted,
+            death,
+            next: NONE,
+        });
+        self.add(offset, lifted, 1);
+    }
+
+    /// Retires every live hit whose death is at or before `source`.
+    ///
+    /// Walks the wheel slots of the ticks since the last entry, at most one
+    /// whole turn: a gap of a turn or more retires everything in one sweep. The
+    /// tick never moves back, so across a walk the slots visited are bounded by
+    /// the bars walked.
+    fn retire_through(&mut self, source: usize) {
+        if self.live == 0 {
+            self.tick = source;
+            return;
+        }
+        let turn = self.wheel.len();
+        let ticks = source.saturating_sub(self.tick).min(turn);
+        for step in 1..=ticks {
+            if self.live == 0 {
+                break;
+            }
+            let slot = self.tick.saturating_add(step) % turn;
+            self.retire_slot(slot, source);
+        }
+        self.tick = self.tick.max(source);
+    }
+
+    /// Retires the dead hits filed in one wheel slot and keeps the rest there.
+    fn retire_slot(&mut self, slot: usize, source: usize) {
+        let mut at = self.wheel.get(slot).copied().unwrap_or(NONE);
+        let mut kept = NONE;
+        while let Some(&hit) = self.slab.get(at) {
+            let next = hit.next;
+            if hit.death <= source {
+                self.add(hit.offset, hit.lifted, -1);
+                self.live = self.live.saturating_sub(1);
+                if let Some(freed) = self.slab.get_mut(at) {
+                    freed.next = self.free;
+                }
+                self.free = at;
+            } else {
+                if let Some(staying) = self.slab.get_mut(at) {
+                    staying.next = kept;
+                }
+                kept = at;
+            }
+            at = next;
+        }
+        if let Some(head) = self.wheel.get_mut(slot) {
+            *head = kept;
+        }
+    }
+
+    /// Files one hit in the wheel slot of its death.
+    fn file(&mut self, mut hit: Queued) {
+        let slot = hit.death % self.wheel.len();
+        hit.next = self.wheel.get(slot).copied().unwrap_or(NONE);
+        let at = if let Some(reused) = self.slab.get_mut(self.free) {
+            let at = self.free;
+            self.free = reused.next;
+            *reused = hit;
+            at
+        } else {
+            self.slab.push(hit);
+            self.slab.len().saturating_sub(1)
+        };
+        if let Some(head) = self.wheel.get_mut(slot) {
+            *head = at;
+        }
+        self.live = self.live.saturating_add(1);
+    }
+
+    /// Add (`sign = 1`) or remove (`sign = -1`) one hit's terms, exactly.
+    fn add(&mut self, offset: i128, lifted: i128, sign: i128) {
+        let [held, total_lifted, total_offset, total_product] = &mut self.sums;
+        *held = held.saturating_add(sign);
+        *total_lifted = total_lifted.saturating_add(sign.saturating_mul(lifted));
+        *total_offset = total_offset.saturating_add(sign.saturating_mul(offset));
+        *total_product =
+            total_product.saturating_add(sign.saturating_mul(offset.saturating_mul(lifted)));
+    }
+
+    /// How many hits are still live.
+    fn held(&self) -> usize {
+        self.live
+    }
+
+    /// `long_run_sum_squares` over these cross-sums, for a sample whose
+    /// Welford mean is `mean` and centred sum of squares is `m2`.
+    fn sum_squares(&self, m2: f64, mean: f64) -> f64 {
+        let x0 = wide(i128::from(self.shift.unwrap_or(0)));
+        let [a, b, c] = self.cross;
+        long_run_sum_squares(m2, mean - x0, a, b, c)
+    }
+}
+
 /// Measures one mask's forward moves over the bars where it fired.
 ///
 /// # Cost
@@ -1435,38 +2225,31 @@ fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c:
 ///
 /// **It is no longer strictly no-storage, and the bound is stated rather than
 /// glossed.** The overlap correction keeps the hits whose forward windows still
-/// touch the current bar, which is at most one per bar over the last `H` bars.
-/// So the working set is `O(H)` — fifteen entries at the default horizon — and
-/// `H` is a run PARAMETER, not a function of how many bars were loaded or how
-/// many the mask hit. Constant in the data, linear in a number the operator
-/// chose. Still one pass.
+/// share a bar with the current one. That is at most one per bar of one
+/// session's window: `min(H, bars in a session)` entries, fifteen at the default
+/// horizon and never more than one day's minutes at any horizon (D-1171). Each
+/// hit is folded in O(1) amortised through `OverlapWindow`'s exact running
+/// sums, and no queued hit is ever visited (D-1174). It was
+/// `O(min(H, hits in the window))` per hit, quadratic in the hits once `H`
+/// passed their span. Still one pass.
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "ONE FOLD over the column, and the length is comment rather than \
-              control flow: the body is a single loop with no branching to lift \
-              out, and every paragraph in it records a defect this function \
-              already had -- the overlap correction, the refused-bar guard, the \
-              split sum, and now the path sums. Splitting it would put the \
-              accumulation in one function and the only place that can check the \
-              accumulators agree in another."
-)]
 pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut n: u64 = 0;
     let mut mismatched: u64 = 0;
     // Outcomes dropped because a bar was REFUSED, kept apart from the tail. See
     // `Forward::refused`: both are absent, and they mean opposite things.
     let mut refused: u64 = 0;
+    let mut missing: u64 = 0;
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
     // The two sides of the distribution, kept apart -- see `Edge::payoff_bp`
     // for why the funnel needs them and `|t|` cannot supply them.
     let mut sides = Sides::default();
     // THE PATH SUMS. See `Edge::adverse_sum`.
-    let mut adverse_sum = 0.0_f64;
-    let mut favourable_sum = 0.0_f64;
+    let mut adverse_sum: i128 = 0;
+    let mut favourable_sum: i128 = 0;
 
     // THE OVERLAP CORRECTION, AND WHY THE t BELOW IS MEANINGLESS WITHOUT IT.
     //
@@ -1535,16 +2318,14 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // Nothing measured this. `crates/runner/benches/ratio.rs` has no row
     // covering `edge` or the ranking pass, and `rank::rank`'s own doc says so.
     // The change is argued from the shape, not from a timing. §3 rule 6.
-    let mut recent: std::collections::VecDeque<(usize, f64)> =
-        std::collections::VecDeque::with_capacity(
-            horizon_bars.min(forward.bars_len.saturating_add(1)),
-        );
-    // Uncentered, because the mean is not known until the walk ends. The three
-    // together reconstruct the centered weighted cross-sum exactly:
+    // The queue and its exact running sums -- see `OverlapWindow`. Its three
+    // cross-sums are uncentred, because the mean is not known until the walk
+    // ends, and together reconstruct the centred weighted cross-sum exactly:
     // `Σ w (x_i - m)(x_j - m) = A - m·B + m²·C`.
-    let mut cross_a = 0.0_f64; // Σ w · x_i · x_j
-    let mut cross_b = 0.0_f64; // Σ w · (x_i + x_j)
-    let mut cross_c = 0.0_f64; // Σ w
+    let mut recent = OverlapWindow::new(
+        horizon_bars,
+        horizon_bars.min(forward.bars_len.saturating_add(1)),
+    );
 
     // WHOLE-SLICE AGREEMENT, ASKED ONCE. `covers` is a per-index test and every
     // index of a SHORTER column satisfies it, so on its own it lets a `Forward`
@@ -1582,6 +2363,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
             // corrupt bar can only ever be an exit bar it always landed here.
             if forward.was_refused(source) {
                 refused = refused.saturating_add(1);
+            }
+            if forward.was_missing(source) {
+                missing = missing.saturating_add(1);
             }
             continue;
         };
@@ -1625,7 +2409,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // replacement for the exit grid — it has no stop, no target and no
         // path, so it cannot say what a stop WOULD have done. It says which
         // combinations are worth asking that question about.
-        sides.observe(x);
+        sides.observe(r);
 
         // AND THE PATH, WHICH `sides` CANNOT SEE.
         //
@@ -1639,51 +2423,22 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // struct gained fields at all: every stage that ranks on `Edge` was
         // choosing which combinations reach the exit grid while blind to the
         // one property that decides whether a stop helps them.
-        // `f64::from` on an `i32`, which is LOSSLESS -- no `as` and no precision
-        // lint to silence. An excursion is a price DIFFERENCE over one horizon,
-        // so it is bounded by the instrument's own range and cannot approach
-        // two billion paisa; a value that somehow did is dropped rather than
-        // truncated into a plausible number.
-        if let Some(down) = forward
-            .adverse_at(source)
-            .and_then(|v| i32::try_from(v).ok())
-        {
-            adverse_sum += f64::from(down);
-        }
-        if let Some(up) = forward
-            .favourable_at(source)
-            .and_then(|v| i32::try_from(v).ok())
-        {
-            favourable_sum += f64::from(up);
-        }
+        // EXACT `i128` SUMS, converted once at assembly -- D-1173. These went
+        // through `i32::try_from` and DROPPED any excursion above 2^31 paisa
+        // (about 2.1 crore rupees), so the sum silently left that hit out while
+        // `n` still counted it. That was a smaller sum presented as a whole one,
+        // which is the fallback §4 bans.
+        adverse_sum =
+            adverse_sum.saturating_add(i128::from(forward.adverse_at(source).unwrap_or(0)));
+        favourable_sum =
+            favourable_sum.saturating_add(i128::from(forward.favourable_at(source).unwrap_or(0)));
 
-        // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE.
-        //
-        // `sources` is strictly increasing, so the front of the queue is the
-        // oldest and the moment it falls out of range every entry behind it is
-        // in range. Dropping from the front is therefore complete, not a
-        // heuristic.
-        while let Some(&(older, _)) = recent.front() {
-            if source.saturating_sub(older) >= horizon_bars {
-                recent.pop_front();
-            } else {
-                break;
-            }
-        }
-        for &(older, x_older) in &recent {
-            let gap = source.saturating_sub(older);
-            // `gap` is in `1..horizon_bars` by the drain above, so the weight is
-            // in `(0, 1)` and never the `d = 0` self-pair, which is `m2`'s job.
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "a bar gap below the horizon cannot reach 2^52."
-            )]
-            let w = 1.0 - (gap as f64) / (horizon_bars as f64);
-            cross_a += w * x_older * x;
-            cross_b += w * (x_older + x);
-            cross_c += w;
-        }
-        recent.push_back((source, x));
+        // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE, paired in O(1)
+        // amortised -- see `OverlapWindow`. `exit_at` is `Some` wherever `at`
+        // was, which is the only way here; the `source` fallback would share no
+        // bar with the next hit and drain at once, so it could not pair anything
+        // that does not overlap.
+        recent.observe(source, r, forward.exit_at(source).unwrap_or(source));
     }
 
     // ONE ASSEMBLY POINT FOR BOTH EXITS. The early return and the final one
@@ -1693,20 +2448,22 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         n,
         mismatched,
         refused,
+        missing,
         mean_paisa: mean,
         // CARRIED, not zeroed, on the `t = 0.0` path. A single observation has
         // no `t` -- there is no spread to divide by -- but it did move one way
         // or the other, and `payoff_bp` refuses a one-sided sample on its own
         // terms rather than being handed a zero that looks measured.
         wins: sides.wins,
-        win_sum: sides.win_sum,
-        adverse_sum,
-        favourable_sum,
+        win_sum: wide(sides.win_sum),
+        adverse_sum: wide(adverse_sum),
+        favourable_sum: wide(favourable_sum),
         losses: sides.losses,
-        loss_sum: sides.loss_sum,
-        min_win_paisa: sides.min_win,
-        max_win_paisa: sides.max_win,
-        max_loss_paisa: sides.max_loss,
+        loss_sum: wide(sides.loss_sum),
+        min_win_paisa: wide(i128::from(sides.min_win)),
+        max_win_paisa: wide(i128::from(sides.max_win)),
+        max_loss_paisa: wide(i128::from(sides.max_loss)),
+        min_loss_paisa: wide(i128::from(sides.min_loss)),
         t,
     };
 
@@ -1756,13 +2513,15 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // `no_zero_spread_mask_reports_a_finding_on_the_ordinary_fixture` are those
     // two measurements, and both FAIL when this check is removed.
     //
-    // AND `rank::walk` ORDERS ON `edge.t.abs()`, so those artefacts sorted
+    // AND `rank::rank` ORDERS ON `edge.t.abs()`, so those artefacts sorted
     // ABOVE every genuine finding and occupied the head of `Ranked::top`, where
     // `keep` cut the real results out beneath them. `significance::p_value` is
     // `2(1 - Φ(|t|))`, which clamps to exactly zero at that magnitude, so they
     // cleared any Bonferroni bar the run could set. `Scored::cmp` deliberately
     // demotes NON-FINITE scores — the ordering defends against infinity and was
-    // defeated by a large finite artefact.
+    // defeated by a large finite artefact. (This and four more sites in this
+    // file named `rank::walk`, which never existed: the ordering is
+    // `rank::rank`'s, through `impl Ord for rank::Scored`. Audit r64-3, D-4501.)
     //
     // `m2` IS THE EXACT TEST AND NEEDS NO EPSILON. Welford increments it by
     // `delta * delta2`, and on identical observations both factors are exactly
@@ -1779,36 +2538,71 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     if m2 <= 0.0 {
         return assemble(0.0);
     }
+    // ONE WINDOW HOLDING THE WHOLE SAMPLE IS NO EVIDENCE EITHER -- D-1171.
+    //
+    // The queue is drained only when a pair stops sharing bars, so if it still
+    // holds every observation, every pair overlapped: the Bartlett bandwidth
+    // covers the whole sample. Newey-West needs a bandwidth well inside the
+    // sample. At this extreme every weight tends to one, and the corrected sum
+    // tends to `(Σ (x - m))²`, which is ZERO by the definition of the mean. What
+    // survives is rounding. Measured on the empty mask over
+    // `synthetic::sessions(6)`, whose one swept day is one shared window at
+    // `H = u32::MAX`: 353 hits scored `t` = 14,175.6 without this check.
+    // Before the session drain the whole slice was one window, and the audit
+    // measured `t` = 24,673.4 and 116,747.9 at 8 and 32 sessions and 0 at
+    // 128, where the residue came out negative. `rank::rank` sorts such a
+    // figure above every real finding.
+    //
+    // `Horizon::bars` refuses only zero and `BRUTEX_HORIZON_BARS` parses any
+    // `u32`, so this is reachable from the operator's own knob. The session
+    // drain above confines a pair to one day, so a sample spread over two or
+    // more days always leaves the queue. Only a sample inside one shared
+    // window reaches this line.
+    if u64::try_from(recent.held()).is_ok_and(|held| held == n) {
+        return assemble(0.0);
+    }
     #[allow(
         clippy::cast_precision_loss,
         reason = "the observation count is bounded by the column length."
     )]
     let count = n as f64;
-    let sum_squares = long_run_sum_squares(m2, mean, cross_a, cross_b, cross_c);
-    let variance = sum_squares / (count - 1.0);
-    let standard_error = (variance / count).sqrt();
-    let t = if standard_error > 0.0 && standard_error.is_finite() {
+    assemble(newey_west_t(count, mean, recent.sum_squares(m2, mean)))
+}
+
+/// The t-statistic of `mean` over `count` observations whose long-run sum of
+/// squares is `sum_squares`, or `0.0` when that sum cannot give one.
+///
+/// # Split out so the refusal is tested where it lives -- D-1175
+///
+/// The test named for this refusal never called `edge`. It asserted that
+/// `f64::sqrt` of a negative number is `NaN`, which is a fact about IEEE 754 and
+/// holds with the guard deleted. This is the last step of `edge`, unchanged, and
+/// `a_long_run_sum_that_cannot_give_a_t_reports_none` drives it directly.
+///
+/// # When the sum is not positive
+///
+/// The comment here used to say the Bartlett kernel is positive semi-definite
+/// only on evenly spaced lags, so irregular hits could drive the sum negative
+/// by negative autocovariance. That was wrong. The triangle `max(0, 1 - |d|/H)`
+/// is a positive-definite function on the real line (its Fourier transform is
+/// a squared sinc), so its matrix is positive semi-definite at ANY set of hit
+/// positions. Under D-1171 the matrix is one such block per day, which is still
+/// positive semi-definite. The exact sum is never negative.
+///
+/// What CAN reach here is rounding: the sum is assembled from uncentred terms
+/// in `f64` (`long_run_sum_squares`), and a near-degenerate sample can round to
+/// zero or just below it. `sqrt` of a negative is `NaN`, which compares false
+/// against every threshold and would read as a silently weak result. So a
+/// non-positive or non-finite standard error is reported as `0.0`, the same
+/// "no evidence" answer a degenerate sample gets. Reporting the uncorrected t
+/// instead would report the inflated number the correction exists to remove.
+fn newey_west_t(count: f64, mean: f64, sum_squares: f64) -> f64 {
+    let standard_error = (sum_squares / (count - 1.0) / count).sqrt();
+    if standard_error > 0.0 && standard_error.is_finite() {
         mean / standard_error
     } else {
-        // TWO WAYS TO GET HERE, AND BOTH ARE REPORTED AS NO EVIDENCE.
-        //
-        // Every observation identical: the mean is exact and its spread is
-        // zero, which is not an infinitely strong result -- it is a degenerate
-        // sample, and reporting it as zero refuses to dress one up as the other.
-        //
-        // Or the long-run variance came out NON-POSITIVE. The Bartlett kernel
-        // is positive semi-definite on evenly spaced lags, and these lags are
-        // bar gaps between irregular hits, so that guarantee does not carry
-        // over: strong negative autocovariance can drive `sum_squares` to or
-        // below zero. `sqrt` of a negative is `NaN`, which would compare false
-        // against every threshold and read as a silently weak result rather
-        // than an unusable one. `is_finite` catches it and it lands here, with
-        // the same answer the degenerate sample gets -- this run measured
-        // nothing usable. Reporting the uncorrected t instead would be reporting
-        // the inflated number this whole block exists to remove.
         0.0
-    };
-    assemble(t)
+    }
 }
 
 #[cfg(test)]
@@ -1819,7 +2613,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
 mod tests {
     use super::{
         Edge, FORCED_EXIT_MINUTE, Horizon, SessionBounds, Sides, edge, forward,
-        long_run_sum_squares, median_step_micros, milli,
+        long_run_sum_squares, median_step_micros, milli, prefix_median_steps_over,
     };
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
@@ -1850,6 +2644,27 @@ mod tests {
 
     fn h(n: u32) -> Horizon {
         Horizon::bars(n).expect("a positive horizon")
+    }
+
+    /// D-1185 (o1runner-5): `forward_over` over the caller's facts is
+    /// `forward`, field for field, and facts that do not cover the bars price
+    /// nothing rather than reading another slice's verdict.
+    #[test]
+    fn forward_over_hoisted_facts_is_forward() {
+        let bars = crate::synthetic::sessions(4);
+        let column = Column::build(&bars, &mut evaluator());
+        let facts = crate::trade::SliceFacts::of(&bars, &column);
+        for horizon in [h(1), h(5), h(30)] {
+            assert_eq!(
+                super::forward_over(&bars, horizon, &facts),
+                forward(&bars, &column, horizon)
+            );
+        }
+        let shorter = bars.get(..bars.len() / 2).expect("a prefix");
+        let short_column = Column::build(shorter, &mut evaluator());
+        let foreign = crate::trade::SliceFacts::of(shorter, &short_column);
+        let refused = super::forward_over(&bars, h(5), &foreign);
+        assert!((0..bars.len()).all(|i| refused.at(i).is_none() && refused.was_refused(i)));
     }
 
     /// Build the evaluator-produced acceptance map beside a test forward.
@@ -2119,26 +2934,93 @@ mod tests {
     /// Charging zero to a side would move the ratio by the number of flat bars
     /// rather than by anything about the setup, and on a coarse rung flat bars
     /// are common.
+    /// An `Edge` from a list of moves, built exactly as `edge` fills one: `Sides`
+    /// over the moves, the mean over all of them.
+    fn edge_of_moves(moves: &[i64]) -> Edge {
+        let mut sides = Sides::default();
+        for &x in moves {
+            sides.observe(x);
+        }
+        let n = u64::try_from(moves.len()).unwrap_or(u64::MAX);
+        let sum: i128 = moves.iter().map(|&x| i128::from(x)).sum();
+        Edge {
+            n,
+            mean_paisa: super::wide(sum) / super::wide(i128::from(n)),
+            wins: sides.wins,
+            win_sum: super::wide(sides.win_sum),
+            losses: sides.losses,
+            loss_sum: super::wide(sides.loss_sum),
+            min_win_paisa: super::wide(i128::from(sides.min_win)),
+            max_win_paisa: super::wide(i128::from(sides.max_win)),
+            max_loss_paisa: super::wide(i128::from(sides.max_loss)),
+            min_loss_paisa: super::wide(i128::from(sides.min_loss)),
+            ..Edge::default()
+        }
+    }
+
+    /// **XPERM-07 (D-3407).** `worst_reward_risk_bp`'s own doc: "this is ALWAYS at
+    /// or below" `payoff_bp`. Exhaustive over every sample of one to four moves
+    /// drawn from seven values, flats and both signs included: 2,800 samples. A
+    /// single move scored `i64::MAX` here while `payoff_bp` refused it ("One move
+    /// is not a distribution"), so one lucky move outranked every real sample
+    /// under `rank::ByAsymmetry`.
+    #[test]
+    fn the_worst_case_ratio_is_never_above_the_mean_ratio_on_any_small_sample() {
+        const VALUES: [i64; 7] = [-30, -10, -1, 0, 1, 10, 30];
+        let mut samples = 0_u32;
+        for len in 1..=4_u32 {
+            for code in 0..7_usize.pow(len) {
+                let moves: Vec<i64> = (0..len)
+                    .map(|slot| {
+                        let digit = code / 7_usize.pow(slot) % 7;
+                        VALUES.get(digit).copied().unwrap_or(0)
+                    })
+                    .collect();
+                let edge = edge_of_moves(&moves);
+                assert!(
+                    edge.worst_reward_risk_bp() <= edge.payoff_bp(),
+                    "{moves:?}: worst {} above payoff {}",
+                    edge.worst_reward_risk_bp(),
+                    edge.payoff_bp()
+                );
+                samples += 1;
+            }
+        }
+        assert_eq!(samples, 7 + 49 + 343 + 2_401);
+        assert_eq!(edge_of_moves(&[5]).worst_reward_risk_bp(), 0, "one move");
+        assert_eq!(
+            edge_of_moves(&[-5]).worst_reward_risk_bp(),
+            0,
+            "one short move"
+        );
+        // Two moves ARE a sample: the guard stops at one, not at two.
+        assert_eq!(
+            edge_of_moves(&[5, 10]).worst_reward_risk_bp(),
+            i64::MAX,
+            "two moves that never lost"
+        );
+    }
+
     #[test]
     fn a_flat_move_is_neither_a_win_nor_a_loss() {
         let mut sides = Sides::default();
-        for x in [5.0, 0.0, 0.0, -1.0, 0.0] {
+        for x in [5, 0, 0, -1, 0] {
             sides.observe(x);
         }
         assert_eq!(sides.wins, 1, "one strictly positive move");
-        assert!(
-            (sides.win_sum - 5.0).abs() < f64::EPSILON,
+        assert_eq!(
+            sides.win_sum, 5,
             "the flats added nothing to the winning side"
         );
-        assert!(
-            (sides.loss_sum + 1.0).abs() < f64::EPSILON,
+        assert_eq!(
+            sides.loss_sum, -1,
             "the flats added nothing to the losing side"
         );
 
-        // A NaN is not a move either, and must not become one.
-        let mut nan = Sides::default();
-        nan.observe(f64::NAN);
-        assert_eq!(nan, Sides::default(), "a NaN is charged to neither side");
+        // Only flats is no move on either side.
+        let mut flat = Sides::default();
+        flat.observe(0);
+        assert_eq!(flat, Sides::default(), "a zero is charged to neither side");
     }
 
     #[test]
@@ -2253,23 +3135,35 @@ mod tests {
         );
     }
 
-    /// A long-run variance can come out non-positive, and that is reported as no
-    /// evidence rather than as a `NaN` that reads like weak evidence.
+    /// A long-run sum that cannot give a `t` is reported as no evidence, never as
+    /// a `NaN` that reads like weak evidence -- D-1175.
     ///
-    /// The Bartlett kernel is positive semi-definite on evenly spaced lags. These
-    /// lags are bar gaps between irregular hits, so the guarantee does not carry
-    /// over and strong negative autocovariance can drive the sum of squares
-    /// below zero. `sqrt` of that is `NaN`, and `NaN` compares false against
-    /// every threshold -- it would pass a `t > bar` test by failing it, and read
-    /// as a merely-weak result instead of an unusable one.
+    /// This drives `newey_west_t`, the last step of `edge`, with every sum that
+    /// cannot give a standard error: negative (rounding), zero, `NaN` and
+    /// infinite. Each must come back exactly `0.0`. Delete the guard and the
+    /// negative case returns `NaN`, the zero case an infinite `t`, and this
+    /// fails. The test it replaces asserted only that `sqrt(-1)` is `NaN`.
     #[test]
-    fn a_non_positive_long_run_variance_is_refused_rather_than_reported_as_nan() {
-        // Cross term far more negative than m2 is positive.
-        let s = long_run_sum_squares(1.0, 0.0, -50.0, 0.0, 0.0);
-        assert!(s < 0.0, "the fixture must actually go negative, got {s}");
+    fn a_long_run_sum_that_cannot_give_a_t_reports_none() {
+        let negative = long_run_sum_squares(1.0, 0.0, -50.0, 0.0, 0.0);
+        assert!(negative < 0.0, "the fixture must actually go negative");
+        for sum in [
+            negative,
+            -0.0,
+            0.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let t = super::newey_west_t(5.0, 3.0, sum);
+            assert!(t.to_bits() == 0.0_f64.to_bits(), "sum {sum} gave t={t}");
+        }
+        // And a positive sum gives the ordinary t: mean / sqrt(sum / (n-1) / n).
+        let t = super::newey_west_t(5.0, 3.0, 80.0);
+        assert!((t - 3.0 / 2.0).abs() < 1e-12, "t={t}");
         assert!(
-            (s / 4.0 / 5.0).sqrt().is_nan(),
-            "and a negative variance is where the NaN would come from"
+            super::newey_west_t(5.0, -3.0, 80.0) < 0.0,
+            "the sign is the mean's"
         );
     }
 
@@ -2311,7 +3205,7 @@ mod tests {
     ///
     /// `Evaluator::warmed_up` needs five completed prior sessions, so a
     /// two-session slice yields an EMPTY column and every assertion below would
-    /// pass against nothing. `rank::walk` orders on `edge.t.abs()`, which is
+    /// pass against nothing. `rank::rank` orders on `edge.t.abs()`, which is
     /// why a large `t` here would sort above every genuine finding, and
     /// `p_value` is `2(1 - Φ(|t|))`, which clamps to exactly zero at that
     /// magnitude and clears any Bonferroni bar the run can set.
@@ -2372,7 +3266,7 @@ mod tests {
         assert!(
             e.t == 0.0,
             "{} identical forward moves scored a t of {} -- a degenerate sample \
-             reported as certainty, which `rank::walk` then sorts above every \
+             reported as certainty, which `rank::rank` then sorts above every \
              real finding and `p_value` clamps to zero",
             e.n,
             e.t
@@ -2697,6 +3591,108 @@ mod tests {
         assert!(forward_of(&bars, h(1)).at(0).is_none());
     }
 
+    /// THE PREFIX CADENCE AT BAR i IS THE WHOLE-SLICE MEDIAN OF bars[..=i].
+    ///
+    /// The oracle is the former production function, recomputed from scratch
+    /// on every prefix; the running two-heap median must agree with it at every
+    /// bar, and in particular its LAST entry is the old whole-slice value, so a
+    /// slice with a uniform cadence is clocked exactly as before D-1410.
+    #[test]
+    fn the_prefix_cadence_ends_on_the_whole_slice_median() {
+        // A deterministic mix of 1-, 2-, 3- and 5-minute gaps, overnight
+        // jumps and repeated stamps, so the median moves in both directions.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for length in [0_usize, 1, 2, 3, 17, 240] {
+            let mut minute = 0_i64;
+            let mut bars = Vec::with_capacity(length);
+            for _ in 0..length {
+                bars.push(candle(minute, 10_000));
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                minute += match state >> 61 {
+                    0 => 0,
+                    3 => 2,
+                    4 => 3,
+                    5 => 5,
+                    6 => 1_440,
+                    _ => 1,
+                };
+            }
+            let steps = prefix_median_steps_over(&bars, None);
+            assert_eq!(steps.len(), bars.len());
+            for i in 0..bars.len() {
+                let own = median_step_micros(bars.get(..=i).unwrap_or_default());
+                let expected = if own == 0 {
+                    // Before the first gap: the entry's own first step only.
+                    median_step_micros(bars.get(i..=i.saturating_add(1)).unwrap_or_default())
+                } else {
+                    own
+                };
+                assert_eq!(
+                    steps.get(i).copied(),
+                    Some(expected),
+                    "length {length} bar {i}"
+                );
+            }
+            assert_eq!(
+                steps.last().copied().unwrap_or(0),
+                median_step_micros(&bars),
+                "length {length}: the last prefix is the whole slice"
+            );
+        }
+    }
+
+    /// The hand-checked shape, the refusals and the timestamp extremes.
+    #[test]
+    fn the_prefix_cadence_is_hand_checked_and_refuses_what_it_cannot_measure() {
+        let m = 60_000_000_i64;
+        // Gaps 2,2,1,1,1: upper medians [2,2,2,2,2,1], bar 0 taking its own
+        // first step because no earlier gap exists.
+        let bars: Vec<Candle> = [0, 2, 4, 5, 6, 7]
+            .into_iter()
+            .map(|minute| candle(minute, 10_000))
+            .collect();
+        assert_eq!(
+            prefix_median_steps_over(&bars, None),
+            vec![2 * m, 2 * m, 2 * m, 2 * m, 2 * m, m]
+        );
+        // A refused row defines neither of its two gaps.
+        assert_eq!(
+            prefix_median_steps_over(&bars, Some(&[true, true, false, true, true, true])),
+            vec![2 * m, 2 * m, 2 * m, 2 * m, 2 * m, m]
+        );
+        // A verdict shorter than the slice refuses the rows it does not cover.
+        assert_eq!(
+            prefix_median_steps_over(&bars, Some(&[true, true])),
+            vec![2 * m; 6]
+        );
+        // Before the first gap a bar reads only its own first step, never one
+        // further: bar 0's own step is refused, so it stays unclocked.
+        assert_eq!(
+            prefix_median_steps_over(&bars, Some(&[false, true, true, true, true, true])),
+            vec![0, 2 * m, 2 * m, 2 * m, m, m]
+        );
+        // Overnight, repeated and reversed stamps are not a cadence.
+        let odd = [
+            candle(0, 1),
+            candle(1_440, 1),
+            candle(1_440, 1),
+            candle(1_439, 1),
+        ];
+        assert_eq!(prefix_median_steps_over(&odd, None), vec![0, 0, 0, 0]);
+        assert!(prefix_median_steps_over(&[], None).is_empty());
+        assert_eq!(prefix_median_steps_over(&odd[..1], None), vec![0]);
+        // The extremes of the timestamp type neither panic nor wrap.
+        let edge = |ts: i64| Candle::new(ts, 1, 1, 1, 1, 1, OI_NULL);
+        let top = [edge(i64::MAX - m), edge(i64::MAX)];
+        assert_eq!(prefix_median_steps_over(&top, None), vec![m, m]);
+        let bottom = [edge(i64::MIN), edge(i64::MIN + m)];
+        assert_eq!(prefix_median_steps_over(&bottom, None), vec![m, m]);
+        let span = [edge(i64::MIN), edge(i64::MAX)];
+        assert_eq!(prefix_median_steps_over(&span, None), vec![0, 0]);
+    }
+
     /// A SLICE THAT STOPS MID-SESSION MEASURES NO FORCED OUTCOME.
     ///
     /// The `crate::trade` twin of this is
@@ -2753,9 +3749,10 @@ mod tests {
     ///
     /// # `forward` runs on the SIGNAL series, which is not always one minute
     ///
-    /// `crate::resample` buckets on the IST clock, so the sixty-minute rung of a
-    /// regular session is seven bars stamped 09:00 … 15:00. None is the exact
-    /// 15:09 one-minute record, so no coarse bar may be promoted into a forced
+    /// The fixture hand-builds seven hourly bars stamped 09:00 … 15:00 a day.
+    /// `crate::resample` now anchors at the open (D-1430) and emits 09:15 …
+    /// 15:15 instead, but the point holds on either grid: no coarse bar is the
+    /// exact 15:09 one-minute record, so none may be promoted into a forced
     /// fill. Exact coarse horizons observed before 15:10 remain usable only for
     /// this legacy same-series runner surface; stored operator paths reproject
     /// onto explicit one-minute OHLCV before reaching money.
@@ -2905,7 +3902,7 @@ mod tests {
         let minute = crate::synthetic::sessions(8);
         let column = Column::build(&minute, &mut evaluator());
         let five = crate::resample::Period::minutes(5).expect("five");
-        let coarse = crate::resample::resample(&minute, five);
+        let coarse = crate::resample::resample(&minute, five).expect("market values resample");
         assert!(
             coarse.len() < minute.len(),
             "the coarse slice must be shorter, or this proves nothing"
@@ -3056,7 +4053,7 @@ mod tests {
     /// out NEGATIVE, `sqrt` returned `NaN`, and `is_finite` sent them to zero.
     /// 60 huge and 60 zero out of 120, maximum `|t|` 2.611610832622043e8. There
     /// is no middle: a degenerate sample scores either nothing or a `t` that
-    /// `rank::walk` sorts above every real finding and that `p_value` clamps to
+    /// `rank::rank` sorts above every real finding and that `p_value` clamps to
     /// exactly zero.
     #[test]
     fn a_constant_sample_whose_windows_overlap_is_still_no_evidence() {
@@ -3199,6 +4196,41 @@ mod tests {
              the guard -- t={}",
             e.t
         );
+    }
+    /// A ZERO MEAN IS READ LONG, and the boundary is the strict `< 0.0`.
+    ///
+    /// D-1178 swaps the path lanes only for a combination traded short, which
+    /// is `mean_paisa < 0` -- the rule `cli::side_of_evidence` and
+    /// [`Edge::payoff_bp`] use. A sample whose moves cancel exactly (+100 and
+    /// -100) has a mean of exactly `0.0` and is NOT short, so its up excursion
+    /// is the reward. Fixture: up runs summing to 300, down runs to 100.
+    /// Read long that is 3.00x; read short it would be 100/300 = 0.33x.
+    #[test]
+    fn a_zero_mean_path_ratio_is_read_on_the_long_side() {
+        let flat_mean = Edge {
+            n: 2,
+            mean_paisa: 0.0,
+            wins: 1,
+            win_sum: 100.0,
+            losses: 1,
+            loss_sum: -100.0,
+            favourable_sum: 300.0,
+            adverse_sum: 100.0,
+            ..Edge::default()
+        };
+        assert_eq!(
+            flat_mean.path_ratio_bp(),
+            300,
+            "a zero mean is read long: 300 up over 100 down is 3.00x"
+        );
+
+        // The control just below zero (the smallest normal negative) IS short, so the lanes swap and the
+        // same path reads 100 / 300, truncated to 33 bp.
+        let barely_short = Edge {
+            mean_paisa: -f64::MIN_POSITIVE,
+            ..flat_mean
+        };
+        assert_eq!(barely_short.path_ratio_bp(), 33);
     }
 }
 
@@ -3478,5 +4510,1118 @@ mod refusal_coverage {
         let column = Column::build(&dirty, &mut evaluator(Availability::Present));
         assert_eq!(column.acceptance_census().accumulator_too_large, 1);
         assert_forward_refuses_the_path(&clean, &dirty, Availability::Present, victim);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod window_tests {
+    use super::{Horizon, WindowExtremes, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// The full-scan answer the sliding window must reproduce exactly.
+    fn scan(bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
+        let window = bars.get(lo..=hi)?;
+        let high = window.iter().map(|b| b.high).max()?;
+        let low = window.iter().map(|b| b.low).min()?;
+        Some((high, low))
+    }
+
+    /// A wobbling series whose maxima and minima move inside every window.
+    fn wobble(n: usize) -> Vec<Candle> {
+        (0..n)
+            .map(|i| {
+                let k = i64::try_from(i).unwrap_or(0);
+                let close = 1_000_000 + (k * 7_919) % 1_009 - (k * 104_729) % 503;
+                Candle::new(
+                    k.saturating_mul(60_000_000),
+                    close,
+                    close + (k * 31) % 17 + 1,
+                    close - (k * 13) % 23 - 1,
+                    close,
+                    100,
+                    OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    /// Every query, in the order `forward` issues them and in orders it never
+    /// does -- backwards, repeated, jumping past everything held, empty and out
+    /// of range -- returns exactly what a direct scan returns, and the deques
+    /// never hold more than the window.
+    #[test]
+    fn the_sliding_window_agrees_with_a_full_scan_on_every_query() {
+        let bars = wobble(400);
+        let mut window = WindowExtremes::new();
+        // A rising left end and a right end that mostly rises and sometimes
+        // steps back -- the shape `forward` produces since D-1410. A backward
+        // query is served by the block table and leaves the deques as they
+        // were, so the bound they keep is the window they HOLD,
+        // `popped_to..next`, not the one just asked (D-1572).
+        for lo in 1..390_usize {
+            let hi = (lo + (lo * 7) % 15).min(399);
+            assert_eq!(
+                window.over(&bars, lo, hi),
+                scan(&bars, lo, hi),
+                "[{lo}, {hi}]"
+            );
+            let held = window.next - window.popped_to;
+            assert!(window.highs.len() <= held, "the deque outgrew [{lo}, {hi}]");
+            assert!(window.lows.len() <= held, "the deque outgrew [{lo}, {hi}]");
+        }
+        // Backwards, then a repeat, then far backwards, each answered by the
+        // block table (D-1572): the deques keep what they held, and every
+        // index they hold is still inside the window they hold,
+        // `popped_to..next`.
+        for (lo, hi) in [(10, 20), (5, 9), (5, 9), (300, 310), (0, 0), (399, 399)] {
+            assert_eq!(
+                window.over(&bars, lo, hi),
+                scan(&bars, lo, hi),
+                "[{lo}, {hi}]"
+            );
+            let (from, to) = (window.popped_to, window.next);
+            assert!(
+                window
+                    .highs
+                    .iter()
+                    .chain(&window.lows)
+                    .all(|&(at, _)| (from..to).contains(&at)),
+                "a held index lies outside the held window after [{lo}, {hi}]"
+            );
+        }
+        // A jump past everything held, served by the deques. A jump skips to
+        // `lo` rather than resetting (D-1455): it reads exactly the bars of the
+        // new window, and the indices held before it must be gone, so the
+        // deques fit the window afterwards.
+        let mut jump = WindowExtremes::new();
+        assert_eq!(jump.over(&bars, 0, 5), scan(&bars, 0, 5));
+        let before = jump.touched;
+        assert_eq!(jump.over(&bars, 300, 310), scan(&bars, 300, 310));
+        assert_eq!(
+            jump.touched - before,
+            11,
+            "only the new window's bars are read"
+        );
+        assert!(
+            jump.highs.len() <= 11 && jump.lows.len() <= 11,
+            "a stale index survived into [300, 310]"
+        );
+        assert!(
+            jump.highs
+                .iter()
+                .chain(&jump.lows)
+                .all(|&(at, _)| (300..=310).contains(&at)),
+            "a held index lies outside [300, 310]"
+        );
+        // Empty and out of range are absent, never a stale maximum.
+        assert_eq!(window.over(&bars, 7, 6), None);
+        assert_eq!(window.over(&bars, 398, 400), None);
+        assert_eq!(WindowExtremes::new().over(&[], 0, 0), None);
+        // Reversed by more than one, and `hi == usize::MAX`, whose `hi + 1`
+        // cannot be formed: both absent, and a valid query after them is still
+        // the scan (D-1452).
+        assert_eq!(window.over(&bars, 9, 3), None);
+        assert_eq!(window.over(&bars, 0, usize::MAX), None);
+        assert_eq!(window.over(&bars, 2, 5), scan(&bars, 2, 5));
+    }
+
+    /// **A RIGHT END THAT MOVES BACKWARDS COSTS O(1), NOT Θ(WINDOW)
+    /// (audit-20261003 o1eng2-1, D-1572).**
+    ///
+    /// Since D-1410 `forward`'s exit can step back when the prefix median
+    /// cadence does. Every other query here moves the right end back by half a
+    /// 2,000-bar window, the shape of a flipping cadence; each answer must equal
+    /// the scan, and the bars read must stay within a constant per query plus
+    /// one pass over the slice. Rebuilding the deques on every backward query
+    /// read ~1,000 bars per query. This test is
+    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    #[test]
+    fn a_backward_right_end_is_answered_in_constant_reads() {
+        let n = 20_000_usize;
+        let bars = wobble(n);
+        let mut window = WindowExtremes::new();
+        let mut queries = 0_u64;
+        for i in 0..n - 2_001 {
+            let hi = i + if i % 2 == 0 { 2_000 } else { 1_000 };
+            assert_eq!(
+                window.over(&bars, i + 1, hi),
+                scan(&bars, i + 1, hi),
+                "[{}, {hi}]",
+                i + 1
+            );
+            queries += 1;
+        }
+        let n = u64::try_from(n).expect("small");
+        assert!(
+            window.touched <= 3 * n + 130 * queries,
+            "{} bars read for {queries} queries over {n} bars",
+            window.touched
+        );
+    }
+    /// **A LEFT END BEFORE THE ONE ALREADY POPPED IS ANSWERED FROM THE BLOCK
+    /// TABLE, AND ONE EQUAL TO IT IS NOT (Gate 18, D-1464).**
+    ///
+    /// The deques no longer hold bars left of `popped_to`, so a query reaching
+    /// back past it must take the block table or it misses their extremes:
+    /// bar 2 is the highest here, and `[0, 12]` after `[5, 10]` must see it. A
+    /// query whose left end EQUALS `popped_to` is still served by the deques:
+    /// growing `[0, 10]` to `[0, 20]` reads the ten new bars and builds no
+    /// table. Both mutants of `lo < self.popped_to` (`==`, `<=`) survived
+    /// every earlier test.
+    #[test]
+    fn a_left_end_behind_the_popped_one_reads_the_block_table_and_an_equal_one_does_not() {
+        let mut bars = wobble(200);
+        bars.get_mut(2).expect("wobble(200) has a third bar").high = i64::MAX / 2;
+        let mut back = WindowExtremes::new();
+        assert_eq!(back.over(&bars, 5, 10), scan(&bars, 5, 10));
+        assert_eq!(back.over(&bars, 0, 12), scan(&bars, 0, 12));
+        assert_eq!(scan(&bars, 0, 12).map(|(high, _)| high), Some(i64::MAX / 2));
+
+        let mut same = WindowExtremes::new();
+        assert_eq!(same.over(&bars, 0, 10), scan(&bars, 0, 10));
+        let before = same.touched;
+        assert_eq!(same.over(&bars, 0, 20), scan(&bars, 0, 20));
+        assert_eq!(same.touched - before, 10, "only the ten new bars are read");
+        assert!(
+            same.blocks.is_none(),
+            "a forward query built the block table"
+        );
+    }
+
+    /// **THE BLOCK TABLE BUILDS EXACTLY THE LEVELS A MIDDLE RUN READS, AND
+    /// EVERY RUN IT CAN BE ASKED IS ANSWERED (Gate 18, D-1464).**
+    ///
+    /// For 1 to 40 blocks the level count is `ilog2(blocks - 2) + 1` from
+    /// three blocks up and 1 below that, and every middle run `first ..= last`
+    /// a query can hand [`super::BlockExtremes::over`] equals the scan of its
+    /// bars. A bound one level short leaves the longest runs unanswered; one
+    /// level long builds memory no query reads.
+    #[test]
+    fn the_block_table_builds_exactly_the_levels_a_middle_run_reads() {
+        let block = super::EXTREME_BLOCK;
+        for blocks in 1..=40_usize {
+            let bars = wobble(blocks * block);
+            let mut touched = 0;
+            let table = super::BlockExtremes::of(&bars, &mut touched);
+            let expected = blocks
+                .checked_sub(2)
+                .filter(|&m| m > 0)
+                .map_or(1, |m| usize::try_from(m.ilog2()).expect("small") + 1);
+            assert_eq!(table.levels.len(), expected, "{blocks} blocks");
+            for first in 1..blocks.saturating_sub(1) {
+                for last in first..blocks - 1 {
+                    assert_eq!(
+                        table.over(first, last),
+                        scan(&bars, first * block, (last + 1) * block - 1),
+                        "{blocks} blocks, run {first}..={last}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And through `forward` itself: every measured excursion equals the scan
+    /// over the bars the position was exposed to, `[i + 1, exit]`.
+    #[test]
+    fn every_forward_excursion_is_the_scan_over_its_own_window() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        for horizon in [1_u32, 15, 400] {
+            let f = forward(&bars, &column, Horizon::bars(horizon).expect("positive"));
+            let mut measured = 0_u32;
+            let mut last_exit = 0_usize;
+            for i in 0..bars.len() {
+                let (Some(up), Some(down)) = (f.favourable_at(i), f.adverse_at(i)) else {
+                    assert_eq!(f.exit_at(i), None, "no outcome, no exit, at {i}");
+                    continue;
+                };
+                let exit = f.exit_at(i).expect("a measured outcome has an exit");
+                assert!(exit > i, "the exit at {i} is not after its entry");
+                // BOTH ENDS ONLY ADVANCE, which is what lets the deques slide.
+                assert!(exit >= last_exit, "the exit moved back at {i}, H={horizon}");
+                last_exit = exit;
+                let (high, low) = scan(&bars, i + 1, exit).expect("a held window");
+                let now = bars.get(i).expect("entry").close;
+                assert_eq!(up, (high - now).max(0), "favourable at {i}, H={horizon}");
+                assert_eq!(down, (now - low).max(0), "adverse at {i}, H={horizon}");
+                measured += 1;
+            }
+            assert!(measured > 100, "H={horizon} measured only {measured}");
+        }
+    }
+
+    /// **A LONG BACKWARD QUERY IS ANSWERED ON EVERY SLICE LENGTH** (FB-01,
+    /// D-2669; found by the Fix Board thread). `BlockExtremes::of` stopped
+    /// doubling when the next span passed the length of the level BELOW, which
+    /// shrinks at every level, rather than the block count, so a backward query
+    /// whose middle run needed the top level answered `None` where a scan has
+    /// extremes. Every slice from 3 to 40 blocks now agrees with the scan.
+    #[test]
+    fn a_backward_query_spanning_most_of_the_slice_is_answered() {
+        for blocks in 3..=40_usize {
+            let n = blocks * super::EXTREME_BLOCK;
+            let bars = wobble(n);
+            let mut window = WindowExtremes::new();
+            assert_eq!(window.over(&bars, 0, n - 1), scan(&bars, 0, n - 1));
+            for (lo, hi) in [(1, n - 2), (0, n - 2), (super::EXTREME_BLOCK - 1, n - 2)] {
+                assert_eq!(
+                    window.over(&bars, lo, hi),
+                    scan(&bars, lo, hi),
+                    "{blocks} blocks, backward [{lo}, {hi}]"
+                );
+            }
+        }
+    }
+
+    /// No PER-BAR power-of-two table is built (D-1170): the per-bar sparse
+    /// table's two `n·log₂ n` tables are gone. The one doubling table left is
+    /// [`super::BlockExtremes`] (D-1572), over 64-bar BLOCKS, and this measures
+    /// what that costs: every level together holds fewer pairs than there are
+    /// bars, where a per-bar table would hold `n·log₂ n`.
+    /// P5-03, D-2665: this used to grep for the old spellings only, so it
+    /// passed while the row it proves said no power-of-two table existed.
+    #[test]
+    fn forward_builds_no_per_bar_power_of_two_table() {
+        let source = include_str!("outcome.rs");
+        let live = source
+            // Up to the first test MODULE: D-1410 put test-only items above it.
+            .split("\n#[cfg(test)]\n#[allow(")
+            .next()
+            .expect("a source prefix");
+        assert!(!live.contains("RangeExtremes"), "the sparse table is back");
+        assert!(live.contains("WindowExtremes::new()"), "forward must slide");
+        for n in [1_usize, 63, 64, 65, 4_096, 65_536, 100_003] {
+            let bars = wobble(n);
+            let mut touched = 0_u64;
+            let blocks = super::BlockExtremes::of(&bars, &mut touched);
+            let base = blocks.levels.first().map_or(0, Vec::len);
+            assert_eq!(
+                base,
+                n.div_ceil(super::EXTREME_BLOCK),
+                "one pair per block at n={n}"
+            );
+            let pairs: usize = blocks.levels.iter().map(Vec::len).sum();
+            assert!(pairs <= n, "{pairs} pairs held for {n} bars");
+            // D-1464 (kept by D-1934): one level per power of two up to the
+            // longest MIDDLE run, `blocks - 2`, the deepest a query reads.
+            assert_eq!(
+                blocks.levels.len(),
+                base.checked_sub(2)
+                    .filter(|&m| m > 0)
+                    .map_or(1, |m| usize::try_from(m.ilog2()).expect("small") + 1),
+                "one level per power of two up to the longest middle run at n={n}"
+            );
+            assert_eq!(
+                touched,
+                u64::try_from(n).expect("small"),
+                "one pass at n={n}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod overlap_tests {
+    use super::{Horizon, edge, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, ist_day};
+    use vocab::ConditionMask;
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// Every measured hit of the empty mask: `(source, move, IST day)`.
+    fn hits(bars: &[Candle], column: &Column, f: &super::Forward) -> Vec<(usize, f64, i64)> {
+        column
+            .sources()
+            .iter()
+            .filter_map(|&s| {
+                let x = f.at(s)?;
+                let day = ist_day(bars.get(s)?.ts_micros);
+                #[allow(clippy::cast_precision_loss, reason = "a test fixture's paisa move")]
+                Some((s, x as f64, day))
+            })
+            .collect()
+    }
+
+    /// The Newey-West `t` written out pair by pair, from its definition rather
+    /// than from `edge`'s accumulators: Bartlett weight `1 - d/H` on the bar gap
+    /// `d`, for pairs on the SAME IST day closer than `H`, and nothing else.
+    fn reference_t(hits: &[(usize, f64, i64)], horizon: u32) -> f64 {
+        #[allow(clippy::cast_precision_loss, reason = "a test fixture's count")]
+        let n = hits.len() as f64;
+        let mean = hits.iter().map(|h| h.1).sum::<f64>() / n;
+        let mut sum = hits.iter().map(|h| (h.1 - mean).powi(2)).sum::<f64>();
+        for (i, a) in hits.iter().enumerate() {
+            for b in hits.iter().skip(i + 1) {
+                let gap = b.0 - a.0;
+                if a.2 == b.2 && gap < horizon as usize {
+                    #[allow(clippy::cast_precision_loss, reason = "a bar gap")]
+                    let w = 1.0 - gap as f64 / f64::from(horizon);
+                    sum += 2.0 * w * (a.1 - mean) * (b.1 - mean);
+                }
+            }
+        }
+        mean / (sum / (n - 1.0) / n).sqrt()
+    }
+
+    /// W3-runner3-7: a hit at the end of one session and the first hit of the
+    /// next are paired by bar gap alone, although `forward` ends both windows at
+    /// their own day's forced close and they share no bar.
+    #[test]
+    fn no_overlap_pair_crosses_a_session() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        for horizon in [23_u32, 60, 400] {
+            let f = forward(&bars, &column, Horizon::bars(horizon).expect("positive"));
+            let measured = hits(&bars, &column, &f);
+            // THE FIXTURE MUST CONTAIN THE CASE: two consecutive hits on
+            // different days closer than the horizon.
+            let crossing = measured
+                .windows(2)
+                .filter(|w| matches!(w, [a, b] if a.2 != b.2 && b.0 - a.0 < horizon as usize))
+                .count();
+            assert!(crossing > 0, "H={horizon}: no cross-day pair to refuse");
+            let got = edge(&column, &f, &ConditionMask::default()).t;
+            let want = reference_t(&measured, horizon);
+            assert!(
+                (got - want).abs() <= 1e-9 * want.abs().max(1.0),
+                "H={horizon}: t={got}, the session-bounded definition gives {want}"
+            );
+        }
+    }
+
+    /// W3-runner3-5: a horizon past the whole sample. Across days the pairing is
+    /// now bounded by the session, so the estimate is a real one -- the same
+    /// definition as above, at weights near one.
+    #[test]
+    fn a_horizon_past_every_session_is_measured_per_session() {
+        for sessions in [8_i64, 12] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = Column::build(&bars, &mut evaluator());
+            let f = forward(&bars, &column, Horizon::bars(u32::MAX).expect("positive"));
+            let e = edge(&column, &f, &ConditionMask::default());
+            let want = reference_t(&hits(&bars, &column, &f), u32::MAX);
+            assert!(
+                e.t.is_finite() && (e.t - want).abs() <= 1e-6 * want.abs().max(1.0),
+                "{sessions} sessions at H=u32::MAX: t={}, per-session definition {want}",
+                e.t
+            );
+        }
+    }
+
+    /// And when ONE window holds the whole sample there is no second window to
+    /// estimate a long-run variance from. Six sessions leave one swept day, so
+    /// at `H = u32::MAX` every hit shares bars with every other.
+    #[test]
+    fn one_window_holding_the_whole_sample_is_no_evidence() {
+        let bars = crate::synthetic::sessions(6);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::bars(u32::MAX).expect("positive"));
+        let measured = hits(&bars, &column, &f);
+        assert!(measured.len() >= 2, "the fixture must measure a sample");
+        assert!(
+            measured
+                .windows(2)
+                .all(|w| matches!(w, [a, b] if a.2 == b.2)),
+            "the fixture must be one day"
+        );
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.n >= 2);
+        assert!(
+            e.t == 0.0,
+            "{} hits in one shared window scored t={}",
+            e.n,
+            e.t
+        );
+        assert!(e.mean_paisa != 0.0, "the mean is still carried");
+
+        // THE SAME DAY AT A ONE-BAR HORIZON IS AN ORDINARY SAMPLE: no pair
+        // overlaps, so the refusal must not fire.
+        let one = forward(&bars, &column, Horizon::bars(1).expect("positive"));
+        let e1 = edge(&column, &one, &ConditionMask::default());
+        assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod money_tests {
+    use super::{EXACT_PAISA_LIMIT, Edge, Horizon, Sides, edge, forward, wide};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
+    use vocab::ConditionMask;
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// The smallest win and the smallest loss are the smallest MAGNITUDES
+    /// observed, in any order, opened by the first of each and never pinned
+    /// at the zero sentinel (G18-runner-12, D-2059).
+    #[test]
+    fn the_smallest_win_and_loss_are_the_smallest_magnitudes_in_any_order() {
+        for order in [
+            [-5_i64, -3, -7, 4, 2, 9],
+            [-7, -5, -3, 9, 4, 2],
+            [-3, -7, -5, 2, 9, 4],
+        ] {
+            let mut sides = Sides::default();
+            for x in order {
+                sides.observe(x);
+            }
+            assert_eq!(sides.min_loss, 3, "{order:?}");
+            assert_eq!(sides.max_loss, 7, "{order:?}");
+            assert_eq!(sides.min_win, 2, "{order:?}");
+        }
+        let mut one = Sides::default();
+        one.observe(-11);
+        assert_eq!(one.min_loss, 11, "the first loss opens the minimum");
+        one.observe(0);
+        assert_eq!(one.min_loss, 11, "a flat move is neither side");
+    }
+
+    /// A flat mean is not a short: its largest gain is the largest up move
+    /// (G18-runner-13, D-2059).
+    #[test]
+    fn a_flat_mean_reads_the_largest_up_move_as_its_gain() {
+        let edge = |mean_paisa| super::Edge {
+            mean_paisa,
+            max_win_paisa: 500.0,
+            max_loss_paisa: 300.0,
+            ..super::Edge::default()
+        };
+        assert_eq!(
+            edge(0.0).largest_gain_paisa().to_bits(),
+            500.0_f64.to_bits()
+        );
+        assert_eq!(
+            edge(1.0).largest_gain_paisa().to_bits(),
+            500.0_f64.to_bits()
+        );
+        assert_eq!(
+            edge(-1.0).largest_gain_paisa().to_bits(),
+            300.0_f64.to_bits()
+        );
+    }
+
+    /// GAP16-26: a move is held as the paisa integer it is. 2^53 + 1 is the
+    /// first integer an `f64` cannot hold, and it came back as ...992.
+    #[test]
+    fn a_move_past_two_to_the_fifty_three_is_held_exactly() {
+        let big: i64 = 9_007_199_254_740_993;
+        let mut sides = Sides::default();
+        sides.observe(big);
+        sides.observe(1);
+        sides.observe(-big);
+        assert_eq!(sides.max_win, big);
+        assert_eq!(sides.min_win, 1);
+        assert_eq!(sides.max_loss, big.unsigned_abs());
+        assert_eq!(sides.win_sum, i128::from(big) + 1);
+        assert_eq!(sides.loss_sum, -i128::from(big));
+
+        // THE EXTREMES OF THE TYPE: no overflow, no sign error, no saturation.
+        let mut ends = Sides::default();
+        for x in [i64::MAX, i64::MAX, i64::MIN, i64::MIN] {
+            ends.observe(x);
+        }
+        assert_eq!(ends.win_sum, 2 * i128::from(i64::MAX));
+        assert_eq!(ends.loss_sum, 2 * i128::from(i64::MIN));
+        assert_eq!(ends.max_loss, i64::MIN.unsigned_abs(), "2^63, not an i64");
+        assert_eq!((ends.wins, ends.losses), (2, 2));
+
+        // ONE rounding, at the conversion, to the nearest double.
+        assert_eq!(
+            wide(i128::from(big) + 1).to_bits(),
+            9_007_199_254_740_994.0_f64.to_bits()
+        );
+        assert_eq!(wide(-5).to_bits(), (-5.0_f64).to_bits());
+        assert_eq!(wide(0).to_bits(), 0.0_f64.to_bits());
+    }
+
+    /// Prices scaled so that every forward move and excursion is far past
+    /// 2^31 paisa and the running sums pass 2^53.
+    fn huge_bars(scale: i64) -> Vec<Candle> {
+        crate::synthetic::sessions(8)
+            .iter()
+            .map(|b| {
+                let s = |p: i64| p.saturating_mul(scale);
+                Candle::new(
+                    b.ts_micros,
+                    s(b.open),
+                    s(b.high),
+                    s(b.low),
+                    s(b.close),
+                    b.volume,
+                    OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    /// The path sums dropped every excursion above `i32::MAX` and kept counting
+    /// the hit in `n`; the net sums rounded at every addition once past 2^53.
+    /// Both are now the exact integer sum, converted once.
+    #[test]
+    fn every_sum_is_the_exact_sum_converted_once() {
+        let bars = huge_bars(1 << 39);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        let all = ConditionMask::default();
+        let e = edge(&column, &f, &all);
+        assert!(e.n > 100, "the fixture must measure -- n={}", e.n);
+
+        let (mut wins, mut losses, mut adverse, mut favourable) = (0_i128, 0_i128, 0_i128, 0_i128);
+        let mut beyond_i32 = 0_u32;
+        for &s in column.sources() {
+            let Some(x) = f.at(s) else { continue };
+            if x > 0 {
+                wins += i128::from(x);
+            } else {
+                losses += i128::from(x);
+            }
+            let down = f.adverse_at(s).expect("measured");
+            let up = f.favourable_at(s).expect("measured");
+            adverse += i128::from(down);
+            favourable += i128::from(up);
+            if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
+                beyond_i32 += 1;
+            }
+        }
+        assert!(
+            beyond_i32 > 0,
+            "no excursion past i32 -- the fixture tests nothing"
+        );
+        assert!(wins > 1_i128 << 53, "the win sum must pass 2^53 -- {wins}");
+        assert_eq!(e.win_sum.to_bits(), wide(wins).to_bits(), "win_sum");
+        assert_eq!(e.loss_sum.to_bits(), wide(losses).to_bits(), "loss_sum");
+        assert_eq!(
+            e.adverse_sum.to_bits(),
+            wide(adverse).to_bits(),
+            "adverse_sum"
+        );
+        assert_eq!(
+            e.favourable_sum.to_bits(),
+            wide(favourable).to_bits(),
+            "favourable_sum"
+        );
+        // And that `Edge` is the one rank refuses: its win sum passed 2^53
+        // (GAP16-26, D-4486).
+        assert!(!e.money_is_exact(), "a total past 2^53 is not exact money");
+    }
+
+    /// The eight money fields, each set alone to `value` on an otherwise
+    /// zero `Edge`.
+    fn each_money_field_alone(value: f64) -> [Edge; 8] {
+        let zero = Edge::default();
+        [
+            Edge {
+                win_sum: value,
+                ..zero
+            },
+            Edge {
+                loss_sum: value,
+                ..zero
+            },
+            Edge {
+                adverse_sum: value,
+                ..zero
+            },
+            Edge {
+                favourable_sum: value,
+                ..zero
+            },
+            Edge {
+                min_win_paisa: value,
+                ..zero
+            },
+            Edge {
+                max_win_paisa: value,
+                ..zero
+            },
+            Edge {
+                max_loss_paisa: value,
+                ..zero
+            },
+            Edge {
+                min_loss_paisa: value,
+                ..zero
+            },
+        ]
+    }
+
+    /// GAP16-26, D-4486: exact below 2^53 in magnitude, and nowhere else, in
+    /// every one of the eight money fields.
+    ///
+    /// Each field alone, at the last exact integer on each side, at 2^53
+    /// itself (exact, but the double 2^53 + 1 converts to, so refused), past
+    /// it, at the extremes of the type `Sides` holds, and at the three values
+    /// that are not numbers. A field left out of the check passes its row and
+    /// fails here; a `<=` in place of `<` passes 2^53 and fails here.
+    #[test]
+    fn money_is_exact_below_two_to_the_fifty_three_in_every_field() {
+        let limit = 1_i128 << 53;
+        assert_eq!(EXACT_PAISA_LIMIT.to_bits(), wide(limit).to_bits());
+        assert_eq!(wide(limit + 1).to_bits(), wide(limit).to_bits());
+        assert!(
+            Edge::default().money_is_exact(),
+            "nothing measured is exact"
+        );
+        for exact in [wide(limit - 1), wide(1 - limit), 0.0, wide(-1), wide(1)] {
+            for (field, e) in each_money_field_alone(exact).iter().enumerate() {
+                assert!(e.money_is_exact(), "field {field} at {exact}");
+            }
+        }
+        for inexact in [
+            wide(limit),
+            wide(-limit),
+            wide(limit + 1),
+            wide(i128::from(i64::MAX)),
+            wide(i128::from(i64::MIN)),
+            wide(i128::from(i64::MIN.unsigned_abs())),
+            wide(2 * i128::from(i64::MIN)),
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            for (field, e) in each_money_field_alone(inexact).iter().enumerate() {
+                assert!(!e.money_is_exact(), "field {field} at {inexact}");
+            }
+        }
+        // Statistics are not money: a mean or t of any size is not asked.
+        let statistics = Edge {
+            mean_paisa: f64::MAX,
+            t: f64::INFINITY,
+            ..Edge::default()
+        };
+        assert!(statistics.money_is_exact());
+    }
+
+    /// The default series is exact money end to end: no ordinary bar walk
+    /// comes near the refusal.
+    #[test]
+    fn an_ordinary_series_is_exact_money() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.n > 100, "the fixture must measure -- n={}", e.n);
+        assert!(e.money_is_exact());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod overlap_window_tests {
+    use super::{OverlapWindow, long_run_sum_squares};
+
+    /// The cross-sums written out pair by pair in `f64`, from the definition:
+    /// every earlier hit whose window still reaches past the new entry and whose
+    /// gap is under `H`, at weight `1 - gap/H`, on the raw moves `x`.
+    fn pairwise(hits: &[(usize, i64, usize)], horizon: usize) -> [f64; 3] {
+        let mut out = [0.0; 3];
+        for (j, &(s, x, _)) in hits.iter().enumerate() {
+            for &(o, xo, exit) in hits.iter().take(j) {
+                if s - o < horizon && exit > s {
+                    #[allow(clippy::cast_precision_loss, reason = "test values")]
+                    let (w, x, xo) = (1.0 - (s - o) as f64 / horizon as f64, x as f64, xo as f64);
+                    out[0] += w * xo * x;
+                    out[1] += w * (xo + x);
+                    out[2] += w;
+                }
+            }
+        }
+        out
+    }
+
+    /// A day of hits with irregular gaps, each window ending at the earlier of
+    /// `H` bars and a forced bar, then the next day.
+    fn session_hits(horizon: usize, moves: impl Fn(usize) -> i64) -> Vec<(usize, i64, usize)> {
+        let mut hits = Vec::new();
+        for day in 0..3_usize {
+            let open = day * 400;
+            let forced = open + 360;
+            let mut at = open;
+            let mut step = 1;
+            while at < forced {
+                hits.push((at, moves(at), (at + horizon).min(forced)));
+                at += step;
+                step = step % 5 + 1;
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn the_running_sums_reproduce_every_pair() {
+        for horizon in [1_usize, 2, 15, 23, 400, 1_000_000] {
+            let hits = session_hits(horizon, |at| {
+                let k = i64::try_from(at).expect("small");
+                (k * 7_919) % 211 - 100
+            });
+            let mut window = OverlapWindow::new(horizon, 16);
+            for &(s, x, exit) in &hits {
+                window.observe(s, x, exit);
+            }
+            // The window works on y = x - x0; recentre the pairwise reference
+            // with the same algebra the walk uses and compare the long-run sum.
+            let want = pairwise(&hits, horizon);
+            #[allow(clippy::cast_precision_loss, reason = "test values")]
+            let mean = hits.iter().map(|h| h.1 as f64).sum::<f64>() / hits.len() as f64;
+            let got = window.sum_squares(1_000.0, mean);
+            let expected = long_run_sum_squares(1_000.0, mean, want[0], want[1], want[2]);
+            assert!(
+                (got - expected).abs() <= 1e-6 * expected.abs().max(1.0),
+                "H={horizon}: running {got}, pairwise {expected}"
+            );
+        }
+    }
+
+    /// **A HIT WHOSE EXIT PRECEDES AN OLDER ONE'S STILL LEAVES ON TIME
+    /// (audit-20261003 o1eng2-1, D-1572).**
+    ///
+    /// Exits that step back -- a flipping median cadence -- left a hit whose
+    /// window had closed queued behind an older hit whose window had not, and
+    /// its pairs were counted as overlapping. Here every odd hit's window is
+    /// far shorter than its even neighbour's; the running sums must equal the
+    /// pair-by-pair definition at every horizon, and the live count must be
+    /// the hits whose windows are still open.
+    #[test]
+    fn a_backward_exit_leaves_the_window_when_its_own_window_closes() {
+        for horizon in [4_usize, 15, 30, 400] {
+            let hits: Vec<(usize, i64, usize)> = (0..600_usize)
+                .map(|s| {
+                    let k = i64::try_from(s).expect("small");
+                    let exit = s + if s % 2 == 0 { horizon } else { 1 + s % 3 };
+                    (s, (k * 7_919) % 211 - 100, exit)
+                })
+                .collect();
+            let mut window = OverlapWindow::new(horizon, 16);
+            for &(s, x, exit) in &hits {
+                window.observe(s, x, exit);
+                let open = hits
+                    .iter()
+                    .take_while(|h| h.0 <= s)
+                    .filter(|&&(o, _, e)| o == s || (s - o < horizon && e > s))
+                    .count();
+                assert_eq!(window.held(), open, "H={horizon}, live hits at {s}");
+            }
+            let want = pairwise(&hits, horizon);
+            #[allow(clippy::cast_precision_loss, reason = "test values")]
+            let mean = hits.iter().map(|h| h.1 as f64).sum::<f64>() / hits.len() as f64;
+            let got = window.sum_squares(1_000.0, mean);
+            let expected = long_run_sum_squares(1_000.0, mean, want[0], want[1], want[2]);
+            assert!(
+                (got - expected).abs() <= 1e-6 * expected.abs().max(1.0),
+                "H={horizon}: running {got}, pairwise {expected}"
+            );
+        }
+    }
+
+    /// The level is removed before anything is multiplied, so moves near the
+    /// top of `i64` with a spread of a few paisa do not cancel into noise, and
+    /// nothing saturates.
+    #[test]
+    fn moves_at_the_ends_of_i64_neither_overflow_nor_cancel() {
+        let base = i64::MAX - 1_000;
+        let hits = session_hits(15, |at| base + i64::try_from(at % 7).expect("small"));
+        let mut window = OverlapWindow::new(15, 16);
+        for &(s, x, exit) in &hits {
+            window.observe(s, x, exit);
+        }
+        let shifted: Vec<(usize, i64, usize)> =
+            hits.iter().map(|&(s, x, e)| (s, x - base, e)).collect();
+        let want = pairwise(&shifted, 15);
+        let [a, b, c] = window.cross;
+        // `x0 = base + 0`, so the window's y equals the shifted reference.
+        assert!(
+            (a - want[0]).abs() <= 1e-9 * want[0].abs().max(1.0),
+            "A {a} vs {}",
+            want[0]
+        );
+        assert!(
+            (b - want[1]).abs() <= 1e-9 * want[1].abs().max(1.0),
+            "B {b} vs {}",
+            want[1]
+        );
+        assert!(
+            (c - want[2]).abs() <= 1e-9 * want[2].abs().max(1.0),
+            "C {c} vs {}",
+            want[2]
+        );
+        assert!(
+            window.sums.iter().all(|s| s.abs() < 1_i128 << 100),
+            "a sum ran away"
+        );
+
+        // AND THE OTHER END: alternating extremes, one per window, so every
+        // product is as large as `y` can be.
+        let mut ends = OverlapWindow::new(2, 4);
+        for (i, x) in [i64::MIN, i64::MAX, i64::MIN, i64::MAX]
+            .into_iter()
+            .enumerate()
+        {
+            ends.observe(i, x, i + 2);
+        }
+        let [a, b, c] = ends.cross;
+        assert!(a.is_finite() && b.is_finite() && c.is_finite());
+        assert!(ends.sums.iter().all(|s| s.abs() < 1_i128 << 110));
+    }
+
+    /// One observation, none, and a window that drains to empty and reopens.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "exactly zero, with nothing added, is the claim"
+    )]
+    fn empty_single_and_reopened_windows() {
+        let empty = OverlapWindow::new(15, 0);
+        assert_eq!(empty.held(), 0);
+        assert_eq!(empty.cross, [0.0; 3]);
+        let mut one = OverlapWindow::new(15, 1);
+        one.observe(10, 5, 25);
+        assert_eq!(
+            (one.held(), one.cross),
+            (1, [0.0; 3]),
+            "no pair from one hit"
+        );
+        one.observe(100, 7, 115);
+        assert_eq!(one.held(), 1, "the first hit drained");
+        assert_eq!(one.cross, [0.0; 3], "and paired with nothing");
+        assert_eq!(
+            one.anchor, 100,
+            "the reopened cluster is anchored on its hit"
+        );
+        assert_eq!(one.sums, [1, 2, 0, 0], "y = 7 - 5, at offset zero");
+    }
+
+    /// The pair loop is gone: no hit visits the queue.
+    #[test]
+    fn edge_visits_no_queued_hit() {
+        let source = include_str!("outcome.rs");
+        let live = source
+            // Up to the first test MODULE: D-1410 put test-only items above it.
+            .split("\n#[cfg(test)]\n#[allow(")
+            .next()
+            .expect("a source prefix");
+        assert!(!live.contains("in &recent {"), "the per-pair loop is back");
+        assert!(
+            live.contains("recent.observe(source, r,"),
+            "edge must fold O(1)"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod missing_minute_tests {
+    use super::{Horizon, edge, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
+    use vocab::ConditionMask;
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// W3-runner3-8: a minute with NO record is not a refused record. Remove
+    /// one mid-session bar; every outcome whose deadline or path needed it is
+    /// absent, and each is named missing, not refused.
+    #[test]
+    fn a_missing_minute_is_named_missing_and_never_a_refused_record() {
+        let mut bars = crate::synthetic::sessions(8);
+        let hole = bars.len() - 200;
+        bars.remove(hole);
+        let column = Column::build(&bars, &mut evaluator());
+        assert_eq!(
+            column.acceptance_census().offered,
+            column.acceptance_census().swept + column.acceptance_census().warming,
+            "nothing in this fixture is refused"
+        );
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        // The entries whose fifteen-minute window spans the hole.
+        let mut dropped = 0_u32;
+        for i in hole - 15..hole {
+            assert!(
+                f.at(i).is_none(),
+                "entry {i} priced across a missing minute"
+            );
+            assert!(f.was_refused(i), "entry {i}: the path was unpriceable");
+            assert!(
+                f.was_missing(i),
+                "entry {i}: and the reason is a missing minute"
+            );
+            dropped += 1;
+        }
+        assert!(dropped > 0);
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.refused > 0, "the hole is still counted as unpriceable");
+        assert_eq!(
+            e.missing, e.refused,
+            "and every one of them is a missing minute"
+        );
+    }
+
+    /// A refused record stays refused, and when a path holds both a refused
+    /// record and a missing minute, the refusal is what it is charged to.
+    #[test]
+    fn a_refused_record_is_never_named_missing() {
+        let clean = crate::synthetic::sessions(8);
+        let mut dirty = clean.clone();
+        let victim = dirty.len() - 100;
+        let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
+        if let Some(bar) = dirty.get_mut(victim) {
+            // `high` below `open`: `Candle::check` refuses it.
+            *bar = Candle::new(
+                stamp, 2_500_000, 2_499_000, 2_498_000, 2_498_500, 1, OI_NULL,
+            );
+        }
+        let column = Column::build(&dirty, &mut evaluator());
+        assert!(!column.accepts(victim));
+        let f = forward(&dirty, &column, Horizon::DEFAULT);
+        assert!(f.was_refused(victim - 2) && !f.was_missing(victim - 2));
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.refused > 0);
+        assert_eq!(e.missing, 0, "a refused record is not a missing minute");
+
+        // BOTH ON ONE PATH: a hole five minutes after the refused record.
+        let mut both = dirty.clone();
+        both.remove(victim + 5);
+        let column = Column::build(&both, &mut evaluator());
+        let f = forward(&both, &column, Horizon::DEFAULT);
+        assert!(f.was_refused(victim - 2), "the path is unpriceable");
+        assert!(
+            !f.was_missing(victim - 2),
+            "and the refused record is named"
+        );
+        assert!(f.was_missing(victim + 1), "past the refusal, only the hole");
+    }
+
+    /// The lane's edges: out of range and the tail are neither.
+    #[test]
+    fn the_tail_and_an_index_past_the_slice_are_neither() {
+        let bars = crate::synthetic::sessions(6);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        let last = bars.len() - 1;
+        assert!(f.at(last).is_none());
+        assert!(
+            !f.was_refused(last) && !f.was_missing(last),
+            "the tail is the design"
+        );
+        assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
+        assert!(!f.was_missing(usize::MAX));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod presize_tests {
+    use super::{FORCED_EXIT_MINUTE, SessionBounds};
+    use indicators::{Candle, OI_NULL};
+
+    fn at_1509(day: i64) -> Candle {
+        let minute = FORCED_EXIT_MINUTE - 1;
+        let ts = (day * 1_440 + minute) * 60_000_000 - indicators::IST_OFFSET_MICROS;
+        Candle::new(ts, 100, 110, 90, 100, 1, OI_NULL)
+    }
+
+    /// o1runner-8: the per-day map is sized from an exact upper bound, never
+    /// grown from empty, and the proved set from the map.
+    #[test]
+    fn the_forced_close_map_is_pre_sized_from_its_exact_bound() {
+        let source = include_str!("outcome.rs");
+        let start = source
+            .find("pub(crate) fn with_steps(")
+            .expect("with_step exists");
+        let body = source
+            .get(start..)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("a body");
+        assert!(
+            !body.contains("HashMap::new()"),
+            "the map grows from empty again"
+        );
+        assert!(body.contains("HashMap::with_capacity(candidates)"));
+        assert!(body.contains("HashSet::with_capacity(required.len())"));
+    }
+
+    /// The shapes `bars.len() / 375 + 1` would under-reserve: a slice of
+    /// nothing but 15:09 rows, one per day, and a day with two of them. The
+    /// answers are the same as before -- each lone record proves its day, and a
+    /// duplicated one proves nothing.
+    #[test]
+    fn a_slice_of_only_forced_close_rows_proves_each_lone_day() {
+        let mut bars: Vec<Candle> = (20_000..21_000).map(at_1509).collect();
+        let bounds = SessionBounds::with_step(&bars, 60_000_000, None);
+        assert!(
+            (0..bars.len()).all(|i| bounds.day_ended(i)),
+            "a lone 15:09 proves its day"
+        );
+
+        bars.insert(500, at_1509(20_500));
+        let bounds = SessionBounds::with_step(&bars, 60_000_000, None);
+        assert!(
+            !bounds.day_ended(500) && !bounds.day_ended(501),
+            "a duplicate proves nothing"
+        );
+        assert!(bounds.day_ended(499) && bounds.day_ended(502));
+
+        let empty = SessionBounds::with_step(&[], 60_000_000, None);
+        assert!(!empty.day_ended(0));
     }
 }

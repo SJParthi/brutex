@@ -36,10 +36,8 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<File> {
     ))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        let flags = 0x100 | 0x4;
-        #[cfg(target_os = "linux")]
-        let flags = 0x20_000 | 0x800;
+        // Per-architecture, not per-OS (D-0980).
+        let flags = crate::open_flags::O_NOFOLLOW_NONBLOCK;
         let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(flags)
@@ -285,10 +283,33 @@ fn audit(
     let sidecar_bytes = blocks
         .checked_mul(4)
         .ok_or("checksum sidecar extent overflow")?;
-    if !header.checksums_present()
-        || layout.record_stride() != Bar::LEN as u64
-        || layout.header_len() != HEADER_BYTES as u64
-        || layout.block_len() > BUFFER_BYTES as u64
+    // THE INTERRUPTED-APPEND EXTENT, NAMED ON ITS OWN. A crash between a
+    // record write and the header commit leaves bytes past the commit (and
+    // the sidecar may hold the tail block's entry, D-0688): docs/02-store-
+    // format.md §7 calls that state interrupted, not damaged, and ordinary
+    // readers serve the month. This audit still refuses it -- it reads exact
+    // extents only -- but it says which state it met and the byte counts,
+    // rather than one sentence covering five causes. Only a later append at
+    // least as long as the dead tail clears it; docs/06-limits.md. D-2791.
+    let supported = header.checksums_present()
+        && layout.record_stride() == Bar::LEN as u64
+        && layout.header_len() == HEADER_BYTES as u64
+        && layout.block_len() <= BUFFER_BYTES as u64;
+    if supported
+        && (before.data.len > data_bytes || before.sidecar.len > sidecar_bytes)
+        && before.data.len >= data_bytes
+        && before.sidecar.len >= sidecar_bytes
+    {
+        return Err(format!(
+            "strict checksum audit refuses an interrupted append: the month holds bytes past \
+             its commit (data {} bytes against {data_bytes} committed, sidecar {} bytes against \
+             {sidecar_bytes} committed). The store calls this state interrupted, not damaged, \
+             and ordinary readers serve the committed records; this audit reads exact extents \
+             only, so the month needs a covering re-append before it can be audited",
+            before.data.len, before.sidecar.len
+        ));
+    }
+    if !supported
         || before.data.len != data_bytes
         || before.sidecar.len != sidecar_bytes
         || data_bytes

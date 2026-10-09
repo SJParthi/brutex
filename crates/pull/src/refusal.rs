@@ -616,10 +616,25 @@ pub fn named_error_of(body: &str, field: &str, envelope: Option<&str>) -> Option
 /// measurement, however sound it is.
 #[must_use]
 pub fn disposition_of(body: &str, contract: &ErrorNames) -> Option<Disposition> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    // THROUGH THE CRATE'S ONE ANSWER PARSER, so a test counting parses sees
+    // this one too. W1-pull2-1.
+    let value = crate::http::parse_answer(body).ok()?;
+    disposition_of_value(&value, contract)
+}
+
+/// [`disposition_of`] over a body its caller has ALREADY parsed.
+///
+/// A 2xx answer is both weighed for a refusal and decoded, and both read one
+/// JSON value; taking the value lets `crate::http` parse that body once rather
+/// than once per reader. It parses nothing itself.
+#[must_use]
+pub fn disposition_of_value(
+    value: &serde_json::Value,
+    contract: &ErrorNames,
+) -> Option<Disposition> {
     let holder = match contract.envelope {
         Some(name) => value.get(name)?,
-        None => &value,
+        None => value,
     };
     let code = holder.get(contract.field)?.as_str()?;
     match contract.message {

@@ -1,15 +1,36 @@
-//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Exact selected-cell trades for every evaluated screen candidate and side.
 //!
 //! Each visited policy tier retains its actual cap and inputs. Immutable child
 //! files are sealed before a catalog can publish the captured set. The catalog
 //! is prepared evidence, not an institutional admission or parent-run success.
-//! Pages are bounded; cold verification and all retained history are not O(1).
+//!
+//! # Cost (D-0991, `docs/06-limits.md`)
+//!
+//! * **Recording one candidate side** re-runs the policy selection over the
+//!   grid's cells (O(cells), kept as an independent check), replays the one
+//!   selected cell from a column walk over facts derived ONCE per capture
+//!   (Θ(rows) walk plus O(trades × holding); the Θ(bars) slice facts are not
+//!   rebuilt per candidate), and publishes two immutable files. Each file is
+//!   one data `fsync`, one directory `fsync` and one full read-back, so a
+//!   candidate side costs exactly four `fsync`s — counted by a test, not
+//!   timed. None of this is O(1).
+//! * **A page** (`tier`, `candidates_page`, `TradeReader::open`) verifies the
+//!   catalog cold ONCE per [`Summary`] — read and BLAKE3 over the whole
+//!   catalog, O(C) in captured candidate sides — and afterwards pins it by its
+//!   filesystem generation, an O(1) `fstat`/`stat` pair, exactly as
+//!   `TradeReader::page` already did. A page is then O(page) plus the bounded
+//!   start descriptor. A changed catalog is still refused.
+//! * Cold `TradeReader::open` verifies every trade row of its file, and
+//!   retained history grows with every capture; neither is O(1).
+//!
+//! Proven by invariant rows CUH-06, CUH-07 and CUH-08 in
+//! `docs/04-invariants.md`, including
+//! `cli::candidate_trades::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side`.
 
 mod codec;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -198,6 +219,29 @@ pub struct Capture<'a> {
     column: &'a Column,
     expression: Option<&'a Expression>,
     state: Mutex<State>,
+    /// `SliceFacts::of(bars, column)`, built on the first materialisation and
+    /// shared by every later one (D-1184, D-0991). Each call used to rebuild
+    /// it, an O(B) value per captured candidate. A capture that materialises
+    /// nothing builds nothing.
+    facts: std::sync::OnceLock<runner::trade::SliceFacts>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of slice-fact derivations by captures on this thread.
+    static CAPTURE_FACTS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of cold catalog verifications on this thread.
+    static CATALOG_VERIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of `fsync` calls issued by `write_exact` on this thread.
+    static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl<'a> Capture<'a> {
@@ -228,6 +272,32 @@ impl<'a> Capture<'a> {
         Self::begin_with(root, attempt, bars, column, Some(expression))
     }
 
+    /// [`Self::begin_expression`] for a caller that already holds
+    /// `runner::identity::data_digest(bars)` for these exact bars.
+    ///
+    /// The expression search prices every candidate over one immutable month,
+    /// and hashing all of its bars again per candidate was O(bars) of
+    /// identical work each time (W2-cli5-2, D-1641). The digest is the caller's
+    /// to keep honest: `expression_pricing::Prepared` computes it once in
+    /// `new` from the bars it owns and never mutates.
+    pub(crate) fn begin_expression_with_digest(
+        root: &Path,
+        attempt: &crate::sweep_evidence::Attempt,
+        bars: &'a [indicators::Candle],
+        column: &'a Column,
+        expression: &'a Expression,
+        execution_digest: [u8; 32],
+    ) -> Result<Self, String> {
+        Self::begin_digested(
+            root,
+            attempt,
+            bars,
+            column,
+            Some(expression),
+            execution_digest,
+        )
+    }
+
     fn begin_with(
         root: &Path,
         attempt: &crate::sweep_evidence::Attempt,
@@ -235,10 +305,25 @@ impl<'a> Capture<'a> {
         column: &'a Column,
         expression: Option<&'a Expression>,
     ) -> Result<Self, String> {
+        let execution_digest = runner::identity::data_digest(bars);
+        Self::begin_digested(root, attempt, bars, column, expression, execution_digest)
+    }
+
+    fn begin_digested(
+        root: &Path,
+        attempt: &crate::sweep_evidence::Attempt,
+        bars: &'a [indicators::Candle],
+        column: &'a Column,
+        expression: Option<&'a Expression>,
+        execution_digest: [u8; 32],
+    ) -> Result<Self, String> {
         let model = model_of(expression);
         let directory = directory_for(root, &attempt.identity(), attempt.token(), model);
-        fs::create_dir_all(&directory).map_err(io_error)?;
-        let execution_digest = runner::identity::data_digest(bars);
+        // Up to four NEW levels (`results/<model>/<identity>/<token>`), and
+        // only the leaf was ever synced (by `write_exact`): a power loss could
+        // lose the attempt directory beneath a durable `Completed` row.
+        // Each new level's parent is synced before the next (xcut-3, D-2623).
+        crate::durable_dir::create_all(&directory).map_err(io_error)?;
         let mut start = Encoder::default();
         start.bytes(&attempt.identity());
         start.word(attempt.token());
@@ -256,6 +341,7 @@ impl<'a> Capture<'a> {
             column,
             expression,
             state: Mutex::new(State::default()),
+            facts: std::sync::OnceLock::new(),
         })
     }
 
@@ -393,13 +479,12 @@ impl<'a> Capture<'a> {
             }
             held.digest
         };
+        // No second membership scan: `shown_cell` only ever returns a copy of
+        // one of `evaluated.grid.cells`, so equality with it, checked above,
+        // already proves the cell is in this grid. That recheck itself is
+        // O(cells) and is kept as an independent selection proof.
         let rows = match evaluated.selected {
-            Some((cell, _)) => {
-                if !evaluated.grid.cells.contains(&cell) {
-                    return Err("candidate cell is absent from its actual grid".to_owned());
-                }
-                self.materialize(tier, evaluated, &cell)?
-            }
+            Some((cell, _)) => self.materialize(tier, evaluated, &cell)?,
             None => Vec::new(),
         };
         let mut candidate = Candidate {
@@ -453,8 +538,13 @@ impl<'a> Capture<'a> {
         let horizon = Horizon::bars(u32::try_from(tier.horizon).map_err(io_error)?)
             .ok_or("candidate horizon is zero")?;
         let side = crate::side_of_direction(evaluated.direction);
+        let facts = self.facts.get_or_init(|| {
+            #[cfg(test)]
+            CAPTURE_FACTS_BUILT.with(|built| built.set(built.get().saturating_add(1)));
+            runner::trade::SliceFacts::of(self.bars, self.column)
+        });
         match self.expression {
-            Some(expression) => grid::materialize_expression_cell(
+            Some(expression) => grid::materialize_expression_cell_over(
                 self.bars,
                 self.column,
                 expression,
@@ -462,8 +552,9 @@ impl<'a> Capture<'a> {
                 side,
                 evaluated.grid,
                 cell,
+                facts,
             ),
-            None => grid::materialize_cell(
+            None => grid::materialize_cell_over(
                 self.bars,
                 self.column,
                 evaluated.mask,
@@ -471,6 +562,7 @@ impl<'a> Capture<'a> {
                 side,
                 evaluated.grid,
                 cell,
+                facts,
             ),
         }
     }
@@ -610,6 +702,11 @@ pub struct Summary {
     pub digest: [u8; 32],
     index: Vec<TierIndex>,
     expression: Option<Box<Expression>>,
+    /// Filesystem generation of `catalog.bin` at the cold verification that
+    /// proved its bytes hash to [`Self::digest`]. Set once, by [`pinned`]'s
+    /// first cold check or by [`read_model`]; every later page compares
+    /// generations instead of re-reading and re-hashing the catalog. D-0991.
+    catalog_generation: std::sync::OnceLock<crate::result_set::FileGeneration>,
 }
 
 impl Summary {
@@ -649,7 +746,14 @@ pub fn read_model(
     if !path.try_exists().map_err(io_error)? {
         return Ok(None);
     }
-    let (payload, digest) = read_sealed(&path, model.catalog(), max_bytes)?;
+    // cli2-5, D-2624: an empty catalog is a seal that was never written —
+    // the same answer as no catalog, not a damaged one.
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == 0) {
+        return Ok(None);
+    }
+    #[cfg(test)]
+    CATALOG_VERIFICATIONS.with(|count| count.set(count.get().saturating_add(1)));
+    let (payload, digest, generation) = read_sealed_generation(&path, model.catalog(), max_bytes)?;
     let summary = decode_summary(&payload, digest, model)?;
     if summary.identity != identity || summary.attempt != attempt {
         return Err("candidate catalog names another run or attempt".to_owned());
@@ -661,6 +765,7 @@ pub fn read_model(
         summary.execution_digest,
         summary.expression(),
     )?;
+    let _first = summary.catalog_generation.set(generation);
     Ok(Some(summary))
 }
 
@@ -733,10 +838,44 @@ fn decode_summary(raw: &[u8], digest: [u8; 32], model: Model) -> Result<Summary,
         digest,
         index,
         expression,
+        catalog_generation: std::sync::OnceLock::new(),
     })
 }
 
+/// Proves `summary` still names the catalog on disk.
+///
+/// Cold (first call for a `Summary` that carries no verified generation): the
+/// whole catalog is re-read and hashed, O(C), and its generation remembered.
+/// Warm: one shared-lock open plus an `fstat`/`stat` generation comparison and
+/// the bounded start-descriptor check, O(1) in C. Any rewrite, replacement or
+/// truncation of `catalog.bin` changes its generation and is refused. D-0991, proven by
+/// `cli::candidate_trades::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change`
+/// (CUH-06).
 fn pinned(root: &Path, summary: &Summary, max_bytes: u64) -> Result<PathBuf, String> {
+    let dir = directory_for(root, &summary.identity, summary.attempt, summary.model);
+    if let Some(expected) = summary.catalog_generation.get().copied() {
+        let path = dir.join("catalog.bin");
+        // Released by name below and by the guard's explicit unlock on every
+        // refusal, never by close (D-0693).
+        let file =
+            Flock::try_lock_shared(crate::readonly_file::open(&path).map_err(io_error)?, &path)
+                .map_err(busy)?;
+        let observed = crate::result_set::file_generation(&file, &path)?;
+        // Through the shared comparison, so a target with no file identity
+        // refuses here too rather than comparing two identity-free values.
+        if crate::result_set::require_generation_unchanged(expected, observed, &path).is_err() {
+            return Err("candidate catalog changed between pages".to_owned());
+        }
+        file.release().map_err(|u| io_error(u.why))?;
+        require_start(
+            &dir,
+            summary.identity,
+            summary.attempt,
+            summary.execution_digest,
+            summary.expression(),
+        )?;
+        return Ok(dir);
+    }
     let held = read_model(
         root,
         summary.identity,
@@ -748,12 +887,26 @@ fn pinned(root: &Path, summary: &Summary, max_bytes: u64) -> Result<PathBuf, Str
     if held.digest != summary.digest {
         return Err("candidate catalog changed between pages".to_owned());
     }
-    Ok(directory_for(
-        root,
-        &summary.identity,
-        summary.attempt,
-        summary.model,
-    ))
+    if let Some(generation) = held.catalog_generation.get().copied() {
+        let _first = summary.catalog_generation.set(generation);
+    }
+    Ok(dir)
+}
+
+/// Proves `summary` still names the catalog on disk, without re-reading it.
+///
+/// For a `Summary` that [`read_model`] returned this is [`pinned`]'s warm
+/// check: one shared-lock open, a generation comparison and the bounded
+/// start-descriptor check; it reads no catalog record. It is the check a page
+/// already trusts between its own reads, offered to a caller that holds a
+/// `Summary` across requests or re-checks one at the end of a page. Proved
+/// warm by AHD-04. D-2283 (W1-api2-2).
+///
+/// # Errors
+/// Refuses a catalog whose generation moved, a start descriptor that no longer
+/// matches, or a catalog that is busy or gone.
+pub fn require_unchanged(root: &Path, summary: &Summary, max_bytes: u64) -> Result<(), String> {
+    pinned(root, summary, max_bytes).map(|_| ())
 }
 
 /// Reads the actual policy and pricing cap for a visited tier.
@@ -1177,29 +1330,75 @@ fn verify_header(raw: &[u8; HEADER], magic: [u8; 8]) -> Result<(), String> {
     }
 }
 fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], String> {
+    write_exact_via(path, magic, payload, std::io::Write::write_all)
+}
+
+/// [`write_exact`] with the byte write injectable, so a test can stop it
+/// part-way the way a kill would.
+///
+/// WRITTEN ASIDE, THEN LINKED INTO ITS NAME. The file used to be created at
+/// its final name and only then locked and filled, so a reader that opened it
+/// in between, or after a kill mid-write, found it empty or short and refused
+/// it as "truncated", and the next writer met `AlreadyExists` over those
+/// bytes and refused every retry for good. The bytes now go to a hidden
+/// sibling unique to this process and call, are synced, and appear under the
+/// final name through `hard_link`, which refuses an existing name exactly as
+/// `create_new` did: the final name only ever holds a whole, sealed file.
+/// conc:cli2-5, D-3603.
+fn write_exact_via(
+    path: &Path,
+    magic: [u8; 8],
+    payload: &[u8],
+    mut write: impl FnMut(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<[u8; 32], String> {
+    static ASIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let header = header(magic);
     let mut hash = brutex_core::blake3::Hasher::new();
     hash.update(&header);
     hash.update(payload);
     let digest = hash.finalize();
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(file) => {
-            // A write or sync failure releases the lock through the guard's
-            // explicit unlock, never by close (D-0693).
-            let mut file = Flock::lock(file, path).map_err(io_error)?;
-            file.write_all(&header)
-                .and_then(|()| file.write_all(payload))
-                .and_then(|()| file.write_all(&digest))
-                .and_then(|()| file.sync_all())
+    match fs::symlink_metadata(path) {
+        // An existing name is compared below; an EMPTY regular file there (an
+        // older writer's interrupted `create_new`) is first filled in place
+        // under its lock (cli2-5, D-2624).
+        Ok(_) => fill_empty_remnant(path, &header, payload, &digest)?,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            let name = path
+                .file_name()
+                .ok_or("candidate detail path has no file name")?
+                .to_string_lossy();
+            let aside = path.with_file_name(format!(
+                ".{name}.{}.{}.partial",
+                std::process::id(),
+                ASIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&aside)
                 .map_err(io_error)?;
-            file.release().map_err(|u| io_error(u.why))?;
+            // HELD FROM CREATION UNTIL THE ASIDE NAME IS GONE (D-4602). The
+            // unlink of the aside after the link changes the inode's ctime,
+            // which every pinned `FileGeneration` compares: D-2624's reason for
+            // not taking a staging name. A reader reaches this inode only
+            // through the final name, after the link, and takes its shared
+            // lock before it pins a generation, so while this exclusive lock
+            // is held it meets `busy` and retries, and no generation is ever
+            // pinned before the unlink.
+            let mut held = Flock::lock(file, aside.as_path()).map_err(io_error)?;
+            let written = write(&mut held, &header)
+                .and_then(|()| write(&mut held, payload))
+                .and_then(|()| write(&mut held, &digest))
+                .and_then(|()| crate::fixed_tail::sync_all_hooked(&held, &aside));
+            let linked = written.and_then(|()| linked_or_lost_race(fs::hard_link(&aside, path)));
+            let removed = fs::remove_file(&aside);
+            let released = held.release().map_err(|unreleased| unreleased.why);
+            linked.map_err(io_error)?;
+            removed.map_err(io_error)?;
+            released.map_err(io_error)?;
+            #[cfg(test)]
+            DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
         }
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(io_error(why)),
     }
     let budget = (payload.len() as u64)
@@ -1212,9 +1411,105 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     File::open(path.parent().ok_or("candidate detail path has no parent")?)
         .and_then(|file| file.sync_all())
         .map_err(io_error)?;
+    #[cfg(test)]
+    DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
     Ok(digest)
 }
+/// A link into the final name, where losing the race to another writer of
+/// the same name is not a failure: the winner's bytes are verified next, as
+/// they always were. Any other link error is (D-3603).
+fn linked_or_lost_race(linked: std::io::Result<()>) -> std::io::Result<()> {
+    match linked {
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
+
+/// Writes the header, payload and seal at offset 0 and syncs, under the
+/// guard's exclusive lock, then releases it by name.
+///
+/// A failed write or barrier cuts the file back to 0 bytes before the lock is
+/// released (`fixed_tail`, D-1900), so what it leaves is the empty remnant the
+/// next writer fills, never a partial file every retry refuses as different
+/// bytes (cli2-5, D-2624).
+fn write_whole(
+    mut file: Flock<File, &Path>,
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    use std::io::Write as _;
+    if let Err(why) = file
+        .write_all(header)
+        .and_then(|()| file.write_all(payload))
+        .and_then(|()| file.write_all(digest))
+    {
+        return Err(io_error(crate::fixed_tail::roll_back(
+            &file,
+            &path.display(),
+            0,
+            &format!("cannot write {}: {why}", path.display()),
+        )));
+    }
+    crate::fixed_tail::sync_all_or_roll_back(&file, path, 0).map_err(io_error)?;
+    #[cfg(test)]
+    DURABLE_SYNCS.with(|count| count.set(count.get().saturating_add(1)));
+    file.release().map_err(|u| io_error(u.why))
+}
+
+/// The existing-name arm of [`write_exact_via`]. Only an empty regular file
+/// whose exclusive lock is free, and which is still empty once the lock is
+/// held, is filled; every other case (a whole file, a symbolic link, a live
+/// writer holding the lock) is left for the caller's comparison to judge.
+fn fill_empty_remnant(
+    path: &Path,
+    header: &[u8; HEADER],
+    payload: &[u8],
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    let existing = fs::symlink_metadata(path).map_err(io_error)?;
+    if !existing.is_file() || existing.len() != 0 {
+        return Ok(());
+    }
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+            .open(path)
+            .map_err(io_error)?
+    };
+    let file = match Flock::try_lock(opened, path) {
+        Ok(file) => file,
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(why)) => return Err(io_error(why)),
+    };
+    if file.metadata().map_err(io_error)?.len() != 0 {
+        return file.release().map_err(|u| io_error(u.why));
+    }
+    write_whole(file, path, header, payload, digest)?;
+    crate::note(
+        &telemetry::Event::warn("cli.ledger", "empty candidate detail filled")
+            .with("path", path.display().to_string().as_str())
+            .with(
+                "reason",
+                "a 0-byte detail file is an interrupted create, never acknowledged",
+            ),
+    );
+    Ok(())
+}
 fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), String> {
+    read_sealed_generation(path, magic, max_bytes).map(|(payload, seal, _)| (payload, seal))
+}
+/// [`read_sealed`], also returning the generation the verified bytes were read
+/// under, so a caller can later pin the same file without re-hashing it.
+fn read_sealed_generation(
+    path: &Path,
+    magic: [u8; 8],
+    max_bytes: u64,
+) -> Result<(Vec<u8>, [u8; 32], crate::result_set::FileGeneration), String> {
     // Released by name below and by the guard's explicit unlock on every
     // refusal, never by close (D-0693).
     let mut file =
@@ -1223,6 +1518,12 @@ fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, 
     let generation = crate::result_set::file_generation(&file, path)?;
     let metadata = file.metadata().map_err(io_error)?;
     let len = metadata.len();
+    if metadata.is_file() && len == 0 {
+        // cli2-5, D-2624: an empty file is an older writer's interrupted
+        // `create_new` or a write cut back to nothing, which the next writer
+        // of this name fills; it is contention, not damage.
+        return Err(EMPTY_DETAIL.to_owned());
+    }
     if !metadata.is_file() || len < (HEADER + SEAL) as u64 || len > max_bytes {
         return Err(
             "candidate detail file is nonregular, truncated or above its byte admission".to_owned(),
@@ -1247,8 +1548,12 @@ fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, 
     let observed = crate::result_set::file_generation(&file, path)?;
     crate::result_set::require_generation_unchanged(generation, observed, path)?;
     file.release().map_err(|u| io_error(u.why))?;
-    Ok((payload, seal))
+    Ok((payload, seal, generation))
 }
+
+/// The refusal for a 0-byte detail file (cli2-5, D-2624). It says "busy",
+/// like [`busy`], because a retry after the next writer is the remedy.
+const EMPTY_DETAIL: &str = "candidate detail is busy: the file is empty, an interrupted write the next writer fills; retry this exact saved page";
 
 fn busy(why: std::fs::TryLockError) -> String {
     match why {

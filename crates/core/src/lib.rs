@@ -16,6 +16,7 @@
 //! | [`error`] | every error this crate can return |
 //! | [`instrument`] | the one identity every vendor resolves to |
 //! | [`isin`] | the cross-check that is deliberately not part of identity |
+//! | [`knob`] | how an environment value naming a folder or a switch is read |
 //! | [`price`] | paisa integers and the one float boundary |
 //! | [`symbol`] | fixed-width symbols, one identity for every vendor |
 //! | [`universe`] | which lists a symbol belongs to |
@@ -27,6 +28,7 @@ pub mod blake3;
 pub mod error;
 pub mod instrument;
 pub mod isin;
+pub mod knob;
 pub mod price;
 pub mod symbol;
 pub mod universe;

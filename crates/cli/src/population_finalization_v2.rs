@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -115,10 +115,8 @@ const LEDGER_FILE: &str = "population-finalization-v2.bin";
 const LOCK_FILE: &str = "population-finalization-v2.lock";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + SEAL_BYTES == POPULATION_FINALIZATION_V2_RECORD_BYTES);
 
@@ -1278,6 +1276,17 @@ impl PopulationFinalizationV2Ledger {
             require_regular_file(&data_file, &data_path)?;
             if writable {
                 sync_directory_entries(&root_file, &root_path)?;
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock. A block is acknowledged only by its synced
+                // Completion, so bytes past the last whole record were never
+                // acknowledged; a whole record is never cut.
+                crate::fixed_tail::heal_torn_tail(
+                    &data_file,
+                    &data_path,
+                    0,
+                    POPULATION_FINALIZATION_V2_RECORD_BYTES as u64,
+                    &[],
+                )?;
             }
             let root_generation = directory_generation(&root_file, &root_path)?;
             let lock_generation = file_generation(&held_lock, &lock_path, 0)?;
@@ -2748,6 +2757,16 @@ fn structural_receipt_from_block(
     })
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "raw append remains dormant until upstream lineage authority is constructible"
+    )
+)]
+const APPEND_LABEL: &str = "Finalization V2 record";
+
 #[cfg_attr(
     not(test),
     expect(
@@ -2759,9 +2778,7 @@ fn append_raw_record(
     file: &mut File,
     raw: &[u8; POPULATION_FINALIZATION_V2_RECORD_BYTES],
 ) -> Result<(), PopulationFinalizationV2Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Finalization V2 record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn directory_generation(
@@ -3045,6 +3062,7 @@ fn hex32(value: [u8; 32]) -> String {
 )]
 mod tests {
     use super::*;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const BLOCK_SEQUENCE: u64 = 29;
@@ -3744,6 +3762,25 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestPath::directory("append-rollback");
+        let limits = bounds(32);
+        let value = prepared();
+        let complete = value.records(0, 0).expect("fixture block");
+        write_ledger_records(root.path(), &complete[..complete.len() - 1]);
+        crate::append_rollback::tests::inject_short_write(
+            &root.path().join(LEDGER_FILE),
+            APPEND_LABEL,
+            POPULATION_FINALIZATION_V2_RECORD_BYTES,
+        );
+        let commit = persist_population_finalization_v2(root.path(), limits, &value)
+            .expect("the next append completes the exact orphan after the rollback");
+        assert!(matches!(commit, PopulationFinalizationV2Commit::Written(_)));
+        PopulationFinalizationV2Ledger::open_read(root.path(), limits)
+            .expect("the ledger stays readable");
+    }
+
+    #[test]
     fn foreign_retry_cannot_hide_a_trailing_prepared_block() {
         let root = TestPath::directory("foreign-orphan");
         let limits = bounds(32);
@@ -3759,6 +3796,32 @@ mod tests {
         assert_eq!(
             std::fs::read(root.path().join(LEDGER_FILE)).expect("reread orphan bytes"),
             before
+        );
+    }
+
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail.
+    /// A reader still refuses it; the next writer cuts it, says so once, and
+    /// keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_history_kept() {
+        let limits = bounds(64);
+        let root = TestPath::directory("kill-torn");
+        let value = prepared();
+        persist_population_finalization_v2(root.path(), limits, &value).expect("seed ledger");
+        let ledger = root.path().join(LEDGER_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[(
+                ledger.as_path(),
+                POPULATION_FINALIZATION_V2_RECORD_BYTES as u64,
+            )],
+            &mut || {
+                let opened = PopulationFinalizationV2Ledger::open_read(root.path(), limits)?;
+                Ok(format!(
+                    "{:?}",
+                    opened.reopen_structural_receipt(&value.finalization_id())?
+                ))
+            },
+            &mut || PopulationFinalizationV2Ledger::open_write(root.path(), limits).map(drop),
         );
     }
 

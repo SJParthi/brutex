@@ -154,7 +154,11 @@ pub const SEBI_TURNOVER_FEE: BpsX100 = BpsX100::new(10);
 
 /// NSE IPFT: 0.0005%, ₹50 per crore, on premium both sides.
 ///
-/// Source: `NSE/FA/56129`; `COSTS_VERIFIED` §5.
+/// Source: `COSTS_VERIFIED` §5. **The circular citation is `UNVERIFIED`.**
+/// This line used to cite `NSE/FA/56129`, but that circular covers 2023-04 to
+/// 2024-03 and was never retrieved (`docs/06-limits.md`, "The whole
+/// pre-2024-10-01 exchange transaction charge is unknown"), so it cannot be
+/// the source of a figure in force from 2024-10-01. D-1779.
 ///
 /// See the note on [`crate::regime::NSE_EXCHANGE_CHARGE`] about `FA73061`,
 /// which reportedly re-splits the transaction charge and this figure while
@@ -237,7 +241,8 @@ pub const fn stamp_duty(side: OrderSide) -> BpsX100 {
 ///
 /// Stage 1 carries the rate and the rule. The arithmetic that applies them —
 /// which components go into the base, and where the single rounding lands — is
-/// stage 2's, and is deliberately not half-written here.
+/// `crate::trip::charge_stack`'s: the base is the sum of the already-rounded
+/// brokerage, exchange, SEBI and IPFT components, rounded once.
 pub const GST_ON_FEE_BASE: BpsX100 = BpsX100::new(1_800_000);
 
 // ---------------------------------------------------------------------------

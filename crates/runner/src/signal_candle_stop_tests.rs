@@ -49,6 +49,7 @@ impl Fixture {
             bars.clone()
         } else {
             crate::resample::resample(&bars, crate::resample::Period::minutes(minutes).unwrap())
+                .unwrap()
         };
         let position = signals
             .iter()
@@ -209,17 +210,18 @@ fn roundtrip(result: &Evaluation) {
 #[test]
 fn all_eight_rungs_keep_original_signal_low_high_and_exact_next_minute_entry() {
     for minutes in [1, 2, 3, 5, 10, 15, 30, 60] {
-        // 10:00 IST is a complete edge on each canonical resampling grid.
-        let fixture = Fixture::new(minutes, 45);
+        // 10:15 IST is a complete edge on every open-anchored resampling grid
+        // (D-1430): sixty minutes past the open is a multiple of each rung.
+        let fixture = Fixture::new(minutes, 60);
         for side in [Direction::Long, Direction::Short] {
             let prepared = fixture.prepared();
             let result = prepared.evaluate(&always(), side, 100_000).unwrap();
             let row = exact_trade(&result);
             assert_eq!(
                 row.entry_micros,
-                stamp(45 + usize::try_from(minutes).unwrap())
+                stamp(60 + usize::try_from(minutes).unwrap())
             );
-            assert_eq!(row.signal_micros, stamp(45));
+            assert_eq!(row.signal_micros, stamp(60));
             assert_eq!(row.signal_close_micros, row.entry_micros);
             assert_eq!(row.signal_bar, fixture.signals.len() as u64 - 1);
             assert_eq!(
@@ -468,17 +470,17 @@ fn a_signal_closing_after_the_last_entry_minute_is_too_late_even_with_no_minute_
     // exists, so alignment gives it none. That is "too late to trade today" --
     // the verdict a present 15:10 entry gets -- never a missing observation,
     // which refuses the whole setting's execution completeness. Buckets sit on
-    // the IST clock grid, so the last one starts at 15:29, 15:28, 15:27, 15:25,
-    // 15:20, 15:15, 15:00 and 15:00 respectively.
+    // the open-anchored grid (D-1430), so the last one starts at 15:29, 15:29,
+    // 15:27, 15:25, 15:25, 15:15, 15:15 and 15:15 respectively.
     let last_buckets = [
         (1, 374),
-        (2, 373),
+        (2, 374),
         (3, 372),
         (5, 370),
-        (10, 365),
+        (10, 370),
         (15, 360),
-        (30, 345),
-        (60, 345),
+        (30, 360),
+        (60, 360),
     ];
     for side in [Direction::Long, Direction::Short] {
         for (minutes, signal_minute) in last_buckets {
@@ -778,4 +780,46 @@ fn codecs_and_checked_aggregate_overflow_cannot_change_trade_readings_or_clocks(
         *bytes.get_mut(byte).unwrap() ^= 1;
         assert!(Policy::decode(&bytes).is_err());
     }
+}
+
+#[test]
+fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
+    // D-2307: the window is read from per-day tables of rows and periods
+    // rather than found by walking every row and period. The pinned fold below was
+    // measured on the build before that change, over every start day and three
+    // end days per start, both sides, so any drift in which rows or periods a
+    // window takes changes it.
+    let mut fixture = Fixture::new(1, 30);
+    fixture.signals = fixture.bars.clone();
+    fixture.column = column(&fixture.signals);
+    let prepared = fixture.prepared();
+    let mut fold = Hasher::new();
+    let mut windows = 0_u32;
+    for first in 0..=LAST_DAY {
+        for last in [first, (first + 1).min(LAST_DAY), LAST_DAY] {
+            for side in [Direction::Long, Direction::Short] {
+                let result = prepared
+                    .evaluate_days(&always(), side, 100_000, first, last)
+                    .unwrap();
+                assert!(
+                    result
+                        .periods()
+                        .iter()
+                        .all(|period| period.day >= first && period.day <= last)
+                );
+                fold.update(&result.digest());
+                windows += 1;
+            }
+        }
+    }
+    assert_eq!(windows, 240);
+    // RE-TAKEN for D-2612 and D-2613 (ind1-1, ind1-2): the fixture's column
+    // is built by the evaluator, whose VWAP, EMA and gap-mid bits are now
+    // decided exactly, so the evaluated rows change. Which rows and periods a
+    // window takes did not: reverting `indicators` alone restores the old pin.
+    let pin: [u8; 32] = [
+        185, 123, 135, 9, 87, 116, 122, 15, 32, 179, 174, 50, 66, 101, 148, 130, 121, 210, 155,
+        149, 149, 108, 19, 77, 3, 161, 99, 135, 17, 223, 226, 80,
+    ];
+    assert_eq!(fold.finalize(), pin);
 }

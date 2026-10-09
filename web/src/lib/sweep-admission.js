@@ -1,3 +1,5 @@
+import { refusalOf, refusalSentence } from './refusal.js';
+
 /** Current writer admission is separate from the outcome of old commands.
  * A positive read is only a snapshot: the server must claim its OS lease again
  * at POST admission. No read here declares historical research completed. */
@@ -26,10 +28,22 @@ export function sweepLaunchStop(sweep, admission, unconfirmed) {
 
 /** An exact acceptance or explicit pre-dispatch refusal is the only decisive
  * POST response. Everything else remains unconfirmed and must not be resent.
- * @param {number} status @param {any} body */
-export function sweepSubmission(status, body) {
+ * @param {number} status @param {any} body
+ * @param {string | null} [reason] the reply's stated reason; by default read from `body`
+ * @param {string} [route] the launch route the reply answered */
+export function sweepSubmission(status, body, reason = refusalOf(body), route = '/backtest/run') {
   if (body?.accepted === false && typeof body.refusal === 'string' && body.refusal &&
       status >= 400 && status < 600 && !Object.hasOwn(body, 'attempt') &&
+      !Object.hasOwn(body, 'attempt_key') && body.started !== true) {
+    return { phase: 'failed', attempt: '', why: body.refusal, confirmed: true };
+  }
+  // THE AUDIT START REFUSED BEFORE DISPATCH (log-1, D-2501). The api names it
+  // exactly: `invocation_audit_unavailable` with `handler_completed: false`,
+  // so no handler ran and nothing can have started. Read as unknown, it locked
+  // Run for the session over a request the server says it never dispatched.
+  if (status === 503 && body?.schema_version === 1 && body.code === 'invocation_audit_unavailable' &&
+      body.handler_completed === false && typeof body.refusal === 'string' && body.refusal.trim() &&
+      body.refusal.length <= 4096 && !Object.hasOwn(body, 'attempt') &&
       !Object.hasOwn(body, 'attempt_key') && body.started !== true) {
     return { phase: 'failed', attempt: '', why: body.refusal, confirmed: true };
   }
@@ -40,5 +54,8 @@ export function sweepSubmission(status, body) {
       (body.attempt_key === undefined || body.attempt_key === attempt) && body.started !== false) {
     return { phase: 'running', attempt, why: '', confirmed: true };
   }
-  return { phase: 'unknown', attempt: '', why: 'The launch response did not confirm acceptance or refusal. It may have started; do not submit it again.', confirmed: false };
+  // THE ANSWER'S OWN REASON, NAMED (F5, D-3222). Both launch routes are
+  // audited, and the audit layer's refusal says whether the handler ran; a
+  // request-bounds refusal is plain text. Neither confirms, so neither resends.
+  return { phase: 'unknown', attempt: '', why: `The launch response did not confirm acceptance or refusal (${refusalSentence(route, status, reason)}). It may have started; do not submit it again.`, confirmed: false };
 }

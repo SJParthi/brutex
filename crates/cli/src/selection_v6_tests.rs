@@ -38,6 +38,19 @@ fn frame(seed: u8) -> Block {
     block
 }
 
+/// Where an abandoned tail at `offset` holding `tail` is set aside (D-2554).
+fn quarantine(root: &Path, offset: impl std::fmt::Display, tail: &[u8]) -> PathBuf {
+    let hex =
+        brutex_core::blake3::hash(tail)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+    root.join(format!("{FILE_NAME}.abandoned-{offset}-{hex}"))
+}
+
 fn bounds(records: u64) -> SelectionV6Bounds {
     SelectionV6Bounds::new(records, records * BLOCK_BYTES).expect("finite bounds")
 }
@@ -95,7 +108,7 @@ fn reopen_reuse_and_append_preserve_exact_history_and_capacity() {
 }
 
 #[test]
-fn incomplete_prefix_is_never_authority_and_only_exact_resume_appends() {
+fn incomplete_prefix_is_never_authority_and_a_foreign_one_is_set_aside() {
     let expected = frame(7);
     for len in [
         1,
@@ -122,15 +135,23 @@ fn incomplete_prefix_is_never_authority_and_only_exact_resume_appends() {
     let foreign = frame(8);
     let path = scratch.0.join(FILE_NAME);
     std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
-    assert!(persist(&scratch.0, bounds(1), &expected).is_err());
+    // D-1569: a foreign unsealed prefix is moved aside whole, never lost.
+    assert!(persist(&scratch.0, bounds(1), &expected).expect("foreign tail set aside"));
+    assert_eq!(std::fs::read(path).expect("completed bytes"), expected);
     assert_eq!(
-        std::fs::read(path).expect("preserved foreign prefix"),
+        quarantined(&scratch.0, 0),
+        vec![foreign[..4096].to_vec()],
+        "preserved foreign prefix"
+    );
+    assert_eq!(
+        std::fs::read(quarantine(&scratch.0, 0, &foreign[..4096]))
+            .expect("preserved foreign prefix"),
         &foreign[..4096]
     );
 }
 
 #[test]
-fn duplicate_corrupt_wrong_version_and_trailing_partial_refuse_without_repair() {
+fn duplicate_corrupt_and_wrong_version_refuse_without_repair() {
     let first = frame(3);
     let mut corrupt = first;
     corrupt[400] ^= 1;
@@ -140,7 +161,6 @@ fn duplicate_corrupt_wrong_version_and_trailing_partial_refuse_without_repair() 
         [first.as_slice(), first.as_slice()].concat(),
         corrupt.to_vec(),
         old_version.to_vec(),
-        [first.as_slice(), &[1]].concat(),
     ] {
         let scratch = Scratch::new();
         let path = scratch.0.join(FILE_NAME);
@@ -269,4 +289,642 @@ fn genuine_execution_v4_authority_reaches_v6_and_corrupt_selection_refuses() {
         },
     )
     .expect("real source-retaining successor");
+}
+
+/// **An abandoned partial tail neither hides committed history nor wedges a
+/// new source.** audit-20261003 hunt-cli-a-5, D-1569.
+///
+/// One interrupted persist left an unsealed partial block after a committed
+/// one. Every read of the committed block then refused, and a different
+/// source could never be appended: "incomplete prefix belongs to different
+/// source; nothing repaired". The partial tail is now never read as authority,
+/// committed blocks before it stay readable, and the next writer, under the
+/// exclusive lock, moves the abandoned bytes aside into a named quarantine
+/// file before appending, so nothing is lost and nothing is hidden.
+#[test]
+fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_source() {
+    let scratch = Scratch::new();
+    let first = frame(11);
+    let foreign = frame(12);
+    let second = frame(13);
+    assert!(persist(&scratch.0, bounds(3), &first).expect("first write"));
+    let path = scratch.0.join(FILE_NAME);
+    let mut torn = std::fs::read(&path).expect("committed first");
+    torn.extend_from_slice(&foreign[..4096]);
+    std::fs::write(&path, &torn).expect("interrupted foreign persist");
+
+    require_committed(&scratch.0, bounds(3), &first)
+        .expect("a committed block stays readable behind an unsealed tail");
+    assert!(
+        require_committed(&scratch.0, bounds(3), &foreign).is_err(),
+        "an unsealed tail is never authority"
+    );
+    assert!(persist(&scratch.0, bounds(3), &second).expect("a new source appends"));
+    assert_eq!(
+        std::fs::read(&path).expect("repaired history"),
+        [first.as_slice(), second.as_slice()].concat()
+    );
+    assert_eq!(
+        quarantined(&scratch.0, SELECTION_V6_BLOCK_BYTES),
+        vec![foreign[..4096].to_vec()],
+        "abandoned bytes kept aside"
+    );
+    let quarantine = quarantine(&scratch.0, SELECTION_V6_BLOCK_BYTES, &foreign[..4096]);
+    assert_eq!(
+        std::fs::read(&quarantine).expect("abandoned bytes kept aside"),
+        &foreign[..4096]
+    );
+    require_committed(&scratch.0, bounds(3), &first).expect("first retained");
+    require_committed(&scratch.0, bounds(3), &second).expect("second committed");
+    // Exact reuse behind a tail also clears the tail aside, then reuses.
+    let mut torn = std::fs::read(&path).expect("two committed");
+    torn.extend_from_slice(&foreign[..10]);
+    std::fs::write(&path, &torn).expect("second interruption");
+    assert!(!persist(&scratch.0, bounds(3), &second).expect("exact reuse"));
+    assert_eq!(
+        std::fs::read(&path).expect("tail moved aside"),
+        [first.as_slice(), second.as_slice()].concat()
+    );
+}
+
+/// **CE-65. A FIFO AT THE QUARANTINE'S SCRATCH NAME NEVER HOLDS THE REPAIR.**
+/// The comparison read the `.abandoned-<n>` name whole with `fs::read`, so a
+/// FIFO there blocked the ledger's repair under its exclusive lock. Since
+/// conc4-1 (D-2554) the copy is written under a `.writing` scratch name and
+/// renamed to a content-keyed one; a stale scratch is unlinked, never opened,
+/// so a FIFO there (or at the final name, which the rename replaces) neither
+/// waits nor is read, and the repair completes.
+#[test]
+fn a_fifo_at_the_quarantine_names_never_holds_the_repair() {
+    let expected = frame(7);
+    let scratch = Scratch::new();
+    let path = scratch.0.join(FILE_NAME);
+    let foreign = frame(8);
+    std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
+    // The name the repair will reach for: offset 0 and this tail's digest
+    // (D-2790, D-2554), so the FIFO sits exactly where the copy lands.
+    let aside = quarantine(&scratch.0, 0, &foreign[..4096]);
+    let writing = PathBuf::from(format!("{}.writing", aside.display()));
+    for fifo in [&aside, &writing] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+    }
+    let (sent, answer) = std::sync::mpsc::channel();
+    let repair = {
+        let root = scratch.0.clone();
+        std::thread::spawn(move || {
+            let _ = sent.send(persist(&root, bounds(1), &expected));
+        })
+    };
+    let repaired = answer.recv_timeout(std::time::Duration::from_secs(2));
+    if repaired.is_err() {
+        for fifo in [&aside, &writing] {
+            let _ = std::fs::OpenOptions::new().write(true).open(fifo);
+        }
+    }
+    let _ = repair.join();
+    assert!(
+        repaired
+            .expect("a FIFO at a quarantine name must not hold the repair")
+            .expect("the tail is set aside"),
+        "the block was written"
+    );
+    assert_eq!(std::fs::read(&path).expect("ledger"), expected);
+    assert_eq!(
+        std::fs::read(&aside).expect("a regular file now"),
+        &foreign[..4096]
+    );
+    assert!(!writing.exists(), "no scratch is left");
+}
+
+/// Every quarantine set aside at `offset`, in name order.
+fn quarantined(root: &std::path::Path, offset: usize) -> Vec<Vec<u8>> {
+    let prefix = format!("{FILE_NAME}.abandoned-{offset}-");
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .expect("scratch listing")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect();
+    names.sort();
+    names
+        .iter()
+        .map(|path| std::fs::read(path).expect("quarantine"))
+        .collect()
+}
+
+/// **A second interrupted write at the same offset does not wedge the rung.**
+/// CE-88, D-2790. A's persist dies leaving tail tA at offset X; B sets tA
+/// aside, then dies leaving tB at X; C must set tB aside too, rather than
+/// collide with tA's quarantine and refuse every source but B's retry.
+#[test]
+fn two_interrupted_writes_at_one_offset_each_get_their_own_quarantine() {
+    let scratch = Scratch::new();
+    let first = frame(21);
+    let a = frame(22);
+    let b = frame(23);
+    let c = frame(24);
+    assert!(persist(&scratch.0, bounds(3), &first).expect("first write"));
+    let path = scratch.0.join(FILE_NAME);
+    let committed = std::fs::read(&path).expect("committed");
+    std::fs::write(&path, [committed.as_slice(), &a[..4096]].concat()).expect("A dies");
+    // B's persist sets tA aside; B then dies mid-write at the same offset.
+    assert!(persist(&scratch.0, bounds(3), &b).expect("B appends"));
+    std::fs::write(&path, [committed.as_slice(), &b[..100]].concat()).expect("B dies");
+    assert!(
+        persist(&scratch.0, bounds(3), &c).expect("C is not wedged by tA's quarantine"),
+        "C appends"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("history"),
+        [first.as_slice(), c.as_slice()].concat()
+    );
+    let mut held = quarantined(&scratch.0, SELECTION_V6_BLOCK_BYTES);
+    held.sort();
+    let mut want = vec![a[..4096].to_vec(), b[..100].to_vec()];
+    want.sort();
+    assert_eq!(held, want, "both tails kept, neither lost");
+}
+
+/// Reseal a block after a deliberate edit, as a forger with the format would.
+fn resealed(mut block: Block) -> Block {
+    let identity = block_identity(&block).expect("identity");
+    block[24..56].copy_from_slice(&identity);
+    let digest = seal(&block).expect("seal");
+    block[SEAL_AT..].copy_from_slice(&digest);
+    block
+}
+
+/// **The display reader decodes a genuine committed block to the authority's
+/// own winners, and refuses any family but the two.** D-1578,
+/// audit-20261003 gaps-10.
+///
+/// The block is the one `commit_stored_selection_v6` writes from a genuine
+/// Execution V4 authority. Read back through `read_stored_selection_v6` from
+/// the `ROOT/selection/<rung>/` layout `ledger-v6` writes, every winner must
+/// equal `top_twenty_five` field for field: rank, family, digests, side,
+/// mask, score and metrics. Other rungs read as absent and name their path.
+///
+/// A sealed block whose family envelope or winner names any code but NIFTY's
+/// 1 or BANKNIFTY's 2 is refused with the `CLAUDE.md` §1 sentence, never
+/// shown under a guessed name, and so is an equity asked for by name.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one genuine fixture carries the decode, the layout and both refusals"
+)]
+fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family() {
+    crate::step3_orchestrator::with_population_v6_evaluated_pair_fixture(
+        |finalization, nifty, banknifty, population_root| {
+            let upstream =
+                crate::population_v6::bind_population_v6_source_v1(finalization, nifty, banknifty)?;
+            let population = crate::population_v6::commit_population_v6(
+                population_root,
+                crate::population_v6::PopulationV6Bounds::new(4, 1_000_000, 512 * 1024 * 1024)?,
+                upstream,
+            )?
+            .into_authority();
+            let execution_root = Scratch::new();
+            let execution = crate::execution_v4::commit_stored_execution_v4(
+                &execution_root.0,
+                execution_bounds(),
+                population,
+            )?;
+            let selection_root = Scratch::new();
+            let policy = RankingPolicyV1::new(runner::topn::Weights::equal())
+                .map_err(|why| format!("{why:?}"))?;
+            let mut selection =
+                commit_stored_selection_v6(&selection_root.0, bounds(4), execution, policy)?;
+            let top = selection.top_twenty_five()?;
+            let bytes =
+                std::fs::read(selection_root.0.join(FILE_NAME)).map_err(|e| e.to_string())?;
+            let block: Block = bytes.as_slice().try_into().map_err(|_| "one block")?;
+            let record = read::decode_block(&block)?;
+            assert_eq!(record.identity, selection.identity());
+            assert_eq!(record.winners.len(), top.len());
+            for (stored, authority) in record.winners.iter().zip(&top) {
+                assert_eq!(stored.rank, authority.rank);
+                assert_eq!(stored.family, authority.family);
+                assert_eq!(stored.disposition_id, authority.disposition_id);
+                assert_eq!(stored.selected_exit_digest, authority.selected_exit_digest);
+                let candidate = authority.ranked.candidate;
+                assert_eq!(stored.strategy_digest, candidate.strategy_digest.bytes());
+                assert_eq!(stored.mask_words, candidate.mask_words);
+                assert_eq!(stored.score, authority.ranked.score);
+                assert_eq!(
+                    stored.direction,
+                    match candidate.direction {
+                        costs::fill::Direction::Long => "long",
+                        costs::fill::Direction::Short => "short",
+                    }
+                );
+                let m = candidate.metrics;
+                assert_eq!(
+                    (
+                        stored.drawdown,
+                        stored.worst_loss,
+                        stored.pessimistic_profit
+                    ),
+                    (m.drawdown, m.worst_loss, m.pessimistic_profit)
+                );
+                assert_eq!(
+                    (stored.loss_ratio_ppm, stored.reward_to_risk_ppm),
+                    (m.loss_ratio_ppm, m.reward_to_risk_ppm)
+                );
+            }
+            assert_eq!(record.families.map(|f| f.family), ["NIFTY", "BANKNIFTY"]);
+
+            // THE LAYOUT `ledger-v6` WRITES.
+            let rung = crate::ledger_all::LEDGER_RUNGS
+                .into_iter()
+                .find(|rung| {
+                    crate::stored::rung_length_micros(rung).ok()
+                        == i64::try_from(record.rung_seconds)
+                            .ok()
+                            .map(|s| s * 1_000_000)
+                })
+                .ok_or("the fixture's rung is a ledger rung")?;
+            let ledger_root = Scratch::new();
+            let directory = ledger_root.0.join("selection").join(rung);
+            std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            std::fs::write(directory.join(FILE_NAME), &bytes).map_err(|e| e.to_string())?;
+            for (name, read) in read_stored_selection_v6(&ledger_root.0, 0, 4) {
+                match read {
+                    StoredSelectionV6Rung::Records {
+                        total,
+                        from,
+                        records,
+                    } => {
+                        assert_eq!(name, rung);
+                        assert_eq!((total, from), (1, 0));
+                        assert_eq!(records, vec![record.clone()]);
+                    }
+                    StoredSelectionV6Rung::Absent(path) => {
+                        assert_ne!(name, rung);
+                        assert!(path.ends_with(&format!("selection/{name}/{FILE_NAME}")));
+                    }
+                    StoredSelectionV6Rung::Refused(why) => panic!("{name}: {why}"),
+                }
+            }
+            // A FILE LONGER THAN ONE PAGE IS PAGED, NOT REFUSED: block `from`
+            // is one seek away and the count is the file's length (D-2303).
+            // Three blocks: the genuine one, a resealed variant with its own
+            // identity, then the genuine one again.
+            let mut other = block;
+            other[88] ^= 1; // the unshown Population V6 completion digest
+            let other = resealed(other);
+            std::fs::write(
+                directory.join(FILE_NAME),
+                [bytes.as_slice(), other.as_slice(), bytes.as_slice()].concat(),
+            )
+            .map_err(|e| e.to_string())?;
+            let page = |from: u64, limit: u64| {
+                read_stored_selection_v6(&ledger_root.0, from, limit)
+                    .into_iter()
+                    .find(|(name, _)| *name == rung)
+                    .map(|(_, read)| read)
+            };
+            match page(1, 1) {
+                Some(StoredSelectionV6Rung::Records {
+                    total,
+                    from,
+                    records,
+                }) => {
+                    assert_eq!((total, from, records.len()), (3, 1, 1));
+                    assert_ne!(
+                        records[0].identity, record.identity,
+                        "block 1 alone was read"
+                    );
+                }
+                other => panic!("one page of one block: {other:?}"),
+            }
+            match page(5, 2) {
+                Some(StoredSelectionV6Rung::Records { total, records, .. }) => {
+                    assert_eq!((total, records.len()), (3, 0), "past the end is empty");
+                }
+                other => panic!("an empty page: {other:?}"),
+            }
+            // A DUPLICATE IDENTITY INSIDE ONE PAGE IS STILL REFUSED.
+            assert!(
+                matches!(page(0, 3), Some(StoredSelectionV6Rung::Refused(why))
+                if why.contains("duplicate committed identities"))
+            );
+
+            // ANY OTHER FAMILY CODE, RESEALED, IS REFUSED BY NAME.
+            let mut envelope = block;
+            envelope[672..680].copy_from_slice(&3_u64.to_le_bytes());
+            let why = read::decode_block(&resealed(envelope)).expect_err("family 3 refused");
+            assert!(why.contains(SELECTION_V6_EQUITY_REFUSAL), "{why}");
+            if !record.winners.is_empty() {
+                let mut winner = block;
+                winner[1056..1064].copy_from_slice(&3_u64.to_le_bytes());
+                let why = read::decode_block(&resealed(winner)).expect_err("winner family refused");
+                assert!(why.contains(SELECTION_V6_EQUITY_REFUSAL), "{why}");
+            }
+            Ok(())
+        },
+    )
+    .expect("real source-retaining successor");
+    for word in ["RELIANCE", "TCS"] {
+        let why = selection_v6_family(word).expect_err("an equity is refused");
+        assert!(
+            why.starts_with(&format!("{word} is a cash equity.")),
+            "{why}"
+        );
+        assert!(why.contains(SELECTION_V6_EQUITY_REFUSAL));
+    }
+    assert!(selection_v6_family("INDIAVIX").is_err());
+    assert_eq!(selection_v6_family("NIFTY"), Ok("NIFTY"));
+    assert_eq!(selection_v6_family("BANKNIFTY"), Ok("BANKNIFTY"));
+}
+
+/// Exact reuse with no tail sets nothing aside; the record ceiling binds even
+/// when the byte ceiling has room; an existing quarantine holding exactly the
+/// abandoned bytes is accepted. D-1569. G18-cli-b-19, D-2027.
+///
+/// Re-taken on merge for conc4-1 (D-2554, D-4603): the quarantine is named by
+/// the tail's offset AND content, so a file of other bytes at the old
+/// offset-only name no longer refuses the repair. It is left untouched, and an
+/// earlier repair's identical copy under the content name is accepted.
+#[test]
+fn reuse_sets_nothing_aside_records_bind_and_an_identical_quarantine_is_accepted() {
+    let quarantines = |root: &Path| {
+        std::fs::read_dir(root)
+            .expect("scratch lists")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .expect("entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".abandoned-")
+            })
+            .count()
+    };
+    let scratch = Scratch::new();
+    let first = frame(21);
+    assert!(persist(&scratch.0, bounds(2), &first).expect("first write"));
+    assert!(!persist(&scratch.0, bounds(2), &first).expect("exact reuse"));
+    assert_eq!(
+        quarantines(&scratch.0),
+        0,
+        "a whole-block ledger has no tail to set aside"
+    );
+
+    let roomy = SelectionV6Bounds::new(1, 2 * BLOCK_BYTES).expect("bytes above the record ceiling");
+    let before = std::fs::read(scratch.0.join(FILE_NAME)).expect("one committed");
+    let refusal = persist(&scratch.0, roomy, &frame(22)).expect_err("the record ceiling binds");
+    assert!(
+        refusal.contains("no space inside declared record bounds"),
+        "{refusal}"
+    );
+    assert_eq!(
+        std::fs::read(scratch.0.join(FILE_NAME)).expect("unchanged"),
+        before
+    );
+
+    let scratch = Scratch::new();
+    let expected = frame(23);
+    let foreign = frame(24);
+    let path = scratch.0.join(FILE_NAME);
+    let offset_only = scratch.0.join(format!("{FILE_NAME}.abandoned-0"));
+    let quarantine = quarantine(&scratch.0, 0, &foreign[..4096]);
+    std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
+    let mut other = foreign[..4096].to_vec();
+    other[0] ^= 1;
+    std::fs::write(&offset_only, &other).expect("other bytes at the offset-only name");
+    std::fs::write(&quarantine, &foreign[..4096]).expect("an earlier repair's identical copy");
+    assert!(
+        persist(&scratch.0, bounds(1), &expected).expect("the identical quarantine is accepted")
+    );
+    assert_eq!(std::fs::read(&path).expect("completed"), expected);
+    assert_eq!(std::fs::read(&quarantine).expect("kept"), &foreign[..4096]);
+    assert_eq!(
+        std::fs::read(&offset_only).expect("untouched"),
+        other,
+        "a file at the old offset-only name is neither compared nor replaced"
+    );
+}
+
+/// A quarantine that cannot be created (here `ENAMETOOLONG`, not `AlreadyExists`)
+/// refuses with the create error and is never compared as an existing copy.
+/// G18-cli-b-19, D-2027.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_quarantine_that_cannot_be_created_refuses_with_the_create_error() {
+    let scratch = Scratch::new();
+    let mut root = std::fs::canonicalize(&scratch.0).expect("scratch resolves");
+    // root + '/' + FILE_NAME = 4,090 bytes: the ledger opens under the
+    // 4,096-byte PATH_MAX, and the quarantine's scratch name, 85 bytes longer
+    // (`.abandoned-0-`, 64 hex digits, `.writing`; D-2554), does not.
+    let target = 4_089 - FILE_NAME.len();
+    while target - root.as_os_str().len() > 255 {
+        root.push("d".repeat(128));
+    }
+    let last = target - root.as_os_str().len() - 1;
+    root.push("d".repeat(last));
+    assert_eq!(root.join(FILE_NAME).as_os_str().len(), 4_090);
+    std::fs::create_dir_all(&root).expect("a deep root under PATH_MAX");
+    let path = root.join(FILE_NAME);
+    std::fs::write(&path, &frame(26)[..4096]).expect("foreign prefix");
+    let why = persist(&root, bounds(1), &frame(25)).expect_err("the quarantine cannot be created");
+    // The refusal names the quarantine and says the ledger was not changed
+    // (D-2554's wording, re-taken on merge, D-4603).
+    assert!(
+        why.starts_with("Selection V6 abandoned tail quarantine "),
+        "{why}"
+    );
+    assert!(why.contains("the ledger was not changed"), "{why}");
+    assert!(!why.contains("nothing repaired"), "{why}");
+    assert_eq!(
+        std::fs::read(&path).expect("ledger").len(),
+        4096,
+        "the ledger is not cut"
+    );
+}
+
+/// A sealed block the display decoder accepts: both family envelopes valid,
+/// `winners` NIFTY-long winners, the given Top-10 count, and each winner's
+/// loss-ratio and reward-to-risk (definedness, value) words.
+fn decodable(winners: u64, top_ten: u64, loss: (u64, u64), reward: (u64, u64)) -> Block {
+    fn put(block: &mut Block, at: usize, value: u64) {
+        block[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut block = frame(0);
+    put(&mut block, 672, 1); // NIFTY envelope
+    put(&mut block, 680, 1); // evaluated
+    put(&mut block, 840, 2); // BANKNIFTY envelope
+    put(&mut block, 848, 1); // evaluated
+    put(&mut block, 912, winners);
+    put(&mut block, 920, top_ten);
+    for rank in 0..winners {
+        let at = 960 + 296 * usize::try_from(rank).expect("a small rank");
+        put(&mut block, at + 96, 1); // NIFTY
+        put(&mut block, at + 128, 1); // long
+        put(&mut block, at + 264, loss.0);
+        put(&mut block, at + 272, loss.1);
+        put(&mut block, at + 280, reward.0);
+        put(&mut block, at + 288, reward.1);
+    }
+    resealed(block)
+}
+
+/// The display decoder admits exactly the winner counts the encoder writes,
+/// a full Top-25 included, and keeps a defined ratio's value distinct from an
+/// undefined one. G18-cli-b-20, D-2027.
+#[test]
+fn the_display_decoder_admits_only_the_encoders_counts_and_ratio_words() {
+    let full = read::decode_block(&decodable(25, 10, (1, 7), (0, 0)))
+        .expect("a full Top-25 with its Top-10 prefix decodes");
+    assert_eq!(full.winners.len(), 25);
+    for winner in &full.winners {
+        assert_eq!((winner.family, winner.direction), ("NIFTY", "long"));
+        assert_eq!(
+            winner.loss_ratio_ppm,
+            Some(7),
+            "a defined ratio keeps its value"
+        );
+        assert_eq!(
+            winner.reward_to_risk_ppm, None,
+            "undefined is not a measured zero"
+        );
+    }
+    let one = read::decode_block(&decodable(1, 1, (1, 0), (1, 1))).expect("one winner");
+    assert_eq!(
+        (
+            one.winners[0].loss_ratio_ppm,
+            one.winners[0].reward_to_risk_ppm
+        ),
+        (Some(0), Some(1))
+    );
+    for (winners, top_ten) in [(26, 10), (1, 0), (12, 12)] {
+        let why = read::decode_block(&decodable(winners, top_ten, (1, 7), (0, 0)))
+            .expect_err("a count the encoder cannot write");
+        assert!(
+            why.contains(&format!("{winners} winner(s) and a Top-10 of {top_ten}")),
+            "{why}"
+        );
+    }
+    for bad in [(0, 5), (2, 0)] {
+        let why = read::decode_block(&decodable(1, 1, bad, (0, 0)))
+            .expect_err("a definedness word the encoder cannot write");
+        assert!(why.contains("invalid definedness word"), "{why}");
+    }
+}
+
+/// A rung whose path cannot be inspected for any reason but absence is
+/// refused by name, never shown as "no record yet". G18-cli-b-20, D-2027.
+#[test]
+fn an_uninspectable_rung_path_is_refused_not_reported_absent() {
+    let root = Scratch::new();
+    std::fs::create_dir(root.0.join("selection")).expect("selection directory");
+    let blocked = crate::ledger_all::LEDGER_RUNGS[0];
+    std::fs::write(root.0.join("selection").join(blocked), b"not a directory")
+        .expect("a regular file where the rung directory belongs");
+    let mut refused = 0;
+    for (rung, read) in read_stored_selection_v6(&root.0, 0, 4) {
+        match read {
+            StoredSelectionV6Rung::Refused(why) => {
+                assert_eq!(rung, blocked, "{why}");
+                assert!(
+                    why.contains(&format!("selection/{rung}/{FILE_NAME}")),
+                    "{why}"
+                );
+                refused += 1;
+            }
+            StoredSelectionV6Rung::Absent(path) => assert_ne!(rung, blocked, "{path}"),
+            StoredSelectionV6Rung::Records { .. } => panic!("{rung}: records in an empty root"),
+        }
+    }
+    assert_eq!(refused, 1);
+}
+
+/// **A page that starts past the file's last block (`from >= total`) is an
+/// empty page for every such `from`, including one whose byte offset cannot
+/// be represented.**
+/// R1286-cli-01, D-4100.
+///
+/// The seek to block `from` is made only when the page shows a block. A page
+/// past the end shows none, so its offset is never computed: `from` at
+/// `u64::MAX / BLOCK_BYTES + 1`, the smallest block index whose offset
+/// overflows a `u64`, and at `u64::MAX`, each read as `total` blocks and an
+/// empty page, never as a refused rung. The blocks are never decoded either,
+/// so two structurally sealed frames suffice.
+#[test]
+fn a_page_past_the_end_never_computes_its_offset_even_one_that_overflows() {
+    let root = Scratch::new();
+    let rung = crate::ledger_all::LEDGER_RUNGS[0];
+    let directory = root.0.join("selection").join(rung);
+    std::fs::create_dir_all(&directory).expect("rung directory");
+    std::fs::write(
+        directory.join(FILE_NAME),
+        [frame(1).as_slice(), frame(2).as_slice()].concat(),
+    )
+    .expect("two blocks");
+    let first_overflowing = u64::MAX / BLOCK_BYTES + 1;
+    assert!(
+        first_overflowing.checked_mul(BLOCK_BYTES).is_none()
+            && (first_overflowing - 1).checked_mul(BLOCK_BYTES).is_some(),
+        "premise: the smallest block index whose offset overflows"
+    );
+    for asked in [2, 3, first_overflowing - 1, first_overflowing, u64::MAX] {
+        let read = read_stored_selection_v6(&root.0, asked, 4)
+            .into_iter()
+            .find(|(name, _)| *name == rung)
+            .map(|(_, read)| read);
+        match read {
+            Some(StoredSelectionV6Rung::Records {
+                total,
+                from,
+                records,
+            }) => assert_eq!((total, from, records.len()), (2, asked, 0), "from {asked}"),
+            other => panic!("from {asked}: an empty page, not {other:?}"),
+        }
+    }
+}
+
+/// conc4-1, D-2554: a quarantine copy that fails part way leaves no file under
+/// any name and the ledger unchanged, so the rerun sets the tail aside; and a
+/// second abandoned tail at the SAME offset gets its own quarantine instead of
+/// refusing every later persist on the rung.
+#[test]
+fn a_failed_or_repeated_quarantine_never_wedges_the_rung() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let scratch = Scratch::new();
+    let path = scratch.0.join(FILE_NAME);
+    let (first, second, own) = (frame(21), frame(22), frame(23));
+    std::fs::write(&path, &first[..4096]).expect("first abandoned prefix");
+    {
+        let _armed = Armed::arm("abandoned", Kind::Write { keep: 100 });
+        assert!(persist(&scratch.0, bounds(1), &own).is_err());
+    }
+    let left: Vec<_> = std::fs::read_dir(&scratch.0)
+        .expect("list")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        left,
+        [std::ffi::OsString::from(FILE_NAME)],
+        "no partial copy"
+    );
+    assert_eq!(std::fs::read(&path).expect("ledger"), &first[..4096]);
+    assert!(persist(&scratch.0, bounds(2), &own).expect("the rerun sets it aside"));
+    // A second source abandons a tail at the same offset after a cut.
+    std::fs::write(&path, &second[..300]).expect("second abandoned prefix");
+    assert!(persist(&scratch.0, bounds(2), &own).expect("own block again"));
+    assert_eq!(std::fs::read(&path).expect("ledger"), own);
+    for tail in [&first[..4096], &second[..300]] {
+        assert_eq!(
+            std::fs::read(quarantine(&scratch.0, 0, tail)).expect("both kept"),
+            tail
+        );
+    }
 }

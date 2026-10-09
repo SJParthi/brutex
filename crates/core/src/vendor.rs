@@ -32,7 +32,8 @@
 //! Strikes arrive in **rupees** and are stored in **paisa**. `27000` in the
 //! master is `2_700_000` here. One missed multiplication makes every strike
 //! wrong by a factor of a hundred, so the conversion goes through
-//! [`Paisa::from_rupees_half_up`] like every other price.
+//! [`Paisa::from_rupee_text_half_up`], from the master's own text, as `pull`'s
+//! vendor prices do (D-1494).
 
 use crate::error::InstrumentError;
 use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
@@ -282,10 +283,21 @@ impl VendorId {
     /// `None` for an empty id — a row with no id cannot be requested — and for
     /// one past [`VENDOR_ID_CAPACITY`], which is a grammar this build has not
     /// seen and must not silently truncate into a different instrument.
+    ///
+    /// `None` as well for an id whose first or last character is whitespace
+    /// that `u8::is_ascii_whitespace` does not name, such as U+00A0, U+3000 or
+    /// the vertical tab U+000B. Only space, tab, line feed, form feed and
+    /// carriage return are trimmed: `str::trim` is Unicode-aware and turned
+    /// `"\u{a0}1333\u{3000}"` into `1333`, filing a row under an id its column
+    /// did not hold. D-0787.
     #[must_use]
     pub fn new(raw: &str) -> Option<Self> {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.len() > VENDOR_ID_CAPACITY {
+        let raw = raw.trim_ascii();
+        if raw.is_empty()
+            || raw.len() > VENDOR_ID_CAPACITY
+            || raw.starts_with(char::is_whitespace)
+            || raw.ends_with(char::is_whitespace)
+        {
             return None;
         }
         let mut bytes = [0_u8; VENDOR_ID_CAPACITY];
@@ -919,6 +931,45 @@ impl Decoded {
 /// instruments beside real ones, and they would be indistinguishable later.
 const TEST_MARKERS: [&str; 2] = ["NSETEST", "BSETEST"];
 
+/// Whether `field` carries one of [`TEST_MARKERS`] once every ASCII whitespace
+/// byte is removed and every ASCII letter upper-cased (audit satk-1, D-4507).
+/// It holds the case-blind scan D-3152 added on the other branch, and folds
+/// whitespace too, so the merge keeps this one (D-4653).
+///
+/// That is at least the normalisation the identity gets: [`collapse_spaces`]
+/// removes spaces and [`Symbol::new`] upper-cases, so a marker spelled
+/// `NSE TEST`, `nse test` or `BSE\tTest` would otherwise reach the store as
+/// the very symbol the marker names. Whitespace other than a space is folded
+/// too, though `Symbol::new` refuses it anyway: a filter that is broader than
+/// the identity rule cannot let a test listing through.
+///
+/// # Cost
+///
+/// O(1). It runs after [`MasterRow::over_wide`], so `field` is at most
+/// [`MAX_FIELD_BYTES`] bytes and fits the stack buffer exactly; the `zip`
+/// cannot drop a byte of a field that passed that gate. Two needles of seven
+/// bytes over at most 64 folded bytes: a fixed bound, no allocation. The
+/// 64-byte edge is exercised by
+/// `core::vendor::tests::a_test_marker_is_found_whatever_its_spacing_or_case`;
+/// no bench times it, so the time is UNVERIFIED (`docs/06-limits.md`).
+fn holds_test_marker(field: &str) -> bool {
+    let mut folded = [0u8; MAX_FIELD_BYTES];
+    let mut len = 0usize;
+    for (slot, byte) in folded
+        .iter_mut()
+        .zip(field.bytes().filter(|byte| !byte.is_ascii_whitespace()))
+    {
+        *slot = byte.to_ascii_uppercase();
+        len = len.saturating_add(1);
+    }
+    let folded = folded.get(..len).unwrap_or_default();
+    TEST_MARKERS.iter().any(|marker| {
+        folded
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+    })
+}
+
 /// `name` with every ASCII space removed, on the stack.
 ///
 /// Returns the bytes in a fixed buffer rather than a `String`: this runs on
@@ -1137,8 +1188,11 @@ static NON_EQUITY_INDEX: MemberIndex<512> = MemberIndex::build(&NON_EQUITY_SERIE
 /// never confused with a bond.
 fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
-    // values costs nothing and cannot change a verdict.
-    let series = series.trim();
+    // values costs nothing and cannot change a verdict. ASCII whitespace only:
+    // `str::trim` also stripped U+00A0, so `"EQ\u{a0}"` was read as the main
+    // board. It is now a series this build has not seen, `Unrecognised`, and
+    // declined by name. D-0787.
+    let series = series.trim_ascii();
     // Hash, mask, probe — three times at most, each of them constant. The
     // tables are disjoint (asserted), so the order these are asked in cannot
     // change a verdict; it is the order of decreasing frequency, which is a
@@ -1456,10 +1510,14 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     }
     let exchange = Exchange::Nse;
 
-    if TEST_MARKERS
-        .iter()
-        .any(|m| row.underlying.contains(m) || row.trading_symbol.contains(m))
-    {
+    // ON THE SPELLING THE IDENTITY WILL HAVE, NOT ON THE RAW FIELD (audit
+    // satk-1, D-4507). The scan used to read the raw bytes, case-sensitive,
+    // while the identity below is built by `collapse_spaces` and `Symbol::new`,
+    // which remove spaces and upper-case. So `NSE TEST`, `BSE TEST 1` and
+    // `nsetest` passed the filter and were filed as the real indices
+    // `NSETEST`, `BSETEST1` and `NSETEST`. Case-blind as D-3152 required:
+    // `031nsetest` is caught too.
+    if holds_test_marker(row.underlying) || holds_test_marker(row.trading_symbol) {
         return declined(Skip::TestInstrument);
     }
 
@@ -1500,7 +1558,16 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // `index_segment_word` is `None` for every vendor that already writes an
     // index code, so this cannot reclassify a Groww or Dhan row: the
     // comparison is against `None` and fails immediately.
+    //
+    // ONLY AN `EQ` ROW IS PROMOTED. The index rows this promotion was written
+    // for carry `EQ` in the type column; a `FUT`, `CE` or `PE` under `INDICES`
+    // is a shape this build has never read, and promoting it would file a
+    // contract as the spot index it names. It is refused instead, which is
+    // what `segment_of` and `type_of` do with every other unread shape. D-0785.
     let ty = if vendor.index_segment_word() == Some(row.segment) {
+        if ty != "EQ" {
+            return Err(InstrumentError::Malformed);
+        }
         "IDX"
     } else {
         ty
@@ -1590,7 +1657,14 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // rather than a choice. `INDIA VIX` needs no row there: it collapses to
     // `INDIAVIX`, which is already what Groww writes.
     let underlying = if ty == "IDX" {
-        let collapsed = collapse_spaces(name)?;
+        let mut collapsed = collapse_spaces(name)?;
+        // THE ALIAS IS LOOKED UP ON THE FOLDED NAME, because `Symbol::new`
+        // folds case one line later. Unfolded, `Nifty 50` missed the alias and
+        // was kept as a second index `NIFTY50` beside `NIFTY` -- identity
+        // decided case-sensitively in one step and case-blind in the next.
+        // Folding here changes nothing else: the symbol would be folded anyway.
+        // D-3153.
+        collapsed.bytes.make_ascii_uppercase();
         match vendor.index_alias(collapsed.as_str()) {
             Some(canonical) => Symbol::new(canonical)?,
             None => Symbol::new(collapsed.as_str())?,
@@ -1732,7 +1806,8 @@ fn unsuffixed_key(
 ) -> Result<Option<InstrumentKey>, InstrumentError> {
     // Only a cash listing has a series. An empty class would make
     // `strip_suffix` succeed on every symbol, so it is excluded explicitly.
-    let class = class.trim();
+    // ASCII whitespace only, for the reason `board_of` gives. D-0787.
+    let class = class.trim_ascii();
     if key.kind != Kind::Equity || class.is_empty() {
         return Ok(None);
     }
@@ -1802,7 +1877,15 @@ fn parse_strike(text: &str) -> Result<Paisa, InstrumentError> {
     // across the 40,000 three-decimal strings from "0.000" to "39.999" -- "0.145" became 14
     // paisa where exact half-up is 15 -- always losing downward. The master file is text and
     // nothing has been lost yet when this is called.
-    Paisa::from_rupee_text_half_up(text).map_err(|_| InstrumentError::Malformed)
+    //
+    // AND A STRIKE IS POSITIVE (D-1311). Any decimal used to pass, so `-19450` and `0`
+    // validated and the row was declined as a routine live contract. No exchange lists a
+    // strike at or below zero; the snapped value is checked, so `0.004` (zero paisa) is
+    // refused as well.
+    match Paisa::from_rupee_text_half_up(text) {
+        Ok(strike) if strike > Paisa::ZERO => Ok(strike),
+        _ => Err(InstrumentError::Malformed),
+    }
 }
 
 #[cfg(test)]
@@ -1978,6 +2061,79 @@ mod tests {
                 Some(Skip::TestInstrument),
                 "{u} must be skipped"
             );
+        }
+    }
+
+    /// Audit satk-1, D-4507. Every spacing and case of a test marker is
+    /// declined, on an index row (where spaces are legal and collapsed into the
+    /// identity) and on a contract row, in either field. Before the fix
+    /// `NSE TEST`, `BSE TEST 1` and `nsetest` were KEPT as real indices.
+    #[test]
+    fn a_test_marker_is_found_whatever_its_spacing_or_case() {
+        let spellings = [
+            "NSETEST",
+            "NSE TEST",
+            "BSE TEST 1",
+            "nsetest",
+            "NseTest",
+            "nse test",
+            " N S E T E S T ",
+            "BSE\tTEST",
+            "031NSE TEST",
+            "Bse  Test01",
+            "XNSETESTX",
+            "BSETES T",
+        ];
+        for written in spellings {
+            // `row` copies the underlying into the trading symbol, so each
+            // field is isolated by giving the other a clean real name.
+            let mut by_underlying = row("NSE", "CASH", written, "IDX", "", "");
+            by_underlying.trading_symbol = "NIFTY";
+            assert_eq!(
+                groww(by_underlying).map(Decoded::skip),
+                Ok(Some(Skip::TestInstrument)),
+                "index row underlying {written:?}"
+            );
+            let mut contract = row("NSE", "FNO", written, "FUT", "2036-11-27", "");
+            contract.trading_symbol = "NIFTY36DECFUT";
+            assert_eq!(
+                groww(contract).map(Decoded::skip),
+                Ok(Some(Skip::TestInstrument)),
+                "contract row underlying {written:?}"
+            );
+            let mut by_symbol = row("NSE", "CASH", "NIFTY", "IDX", "", "");
+            by_symbol.trading_symbol = written;
+            assert_eq!(
+                groww(by_symbol).map(Decoded::skip),
+                Ok(Some(Skip::TestInstrument)),
+                "trading symbol {written:?}"
+            );
+        }
+        // At the width gate's limit the whole field is still read: a marker in
+        // its last seven bytes is found.
+        let at_limit = format!("{}NSETEST", "X".repeat(MAX_FIELD_BYTES - 7));
+        assert_eq!(at_limit.len(), MAX_FIELD_BYTES);
+        assert!(super::holds_test_marker(&at_limit));
+        let spaced = format!("{}NSE TEST", " ".repeat(MAX_FIELD_BYTES - 8));
+        assert_eq!(spaced.len(), MAX_FIELD_BYTES);
+        assert!(super::holds_test_marker(&spaced));
+        // And the restraint: near misses and real names are not test listings.
+        for real in [
+            "NIFTY",
+            "NIFTY BANK",
+            "BSE",
+            "NSETES",
+            "NSE-TEST",
+            "BSE TES",
+            "",
+            " ",
+        ] {
+            assert!(!super::holds_test_marker(real), "{real:?}");
+        }
+        for (written, want) in [("NIFTY BANK", "NIFTYBANK"), ("NIFTY", "NIFTY")] {
+            let key = kept(groww(row("NSE", "CASH", written, "IDX", "", "")).expect("ok"))
+                .expect("a real index is kept");
+            assert_eq!(key.underlying.as_str(), want);
         }
     }
 
@@ -2616,7 +2772,7 @@ mod tests {
 
     #[test]
     fn every_series_code_survives_the_open_addressed_table_it_moved_into() {
-        // I-41. `board_of` probes three `MemberIndex` tables instead of
+        // I-41 (row written by D-3504). `board_of` probes three `MemberIndex` tables instead of
         // binary-searching three arrays. A collision that silently dropped a
         // member would not fail to compile and would not look wrong -- it would
         // reclassify a measured bond as `Unrecognised`, which is a LOUD decline
@@ -3382,5 +3538,149 @@ mod tests {
         assert_eq!(parse_expiry("2026-08-4"), Err(InstrumentError::Malformed));
         // Year two characters short.
         assert_eq!(parse_expiry("26-08-04"), Err(InstrumentError::Malformed));
+    }
+
+    // =======================================================================
+    // C4 core batch 1 — D-0785 onward
+    // =======================================================================
+
+    /// A Zerodha `INDICES` row is promoted to an index only when its type word
+    /// is `EQ`, which is how every index row in this module's fixtures and in
+    /// `tests/zerodha_index.rs` is spelled. A derivative type under `INDICES`
+    /// is a row this build has never read, and it is refused rather than
+    /// filed as an index.
+    #[test]
+    fn an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index() {
+        for ty in ["FUT", "CE", "PE"] {
+            let input = MasterRow {
+                vendor_id: "256265",
+                exchange: "NSE",
+                segment: "INDICES",
+                underlying: "",
+                trading_symbol: "NIFTY 50",
+                instrument_type: ty,
+                listing_class: "",
+                isin: "",
+                expiry: "2026-08-27",
+                strike_rupees: "24000",
+                option_side: "",
+            };
+            assert_eq!(
+                decode_master_row(Vendor::Zerodha, input),
+                Err(InstrumentError::Malformed),
+                "an INDICES row typed {ty} must be refused, not kept as an index"
+            );
+        }
+        // The control: the same row typed `EQ` is the vendor's index row.
+        let index = MasterRow {
+            vendor_id: "256265",
+            exchange: "NSE",
+            segment: "INDICES",
+            underlying: "",
+            trading_symbol: "NIFTY 50",
+            instrument_type: "EQ",
+            listing_class: "",
+            isin: "",
+            expiry: "",
+            strike_rupees: "",
+            option_side: "",
+        };
+        let kept =
+            listing(decode_master_row(Vendor::Zerodha, index).expect("decodes")).expect("kept");
+        assert_eq!(kept.key.kind, Kind::Index);
+        assert_eq!(kept.key.underlying.as_str(), "NIFTY");
+    }
+
+    /// Only ASCII whitespace is trimmed from the vendor id, the series and the
+    /// suffix class. Whitespace outside ASCII (U+00A0, U+3000) at an end of the
+    /// id refuses it, and in the series leaves a code no table holds. D-0787.
+    #[test]
+    fn whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class() {
+        // The id. Each end on its own, and both together.
+        for raw in [
+            "\u{a0}1333\u{3000}",
+            "\u{a0}1333",
+            "1333\u{3000}",
+            " \u{a0}1333 ",
+            "\u{b}1333",
+        ] {
+            assert_eq!(VendorId::new(raw), None, "{raw:?} must be refused");
+            let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
+            input.vendor_id = raw;
+            assert_eq!(
+                groww(input).expect("explicit decline").skip(),
+                Some(Skip::NoVendorId),
+                "{raw:?} must be declined, not kept under 1333"
+            );
+        }
+        // Inside the id it is data, and ASCII padding is still trimmed.
+        assert_eq!(
+            VendorId::new(" \t\u{c}\r13\u{a0}33\n\r\u{c} ")
+                .expect("interior")
+                .as_str(),
+            "13\u{a0}33"
+        );
+
+        // The series. Groww's `EQ` with a trailing U+00A0 is not the main board.
+        assert_eq!(board_of("EQ\u{a0}"), EquityVerdict::Unrecognised);
+        assert_eq!(board_of("\u{3000}EQ"), EquityVerdict::Unrecognised);
+        assert_eq!(
+            groww(groww_cash("RELIANCE", "EQ\u{a0}", REAL_ISIN))
+                .expect("explicit decline")
+                .skip(),
+            Some(Skip::UnrecognisedListingClass)
+        );
+        assert_eq!(board_of(" \t\u{c}\rEQ\n\r"), EquityVerdict::MainBoard);
+        assert_eq!(board_of("\u{b}EQ"), EquityVerdict::Unrecognised);
+
+        // The suffix class. Only the row's own series, ASCII-trimmed, strips.
+        let l = listing(
+            groww(MasterRow {
+                vendor_id: "1333",
+                underlying: "",
+                trading_symbol: "BLUECHIP-BE",
+                listing_class: "BE",
+                isin: "INE657B01025",
+                ..row("NSE", "CASH", "BLUECHIP-BE", "EQ", "", "")
+            })
+            .expect("ok"),
+        )
+        .expect("kept");
+        assert_eq!(
+            unsuffixed_key(l.key, "BLUECHIP-BE", "BE\u{a0}").expect("no error"),
+            None
+        );
+        assert_eq!(
+            unsuffixed_key(l.key, "BLUECHIP-BE", " BE\t")
+                .expect("no error")
+                .map(|k| k.underlying.as_str().to_owned()),
+            Some("BLUECHIP".to_owned())
+        );
+    }
+
+    /// core-01-b. An option strike must be a positive price. D-1311.
+    ///
+    /// `parse_strike` accepted any decimal, so `-19450` and `0` validated and the
+    /// row was declined as a routine live contract. No exchange lists a strike at
+    /// or below zero; such a row is malformed and must say so.
+    #[test]
+    fn a_strike_at_or_below_zero_is_malformed_not_a_live_contract() {
+        for strike in ["-19450", "0", "0.00", "-0", "0.004", "-0.004", "-0.01"] {
+            assert_eq!(
+                groww(row("NSE", "FNO", "NIFTY", "CE", "2026-08-04", strike)),
+                Err(InstrumentError::Malformed),
+                "strike {strike:?} is not a strike"
+            );
+            assert_eq!(parse_strike(strike), Err(InstrumentError::Malformed));
+        }
+        // The smallest positive strike, one paisa after the half-up snap, is still read.
+        assert_eq!(parse_strike("0.005").map(Paisa::raw), Ok(1));
+        assert_eq!(parse_strike("117.5").map(Paisa::raw), Ok(11_750));
+        assert_eq!(
+            groww(row("NSE", "FNO", "NIFTY", "PE", "2026-08-04", "0.01"))
+                .expect("ok")
+                .skip(),
+            Some(Skip::LiveContract)
+        );
     }
 }

@@ -165,9 +165,14 @@ impl Verdict {
     /// [`crate::significance`]. It is a threshold on the p-value and nothing
     /// more — clearing it does not make a strategy profitable, and
     /// [`crate::grid`]'s pessimistic total is a separate question.
+    ///
+    /// Inclusive, `p <= 0.05`: the same boundary the Romano-Wolf stepdown
+    /// rejects on (`(1 + count) / (B + 1) <= alpha`), so a strategy at exactly
+    /// 5% is not printed as failing White beside a stepdown that rejects it
+    /// (D-1548).
     #[must_use]
     pub fn clears(&self) -> bool {
-        self.draws > 0 && self.p_value < 0.05
+        self.draws > 0 && self.p_value <= 0.05
     }
 
     /// What this verdict's sample size is worth, in measured terms.
@@ -383,22 +388,40 @@ impl_exact_family_test_receipt_v1!(SpaReceiptV1);
 /// returns should pass their own.
 pub const DEFAULT_BLOCK: usize = 10;
 
+/// The largest average block length the stationary bootstrap can honour.
+///
+/// The continuation draw is in parts per million: a new block starts with
+/// probability `1_000_000 / block` ppm. Above one million that floors to
+/// zero, so no draw ever restarts and every draw is one rotation of the series
+/// (W3-runner1-2, D-0742). Every entry point refuses a longer block rather
+/// than resampling at a block length the caller did not ask for.
+pub const MAX_BLOCK: usize = 1_000_000;
+
 /// White's Reality Check.
 ///
 /// `returns[i]` is strategy `i`'s per-period returns. All must be the same
 /// length: they are aligned in time, and a bootstrap draw picks the same periods
 /// from every strategy so that the correlation between them is preserved.
 ///
-/// `None` when the set is empty, when the series disagree in length, or when a
-/// series is empty — refused rather than answered, because a p-value computed
-/// over misaligned strategies is a number about nothing.
+/// `None` when the set is empty, when the series disagree in length, when a
+/// series is empty, or when `block` exceeds [`MAX_BLOCK`] — refused rather than
+/// answered, because a p-value computed over misaligned strategies, or over
+/// draws that are all rotations of the sample, is a number about nothing.
+///
+/// A zero `block` is answered rather than refused, and the answer is the
+/// conservative one: no draw is taken (`Verdict::draws` is 0) and `p = 1`.
+/// It used to be resampled as a block of one and could clear (audit satk-8,
+/// D-4506).
 ///
 /// # Cost
 ///
+/// O(S·N) once to build each series' exact prefix sums, O(B·N) to draw and
+/// split every draw into its R runs, and O(B·S·R) to read the resampled
+/// means, R ≈ N/`block` expected (D-2316). The O(B·S·R) term holds for every
+/// series whose fold is provably exact, `N x max|v| <= 2^53`; a series outside
+/// that bound keeps the O(N) fold per draw, so the worst case is still
 /// `draws x periods x strategies`. This is a once-per-run boundary and the
-/// cost is stated rather than bounded — with 1,000 draws over 1,000 periods and
-/// 200 strategies it is 200 million operations, which is seconds, not
-/// milliseconds.
+/// cost is stated rather than bounded.
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
@@ -408,7 +431,20 @@ pub fn reality_check(
     seed: u64,
     block: usize,
 ) -> Option<Verdict> {
-    let periods = aligned(returns)?;
+    if block > MAX_BLOCK {
+        return None;
+    }
+    let periods = aligned_for(returns, block)?;
+    // A ZERO BLOCK IS NO RESAMPLE, AND IT READS AS NO EVIDENCE (audit satk-8,
+    // D-4506). The continuation draw below cannot express a mean block of zero
+    // periods, and it used to run one as a block of ONE (`block <= 1` in
+    // `stationary_indices_into`) -- so a caller who asked for a block nobody can
+    // draw got an i.i.d. bootstrap they did not ask for, and a p-value that
+    // could clear. The doc on [`white_reality_check_receipt_v1`] has promised the
+    // legacy API answers a zero block `p = 1`; this is that promise kept: no
+    // draw is taken, `Verdict::draws` says so, and the p-value is the
+    // conservative `1 / 1`.
+    let draws = if block == 0 { 0 } else { draws };
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // THE OBSERVED STATISTIC: the best mean across strategies, scaled by the
@@ -423,8 +459,12 @@ pub fn reality_check(
 
     let mut rng = Rng::new(seed);
     let mut beaten = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         // RECENTRED, and this is the whole test. Each resampled mean has its
         // OWN observed mean subtracted, so the bootstrap distribution is what a
         // set of strategies with NO edge would produce while keeping this set's
@@ -432,7 +472,7 @@ pub fn reality_check(
         // the question White's test asks.
         let mut best = f64::NEG_INFINITY;
         for (s, series) in returns.iter().enumerate() {
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(series, prefixes.get(s).and_then(Option::as_ref), &draw);
             let centred = stats.get(s).map_or(0.0, |o| resampled - o.mean);
             best = best.max(root_n * centred);
         }
@@ -470,7 +510,24 @@ pub fn reality_check(
         // (Davison & Hinkley), and its floor is exactly the resolution the
         // draws bought: 1/1001 at 1,000 draws. It is what a resampling test can
         // honestly say, and it never returns zero.
-        p_value: if draws == 0 || periods < 2 {
+        //
+        // A FAMILY IN WHICH NO ROW EVER VARIED IS THE THIRD WAY IN (D-0972).
+        // Every recentred draw of a constant row is exactly zero, so when every
+        // row is constant the null distribution is the same point mass the
+        // one-period case produces, and a positive constant scored 1/(B+1) --
+        // for 1 paisa as readily as for 1,000,000. A family with at least one
+        // varying row is untouched: its null has spread, and a riskless mean
+        // beating that spread is the answer this test is meant to give.
+        //
+        // ONE CLAUSE STANDS FOR ALL THREE (G18-runner, D-2057). `aligned` gives
+        // every row exactly `periods` entries, so `periods < 2` leaves each row
+        // constant and is a point mass by construction; and `draws == 0` leaves
+        // `beaten` at zero, so the formula below is `1 / 1`, the same 1.0. The
+        // two clauses were spelled out here and decided nothing, which made
+        // each `||` -> `&&` mutant unkillable; their cases stay pinned by
+        // `zero_draws_reports_no_evidence_rather_than_certainty` and
+        // `a_single_period_carries_no_evidence_rather_than_certainty`.
+        p_value: if white_null_is_a_point_mass(returns) {
             1.0
         } else {
             beaten.saturating_add(1) as f64 / draws.saturating_add(1) as f64
@@ -478,6 +535,33 @@ pub fn reality_check(
         draws,
         strategies: returns.len(),
     })
+}
+
+/// Whether every row of a family is constant, so that every recentred
+/// resample of every row is exactly zero and White's bootstrap maximum is a
+/// point mass at zero on every draw (D-0972).
+///
+/// Exact rather than approximate: [`summarise`] and the resampled-mean fold
+/// fold the same value the same number of times in the same order over a
+/// constant row, so `resampled - mean` is `0.0` bit for bit -- and
+/// [`resampled_mean`] is that fold's value bit for bit on either of its paths
+/// (D-2316).
+fn white_null_is_a_point_mass(returns: &[Vec<i64>]) -> bool {
+    returns
+        .iter()
+        .all(|series| series.iter().all(|value| Some(value) == series.first()))
+}
+
+/// Whether White's exact receipt would count its strongest possible
+/// probability, `1/(B+1)`, against a point-mass null (D-0972).
+///
+/// Only a positive observed statistic can: every draw's maximum is `0.0`, so it
+/// never matches or exceeds a positive statistic and always matches a
+/// nonpositive one, which already counts the conservative `(B+1)/(B+1)`. The
+/// receipt refuses the first case rather than restating it: a changed
+/// probability under the V1 procedure domain would rename what V1 bytes mean.
+fn white_point_mass_would_mint_evidence(returns: &[Vec<i64>], observed: f64) -> bool {
+    observed > 0.0 && white_null_is_a_point_mass(returns)
 }
 
 /// Hansen's Superior Predictive Ability test.
@@ -498,12 +582,36 @@ pub fn reality_check(
 /// a strategy with a large but wildly variable return does not outrank a steady
 /// one purely on size.
 ///
+/// **The standard error is the i.i.d. one, and Hansen's is not.** Hansen
+/// (2005) studentizes by a long-run (HAC or bootstrap) estimate; [`summarise`]
+/// gives `sqrt(variance / n)`. Both sides of the comparison share it, so the
+/// test stays a valid max-type test, but under serial correlation the
+/// recentring gate drops a different set of strategies (hunt-runner-5,
+/// D-1549, `docs/06-limits.md`).
+///
 /// `None` under the same conditions as [`reality_check`].
+///
+/// A zero `block` is answered as [`reality_check`] answers it: no draw,
+/// `p = 1` (audit satk-8, D-4506).
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
 pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Option<Verdict> {
-    let periods = aligned(returns)?;
+    if block > MAX_BLOCK {
+        return None;
+    }
+    let periods = aligned_for(returns, block)?;
+    // A ZERO BLOCK IS NO RESAMPLE, AND IT READS AS NO EVIDENCE (audit satk-8,
+    // D-4506). The continuation draw below cannot express a mean block of zero
+    // periods, and it used to run one as a block of ONE (`block <= 1` in
+    // `stationary_indices_into`) -- so a caller who asked for a block nobody can
+    // draw got an i.i.d. bootstrap they did not ask for, and a p-value that
+    // could clear. [`white_reality_check_receipt_v1`]'s doc promised the
+    // legacy White API answers a zero block `p = 1`, and Hansen's legacy API
+    // answers it the same way rather than differently from its sibling: no
+    // draw is taken, `Verdict::draws` says so, and the p-value is the
+    // conservative `1 / 1`.
+    let draws = if block == 0 { 0 } else { draws };
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // HANSEN'S STATISTIC IS `sqrt(n) * mean / sigma`, AND THAT IS EXACTLY
@@ -547,12 +655,16 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 
     let mut rng = Rng::new(seed);
     let mut beaten = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         let mut best = f64::NEG_INFINITY;
         for (s, series) in returns.iter().enumerate() {
             let Some(own) = stats.get(s) else { continue };
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(series, prefixes.get(s).and_then(Option::as_ref), &draw);
             // A strategy too far below zero cannot be the best under the null,
             // so it is recentred to nothing rather than dragging the maximum up.
             // Same correction as the observed statistic: no `root_n`, because
@@ -616,14 +728,23 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 /// Unlike [`reality_check`], this authority-producing API refuses zero draws,
 /// a zero block, fewer than two periods and an unrepresentable `draws + 1`
 /// denominator.  The legacy API keeps its conservative `p = 1` compatibility
-/// behavior for those cases.  The counted comparison remains White's existing
+/// behavior for those cases.  Both refuse a block above [`MAX_BLOCK`].  It also
+/// refuses a family in which every row is constant and the observed statistic is positive (D-0972): every draw's
+/// maximum is then exactly zero, and the count would be the strongest
+/// probability the draws can express, earned by no variation at all.  The
+/// legacy API answers that family `p = 1`.  The counted comparison remains
+/// White's existing
 /// `bootstrap maximum >= observed statistic`; changing it to strict `>` would
 /// be a different procedure version, not a receipt-only change.
 ///
 /// # Cost
 ///
-/// O(B·N·S) time and O(N+S) temporary space for B draws, N periods and S
-/// strategies.  Constructing the receipt is not O(1).
+/// O(S·N + B·N + B·S·R) time and O(S·N + N + S) temporary space for B
+/// draws, N periods, S strategies and R runs per draw (R ≈ N/`block`
+/// expected), where every series' fold is provably exact
+/// (`N x max|v| <= 2^53`); a series outside that bound keeps the O(N) fold,
+/// so the worst case is still O(B·N·S) (D-2316).  Constructing the receipt is
+/// not O(1).
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -641,17 +762,25 @@ pub fn white_reality_check_receipt_v1(
         .iter()
         .map(|summary| root_n * summary.mean)
         .fold(f64::NEG_INFINITY, f64::max);
-    if !observed.is_finite() {
+    if !observed.is_finite() || white_point_mass_would_mint_evidence(returns, observed) {
         return None;
     }
 
     let mut rng = Rng::new(seed);
     let mut matched_or_exceeded = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         let mut best = f64::NEG_INFINITY;
         for (strategy, series) in returns.iter().enumerate() {
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(
+                series,
+                prefixes.get(strategy).and_then(Option::as_ref),
+                &draw,
+            );
             let centred = stats
                 .get(strategy)
                 .map_or(0.0, |summary| resampled - summary.mean);
@@ -686,8 +815,12 @@ pub fn white_reality_check_receipt_v1(
 ///
 /// # Cost
 ///
-/// O(B·N·S) time and O(N+S) temporary space for B draws, N periods and S
-/// strategies.  Constructing the receipt is not O(1).
+/// O(S·N + B·N + B·S·R) time and O(S·N + N + S) temporary space for B
+/// draws, N periods, S strategies and R runs per draw (R ≈ N/`block`
+/// expected), where every series' fold is provably exact
+/// (`N x max|v| <= 2^53`); a series outside that bound keeps the O(N) fold,
+/// so the worst case is still O(B·N·S) (D-2316).  Constructing the receipt is
+/// not O(1).
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -716,12 +849,20 @@ pub fn spa_receipt_v1(
     };
     let mut rng = Rng::new(seed);
     let mut matched_or_exceeded = 0_usize;
+    let mut index = Vec::with_capacity(periods);
+    let prefixes = exact_prefixes(returns, periods);
+    let mut draw = Resample::default();
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
+        draw.fill(&index);
         let mut best = f64::NEG_INFINITY;
         for (strategy, series) in returns.iter().enumerate() {
             let own = stats.get(strategy)?;
-            let resampled = mean_at(series, &index);
+            let resampled = resampled_mean(
+                series,
+                prefixes.get(strategy).and_then(Option::as_ref),
+                &draw,
+            );
             let keep = studentized(own.mean, own.standard_error) >= gate;
             let centred = if keep {
                 resampled - own.mean
@@ -754,10 +895,10 @@ fn exact_family_test_inputs_v1(
     draws: usize,
     block: usize,
 ) -> Option<(usize, Vec<Performance>)> {
-    if draws == 0 || block == 0 || draws.checked_add(1).is_none() {
+    if draws == 0 || block == 0 || block > MAX_BLOCK || draws.checked_add(1).is_none() {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     if periods < 2 {
         return None;
     }
@@ -1104,9 +1245,19 @@ impl RomanoWolfAdjustedReceiptV1 {
 /// what makes this different from testing each strategy at 5% and hoping.
 ///
 /// Returns the rejected strategies in the order they were rejected. This
-/// legacy vector shape renders both malformed input and a complete
-/// non-rejection as empty; callers that must distinguish them use
-/// [`romano_wolf_receipt`].
+/// legacy vector shape renders malformed input, a zero `block` or one above
+/// [`MAX_BLOCK`] and a complete non-rejection as empty (the zero block since
+/// audit satk-8, D-4506; it was resampled as a block of one before); callers that must
+/// distinguish them use
+/// [`romano_wolf_receipt`]. An `alpha_ppm` above `1_000_000` and zero draws
+/// are malformed input here (D-0973).
+///
+/// A strategy is rejected on the exact `(1 + strict exceedances) / (B + 1) <=
+/// alpha` rule, so on a family with no zero-variance row the rejected set is
+/// the set whose [`romano_wolf_adjusted_p_values_v1`] probability rejects at the
+/// same alpha; a zero-variance strategy is never rejected. Each strategy's
+/// null statistics are computed once however many rounds the stepdown takes
+/// (D-0973).
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
@@ -1117,7 +1268,13 @@ pub fn romano_wolf(
     block: usize,
     alpha_ppm: u64,
 ) -> Vec<Rejected> {
-    let Some(periods) = aligned(returns) else {
+    // A zero block is malformed here as it is for the receipt: there is no
+    // mean block length of zero periods to draw, and it used to be run as a
+    // block of one (audit satk-8, D-4506).
+    if block == 0 || block > MAX_BLOCK {
+        return Vec::new();
+    }
+    let Some(periods) = aligned_for(returns, block) else {
         return Vec::new();
     };
     romano_wolf_aligned(returns, periods, draws, seed, block, alpha_ppm)
@@ -1126,9 +1283,11 @@ pub fn romano_wolf(
 /// Runs Romano--Wolf and preserves the complete procedure denominators.
 ///
 /// Unlike [`romano_wolf`], this distinguishes a valid family that rejected
-/// nothing from malformed input.  Zero draws, a zero block length and an alpha
-/// outside the ppm probability domain have no complete procedure receipt and
-/// return `None`.
+/// nothing from malformed input.  Zero draws, a zero block length or one above
+/// [`MAX_BLOCK`], and an alpha outside the ppm probability domain have no
+/// complete procedure receipt and return `None`.  The decisions are
+/// [`romano_wolf`]'s, on the exact rule (D-0973): at alpha zero nothing is
+/// rejected.
 #[must_use]
 pub fn romano_wolf_receipt(
     returns: &[Vec<i64>],
@@ -1137,10 +1296,10 @@ pub fn romano_wolf_receipt(
     block: usize,
     alpha_ppm: u64,
 ) -> Option<RomanoWolfReceipt> {
-    if draws == 0 || block == 0 || alpha_ppm > 1_000_000 {
+    if draws == 0 || block == 0 || block > MAX_BLOCK || alpha_ppm > 1_000_000 {
         return None;
     }
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     let rejected = romano_wolf_aligned(returns, periods, draws, seed, block, alpha_ppm);
     let mut decisions = vec![false; returns.len()];
     for result in &rejected {
@@ -1175,7 +1334,8 @@ pub fn romano_wolf_receipt(
 /// assumption enters this result.
 ///
 /// `None` refuses an empty/misaligned family, fewer than two periods, zero
-/// draws, zero block length, an unrepresentable exact denominator, or any
+/// draws, a zero block length or one above [`MAX_BLOCK`], an unrepresentable
+/// exact denominator, or any
 /// zero-variance candidate.  The last case is structural: studentization has
 /// no denominator, and assigning the source paper's strict-exceedance floor to
 /// a point mass at zero would manufacture the strongest possible p-value from
@@ -1183,8 +1343,12 @@ pub fn romano_wolf_receipt(
 ///
 /// # Cost
 ///
-/// O(S·N + S log S + B·N + B·S·N) time for S strategies, N periods and B
-/// draws.  Retained temporary space is O(B·N + B + S).  Candidate lookup on
+/// O(S·N + S log S + B·N + B·S·R) time for S strategies, N periods, B draws
+/// and R runs per draw (R ≈ N/`block` expected), where every series' fold is
+/// provably exact (`N x max|v| <= 2^53`); a series outside that bound keeps
+/// the O(N) fold, so the worst case is still O(B·S·N) (D-2316).  Retained
+/// temporary space is O(S·N + B·R + B + S): one prefix per exact series and
+/// each held draw's runs, at most two words per period.  Candidate lookup on
 /// the completed receipt is O(1); constructing the complete statistical
 /// authority is deliberately not claimed constant-time.
 ///
@@ -1198,11 +1362,11 @@ pub fn romano_wolf_adjusted_p_values_v1(
     seed: u64,
     block: usize,
 ) -> Option<RomanoWolfAdjustedReceiptV1> {
-    if draws == 0 || block == 0 {
+    if draws == 0 || block == 0 || block > MAX_BLOCK {
         return None;
     }
     let denominator = draws.checked_add(1)?;
-    let periods = aligned(returns)?;
+    let periods = aligned_for(returns, block)?;
     if periods < 2 {
         return None;
     }
@@ -1242,9 +1406,8 @@ pub fn romano_wolf_adjusted_p_values_v1(
     });
 
     let mut rng = Rng::new(seed);
-    let indices: Vec<Vec<usize>> = (0..draws)
-        .map(|_| stationary_indices(periods, block, &mut rng))
-        .collect();
+    let held = held_draws(periods, block, draws, &mut rng);
+    let prefixes = exact_prefixes(returns, periods);
 
     // Walking the canonical order backwards grows one surviving suffix at a
     // time.  `maxima[m]` is therefore exactly max(t*_{r_s},...,t*_{r_S}) for
@@ -1256,8 +1419,9 @@ pub fn romano_wolf_adjusted_p_values_v1(
         let series = returns.get(strategy)?;
         let own = stats.get(strategy)?;
         let observed_statistic = *observed.get(strategy)?;
-        for (maximum, index) in maxima.iter_mut().zip(&indices) {
-            let centred = mean_at(series, index) - own.mean;
+        let prefix = prefixes.get(strategy).and_then(Option::as_ref);
+        for (maximum, draw) in maxima.iter_mut().zip(&held) {
+            let centred = resampled_mean(series, prefix, draw) - own.mean;
             let null_statistic = studentized(centred, own.standard_error);
             *maximum = maximum.max(null_statistic);
         }
@@ -1341,6 +1505,50 @@ pub(crate) fn romano_wolf_family_digest_v1<R: AsRef<[i64]>>(
     Some(hasher.finalize())
 }
 
+/// The legacy stepdown, on the exact finite-resample rule and in one walk
+/// (D-0973).
+///
+/// # One boundary, the adjusted receipt's
+///
+/// A surviving strategy is rejected in a round when one plus the number of
+/// bootstrap maxima over the surviving set that STRICTLY exceed its statistic is
+/// at most `floor((B + 1) * alpha_ppm / 1_000_000)`: the exact `(1 + count) /
+/// (B + 1) <= alpha` test [`ExactResamplingPValueV1::rejects_at_ppm`] applies to
+/// [`romano_wolf_adjusted_p_values_v1`]. The statistic, the tie order, the index
+/// matrix and the seed are that receipt's too, so on a family with no
+/// zero-variance row the rejected set is exactly the set whose adjusted
+/// probability rejects at the same alpha. This replaced a rounded `1 - alpha`
+/// quantile of the maxima, which rejected at alpha 0 and near 5% disagreed with
+/// the exact rule in both directions.
+///
+/// # One walk
+///
+/// A round rejects every survivor at or above one bar, so the surviving set is
+/// always a suffix of the canonical order (descending statistic, caller position
+/// breaking ties). Walking that order from the weakest strategy grows the
+/// maxima of every suffix in turn, and each suffix's bar -- the smallest
+/// statistic its maxima would reject -- is kept. The rounds then read those
+/// bars forwards. Each strategy's null series is computed once, where the
+/// former loop recomputed every survivor's on every round.
+///
+/// # A zero-variance strategy is never rejected
+///
+/// Its studentized statistic and every null draw of it are `0.0` (see
+/// [`studentized`]), so no draw can strictly exceed it; the exact rule would
+/// count that as the strongest evidence the draws can express, earned by no
+/// variation. It still enters the maxima as it always did, and the stepdown
+/// stops at it.
+///
+/// # Cost
+///
+/// O(S·N + B·N + S·B·R + S·B + S log S) time for S strategies, B draws, N
+/// periods and R runs per draw, R ≈ N/`block` expected (the per-suffix
+/// selection is `select_nth_unstable_by`, whose documentation says its
+/// fallback "guarantees linear runtime for all inputs"), and
+/// O(S·N + B·R + B + S) space. The S·B·R term needs every series' fold to be
+/// provably exact (`N x max|v| <= 2^53`); a series outside it keeps the O(N)
+/// fold, so the worst case is still O(S·B·N) (D-2316). The former loop was
+/// O(rounds·B·S·N). Not measured by a bench; `CLAUDE.md` §3 rule 6.
 fn romano_wolf_aligned(
     returns: &[Vec<i64>],
     periods: usize,
@@ -1349,105 +1557,137 @@ fn romano_wolf_aligned(
     block: usize,
     alpha_ppm: u64,
 ) -> Vec<Rejected> {
+    // Outside the probability domain there is no procedure to run, and zero
+    // draws is no resample: both are refused as empty, which is what this
+    // legacy vector renders malformed input as.
+    if alpha_ppm > 1_000_000 || draws == 0 {
+        return Vec::new();
+    }
+    // The largest numerator `1 + count` that still rejects.
+    let admissible = usize::try_from(
+        (draws as u128)
+            .saturating_add(1)
+            .saturating_mul(u128::from(alpha_ppm))
+            / 1_000_000,
+    )
+    .unwrap_or(usize::MAX);
+    if admissible == 0 {
+        return Vec::new();
+    }
+
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
-    let root_n = (periods as f64).sqrt();
-
-    let mut alive: Vec<usize> = (0..returns.len()).collect();
-    let mut out: Vec<Rejected> = Vec::new();
-    let mut round = 0_usize;
-
-    // ONE RESAMPLE SET, DRAWN ONCE AND REUSED BY EVERY ROUND.
-    //
-    // This drew fresh indices per round, from `Rng::new(seed + round)`. That
-    // breaks the property the stepdown rests on: with a SHRINKING alive set the
-    // maximum is taken over fewer strategies, so the threshold must be
-    // non-increasing. On independent draws it is not, because the round's
-    // threshold is a different sample as well as a smaller set.
-    //
-    // Measured: 32.536 -> 33.906 on a shrinking set at seed 97 -- the bar ROSE
-    // after a strategy was removed. It rose in 19 of 400 configurations, and 0
-    // of 400 after this change. It altered the rejection set in 4 of 400, one
-    // of them permissively.
-    //
-    // Romano & Wolf's construction is one B x n resample matrix held across the
-    // stepdown, which is what this now is. `Rng::new(seed)` once, so the draws
-    // are still fully determined by the caller's seed and §3 rule 5 holds.
-    let mut rng = Rng::new(seed);
-    let indices: Vec<Vec<usize>> = (0..draws)
-        .map(|_| stationary_indices(periods, block, &mut rng))
+    let observed: Vec<f64> = stats
+        .iter()
+        .map(|stat| studentized(stat.mean, stat.standard_error))
         .collect();
+    let mut order: Vec<usize> = (0..returns.len()).collect();
+    order.sort_unstable_by(
+        |left, right| match (observed.get(*left), observed.get(*right)) {
+            (Some(left_value), Some(right_value)) => right_value
+                .total_cmp(left_value)
+                .then_with(|| left.cmp(right)),
+            _ => left.cmp(right),
+        },
+    );
 
-    // Bounded by the strategy count: each round removes at least one or stops.
-    while !alive.is_empty() {
-        // The bootstrap maximum over the SURVIVING set only. That shrinking is
-        // the stepdown -- with the winner removed the bar is lower, so a
-        // strategy it was masking can now clear.
-        let mut maxima: Vec<f64> = Vec::with_capacity(draws);
-        for index in &indices {
-            let mut best = f64::NEG_INFINITY;
-            for &s in &alive {
-                let (Some(series), Some(own)) = (returns.get(s), stats.get(s)) else {
-                    continue;
-                };
-                let centred = mean_at(series, index) - own.mean;
-                best = best.max(studentized(root_n * centred, own.standard_error));
-            }
-            maxima.push(best);
+    // ONE RESAMPLE SET, DRAWN ONCE AND HELD ACROSS THE STEPDOWN.
+    //
+    // Fresh indices per round, from `Rng::new(seed + round)`, once let the
+    // threshold RISE after a strategy was removed: measured 32.536 -> 33.906 at
+    // seed 97, in 19 of 400 configurations. Romano & Wolf's construction is one
+    // B x n resample matrix, and `Rng::new(seed)` once keeps §3 rule 5.
+    let mut rng = Rng::new(seed);
+    let held = held_draws(periods, block, draws, &mut rng);
+    let prefixes = exact_prefixes(returns, periods);
+
+    let mut maxima = vec![f64::NEG_INFINITY; draws];
+    let mut scratch: Vec<f64> = Vec::with_capacity(draws);
+    let mut bars = vec![f64::INFINITY; order.len()];
+    for rank in (0..order.len()).rev() {
+        let Some(&strategy) = order.get(rank) else {
+            continue;
+        };
+        let (Some(series), Some(own)) = (returns.get(strategy), stats.get(strategy)) else {
+            continue;
+        };
+        let prefix = prefixes.get(strategy).and_then(Option::as_ref);
+        for (maximum, draw) in maxima.iter_mut().zip(&held) {
+            *maximum = maximum.max(null_statistic(series, prefix, draw, own));
         }
-        let Some(threshold) = quantile(&mut maxima, 1_000_000_u64.saturating_sub(alpha_ppm)) else {
+        // A statistic `x` rejects against these maxima iff fewer than
+        // `admissible` of them strictly exceed it, i.e. iff `x` is at least
+        // the `admissible`-th largest. More admissible than draws rejects
+        // anything.
+        let bar = match draws.checked_sub(admissible) {
+            None => f64::NEG_INFINITY,
+            Some(position) => {
+                scratch.clear();
+                scratch.extend_from_slice(&maxima);
+                let (_, kth, _) = scratch.select_nth_unstable_by(position, f64::total_cmp);
+                *kth
+            }
+        };
+        if let Some(slot) = bars.get_mut(rank) {
+            *slot = bar;
+        }
+    }
+
+    let mut out: Vec<Rejected> = Vec::new();
+    let mut start = 0_usize;
+    let mut round = 0_usize;
+    while let Some(&bar) = bars.get(start) {
+        let mut end = start;
+        while let Some(&strategy) = order.get(end) {
+            let (Some(&statistic), Some(own)) = (observed.get(strategy), stats.get(strategy))
+            else {
+                break;
+            };
+            if own.standard_error > 0.0 && statistic >= bar {
+                end = end.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+        let Some(rejected_now) = order.get(start..end).filter(|now| !now.is_empty()) else {
             break;
         };
-
-        // Every surviving strategy above the threshold is rejected together:
-        // they all cleared the same bar in the same round.
-        //
-        // THE PARTITION IS BUILT ONCE, NOT DERIVED TWICE.
-        //
-        // This collected `rejected_now` and then ran
-        // `alive.retain(|s| !rejected_now.contains(s))`, which is a LINEAR SCAN
-        // of the rejected set for every survivor -- O(alive x rejected) per
-        // round, and nothing structural bounds either: `romano_wolf` is a
-        // `pub fn` over `&[Vec<i64>]` and the caller decides how many strategies
-        // it holds. A round that rejects half of 10,000 candidates is 25 million
-        // comparisons to compute a set the loop above already knew.
-        //
-        // Gate 11 rule 7 could not see it. Its pattern is `\.contains\(&` and
-        // this was `.contains(s)`, `s` already being a reference -- so the one
-        // genuine `Vec` scan of that shape in the crate was invisible to the
-        // gate written to refuse exactly it.
-        //
-        // Both halves fall out of the single pass that decides them, so the
-        // cost is O(alive) and the two vectors cannot disagree about which
-        // strategy went where.
-        let mut rejected_now: Vec<usize> = Vec::new();
-        let mut survivors: Vec<usize> = Vec::with_capacity(alive.len());
-        for &s in &alive {
-            // A strategy with no `stats` row SURVIVES, which is what `retain`
-            // did: it was never pushed to `rejected_now`, so the predicate kept
-            // it. Spelled out here because the old shape said it by omission.
-            let Some(own) = stats.get(s) else {
-                survivors.push(s);
-                continue;
-            };
-            if studentized(root_n * own.mean, own.standard_error) > threshold {
-                rejected_now.push(s);
-            } else {
-                survivors.push(s);
-            }
+        // Within a round, caller position: every one of them cleared the same
+        // bar, which is the order this vector has always reported them in.
+        let first = out.len();
+        out.extend(
+            rejected_now
+                .iter()
+                .map(|&strategy| Rejected { strategy, round }),
+        );
+        if let Some(this_round) = out.get_mut(first..) {
+            this_round.sort_unstable_by_key(|rejected| rejected.strategy);
         }
-        if rejected_now.is_empty() {
-            break;
-        }
-        for s in &rejected_now {
-            out.push(Rejected {
-                strategy: *s,
-                round,
-            });
-        }
-        alive = survivors;
+        start = end;
         round = round.saturating_add(1);
     }
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Null statistics [`romano_wolf_aligned`] has computed on this thread,
+    /// so a test can count the stepdown's work rather than time it.
+    static NULL_STATISTICS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// One strategy's recentred, studentized statistic on one resample.
+fn null_statistic(
+    series: &[i64],
+    prefix: Option<&ExactPrefix>,
+    draw: &Resample,
+    own: &Performance,
+) -> f64 {
+    #[cfg(test)]
+    NULL_STATISTICS.with(|count| count.set(count.get().saturating_add(1)));
+    studentized(
+        resampled_mean(series, prefix, draw) - own.mean,
+        own.standard_error,
+    )
 }
 
 /// Every series is the same non-zero length, and that length.
@@ -1457,6 +1697,18 @@ fn aligned(returns: &[Vec<i64>]) -> Option<usize> {
         return None;
     }
     Some(first)
+}
+
+/// [`aligned`], refused when the average block is longer than the series.
+///
+/// A block past the period count resamples almost every draw as one rotation of
+/// the sample, so the null distribution collapses onto the observed statistic:
+/// measured over 400 periods of pure noise, a block of 40,000 put 36 of 40
+/// families under p = 0.05 where a block of 10 put 2 (D-0742's open half,
+/// refused by D-1990). Refused rather than clamped: a block the caller did not
+/// ask for is an answer to a different question.
+fn aligned_for(returns: &[Vec<i64>], block: usize) -> Option<usize> {
+    aligned(returns).filter(|&periods| block <= periods)
 }
 
 /// Mean and standard error of one series.
@@ -1528,8 +1780,41 @@ pub(crate) fn studentized(statistic: f64, standard_error: f64) -> f64 {
 /// resample keeps serial dependence that a single-period resample destroys.
 fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize> {
     let mut out = Vec::with_capacity(periods);
+    stationary_indices_into(&mut out, periods, block, rng);
+    out
+}
+
+/// `draws` stationary-bootstrap draws held as their runs, for a procedure that
+/// reads every draw once per stepdown rank.
+///
+/// One index buffer is reused and each draw keeps only its runs, so the held
+/// set is O(B·R) words for R runs per draw -- at most two words per period,
+/// about `2·periods/block` words at the expected block length -- rather than
+/// B·N indices. The `rng` stream is consumed exactly as the index form
+/// consumed it (D-2316).
+fn held_draws(periods: usize, block: usize, draws: usize, rng: &mut Rng) -> Vec<Resample> {
+    let mut index = Vec::with_capacity(periods);
+    (0..draws)
+        .map(|_| {
+            stationary_indices_into(&mut index, periods, block, rng);
+            Resample::of(&index)
+        })
+        .collect()
+}
+
+/// [`stationary_indices`] into a caller's buffer, which is cleared first.
+///
+/// The draw loops of [`reality_check`], [`spa`] and both receipts hold one
+/// buffer for every draw, so B draws allocate once rather than B times (Rust
+/// and O(1) sweep OE-2, D-2305, proved by
+/// `runner::bootstrap::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`).
+/// The indices are the same: one `rng` stream,
+/// consumed in the same order.
+fn stationary_indices_into(out: &mut Vec<usize>, periods: usize, block: usize, rng: &mut Rng) {
+    out.clear();
+    out.reserve(periods);
     if periods == 0 {
-        return out;
+        return;
     }
     // Continue-probability as parts per million, so the draw stays integer.
     let carry_on = if block <= 1 {
@@ -1549,58 +1834,157 @@ fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize>
             rng.below(periods)
         };
     }
-    out
 }
 
-/// Mean of `series` taken at `index`.
-fn mean_at(series: &[i64], index: &[usize]) -> f64 {
-    if index.is_empty() {
+#[cfg(test)]
+std::thread_local! {
+    /// Resampled means evaluated on this thread, one per strategy per draw,
+    /// whichever path [`resampled_mean`] took (D-1197; the name is the
+    /// former `mean_at`'s, which D-2316 replaced).
+    static MEAN_AT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Terms a resampled mean READ on this thread: one per run on the prefix
+    /// path, one per resampled index on the fold path (D-2316).
+    static MEAN_TERMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// f64's contiguous-integer range, `2^53`.
+///
+/// While every partial sum of the fold is an integer no larger than this in
+/// magnitude, every `a + x as f64` is exact, so the fold IS the exact integer
+/// sum converted once to f64 (D-2316).
+const EXACT_SUM_LIMIT: u128 = 1 << 53;
+
+/// One series' integer prefix sums, padded with zeros out to `periods`.
+///
+/// Built only when the f64 fold over any `periods` of its values is exact:
+/// every `|v| <= 2^53` and `periods x max|v| <= 2^53`, computed in `u128` so
+/// the check itself cannot overflow. The zero padding is the fold's
+/// `unwrap_or(0)` for a series shorter than `periods`.
+#[derive(Debug)]
+struct ExactPrefix {
+    /// `sums[k]` is the sum of the first `k` padded values; `periods + 1` long.
+    sums: Vec<i64>,
+    /// The largest `|v|` among the first `periods` values.
+    magnitude: u128,
+}
+
+impl ExactPrefix {
+    /// `None` when the fold over this series is not provably exact -- the
+    /// caller then keeps the fold, which gives the same bits more slowly.
+    fn new(series: &[i64], periods: usize) -> Option<Self> {
+        let magnitude = series
+            .iter()
+            .take(periods)
+            .map(|v| u128::from(v.unsigned_abs()))
+            .max()
+            .unwrap_or(0);
+        let span = u128::try_from(periods).ok()?.checked_mul(magnitude)?;
+        if magnitude > EXACT_SUM_LIMIT || span > EXACT_SUM_LIMIT {
+            return None;
+        }
+        let mut sums = Vec::with_capacity(periods.checked_add(1)?);
+        let mut total = 0_i64;
+        sums.push(total);
+        for at in 0..periods {
+            total = total.checked_add(series.get(at).copied().unwrap_or(0))?;
+            sums.push(total);
+        }
+        Some(Self { sums, magnitude })
+    }
+
+    /// The exact integer sum of the padded series over `draw`, or `None` when
+    /// it is not provably the fold's value: the draw is longer than the bound
+    /// was checked for, or a run leaves the padded range (where the fold may
+    /// read a value past `periods`).
+    fn sum(&self, draw: &Resample) -> Option<i64> {
+        let span = u128::try_from(draw.len).ok()?.checked_mul(self.magnitude)?;
+        if span > EXACT_SUM_LIMIT {
+            return None;
+        }
+        let mut total = 0_i64;
+        for &(start, last) in &draw.runs {
+            let high = *self.sums.get(last.checked_add(1)?)?;
+            let low = *self.sums.get(start)?;
+            total = total.checked_add(high.checked_sub(low)?)?;
+        }
+        #[cfg(test)]
+        MEAN_TERMS.with(|n| n.set(n.get() + draw.runs.len() as u64));
+        Some(total)
+    }
+}
+
+/// Each strategy's [`ExactPrefix`], `None` where the fold is kept. Built once
+/// per call, not per draw.
+fn exact_prefixes(returns: &[Vec<i64>], periods: usize) -> Vec<Option<ExactPrefix>> {
+    returns
+        .iter()
+        .map(|series| ExactPrefix::new(series, periods))
+        .collect()
+}
+
+/// One draw as its contiguous runs, in draw order.
+///
+/// A stationary-bootstrap draw continues a block by `at + 1` and jumps
+/// otherwise, so it is a sequence of runs of consecutive indices; the wrap
+/// from the last period to 0 starts a new run. `(start, last)` is inclusive,
+/// so the runs reproduce every index of the draw in its original order.
+#[derive(Debug, Default)]
+struct Resample {
+    runs: Vec<(usize, usize)>,
+    /// Indices in the draw: the mean's divisor.
+    len: usize,
+}
+
+impl Resample {
+    /// The runs of `index`.
+    fn of(index: &[usize]) -> Self {
+        let mut out = Self::default();
+        out.fill(index);
+        out
+    }
+
+    /// Replaces this draw's runs with those of `index`: O(len) once per draw,
+    /// shared by every strategy.
+    fn fill(&mut self, index: &[usize]) {
+        self.runs.clear();
+        self.len = index.len();
+        for &at in index {
+            match self.runs.last_mut() {
+                Some((_, last)) if last.checked_add(1) == Some(at) => *last = at,
+                _ => self.runs.push((at, at)),
+            }
+        }
+    }
+
+    /// The draw's indices, in their original order.
+    fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.runs.iter().flat_map(|&(start, last)| start..=last)
+    }
+}
+
+/// Mean of `series` over one draw.
+///
+/// The value is the former `mean_at`'s, bit for bit: the fold
+/// `index.iter().fold(0.0, |a, &i| a + series.get(i).copied().unwrap_or(0) as f64)`
+/// divided by `index.len() as f64`, which the tests keep as their reference.
+/// O(runs) through `prefix` when it is present and provably exact for this
+/// draw; otherwise that same fold over the same indices in the same order,
+/// O(len) (D-2316).
+fn resampled_mean(series: &[i64], prefix: Option<&ExactPrefix>, draw: &Resample) -> f64 {
+    #[cfg(test)]
+    MEAN_AT_CALLS.with(|n| n.set(n.get() + 1));
+    if draw.len == 0 {
         return 0.0;
     }
-    let sum = index.iter().fold(0.0_f64, |a, &i| {
-        a + series.get(i).copied().unwrap_or(0) as f64
-    });
-    sum / index.len() as f64
-}
-
-/// The `q_ppm` quantile of a slice, sorting it in place.
-///
-/// Parts per million rather than a fraction, so no float ever becomes an index.
-/// A truncating cast on a quantile silently returns the wrong threshold, and a
-/// wrong threshold here admits or rejects strategies with no sign anything went
-/// wrong -- the lint table denies that cast for exactly this reason.
-///
-/// `None` for an empty slice — refused rather than answered zero, because a
-/// threshold of zero would reject every strategy with a positive statistic and
-/// report it as a finding.
-fn quantile(values: &mut [f64], q_ppm: u64) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    // `total_cmp` and not `partial_cmp`: a NaN under a partial comparator makes
-    // the sort's behaviour unspecified, and a NaN can arrive here from a
-    // degenerate series. The same choice `crate::rank` makes and for the same
-    // reason.
-    values.sort_unstable_by(f64::total_cmp);
-    // WALKED, NOT CAST. The index is a fraction of the length, and turning a
-    // rounded `f64` back into an index needs a cast the lint table denies for
-    // good reason: a truncating cast on a quantile silently returns the wrong
-    // threshold, and a wrong threshold here rejects or admits strategies with
-    // no sign that anything went wrong.
-    //
-    // Integer arithmetic instead. `q` is clamped to `0..=1` and scaled to parts
-    // per million, so the whole computation stays in `usize` and cannot land
-    // outside the slice.
-    let last = values.len().saturating_sub(1);
-    let idx = usize::try_from(
-        (last as u64)
-            .saturating_mul(q_ppm.min(1_000_000))
-            .saturating_add(500_000)
-            / 1_000_000,
-    )
-    .unwrap_or(0)
-    .min(last);
-    values.get(idx).copied()
+    let sum = if let Some(exact) = prefix.and_then(|exact| exact.sum(draw)) {
+        exact as f64
+    } else {
+        #[cfg(test)]
+        MEAN_TERMS.with(|n| n.set(n.get() + draw.len as u64));
+        draw.indices()
+            .fold(0.0, |a, i| a + series.get(i).copied().unwrap_or(0) as f64)
+    };
+    sum / draw.len as f64
 }
 
 #[cfg(test)]
@@ -1689,6 +2073,12 @@ mod tests {
         }
     }
 
+    /// The block these short-sample tests resample with. D-1990 refuses a
+    /// block longer than the sample, and each of them has fewer periods than
+    /// `DEFAULT_BLOCK`, so they draw one period at a time; what they pin is the
+    /// period count, not the block (D-1934).
+    const SHORT_SAMPLE_BLOCK: usize = 1;
+
     /// A ONE-PERIOD SERIES HAS NOTHING TO RESAMPLE, SO IT CARRIES NO EVIDENCE.
     ///
     /// `aligned` refuses an empty series and a length mismatch and nothing else,
@@ -1710,14 +2100,14 @@ mod tests {
         for magnitude in [1_i64, 7, 500, 1_000_000] {
             let one = vec![vec![magnitude]];
 
-            let rc = reality_check(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            let rc = reality_check(&one, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
             same(rc.p_value, 1.0, "one period cannot be resampled");
             assert!(
                 !rc.clears(),
                 "Reality Check cleared a single period of {magnitude} paisa"
             );
 
-            let v = spa(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            let v = spa(&one, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
             same(v.p_value, 1.0, "one period cannot be resampled");
             assert!(
                 !v.clears(),
@@ -1730,7 +2120,7 @@ mod tests {
         // threshold — asserting otherwise would smuggle in the number this crate
         // declined to invent.
         let two = vec![vec![10_i64, 20]];
-        let v = spa(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        let v = spa(&two, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
         assert!(
             v.p_value <= 1.0,
             "two periods still produce a computed p-value, not the guard's 1.0"
@@ -1752,7 +2142,7 @@ mod tests {
     fn a_verdict_reports_the_sample_size_it_had_and_what_that_is_worth() {
         for periods in [2_usize, 3, 5, 10, 30, 100, 400] {
             let set = vec![noise(periods, 4), noise(periods, 5)];
-            let v = spa(&set, 200, 6, DEFAULT_BLOCK).expect("a verdict");
+            let v = spa(&set, 200, 6, SHORT_SAMPLE_BLOCK).expect("a verdict");
             assert_eq!(v.periods, periods, "the sample size travels with it");
             assert!(
                 v.calibration().contains("period"),
@@ -1903,6 +2293,37 @@ mod tests {
         );
     }
 
+    /// WHITE, SPA AND ROMANO-WOLF JUDGE ONE 5% WITH ONE BOUNDARY.
+    /// hunt-runner-2, D-1548.
+    ///
+    /// Romano-Wolf rejects when `(1 + count) / (B + 1) <= alpha`, the usual
+    /// "reject when p <= alpha". `Verdict::clears` was `p < 0.05`, so at 19
+    /// draws a strategy no draw beat had p = 1/20 = 0.05 exactly: the stepdown
+    /// rejected it and White and SPA, printed beside it "at the same 5%",
+    /// said it did not clear.
+    #[test]
+    fn an_exact_five_percent_p_value_clears_where_the_stepdown_rejects() {
+        let set = vec![edged(300, 5, 500)];
+        let white = reality_check(&set, 19, 7, DEFAULT_BLOCK).expect("a verdict");
+        let hansen = spa(&set, 19, 7, DEFAULT_BLOCK).expect("a verdict");
+        let stepdown = romano_wolf(&set, 19, 7, DEFAULT_BLOCK, 50_000);
+        // Bit-exact on purpose: the boundary case is p EQUAL to 0.05.
+        let five = 0.05_f64.to_bits();
+        assert_eq!(
+            white.p_value.to_bits(),
+            five,
+            "premise: no draw beat the edge"
+        );
+        assert_eq!(
+            hansen.p_value.to_bits(),
+            five,
+            "premise: no draw beat the edge"
+        );
+        assert_eq!(stepdown.len(), 1, "premise: the stepdown rejects at 5%");
+        assert!(white.clears(), "White at p = 0.05");
+        assert!(hansen.clears(), "SPA at p = 0.05");
+    }
+
     #[test]
     fn a_large_genuine_edge_clears_where_noise_does_not() {
         // One strategy with a real edge among nineteen worthless ones.
@@ -2017,6 +2438,30 @@ mod tests {
         assert_eq!(rejected, again, "the same seed gave two different answers");
     }
 
+    /// **One buffer reused across draws yields the draws a fresh vector
+    /// does.** Rust and O(1) sweep OE-2, D-2305. Proved by this test,
+    /// `runner::bootstrap::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`.
+    ///
+    /// Two generators from one seed: one fills a single buffer for every draw,
+    /// the other allocates per draw. Every draw's indices are equal, at block
+    /// lengths 1, 3 and 50 and at 1 and 97 periods, and the buffer is cleared,
+    /// not appended to.
+    #[test]
+    fn a_reused_index_buffer_draws_exactly_what_a_fresh_one_does() {
+        for (periods, block) in [(1_usize, 1_usize), (97, 1), (97, 3), (97, 50)] {
+            let (mut reused, mut fresh) = (super::Rng::new(41), super::Rng::new(41));
+            let mut buffer = Vec::new();
+            for _ in 0..200 {
+                super::stationary_indices_into(&mut buffer, periods, block, &mut reused);
+                assert_eq!(
+                    buffer,
+                    super::stationary_indices(periods, block, &mut fresh)
+                );
+                assert_eq!(buffer.len(), periods);
+            }
+        }
+    }
+
     #[test]
     fn romano_wolf_names_which_strategies_rather_than_whether_any() {
         // Two genuine edges among eighteen noise series. A stepdown must be able
@@ -2059,7 +2504,7 @@ mod tests {
             &[vec![-1, 1, -1, 1], vec![1, -1, 1, -1]],
             20,
             7,
-            DEFAULT_BLOCK,
+            SHORT_SAMPLE_BLOCK,
             50_000,
         )
         .expect("an aligned family with real draws has a receipt");
@@ -2073,11 +2518,12 @@ mod tests {
         assert_eq!(complete.alpha_ppm(), 50_000);
 
         assert!(
-            romano_wolf_receipt(&[vec![1, 2], vec![1]], 20, 7, DEFAULT_BLOCK, 50_000).is_none()
+            romano_wolf_receipt(&[vec![1, 2], vec![1]], 20, 7, SHORT_SAMPLE_BLOCK, 50_000)
+                .is_none()
         );
-        assert!(romano_wolf_receipt(&[vec![1, 2]], 0, 7, DEFAULT_BLOCK, 50_000).is_none());
+        assert!(romano_wolf_receipt(&[vec![1, 2]], 0, 7, SHORT_SAMPLE_BLOCK, 50_000).is_none());
         assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, 0, 50_000).is_none());
-        assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, DEFAULT_BLOCK, 1_000_001).is_none());
+        assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, SHORT_SAMPLE_BLOCK, 1_000_001).is_none());
     }
 
     #[test]
@@ -2102,7 +2548,7 @@ mod tests {
         // Dropping a strategy on an uncomputable gate would make the test more
         // powerful on exactly the samples that justify it least.
         let set = vec![vec![10_i64, 20, 30], vec![-5_i64, -5, -5]];
-        let v = spa(&set, 50, 9, DEFAULT_BLOCK).expect("three periods still yield a verdict");
+        let v = spa(&set, 50, 9, SHORT_SAMPLE_BLOCK).expect("three periods still yield a verdict");
         assert_eq!(v.strategies, 2);
         assert!(
             v.statistic.is_finite(),
@@ -2122,6 +2568,64 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_block_takes_no_draw_and_reads_as_no_evidence() {
+        // Audit satk-8, D-4506. A zero block used to be resampled as a block of
+        // one -- `block <= 1` in `stationary_indices_into` -- so the very same
+        // family that clears at a block of one cleared at a block of zero, a
+        // block no caller can mean. The premise is pinned first: at a block of
+        // one this family DOES clear, so the zero-block answer below is not a
+        // family that would have read p = 1 anyway.
+        let set = vec![edged(100, 1, 500), noise(100, 2)];
+        let draws = 400;
+        let white_one = reality_check(&set, draws, 1, 1).expect("a verdict at block 1");
+        let hansen_one = spa(&set, draws, 1, 1).expect("a verdict at block 1");
+        assert!(
+            white_one.clears(),
+            "premise: White clears at a block of one"
+        );
+        assert!(
+            hansen_one.clears(),
+            "premise: Hansen clears at a block of one"
+        );
+        assert_eq!(white_one.draws, draws);
+        assert!(
+            !romano_wolf(&set, draws, 1, 1, 50_000).is_empty(),
+            "premise: the stepdown names a strategy at a block of one"
+        );
+
+        for (name, verdict) in [
+            ("White", reality_check(&set, draws, 1, 0)),
+            ("Hansen", spa(&set, draws, 1, 0)),
+        ] {
+            let v = verdict.expect("a zero block is answered, not refused");
+            same(v.p_value, 1.0, name);
+            assert_eq!(v.draws, 0, "{name}: no draw is taken at a zero block");
+            assert!(!v.clears(), "{name}: a zero block cannot clear");
+            assert_eq!(v.periods, 100, "{name}: the sample is still measured");
+            assert_eq!(v.strategies, 2, "{name}: every strategy is still counted");
+        }
+        // The observed statistic is the sample's own and does not depend on the
+        // block, so it is reported unchanged.
+        let white_zero = reality_check(&set, draws, 1, 0).expect("a verdict");
+        same(white_zero.statistic, white_one.statistic, "White statistic");
+        let hansen_zero = spa(&set, draws, 1, 0).expect("a verdict");
+        same(
+            hansen_zero.statistic,
+            hansen_one.statistic,
+            "Hansen statistic",
+        );
+        assert!(
+            romano_wolf(&set, draws, 1, 0, 50_000).is_empty(),
+            "the legacy stepdown renders a zero block as malformed: empty"
+        );
+        // Extreme draw counts change nothing: no draw is ever taken.
+        let huge = reality_check(&set, usize::MAX, 1, 0).expect("a verdict");
+        assert_eq!((huge.draws, huge.p_value.to_bits()), (0, 1.0_f64.to_bits()));
+        let huge = spa(&set, usize::MAX, 1, 0).expect("a verdict");
+        assert_eq!((huge.draws, huge.p_value.to_bits()), (0, 1.0_f64.to_bits()));
+    }
+
+    #[test]
     fn a_series_that_never_varies_does_not_produce_an_infinite_statistic() {
         // Zero standard error would divide to infinity, which reads as the
         // strongest result ever found rather than as a degenerate one.
@@ -2131,6 +2635,213 @@ mod tests {
             v.statistic.is_finite(),
             "a constant series produced a non-finite statistic"
         );
+    }
+
+    /// TWO PERIODS IS COMPUTED, NOT REFUSED, by White's test too.
+    ///
+    /// The `periods < 2` guard is structural: one period cannot be resampled.
+    /// Two can, so the guard must not fire at exactly two. With returns of
+    /// `[10, 20]` the observed statistic is `sqrt(2) * 15`; the largest
+    /// recentred resample is both indices drawing 20, `sqrt(2) * (20 - 15)`,
+    /// which never reaches it. So no draw beats the observation and the
+    /// p-value is exactly the bootstrap floor `1 / (draws + 1)` -- not the
+    /// guard's `1.0`.
+    #[test]
+    fn two_periods_are_tested_by_the_reality_check_rather_than_refused() {
+        let two = vec![vec![10_i64, 20]];
+        let rc = reality_check(&two, 1_000, 3, SHORT_SAMPLE_BLOCK).expect("a verdict");
+        assert_eq!(rc.periods, 2);
+        same(rc.p_value, 1.0 / 1_001.0, "no draw can beat sqrt(2) * 15");
+        assert!(rc.clears(), "the floor 1/1001 clears 5%");
+    }
+
+    /// The reference fold: `mean_at` exactly as production computed every
+    /// resampled mean before D-2316, kept here so the prefix/run path is
+    /// compared against the code it replaced rather than against itself.
+    fn mean_at(series: &[i64], index: &[usize]) -> f64 {
+        if index.is_empty() {
+            return 0.0;
+        }
+        let sum = index.iter().fold(0.0_f64, |a, &i| {
+            a + series.get(i).copied().unwrap_or(0) as f64
+        });
+        sum / index.len() as f64
+    }
+
+    /// The largest `|v|` for which `periods x |v| <= 2^53`.
+    fn exact_bound(periods: usize) -> i64 {
+        let periods = u64::try_from(periods.max(1)).expect("a period count fits u64");
+        i64::try_from((1_u64 << 53) / periods).expect("2^53 fits i64")
+    }
+
+    /// One draw's mean both ways must be the same f64, bit for bit.
+    fn prefix_matches_fold(series: &[i64], periods: usize, index: &[usize], what: &str) {
+        let prefix = super::ExactPrefix::new(series, periods);
+        let draw = super::Resample::of(index);
+        assert_eq!(
+            draw.indices().collect::<Vec<usize>>(),
+            index,
+            "{what}: the runs must reproduce the draw in order"
+        );
+        assert_eq!(draw.len, index.len(), "{what}: divisor");
+        same(
+            super::resampled_mean(series, prefix.as_ref(), &draw),
+            mean_at(series, index),
+            what,
+        );
+    }
+
+    /// OE-1 / D-2316: the run/prefix mean is `mean_at`'s fold bit for bit over
+    /// many seeds, blocks and period counts, at the exactness boundary on both
+    /// sides, on short, negative and extreme series, and wherever the prefix
+    /// path must decline and the fold answers.
+    #[test]
+    fn the_run_prefix_mean_is_the_fold_bit_for_bit() {
+        let mut fast = 0_usize;
+        let mut kept = 0_usize;
+        for periods in [0_usize, 1, 2, 3, 7, 64, 225] {
+            let bound = exact_bound(periods);
+            let alternating = |edge: i64| -> Vec<i64> {
+                (0..periods)
+                    .map(|t| if t % 3 == 1 { -edge } else { edge })
+                    .collect()
+            };
+            let mut over = alternating(bound);
+            if let Some(first) = over.first_mut() {
+                *first = bound + 1;
+            }
+            let families: Vec<(&str, Vec<i64>, bool)> = vec![
+                ("noise", noise(periods, 11), true),
+                (
+                    "negative",
+                    noise(periods, 12).iter().map(|v| v - 500).collect(),
+                    true,
+                ),
+                ("short", noise(periods / 2, 13), true),
+                ("at the bound", alternating(bound), true),
+                ("one past the bound", over, periods == 0),
+                (
+                    "extreme",
+                    (0..periods)
+                        .map(|t| if t % 2 == 0 { i64::MIN } else { i64::MAX })
+                        .collect(),
+                    periods == 0,
+                ),
+            ];
+            for (name, series, exact) in &families {
+                assert_eq!(
+                    super::ExactPrefix::new(series, periods).is_some(),
+                    *exact,
+                    "{name} at {periods} periods: exactness"
+                );
+                if *exact {
+                    fast += 1;
+                } else {
+                    kept += 1;
+                }
+                for block in [0_usize, 1, 2, DEFAULT_BLOCK, periods + 5] {
+                    for seed in 0..24_u64 {
+                        let mut rng = super::Rng::new(seed);
+                        let index = super::stationary_indices(periods, block, &mut rng);
+                        let what = format!("{name} periods {periods} block {block} seed {seed}");
+                        prefix_matches_fold(series, periods, &index, &what);
+                    }
+                }
+            }
+        }
+        assert!(fast > 0 && kept > 0, "both paths must be exercised");
+
+        // Indices past `periods` over a longer series, and a draw longer than
+        // the bound was checked for: the prefix path declines and the fold's
+        // own reads answer.
+        let long: Vec<i64> = (1..=10).collect();
+        prefix_matches_fold(&long, 5, &[3, 4, 5, 6], "past the padded range");
+        let edge = vec![exact_bound(4); 4];
+        prefix_matches_fold(
+            &edge,
+            4,
+            &[0, 1, 2, 3, 0, 1, 2, 3],
+            "a draw twice the bound",
+        );
+        prefix_matches_fold(
+            &[7, -3],
+            2,
+            &[usize::MAX, 0, 1],
+            "an index that cannot extend",
+        );
+
+        // The guard is load-bearing: here the f64 fold rounds and the exact
+        // integer sum does not, and the prefix is refused rather than used.
+        let rounding = [1_i64 << 53, 1, 1];
+        let exact_sum = ((1_i64 << 53) + 2) as f64;
+        assert!(
+            mean_at(&rounding, &[0, 1, 2]).to_bits() != (exact_sum / 3.0).to_bits(),
+            "the fold must round on this series"
+        );
+        assert!(super::ExactPrefix::new(&rounding, 3).is_none());
+        prefix_matches_fold(&rounding, 3, &[0, 1, 2], "a fold that rounds");
+    }
+
+    /// `ExactPrefix::sum` re-checks the bound for the draw it is given: a draw
+    /// exactly at the limit is summed, one index past it is refused, though
+    /// the series itself was admitted at the limit.
+    #[test]
+    fn the_prefix_sum_refuses_a_draw_past_the_exact_bound() {
+        let mut series = vec![0_i64; 8];
+        if let Some(first) = series.first_mut() {
+            *first = 1_i64 << 50;
+        }
+        let prefix = super::ExactPrefix::new(&series, 8).expect("8 x 2^50 is the limit itself");
+        let at_limit = super::Resample::of(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(prefix.sum(&at_limit), Some(1_i64 << 50));
+        let past = super::Resample::of(&[0, 1, 2, 3, 4, 5, 6, 7, 1]);
+        assert_eq!(prefix.sum(&past), None);
+    }
+
+    /// OE-1 / D-2316: the prefix path reads one term per run, not one per
+    /// period, both for one draw and across a whole Romano--Wolf stepdown, and
+    /// the fold it keeps for an inexact series reads every period.
+    #[test]
+    fn the_prefix_path_reads_one_term_per_run_not_per_period() {
+        let terms = || super::MEAN_TERMS.with(std::cell::Cell::get);
+        let periods = 4_000;
+        let series = noise(periods, 3);
+        let prefix = super::ExactPrefix::new(&series, periods).expect("noise is exact");
+        let mut rng = super::Rng::new(9);
+        let draw = super::Resample::of(&super::stationary_indices(periods, 50, &mut rng));
+        let before = terms();
+        let _ = super::resampled_mean(&series, Some(&prefix), &draw);
+        let read = terms() - before;
+        assert_eq!(read, draw.runs.len() as u64, "one term per run");
+        assert!(
+            draw.runs.len() * 10 < periods,
+            "runs {} must be far fewer than periods {periods}",
+            draw.runs.len()
+        );
+
+        let extreme = vec![i64::MAX; periods];
+        assert!(super::ExactPrefix::new(&extreme, periods).is_none());
+        let before = terms();
+        let _ = super::resampled_mean(&extreme, None, &draw);
+        assert_eq!(
+            terms() - before,
+            periods as u64,
+            "the fold reads every period"
+        );
+
+        // Whole stepdown: S strategies x the runs of every held draw.
+        let set: Vec<Vec<i64>> = (0..5).map(|s| noise(300, 40 + s)).collect();
+        let (draws, seed, block) = (120, 17, DEFAULT_BLOCK);
+        let mut rng = super::Rng::new(seed);
+        let runs: usize = super::held_draws(300, block, draws, &mut rng)
+            .iter()
+            .map(|draw| draw.runs.len())
+            .sum();
+        let before = terms();
+        let _ = romano_wolf(&set, draws, seed, block, 50_000);
+        let read = terms() - before;
+        assert_eq!(read, (set.len() * runs) as u64, "S x total runs");
+        assert!(read * 5 < (set.len() * draws * 300) as u64, "not S x B x N");
     }
 }
 
@@ -2301,13 +3012,17 @@ mod exact_family_test_receipt_tests {
     #[test]
     fn handled_zero_variance_keeps_named_procedure_compatibility() {
         let constant = vec![vec![7_i64; 32]];
-        let white = white_reality_check_receipt_v1(&constant, 19, 3, 4)
-            .expect("White permits a deterministic nonzero mean");
+        // White still permits a deterministic nonzero mean BESIDE A ROW THAT
+        // VARIES: its null then has spread. A family with none is refused
+        // instead (D-0972), which
+        // `a_family_that_never_varied_mints_no_white_evidence` pins.
+        let mixed = vec![vec![7_i64; 32], noise(32, 5)];
+        let white = white_reality_check_receipt_v1(&mixed, 19, 3, 4)
+            .expect("White permits a deterministic nonzero mean beside variation");
         assert_eq!(
             white.verdict(),
-            reality_check(&constant, 19, 3, 4).expect("legacy White verdict")
+            reality_check(&mixed, 19, 3, 4).expect("legacy White verdict")
         );
-        assert_eq!(white.exact_p_value().numerator(), 1);
         assert_eq!(white.exact_p_value().denominator(), 20);
 
         let spa_exact = spa_receipt_v1(&constant, 19, 3, 4)
@@ -2319,6 +3034,65 @@ mod exact_family_test_receipt_tests {
         assert_eq!(spa_exact.matched_or_exceeded(), 19);
         assert_eq!(spa_exact.exact_p_value().numerator(), 20);
         assert_eq!(spa_exact.exact_p_value().denominator(), 20);
+    }
+
+    /// A FAMILY IN WHICH NO ROW EVER VARIED EARNS NO WHITE EVIDENCE (D-0972).
+    ///
+    /// Every recentred draw of a constant row is exactly zero, so with no
+    /// varying row White's bootstrap maximum is a point mass at zero. Before
+    /// D-0972 a positive constant then counted the strongest probability the
+    /// draws can express, 1/1001 at 1,000 draws, for 1 paisa as readily as for
+    /// 1,000,000, while SPA answered 1 and Romano--Wolf refused. Several
+    /// magnitudes are asserted because the magnitude is the tell.
+    #[test]
+    fn a_family_that_never_varied_mints_no_white_evidence() {
+        for constant in [1_i64, 7, 1_000_000] {
+            for family in [
+                vec![vec![constant; 100]],
+                vec![vec![constant; 100], vec![0; 100], vec![-constant; 100]],
+            ] {
+                assert_eq!(
+                    white_reality_check_receipt_v1(&family, 1_000, 7, DEFAULT_BLOCK),
+                    None,
+                    "a point-mass null minted exact White evidence at {constant}"
+                );
+                let legacy = reality_check(&family, 1_000, 7, DEFAULT_BLOCK).expect("a verdict");
+                assert!(
+                    legacy.p_value.to_bits() == 1.0_f64.to_bits(),
+                    "a point-mass null is no evidence, got p = {}",
+                    legacy.p_value
+                );
+                assert!(!legacy.clears(), "a point-mass null cleared at {constant}");
+            }
+        }
+
+        // A nonpositive statistic against the same point mass already counts
+        // every draw, so those receipts are unchanged and conservative.
+        for family in [
+            vec![vec![0_i64; 100]],
+            vec![vec![-5_i64; 100], vec![0; 100]],
+        ] {
+            let white = white_reality_check_receipt_v1(&family, 1_000, 7, DEFAULT_BLOCK)
+                .expect("a nonpositive point mass keeps its conservative receipt");
+            assert_eq!(white.matched_or_exceeded(), 1_000);
+            assert_eq!(white.exact_p_value().numerator(), 1_001);
+            assert_eq!(white.exact_p_value().denominator(), 1_001);
+            assert_eq!(
+                white.verdict(),
+                reality_check(&family, 1_000, 7, DEFAULT_BLOCK).expect("legacy verdict")
+            );
+        }
+
+        // One varying row gives the null spread, and the constant keeps the
+        // measured White answer the named-procedure test above relies on.
+        let mixed = vec![vec![1_i64; 100], noise(100, 3)];
+        let white = white_reality_check_receipt_v1(&mixed, 1_000, 7, DEFAULT_BLOCK)
+            .expect("a family with variation is measured");
+        assert!(white.exact_p_value().numerator() < white.exact_p_value().denominator());
+        assert_eq!(
+            white.verdict(),
+            reality_check(&mixed, 1_000, 7, DEFAULT_BLOCK).expect("legacy verdict")
+        );
     }
 }
 
@@ -2689,12 +3463,16 @@ mod stepdown_partition_tests {
         );
     }
 
-    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS.
+    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS, and no strategy is
+    /// rejected twice.
     ///
-    /// The `while !alive.is_empty()` bound rests on it. Under the old `retain`
-    /// this was guaranteed by the predicate; under a hand-written partition a
-    /// survivor pushed on both branches would loop forever, and a test that
-    /// merely finished would not say so. This one asserts the count.
+    /// Termination is STRUCTURAL: a round runs only when `end > start`, and
+    /// `start = end` after it, so the walk over the ordered strategies cannot
+    /// revisit one. A round number exists only after a non-empty round, so a
+    /// per-round count could not fail (P7-02, D-2667). What this asserts is
+    /// what a broken partition would change: the fixture must reject something,
+    /// each strategy appears at most once, and the rounds are numbered in order
+    /// without a gap.
     #[test]
     fn the_surviving_set_strictly_shrinks_every_round_that_rejects() {
         let set: Vec<Vec<i64>> = (0..12)
@@ -2706,21 +3484,401 @@ mod stepdown_partition_tests {
             })
             .collect();
         let rejected = romano_wolf(&set, 150, 5, DEFAULT_BLOCK, 50_000);
-        if rejected.is_empty() {
-            return;
+        assert!(
+            !rejected.is_empty(),
+            "means from 0.75 to 121.75 against an SE near 0.7 must reject"
+        );
+        let mut seen = vec![false; set.len()];
+        let mut expected_round = 0_usize;
+        for r in &rejected {
+            let slot = seen.get_mut(r.strategy).expect("a strategy of the input");
+            assert!(!*slot, "strategy {} rejected twice", r.strategy);
+            *slot = true;
+            assert!(
+                r.round == expected_round || r.round == expected_round + 1,
+                "round {} after round {expected_round}: a gap or a step back",
+                r.round
+            );
+            expected_round = r.round;
         }
         let rounds = rejected.last().map_or(0, |r| r.round);
-        for round in 0..=rounds {
-            let n = rejected.iter().filter(|r| r.round == round).count();
+        assert!(
+            rounds < rejected.len() && rejected.len() <= set.len(),
+            "{} rounds for {} rejections of {} strategies",
+            rounds + 1,
+            rejected.len(),
+            set.len()
+        );
+    }
+
+    /// o1runner-7 / D-1197: the stepdown computes each strategy's resampled
+    /// mean once per draw, not once per draw per ROUND, counted at `mean_at`
+    /// itself, and answers the same set on every rerun -- the set its receipt
+    /// carries. On the merged tree that property is held by D-0973's one-walk
+    /// stepdown; the null table D-1197 introduced was folded into it.
+    #[test]
+    fn the_stepdown_computes_each_null_statistic_once_and_answers_unchanged() {
+        // Ten strong strategies clear round zero; a moderate one, masked while
+        // they are in the maximum, clears a later round; one null never does.
+        let noise = |t: i64| ((t * 7_919) % 23) - 11;
+        let mut set: Vec<Vec<i64>> = (0..10)
+            .map(|s| (0..64).map(|t| 40 + s + noise(t + s)).collect())
+            .collect();
+        set.push((0..64).map(|t| 55 + 60 * noise(t * 3)).collect());
+        set.push((0..64).map(|t| noise(t * 5)).collect());
+        let draws = 150;
+        let before = super::MEAN_AT_CALLS.with(std::cell::Cell::get);
+        let rejected = romano_wolf(&set, draws, 5, DEFAULT_BLOCK, 50_000);
+        let calls = super::MEAN_AT_CALLS.with(std::cell::Cell::get) - before;
+        let rounds = rejected.last().map_or(0, |r| r.round) + 1;
+        assert!(
+            rounds >= 2,
+            "the fixture must take several rounds: {rejected:?}"
+        );
+        assert_eq!(
+            calls,
+            (set.len() * draws) as u64,
+            "one mean per strategy per draw"
+        );
+
+        // The per-round recomputation this test first compared against is
+        // gone: D-0973 replaced the rounded `1 - alpha` quantile with the exact
+        // `(1 + count) / (B + 1)` rule, so the old loop is no longer the
+        // reference. `exact_stepdown_tests` holds the new oracle (the adjusted
+        // receipt); here the answer is idempotent and is the receipt's set.
+        for seed in [1_u64, 5, 97, 2_026] {
+            let once = romano_wolf(&set, draws, seed, DEFAULT_BLOCK, 50_000);
+            assert_eq!(
+                once,
+                romano_wolf(&set, draws, seed, DEFAULT_BLOCK, 50_000),
+                "seed {seed}"
+            );
+            let receipt = super::romano_wolf_receipt(&set, draws, seed, DEFAULT_BLOCK, 50_000)
+                .expect("a valid family has a receipt");
+            assert_eq!(receipt.rejected(), once.as_slice(), "seed {seed}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod block_ceiling_tests {
+    use super::{
+        FamilyTestsRefusalV1, Rng, family_tests_v1, reality_check, romano_wolf,
+        romano_wolf_adjusted_p_values_v1, romano_wolf_receipt, spa, spa_receipt_v1,
+        stationary_indices, white_reality_check_receipt_v1,
+    };
+
+    /// Deterministic noise around zero, plus `edge` paisa per period.
+    fn edged(periods: usize, seed: u64, edge: i64) -> Vec<i64> {
+        let mut r = Rng::new(seed);
+        (0..periods)
+            .map(|_| i64::try_from(r.next_u64() % 200).unwrap_or(0) - 100 + edge)
+            .collect()
+    }
+
+    /// W3-runner1-2 (D-0742): the continuation draw is in parts per million,
+    /// so above one million periods the restart probability floors to zero
+    /// and every draw is one rotation of the series. Every entry point
+    /// refuses that block instead of resampling rotations; one million itself
+    /// is under the ceiling, and a block is also refused past the series length (D-1990).
+    #[test]
+    fn a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point() {
+        let ceiling = 1_000_000_usize;
+        assert_eq!(
+            super::MAX_BLOCK,
+            ceiling,
+            "the ppm draw resolves one million"
+        );
+        let beyond = ceiling + 1;
+        let periods = 200_usize;
+
+        // Why it is refused: at `beyond` no draw ever restarts.
+        let mut rng = Rng::new(5);
+        for _ in 0..50 {
+            let index = stationary_indices(periods, beyond, &mut rng);
             assert!(
-                n > 0,
-                "round {round} emitted nothing, so the loop ran a round without \
-                 shrinking the surviving set"
+                index
+                    .windows(2)
+                    .all(|pair| pair.get(1) == pair.first().map(|at| (at + 1) % periods).as_ref()),
+                "above the ppm resolution every draw is one rotation"
             );
         }
+
+        // A small positive mean on noise, beside plain noise.
+        let set = vec![edged(periods, 11, 3), edged(periods, 12, 0)];
+        let rc = reality_check(&set, 999, 3, beyond);
         assert!(
-            rejected.len() <= set.len(),
-            "the total rejected can never exceed the input"
+            rc.is_none(),
+            "Reality Check answered over rotations: {:?}",
+            rc.map(|v| v.p_value)
         );
+        let v = spa(&set, 999, 3, beyond);
+        assert!(
+            v.is_none(),
+            "SPA answered over rotations: {:?}",
+            v.map(|v| (v.p_value, v.clears()))
+        );
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, beyond).is_none());
+        assert!(spa_receipt_v1(&set, 999, 3, beyond).is_none());
+        assert!(romano_wolf_receipt(&set, 999, 3, beyond, 50_000).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, beyond).is_none());
+        assert_eq!(
+            family_tests_v1(&set, &[0], 999, 3, beyond).err(),
+            Some(FamilyTestsRefusalV1::RomanoWolf)
+        );
+        assert_eq!(
+            family_tests_v1(&set, &[], 999, 3, beyond).err(),
+            Some(FamilyTestsRefusalV1::White)
+        );
+
+        // A strong edge the stepdown names at the series length is not named
+        // beyond it.
+        let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        assert!(!romano_wolf(&strong, 999, 3, periods, 50_000).is_empty());
+        assert!(romano_wolf(&strong, 999, 3, beyond, 50_000).is_empty());
+
+        // A block as long as the series is accepted.
+        assert!(reality_check(&set, 999, 3, periods).is_some());
+        assert!(spa(&set, 999, 3, periods).is_some());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, periods).is_some());
+        assert!(spa_receipt_v1(&set, 999, 3, periods).is_some());
+        assert!(romano_wolf_receipt(&set, 999, 3, periods, 50_000).is_some());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, periods).is_some());
+        assert!(family_tests_v1(&set, &[0], 999, 3, periods).is_ok());
+    }
+
+    /// The ceiling ITSELF, on a series long enough that the length check
+    /// cannot answer for it (G18-runner-06, D-2057). Over 200 periods a block
+    /// of 1,000,001 is refused by `aligned_for` before `MAX_BLOCK` is read, so
+    /// the test above never told `>` from `>=` or `==`. Over 1,000,001 periods
+    /// one million is accepted and one more is refused by the ceiling alone.
+    #[test]
+    fn the_ceiling_is_read_on_a_series_longer_than_it() {
+        let ceiling = super::MAX_BLOCK;
+        let periods = ceiling + 1;
+        let set = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        let draws = 19;
+        let alpha = 100_000;
+        assert!(reality_check(&set, draws, 3, ceiling).is_some());
+        assert!(reality_check(&set, draws, 3, periods).is_none());
+        assert!(!romano_wolf(&set, draws, 3, ceiling, alpha).is_empty());
+        assert!(romano_wolf(&set, draws, 3, periods, alpha).is_empty());
+        assert!(romano_wolf_receipt(&set, draws, 3, ceiling, alpha).is_some());
+        assert!(romano_wolf_receipt(&set, draws, 3, periods, alpha).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, draws, 3, ceiling).is_some());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, draws, 3, periods).is_none());
+        assert!(spa(&set, draws, 3, ceiling).is_some());
+        assert!(spa(&set, draws, 3, periods).is_none());
+        assert!(white_reality_check_receipt_v1(&set, draws, 3, ceiling).is_some());
+        assert!(white_reality_check_receipt_v1(&set, draws, 3, periods).is_none());
+        assert!(spa_receipt_v1(&set, draws, 3, ceiling).is_some());
+        assert!(spa_receipt_v1(&set, draws, 3, periods).is_none());
+        assert!(family_tests_v1(&set, &[0], draws, 3, ceiling).is_ok());
+        assert!(family_tests_v1(&set, &[0], draws, 3, periods).is_err());
+    }
+
+    /// An alpha of exactly one million ppm is a probability, so the receipt
+    /// is complete; one more is not (G18-runner-07, D-2057).
+    #[test]
+    fn an_alpha_of_one_is_inside_the_ppm_domain() {
+        let set = vec![edged(200, 11, 3), edged(200, 12, 0)];
+        assert!(romano_wolf_receipt(&set, 99, 3, 10, 1_000_000).is_some());
+        assert!(romano_wolf_receipt(&set, 99, 3, 10, 1_000_001).is_none());
+    }
+
+    /// No draws clears nothing, even beside a p-value under the threshold;
+    /// one draw at exactly 5% clears (G18-runner-08, D-2057).
+    #[test]
+    fn a_verdict_clears_only_with_draws_and_at_most_five_percent() {
+        let at = |draws, p_value| super::Verdict {
+            p_value,
+            draws,
+            ..super::Verdict::default()
+        };
+        assert!(!at(0, 0.0).clears());
+        assert!(!at(0, 0.05).clears());
+        assert!(at(1, 0.05).clears());
+        assert!(!at(1, 0.050_000_1).clears());
+    }
+
+    /// D-0742's open half, D-1990: a block longer than the series is refused
+    /// by every entry point, even under the ppm ceiling. Measured before the
+    /// fix: over 400 periods of pure noise, a block of 40,000 put 36 of 40
+    /// families under p = 0.05.
+    #[test]
+    fn a_block_longer_than_the_series_is_refused_by_every_entry_point() {
+        let periods = 200_usize;
+        let longer = periods + 1;
+        assert!(longer <= super::MAX_BLOCK, "under the ppm ceiling");
+        let set = vec![edged(periods, 11, 3), edged(periods, 12, 0)];
+        assert!(reality_check(&set, 999, 3, longer).is_none());
+        assert!(spa(&set, 999, 3, longer).is_none());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, longer).is_none());
+        assert!(spa_receipt_v1(&set, 999, 3, longer).is_none());
+        assert!(romano_wolf_receipt(&set, 999, 3, longer, 50_000).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, longer).is_none());
+        let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        assert!(romano_wolf(&strong, 999, 3, longer, 50_000).is_empty());
+        assert_eq!(
+            family_tests_v1(&set, &[0], 999, 3, longer).err(),
+            Some(FamilyTestsRefusalV1::RomanoWolf)
+        );
+        assert_eq!(
+            family_tests_v1(&set, &[], 999, 3, longer).err(),
+            Some(FamilyTestsRefusalV1::White)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod exact_stepdown_tests {
+    use super::{
+        DEFAULT_BLOCK, NULL_STATISTICS, Rng, romano_wolf, romano_wolf_adjusted_p_values_v1,
+        romano_wolf_receipt,
+    };
+
+    fn noise(periods: usize, seed: u64, shift: i64) -> Vec<i64> {
+        let mut rng = Rng::new(seed);
+        (0..periods)
+            .map(|_| i64::try_from(rng.next_u64() % 21).unwrap_or(0) - 10 + shift)
+            .collect()
+    }
+
+    fn family(seed: u64, shift: i64) -> Vec<Vec<i64>> {
+        vec![
+            noise(60, seed, shift),
+            noise(60, seed.wrapping_add(10_000), 0),
+            noise(60, seed.wrapping_add(20_000), shift / 2),
+        ]
+    }
+
+    /// ONE PROCEDURE AND ONE BOUNDARY (D-0973).
+    ///
+    /// On a family with no zero-variance row, the legacy stepdown rejects a
+    /// strategy exactly when its Romano--Wolf adjusted probability rejects at
+    /// the same alpha under the exact `(1 + count) / (B + 1)` rule, and the
+    /// receipt carries the same set. Before D-0973 it read a rounded `1 - alpha`
+    /// quantile: at alpha 0 it rejected the strongest strategy, and near 5% it
+    /// disagreed with the exact rule in both directions.
+    #[test]
+    fn the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects() {
+        let mut compared = 0_usize;
+        let mut disagreements: Vec<(u64, i64, u64, usize)> = Vec::new();
+        for seed in 0..40_u64 {
+            for shift in 1..=5_i64 {
+                let returns = family(seed, shift);
+                let adjusted = romano_wolf_adjusted_p_values_v1(&returns, 400, seed, DEFAULT_BLOCK)
+                    .expect("a varying family has adjusted probabilities");
+                for alpha in [0_u64, 1, 50_000, 100_000, 1_000_000] {
+                    let legacy = romano_wolf(&returns, 400, seed, DEFAULT_BLOCK, alpha);
+                    let receipt = romano_wolf_receipt(&returns, 400, seed, DEFAULT_BLOCK, alpha)
+                        .expect("a valid family has a receipt");
+                    assert_eq!(receipt.rejected(), legacy.as_slice());
+                    for strategy in 0..returns.len() {
+                        let exact = adjusted
+                            .candidate(strategy)
+                            .and_then(|row| row.adjusted_p_value().rejects_at_ppm(alpha))
+                            .expect("every candidate has a probability");
+                        if legacy.iter().any(|row| row.strategy == strategy) != exact
+                            || receipt.is_rejected(strategy) != Some(exact)
+                        {
+                            disagreements.push((seed, shift, alpha, strategy));
+                        }
+                        compared = compared.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 40 * 5 * 5 * 3);
+        assert!(
+            disagreements.is_empty(),
+            "{} disagreements (seed, shift, alpha, strategy): {disagreements:?}",
+            disagreements.len()
+        );
+    }
+
+    /// At alpha zero nothing is rejected: `(1 + count) / (B + 1)` is never 0.
+    #[test]
+    fn alpha_zero_rejects_nothing() {
+        let returns = family(3, 8);
+        assert!(
+            !romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, 1_000_000).is_empty(),
+            "the control: the same family does reject at alpha 1"
+        );
+        assert!(romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, 0).is_empty());
+        let receipt =
+            romano_wolf_receipt(&returns, 400, 3, DEFAULT_BLOCK, 0).expect("a valid receipt");
+        assert!(receipt.rejected().is_empty());
+    }
+
+    /// AN ALPHA OUTSIDE THE PROBABILITY DOMAIN RUNS NO PROCEDURE (D-0973).
+    ///
+    /// `romano_wolf_receipt` already refused it; the legacy vector saturated
+    /// `1_000_000 - alpha` to the minimum bootstrap maximum and rejected almost
+    /// every strategy. It now renders it as it renders every malformed input:
+    /// empty.
+    #[test]
+    fn an_alpha_above_one_rejects_nothing() {
+        let returns = family(3, 8);
+        let at_one = romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, 1_000_000);
+        assert_eq!(at_one.len(), returns.len(), "alpha 1 rejects every row");
+        for alpha in [1_000_001_u64, 2_000_000, u64::MAX] {
+            assert!(
+                romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, alpha).is_empty(),
+                "alpha {alpha} is not a probability"
+            );
+            assert!(romano_wolf_receipt(&returns, 400, 3, DEFAULT_BLOCK, alpha).is_none());
+        }
+    }
+
+    /// EACH NULL STATISTIC IS COMPUTED ONCE, HOWEVER MANY ROUNDS (D-0973).
+    ///
+    /// The former loop recomputed every survivor's resampled mean on every
+    /// round, B·Σ|alive| statistics over the stepdown. The walk computes each
+    /// strategy's B statistics once, whatever the round count.
+    #[test]
+    fn each_null_statistic_is_computed_once_however_many_rounds() {
+        let returns: Vec<Vec<i64>> = (0..8_u64)
+            .map(|strategy| {
+                let edge = 8_i64.saturating_sub(i64::try_from(strategy).unwrap_or(8));
+                noise(120, strategy.wrapping_add(500), edge)
+            })
+            .collect();
+        NULL_STATISTICS.with(|count| count.set(0));
+        let rejected = romano_wolf(&returns, 300, 11, DEFAULT_BLOCK, 50_000);
+        let computed = NULL_STATISTICS.with(std::cell::Cell::get);
+        let rounds = rejected.last().map_or(0, |row| row.round.saturating_add(1));
+        assert!(rounds >= 2, "the family must step down; rounds {rounds}");
+        assert_eq!(computed, 300 * returns.len(), "rounds {rounds}");
+    }
+
+    /// A ZERO-VARIANCE STRATEGY IS NEVER REJECTED (D-0973).
+    ///
+    /// Its statistic and every null draw of it are `0.0`, so no draw strictly
+    /// exceeds it and the exact rule alone would call it the strongest result
+    /// the draws can express.
+    #[test]
+    fn a_strategy_that_never_varied_is_never_rejected() {
+        for alpha in [50_000_u64, 1_000_000] {
+            assert!(
+                romano_wolf(&[vec![0; 60], vec![0; 60]], 400, 5, DEFAULT_BLOCK, alpha).is_empty()
+            );
+            assert!(romano_wolf(&[vec![9; 60]], 400, 5, DEFAULT_BLOCK, alpha).is_empty());
+        }
+        let beside = vec![noise(60, 7, 8), vec![3; 60], noise(60, 8, 0)];
+        let rejected = romano_wolf(&beside, 400, 5, DEFAULT_BLOCK, 50_000);
+        assert!(
+            rejected.iter().any(|row| row.strategy == 0),
+            "the control: the edged row beside it is still rejected"
+        );
+        assert!(rejected.iter().all(|row| row.strategy != 1));
     }
 }

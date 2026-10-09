@@ -44,27 +44,25 @@
 //! is_not_minute_aligned_is_kept_and_its_offset_is_visible` pins the current
 //! behaviour so that changing it has to be deliberate.
 //!
-//! # What this module deliberately does **not** know
+//! # The trading calendar this module reads, and what it still does not know
 //!
-//! **There is no trading calendar here.** It does not know a holiday, a Muhurat
-//! session or a Saturday budget session, and it therefore never claims a bar is
-//! on a non-trading date. `docs/00-charter.md` §3 records special-session shapes
-//! and **no holiday list**, so a weekend rule would be *wrong* — it records
-//! 2025-02-01 as a Saturday and a full 375-bar session, alongside 2020-02-01
-//! (Sat) and 2026-02-01 (Sun). Nothing in this module computes a day of the
-//! week; there is no `% 7` in it, and
-//! `pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule`
-//! walks all seven days of one week and asserts the same 375 for each.
+//! **This module computes no day of the week and holds no holiday list of its
+//! own.** There is no `% 7` in it. A weekend rule would be *wrong*: 2025-02-01
+//! was a Saturday and a full 375-bar session, as were 2020-02-01 (Sat) and
+//! 2026-02-01 (Sun).
 //!
+//! It reads [`crate::calendar::kind_of`], the measured NSE calendar whose
+//! sources that module states, and nothing else. A bar on a day the calendar
+//! records `Closed` is dropped and counted as [`DropReason::OnClosedDay`];
+//! irregular sessions keep exactly their own windows; a day the calendar has
+//! not measured is kept and counted by name
+//! ([`DropCensus::count_unclassified_kept`]) rather than guessed either way.
 //! Invariant `P-03` — "a bar on a non-trading date is dropped and counted" —
-//! therefore stays `—` in `docs/04-invariants.md`, and is **not** advanced by
-//! this module. That status was checked against the table rather than asserted.
-//! An earlier draft of this header pointed at `docs/06-limits.md` §20 for the
-//! explanation; that section does not exist — `docs/06-limits.md` runs §19 then
-//! §21 — so the reason is written out here instead of cited to nothing.
+//! is proved by `pull::unit::calendar_filter` (D-2673). This header said the
+//! opposite until then, when no calendar existed.
 //!
-//! What is filtered here is the **window**: the operator's date range, and the
-//! intraday session bounds.
+//! What is filtered here is the **window**: the operator's date range, the
+//! closed days, and the intraday session bounds.
 //!
 //! # Cost
 //!
@@ -120,6 +118,14 @@ pub const BARS_PER_REGULAR_SESSION: u32 = 375;
 const _: () = assert!(SESSION_CLOSE_MINUTE - SESSION_OPEN_MINUTE == BARS_PER_REGULAR_SESSION);
 const _: () = assert!(SESSION_OPEN_MINUTE == 555 && SESSION_CLOSE_MINUTE == 930);
 const _: () = assert!(IST_OFFSET_SECS == 19_800);
+// The store keeps its own copy to compute a month's IST span at its write
+// boundary (`store::path::YearMonth::ist_bounds_micros`, D-0915) because it
+// cannot depend on this crate. This is what keeps the copy honest.
+const _: () = assert!(IST_OFFSET_SECS == store::path::IST_OFFSET_SECS);
+// The store's copy of the open, which `pull::fold` anchors every intraday rung
+// on, is this one (D-3518).
+const _: () =
+    assert!(SESSION_OPEN_MINUTE == store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT);
 const _: () = assert!(SECS_PER_DAY == 86_400);
 // `IstMoment::from_epoch_secs` narrows this one to `u32`. The cast is exact
 // only while it is 60, and this is what says so at compile time.
@@ -166,6 +172,19 @@ pub enum SessionError {
     VenueHoursUnknown {
         /// Which venue, in its own words.
         venue: &'static str,
+        /// The day, as days from the epoch.
+        days: u32,
+    },
+    /// A minute bar falls on a day the exchange calendar records as traded
+    /// but whose session length was never measured
+    /// ([`crate::calendar::DayKind::OpenLengthUnmeasured`], the five Muhurat
+    /// sessions before 2025).
+    ///
+    /// A REFUSAL, named, rather than a drop against the regular hours or a keep
+    /// against them: either would be a claim about which minutes that session
+    /// owed, and nothing here measured it. The remedy is to measure the session
+    /// and record it in the calendar's irregular table. CE-52, D-2670.
+    SessionLengthUnmeasured {
         /// The day, as days from the epoch.
         days: u32,
     },
@@ -250,6 +269,14 @@ impl fmt::Display for SessionError {
                  whether a bar at that time is inside the session is unknown. \
                  Refused rather than assumed: applying another day's hours \
                  would admit or drop bars against a session nobody confirmed"
+            ),
+            Self::SessionLengthUnmeasured { days } => write!(
+                f,
+                "day {days} traded a session whose length was never measured \
+                 (a Muhurat with no minute series), so whether a minute bar on \
+                 it was inside that session is unknown. Refused rather than \
+                 judged against the regular hours; measure the session and \
+                 record it in the calendar's irregular table"
             ),
             Self::BeforeEpoch { secs } => {
                 write!(f, "timestamp {secs} is before the Unix epoch")
@@ -841,6 +868,14 @@ pub enum DropReason {
     /// brings back a bar from the extra day. The bar is dropped, counted, and
     /// visible — `CLAUDE.md` §4, degrade loudly and name the reason.
     AfterWindow,
+    /// The date is one [`crate::calendar::kind_of`] records as
+    /// [`crate::calendar::DayKind::Closed`]: the exchange did not trade, so a
+    /// bar stamped on it is not a session bar. Invariant P-03, D-2673.
+    ///
+    /// Only the calendar's own answer drops a bar here. A day the calendar has
+    /// not measured is never dropped for being "probably" closed; it is kept
+    /// and counted by name instead ([`DropCensus::unclassified_kept`]).
+    OnClosedDay,
 }
 
 impl DropReason {
@@ -852,6 +887,7 @@ impl DropReason {
             Self::AtOrAfterSessionClose => "at or after the session close",
             Self::BeforeWindow => "before the requested window",
             Self::AfterWindow => "after the requested window",
+            Self::OnClosedDay => "on a day the exchange calendar records closed",
         }
     }
 }
@@ -872,6 +908,8 @@ pub struct DropCensus {
     after_close: u32,
     before_window: u32,
     after_window: u32,
+    closed_day: u32,
+    unclassified_kept: u32,
 }
 
 impl DropCensus {
@@ -883,6 +921,8 @@ impl DropCensus {
             after_close: 0,
             before_window: 0,
             after_window: 0,
+            closed_day: 0,
+            unclassified_kept: 0,
         }
     }
 
@@ -912,6 +952,10 @@ impl DropCensus {
         self.after_close = self.after_close.saturating_add(other.after_close);
         self.before_window = self.before_window.saturating_add(other.before_window);
         self.after_window = self.after_window.saturating_add(other.after_window);
+        self.closed_day = self.closed_day.saturating_add(other.closed_day);
+        self.unclassified_kept = self
+            .unclassified_kept
+            .saturating_add(other.unclassified_kept);
     }
 
     /// Counts one drop. Saturating, because a census that wrapped would report
@@ -923,6 +967,7 @@ impl DropCensus {
             DropReason::AtOrAfterSessionClose => &mut self.after_close,
             DropReason::BeforeWindow => &mut self.before_window,
             DropReason::AfterWindow => &mut self.after_window,
+            DropReason::OnClosedDay => &mut self.closed_day,
         };
         *slot = slot.saturating_add(1);
     }
@@ -935,7 +980,26 @@ impl DropCensus {
             DropReason::AtOrAfterSessionClose => self.after_close,
             DropReason::BeforeWindow => self.before_window,
             DropReason::AfterWindow => self.after_window,
+            DropReason::OnClosedDay => self.closed_day,
         }
+    }
+
+    /// Counts one bar that was KEPT on a day the exchange calendar cannot
+    /// classify ([`crate::calendar::DayKind::Unmeasured`]: outside the
+    /// calendar's measured range).
+    ///
+    /// Not a drop, and not part of [`Self::total`]: dropping it would claim the
+    /// exchange was shut on a day nobody measured, which is an invented
+    /// calendar fact. Counting it by name is what keeps the keep from being
+    /// silent. D-2673.
+    pub const fn count_unclassified_kept(&mut self) {
+        self.unclassified_kept = self.unclassified_kept.saturating_add(1);
+    }
+
+    /// How many bars were kept on a day the exchange calendar cannot classify.
+    #[must_use]
+    pub const fn unclassified_kept(&self) -> u32 {
+        self.unclassified_kept
     }
 
     /// How many were dropped in total.
@@ -959,6 +1023,7 @@ impl DropCensus {
             .saturating_add(self.after_close)
             .saturating_add(self.before_window)
             .saturating_add(self.after_window)
+            .saturating_add(self.closed_day)
     }
 
     /// Whether nothing was dropped.
@@ -1077,6 +1142,19 @@ impl Window {
     /// a timestamp is a refusal, never a drop: a drop is a bar this engine
     /// declined, and a bar it could not read is the vendor or the decoder being
     /// wrong.
+    ///
+    /// [`SessionError::SessionLengthUnmeasured`] for a minute bar on a day the
+    /// exchange calendar records as a session of unmeasured length, and
+    /// [`SessionError::VenueHoursUnknown`] for a day the venue's table carries
+    /// no verified hours for.
+    ///
+    /// # Which session a minute is judged against
+    ///
+    /// On a day [`crate::calendar::kind_of`] records as an irregular session
+    /// (the 2021-02-24 outage day, the two disaster-recovery Saturdays, the
+    /// 2025 Muhurat hour) the calendar's own windows, on every venue. On every
+    /// other day the venue's dated table. One session authority, so ingest
+    /// never drops a minute the gap audit then calls a vendor hole. D-2670.
     pub fn verdict(
         self,
         epoch_secs: i64,
@@ -1094,6 +1172,17 @@ impl Window {
         if day > self.to.days_from_epoch() {
             return Ok(Some(DropReason::AfterWindow));
         }
+        // A CLOSED DAY HOLDS NO SESSION, AT ANY CADENCE (P-03, D-2673). The
+        // exchange calendar's own answer, never a weekday rule: 2025-02-01 was
+        // a Saturday and a full session, and `kind_of` says so. A daily bar is
+        // NOT exempt here — its exemption is from intraday hours, and a closed
+        // day has none. A day outside the calendar's measured range is not
+        // `Closed` and is not dropped; `on_unclassified_day` lets a caller
+        // count it by name.
+        let kind = crate::calendar::kind_of(i64::from(day));
+        if matches!(kind, crate::calendar::DayKind::Closed) {
+            return Ok(Some(DropReason::OnClosedDay));
+        }
         // A DAILY BAR HAS NO INTRADAY TIME AND IS EXEMPT. See the module
         // header: vendors stamp it at midnight, at the open or at the close,
         // and an intraday window would drop every one of them.
@@ -1106,25 +1195,59 @@ impl Window {
         // directly, for every venue and every day, and on 2026-08-03 that
         // became wrong in the one place it matters most.
         //
-        // NSE's CAS change (NSE/CMTR/74466) moved the three segments apart:
-        // the swept INDEX now stops at 15:15, because every share it is
-        // computed from is CAS-eligible and leaves continuous trading then;
-        // cash keeps 15:30; derivatives extend to 15:40. `crate::vendor` had
-        // all three encoded, with citations, in `NSE_INDEX_SESSIONS`,
+        // NSE's CAS change (NSE/CMTR/74466) moved the segments apart from
+        // 2026-08-03: derivatives extend to 15:40 (last bar 15:39); cash and
+        // the swept INDEX keep 15:30 (last bar 15:29). `crate::vendor` has
+        // each encoded, with citations, in `NSE_INDEX_SESSIONS`,
         // `NSE_CASH_SESSIONS` and `NSE_DERIVATIVES_SESSIONS` — and this
         // function never opened them.
         //
-        // So for the two instruments the engine exists to sweep, fifteen
-        // one-minute bars a day from 15:15 to 15:29 were admitted as ordinary
-        // session bars. The charter records what is in them as UNVERIFIED:
-        // the frozen actual index or the indicative auction index, both
-        // published, and only measurement can say which. Either way they are
-        // not continuous-session bars, they went to disk, and §3 rule 8 makes
-        // the month unrewritable.
+        // **Amended by D-4502 (audit satk-4).** This paragraph said the index
+        // "now stops at 15:15, because every share it is computed from is
+        // CAS-eligible", and the next one called its 15:15-15:29 bars "not
+        // continuous-session bars". Neither is what the table this function
+        // reads says. `NSE_INDEX_SESSIONS` keeps 15:30 from 2026-08-03 by the
+        // operator's rule of 2026-08-20 ("the extension applies to futures and
+        // options ALONE ... Nothing else moved"), and the vendors send index
+        // bars through 15:29. 15:15 was an inference from the cash closing
+        // auction about a derived value, not a published trading hour. So an
+        // index bar from 15:15 to 15:29 is KEPT as a session bar, and the
+        // charter's open question -- whether those minutes carry the frozen
+        // index or the indicative auction index -- is still UNVERIFIED and
+        // still a question for measurement, not for this window.
         //
         // Reading the table also removes the second source of truth. The
         // constants remain as the ANCHOR row's value — every table names them
         // — so there is one number, in one place, cited once.
+        //
+        // AN EXCEPTIONAL DAY ASKS THE EXCHANGE CALENDAR FIRST (CE-52, D-2670).
+        // `crate::calendar::kind_of` is the session authority the gap audit,
+        // `fold::minute_session` and the stored-run boundary all read. This
+        // function used to read only the venue's regular hours, so on
+        // 2021-02-24 it dropped the 15:45–16:59 reopening the calendar owes —
+        // and the gap audit then reported those 75 minutes as a vendor hole no
+        // re-pull could fill. Two authorities, one day, opposite answers.
+        //
+        // Only a day the calendar records as NOT a full regular session is
+        // overridden: an irregular `Open` keeps exactly its own windows, and a
+        // Muhurat whose length was never measured is refused by name. A full
+        // day, a closed day and a day outside the calendar's measured range
+        // fall through to the venue's table unchanged, which is what keeps the
+        // dated 2026-08-03 derivatives row in force. One fixed-table lookup
+        // per bar; `kind_of` states its own bound.
+        match kind {
+            crate::calendar::DayKind::Open(session)
+                if session != crate::calendar::Session::full() =>
+            {
+                return Ok(irregular_verdict(session, at.minute_of_day()));
+            }
+            crate::calendar::DayKind::OpenLengthUnmeasured => {
+                return Err(SessionError::SessionLengthUnmeasured { days: day });
+            }
+            crate::calendar::DayKind::Open(_)
+            | crate::calendar::DayKind::Closed
+            | crate::calendar::DayKind::Unmeasured => {}
+        }
         let session = venue
             .hours_on(at.day())
             .map_err(|why| SessionError::VenueHoursUnknown {
@@ -1141,21 +1264,77 @@ impl Window {
     }
 }
 
+/// The verdict on one minute of a day the exchange calendar records as an
+/// irregular session: kept exactly when the calendar says the session owed it.
+///
+/// A minute before the first window opens is [`DropReason::BeforeSessionOpen`].
+/// Any other minute outside every window — after the last window, or in the
+/// halt between two — is [`DropReason::AtOrAfterSessionClose`]: it is at or
+/// after the close of the window it follows. No third reason is minted, so the
+/// census, the receipt and the audit page keep their four named counters.
+fn irregular_verdict(session: crate::calendar::Session, minute: u32) -> Option<DropReason> {
+    // A minute of the day is below 1,440 and always fits; one that did not
+    // would saturate to a minute outside every window and after the first
+    // open, which is the after-close answer.
+    let minute = u16::try_from(minute).unwrap_or(u16::MAX);
+    // THE OPEN IS ASKED FIRST. A minute below the first window's open is in
+    // no window, so asking it before `expects` changes no answer -- and it
+    // puts the open minute itself in front of the strict `<`, where `<=` would
+    // drop the session's first bar. Asked after `expects`, that minute had
+    // already returned `None`, and `<` and `<=` were one program (D-2076).
+    if session.windows.first().is_some_and(|w| minute < w.from) {
+        return Some(DropReason::BeforeSessionOpen);
+    }
+    if session.expects(minute) {
+        return None;
+    }
+    Some(DropReason::AtOrAfterSessionClose)
+}
+
+/// Whether `epoch_secs` falls on a day the exchange calendar cannot classify
+/// ([`crate::calendar::DayKind::Unmeasured`]), so a bar kept on it must be
+/// counted by name with [`DropCensus::count_unclassified_kept`].
+///
+/// `false` for a timestamp that is not one: [`Window::verdict`] refuses that
+/// first, so no caller reaches this with it.
+#[must_use]
+pub fn on_unclassified_day(epoch_secs: i64) -> bool {
+    IstMoment::from_epoch_secs(epoch_secs).is_ok_and(|at| {
+        matches!(
+            crate::calendar::kind_of(i64::from(at.day().days_from_epoch())),
+            crate::calendar::DayKind::Unmeasured
+        )
+    })
+}
+
 impl fmt::Display for Window {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}..={}", self.from, self.to)
     }
 }
 
-/// The two facts about [`DropCensus`] that no external test can reach.
-///
-/// Everything else about this module is proved from outside, in
-/// `crates/pull/tests/unit.rs`, because that is where a caller stands. These
-/// two are here because the counters are private and the only public way to
-/// raise one is [`DropCensus::count`], which would need 4,294,967,295 calls.
-/// A saturating add nobody ever saturates is a claim, not a behaviour.
 /// Split a window into consecutive legal chunks, each at most `cap_days` long
-/// and each inside one calendar month.
+/// — or, when the vendor published no cap, each inside one calendar month.
+///
+/// **A capped chunk may cross a month boundary, and that is the design.** This
+/// read *"each inside one calendar month"*, and the comments below said the
+/// month bound "binds at every rung". Neither has been true since the month
+/// clamp was removed for capped rungs (`ingest::months_in` now splits a landed
+/// batch into one file per month, `docs/04-invariants.md` RG-04 and MR-38):
+/// with `Some(cap)` the chunk ends at the earlier of the cap and the window's
+/// last day, and the month is not consulted. D-1370.
+///
+/// ```
+/// # use pull::session::{Day, SessionError, Window, split_window};
+/// let window = Window::new(Day::new(2026, 7, 15)?, Day::new(2026, 8, 20)?)?;
+/// // Capped: the first chunk runs straight across July into August.
+/// let capped = split_window(window, Some(30))?;
+/// assert_eq!(capped[0].to().to_string(), "2026-08-13");
+/// // Uncapped: the month is the only bound left.
+/// let uncapped = split_window(window, None)?;
+/// assert_eq!(uncapped[0].to().to_string(), "2026-07-31");
+/// # Ok::<(), SessionError>(())
+/// ```
 ///
 /// # Why this exists
 ///
@@ -1177,10 +1356,10 @@ impl fmt::Display for Window {
 /// The cap is per (feed, rung) — `crate::vendor::HttpSpec::window_cap_days` —
 /// and a rung the charter records no figure for has none to apply. That is
 /// `None`, and it means *the vendor puts no bound on this request*. It does
-/// **not** mean the window goes out whole: the MONTH BOUNDARY below binds at
-/// every rung, because the store addresses one month per file whatever the bar
-/// length is. The caller that read `None` as "send it whole" is the caller this
-/// argument was widened to remove.
+/// **not** mean the window goes out whole: with no cap the MONTH BOUNDARY is
+/// the bound, so one unbounded request for a seven-year window is never sent.
+/// The caller that read `None` as "send it whole" is the caller this argument
+/// was widened to remove.
 ///
 /// # The split
 ///
@@ -1209,30 +1388,21 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
     let mut chunks = Vec::new();
     let mut start = first;
     while start <= last {
-        // AND NEVER ACROSS A MONTH BOUNDARY.
+        // THE MONTH BOUNDS ONLY AN UNCAPPED RUNG.
         //
-        // The store addresses ONE MONTH PER FILE, and `fetch::land` refuses a
-        // batch that spans two: "bars span 2026-07 to 2026-08; the store
-        // addresses one month per file and splitting is the caller's decision,
-        // not this one's". This IS that caller, and it was not splitting.
+        // This comment used to say "AND NEVER ACROSS A MONTH BOUNDARY" and that
+        // the chunk ends at the earlier of the cap, the last day and the month
+        // end. The code below has not done that since the clamp was removed for
+        // capped rungs: `fetch::land` / `ingest::one` no longer refuse a batch
+        // spanning two months, `ingest::months_in` writes one file per month
+        // out of it, and clamping cost 81 requests where a 2,000-day cap needs
+        // 2. So: with a published cap the chunk ends at the earlier of the cap
+        // and the operator's last day; with none it ends at the earlier of the
+        // month end and the last day. D-1370.
         //
-        // Measured on a real 37-day, 774-instrument pull: 6,907,286 rows read,
-        // 5,496,790 stored, and 699 MEMBERS FAILED — every instrument whose
-        // window crossed July into August. The vendor answered, the bars
-        // decoded, and the store refused them at the write boundary for a
-        // reason the caller could have prevented.
-        //
-        // So the chunk ends at the earlier of: the vendor's day cap WHEN IT
-        // PUBLISHED ONE, the operator's last day, and the last day of the month
-        // `start` falls in. `cap_days - 1` because both ends are INCLUDED: a
-        // 30-day chunk starting at day 0 ends at day 29, not day 30. Off by one
-        // here would make every chunk one day over the vendor's cap, which is
-        // the failure this function exists to prevent and would be invisible
-        // until the vendor refused.
-        //
-        // With no published cap the month is the only bound, and it is enough
-        // to keep every chunk writable — `cap_days` is the vendor's rule and
-        // `month_end` is the store's, and only the second one is ours to know.
+        // `cap_days - 1` because both ends are INCLUDED: a 30-day chunk starting
+        // at day 0 ends at day 29, not day 30. Off by one here would make every
+        // chunk one day over the vendor's cap.
         let month_end = Day::from_days(start)?.end_of_month().days_from_epoch();
         let capped = match cap_days {
             Some(cap) => start.saturating_add(cap - 1),
@@ -1295,8 +1465,18 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
     reason = "the same exception every test module in this workspace takes: a \
               test that cannot panic cannot fail."
 )]
+/// The two facts about [`DropCensus`] that no external test can reach.
+///
+/// Everything else about this module is proved from outside, in
+/// `crates/pull/tests/unit.rs`, because that is where a caller stands. These
+/// two are here because the counters are private and the only public way to
+/// raise one is [`DropCensus::count`], which would need 4,294,967,295 calls.
+/// A saturating add nobody ever saturates is a claim, not a behaviour.
+///
+/// This paragraph sat above `split_window` and rendered as the first lines of
+/// THAT function's documentation (D-1370).
 mod tests {
-    use super::{DropCensus, DropReason};
+    use super::{Cadence, Day, DropCensus, DropReason, SessionError, Window};
 
     /// A counter at the ceiling stops there. It never wraps to a number
     /// smaller than the truth, which is the one direction a census must never
@@ -1308,6 +1488,8 @@ mod tests {
             after_close: 0,
             before_window: 0,
             after_window: 0,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         census.count(DropReason::BeforeSessionOpen);
         assert_eq!(
@@ -1324,6 +1506,7 @@ mod tests {
             DropReason::AtOrAfterSessionClose,
             DropReason::BeforeWindow,
             DropReason::AfterWindow,
+            DropReason::OnClosedDay,
         ] {
             let mut one = DropCensus::new();
             let slot = match reason {
@@ -1331,11 +1514,29 @@ mod tests {
                 DropReason::AtOrAfterSessionClose => &mut one.after_close,
                 DropReason::BeforeWindow => &mut one.before_window,
                 DropReason::AfterWindow => &mut one.after_window,
+                DropReason::OnClosedDay => &mut one.closed_day,
             };
             *slot = u32::MAX;
             one.count(reason);
             assert_eq!(one.of(reason), u32::MAX, "{reason} wrapped");
         }
+        // The kept-unclassified counter saturates too, and never joins the
+        // drop total: those bars were kept.
+        let mut kept = DropCensus::new();
+        kept.unclassified_kept = u32::MAX;
+        kept.count_unclassified_kept();
+        assert_eq!(kept.unclassified_kept(), u32::MAX);
+        assert_eq!(kept.total(), 0);
+        assert!(kept.is_empty());
+        let mut sum = DropCensus::new();
+        sum.closed_day = 2;
+        sum.unclassified_kept = 3;
+        let mut into = DropCensus::new();
+        into.absorb(sum);
+        into.absorb(sum);
+        assert_eq!(into.of(DropReason::OnClosedDay), 4);
+        assert_eq!(into.unclassified_kept(), 6);
+        assert_eq!(into.total(), 4);
     }
 
     /// `total` is the sum until it cannot be, and then it is the ceiling —
@@ -1348,6 +1549,8 @@ mod tests {
             after_close: 1,
             before_window: 1,
             after_window: 1,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         // The true sum is 4,294,967,298. It does not fit, so the answer is the
         // ceiling — and emphatically not the wrapped 2.
@@ -1360,6 +1563,8 @@ mod tests {
             after_close: 2_000_000_000,
             before_window: 0,
             after_window: 0,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         assert_eq!(half.total(), u32::MAX, "5e9 does not fit u32");
 
@@ -1369,6 +1574,8 @@ mod tests {
             after_close: 1,
             before_window: 1,
             after_window: 1,
+            closed_day: 0,
+            unclassified_kept: 0,
         };
         assert_eq!(exact.total(), u32::MAX);
         assert_eq!(
@@ -1379,6 +1586,120 @@ mod tests {
             u64::from(u32::MAX),
             "this case is the boundary: the true sum is exactly u32::MAX"
         );
+    }
+
+    /// The IST epoch second at which `minute` of `epoch_day` opens.
+    fn at(epoch_day: i64, minute: i64) -> i64 {
+        epoch_day * 86_400 - super::IST_OFFSET_SECS + minute * 60
+    }
+
+    /// One minute verdict, for a one-day window on `epoch_day`.
+    fn minute_verdict(
+        epoch_day: i64,
+        minute: i64,
+        venue: crate::vendor::Venue,
+    ) -> Result<Option<DropReason>, SessionError> {
+        let day = Day::from_days(u32::try_from(epoch_day).unwrap()).unwrap();
+        Window::new(day, day)
+            .unwrap()
+            .verdict(at(epoch_day, minute), Cadence::Minute, venue)
+    }
+
+    /// **ONE SESSION AUTHORITY (CE-52).** On every day the exchange calendar
+    /// records as irregular, ingest keeps exactly the minutes the calendar says
+    /// the session owed — no more and no fewer — on every NSE venue.
+    ///
+    /// Before this, `verdict` read only the venue's regular hours, so the
+    /// 2021-02-24 reopening 15:45–16:59 (75 bars `calendar::kind_of` owes) was
+    /// dropped as `AtOrAfterSessionClose` while the gap audit, asking the
+    /// calendar, then reported the same 75 minutes as a vendor hole no re-pull
+    /// could ever fill.
+    #[test]
+    fn the_ingest_verdict_keeps_exactly_what_the_calendar_owes_on_irregular_days() {
+        let irregular = [
+            crate::calendar::SYSTEMS_OUTAGE_DAY,
+            19_784, // 2024-03-02 disaster-recovery Saturday
+            19_861, // 2024-05-18 disaster-recovery Saturday
+            20_382, // 2025-10-21 Muhurat, 13:45-14:44
+        ];
+        for epoch_day in irregular {
+            let crate::calendar::DayKind::Open(session) = crate::calendar::kind_of(epoch_day)
+            else {
+                panic!("{epoch_day} is an open day in the calendar");
+            };
+            assert_ne!(session, crate::calendar::Session::full(), "{epoch_day}");
+            for venue in crate::vendor::Venue::ALL {
+                let mut kept = 0_u16;
+                for minute in 0..1_440_u16 {
+                    let verdict = minute_verdict(epoch_day, i64::from(minute), venue)
+                        .expect("a calendar-measured day is never refused");
+                    assert_eq!(
+                        verdict.is_none(),
+                        session.expects(minute),
+                        "{venue} day {epoch_day} minute {minute}: the ingest verdict \
+                         and the calendar disagree"
+                    );
+                    if verdict.is_none() {
+                        kept += 1;
+                    }
+                }
+                assert_eq!(kept, session.bars(), "{venue} day {epoch_day}");
+            }
+        }
+        // The outage day's reopening by name: 15:45 and 16:59 kept, 17:00 not.
+        let outage = crate::calendar::SYSTEMS_OUTAGE_DAY;
+        let venue = crate::vendor::Venue::NseIndex;
+        assert_eq!(minute_verdict(outage, 945, venue), Ok(None));
+        assert_eq!(minute_verdict(outage, 1_019, venue), Ok(None));
+        assert_eq!(
+            minute_verdict(outage, 1_020, venue),
+            Ok(Some(DropReason::AtOrAfterSessionClose))
+        );
+        assert_eq!(
+            minute_verdict(outage, 554, venue),
+            Ok(Some(DropReason::BeforeSessionOpen))
+        );
+        // And a regular day is still the venue's own table, untouched.
+        assert_eq!(
+            minute_verdict(outage + 1, 945, venue),
+            Ok(Some(DropReason::AtOrAfterSessionClose))
+        );
+    }
+
+    /// A Muhurat whose session length was never measured is REFUSED by name,
+    /// never silently dropped against the regular hours and never admitted
+    /// against them: nobody knows which minutes that session owed.
+    #[test]
+    fn an_unmeasured_muhurat_minute_is_refused_by_name_not_dropped() {
+        for epoch_day in [18_580_i64, 18_935, 19_289, 19_673, 20_028] {
+            assert_eq!(
+                crate::calendar::kind_of(epoch_day),
+                crate::calendar::DayKind::OpenLengthUnmeasured
+            );
+            for minute in [600_i64, 1_095] {
+                for venue in crate::vendor::Venue::ALL {
+                    assert_eq!(
+                        minute_verdict(epoch_day, minute, venue),
+                        Err(SessionError::SessionLengthUnmeasured {
+                            days: u32::try_from(epoch_day).unwrap(),
+                        }),
+                        "{venue} {epoch_day} {minute}"
+                    );
+                }
+            }
+            // A daily bar has no intraday time and stays exempt.
+            let day = Day::from_days(u32::try_from(epoch_day).unwrap()).unwrap();
+            assert_eq!(
+                Window::new(day, day).unwrap().verdict(
+                    at(epoch_day, 0),
+                    Cadence::Daily,
+                    crate::vendor::Venue::NseIndex
+                ),
+                Ok(None)
+            );
+        }
+        let text = SessionError::SessionLengthUnmeasured { days: 18_935 }.to_string();
+        assert!(text.contains("18935") && text.contains("length"), "{text}");
     }
 }
 
@@ -1397,13 +1718,6 @@ mod month_boundary {
         Day::new(y, m, d).expect("a real calendar date")
     }
 
-    /// EVERY CHUNK LANDS IN EXACTLY ONE MONTH, AND THE CHUNKS TILE THE WINDOW.
-    ///
-    /// Not a style preference. `fetch::land` refuses a batch spanning two
-    /// months by name, so a chunk that spans one is a fetch the vendor
-    /// answered and the store threw away. This is the regression test for a
-    /// measured failure: 37 days, 774 instruments, 699 members failed with
-    /// "bars span 2026-07 to 2026-08".
     /// **A chunk fills the vendor's cap, and the store splits it afterwards.**
     ///
     /// This used to assert that no chunk ever spanned two months, because

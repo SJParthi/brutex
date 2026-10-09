@@ -304,10 +304,27 @@ impl Receipt {
 }
 
 fn publish(path: &Path, expected: &[u8; BYTES]) -> Result<(), String> {
+    // A barrier that failed on this receipt in this process is never confirmed
+    // by a second one (D-1900 rule 3; replay-3, D-2635).
+    crate::fixed_tail::refuse_after_failed_barrier(path)?;
     if fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() == BYTES as u64)
     {
-        Receipt::open(path, expected)?;
+        // replay-3 (D-2635): exact bytes on disk are not proof they reached
+        // the device. A publisher killed after its last `write_all` and before
+        // its `sync_all` leaves a complete receipt in the page cache with the
+        // lock released, and this path used to answer `Ok` for it with no
+        // barrier at all. The file and its directory entry are synced here, as
+        // the slow path does, before the receipt is vouched for.
+        let receipt = Receipt::open(path, expected)?;
+        if let Err(why) = crate::fixed_tail::sync_all_hooked(&receipt.file, path) {
+            crate::fixed_tail::remember_failed_barrier(path);
+            return Err(format!(
+                "checksum receipt {} could not be made durable: {why}",
+                path.display()
+            ));
+        }
+        sync_parent(path)?;
         return Ok(());
     }
     let mut file = open(path, true)?;
@@ -352,14 +369,19 @@ fn publish(path: &Path, expected: &[u8; BYTES]) -> Result<(), String> {
             .map_err(error)?;
         }
         file.sync_all().map_err(error)?;
-        File::open(path.parent().ok_or("receipt parent absent")?)
-            .and_then(|dir| dir.sync_all())
-            .map_err(error)?;
+        sync_parent(path)?;
         regular_generation(&file, path)?;
         Ok(())
     })();
     let unlock = file.unlock().map_err(error);
     result.and(unlock)
+}
+
+/// Syncs the directory holding `path`, so its entry is durable.
+fn sync_parent(path: &Path) -> Result<(), String> {
+    File::open(path.parent().ok_or("receipt parent absent")?)
+        .and_then(|dir| dir.sync_all())
+        .map_err(error)
 }
 
 fn receipt_directory(root: &Path, create: bool) -> Result<PathBuf, String> {
@@ -374,12 +396,17 @@ fn namespace_directory(root: &Path, namespace: &str, create: bool) -> Result<Pat
     let base = root.join(namespace);
     if create {
         match fs::create_dir(&base) {
-            Ok(()) => File::open(&root)
-                .and_then(|dir| dir.sync_all())
-                .map_err(error)?,
+            Ok(()) => {}
             Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(why) => return Err(error(why)),
         }
+        // replay-4 (D-2635): the root is synced on EVERY creating call, not
+        // only the one whose `create_dir` succeeded. A process killed between
+        // `create_dir` and this barrier left an entry that every later call
+        // found `AlreadyExists` and never made durable.
+        File::open(&root)
+            .and_then(|dir| crate::fixed_tail::sync_all_hooked(&dir, &root))
+            .map_err(error)?;
     }
     if !fs::symlink_metadata(&base).map_err(error)?.is_dir() {
         return Err("checksum receipt namespace must be a nonsymlink directory".to_owned());
@@ -478,7 +505,12 @@ fn regular_generation(
     let held = file.metadata().map_err(error)?;
     let named = fs::symlink_metadata(path).map_err(error)?;
     if !held.is_file() || !named.is_file() || held.nlink() != 1 {
-        return Err("checksum receipt refuses a non-regular file or alias".to_owned());
+        return Err(format!(
+            "checksum receipt refuses {}: it is not a regular file with one link \
+             ({} links); remove any other hard link to it (CE-40, D-1769)",
+            path.display(),
+            held.nlink()
+        ));
     }
     crate::result_set::file_generation(file, path)
 }
@@ -506,10 +538,7 @@ fn open_writable(path: &Path) -> Result<File, String> {
     options.read(true).write(true).create(true).truncate(false);
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100 | 0x4);
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20_000 | 0x800);
+        options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     let file = options.open(path).map_err(error)?;
     regular_generation(&file, path)?;
@@ -535,7 +564,8 @@ fn open_writable(_path: &Path) -> Result<File, String> {
 ///
 /// # Errors
 /// Refuses malformed arguments and every strict audit/durability failure.
-pub fn command(args: &[&str]) -> Result<String, String> {
+pub fn command(args: &[&str]) -> Result<String, crate::Refused> {
+    use crate::misused;
     let [
         vendor,
         underlying,
@@ -546,16 +576,21 @@ pub fn command(args: &[&str]) -> Result<String, String> {
         max_bytes,
     ] = args
     else {
-        return Err("checksum-audit-stored requires VENDOR UNDERLYING RUNG YEAR MONTH RECEIPT_ROOT MAX_BYTES".to_owned());
+        return Err(misused(
+            "checksum-audit-stored requires VENDOR UNDERLYING RUNG YEAR MONTH RECEIPT_ROOT MAX_BYTES",
+        ));
     };
-    let vendor = crate::parse_vendor(vendor)?;
-    let key = crate::stored::swept_index(underlying)?;
-    let timeframe = crate::stored::rung(rung)?;
+    // EVERY ARGUMENT BEFORE THE STORE: a malformed one is the operator's to fix
+    // and is `MISUSED`; this exited `FAILED` for `x` as a year (P8-03, D-2722).
+    let vendor = crate::parse_vendor(vendor).map_err(misused)?;
+    let key = crate::stored::swept_index(underlying).map_err(misused)?;
+    let timeframe = crate::stored::rung(rung).map_err(misused)?;
     let month = YearMonth::new(
-        year.parse::<u16>().map_err(error)?,
-        month.parse::<u8>().map_err(error)?,
+        year.parse::<u16>().map_err(misused)?,
+        month.parse::<u8>().map_err(misused)?,
     )
-    .map_err(error)?;
+    .map_err(misused)?;
+    let max_bytes = max_bytes.parse::<u64>().map_err(misused)?;
     let store_root = crate::store_root()?;
     let admitted = audit_month(MonthRequest {
         store_root: &store_root,
@@ -564,7 +599,7 @@ pub fn command(args: &[&str]) -> Result<String, String> {
         key: &key,
         timeframe,
         month,
-        max_bytes: max_bytes.parse::<u64>().map_err(error)?,
+        max_bytes,
     })?;
     let evidence = admitted.evidence();
     Ok(format!(

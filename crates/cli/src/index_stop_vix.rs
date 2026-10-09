@@ -383,18 +383,20 @@ pub(crate) fn publish(
     let pin = catalog.completion_digest();
     let lookup = lookup_identity(identity, pin);
     let directory = root.join(NAMESPACE).join(crate::identity_hex(&lookup));
-    match std::fs::symlink_metadata(&directory) {
-        Ok(_) => {
-            let saved = Reader::open(root, identity, pin, bounds)?;
-            if saved.image.meta.feed != feed.as_str() {
-                return Err("saved VIX reference feed differs from the native source".into());
-            }
-            return Ok(saved);
-        }
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
-        Err(why) => return Err(display(why)),
+    // The receipt, not the directory, marks a publication finished: the
+    // directory exists from the first step of `prepare_in_namespace`, so a run
+    // cut short before `finish` must fall through and resume rather than be
+    // read as published and refused on every rerun (D-1760).
+    if persistence::committed(&directory)? {
+        return saved(root, identity, pin, feed, bounds);
     }
-    catalog.with_current(|| {
+    // `Some(why)` is the ONE race the receipt may answer: another publisher
+    // held the owner lock, so this call wrote nothing (ledgers-1, D-1908).
+    // Every other failure is this call's own, including a failed receipt or
+    // directory barrier after the 112 bytes were visible, and is returned: a
+    // whole-length receipt this call failed to make durable is not a
+    // publication.
+    let published = catalog.with_current(|| {
         let image = capture(store, feed, catalog, bounds)?;
         let body = codec::encode(&image, bounds.bytes)?;
         require_read_cost(
@@ -403,12 +405,38 @@ pub(crate) fn publish(
             bounds,
         )?;
         let digest = hash(&body);
-        let pending = persistence::prepare_in_namespace(root, NAMESPACE, lookup, &body)?;
+        let pending = match persistence::prepare_in_namespace(root, NAMESPACE, lookup, &body) {
+            Ok(pending) => pending,
+            Err(why) if persistence::lost_owner_race(&why) => return Ok(Some(why)),
+            Err(why) => return Err(why),
+        };
         pending.verify_body(digest, body.len() as u64)?;
         pending.finish(lookup, digest, body.len() as u64)?;
-        Ok(())
+        Ok(None)
     })?;
-    Reader::open(root, identity, pin, bounds)
+    match published {
+        None => Reader::open(root, identity, pin, bounds),
+        // A concurrent publisher of the same catalog finished first, and its
+        // capture saw a different VIX store: its receipt is the answer.
+        Some(why) if persistence::committed(&directory)? => {
+            saved(root, identity, pin, feed, bounds).map_err(|saved| format!("{why}; {saved}"))
+        }
+        Some(why) => Err(why),
+    }
+}
+
+fn saved(
+    root: &Path,
+    identity: [u8; 32],
+    pin: [u8; 32],
+    feed: Vendor,
+    bounds: Bounds,
+) -> Result<Reader, String> {
+    let saved = Reader::open(root, identity, pin, bounds)?;
+    if saved.image.meta.feed != feed.as_str() {
+        return Err("saved VIX reference feed differs from the native source".into());
+    }
+    Ok(saved)
 }
 
 #[derive(Clone, Copy)]
@@ -532,7 +560,13 @@ fn load_month(
     feed: Vendor,
     month: YearMonth,
 ) -> Result<(Month, Option<VixReferenceMonth>), String> {
-    match VixReferenceMonth::open(store, feed, month) {
+    match VixReferenceMonth::open_waiting(store, feed, month) {
+        // replay-1 (D-2636): a writer holding the month is not the month's
+        // answer. It was captured as a durable `unavailable_reason` month, and
+        // the companion it sealed stayed authoritative under `committed()`
+        // (D-1760) long after the writer closed. Now nothing is published and
+        // the catalog's own retry reads the month.
+        Err(crate::vix_reference::VixOpenRefusal::Busy(reason)) => Err(reason),
         Ok(loaded) => Ok((
             Month {
                 year: month.year(),
@@ -543,7 +577,7 @@ fn load_month(
             },
             Some(loaded),
         )),
-        Err(reason) => {
+        Err(crate::vix_reference::VixOpenRefusal::Unavailable(reason)) => {
             if reason.is_empty() || reason.len() > MAX_REASON_BYTES {
                 return Err("complete VIX refusal diagnostic exceeds explicit record admission; no truncated annotation published".into());
             }

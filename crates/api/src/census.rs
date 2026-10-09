@@ -18,7 +18,8 @@
 //! `crates/api/src/render.rs` recorded, in the same change that moved that walk
 //! to startup, that it "made `crate::census`'s opening sentence false" — and
 //! nobody came back here. It is one walk, at startup, into `server::Site`, and
-//! it is the only one in shipping code under `crates/api`; the sentence it
+//! it is one of three `read_dir` sites in shipping code under `crates/api`,
+//! with `assets.rs` and `server.rs`'s `archive_ready` (D-3304); the sentence it
 //! falsified is corrected rather than reargued.
 //!
 //! # Read once, rendered many times
@@ -39,7 +40,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brutex_core::instrument::{Exchange, Segment};
+use brutex_core::instrument::{Exchange, InstrumentKey, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use pull::manifest::{ENTRY_STRIDE, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest, manifest_path};
@@ -302,7 +303,46 @@ impl VendorCensus {
 #[must_use]
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     let path = manifest_path(root, vendor);
-    let state = match sized(&path) {
+    let state = state_read_twice_if_degraded(&path, vendor, sized);
+    note_read(vendor, &path, &state);
+    VendorCensus {
+        vendor,
+        path,
+        state,
+    }
+}
+
+/// One read of the manifest, and ONE more when the first loaded degraded
+/// (pull2-5, D-2536).
+///
+/// This read takes no lock, so it can overlap a writer's slot commit: the
+/// newest slot then fails its checksum, the manifest loads from the older one
+/// and reports `degraded_reason`, and since D-1786 the browser refuses any
+/// non-empty `x-brutex-census-degraded` — so one overlapping read blanked the
+/// selected-feed page for a census that was whole a moment later. A degraded
+/// first read is read once more and the second kept when it is NOT degraded;
+/// a census still degraded on the second read is genuinely damaged and is
+/// reported exactly as before. At most two reads, so the extra cost is one
+/// bounded manifest read, and only on a degraded census
+/// (`docs/06-limits.md`, D-2536).
+fn state_read_twice_if_degraded(
+    path: &Path,
+    vendor: Vendor,
+    mut read: impl FnMut(&Path) -> std::io::Result<Result<Vec<u8>, String>>,
+) -> Census {
+    let degraded = |state: &Census| matches!(state, Census::Held { manifest } if manifest.degraded_reason().is_some());
+    let first = state_of(read(path), vendor);
+    if !degraded(&first) {
+        return first;
+    }
+    let second = state_of(read(path), vendor);
+    let whole = matches!(second, Census::Held { .. }) && !degraded(&second);
+    if whole { second } else { first }
+}
+
+/// What one read of the manifest's bytes says the census is.
+fn state_of(read: std::io::Result<Result<Vec<u8>, String>>, vendor: Vendor) -> Census {
+    match read {
         Err(e) => Census::of_io_error(&e),
         Ok(Err(reason)) => Census::Unreadable {
             reason,
@@ -327,7 +367,11 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
                 },
             }
         }
-    };
+    }
+}
+
+/// The `api.census read` line for one vendor's census.
+fn note_read(vendor: Vendor, path: &Path, state: &Census) {
     // THE COUNTER'S OWN STATE, NAMED — held, absent, or unreadable.
     //
     // These three are not interchangeable and the difference decides what the
@@ -381,11 +425,6 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
         "state" => telemetry::Value::Str(said),
         "path" => telemetry::Value::Str(&path.display().to_string()),
     );
-    VendorCensus {
-        vendor,
-        path,
-        state,
-    }
 }
 
 /// The bytes at `path`, if this reader may hold them.
@@ -401,26 +440,103 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
 /// hold is not an error it can report — it is an allocator failure or an OOM
 /// kill, and neither reaches the operator as "that manifest is too big".
 ///
-/// The size is the length `stat` gives, which for a character device is 0
-/// whatever a read of it returns, so such a path is read, not refused, and
-/// nothing here bounds that read. Pinned as it stands by
-/// `a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read`,
-/// and recorded as not done in D-0695, with the FIFO its tenth repair found.
+/// ONE OPEN, NONBLOCKING, AND THE TYPE AND SIZE ARE THAT DESCRIPTOR'S.
+/// It used to `stat` the path and then `std::fs::read` it: a second, blocking
+/// open with no type check and no bound of its own. A FIFO at a manifest path
+/// held that open until some writer appeared, at boot (`Site::load` reads every
+/// manifest) and on every request whose census key missed, one Tokio worker
+/// at a time. A character device has a `stat` length of 0, passed the bound
+/// and was read to its end, `/dev/zero` without one. And a file swapped in
+/// between the two calls was read whole whatever its size. Now the path is
+/// opened once with `O_NONBLOCK`, so a FIFO with no writer opens at once
+/// rather than waiting; anything that descriptor's `fstat` does not call a
+/// regular file is refused by name, unread; the size bound is that same
+/// descriptor's length; and the read itself is capped at one byte past the
+/// bound, so a file that grows under the read is refused rather than held.
+/// R9-api-cx-1, D-0954. O(1) calls; the read is O(manifest bytes), bounded;
+/// `api::census::a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`.
 fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
-    let size = std::fs::metadata(path)?.len();
+    use std::io::Read as _;
+    let file = open_without_waiting(path)?;
+    let meta = file.metadata()?;
+    // A directory stays the file system's answer, `IsADirectory`, as the
+    // read it replaces gave and as the stamp check keeps it (D-0695).
+    if meta.is_dir() {
+        return Err(std::io::ErrorKind::IsADirectory.into());
+    }
+    if !meta.is_file() {
+        return Ok(Err(format!(
+            "not a regular file (a {}); a manifest is one, and this reader neither waits on a FIFO nor reads a device",
+            kind_of(meta.file_type())
+        )));
+    }
+    let size = meta.len();
     if size > MAX_MANIFEST_BYTES {
         return Ok(Err(format!(
             "{size} bytes; the largest manifest this build can write is \
              {MAX_MANIFEST_BYTES} and this reader refuses more"
         )));
     }
-    let bytes = std::fs::read(path)?;
+    let mut bytes = Vec::new();
+    let _ = file
+        .take(MAX_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+        return Ok(Err(format!(
+            "grew past {MAX_MANIFEST_BYTES} bytes while it was read ({size} when opened); this reader refuses more"
+        )));
+    }
     // COUNTED IN TEST BUILDS ONLY, so a request path can be shown not to read
     // manifest bytes it already holds. The ledger is keyed by path, because
     // tests run concurrently and each owns its own scratch root. D-0686.
     #[cfg(test)]
     manifest_reads::note(path);
     Ok(Ok(bytes))
+}
+
+/// `O_NONBLOCK`, from each platform's own `fcntl.h`, the values
+/// `cli::readonly_file` uses: Linux UAPI `asm-generic/fcntl.h` (`x86_64` and
+/// aarch64) gives `0x800`, the macOS SDK gives `0x4`. On any other target the
+/// open is an ordinary one, and a FIFO there can still hold it.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const NONBLOCK: Option<i32> = Some(0x800);
+#[cfg(target_os = "macos")]
+const NONBLOCK: Option<i32> = Some(0x4);
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+const NONBLOCK: Option<i32> = None;
+
+/// Opens `path` for reading without waiting for a FIFO's writer.
+pub(crate) fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    if let Some(flags) = NONBLOCK {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(flags);
+    }
+    options.open(path)
+}
+
+/// What a path that is not a regular file is, in the refusal's words.
+pub(crate) fn kind_of(kind: std::fs::FileType) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        if kind.is_fifo() {
+            return "FIFO";
+        }
+    }
+    let _ = kind;
+    "device or other special file"
 }
 
 /// Every vendor's manifest, read off disk once.
@@ -717,18 +833,24 @@ pub fn grid_rows(series: usize) -> usize {
 ///   unreadable contributes nothing and says so elsewhere — [`VendorCensus::note`]
 ///   is already loud about it, and inventing rows for it here would be a
 ///   different lie from the one just fixed.
-/// * **Swept.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, always. `CLAUDE.md`
-///   §1 fixes the engine surface at exactly these two, so their absence is the
-///   single most important thing this page can report. Before the first ingest
-///   there is nothing held at all, and a blank grid would say nothing where
-///   "two rows, neither held" says what to do next.
+/// * **Swept.** Every key `InstrumentKey::swept_surface` names, always: the two
+///   indices and the 208 F&O shares `CLAUDE.md` §1 puts on the engine surface
+///   (D-0506, D-0682, D-3507). Their absence is the single most important
+///   thing this page can report. Before the first ingest there is nothing held
+///   at all, and a blank grid would say nothing where "210 rows, none held"
+///   says what to do next. (This said §1 fixed the surface "at exactly" the two
+///   indices until D-2570, and then that only the two were seeded, which
+///   D-3507 ended; D-4656.)
 ///
 /// # Cost
 ///
-/// **O(keys log keys)** — one pass to collect and one sort. Not O(1), and it is
-/// not on a request path: `api::server::Site` computes it once at startup beside
-/// the manifest load that is already O(entries), and every `/store` request is
-/// arithmetic and hash probes off the result. `docs/06-limits.md` §32.
+/// **O(keys log keys)** — one pass to collect and one sort. Not O(1).
+/// `api::server::Site` computes it once at startup beside the manifest load
+/// that is already O(entries), and `/store?show=gaps` computes it again per
+/// request over that request's fresh censuses (UC-20, D-1446); the default
+/// `/store` view is arithmetic and hash probes off the startup result.
+/// `docs/06-limits.md` §32. (This said "not on a request path" until
+/// tests-docs-security-pass17 P17-16, D-1967.)
 ///
 /// Sorted, because the pager addresses a row by **ordinal** — `HashMap`
 /// iteration order is not stable between runs, so an unsorted axis would put a
@@ -835,7 +957,7 @@ pub fn held_entries(censuses: &[VendorCensus]) -> Vec<(Series, YearMonth)> {
 /// unfiltered page is the same page it always was and a filter can only ever
 /// remove rows. That is what makes the count honest: `showing N of M` is a
 /// statement about this filter, not about the store.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct StoreFilter {
     /// Index, cash or F&O. `None` is all three.
     pub segment: Option<Segment>,
@@ -993,20 +1115,24 @@ pub fn held_page(
         .collect()
 }
 
-/// The two series the engine sweeps, as the store spells them.
+/// The series the engine sweeps, as the store spells them, in
+/// `swept_surface` order; [`held_series`] sorts the axis they join.
 ///
-/// `CLAUDE.md` §1 fixes the surface at exactly these two. They are always on the
-/// axis, held or not, so an empty store still names what it is missing.
+/// `InstrumentKey::swept_surface` is the one enumeration of the surface
+/// (D-3507): the two indices and the 208 F&O shares. This listed the two
+/// indices by hand until then, so a swept share the store did not hold had no
+/// row on `/store`. They are always on the axis, held or not, so an empty store
+/// still names what it is missing. (Z1-slice12-F2, D-2570, had called seeding
+/// all 210 a product choice the page had not made; D-3507 made it, and D-4656
+/// records the merge that kept D-3507's code.)
 #[must_use]
 pub fn swept_series() -> Vec<Series> {
-    ["BANKNIFTY", "NIFTY"]
-        .into_iter()
-        .filter_map(|s| Symbol::new(s).ok())
-        .map(|symbol| Series {
+    InstrumentKey::swept_surface()
+        .map(|key| Series {
             contract: None,
-            exchange: Exchange::Nse,
-            segment: Segment::Index,
-            symbol,
+            exchange: key.exchange,
+            segment: key.segment,
+            symbol: key.underlying,
             timeframe: Timeframe::MINUTE_1,
         })
         .collect()
@@ -1026,6 +1152,44 @@ mod tests {
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).expect("a real date")
+    }
+
+    /// Z1-slice12-F2, D-2570: the `held_series` and `swept_series` docs said
+    /// `CLAUDE.md` §1 fixed the engine surface "at exactly these" two indices (quoted split, so this doc does not match itself),
+    /// which D-0506 made false. On the old source the needle is present twice
+    /// and this fails; the needle is split so this test does not match itself.
+    /// The second half pins what the docs now say the function does: 210
+    /// always-on rows, the two spot indices and the 208 F&O shares, every one
+    /// NSE and no contract. It pinned two rows and no equity until D-3507
+    /// seeded the shares; the merge that kept D-3507's code kept this test's
+    /// first half and moved its second to the surface D-3507 names (D-4662).
+    #[test]
+    fn the_axis_docs_do_not_say_the_surface_is_two_indices() {
+        let source = include_str!("census.rs");
+        let needle = concat!("exactly these", " two");
+        assert_eq!(
+            source.matches(needle).count(),
+            0,
+            "a stale surface claim is back"
+        );
+        let stale = concat!("fixes the surface", " at exactly");
+        assert_eq!(source.matches(stale).count(), 0);
+        let swept = swept_series();
+        assert_eq!(swept.len(), 210);
+        for s in &swept {
+            assert_eq!(s.exchange, Exchange::Nse);
+            assert!(s.contract.is_none());
+        }
+        let indices = swept.iter().filter(|s| s.segment == Segment::Index).count();
+        let shares = swept.iter().filter(|s| s.segment == Segment::Cash).count();
+        assert_eq!((indices, shares), (2, 208));
+        assert!(swept.contains(&nifty()));
+        assert!(swept.contains(&series(Segment::Index, "BANKNIFTY")));
+        // An empty census list still yields exactly the always-on rows, in
+        // the axis's sorted order rather than `swept_surface`'s.
+        let mut axis = swept;
+        axis.sort_unstable();
+        assert_eq!(held_series(&[]), axis);
     }
 
     /// The spot index series, as the store spells it.
@@ -1225,50 +1389,96 @@ mod tests {
         std::fs::remove_file(&p).expect("cleanup");
     }
 
-    /// THE SIZE BOUND IS THE LENGTH `stat` GIVES, SO A CHARACTER DEVICE PASSES
-    /// IT AND IS READ, pinned as it stands. D-0695.
+    /// **A manifest path that is not a regular file is refused by name and
+    /// never read, and a FIFO there cannot hold the census.** R9-api-cx-1,
+    /// D-0954; this was pinned as it stood, read and not refused, by D-0695.
     ///
-    /// `sized` takes the size from `std::fs::metadata(path)?.len()` and then
-    /// calls `std::fs::read`, which reads to the end. A character device's
-    /// length is 0 whatever a read of it returns, so a manifest path linked to
-    /// one passes the bound. `/dev/null` is what is read here, because its
-    /// read ends at once. `/dev/zero` has the same length of 0 and gives a
-    /// read a mebibyte of bytes here when asked for one, so nothing `sized`
-    /// checks bounds a read of it. D-0695's eleventh repair records this as
-    /// not done, beside the FIFO its tenth repair recorded: both are paths
-    /// that are not a regular file.
+    /// `sized` used to `stat` the path and then `std::fs::read` it. A
+    /// character device's length is 0 whatever a read gives, so a link to
+    /// `/dev/zero` passed the bound and was read to no end; a FIFO held the
+    /// blocking open until a writer came. Each is now a refusal naming the
+    /// kind, through `sized` and through `read_vendor`, which reports it
+    /// unreadable and loud, never absent and never held.
+    ///
+    /// The FIFO is driven on another thread with a two-second deadline, so a
+    /// regression fails here instead of hanging the suite: past the deadline
+    /// the test opens the FIFO's write end itself, which releases the stuck
+    /// read, and then fails. A regular file beside it is still read whole, and
+    /// a directory is still the file system's `IsADirectory`.
     #[cfg(unix)]
     #[test]
-    fn a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read() {
-        use std::io::Read as _;
+    fn a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits() {
         use std::os::unix::fs::FileTypeExt as _;
         for device in ["/dev/null", "/dev/zero"] {
             let meta = std::fs::metadata(device).expect("the device");
-            assert!(
-                meta.file_type().is_char_device() && !meta.is_file(),
-                "{device} is a character device"
-            );
+            assert!(meta.file_type().is_char_device(), "{device}");
             assert_eq!(meta.len(), 0, "{device}: the length `stat` gives");
         }
-        let mut zeros = Vec::new();
-        std::fs::File::open("/dev/zero")
-            .expect("open /dev/zero")
-            .take(1 << 20)
-            .read_to_end(&mut zeros)
-            .expect("a bounded read of /dev/zero");
-        assert_eq!(zeros.len(), 1 << 20, "bytes past the length of 0");
-
-        let dir = root("character-device");
-        let path = manifest_path(&dir, Vendor::Dhan);
-        std::os::unix::fs::symlink("/dev/null", &path).expect("a link to a character device");
-        assert_eq!(
-            sized(&path)
+        let dir = root("not-a-regular-file");
+        for (vendor, device) in [(Vendor::Dhan, "/dev/null"), (Vendor::Zerodha, "/dev/zero")] {
+            let path = manifest_path(&dir, vendor);
+            std::os::unix::fs::symlink(device, &path).expect("a link to a character device");
+            let why = sized(&path)
                 .expect("the file system answers")
-                .expect("under the bound"),
-            Vec::<u8>::new(),
-            "passes the size bound and is read, not refused as no regular file"
+                .expect_err("refused, not read");
+            assert!(
+                why.contains("not a regular file (a device or other special file)"),
+                "{why}"
+            );
+            let census = read_vendor(&dir, vendor);
+            assert_eq!(census.state.name(), "unreadable", "{device}");
+            assert!(census.is_loud() && census.note().contains("not a regular file"));
+            std::fs::remove_file(&path).expect("cleanup");
+        }
+
+        let fifo = manifest_path(&dir, Vendor::Groww);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success(),
+            "the Unix test host creates its FIFO fixture"
         );
-        std::fs::remove_file(&path).expect("cleanup");
+        assert!(
+            std::fs::metadata(&fifo)
+                .expect("stat")
+                .file_type()
+                .is_fifo()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(sized(&fifo).map(|read| read.map(|bytes| bytes.len())));
+            })
+        };
+        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if read.is_err() {
+            // Release the stuck open so the suite does not hang, then fail.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        reader.join().expect("the reader thread ends");
+        let why = read
+            .expect("a FIFO with no writer is answered at once, not waited on")
+            .expect("the file system answers")
+            .expect_err("refused, not read");
+        assert!(why.contains("not a regular file (a FIFO)"), "{why}");
+        let census = read_vendor(&dir, Vendor::Groww);
+        assert_eq!(census.state.name(), "unreadable");
+        assert!(census.note().contains("FIFO"), "{}", census.note());
+        std::fs::remove_file(&fifo).expect("cleanup");
+
+        let plain = manifest_path(&dir, Vendor::TrueData);
+        std::fs::write(&plain, [7_u8; 40]).expect("a regular file");
+        assert_eq!(sized(&plain).expect("read").expect("held"), vec![7_u8; 40]);
+        std::fs::remove_file(&plain).expect("cleanup");
+        std::fs::create_dir(&plain).expect("a directory");
+        assert_eq!(
+            sized(&plain).expect_err("the file system's answer").kind(),
+            std::io::ErrorKind::IsADirectory
+        );
+        std::fs::remove_dir(&plain).expect("cleanup");
     }
 
     #[test]
@@ -1313,6 +1523,79 @@ mod tests {
         assert!(note.contains("DEGRADED CENSUS"), "{note}");
         assert!(note.contains("recovered generation 1"), "{note}");
         assert!(note.contains(&why), "the refusal itself is carried: {note}");
+    }
+
+    /// **ONE READ THAT OVERLAPPED A SLOT COMMIT IS READ AGAIN, NOT SERVED AS
+    /// DEGRADED (pull2-5, D-2536).**
+    ///
+    /// The reader is injected: its first answer is a census whose newest slot
+    /// fails its checksum (the torn moment of a commit), its second the same
+    /// census whole. On the old code `read_vendor` read once, so the census
+    /// came back degraded and the first assertion failed. Walked: torn then
+    /// whole (whole kept), torn both times (degraded kept, two reads), whole
+    /// first (one read), torn then unreadable and torn then absent (the
+    /// degraded first read kept, never a worse second).
+    #[test]
+    fn a_census_torn_on_one_read_is_read_again_and_whole_is_kept() {
+        type Answer = std::io::Result<Result<Vec<u8>, String>>;
+        let good = ManifestHeader {
+            generation: 1,
+            ..ManifestHeader::genesis(Vendor::Groww)
+        }
+        .image();
+        let image = |slot0: &[u8; 64]| {
+            let mut bytes = vec![0u8; HEADER_LEN_USIZE];
+            bytes.get_mut(..64).expect("room").copy_from_slice(slot0);
+            bytes
+                .get_mut(16_384..16_448)
+                .expect("room")
+                .copy_from_slice(&good);
+            bytes
+        };
+        let mut damaged = ManifestHeader::genesis(Vendor::Groww).image();
+        damaged[16] ^= 0xFF;
+        let torn = image(&damaged);
+        let whole = image(&ManifestHeader::genesis(Vendor::Groww).image());
+        let path = Path::new("UNUSED.man");
+        let run = |answers: Vec<Answer>| {
+            let mut answers = answers.into_iter();
+            let mut reads = 0_usize;
+            let state = state_read_twice_if_degraded(path, Vendor::Groww, |_| {
+                reads += 1;
+                answers.next().expect("asked at most as often as scripted")
+            });
+            (state, reads)
+        };
+        let degraded_of = |state: &Census| match state {
+            Census::Held { manifest } => manifest.degraded_reason().map(|why| why.to_string()),
+            Census::Absent | Census::Unreadable { .. } => None,
+        };
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(matches!(state, Census::Held { .. }), "{}", state.name());
+        assert_eq!(degraded_of(&state), None, "the whole second read is kept");
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(torn.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(degraded_of(&state).is_some(), "damaged twice is damaged");
+
+        let (state, reads) = run(vec![Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 1, "a whole census is read once");
+        assert_eq!(degraded_of(&state), None);
+
+        for worse in [
+            Ok(Err("REFUSED".to_owned())),
+            Err(std::io::ErrorKind::NotFound.into()),
+        ] {
+            let (state, reads) = run(vec![Ok(Ok(torn.clone())), worse]);
+            assert_eq!(reads, 2);
+            assert!(
+                degraded_of(&state).is_some(),
+                "the degraded first read stands: {}",
+                state.name()
+            );
+        }
     }
 
     #[test]
@@ -1470,15 +1753,34 @@ mod tests {
         std::fs::remove_file(file).expect("cleanup");
     }
 
+    /// D-3507 (ONEAUTH-08). D-0048 makes the axis the union of what is held
+    /// and what the engine sweeps, and D-0506 widened the sweep to the 208 F&O
+    /// shares. The axis kept the two indices only, so a swept share the store
+    /// did not hold had no row anywhere on `/store`.
+    #[test]
+    fn an_empty_store_names_every_swept_instrument_it_is_missing() {
+        let axis = held_series(&[]);
+        assert_eq!(axis.len(), 210, "two indices and 208 shares");
+        assert!(axis.contains(&series(Segment::Cash, "RELIANCE")));
+        assert!(axis.contains(&series(Segment::Index, "NIFTY")));
+        for index in brutex_core::universe::FNO_INDEX_UNDERLYINGS {
+            assert!(!axis.contains(&series(Segment::Cash, index)), "{index}");
+        }
+        assert!(!axis.contains(&series(Segment::Index, "FINNIFTY")));
+    }
+
     #[test]
     fn the_grid_is_addressed_by_arithmetic_and_pages_without_building_the_rest() {
         let dir = root("grid");
         let census = vec![read_vendor(&dir, Vendor::Groww)];
-        let two = swept_series();
-        assert_eq!(two.len(), 2, "the engine surface is exactly two");
-        assert_eq!(two[0].symbol.as_str(), "BANKNIFTY");
-        assert_eq!(two[1].symbol.as_str(), "NIFTY");
+        // The arithmetic is checked on a two-series axis; the swept axis is
+        // 210 series (D-3507) and is addressed by the same arithmetic.
+        let two = vec![
+            series(Segment::Index, "BANKNIFTY"),
+            series(Segment::Index, "NIFTY"),
+        ];
         assert_eq!(grid_rows(two.len()), 2 * GRID_MONTHS);
+        assert_eq!(grid_rows(swept_series().len()), 210 * GRID_MONTHS);
         assert_eq!(grid_rows(0), 0);
 
         let today = day(2026, 8, 7);
@@ -1543,21 +1845,24 @@ mod tests {
             "a held future must be on the axis: {axis:?}"
         );
         assert!(axis.contains(&voltas));
-        // And the two swept series are still named, held or not, so a fresh
+        // And the 210 swept series are still named, held or not, so a fresh
         // install says what it is missing rather than showing nothing.
         assert!(axis.contains(&nifty()));
         assert!(axis.contains(&series(Segment::Index, "BANKNIFTY")));
-        assert_eq!(axis.len(), 4);
+        assert!(axis.contains(&series(Segment::Cash, "RELIANCE")));
+        assert_eq!(axis.len(), 2 + 210);
         assert!(axis.windows(2).all(|w| w[0] < w[1]), "sorted: {axis:?}");
 
         // THE CONTRADICTION, ASSERTED AWAY. Rows held and cells held must agree
         // about whether this store has anything in it.
+        // The whole axis: the two futures sort after the 210 swept series'
+        // 7,560 rows (D-3507), past any first page.
         let grid = coverage_page(
             &axis,
             std::slice::from_ref(&census),
             day(2026, 7, 15),
             0,
-            200,
+            grid_rows(axis.len()),
         );
         let filled = grid.iter().filter(|c| c.is_held()).count();
         assert_eq!(
@@ -1592,8 +1897,10 @@ mod tests {
         let dir = root("axisabsent");
         let absent = read_vendor(&dir, Vendor::Groww);
         assert_eq!(absent.state.name(), "absent");
-        assert_eq!(held_series(&[absent]), swept_series());
-        assert_eq!(held_series(&[]), swept_series(), "and no census at all");
+        let swept: std::collections::BTreeSet<Series> = swept_series().into_iter().collect();
+        let set = |axis: Vec<Series>| axis.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(set(held_series(&[absent])), swept);
+        assert_eq!(set(held_series(&[])), swept, "and no census at all");
         // Two vendors holding the same series contribute one row, not two.
         let month = YearMonth::new(2026, 7).expect("valid");
         let shared = series(Segment::Fno, "ABB-III");
@@ -1601,7 +1908,7 @@ mod tests {
         let b = census_of(&root("axisb"), Vendor::Dhan, &[(shared, month, 7)]);
         let axis = held_series(&[a, b]);
         assert_eq!(axis.iter().filter(|s| **s == shared).count(), 1);
-        assert_eq!(axis.len(), 3, "the shared series plus the swept pair");
+        assert_eq!(axis.len(), 1 + 210, "the shared series plus the swept 210");
     }
 
     /// A series renders as the store path with its separators changed, and the
@@ -1656,7 +1963,13 @@ mod tests {
         );
 
         let axis = held_series(&[a, b]);
-        let names: Vec<String> = axis.iter().map(ToString::to_string).collect();
+        // The swept shares sort among the cash series; the index rows are the
+        // ones this fixture interleaves (D-3507).
+        let names: Vec<String> = axis
+            .iter()
+            .filter(|s| s.segment == Segment::Index)
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(
             names,
             [

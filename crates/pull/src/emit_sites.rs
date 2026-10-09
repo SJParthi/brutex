@@ -8,8 +8,10 @@
 //! the production helper and then found the record in a file.**
 //!
 //! **THE COUNT IS MEASURED AND THE TABLE DOES NOT COVER ALL OF IT.** This header
-//! said 21 while the crate held 36, and `SITES` holds 36 rows, so the rest
-//! are driven by nothing here. Nothing pins either number -- there is no gate
+//! said 21 while the crate held 36. Measured again on 2026-10-09 (D-4414):
+//! 48 `telemetry::emit(` calls and 45 `SITES` rows, where one emit can need
+//! two rows when its message depends on the outcome (`capture::note_kept`), so
+//! some calls are driven by nothing here. Nothing pins either number -- there is no gate
 //! comparing the table to the crate -- so re-measure rather than trusting this
 //! sentence: `grep -c "telemetry::emit(" crates/pull/src/*.rs`. The gap is
 //! stated because a registry that looks exhaustive and is not is worse than one
@@ -324,7 +326,10 @@ fn drive_duplicate_candles(scratch: &Scratch) {
     let first = *rows.first().expect("a full session");
     rows.insert(1, first);
     let done = crate::ingest::from_window(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -340,7 +345,10 @@ fn drive_duplicate_candles(scratch: &Scratch) {
 fn drive_request_minutes(scratch: &Scratch) {
     let request = request_over(Window::new(window().from(), window().from()).expect("one day"));
     let done = crate::ingest::from_window(
-        &RawWindow { rows: Vec::new() },
+        &RawWindow {
+            rows: Vec::new(),
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -377,7 +385,10 @@ fn drive_bad_candles(scratch: &Scratch, conflict: bool) {
         rows.push(RawRow { volume: 2, ..row });
     }
     let done = crate::ingest::from_window(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -520,15 +531,11 @@ static SITES: &[Site] = &[
         ),
         drive: |scratch| drive_bad_candles(scratch, true),
     },
+    // The `pull.file` "not filed" row `request_minutes.rs` had here is gone
+    // with its emit: that was the second event for one gap (OD-2, D-2371). The
+    // row below is the one event, now at `Error`.
     Site {
-        at: "request_minutes.rs incomplete coverage refusal",
-        target: "pull.file",
-        message: "not filed",
-        says: ("stage", Says::Holds("minute coverage")),
-        drive: drive_request_minutes,
-    },
-    Site {
-        at: "crates/pull/src/ingest.rs — from_window request coverage warning",
+        at: "crates/pull/src/ingest.rs — from_window request coverage gap",
         target: "pull.request_minutes",
         message: "request minute coverage incomplete",
         says: ("reason", Says::Holds("375 missing scheduled minutes")),
@@ -553,6 +560,25 @@ static SITES: &[Site] = &[
         message: "vendor capture could not be written",
         says: ("feed", Says::Holds("truedata")),
         drive: drive_capture_refused,
+    },
+    Site {
+        // A KEPT BODY IS NAMED, SO A REFUSAL'S EVIDENCE CAN BE FOUND FROM THE
+        // LOG. Both callers drop the path `record_unreadable` returns, so this
+        // line is the only place the file is named (sobs-11, D-4414).
+        at: "crates/pull/src/capture.rs — note_kept, durable",
+        target: "pull.capture",
+        message: "vendor body kept",
+        says: ("path", Says::Holds("captures")),
+        drive: drive_capture_kept,
+    },
+    Site {
+        // AND A NAME THE DIRECTORY SYNC COULD NOT MAKE DURABLE IS SAID, at
+        // `Warn` and with the reason, rather than reported as kept.
+        at: "crates/pull/src/capture.rs — note_kept, name not durable",
+        target: "pull.capture",
+        message: "vendor body kept, and its name may not survive a power cut",
+        says: ("why", Says::Holds("may not survive a power cut")),
+        drive: drive_capture_kept_unsynced,
     },
     Site {
         // THE CORRECTION D-0332 MAKES, PROVEN TO REACH A FILE.
@@ -773,18 +799,25 @@ static SITES: &[Site] = &[
         drive: drive_rate,
     },
     Site {
-        at: "crates/pull/src/config.rs:271 (Ok arm)",
+        at: "crates/pull/src/config.rs:274 (Ok arm)",
         target: "pull.config",
         message: "loaded",
         says: ("file", Says::Holds("CREDENTIALS")),
         drive: drive_config_loaded,
     },
     Site {
-        at: "crates/pull/src/config.rs:271 (Err arm)",
+        at: "crates/pull/src/config.rs:274 (Err arm)",
         target: "pull.config",
         message: "refused",
         says: ("vendors", Says::Signs(0)),
         drive: drive_config_refused,
+    },
+    Site {
+        at: "crates/pull/src/config.rs:274 (Err arm, file never read)",
+        target: "pull.config",
+        message: "refused",
+        says: ("file", Says::Holds("ABSENT-CONFIGURATION")),
+        drive: drive_config_absent,
     },
     Site {
         at: "crates/pull/src/session.rs:1136",
@@ -964,6 +997,41 @@ fn drive_capture_refused(scratch: &Scratch) {
     );
 }
 
+/// A real capture of an unreadable body, kept and named.
+fn drive_capture_kept(scratch: &Scratch) {
+    let kept = crate::capture::record_unreadable(
+        &scratch.root,
+        crate::vendor::Feed::TrueData,
+        "https://example.invalid/evidence",
+        "{}",
+        "the decoder refused it",
+    )
+    .expect("the first unreadable body is inside the budget");
+    assert!(kept.starts_with(scratch.root.join("captures")), "{kept:?}");
+}
+
+/// A real capture into a directory that takes the file and cannot be opened,
+/// so its fsync fails for real. The test runs where the mode bits bind.
+fn drive_capture_kept_unsynced(scratch: &Scratch) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = scratch.root.join("captures");
+    fs::create_dir_all(&dir).expect("the capture directory");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).expect("the directory is shut");
+    let kept = crate::capture::record(
+        &scratch.root,
+        crate::vendor::Feed::Gdfl,
+        crate::capture::Method::Get,
+        "https://example.invalid/evidence",
+        "{}",
+    );
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .expect("the directory is reopened");
+    assert!(
+        kept.is_some(),
+        "the bytes landed, so the path is returned whatever the name's fate"
+    );
+}
+
 /// A multiplicative decrease, through the governor's own public method.
 /// One index bar whose volume column carries noise, decoded through the shipped
 /// path.
@@ -1107,18 +1175,32 @@ fn drive_config_loaded(scratch: &Scratch) {
 
 /// A configuration file that is there and does not parse.
 ///
-/// **Not a missing file, deliberately.** `CredentialConfig::load` returns on
-/// the read before `note_load` is ever called, so an absent file leaves no line
-/// here — the refusal an operator sees for that one is the `Unreadable` error
-/// itself. What this row proves is the other half: a file that was read and
-/// whose contents were refused, which is the case that used to reach an HTML
-/// page and nothing else.
+/// The half of the refusal that reads the file. [`drive_config_absent`] is the
+/// other half, a file that was never read.
 fn drive_config_refused(scratch: &Scratch) {
     let path = scratch.root.join("HALF-A-CONFIGURATION");
     fs::write(&path, "org    = \"orgone\"\n").expect("a scratch configuration");
     assert!(
         CredentialConfig::load(&path).is_err(),
         "a configuration naming no vendor halts, and never defaults"
+    );
+}
+
+/// A configuration file that is not there — P-07's headline case.
+///
+/// `CredentialConfig::load` used to return on the read before `note_load` ran,
+/// so the absent file, the unreadable one, the FIFO, the oversized one and the
+/// non-UTF-8 one each left NO line, while `note_load`'s own doc promised the
+/// log could tell "the file is missing" from "the file names no vendor".
+/// D-1393.
+fn drive_config_absent(scratch: &Scratch) {
+    let path = scratch.root.join("ABSENT-CONFIGURATION");
+    assert!(
+        matches!(
+            CredentialConfig::load(&path),
+            Err(crate::config::ConfigError::Unreadable { .. })
+        ),
+        "a configuration that is not there halts, and never defaults"
     );
 }
 
@@ -1259,6 +1341,7 @@ fn drive_folder_refused(scratch: &Scratch) {
 fn drive_land(_scratch: &Scratch) {
     let request = request_over(window());
     let raw = RawWindow {
+        skipped: crate::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: 0,
             open: 1,
@@ -1457,6 +1540,14 @@ fn newer(dir: &Path, sink: &Sink, since: u64, target: &str) -> Vec<Record> {
 /// until this test nothing read it.
 #[test]
 fn every_emit_site_in_this_crate_reaches_a_file() {
+    crate::support::where_permission_binds(
+        "emit_sites::every_emit_site_in_this_crate_reaches_a_file",
+        every_emit_site_in_this_crate_reaches_a_file_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn every_emit_site_in_this_crate_reaches_a_file_body() {
     // Declared first so it is dropped LAST, and a [`Scratch`] rather than a
     // bare path so a row that fails still takes its sink's directory with it —
     // a panicking test must not leave the log it was reading behind.
@@ -1548,9 +1639,11 @@ fn drive_run_named(scratch: &Scratch) {
 /// entirely. The row asserted against it produced no records at all — an empty
 /// file, which is what a drive on the wrong path looks like.
 ///
-/// Two bars either side of a month boundary. The store addresses ONE month per
-/// file, so a batch needing two is refused at the `address` stage — which is a
-/// real refusal with a real caller, not a fault invented to reach a log line.
+/// A plan naming BSE. D-0017 narrows ingest to NSE, so `ingest::identify`
+/// refuses the member at the `address` stage — a real refusal with a real
+/// caller, not a fault invented to reach a log line. This drive used two bars
+/// either side of a month boundary until D-3136 made `from_rows` file such a
+/// batch one month per file, as the spot door does.
 fn drive_not_filed(scratch: &Scratch) {
     let store = scratch.store();
     let request = request_over(crossing());
@@ -1563,7 +1656,7 @@ fn drive_not_filed(scratch: &Scratch) {
         volume: 1,
         open_interest: i64::MIN,
     };
-    // 2022-10-03 and 2022-11-03, both inside `crossing()`, in two months.
+    // 2022-10-03 and 2022-11-03, both inside `crossing()`.
     let bars = [at(1_664_775_000), at(1_667_453_400)];
     let done = crate::ingest::from_rows(
         &bars,
@@ -1571,13 +1664,15 @@ fn drive_not_filed(scratch: &Scratch) {
         INSTRUMENT,
         "emit-sites",
         &store,
-        plan_over(&request),
+        crate::ingest::Plan {
+            exchange: "BSE",
+            ..plan_over(&request)
+        },
     );
     assert_eq!(
         done.failures.len(),
         1,
-        "a batch spanning two months is one member's refusal, and the store \
-         addresses one month per file"
+        "a member on an exchange this build does not pull is one refusal"
     );
     assert_eq!(
         done.bars_stored, 0,

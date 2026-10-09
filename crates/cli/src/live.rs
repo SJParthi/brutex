@@ -206,6 +206,31 @@ const ROWS_AT: usize = HEADER_BYTES + SUMMARY_BYTES;
 /// than measured. `CLAUDE.md` §3 rule 6.
 pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 
+/// The fewest observations a live row may be judged against the bar with.
+///
+/// The end-of-run report's own floor, carried so `/live.json` cannot call a row
+/// clear that the report refuses to judge (xcut-1, D-1991). `api` does not
+/// name `runner`, so the figure reaches it through this crate.
+pub const MIN_JUDGEABLE_OBSERVATIONS: u64 = runner::report::MIN_OBSERVATIONS;
+
+/// Whether one live row clears its run's bar, by the rule the end-of-run
+/// report applies to the same row.
+///
+/// Three conditions, all required: at least [`MIN_JUDGEABLE_OBSERVATIONS`]
+/// (xcut-1, D-1991); `|t_milli|` strictly above the normal bar carried as its
+/// ceiling (CE-7, D-1769); and the Student-t tail at the row's own `n - 1`
+/// degrees of freedom within the Bonferroni share of `trials`. The last is new:
+/// at a Bonferroni tail the normal bar understates a Student-t one badly even
+/// at thirty observations, and `/live.json` called such a row clear while the
+/// report, which now holds it to the Student-t tail, does not (p8num-1,
+/// D-2725). `api` does not name `runner`, so the rule reaches it through here.
+#[must_use]
+pub fn clears_bar(row: &Row, summary: &Summary) -> bool {
+    row.n >= MIN_JUDGEABLE_OBSERVATIONS
+        && row.t_milli.saturating_abs() > summary.bar_milli
+        && runner::significance::clears_bonferroni_milli(row.t_milli, row.n, summary.trials)
+}
+
 /// What a run has found so far, and what it must clear.
 ///
 /// # Why the bar travels with the rows
@@ -252,8 +277,40 @@ impl Summary {
 }
 
 /// One run's live top-N, on disk.
+///
+/// Dropped without [`Live::finish`] -- an early return, a refused rung, a
+/// failed permanent append, an unwinding panic -- it removes its own file
+/// (conc17-1, CE-20, D-2641). Only a process that never runs its destructors
+/// (SIGKILL, power loss) still leaves one behind.
 pub struct Live {
     path: PathBuf,
+    /// Set by [`Live::finish`], which has already removed the file and
+    /// reported a refusal; `Drop` then has nothing left to do.
+    finished: bool,
+}
+
+impl Drop for Live {
+    /// Removes the file of a run that ended without [`Live::finish`].
+    ///
+    /// Every such run used to leave its file for good, and `/live.json`
+    /// served it as a run still in flight; past [`LIVE_RUN_LIMIT`] distinct
+    /// leftovers every refresh refused for the life of the store, healthy runs
+    /// included (conc17-1). A drop cannot return a refusal, so one that fails
+    /// for any reason but absence is logged by name, never swallowed.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => crate::note(
+                &telemetry::Event::warn("cli.live", "abandoned live file not removed")
+                    .with("path", self.path.display().to_string().as_str())
+                    .with("why", why.to_string().as_str()),
+            ),
+        }
+    }
 }
 
 impl Live {
@@ -296,6 +353,7 @@ impl Live {
             .map_err(|why| format!("the live directory could not be made: {why}"))?;
         let mut live = Self {
             path: Self::path(root, identity),
+            finished: false,
         };
         // AN EMPTY PUBLISH RATHER THAN A HAND-WRITTEN HEADER, so the file is
         // born through the same atomic path every later update takes. The first
@@ -398,18 +456,22 @@ impl Live {
     /// and the trades. A live file that outlives its run is a claim that a search
     /// is still going when it is not.
     ///
-    /// # It is the ONLY remover, and it runs only on the success path
+    /// # It is the success-path remover; `Drop` is every other in-process one
     ///
-    /// There is no `Drop` impl on [`Live`], so a run ended by SIGTERM, SIGKILL
-    /// or a closed terminal never reaches this method and leaves its file
-    /// behind permanently. MEASURED on 2026-09-01: a 6,840-byte file -- 25 rows,
-    /// written at 21:41 -- was still served as an in-flight run hours later.
+    /// This was the ONLY remover, so an in-process early return (a refused
+    /// rung, an evaluator error, a failed `record_all`) left its file behind
+    /// permanently (conc17-1). `Drop` now removes it on every such path
+    /// (D-2641). A run ended by SIGKILL, a power cut or a closed terminal that
+    /// kills without unwinding still never reaches either, and leaves its file.
+    /// MEASURED on 2026-09-01: a 6,840-byte file -- 25 rows, written at 21:41
+    /// -- was still served as an in-flight run hours later.
     ///
     /// [`census`] dates what it reads and [`Freshness`] reports it, which is a
     /// half-answer and is documented as one on [`STALE_AFTER_SECS`]: the file is
     /// published once and then sits untouched for the 87.6% of a run the exit
-    /// grid occupies, so mtime cannot tell a killed run from a pricing one. This
-    /// method staying the only remover is why that half-answer is needed at all.
+    /// grid occupies, so mtime cannot tell a killed run from a pricing one.
+    /// Reclaiming a killed run's file needs a lease the census can probe, which
+    /// is not built (CE-20's second half, left to its owner).
     ///
     /// # Errors
     ///
@@ -417,7 +479,8 @@ impl Live {
     /// the run stands — the same rule `record_all` follows, because detail about
     /// a completed run must not turn that run into a failure.
     #[must_use]
-    pub fn finish(self) -> String {
+    pub fn finish(mut self) -> String {
+        self.finished = true;
         match std::fs::remove_file(&self.path) {
             Ok(()) => String::new(),
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -1023,7 +1086,12 @@ fn identity_from_name(path: &Path) -> Option<[u8; 32]> {
     // than normalising it: this directory's filenames are written by
     // `Live::path` and nothing else, so a name that is not lowercase hex was not
     // written by this program.
-    if !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+    //
+    // LOWERCASE, and `is_ascii_hexdigit` is not that check either: it admits
+    // `b'A'..=b'F'`, and `from_str_radix` parses `"AA"` to the byte `"aa"` does,
+    // so a foreign `AA..AA.bin` reported the identity `aa..aa.bin` names.
+    // W2-cli9-6, D-0931.
+    if !stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     let mut out = [0_u8; 32];
@@ -1103,6 +1171,147 @@ mod tests {
     };
     use crate::frontier::Row;
     use crate::frontier::STRIDE_BYTES;
+
+    /// A row at `n` observations and `t_milli`, every other figure neutral.
+    fn judged_row(n: u64, t_milli: i64) -> Row {
+        Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: n,
+            n,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: crate::frontier::Direction::Long,
+            rules: crate::Rules::elite(400, 25),
+        }
+    }
+
+    /// **EACH OF `clears_bar`'S THREE CONDITIONS DECIDES ON ITS OWN.**
+    /// G18-cli-b-01, D-2020.
+    ///
+    /// The bar is set at 6.000 so the carried ceiling, not the Student-t tail
+    /// (5.225 at 29 degrees of freedom and 3,689 trials, about 4.4 at a
+    /// thousand), is what a 1,000-observation row meets: `|t|` exactly AT the
+    /// ceiling does not clear (strictly above), one thousandth over does, and a
+    /// negative `t` is judged by its magnitude. A row under the
+    /// thirty-observation floor never clears however large its `t`, and a row
+    /// over both the floor and the ceiling still fails a Student-t tail it
+    /// does not reach.
+    #[test]
+    fn each_condition_of_clears_bar_decides_on_its_own() {
+        let summary = Summary {
+            trials: 3_689,
+            bar_milli: 6_000,
+            priced: 0,
+        };
+        for (n, t_milli, clears, why) in [
+            (1_000, 6_000, false, "at the ceiling is not above it"),
+            (1_000, -6_000, false, "at the ceiling, negative"),
+            (1_000, 6_001, true, "one thousandth above the ceiling"),
+            (1_000, -6_001, true, "above the ceiling by magnitude"),
+            (1_000, 9_000, true, "far above the ceiling"),
+            (1_000, 5_999, false, "under the ceiling, over the tail"),
+            (29, 1_000_000, false, "under the observation floor"),
+            (
+                super::MIN_JUDGEABLE_OBSERVATIONS,
+                1_000_000,
+                true,
+                "at the floor",
+            ),
+        ] {
+            assert_eq!(
+                super::clears_bar(&judged_row(n, t_milli), &summary),
+                clears,
+                "n {n} t {t_milli}: {why}"
+            );
+        }
+        let low_bar = Summary {
+            bar_milli: 1_000,
+            ..summary
+        };
+        assert!(
+            !super::clears_bar(&judged_row(30, 5_000), &low_bar),
+            "over the floor and the ceiling, short of the Student-t tail"
+        );
+        assert!(super::clears_bar(&judged_row(30, 5_300), &low_bar));
+    }
+
+    /// `docs/02-store-format.md` §29 states the live file this build writes:
+    /// its magic, version, count slot, summary width and row stride.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_live_file_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 29. Live top-N")
+            .expect("the live-file section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(
+            " — `results/live/<identity>.bin`, version {VERSION}\n"
+        )));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = core::str::from_utf8(&MAGIC).expect("the magic is ASCII");
+        assert!(section.contains(&format!("| 0 | 8 | `{magic}` |")));
+        assert!(section.contains(&format!("| 8 | 4 | version `{VERSION}`, `u32` |")));
+        assert!(section.contains(&format!("| {} | 4 | row count, `u32` |", super::COUNT_AT)));
+        assert!(section.contains(&format!(
+            "| {ROWS_AT} | `count * {STRIDE_BYTES}` | rows, each a §13 frontier row of the same \
+             {STRIDE_BYTES} bytes |"
+        )));
+        assert!(section.contains(&format!("`{ROWS_AT} + count*{STRIDE_BYTES}`")));
+        assert_eq!(super::HEADER_BYTES + super::SUMMARY_BYTES, ROWS_AT);
+    }
+
+    /// An upper-case hex name is not an identity, because `Live::path` writes
+    /// `{byte:02x}` and nothing else writes this directory.
+    ///
+    /// `u8::is_ascii_hexdigit` admits `b'A'..=b'F'` and `from_str_radix` parses
+    /// `"AA"` to the same byte as `"aa"`, so before this row a foreign
+    /// `AA..AA.bin` parsed to `[0xAA; 32]`, the identity `aa..aa.bin` already
+    /// names. W2-cli9-6, D-0931.
+    #[test]
+    fn an_upper_case_hex_name_is_not_an_identity() {
+        let root = std::path::Path::new("/nonexistent-brutex-root");
+        let written = Live::path(root, &[0xAA; 32]);
+        assert_eq!(
+            super::identity_from_name(&written),
+            Some([0xAA; 32]),
+            "the name the only writer produces parses to its identity"
+        );
+        let mut every_digit = [0_u8; 32];
+        for (slot, byte) in every_digit.iter_mut().zip((0_u8..=0xff).step_by(9)) {
+            *slot = byte;
+        }
+        assert_eq!(
+            super::identity_from_name(&Live::path(root, &every_digit)),
+            Some(every_digit),
+            "every lowercase digit the writer can emit, 0-9 and a-f, is admitted"
+        );
+        let upper = Live::dir(root).join(format!("{}.bin", "AA".repeat(32)));
+        assert_eq!(
+            super::identity_from_name(&upper),
+            None,
+            "a name that is not lowercase hex was not written by this program"
+        );
+        let mixed = Live::dir(root).join(format!("{}Aa.bin", "aa".repeat(31)));
+        assert_eq!(
+            super::identity_from_name(&mixed),
+            None,
+            "one upper-case digit is enough to refuse the name"
+        );
+    }
 
     /// One file name of the only shape the reader admits: sixty-four hex
     /// characters and `.bin`, the byte repeated thirty-two times.
@@ -1244,14 +1453,25 @@ mod tests {
     fn bounded_live_cache_refuses_row_run_and_directory_limits() {
         let root = tempdir();
         let mut cache = super::CensusCache::default();
-        for byte in 0..=u8::try_from(super::LIVE_RUN_LIMIT).expect("bound fits byte") {
-            Live::open(root.path(), &[byte; 32]).expect("empty named run");
-        }
+        // HELD, because a dropped `Live` now removes its file (conc17-1,
+        // D-2641): the ceiling is about runs still writing.
+        let held: Vec<Live> = (0..=u8::try_from(super::LIVE_RUN_LIMIT).expect("bound fits byte"))
+            .map(|byte| Live::open(root.path(), &[byte; 32]).expect("empty named run"))
+            .collect();
         assert!(
             cache
                 .refresh(root.path())
                 .expect_err("run ceiling")
                 .contains("runs")
+        );
+        drop(held);
+        assert!(
+            cache
+                .refresh(root.path())
+                .expect("every dropped run removed its file")
+                .runs
+                .is_empty(),
+            "dropped runs never count against the ceiling"
         );
         let root = tempdir();
         let identity = [95_u8; 32];
@@ -1751,6 +1971,58 @@ mod tests {
             10,
             "fewer candidates than the heap holds means every one is a rewrite"
         );
+    }
+
+    /// conc17-1, CE-20 (D-2641): a live view dropped without `finish` -- the
+    /// shape of every in-process early return -- removes its file, so it is
+    /// never served as a run in flight and never counts against
+    /// `LIVE_RUN_LIMIT`. `finish` still removes it and reports nothing, and a
+    /// drop after `finish` touches nothing (a same-identity successor's file
+    /// survives it). On the old code there was no `Drop`, so the file stayed.
+    #[test]
+    fn a_live_view_dropped_without_finish_removes_its_file() {
+        let root = tempdir();
+        let identity = [0x5e_u8; 32];
+        let path = Live::path(root.path(), &identity);
+
+        // Opened, published, dropped: gone.
+        let mut live = Live::open(root.path(), &identity).expect("writable");
+        live.publish(&[row(identity, 1, 1_000)], Summary::default())
+            .expect("published");
+        assert!(path.exists());
+        assert_eq!(current(root.path()).len(), 1);
+        drop(live);
+        assert!(!path.exists(), "a dropped live view removes its file");
+        assert!(current(root.path()).is_empty());
+
+        // Opened and dropped with nothing published beyond the empty file.
+        drop(Live::open(root.path(), &identity).expect("writable"));
+        assert!(!path.exists());
+
+        // An early return inside a function drops it the same way.
+        let refused = || -> Result<(), String> {
+            let mut live = Live::open(root.path(), &identity)?;
+            live.publish(&[row(identity, 1, 2_000)], Summary::default())?;
+            Err("the rung was refused after its live view opened".to_owned())
+        };
+        assert!(refused().is_err());
+        assert!(!path.exists(), "an early return leaves no live file");
+
+        // Finished: removed, nothing reported, and the drop after it does not
+        // remove a successor that reopened the same name.
+        let live = Live::open(root.path(), &identity).expect("writable");
+        assert!(live.finish().is_empty());
+        assert!(!path.exists());
+        let successor = Live::open(root.path(), &identity).expect("writable");
+        assert!(path.exists());
+        drop(successor);
+        assert!(!path.exists());
+
+        // The file already gone (removed by hand): the drop is quiet.
+        let live = Live::open(root.path(), &identity).expect("writable");
+        std::fs::remove_file(&path).expect("removed by hand");
+        drop(live);
+        assert!(!path.exists());
     }
 
     /// A scratch directory that removes itself.

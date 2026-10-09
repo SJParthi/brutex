@@ -18,6 +18,58 @@ pub const MAX_SOURCE_BYTES: usize = 4096;
 /// Fixed serialized width, including version, count and zeroed padding.
 pub const ENCODED_LEN: usize = 4 + MAX_INSTRUCTIONS * 3;
 const MAX_NESTING: u16 = 32;
+/// Bits in one scratch word: a program whose stack never stands taller than
+/// this evaluates in one word of each plane.
+const WORD_SLOTS: usize = 64;
+/// Scratch words for every taller program: the deepest stack any program of
+/// [`MAX_INSTRUCTIONS`] can reach is `MAX_INSTRUCTIONS.div_ceil(2)` = 576
+/// values, because a height of `h` needs `h` leaves and `h - 1` joins to come
+/// back to one value, so `2h - 1 <= MAX_INSTRUCTIONS`. Nine words hold 576.
+const DEEP_WORDS: usize = MAX_INSTRUCTIONS.div_ceil(2).div_ceil(WORD_SLOTS);
+
+/// The two scratch widths [`Expression::evaluate`] dispatches on, chosen from
+/// the program's own stack HEIGHT, not its length (o1engine-22, D-4484).
+///
+/// AN ENUM, NOT A MATCH ON THE WIDTH (D-1455). An exhaustive match on this
+/// enum has no wildcard arm for a deleted case to fall into, and each arm
+/// takes its width from [`Tier::words`], so an arm and the width it runs are
+/// one fact.
+///
+/// # Why height and not length since D-4484
+///
+/// The tiers were 8, 64 and 576 one-byte slots chosen from the LENGTH, so a
+/// 599-instruction AND of 300 conditions -- whose stack never stands taller
+/// than two -- cleared 576 bytes on every bar. The height is measured once,
+/// when the program is built ([`Expression::from_parts`]), and a stack of up
+/// to 64 values is one 64-bit word per plane: nothing is cleared but two
+/// registers. Only a program that really stacks past 64 values -- 129
+/// instructions at the least -- clears the nine words of the deep tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    /// One word per plane: heights up to [`WORD_SLOTS`].
+    Word,
+    /// [`DEEP_WORDS`] words per plane: every height a program can reach.
+    Deep,
+}
+
+impl Tier {
+    /// The smallest tier a stack of `height` values fits.
+    const fn of(height: usize) -> Self {
+        if height <= WORD_SLOTS {
+            Self::Word
+        } else {
+            Self::Deep
+        }
+    }
+
+    /// The scratch words per plane this tier clears before a walk.
+    const fn words(self) -> usize {
+        match self {
+            Self::Word => 1,
+            Self::Deep => DEEP_WORDS,
+        }
+    }
+}
 
 /// Strong Kleene truth: only `True` admits a signal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,9 +146,91 @@ pub enum Refusal {
 pub struct Expression {
     pub(crate) code: [Instruction; MAX_INSTRUCTIONS],
     pub(crate) len: usize,
+    /// The tallest the evaluation stack stands, measured once by
+    /// [`Self::from_parts`]. Derived from `code` and `len`, never encoded: the
+    /// wire format and [`VERSION`] are unchanged (D-4484).
+    pub(crate) height: usize,
+}
+
+/// The tallest the stack of `code[..len]` stands, counting a leaf as one more
+/// value, a join as one fewer and a `Not` as neither.
+///
+/// It stops at the first `Pad` and never goes below zero, so a malformed
+/// program gets a number too; [`Expression::evaluate`] refuses such a program
+/// as it always has, and the number only chooses the scratch width.
+fn peak(code: &[Instruction], len: usize) -> usize {
+    let mut used = 0_usize;
+    let mut tallest = 0_usize;
+    for instruction in code.iter().take(len) {
+        match instruction {
+            Instruction::Bit(_) => {
+                used += 1;
+                tallest = tallest.max(used);
+            }
+            Instruction::Not => {}
+            Instruction::And | Instruction::Or => used = used.saturating_sub(1),
+            Instruction::Pad => break,
+        }
+    }
+    tallest
+}
+
+/// One value of a bit-plane stack: bit `at` of each plane, as `(true, known)`.
+///
+/// `true` is never set without `known`, so the three [`Truth`] values are
+/// `(0, 1)` false, `(1, 1)` true and `(0, 0)` unknown. A slot past the planes
+/// reads as unknown; [`Expression::evaluate`] never reads above what it pushed.
+fn slot<const WORDS: usize>(planes: &[[u64; WORDS]; 2], at: usize) -> (u64, u64) {
+    let word = at / WORD_SLOTS;
+    let shift = at % WORD_SLOTS;
+    let [truth, known] = planes;
+    (
+        truth.get(word).map_or(0, |w| (w >> shift) & 1),
+        known.get(word).map_or(0, |w| (w >> shift) & 1),
+    )
+}
+
+/// Writes one value into bit `at` of each plane. `false` when `at` is past
+/// the planes: the caller refuses rather than drops it.
+fn put<const WORDS: usize>(planes: &mut [[u64; WORDS]; 2], at: usize, value: (u64, u64)) -> bool {
+    let word = at / WORD_SLOTS;
+    let shift = at % WORD_SLOTS;
+    let [truth, known] = planes;
+    let (Some(t), Some(k)) = (truth.get_mut(word), known.get_mut(word)) else {
+        return false;
+    };
+    *t = (*t & !(1 << shift)) | (value.0 << shift);
+    *k = (*k & !(1 << shift)) | (value.1 << shift);
+    true
+}
+
+/// Strong Kleene AND on `(true, known)` bit pairs, the bit-plane form of
+/// [`Truth::and`]: a known false on either side settles it false, two known
+/// trues settle it true, anything else is unknown.
+const fn and_bits(a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
+    (a.0 & b.0, (a.1 & b.1) | (a.1 & !a.0) | (b.1 & !b.0))
+}
+
+/// Strong Kleene OR on `(true, known)` bit pairs, the bit-plane form of
+/// [`Truth::or`]: a true on either side settles it true, two known falses
+/// settle it false, anything else is unknown.
+const fn or_bits(a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
+    (a.0 | b.0, (a.1 & b.1) | a.0 | b.0)
 }
 
 impl Expression {
+    /// A program and its measured stack height: the one way any code in this
+    /// crate builds an [`Expression`], so the height every evaluation sizes
+    /// its scratch from is the height of the code it walks (D-4484).
+    pub(crate) fn from_parts(code: &[Instruction; MAX_INSTRUCTIONS], len: usize) -> Self {
+        let height = peak(code, len);
+        Self {
+            code: *code,
+            len,
+            height,
+        }
+    }
+
     /// Reopen the exact fixed-width descriptor without an external parser.
     /// Only canonical programs of this version are accepted. The fixed wire
     /// capacity bounds evaluation; the source nesting limit governs parsing.
@@ -119,10 +253,7 @@ impl Expression {
         if len == 0 || len > MAX_INSTRUCTIONS {
             return Err(Refusal::Encoding);
         }
-        let mut result = Self {
-            code: [Instruction::Pad; MAX_INSTRUCTIONS],
-            len,
-        };
+        let mut result = Self::from_parts(&[Instruction::Pad; MAX_INSTRUCTIONS], len);
         let mut starts = [0_usize; MAX_INSTRUCTIONS];
         let mut depth = 0_usize;
         for (index, bytes) in encoded
@@ -173,7 +304,7 @@ impl Expression {
         if depth != 1 {
             return Err(Refusal::Encoding);
         }
-        Ok(result)
+        Ok(Self::from_parts(&result.code, result.len))
     }
 
     /// Parse names or decimal bit IDs, `!`, `&`, `|`, and parentheses.
@@ -190,69 +321,90 @@ impl Expression {
         let mut parser = Parser {
             source: source.as_bytes(),
             at: 0,
-            expression: Self {
-                code: [Instruction::Pad; MAX_INSTRUCTIONS],
-                len: 0,
-            },
+            expression: Self::from_parts(&[Instruction::Pad; MAX_INSTRUCTIONS], 0),
         };
         parser.disjunction(0)?;
         parser.space();
         if parser.at != parser.source.len() {
             return Err(Refusal::Syntax);
         }
-        Ok(parser.expression)
+        Ok(Self::from_parts(
+            &parser.expression.code,
+            parser.expression.len,
+        ))
     }
 
     /// Evaluate one bar in bounded space/time with no heap allocation.
     /// `known` must come from the evaluator's actual availability evidence.
+    ///
+    /// # Cost per bar
+    ///
+    /// Θ(`len`): one step per instruction, at most [`MAX_INSTRUCTIONS`]. This is
+    /// not O(1) in the program, and cannot be: every instruction can change the
+    /// answer. Each step is O(1) -- a leaf reads two mask bits and writes one
+    /// bit of each plane, a join reads two values and writes one -- and the
+    /// scratch cleared before the walk is two words when the program's stack
+    /// never stands taller than 64, which every program shorter than 129
+    /// instructions and every AND or OR chain satisfies, and eighteen words
+    /// otherwise (D-4484). The per-instruction cost is held flat from 1 to
+    /// 1,151 instructions and from height 2 to height 576 by the `FXD-04` and
+    /// `FXD-05` rows of `benches/ratio.rs`, and the tier and the bit-plane
+    /// logic by
+    /// `vocab::expression::invariant_tests::the_scratch_is_sized_to_the_program_height_and_the_deepest_still_evaluates`
+    /// and
+    /// `vocab::expression::invariant_tests::the_bit_planes_answer_exactly_what_the_kleene_table_answers`.
     #[must_use]
     pub fn evaluate(&self, truth: ConditionMask, known: ConditionMask) -> Truth {
-        let mut stack = [Truth::Unknown; MAX_INSTRUCTIONS];
+        match Tier::of(self.height) {
+            Tier::Word => self.run::<{ Tier::Word.words() }>(truth, known),
+            Tier::Deep => self.run::<{ Tier::Deep.words() }>(truth, known),
+        }
+    }
+
+    /// The postfix walk over two bit planes of `WORDS` words each. A stack
+    /// that would overflow, underflow or meet a `Pad` answers
+    /// [`Truth::Unknown`], so a malformed program can only refuse a signal,
+    /// never create one.
+    fn run<const WORDS: usize>(&self, truth: ConditionMask, known: ConditionMask) -> Truth {
+        let mut planes = [[0_u64; WORDS]; 2];
         let mut used = 0_usize;
         for instruction in self.code.iter().take(self.len) {
             match instruction {
                 Instruction::Bit(bit) => {
-                    let value = if !known.get(u32::from(*bit)) {
-                        Truth::Unknown
-                    } else if truth.get(u32::from(*bit)) {
-                        Truth::True
-                    } else {
-                        Truth::False
-                    };
-                    let Some(slot) = stack.get_mut(used) else {
+                    let is_known = u64::from(known.get(u32::from(*bit)));
+                    let is_true = u64::from(truth.get(u32::from(*bit))) & is_known;
+                    if !put(&mut planes, used, (is_true, is_known)) {
                         return Truth::Unknown;
-                    };
-                    *slot = value;
+                    }
                     used += 1;
                 }
                 Instruction::Not => {
-                    let Some(top) = used.checked_sub(1).and_then(|i| stack.get_mut(i)) else {
+                    let Some(top) = used.checked_sub(1) else {
                         return Truth::Unknown;
                     };
-                    *top = top.negate();
+                    let (is_true, is_known) = slot(&planes, top);
+                    put(&mut planes, top, (is_true ^ is_known, is_known));
                 }
                 Instruction::And | Instruction::Or => {
-                    let Some(left_index) = used.checked_sub(2) else {
+                    let Some(left) = used.checked_sub(2) else {
                         return Truth::Unknown;
                     };
-                    let right = stack.get(used - 1).copied().unwrap_or(Truth::Unknown);
-                    used -= 1;
-                    let Some(left) = stack.get_mut(left_index) else {
-                        return Truth::Unknown;
-                    };
-                    *left = if *instruction == Instruction::And {
-                        left.and(right)
+                    let (a, b) = (slot(&planes, left), slot(&planes, left + 1));
+                    let joined = if *instruction == Instruction::And {
+                        and_bits(a, b)
                     } else {
-                        left.or(right)
+                        or_bits(a, b)
                     };
+                    put(&mut planes, left, joined);
+                    used -= 1;
                 }
                 Instruction::Pad => return Truth::Unknown,
             }
         }
-        if used == 1 {
-            stack.first().copied().unwrap_or(Truth::Unknown)
-        } else {
-            Truth::Unknown
+        match (used, slot(&planes, 0)) {
+            (1, (1, _)) => Truth::True,
+            (1, (0, 1)) => Truth::False,
+            _ => Truth::Unknown,
         }
     }
 
@@ -307,8 +459,11 @@ impl Expression {
 
 impl std::fmt::Display for Expression {
     /// Canonical fully parenthesized numeric infix, rendered iteratively.
-    /// The fixed wire grammar can exceed the source parser's nesting/byte
-    /// limits; display is lossless human text, not a promise to bypass them.
+    /// Display is lossless human text, not a parser round trip (D-0751): each
+    /// NOT renders as `!(`, two parser nesting levels, and each binary node
+    /// adds one level and five bytes, so even a program [`Self::parse`]
+    /// accepted can render past its nesting or byte limit. The exact round
+    /// trip is [`Self::encode`] and [`Self::decode`].
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         render_program(self, &render_children(self)?, f)
     }
@@ -558,12 +713,7 @@ impl Parser<'_> {
         let bit = token
             .parse::<u16>()
             .ok()
-            .or_else(|| {
-                table::TABLE
-                    .iter()
-                    .find(|row| row.name == token)
-                    .map(|row| row.index)
-            })
+            .or_else(|| table::index_of(token))
             .ok_or(Refusal::UnavailableBit)?;
         let definition = table::definition(bit).ok_or(Refusal::UnavailableBit)?;
         if definition.status != table::BitStatus::Live {
@@ -579,12 +729,265 @@ mod invariant_tests {
     use super::*;
 
     fn program(code: &[Instruction]) -> Expression {
-        let mut expression = Expression {
-            code: [Instruction::Pad; MAX_INSTRUCTIONS],
-            len: code.len(),
+        let mut padded = [Instruction::Pad; MAX_INSTRUCTIONS];
+        padded[..code.len()].copy_from_slice(code);
+        Expression::from_parts(&padded, code.len())
+    }
+
+    /// The deepest stack a program of `len` instructions can reach: every leaf
+    /// first, then every join, then a `Not` if `len` is even.
+    fn deepest(len: usize) -> Expression {
+        let leaves = len.div_ceil(2);
+        let mut code = vec![Instruction::Bit(0); leaves];
+        code.extend(std::iter::repeat_n(Instruction::And, leaves - 1));
+        if len.is_multiple_of(2) {
+            code.push(Instruction::Not);
+        }
+        assert_eq!(code.len(), len);
+        program(&code)
+    }
+
+    /// An AND of `leaves` copies of bit 0, left-associated: `2 * leaves - 1`
+    /// instructions whose stack never stands taller than two.
+    fn chain(leaves: usize) -> Expression {
+        let mut code = vec![Instruction::Bit(0)];
+        for _ in 1..leaves {
+            code.extend([Instruction::Bit(0), Instruction::And]);
+        }
+        program(&code)
+    }
+
+    /// THE SCRATCH IS SIZED TO THE PROGRAM'S HEIGHT, AND THE DEEPEST PROGRAM OF
+    /// EVERY TIER STILL EVALUATES. Audit o1engine-22, D-1455, D-4484.
+    ///
+    /// `evaluate` cleared a 1,151-slot stack on every bar; D-1455 sized it from
+    /// the LENGTH, so a 599-instruction chain of height two still cleared 576
+    /// bytes. It now sizes it from the HEIGHT measured when the program was
+    /// built: up to 64 values is one word per plane, more is nine. The width
+    /// must never be below the height (an undersized stack answers `Unknown`,
+    /// refusing a real signal). At each tier's edge the deepest program is
+    /// evaluated: all-true leaves give `True` (or `False` under a trailing
+    /// `Not`), a false leaf gives the opposite, and an unknown one `Unknown`.
+    #[test]
+    fn the_scratch_is_sized_to_the_program_height_and_the_deepest_still_evaluates() {
+        assert_eq!(Tier::of(0), Tier::Word);
+        assert_eq!(Tier::of(1), Tier::Word);
+        assert_eq!(Tier::of(64), Tier::Word);
+        assert_eq!(Tier::of(65), Tier::Deep);
+        assert_eq!(Tier::of(MAX_INSTRUCTIONS.div_ceil(2)), Tier::Deep);
+        assert_eq!(Tier::Word.words(), 1);
+        assert_eq!(Tier::Deep.words(), 9);
+        assert!(
+            Tier::Deep.words() * WORD_SLOTS >= MAX_INSTRUCTIONS.div_ceil(2),
+            "the deep tier holds the tallest stack a program can build"
+        );
+        for len in 1..=MAX_INSTRUCTIONS {
+            let tallest = deepest(len);
+            assert_eq!(tallest.height, len.div_ceil(2), "len {len}");
+            assert!(
+                Tier::of(tallest.height).words() * WORD_SLOTS >= tallest.height,
+                "len {len} can stack past its tier"
+            );
+        }
+        // THE CASE THE LENGTH TIER GOT WRONG: 599 instructions, height two.
+        let long_and_shallow = chain(300);
+        assert_eq!(long_and_shallow.len, 599);
+        assert_eq!(long_and_shallow.height, 2);
+        assert_eq!(Tier::of(long_and_shallow.height), Tier::Word);
+
+        let known = ConditionMask::ZERO.with_bit(0);
+        for len in [
+            1,
+            2,
+            127,
+            128,
+            129,
+            130,
+            131,
+            MAX_INSTRUCTIONS - 1,
+            MAX_INSTRUCTIONS,
+        ] {
+            let expression = deepest(len);
+            let (yes, no) = if len.is_multiple_of(2) {
+                (Truth::False, Truth::True)
+            } else {
+                (Truth::True, Truth::False)
+            };
+            assert_eq!(expression.evaluate(known, known), yes, "len {len}");
+            assert_eq!(
+                expression.evaluate(ConditionMask::ZERO, known),
+                no,
+                "len {len}"
+            );
+            assert_eq!(
+                expression.evaluate(known, ConditionMask::ZERO),
+                Truth::Unknown,
+                "len {len}"
+            );
+        }
+        assert_eq!(long_and_shallow.evaluate(known, known), Truth::True);
+        assert_eq!(
+            long_and_shallow.evaluate(ConditionMask::ZERO, known),
+            Truth::False
+        );
+        // Past the deepest tier's reach is refused, never read as a signal:
+        // 577 bare leaves stack one value past nine words.
+        let overflow = program(&[Instruction::Bit(0); 577]);
+        assert_eq!(overflow.height, 577);
+        assert_eq!(overflow.evaluate(known, known), Truth::Unknown);
+        // And a program built with too small a height for its code -- only a
+        // test can build one -- refuses at the first push past its tier.
+        let mut short = program(&[Instruction::Bit(0); 65]);
+        short.height = 1;
+        assert_eq!(short.evaluate(known, known), Truth::Unknown);
+    }
+
+    /// `peak` counts a leaf up, a join down and a `Not` neither, never below
+    /// zero, and stops at the first `Pad`.
+    #[test]
+    fn the_height_is_the_tallest_the_stack_stands() {
+        use Instruction::{And, Bit, Not, Or, Pad};
+        for (code, height) in [
+            (&[][..], 0),
+            (&[Bit(0)][..], 1),
+            (&[Bit(0), Not][..], 1),
+            (&[Bit(0), Bit(1), And][..], 2),
+            (&[Bit(0), Bit(1), Or, Bit(2), And][..], 2),
+            (&[Bit(0), Bit(1), Bit(2), And, And][..], 3),
+            (&[And, Or, Bit(0)][..], 1),
+            (&[Bit(0), Bit(1), Pad, Bit(2), Bit(3)][..], 2),
+        ] {
+            assert_eq!(peak(code, code.len()), height, "{code:?}");
+            assert_eq!(program(code).height, height, "{code:?}");
+        }
+        assert_eq!(peak(&[Bit(0), Bit(1), Bit(2)], 2), 2, "only `len` is read");
+    }
+
+    /// The reference the bit planes are checked against: the byte-per-value
+    /// walk over `Truth` that shipped until D-4484, unbounded so it cannot
+    /// overflow, with the same refusals.
+    fn reference(expression: &Expression, truth: ConditionMask, known: ConditionMask) -> Truth {
+        let mut stack: Vec<Truth> = Vec::new();
+        for instruction in expression.code.iter().take(expression.len) {
+            match instruction {
+                Instruction::Bit(bit) => stack.push(if !known.get(u32::from(*bit)) {
+                    Truth::Unknown
+                } else if truth.get(u32::from(*bit)) {
+                    Truth::True
+                } else {
+                    Truth::False
+                }),
+                Instruction::Not => match stack.last_mut() {
+                    Some(top) => *top = top.negate(),
+                    None => return Truth::Unknown,
+                },
+                Instruction::And | Instruction::Or => {
+                    let (Some(right), Some(left)) = (stack.pop(), stack.pop()) else {
+                        return Truth::Unknown;
+                    };
+                    stack.push(if *instruction == Instruction::And {
+                        left.and(right)
+                    } else {
+                        left.or(right)
+                    });
+                }
+                Instruction::Pad => return Truth::Unknown,
+            }
+        }
+        if stack.len() == 1 {
+            stack[0]
+        } else {
+            Truth::Unknown
+        }
+    }
+
+    /// **The bit planes answer exactly what the Kleene table answers** (D-4484).
+    ///
+    /// First the three operations on every pair of truth values, then whole
+    /// programs: every program of up to five instructions over three bits --
+    /// malformed ones included -- and a seeded sample of longer ones, each
+    /// against every assignment of false, true and unknown to the three bits,
+    /// compared with [`reference`].
+    #[test]
+    fn the_bit_planes_answer_exactly_what_the_kleene_table_answers() {
+        let bits = |t: Truth| match t {
+            Truth::False => (0_u64, 1_u64),
+            Truth::True => (1, 1),
+            Truth::Unknown => (0, 0),
         };
-        expression.code[..code.len()].copy_from_slice(code);
-        expression
+        let all = [Truth::False, Truth::True, Truth::Unknown];
+        for a in all {
+            let (t, k) = bits(a);
+            assert_eq!((t ^ k, k), bits(a.negate()), "not {a:?}");
+            for b in all {
+                assert_eq!(
+                    and_bits(bits(a), bits(b)),
+                    bits(a.and(b)),
+                    "{a:?} and {b:?}"
+                );
+                assert_eq!(or_bits(bits(a), bits(b)), bits(a.or(b)), "{a:?} or {b:?}");
+            }
+        }
+
+        let alphabet = [
+            Instruction::Bit(0),
+            Instruction::Bit(1),
+            Instruction::Bit(2),
+            Instruction::Not,
+            Instruction::And,
+            Instruction::Or,
+            Instruction::Pad,
+        ];
+        let assignments: Vec<(ConditionMask, ConditionMask)> = (0..27_u32)
+            .map(|n| {
+                (0..3_u32).fold(
+                    (ConditionMask::ZERO, ConditionMask::ZERO),
+                    |(truth, known), bit| match n / 3_u32.pow(bit) % 3 {
+                        0 => (truth, known.with_bit(bit)),
+                        1 => (truth.with_bit(bit), known.with_bit(bit)),
+                        _ => (truth, known),
+                    },
+                )
+            })
+            .collect();
+        let check = |code: &[Instruction]| {
+            let expression = program(code);
+            for &(truth, known) in &assignments {
+                assert_eq!(
+                    expression.evaluate(truth, known),
+                    reference(&expression, truth, known),
+                    "{code:?}"
+                );
+            }
+        };
+        let mut compared = 0_usize;
+        for len in 0..=5_u32 {
+            for n in 0..7_usize.pow(len) {
+                let code: Vec<Instruction> = (0..len)
+                    .map(|at| alphabet[n / 7_usize.pow(at) % 7])
+                    .collect();
+                check(&code);
+                compared += 1;
+            }
+        }
+        let mut seed = 0x5eed_u64;
+        for _ in 0..2_000 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let len = usize::try_from(seed >> 54).unwrap_or(0) % 200;
+            let code: Vec<Instruction> = (0..len)
+                .map(|at| {
+                    let draw = seed.rotate_left(u32::try_from(at % 64).unwrap_or(0)) >> 60;
+                    // Leaves twice as often as anything else, so long
+                    // programs stack high rather than underflow at once.
+                    alphabet[usize::try_from(draw).unwrap_or(0) % 9 % 7]
+                })
+                .collect();
+            check(&code);
+            compared += 1;
+        }
+        assert!(compared > 21_000, "the sweep must actually run");
     }
 
     #[test]

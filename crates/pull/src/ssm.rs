@@ -241,13 +241,32 @@ impl AwsIdentity {
     /// [`SsmError`] naming the variable that was missing, so an operator is
     /// told which one to set rather than that "AWS failed".
     pub fn from_env() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] over any lookup, so the rule is testable without
+    /// mutating the process environment — `std::env::set_var` needs `unsafe`
+    /// and this crate forbids it.
+    ///
+    /// # An empty value is an UNSET value
+    ///
+    /// `AWS_ACCESS_KEY_ID=` exported empty — the common way a CI step or a
+    /// shell "clears" a variable — used to be read as a key id of zero
+    /// characters. That identity is not one: it signs a request AWS refuses
+    /// with a fault naming neither the variable nor the file, and because
+    /// [`Self::discover`] stops at the first identity it builds, an empty
+    /// export also SHADOWED a complete `~/.aws/credentials`. AWS's own
+    /// resolvers treat an empty variable as absent and move on; so does this.
+    /// D-1372.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, SsmError> {
         let read = |name: &str| -> Result<String, SsmError> {
-            std::env::var(name).map_err(|_| {
+            non_blank(lookup(name)).ok_or_else(|| {
                 SsmError::unreachable(format!(
                     "the AWS identity is not in this process's environment: \
-                     {name} is unset. This is the AWS key that proves you may \
-                     READ the parameter — not the broker token, which is what \
-                     comes back from it."
+                     {name} is unset or empty. This is the AWS key that proves \
+                     you may READ the parameter — not the broker token, which \
+                     is what comes back from it."
                 ))
             })
         };
@@ -255,8 +274,10 @@ impl AwsIdentity {
             key_id: read("AWS_ACCESS_KEY_ID")?,
             secret: read("AWS_SECRET_ACCESS_KEY")?,
             // Absent for a long-lived key, present for anything temporary.
-            // Absence is not a failure and must not be reported as one.
-            session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
+            // Absence is not a failure and must not be reported as one — and
+            // an empty token is absence, or it would be SIGNED and sent as an
+            // `x-amz-security-token` of nothing.
+            session_token: non_blank(lookup("AWS_SESSION_TOKEN")),
         })
     }
 
@@ -285,10 +306,52 @@ impl AwsIdentity {
     /// [`SsmError`] naming every place that was looked at, so "no credentials"
     /// is never the whole message.
     pub fn discover() -> Result<Self, SsmError> {
-        if let Ok(from_env) = Self::from_env() {
-            return Ok(from_env);
+        refuse_non_unicode(|name| std::env::var(name))?;
+        Self::discover_from(|name| std::env::var(name).ok(), Self::from_shared_file)
+    }
+
+    /// [`Self::discover`] over any environment lookup and any profile reader.
+    ///
+    /// # A half-set environment is refused, not discarded
+    ///
+    /// This kept the environment's identity only when it was whole and
+    /// otherwise dropped the env error and signed as `[default]` — so an
+    /// operator who exported `AWS_ACCESS_KEY_ID` and forgot the secret was
+    /// silently signed as a DIFFERENT identity, with no mention of the
+    /// variable they set. Exactly one of the pair present is now a refusal
+    /// naming both (errpaths-1, D-1534).
+    ///
+    /// # The profile is the one `AWS_PROFILE` names
+    ///
+    /// `AWS_PROFILE` was read nowhere, so an operator who chose a profile was
+    /// signed as `[default]`. It now names the profile; empty or unset is
+    /// `default`, as an empty key is unset (D-1372). That AWS's own tools read
+    /// the variable the same way is UNVERIFIED here: `docs/00-charter.md`
+    /// records no AWS source.
+    fn discover_from(
+        lookup: impl Fn(&str) -> Option<String>,
+        from_file: impl Fn(&str) -> Result<Self, SsmError>,
+    ) -> Result<Self, SsmError> {
+        let key = non_blank(lookup("AWS_ACCESS_KEY_ID")).is_some();
+        let secret = non_blank(lookup("AWS_SECRET_ACCESS_KEY")).is_some();
+        if key && secret {
+            return Self::from_lookup(&lookup);
         }
-        Self::from_shared_file("default")
+        if key || secret {
+            let (set, missing) = if key {
+                ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+            } else {
+                ("AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID")
+            };
+            return Err(SsmError::unreachable(format!(
+                "the AWS identity in this process's environment is half set: \
+                 {set} is set and {missing} is unset or empty. Refused rather \
+                 than signing as the credentials file's profile instead, which \
+                 would be a different identity from the one you exported."
+            )));
+        }
+        let profile = non_blank(lookup("AWS_PROFILE")).unwrap_or_else(|| "default".to_owned());
+        from_file(&profile)
     }
 
     /// One profile out of `~/.aws/credentials`.
@@ -311,12 +374,12 @@ impl AwsIdentity {
                 "HOME is unset, so ~/.aws/credentials cannot be located".to_owned(),
             ));
         };
-        Self::from_credentials_file(
-            &std::path::PathBuf::from(home)
-                .join(".aws")
-                .join("credentials"),
-            profile,
-        )
+        // AN EMPTY OR RELATIVE HOME IS REFUSED, not read as the working
+        // directory's `.aws/credentials` (CE-38, D-1769).
+        let home = brutex_core::knob::home(Some(home)).map_err(|why| {
+            SsmError::unreachable(format!("{why}, so ~/.aws/credentials cannot be located"))
+        })?;
+        Self::from_credentials_file(&home.join(".aws").join("credentials"), profile)
     }
 
     /// One profile out of a credentials file **the caller names**.
@@ -332,12 +395,52 @@ impl AwsIdentity {
     ///
     /// [`SsmError`] when the file is absent, the profile is not in it, or the
     /// profile carries no key pair — three different faults, named separately.
+    /// And, before any of those, when the path is not a regular file, when it
+    /// holds more than [`crate::config::MAX_FILE_BYTES`], or when it is not
+    /// UTF-8 — each named by its own sentence.
+    ///
+    /// # The read is bounded, and a FIFO is refused before it is opened
+    ///
+    /// This was `std::fs::read_to_string(path)`: no `is_file` check and no
+    /// bound. A FIFO at `~/.aws/credentials` blocked in `open` forever with
+    /// nothing logged, and a symlink to `/dev/zero` grew the string until the
+    /// allocator gave up — the two failures D-0036 removed from
+    /// `credentials.toml`, still reachable in the file beside it on the same
+    /// start-up path. It now goes through `crate::config::read_bounded`, the
+    /// same `metadata`-then-`take` shape, so the two credential files share one
+    /// bound and one refusal order. P1-19-03, D-2326; proved by
+    /// `pull::ssm::a_fifo_credentials_file_is_refused_without_opening_it`
+    /// and `pull::ssm::an_oversized_credentials_file_is_refused_by_size`.
     pub fn from_credentials_file(path: &std::path::Path, profile: &str) -> Result<Self, SsmError> {
-        let text = std::fs::read_to_string(path).map_err(|why| {
+        let read = crate::config::read_bounded(path).map_err(|why| {
             SsmError::unreachable(format!(
                 "the AWS identity is in neither the environment nor {}: {why}. \
                  This is the AWS key that proves you may READ the parameter — \
                  not the broker token, which is what comes back from it.",
+                path.display()
+            ))
+        })?;
+        let Some(bytes) = read else {
+            return Err(SsmError::unreachable(format!(
+                "{} is not a regular file (a FIFO, a device, a socket or a \
+                 directory), so it was refused before it was opened: a FIFO \
+                 with no writer blocks forever and a device never ends. The \
+                 AWS credentials file must be an ordinary file.",
+                path.display()
+            )));
+        };
+        if bytes.len() > crate::config::MAX_FILE_BYTES_LEN {
+            return Err(SsmError::unreachable(format!(
+                "{} holds more than {} bytes, which is more than any \
+                 credentials file this reader will take into memory; refused \
+                 rather than read whole",
+                path.display(),
+                crate::config::MAX_FILE_BYTES
+            )));
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            SsmError::unreachable(format!(
+                "{} is not UTF-8 text, so no profile in it can be read",
                 path.display()
             ))
         })?;
@@ -359,11 +462,13 @@ impl AwsIdentity {
             let Some((name, value)) = line.split_once('=') else {
                 continue;
             };
-            let value = value.trim().to_owned();
+            // An empty value is no value (D-1372): `aws_access_key_id =` with
+            // nothing after it does not make the profile complete.
+            let value = non_blank(Some(value.trim().to_owned()));
             match name.trim() {
-                "aws_access_key_id" => key_id = Some(value),
-                "aws_secret_access_key" => secret = Some(value),
-                "aws_session_token" => token = Some(value),
+                "aws_access_key_id" => key_id = value,
+                "aws_secret_access_key" => secret = value,
+                "aws_session_token" => token = value,
                 _ => {}
             }
         }
@@ -381,6 +486,43 @@ impl AwsIdentity {
             ))),
         }
     }
+}
+
+/// `None` for an absent value and for one that is empty or only whitespace.
+///
+/// One rule for both identity sources, so the environment and the file cannot
+/// disagree about whether a blank key is a key. D-1372.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
+/// The four AWS identity variables this module reads.
+const AWS_IDENTITY_VARS: [&str; 4] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+];
+
+/// Refuses, by name, an AWS identity variable that is set but not UTF-8.
+///
+/// `std::env::var(..).ok()` reads a non-UTF-8 value as UNSET, so a mangled
+/// `AWS_PROFILE` or key pair silently signed as `[default]`: an identity the
+/// operator did not choose, which D-1534 already refuses for the half-set
+/// case. Other environment readers in the workspace refuse non-UTF-8 by name,
+/// and this now does too (CE-69, D-1772). Four lookups, whatever the input.
+fn refuse_non_unicode(
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<(), SsmError> {
+    for name in AWS_IDENTITY_VARS {
+        if let Err(std::env::VarError::NotUnicode(_)) = read(name) {
+            return Err(SsmError::unreachable(format!(
+                "{name} is set but is not valid UTF-8. Refused rather than \
+                 read as unset, which would sign as a different AWS identity."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Lower-case hex, which is the only encoding `SigV4` accepts.
@@ -428,9 +570,16 @@ fn hmac(key: &[u8], data: &str) -> Vec<u8> {
 /// for the next, and one derived for `ap-south-1` cannot sign for anywhere else
 /// — which is why a leaked signature is worth so much less than a leaked secret.
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
+    signing_key_for(secret, date, region, SERVICE)
+}
+
+/// [`signing_key`] for a named service. Split out so the derivation can be
+/// checked against the vector AWS publishes, which is for service `iam`; this
+/// module only ever signs for [`SERVICE`].
+fn signing_key_for(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
     let k_date = hmac(format!("AWS4{secret}").as_bytes(), date);
     let k_region = hmac(&k_date, region);
-    let k_service = hmac(&k_region, SERVICE);
+    let k_service = hmac(&k_region, service);
     hmac(&k_service, "aws4_request")
 }
 
@@ -442,7 +591,7 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 /// `crate::ingest::parse_window` takes `today`: a function that reads the clock
 /// cannot be tested at its own boundary, and a signature is only checkable
 /// against a fixed instant.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Signable<'a> {
     /// The host header, `ssm.<region>.amazonaws.com`.
     pub host: &'a str,
@@ -454,6 +603,22 @@ pub struct Signable<'a> {
     pub body: &'a str,
     /// The session token, when the identity carries one.
     pub session_token: Option<&'a str>,
+}
+
+/// Redacted like [`AwsIdentity`]: the body names the real parameter path, which
+/// `CLAUDE.md` §8 keeps out of every tracked file, and the session token is a
+/// credential. A derived `Debug` printed both into any panic or log line that
+/// formatted a `Signable` (P11-02, D-1776).
+impl core::fmt::Debug for Signable<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Signable")
+            .field("host", &self.host)
+            .field("region", &self.region)
+            .field("stamp", &self.stamp)
+            .field("body", &"<redacted>")
+            .field("session_token", &self.session_token.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Signable<'_> {
@@ -501,10 +666,31 @@ impl Signable<'_> {
     ///
     /// # Errors
     ///
-    /// [`SecretError::Unavailable`] for a timestamp that cannot hold a date,
+    /// [`SecretError::Unreachable`] for a timestamp that cannot hold a date,
     /// which is this module refusing its own malformed input rather than
-    /// signing something meaningless.
+    /// signing something meaningless — and for a `region` that is not
+    /// [`crate::config::REGION`].
+    ///
+    /// # Why the region is checked HERE, and not only in the configuration
+    ///
+    /// `CLAUDE.md` §8 fixes the region: credentials are read from Parameter
+    /// Store in `ap-south-1`. `config` refuses any other region in the local
+    /// file, but this function and [`get_parameter`] are `pub` and took the
+    /// region as a free string, so any caller holding an identity could sign
+    /// and send a read to every other region's Parameter Store — the same
+    /// parameter path resolved against a different store. The rule was held by
+    /// one caller's discipline rather than by the one function every read
+    /// passes through. A signature is the last point before a packet exists,
+    /// so this is where the refusal sits. D-1371.
     pub fn authorization(&self, id: &AwsIdentity) -> Result<String, SsmError> {
+        if self.region != crate::config::REGION {
+            return Err(SsmError::unreachable(format!(
+                "refusing to sign a Parameter Store read for region {:?}: \
+                 CLAUDE.md §8 reads credentials from {} and nowhere else",
+                self.region,
+                crate::config::REGION
+            )));
+        }
         let date = self.date().ok_or_else(|| {
             SsmError::unreachable(format!(
                 "{:?} is not an AWS timestamp; it must be YYYYMMDDTHHMMSSZ",
@@ -560,6 +746,63 @@ fn refusal_detail(status: u16, body: &str) -> String {
              §8 keeps that path out of this process's output. See CloudTrail \
              for the full text."
         ),
+    }
+}
+
+/// The class of a fault AWS NAMED, or `None` for a name this build has no
+/// class for.
+///
+/// # Why the name outranks the status
+///
+/// This used to be decided by `AccessDenied` or 403, then `ParameterNotFound`
+/// or 404, and everything else was `Unreachable`, which the caller reads as
+/// transport. An expired session, an unknown key, a bad signature (a clock
+/// skewed past what AWS accepts lands here) and a malformed request are none of
+/// them fixed by asking again, yet each was told "worth retrying" and every
+/// instrument paid its own read (conc8-3, D-2692). Which HTTP status AWS sends
+/// them under is not recorded in the charter and is not assumed here.
+///
+/// The identity, the signature and the key are the role's problem, so
+/// `AccessDenied`. A missing parameter, a missing version and a request AWS
+/// says is malformed all send the operator to the configured path, so
+/// `NotFound`. A throttle, AWS's own failure and a write conflict are the only
+/// three that a later read can clear.
+const fn fault_kind(name: &str) -> Option<SecretError> {
+    Some(match name.as_bytes() {
+        b"AccessDeniedException"
+        | b"ExpiredTokenException"
+        | b"UnrecognizedClientException"
+        | b"InvalidSignatureException"
+        | b"MissingAuthenticationToken"
+        | b"InvalidKeyId" => SecretError::AccessDenied,
+        b"ParameterNotFound" | b"ParameterVersionNotFound" | b"ValidationException" => {
+            SecretError::NotFound
+        }
+        b"ThrottlingException" | b"InternalServerError" | b"TooManyUpdates" => {
+            SecretError::Unreachable
+        }
+        _ => return None,
+    })
+}
+
+/// Which of the port's meanings a refused read is: the fault AWS named, read
+/// from the same allowlist [`refusal_detail`] echoes, and the status only when
+/// it named none.
+fn refusal_kind(status: u16, body: &str) -> SecretError {
+    // The first listed name the body carries decides; the list is a fixed
+    // twelve, so this is a compile-time bound, not a search over the data.
+    for name in AWS_FAULTS {
+        if body.contains(name) {
+            if let Some(kind) = fault_kind(name) {
+                return kind;
+            }
+            break;
+        }
+    }
+    match status {
+        403 => SecretError::AccessDenied,
+        404 => SecretError::NotFound,
+        _ => SecretError::Unreachable,
     }
 }
 
@@ -622,7 +865,7 @@ const _: () = {
 ///
 /// # Errors
 ///
-/// [`SecretError::Unavailable`] when the body is not JSON, or does not carry
+/// [`SecretError::Unreachable`] when the body is not JSON, or does not carry
 /// `Parameter.Value` — named separately, because "AWS said no" and "AWS said
 /// something this build does not understand" are different faults with
 /// different fixes.
@@ -650,6 +893,25 @@ pub fn host_for(region: &str) -> String {
     format!("ssm.{region}.amazonaws.com")
 }
 
+/// The headers every `GetParameter` request carries whatever the identity.
+///
+/// # Why a function and not two literals at the call site
+///
+/// GAP2-38: the action this crate sends was named by a private constant that
+/// only [`get_parameter`] read, and no test named the literal. Changing
+/// [`TARGET`] to any other SSM action — `PutParameter` among them — would have
+/// compiled, passed every test, and turned the read-only credential path into
+/// a writer. `docs/04-invariants.md` P-05 claims a credential is read and never
+/// written; that claim is now pinned on the bytes that go on the wire, by
+/// `ssm::tests::the_only_action_on_the_wire_is_get_parameter`, because
+/// [`get_parameter`] takes its fixed headers from here and nowhere else.
+///
+/// `x-amz-date` and `authorization` are not here: both vary per request.
+#[must_use]
+pub const fn fixed_headers() -> [(&'static str, &'static str); 2] {
+    [("content-type", CONTENT_TYPE), ("x-amz-target", TARGET)]
+}
+
 /// The credential-dependent headers this request puts on the wire.
 ///
 /// Returned as data rather than applied in place so a test can hold it beside
@@ -674,6 +936,47 @@ fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
     }
 }
 
+/// Refuses a parameter value this build will not send as a credential.
+///
+/// # Empty, and whitespace-padded (P1-19-01, D-2525)
+///
+/// Empty was always refused. A value with leading or trailing whitespace —
+/// most often a newline pasted into the console with the token — was returned
+/// as it was: a newline then failed inside the HTTP client at send time and
+/// was reported as a transport fault ("was not reached") and retried like a
+/// network blip, never reaching the credential law. A padded value is now
+/// refused HERE, at the one place it arrives, as configuration. The value is
+/// never quoted and never trimmed: trimming would send a credential the
+/// operator did not store, which is a guess about what they meant.
+///
+/// # Errors
+///
+/// [`SecretError::Empty`] for an empty value and [`SecretError::Padded`] for a
+/// value with leading or trailing whitespace. Neither detail carries a byte of
+/// the value.
+fn refuse_unusable_value(value: &str) -> Result<(), SsmError> {
+    if value.is_empty() {
+        return Err(SsmError {
+            detail: "the parameter exists and holds nothing. An empty \
+                     credential is not a credential, and this build will not \
+                     send one to a broker."
+                .to_owned(),
+            kind: SecretError::Empty,
+        });
+    }
+    if value.trim() != value {
+        return Err(SsmError {
+            detail: "the parameter's value begins or ends with whitespace, \
+                     most often a newline stored with the token. This build \
+                     will not send it and will not trim it: re-store the \
+                     credential without the padding."
+                .to_owned(),
+            kind: SecretError::Padded,
+        });
+    }
+    Ok(())
+}
+
 /// One live `GetParameter` call, signed and sent.
 ///
 /// # This is the function that makes it real
@@ -694,7 +997,9 @@ fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
 /// # Errors
 ///
 /// [`SsmError`] for a socket that did not answer, a status that is not 200, or
-/// a body this build cannot read. AWS's own error code is mapped to the port's
+/// a body this build cannot read, and before any socket for a `region` that is
+/// not [`crate::config::REGION`] (see [`Signable::authorization`]). AWS's own
+/// error code is mapped to the port's
 /// vocabulary — `AccessDeniedException` and `ParameterNotFound` send an operator
 /// to opposite places and must not be flattened into "it failed".
 pub async fn get_parameter(
@@ -720,10 +1025,14 @@ pub async fn get_parameter(
 
     let mut request = client
         .post(format!("https://{host}/"))
-        .header("content-type", CONTENT_TYPE)
-        .header("x-amz-target", TARGET)
         .header("x-amz-date", stamp)
         .header("authorization", authorization);
+    // THE ACTION COMES FROM ONE PLACE, AND A TEST NAMES IT. See
+    // `fixed_headers`: this is the line that makes the read-only claim a
+    // property of the bytes sent rather than of a constant's spelling.
+    for (name, value) in fixed_headers() {
+        request = request.header(name, value);
+    }
 
     // A temporary credential MUST transmit the header its own signature covers.
     //
@@ -746,28 +1055,22 @@ pub async fn get_parameter(
         request = request.header(name, value);
     }
 
-    let answer = request.body(body).send().await.map_err(|why| {
+    let mut answer = request.body(body).send().await.map_err(|why| {
         // `why` is reqwest's own words and never carries a header this code
         // set, so neither secret can reach this string.
         SsmError::unreachable(format!("{host} was not reached: {why}"))
     })?;
 
     let status = answer.status();
-    let text = answer
-        .text()
-        .await
-        .map_err(|why| SsmError::unreachable(format!("the answer could not be read: {why}")))?;
+    // BOUNDED, LIKE EVERY OTHER VENDOR READ IN THIS CRATE. This was
+    // `answer.text()`, which held the whole body before anything looked at it,
+    // with only the client's 10 s timeout as a bound. See `answer_within`.
+    let text = answer_within(&mut answer).await?;
 
     if !status.is_success() {
         // AWS names its faults in the body; the port's four variants are what
         // an operator acts on. Mapped rather than flattened.
-        let kind = if text.contains("AccessDenied") || status.as_u16() == 403 {
-            SecretError::AccessDenied
-        } else if text.contains("ParameterNotFound") || status.as_u16() == 404 {
-            SecretError::NotFound
-        } else {
-            SecretError::Unreachable
-        };
+        let kind = refusal_kind(status.as_u16(), &text);
         // THE BODY IS NEVER QUOTED, AND THIS IS THE §8 LINE.
         //
         // The 300 characters of `text` that used to be spliced here were the
@@ -801,15 +1104,7 @@ pub async fn get_parameter(
     }
 
     let value = value_of(&text)?;
-    if value.is_empty() {
-        return Err(SsmError {
-            detail: "the parameter exists and holds nothing. An empty \
-                     credential is not a credential, and this build will not \
-                     send one to a broker."
-                .to_owned(),
-            kind: SecretError::Empty,
-        });
-    }
+    refuse_unusable_value(&value)?;
     // THE CREDENTIAL READ HAPPENED — AND NOT ONE BYTE OF THE CREDENTIAL.
     //
     // `CLAUDE.md` §8 keeps the parameter PATH out of every tracked file because
@@ -821,9 +1116,11 @@ pub async fn get_parameter(
     //
     // The `name` is deliberately absent: it IS the parameter path.
     //
-    // `Info`, and once per run. A pull that dies on its credential is the most
-    // common way a backfill ends, and until this line the log said nothing at
-    // all about whether the secret was ever read.
+    // `Info`, and once per read: per secret per instrument on a broker leg,
+    // because the caller reads per instrument (see `pooled_client`). This said
+    // "once per run" until D-1494 (GAP2-45). A pull that dies on its
+    // credential is the most common way a backfill ends, and until this line
+    // the log said nothing at all about whether the secret was ever read.
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.ssm", "credential read")
             .with("region", telemetry::Value::Str(region))
@@ -831,6 +1128,50 @@ pub async fn get_parameter(
             .with("value_len", telemetry::Value::Uint(value.len() as u64)),
     );
     Ok(value)
+}
+
+/// The most of one Parameter Store answer this build takes off the socket.
+///
+/// A `GetParameter` answer is one small JSON object: the parameter's name,
+/// type, version, ARN and dates, and one value — a broker credential, which is
+/// a header value. Sixteen kibibytes holds that with room to spare and is
+/// small enough that holding it costs nothing. The figure is this build's
+/// CHOICE, not an AWS limit: what AWS caps a parameter value at is UNVERIFIED
+/// here, because `docs/00-charter.md` records no AWS source. A real answer
+/// that ever runs past it is refused naming this number, so the cap is raised
+/// by a decision rather than by a silent truncation. D-2326.
+///
+/// Refusal bodies are read through the same cap: their text is only matched
+/// against fault names (see `refusal_detail`) and never quoted.
+pub const MAX_ANSWER_BYTES: usize = 16 * 1024;
+
+/// The body of a Parameter Store answer, refused past [`MAX_ANSWER_BYTES`].
+///
+/// Read through `crate::http::body_within`, the chunked reader every broker
+/// read in this crate uses, so memory never exceeds the cap plus one frame no
+/// matter what the far end sends. `body_within` stops at the first frame past
+/// the cap and reports a byte count above it; that count is what is refused,
+/// before any parse sees the kept prefix — a cut JSON object is not decoded as
+/// if it were whole. P1-19-03, D-2326; proved by
+/// `pull::ssm::an_oversized_parameter_store_answer_is_refused_by_size`.
+///
+/// # Errors
+///
+/// [`SsmError`] when a frame never arrives, or when the body runs past
+/// [`MAX_ANSWER_BYTES`] — two different sentences.
+async fn answer_within(answer: &mut reqwest::Response) -> Result<String, SsmError> {
+    let (text, seen) = crate::http::body_within(answer, MAX_ANSWER_BYTES)
+        .await
+        .map_err(|why| SsmError::unreachable(format!("the answer could not be read: {why}")))?;
+    if seen > MAX_ANSWER_BYTES {
+        return Err(SsmError::unreachable(format!(
+            "the Parameter Store answer (status {}) ran past {MAX_ANSWER_BYTES} \
+             bytes, which is more than one parameter's answer can need; refused \
+             rather than read whole",
+            answer.status().as_u16()
+        )));
+    }
+    Ok(text)
 }
 
 /// The current instant, in the basic ISO-8601 form `SigV4` requires.
@@ -855,35 +1196,27 @@ pub fn now_stamp() -> Result<String, SsmError> {
             )
         })?
         .as_secs();
-    // Civil date from a day count, by the same closed form `costs::day` uses —
-    // no calendar crate, and no float.
-    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    Ok(stamp_of(secs))
+}
+
+/// The `SigV4` `X-Amz-Date` of `secs` seconds past the Unix epoch:
+/// `YYYYMMDDTHHMMSSZ`.
+///
+/// The civil date is `telemetry::civil_from_days`, the workspace's one Hinnant
+/// implementation that `pull` can name (D-3513). This file carried a private
+/// copy whose comment said `pull` depended on `core` and `store` only, and
+/// nothing tested it: `now_stamp` reads the clock, so its one caller runs only
+/// against real AWS.
+fn stamp_of(secs: u64) -> String {
+    let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
     let rest = secs % 86_400;
-    let (y, m, d) = civil_from_days(days);
-    Ok(format!(
+    let (y, m, d) = telemetry::civil_from_days(days);
+    format!(
         "{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z",
         rest / 3600,
         (rest % 3600) / 60,
         rest % 60
-    ))
-}
-
-/// The civil date of a day count, by Howard Hinnant's `civil_from_days`.
-///
-/// The same algorithm `crates/costs/src/day.rs` carries, written here rather
-/// than depended on: `pull` does not take `costs`, and `docs/01-architecture.md`
-/// gives it `core` and `store` only. Integer arithmetic throughout.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    )
 }
 
 #[cfg(test)]
@@ -894,6 +1227,126 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    /// **conc8-3: a permanent fault is classed by its NAME, whatever the
+    /// status.** An expired or unknown identity, a bad signature (a skewed
+    /// clock lands here) and a malformed request are not fixed by retrying.
+    /// Classed as `Unreachable` they read as transport, so the run neither
+    /// stopped nor named the fault class. The status AWS sends them under is
+    /// not assumed: each is checked under 400 and under 500.
+    #[test]
+    fn a_permanent_parameter_store_fault_is_classed_by_its_name() {
+        for status in [400, 500] {
+            for (name, kind) in [
+                ("AccessDeniedException", SecretError::AccessDenied),
+                ("ExpiredTokenException", SecretError::AccessDenied),
+                ("UnrecognizedClientException", SecretError::AccessDenied),
+                ("InvalidSignatureException", SecretError::AccessDenied),
+                ("MissingAuthenticationToken", SecretError::AccessDenied),
+                ("InvalidKeyId", SecretError::AccessDenied),
+                ("ParameterNotFound", SecretError::NotFound),
+                ("ParameterVersionNotFound", SecretError::NotFound),
+                ("ValidationException", SecretError::NotFound),
+                ("ThrottlingException", SecretError::Unreachable),
+                ("InternalServerError", SecretError::Unreachable),
+                ("TooManyUpdates", SecretError::Unreachable),
+            ] {
+                let body = format!(r#"{{"__type":"{name}","message":"Refused."}}"#);
+                assert_eq!(refusal_kind(status, &body), kind, "{name} under {status}");
+            }
+        }
+        // EVERY ALLOWLISTED NAME HAS A CLASS OF ITS OWN, so a name added to
+        // `AWS_FAULTS` without one fails here rather than falling to the status.
+        for name in AWS_FAULTS {
+            assert!(fault_kind(name).is_some(), "{name} has no class");
+        }
+        // NO NAME: the status decides, as before.
+        assert_eq!(refusal_kind(403, "{}"), SecretError::AccessDenied);
+        assert_eq!(refusal_kind(404, "{}"), SecretError::NotFound);
+        assert_eq!(refusal_kind(400, "{}"), SecretError::Unreachable);
+        assert_eq!(refusal_kind(503, "<html>"), SecretError::Unreachable);
+    }
+
+    /// **A WHITESPACE-PADDED VALUE IS REFUSED WHERE IT ARRIVES (P1-19-01,
+    /// D-2525).**
+    ///
+    /// On the old code only `is_empty` was checked, so every padded case below
+    /// was returned as a credential: there was no `refuse_unusable_value` and no
+    /// `SecretError::Padded`, and a newline then failed inside the HTTP client as
+    /// a transport fault. Every leading and trailing ASCII whitespace byte is
+    /// walked on both ends, the whitespace-only values, the empty value, and
+    /// interior whitespace, which is not padding and is left to the header
+    /// check in `HttpSource::new`.
+    #[test]
+    fn a_whitespace_padded_parameter_value_is_refused_and_never_quoted() {
+        use crate::secret::SecretError;
+        let empty = refuse_unusable_value("").expect_err("empty refuses");
+        assert_eq!(empty.kind, SecretError::Empty);
+        for pad in [' ', '\t', '\n', '\r', '\u{0b}', '\u{0c}', '\u{a0}'] {
+            for value in [
+                format!("{pad}SECRETVALUE"),
+                format!("SECRETVALUE{pad}"),
+                format!("{pad}SECRETVALUE{pad}"),
+                format!("{pad}"),
+                format!("{pad}{pad}"),
+            ] {
+                let refused = refuse_unusable_value(&value).expect_err("padding refuses");
+                assert_eq!(refused.kind, SecretError::Padded, "{pad:?}");
+                assert!(
+                    !refused.detail.contains("SECRETVALUE"),
+                    "the value is never quoted: {}",
+                    refused.detail
+                );
+            }
+        }
+        for usable in ["SECRETVALUE", "S", "SECRET VALUE", "KEY:TOKEN"] {
+            assert!(
+                refuse_unusable_value(usable).is_ok(),
+                "{usable:?} has no padding"
+            );
+        }
+        // THE CALL SITE USES IT: `get_parameter` reads no value past it.
+        let source = include_str!("ssm.rs");
+        let body = source
+            .split("pub async fn get_parameter(")
+            .nth(1)
+            .expect("get_parameter exists");
+        assert!(
+            body.contains("refuse_unusable_value(&value)?;"),
+            "get_parameter refuses an unusable value before returning it"
+        );
+    }
+
+    /// D-3513 (ONEAUTH-14). The epoch, a leap day at both ends, the last
+    /// second of a century year that is not a leap year, and 2100.
+    #[test]
+    fn the_amz_date_is_the_civil_stamp_of_the_clock() {
+        assert_eq!(super::stamp_of(0), "19700101T000000Z");
+        assert_eq!(super::stamp_of(1_709_164_800), "20240229T000000Z");
+        assert_eq!(super::stamp_of(1_709_251_199), "20240229T235959Z");
+        assert_eq!(super::stamp_of(1_709_251_200), "20240301T000000Z");
+        assert_eq!(super::stamp_of(951_782_400), "20000229T000000Z");
+        assert_eq!(super::stamp_of(4_107_542_399), "21000228T235959Z");
+        assert_eq!(super::stamp_of(4_107_542_400), "21000301T000000Z");
+        assert_eq!(super::stamp_of(1_234_567_890), "20090213T233130Z");
+    }
+
+    /// D-3513: `now_stamp` is `stamp_of` the clock — sixteen characters, the
+    /// `T` and `Z` where `SigV4` puts them, digits elsewhere, and a date no
+    /// earlier than this change was written.
+    #[test]
+    fn the_clock_stamp_is_a_sigv4_date_of_now() {
+        let stamp = super::now_stamp().expect("the clock is after the epoch");
+        assert_eq!(stamp.len(), 16, "{stamp}");
+        for (k, c) in stamp.char_indices() {
+            match k {
+                8 => assert_eq!(c, 'T', "{stamp}"),
+                15 => assert_eq!(c, 'Z', "{stamp}"),
+                _ => assert!(c.is_ascii_digit(), "{stamp}"),
+            }
+        }
+        assert!(stamp.as_str() >= "20261006T000000Z", "{stamp}");
+    }
+
     /// §8 — the parameter path never reaches the output, whatever AWS says.
     #[test]
     fn a_refusal_never_repeats_the_body_that_names_the_parameter() {
@@ -985,10 +1438,32 @@ mod tests {
     /// endpoint, where it reads as a credentials problem.
     #[test]
     fn the_signing_key_matches_the_published_derivation() {
+        // THE PUBLISHED VECTOR, COMPARED (P1-14-01). This test said it checked
+        // AWS's derivation and asserted only length, determinism and
+        // inequality, which every HMAC chain satisfies: `AWS{secret}` for
+        // `AWS4{secret}`, a renamed `aws4_request` or reordered links all
+        // passed. AWS's "derive a signing key" example is for service `iam`
+        // with this secret, date and region, and its documented key is the
+        // hex below.
+        assert_eq!(
+            hex(&signing_key_for(
+                EXAMPLE_SECRET,
+                "20150830",
+                "us-east-1",
+                "iam"
+            )),
+            "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9",
+            "AWS's published signing key for its own worked example"
+        );
         let key = signing_key(EXAMPLE_SECRET, "20150830", "us-east-1");
-        // AWS's own worked example for service `iam`; this module signs for
-        // `ssm`, so the chain is re-derived here with the same first three
-        // links and asserted to be 32 bytes of HMAC-SHA256 output.
+        // The same chain for `ssm`, the one service this module signs for,
+        // computed outside this crate (an HMAC-SHA256 chain in another tool)
+        // from the same four links.
+        assert_eq!(
+            hex(&key),
+            "1b014a52e2c4682dbb4f9c057f77de175576bae388238bec84a63594a1c63358",
+            "the published chain with service `ssm`"
+        );
         assert_eq!(key.len(), 32, "HMAC-SHA256 is 32 bytes");
         // Deterministic: the same inputs give the same key, every time.
         assert_eq!(key, signing_key(EXAMPLE_SECRET, "20150830", "us-east-1"));
@@ -1127,6 +1602,17 @@ mod tests {
             session_token: None,
         };
         let header = signable.authorization(&identity()).expect("signs");
+        // THE WHOLE HEADER, PINNED (P1-14-01). The value was computed outside
+        // this crate by an independent `SigV4` implementation following AWS's
+        // specification (canonical request, string to sign, four-link key) for
+        // exactly these inputs, so a reordered string-to-sign or a changed
+        // chain fails here rather than against a live endpoint.
+        assert_eq!(
+            header,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/ap-south-1/ssm/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-date;x-amz-target, \
+             Signature=75a1dae843ac5a003e5a5e6e6cd8a3df0742ea7d527203b07a96e1024149233d"
+        );
         assert!(header.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/"));
         assert!(header.contains("/ap-south-1/ssm/aws4_request"));
         assert!(header.contains("SignedHeaders=content-type;host;x-amz-date;x-amz-target"));
@@ -1145,6 +1631,42 @@ mod tests {
         .authorization(&identity())
         .expect("signs");
         assert_ne!(header, later, "one second changes the signature");
+    }
+
+    /// `CLAUDE.md` §8: one region, and a signature for any other is refused.
+    ///
+    /// Before D-1371 `authorization` signed for whatever `region` it was handed,
+    /// so `get_parameter` — `pub`, taking the region as a free string — would
+    /// send a credential read to any region's Parameter Store. Only `config`
+    /// refused a foreign region, and only for the one caller that goes
+    /// through it. No network is touched: the refusal is before the client.
+    #[test]
+    fn a_signature_for_any_region_but_the_one_section_8_names_is_refused() {
+        for region in ["us-east-1", "ap-south-2", "AP-SOUTH-1", "ap-south-1 ", ""] {
+            let foreign = Signable {
+                host: "ssm.us-east-1.amazonaws.com",
+                region,
+                stamp: "20260807T120000Z",
+                body: "{}",
+                session_token: None,
+            };
+            let Err(SsmError { detail, kind }) = foreign.authorization(&identity()) else {
+                panic!("{region:?} is not ap-south-1 and must not be signed for")
+            };
+            assert_eq!(kind, SecretError::Unreachable, "{region:?}");
+            assert!(detail.contains("ap-south-1"), "{detail}");
+            assert!(detail.contains("§8"), "{detail}");
+        }
+        // And the one region the law names still signs.
+        let home = Signable {
+            host: "ssm.ap-south-1.amazonaws.com",
+            region: crate::config::REGION,
+            stamp: "20260807T120000Z",
+            body: "{}",
+            session_token: None,
+        };
+        let header = home.authorization(&identity()).expect("ap-south-1 signs");
+        assert!(header.contains("/ap-south-1/ssm/aws4_request"), "{header}");
     }
 
     /// A timestamp too short to hold a date is refused, not sliced.
@@ -1323,6 +1845,133 @@ mod tests {
         assert!(detail.contains("aws_secret_access_key"), "{detail}");
     }
 
+    /// An empty key is no key, in the file and in the environment alike.
+    ///
+    /// Before D-1372 `aws_access_key_id =` with nothing after it completed a
+    /// profile, and an empty exported `AWS_ACCESS_KEY_ID` built an identity
+    /// that shadowed the file in `discover`. Both signed a request AWS refuses
+    /// with a fault naming neither source.
+    #[test]
+    fn an_empty_key_is_refused_as_missing_and_never_signs() {
+        for (tag, body) in [
+            (
+                "empty-id",
+                "[default]\naws_access_key_id =\naws_secret_access_key = shhh\n",
+            ),
+            (
+                "empty-secret",
+                "[default]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key =   \n",
+            ),
+        ] {
+            let path = file_holding(tag, body);
+            let Err(SsmError { detail, .. }) = AwsIdentity::from_credentials_file(&path, "default")
+            else {
+                panic!("{tag}: a blank half of the pair is no pair")
+            };
+            assert!(detail.contains("aws_secret_access_key"), "{detail}");
+        }
+
+        // A blank token is absence, not a token of nothing that gets signed.
+        let path = file_holding(
+            "empty-token",
+            "[default]\naws_access_key_id = AKIAEXAMPLE\n\
+             aws_secret_access_key = shhh\naws_session_token =\n",
+        );
+        let id = AwsIdentity::from_credentials_file(&path, "default").expect("a full pair");
+        assert_eq!(id.session_token, None);
+
+        // The environment, through the same lookup `from_env` uses.
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        let Err(SsmError { detail, .. }) = AwsIdentity::from_lookup(env(&[
+            ("AWS_ACCESS_KEY_ID", ""),
+            ("AWS_SECRET_ACCESS_KEY", "shhh"),
+        ])) else {
+            panic!("an empty exported key id must not become an identity")
+        };
+        assert!(detail.contains("AWS_ACCESS_KEY_ID"), "{detail}");
+        assert!(detail.contains("empty"), "{detail}");
+
+        let id = AwsIdentity::from_lookup(env(&[
+            ("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"),
+            ("AWS_SECRET_ACCESS_KEY", "shhh"),
+            ("AWS_SESSION_TOKEN", ""),
+        ]))
+        .expect("a full pair");
+        assert_eq!(id.key_id, "AKIAEXAMPLE");
+        assert_eq!(id.session_token, None, "an empty token is not sent");
+    }
+
+    /// audit-20261003 errpaths-1 (D-1534). Discovery refuses a HALF-SET
+    /// environment identity loudly instead of discarding the env error and
+    /// signing as `[default]`, and it reads the profile `AWS_PROFILE` names
+    /// instead of always `[default]`.
+    #[test]
+    fn discovery_refuses_a_half_set_environment_and_honours_the_named_profile() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        let file = |profile: &str| {
+            Ok(AwsIdentity {
+                key_id: format!("FILE_{profile}"),
+                secret: "shhh".to_owned(),
+                session_token: None,
+            })
+        };
+
+        for half in [
+            &[("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")][..],
+            &[("AWS_SECRET_ACCESS_KEY", "shhh")][..],
+            &[
+                ("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"),
+                ("AWS_SECRET_ACCESS_KEY", ""),
+            ][..],
+        ] {
+            let found = AwsIdentity::discover_from(env(half), file);
+            let Err(SsmError { detail, .. }) = found else {
+                panic!("a half-set environment must be refused: {found:?}")
+            };
+            assert!(
+                detail.contains("AWS_ACCESS_KEY_ID") && detail.contains("AWS_SECRET_ACCESS_KEY"),
+                "the refusal names both halves: {detail}"
+            );
+        }
+
+        let named = AwsIdentity::discover_from(env(&[("AWS_PROFILE", "Second")]), file)
+            .expect("the named profile");
+        assert_eq!(named.key_id, "FILE_Second", "AWS_PROFILE picks the profile");
+
+        let fallback = AwsIdentity::discover_from(env(&[("AWS_PROFILE", "")]), file)
+            .expect("the default profile");
+        assert_eq!(
+            fallback.key_id,
+            format!("FILE_{}", "default"),
+            "an empty AWS_PROFILE is unset, as an empty key is"
+        );
+
+        let whole = AwsIdentity::discover_from(
+            env(&[
+                ("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"),
+                ("AWS_SECRET_ACCESS_KEY", "shhh"),
+                ("AWS_PROFILE", "Second"),
+            ]),
+            file,
+        )
+        .expect("a whole environment identity");
+        assert_eq!(whole.key_id, "AKIAEXAMPLE", "a whole env pair still wins");
+    }
+
     /// An absent file names the path it looked at, not "no credentials".
     #[test]
     fn an_absent_file_names_the_path_and_says_which_secret_this_is() {
@@ -1336,5 +1985,280 @@ mod tests {
             detail.contains("not the broker token"),
             "the two secrets are told apart in the refusal itself: {detail}"
         );
+    }
+
+    /// GAP2-38 / D-0948: the one SSM action this crate sends is
+    /// `GetParameter`, named by its literal, on the headers `get_parameter`
+    /// actually transmits — and the body asks for exactly a name and
+    /// decryption, nothing that could write.
+    ///
+    /// Before this, `TARGET` was read by `get_parameter` and by a signing test
+    /// that interpolated the constant into its own expectation, so changing it
+    /// to `PutParameter` passed every test.
+    #[test]
+    fn the_only_action_on_the_wire_is_get_parameter() {
+        let headers = fixed_headers();
+        let targets: Vec<&str> = headers
+            .iter()
+            .filter(|(name, _)| *name == "x-amz-target")
+            .map(|(_, value)| *value)
+            .collect();
+        assert_eq!(targets, ["AmazonSSM.GetParameter"]);
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| *name == "content-type"
+                    && *value == "application/x-amz-json-1.1")
+        );
+        for (name, value) in headers {
+            assert!(
+                !value.contains("Put") && !value.contains("Delete"),
+                "{name}: {value}"
+            );
+        }
+        let sent: serde_json::Value =
+            serde_json::from_str(&body("/anorg/anenv/avendor/afield", true)).expect("json body");
+        let object = sent.as_object().expect("an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["Name", "WithDecryption"]);
+        assert_eq!(object["WithDecryption"], serde_json::Value::Bool(true));
+    }
+
+    /// THE FREE FUNCTION REFUSES TOO, NOT ONLY THE SIGNER IT CALLS.
+    ///
+    /// The region test above proves `Signable::authorization` refuses; nothing
+    /// proved `get_parameter` passes that refusal on, so a body of
+    /// `Ok(String::new())` -- an empty secret handed to the broker as if it
+    /// were read -- survived gate 18. The refusal is before the client is
+    /// built, so no socket is opened and no network is needed. D-1456.
+    #[tokio::test]
+    async fn get_parameter_returns_the_signers_refusal_rather_than_a_value() {
+        let Err(SsmError { detail, kind }) = get_parameter(
+            &identity(),
+            "us-east-1",
+            "/org/env/vendor/field",
+            "20260807T120000Z",
+        )
+        .await
+        else {
+            panic!("a foreign region must not yield a parameter value")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("ap-south-1"), "{detail}");
+        assert!(detail.contains("§8"), "{detail}");
+    }
+
+    /// CE-69: a non-UTF-8 AWS variable is refused by name, not read as unset.
+    #[test]
+    fn a_non_unicode_aws_variable_is_refused_by_name() {
+        use std::env::VarError;
+        for bad in AWS_IDENTITY_VARS {
+            let read = |name: &str| {
+                if name == bad {
+                    Err(VarError::NotUnicode(std::ffi::OsString::from("x")))
+                } else {
+                    Err(VarError::NotPresent)
+                }
+            };
+            let Err(SsmError { detail, .. }) = refuse_non_unicode(read) else {
+                panic!("{bad} not UTF-8 must be refused")
+            };
+            assert!(detail.contains(bad), "the refusal names {bad}: {detail}");
+        }
+        let unset = refuse_non_unicode(|_: &str| Err(VarError::NotPresent));
+        assert!(unset.is_ok(), "unset variables are not refused here");
+        let set = refuse_non_unicode(|_: &str| Ok("AKIAEXAMPLE".to_owned()));
+        assert!(set.is_ok(), "UTF-8 values pass");
+    }
+
+    /// P11-02: a formatted `Signable` names neither the body nor the token.
+    #[test]
+    fn a_signable_prints_no_parameter_path_and_no_token() {
+        let signable = Signable {
+            host: "ssm.ap-south-1.amazonaws.com",
+            region: "ap-south-1",
+            stamp: "20261004T000000Z",
+            body: r#"{"Name":"PARAMETER-NAME"}"#,
+            session_token: Some("TOKEN-VALUE"),
+        };
+        let shown = format!("{signable:?}");
+        assert!(
+            !shown.contains("PARAMETER-NAME") && !shown.contains("TOKEN-VALUE"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("ap-south-1") && shown.contains("<redacted>"),
+            "{shown}"
+        );
+    }
+
+    /// **A FIFO AT `~/.aws/credentials` IS REFUSED, NOT WAITED ON.** P1-19-03,
+    /// D-2326. The read was `std::fs::read_to_string`, which opens first and a
+    /// read-only open of a FIFO with no writer blocks forever, with nothing
+    /// logged. The read runs on a thread so a regression is a failed assertion
+    /// after five seconds rather than a hung suite; a writer is then opened,
+    /// which is what releases a reader blocked in open(2).
+    ///
+    /// `mkfifo` is the external program, run from a test only, for the reason
+    /// `pull::ingest::a_fifo_at_the_lock_path_is_refused_rather_than_waited_on`
+    /// gives: `std` has no FIFO constructor and `CLAUDE.md` §2 forbids a binding.
+    #[test]
+    fn a_fifo_credentials_file_is_refused_without_opening_it() {
+        let dir = std::env::temp_dir().join(format!("brutex-ssm-{}-fifo", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let path = dir.join("credentials");
+        let _stale = std::fs::remove_file(&path);
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .status()
+            .expect("the FIFO this test is about can be made");
+        assert!(
+            made.success(),
+            "the premise: a FIFO at the credentials name"
+        );
+
+        let (tell, heard) = std::sync::mpsc::channel();
+        let asked = path.clone();
+        std::thread::spawn(move || {
+            let answer = AwsIdentity::from_credentials_file(&asked, "default").map(drop);
+            let _gone = tell.send(answer);
+        });
+        let answer = heard.recv_timeout(std::time::Duration::from_secs(5));
+        if answer.is_err() {
+            // Release the reader blocked in open(2) before failing.
+            let _writer = std::fs::OpenOptions::new().write(true).open(&path);
+        }
+        let Ok(Err(SsmError { detail, kind })) = answer else {
+            panic!("a FIFO credentials file must refuse promptly, got {answer:?}")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("not a regular file"), "{detail}");
+        assert!(
+            detail.contains("credentials"),
+            "the path is named: {detail}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **THE CREDENTIALS FILE IS BOUNDED AT THE READ.** A file of exactly
+    /// `crate::config::MAX_FILE_BYTES` is read and its profile found; one byte
+    /// more is refused naming the bound, so a symlink to a device or a runaway
+    /// file can no longer grow the read until the allocator gives up. A file
+    /// that is not UTF-8 is refused by its own sentence. P1-19-03, D-2326.
+    #[test]
+    fn an_oversized_credentials_file_is_refused_by_size() {
+        let profile = "[default]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key = shhh\n#";
+        let cap = crate::config::MAX_FILE_BYTES_LEN;
+        let pad = "x".repeat(cap - profile.len());
+        let exact = file_holding("cap exact", &format!("{profile}{pad}"));
+        assert_eq!(
+            std::fs::metadata(&exact)
+                .expect("the file was written")
+                .len(),
+            65_536
+        );
+        let id = AwsIdentity::from_credentials_file(&exact, "default")
+            .expect("a file of exactly the bound is read");
+        assert_eq!(id.key_id, "AKIAEXAMPLE");
+
+        let over = file_holding("cap over", &format!("{profile}{pad}x"));
+        let Err(SsmError { detail, kind }) = AwsIdentity::from_credentials_file(&over, "default")
+        else {
+            panic!("one byte past the bound must be refused")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("more than 65536 bytes"), "{detail}");
+
+        let dir = over.parent().expect("a scratch dir").to_path_buf();
+        let binary = dir.join("not utf8.bin");
+        std::fs::write(&binary, [0xff, 0xfe]).expect("a non-UTF-8 file");
+        let Err(SsmError { detail, .. }) = AwsIdentity::from_credentials_file(&binary, "default")
+        else {
+            panic!("a file that is not text holds no profile")
+        };
+        assert!(detail.contains("not UTF-8"), "{detail}");
+        for path in [exact, over] {
+            std::fs::remove_dir_all(path.parent().expect("a scratch dir")).ok();
+        }
+    }
+
+    /// One raw HTTP answer from a loopback socket, read by `answer_within`.
+    fn answered(head: &str, body: Vec<u8>) -> Result<String, SsmError> {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let address = socket.local_addr().expect("address");
+        let head = format!("HTTP/1.1 200 OK\r\n{head}Connection: close\r\n\r\n");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = socket.accept().expect("request");
+            let mut request = [0; 4096];
+            let received = stream.read(&mut request).expect("headers");
+            assert!(received > 0, "the client sent request bytes");
+            stream.write_all(head.as_bytes()).expect("response headers");
+            let _ = stream.write_all(&body);
+        });
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let mut answer = pooled_client()
+                    .expect("client")
+                    .get(format!("http://{address}"))
+                    .send()
+                    .await
+                    .expect("response");
+                answer_within(&mut answer).await
+            });
+        server.join().expect("fixture server");
+        result
+    }
+
+    /// **THE PARAMETER STORE ANSWER IS BOUNDED BEFORE IT IS HELD.** P1-19-03,
+    /// D-2326. `get_parameter` read it with `answer.text()`, whole, bounded
+    /// only by the client's timeout. An answer of exactly
+    /// [`MAX_ANSWER_BYTES`] is returned whole; one that runs past it is refused
+    /// naming the cap and the status, and a body that never arrives is refused
+    /// by its own sentence.
+    #[test]
+    fn an_oversized_parameter_store_answer_is_refused_by_size() {
+        assert_eq!(MAX_ANSWER_BYTES, 16_384);
+        let exact = answered("", vec![b'a'; MAX_ANSWER_BYTES]).expect("exactly the cap is read");
+        assert_eq!(exact.len(), MAX_ANSWER_BYTES);
+
+        let Err(SsmError { detail, kind }) = answered("", vec![b'a'; MAX_ANSWER_BYTES + 1]) else {
+            panic!("one byte past the cap must be refused")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("ran past 16384 bytes"), "{detail}");
+        assert!(detail.contains("status 200"), "{detail}");
+
+        let Err(SsmError { detail, .. }) = answered("Content-Length: 4\r\n", b"ab".to_vec()) else {
+            panic!("a body cut short is not an answer")
+        };
+        assert!(detail.contains("could not be read"), "{detail}");
+    }
+
+    /// **`get_parameter` READS ITS ANSWER THROUGH THE BOUNDED READER.** The
+    /// test above proves `answer_within` refuses; nothing else would notice
+    /// `get_parameter` going back to `answer.text()`, because its host is
+    /// fixed to AWS and no test can answer for it. So the shape is pinned on
+    /// the source, comments excluded. D-2326.
+    #[test]
+    fn get_parameter_reads_its_answer_through_the_bounded_reader() {
+        let source = include_str!("ssm.rs");
+        let start = source
+            .find("pub async fn get_parameter(")
+            .expect("the function");
+        let end = source.find("pub const MAX_ANSWER_BYTES").expect("the cap");
+        let code: String = source
+            .get(start..end)
+            .expect("the function precedes the cap")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(code.contains("answer_within(&mut answer)"), "{code}");
+        assert!(!code.contains(".text()"), "the whole-body read is back");
     }
 }

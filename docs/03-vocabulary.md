@@ -1,11 +1,15 @@
 # 03 — Condition vocabulary
 
-74 conditions. Bit index is the identity: **never renumbered, never reused,
-never reordered.** New conditions append at the next free bit.
+370 positions, 0–369. Bit index is the identity: **never renumbered, never
+reused, never reordered.** New conditions append at the next free bit.
 
-The mask is `u128`. Bits 0–73 are live; 74–127 are free headroom — 54 more
-conditions can be added without touching the mask type, the store, or any
-existing result.
+The mask is `ConditionMask`, six `u64` words: 384 bits, so 14 free positions
+remain before the mask must widen. Positions are live, retired (a duplicate of
+a live position, named in its row) or void (definitionally constant); §8 counts
+each. This opening used to describe the table as shipped — 74 conditions in a
+`u128` with 54 free — long after it passed 128 positions, and §2 said the
+evaluator produced a `u128`. `vocab::table::the_document_opening_states_the_current_table_and_mask`
+now reads both against `COUNT` and `ConditionMask::BITS`. D-0791.
 
 ---
 
@@ -23,8 +27,8 @@ that always evaluates false. The position is never recycled.
 
 ## 2. Evaluation contract
 
-For bar *i*, the evaluator produces one `u128` where bit *b* is set iff
-condition *b* holds at that bar.
+For bar *i*, the evaluator produces one `ConditionMask` where bit *b* is set
+iff condition *b* holds at that bar.
 
 A candidate mask *M* **hits** bar *i* iff:
 
@@ -43,9 +47,19 @@ recomputed per candidate, per worker, or per level.
 
 ## 3. Look-ahead
 
-At bar *i* the evaluator may read bars `0..=i` and nothing else. State that
-carries forward — moving averages, pivots, swing detection — updates **after**
-the bar is emitted, never before.
+At bar *i* the evaluator may read bars `0..=i` and nothing else. Within that,
+two kinds of state differ in when bar *i* enters them, and both are correct:
+
+- **Anchors** — levels fixed before the bar, such as pivots and the previous
+  session's ladders — are read for bar *i* and only then updated, so bar *i* is
+  compared with a reference it did not move.
+- **Descriptions** — running summaries of where price has traded, such as VWAP
+  (`indicators::vwap`, "fold, then emit") and the session's running extremes
+  (`indicators::session`) — fold bar *i* first and then emit, because a running
+  average that excluded the newest bar would describe the past, not the bar.
+
+Neither reads bar *i+1*. (This said every family updates **after** the bar is
+emitted, which the description families never did; p11num-4, D-1775.)
 
 Swing-based conditions (`bos_*`, `choch_*`, `near_swing_*`) confirm a swing
 only *k* bars after it occurred. That latency is correct and must not be
@@ -55,13 +69,18 @@ only *k* bars after it occurred. That latency is correct and must not be
 
 ## 4. Conditions that do not apply to daily bars
 
-Time-of-day bits (44–47) and VWAP bits (52–53) are meaningless on a 1-day bar.
-On a daily timeframe they are cleared, not left as noise. A bit that cannot be
-evaluated evaluates false — it never evaluates to "probably".
+Time-of-day bits (44–47) and the VWAP family are meaningless on a 1-day bar.
+No code clears them on daily bars, because `1day` is not a swept rung
+(`cli::EVERY_RUNG` stops at `60min`); a 1-day sweep would need that clearing first. A
+bit that cannot be evaluated evaluates false — it never evaluates to
+"probably".
 
-VWAP additionally requires traded volume. Spot indices carry none, so bits
-52–53 permanently abstain on the two engine instruments. That is honest and
-documented rather than quietly producing zeros that look like signal.
+VWAP additionally requires traded volume. Availability is chosen from the
+instrument kind before any bar is read (D-0507): spot indices carry no volume,
+so the VWAP family abstains on `NSE-NIFTY` and `NSE-BANKNIFTY`; the 208 F&O
+cash equities carry it, so the whole VWAP family is live on them. (This said
+VWAP abstains permanently on "the two engine instruments", which stopped being
+the whole engine surface at D-0506; p11num-4, D-1775.)
 
 ---
 
@@ -80,15 +99,15 @@ documented rather than quietly producing zeros that look like signal.
 
 ### Classic pivots — bits 6–12
 
-| Bit | Name |
-|---:|---|
-| 6 | `near_pivot_p` |
-| 7 | `near_pivot_r1` |
-| 8 | `near_pivot_r2` |
-| 9 | `near_pivot_r3` |
-| 10 | `near_pivot_s1` |
-| 11 | `near_pivot_s2` |
-| 12 | `near_pivot_s3` |
+| Bit | Name | Status |
+|---:|---|---|
+| 6 | `near_pivot_p` | **retired** — duplicates 62 |
+| 7 | `near_pivot_r1` | live |
+| 8 | `near_pivot_r2` | live |
+| 9 | `near_pivot_r3` | live |
+| 10 | `near_pivot_s1` | live |
+| 11 | `near_pivot_s2` | live |
+| 12 | `near_pivot_s3` | live |
 
 ### Previous-day high / low — bits 13–18
 
@@ -103,19 +122,19 @@ documented rather than quietly producing zeros that look like signal.
 
 ### Fibonacci — bearish anchor (PDH) — bits 19–29
 
-| Bit | Name |
-|---:|---|
-| 19 | `near_fib_0` |
-| 20 | `near_fib_236` |
-| 21 | `near_fib_382` |
-| 22 | `near_fib_50` |
-| 23 | `near_fib_618` |
-| 24 | `near_fib_786` |
-| 25 | `near_fib_100` |
-| 26 | `near_fib_1272` |
-| 27 | `near_fib_1618` |
-| 28 | `near_fib_200` |
-| 29 | `near_fib_2618` |
+| Bit | Name | Status |
+|---:|---|---|
+| 19 | `near_fib_0` | **retired** — duplicates 17 |
+| 20 | `near_fib_236` | live |
+| 21 | `near_fib_382` | live |
+| 22 | `near_fib_50` | live |
+| 23 | `near_fib_618` | live |
+| 24 | `near_fib_786` | live |
+| 25 | `near_fib_100` | **retired** — duplicates 18 |
+| 26 | `near_fib_1272` | live |
+| 27 | `near_fib_1618` | live |
+| 28 | `near_fib_200` | live |
+| 29 | `near_fib_2618` | live |
 
 ### Bar shape — bits 30–36
 
@@ -234,6 +253,9 @@ documented rather than quietly producing zeros that look like signal.
 ---
 
 ## 6. Headroom
+
+**Superseded by §8, kept for the record.** The table below is the headroom as
+shipped; §8 is the headroom now. D-0791.
 
 | | |
 |---|---|
@@ -501,43 +523,43 @@ indicators and the gap-leg spreadsheet the design comes from.
 
 | Bit | Name | Needs a tolerance | Status |
 |---:|---|---|---|
-| 235 | `near_forming_pivot_pivot` | — | **void** |
+| 235 | `near_forming_pivot_pivot` | yes | **void** |
 | 236 | `close_above_forming_pivot_pivot_band` | — | **void** |
 | 237 | `close_below_forming_pivot_pivot_band` | — | **void** |
-| 238 | `near_forming_pivot_cpr_bc` | — | **void** |
+| 238 | `near_forming_pivot_cpr_bc` | yes | **void** |
 | 239 | `close_above_forming_pivot_cpr_bc_band` | — | **void** |
 | 240 | `close_below_forming_pivot_cpr_bc_band` | — | **void** |
-| 241 | `near_forming_pivot_cpr_tc` | — | **void** |
+| 241 | `near_forming_pivot_cpr_tc` | yes | **void** |
 | 242 | `close_above_forming_pivot_cpr_tc_band` | — | **void** |
 | 243 | `close_below_forming_pivot_cpr_tc_band` | — | **void** |
-| 244 | `near_forming_pivot_r1` | — | **void** |
+| 244 | `near_forming_pivot_r1` | yes | **void** |
 | 245 | `close_above_forming_pivot_r1_band` | — | **void** |
 | 246 | `close_below_forming_pivot_r1_band` | — | **void** |
-| 247 | `near_forming_pivot_r2` | — | **void** |
+| 247 | `near_forming_pivot_r2` | yes | **void** |
 | 248 | `close_above_forming_pivot_r2_band` | — | **void** |
 | 249 | `close_below_forming_pivot_r2_band` | — | **void** |
-| 250 | `near_forming_pivot_r3` | — | **void** |
+| 250 | `near_forming_pivot_r3` | yes | **void** |
 | 251 | `close_above_forming_pivot_r3_band` | — | **void** |
 | 252 | `close_below_forming_pivot_r3_band` | — | **void** |
-| 253 | `near_forming_pivot_r4` | — | **void** |
+| 253 | `near_forming_pivot_r4` | yes | **void** |
 | 254 | `close_above_forming_pivot_r4_band` | — | **void** |
 | 255 | `close_below_forming_pivot_r4_band` | — | **void** |
-| 256 | `near_forming_pivot_r5` | — | **void** |
+| 256 | `near_forming_pivot_r5` | yes | **void** |
 | 257 | `close_above_forming_pivot_r5_band` | — | **void** |
 | 258 | `close_below_forming_pivot_r5_band` | — | **void** |
-| 259 | `near_forming_pivot_s1` | — | **void** |
+| 259 | `near_forming_pivot_s1` | yes | **void** |
 | 260 | `close_above_forming_pivot_s1_band` | — | **void** |
 | 261 | `close_below_forming_pivot_s1_band` | — | **void** |
-| 262 | `near_forming_pivot_s2` | — | **void** |
+| 262 | `near_forming_pivot_s2` | yes | **void** |
 | 263 | `close_above_forming_pivot_s2_band` | — | **void** |
 | 264 | `close_below_forming_pivot_s2_band` | — | **void** |
-| 265 | `near_forming_pivot_s3` | — | **void** |
+| 265 | `near_forming_pivot_s3` | yes | **void** |
 | 266 | `close_above_forming_pivot_s3_band` | — | **void** |
 | 267 | `close_below_forming_pivot_s3_band` | — | **void** |
-| 268 | `near_forming_pivot_s4` | — | **void** |
+| 268 | `near_forming_pivot_s4` | yes | **void** |
 | 269 | `close_above_forming_pivot_s4_band` | — | **void** |
 | 270 | `close_below_forming_pivot_s4_band` | — | **void** |
-| 271 | `near_forming_pivot_s5` | — | **void** |
+| 271 | `near_forming_pivot_s5` | yes | **void** |
 | 272 | `close_above_forming_pivot_s5_band` | — | **void** |
 | 273 | `close_below_forming_pivot_s5_band` | — | **void** |
 | 274 | `wide_cpr_day` | — | live |
@@ -570,11 +592,17 @@ No threshold, so nothing here is UNVERIFIED.
 | 278 | `structure_up_in_force` | the last break was upward |
 | 279 | `structure_down_in_force` | the last break was downward |
 
-Bits 56–59 are **break events** — `bos_up`, `bos_down`, `choch_up`, `choch_down` — each true
-only on the handful of bars where a level was taken out. `Structure::last` holds which
-direction is in force *between* those events, which is the regime, and it was unpublished: a
-sweep could ask "did structure break up on this bar" and could not ask "is the structure
-up".
+Bits 56–59 are `bos_bullish`, `bos_bearish`, `choch_bullish` and `choch_bearish`, and they
+are **not all events**. This paragraph used to call all four "break events ... each true only
+on the handful of bars where a level was taken out", and the section below already
+contradicted it. `Structure::classify` compares the close against the latched swing on every
+bar, so `bos_bullish`/`bos_bearish` (56–57) are **states**: true on every bar that closes
+beyond the swing in the direction already in force, for as long as that swing is the latch.
+`choch_bullish`/`choch_bearish` (58–59) fire on the bar the direction flips; the next bar
+beyond the same swing classifies as a `bos`, because `Structure::advance` has moved the
+latch (F-A9DB2D, D-0947). `Structure::last` holds which direction is in force, which is the
+regime, and it was unpublished: a sweep could ask "did structure break on this bar" and could
+not ask "is the structure up".
 
 **Neither is set before the first break.** There is no structure yet, and §4 forbids a bit
 evaluating to "probably". Same source and same latch as 56–59, so no new formula and no
@@ -589,45 +617,54 @@ from *has been above since this morning*, and a grep for `cross` across the whol
 returned zero. Even the break family is a state — `bos_up` fires on every bar above the
 swing high, not only the first.
 
-A crossing is two states one bar apart, and both states were already here, so these are
-**derived** rather than measured: `crossed_up_X` is `close_above_X` clear on the previous
-bar of this session and set on this one. No indicator module computes anything new.
+A crossing is a change between two states that were already here, so these are
+**derived** rather than measured: `crossed_up_X` is `close_above_X` set on this bar when
+the last definite side earlier in this session was below. A bar on neither side (on the
+level, or inside a band) records nothing and does not erase the remembered side (CX-01,
+the D-0244 amendment; this table said "clear on the previous bar" until D-3405). No
+indicator module computes anything new.
 
-**Seventeen levels, not thirty-five.** Sixteen `close_above_` names are `void` by D-0080,
-| 280 | `crossed_up_ema20` | `close_above_ema20` was clear on the previous bar and is set now |
-| 281 | `crossed_down_ema20` | `close_below_ema20` was clear on the previous bar and is set now |
-| 282 | `crossed_up_ema200` | `close_above_ema200` was clear on the previous bar and is set now |
-| 283 | `crossed_down_ema200` | `close_below_ema200` was clear on the previous bar and is set now |
-| 284 | `crossed_up_pdh` | `close_above_pdh` was clear on the previous bar and is set now |
-| 285 | `crossed_down_pdh` | `close_below_pdh` was clear on the previous bar and is set now |
-| 286 | `crossed_up_pdl` | `close_above_pdl` was clear on the previous bar and is set now |
-| 287 | `crossed_down_pdl` | `close_below_pdl` was clear on the previous bar and is set now |
-| 288 | `crossed_up_supertrend` | `close_above_supertrend` was clear on the previous bar and is set now |
-| 289 | `crossed_down_supertrend` | `close_below_supertrend` was clear on the previous bar and is set now |
-| 290 | `crossed_up_gap_mid` | `close_above_gap_mid` was clear on the previous bar and is set now |
-| 291 | `crossed_down_gap_mid` | `close_below_gap_mid` was clear on the previous bar and is set now |
-| 292 | `crossed_up_pivot_r1_band` | `close_above_pivot_r1_band` was clear on the previous bar and is set now |
-| 293 | `crossed_down_pivot_r1_band` | `close_below_pivot_r1_band` was clear on the previous bar and is set now |
-| 294 | `crossed_up_pivot_r2_band` | `close_above_pivot_r2_band` was clear on the previous bar and is set now |
-| 295 | `crossed_down_pivot_r2_band` | `close_below_pivot_r2_band` was clear on the previous bar and is set now |
-| 296 | `crossed_up_pivot_r3_band` | `close_above_pivot_r3_band` was clear on the previous bar and is set now |
-| 297 | `crossed_down_pivot_r3_band` | `close_below_pivot_r3_band` was clear on the previous bar and is set now |
-| 298 | `crossed_up_pivot_s1_band` | `close_above_pivot_s1_band` was clear on the previous bar and is set now |
-| 299 | `crossed_down_pivot_s1_band` | `close_below_pivot_s1_band` was clear on the previous bar and is set now |
-| 300 | `crossed_up_pivot_s2_band` | `close_above_pivot_s2_band` was clear on the previous bar and is set now |
-| 301 | `crossed_down_pivot_s2_band` | `close_below_pivot_s2_band` was clear on the previous bar and is set now |
-| 302 | `crossed_up_pivot_s3_band` | `close_above_pivot_s3_band` was clear on the previous bar and is set now |
-| 303 | `crossed_down_pivot_s3_band` | `close_below_pivot_s3_band` was clear on the previous bar and is set now |
-| 304 | `crossed_up_pivot_r4_band` | `close_above_pivot_r4_band` was clear on the previous bar and is set now |
-| 305 | `crossed_down_pivot_r4_band` | `close_below_pivot_r4_band` was clear on the previous bar and is set now |
-| 306 | `crossed_up_pivot_s4_band` | `close_above_pivot_s4_band` was clear on the previous bar and is set now |
-| 307 | `crossed_down_pivot_s4_band` | `close_below_pivot_s4_band` was clear on the previous bar and is set now |
-| 308 | `crossed_up_pivot_r5_band` | `close_above_pivot_r5_band` was clear on the previous bar and is set now |
-| 309 | `crossed_down_pivot_r5_band` | `close_below_pivot_r5_band` was clear on the previous bar and is set now |
-| 310 | `crossed_up_pivot_s5_band` | `close_above_pivot_s5_band` was clear on the previous bar and is set now |
-| 311 | `crossed_down_pivot_s5_band` | `close_below_pivot_s5_band` was clear on the previous bar and is set now |
-| 312 | `crossed_up_day_open` | `close_above_day_open` was clear on the previous bar and is set now |
-| 313 | `crossed_down_day_open` | `close_below_day_open` was clear on the previous bar and is set now |
+**Seventeen levels, not thirty-five.** Thirteen `close_above_` names are `void` by D-0080
+(the forming-day pivot levels) and five more are one-sided VWAP rows — 52, 143 and the
+band-1, band-2 and band-3 uppers 146, 148 and 193 — so seventeen two-sided levels remain
+(D-3406; this said sixteen and stopped mid-sentence).
+
+| Bit | Name | Fires when |
+|---|---|---|
+| 280 | `crossed_up_ema20` | `close_above_ema20` is set now, and the last definite side earlier in this session was below |
+| 281 | `crossed_down_ema20` | `close_below_ema20` is set now, and the last definite side earlier in this session was above |
+| 282 | `crossed_up_ema200` | `close_above_ema200` is set now, and the last definite side earlier in this session was below |
+| 283 | `crossed_down_ema200` | `close_below_ema200` is set now, and the last definite side earlier in this session was above |
+| 284 | `crossed_up_pdh` | `close_above_pdh` is set now, and the last definite side earlier in this session was below |
+| 285 | `crossed_down_pdh` | `close_below_pdh` is set now, and the last definite side earlier in this session was above |
+| 286 | `crossed_up_pdl` | `close_above_pdl` is set now, and the last definite side earlier in this session was below |
+| 287 | `crossed_down_pdl` | `close_below_pdl` is set now, and the last definite side earlier in this session was above |
+| 288 | `crossed_up_supertrend` | `close_above_supertrend` is set now, and the last definite side earlier in this session was below |
+| 289 | `crossed_down_supertrend` | `close_below_supertrend` is set now, and the last definite side earlier in this session was above |
+| 290 | `crossed_up_gap_mid` | `close_above_gap_mid` is set now, and the last definite side earlier in this session was below |
+| 291 | `crossed_down_gap_mid` | `close_below_gap_mid` is set now, and the last definite side earlier in this session was above |
+| 292 | `crossed_up_pivot_r1_band` | `close_above_pivot_r1_band` is set now, and the last definite side earlier in this session was below |
+| 293 | `crossed_down_pivot_r1_band` | `close_below_pivot_r1_band` is set now, and the last definite side earlier in this session was above |
+| 294 | `crossed_up_pivot_r2_band` | `close_above_pivot_r2_band` is set now, and the last definite side earlier in this session was below |
+| 295 | `crossed_down_pivot_r2_band` | `close_below_pivot_r2_band` is set now, and the last definite side earlier in this session was above |
+| 296 | `crossed_up_pivot_r3_band` | `close_above_pivot_r3_band` is set now, and the last definite side earlier in this session was below |
+| 297 | `crossed_down_pivot_r3_band` | `close_below_pivot_r3_band` is set now, and the last definite side earlier in this session was above |
+| 298 | `crossed_up_pivot_s1_band` | `close_above_pivot_s1_band` is set now, and the last definite side earlier in this session was below |
+| 299 | `crossed_down_pivot_s1_band` | `close_below_pivot_s1_band` is set now, and the last definite side earlier in this session was above |
+| 300 | `crossed_up_pivot_s2_band` | `close_above_pivot_s2_band` is set now, and the last definite side earlier in this session was below |
+| 301 | `crossed_down_pivot_s2_band` | `close_below_pivot_s2_band` is set now, and the last definite side earlier in this session was above |
+| 302 | `crossed_up_pivot_s3_band` | `close_above_pivot_s3_band` is set now, and the last definite side earlier in this session was below |
+| 303 | `crossed_down_pivot_s3_band` | `close_below_pivot_s3_band` is set now, and the last definite side earlier in this session was above |
+| 304 | `crossed_up_pivot_r4_band` | `close_above_pivot_r4_band` is set now, and the last definite side earlier in this session was below |
+| 305 | `crossed_down_pivot_r4_band` | `close_below_pivot_r4_band` is set now, and the last definite side earlier in this session was above |
+| 306 | `crossed_up_pivot_s4_band` | `close_above_pivot_s4_band` is set now, and the last definite side earlier in this session was below |
+| 307 | `crossed_down_pivot_s4_band` | `close_below_pivot_s4_band` is set now, and the last definite side earlier in this session was above |
+| 308 | `crossed_up_pivot_r5_band` | `close_above_pivot_r5_band` is set now, and the last definite side earlier in this session was below |
+| 309 | `crossed_down_pivot_r5_band` | `close_below_pivot_r5_band` is set now, and the last definite side earlier in this session was above |
+| 310 | `crossed_up_pivot_s5_band` | `close_above_pivot_s5_band` is set now, and the last definite side earlier in this session was below |
+| 311 | `crossed_down_pivot_s5_band` | `close_below_pivot_s5_band` is set now, and the last definite side earlier in this session was above |
+| 312 | `crossed_up_day_open` | `close_above_day_open` is set now, and the last definite side earlier in this session was below |
+| 313 | `crossed_down_day_open` | `close_below_day_open` is set now, and the last definite side earlier in this session was above |
 
 ### Which test of this level this is — bits 314–364, D-0246
 
@@ -765,7 +802,7 @@ A bar with `close == open` is **neither direction**. It sets neither 37 `prior_n
 nor 38 `prior_n_bearish`, and it **breaks** 39 `prior_alternating`, because a bar that is
 neither direction cannot be the opposite of its neighbour.
 
-This matches what 30 `bar_bullish` and 31 `bar_up`/31 `bar_bearish` already do for the
+This matches what 30 `bar_bullish` and 31 `bar_bearish` already do for the
 current bar — a flat bar sets neither, and 32 `bar_doji` is what fires instead. The
 prior-direction ring used to store a `bool` and file a flat bar as bearish, so 38 asserted
 three bearish bars over a run in which 31 never fired once. It now stores an

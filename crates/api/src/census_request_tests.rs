@@ -1206,8 +1206,25 @@ fn past_a_ctime_tick(path: &Path, change: impl Fn()) {
 /// driven here. Like `folder`'s unreadable-folder test, this needs a process
 /// the permission binds, which a root process is not.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+#[test]
+fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_manifest_directory_this_process_may_not_search_is_not_served_as_absent",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a test runtime")
+                .block_on(
+                    a_manifest_directory_this_process_may_not_search_is_not_served_as_absent_body(),
+                );
+        },
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent_body() {
     let fixture = Fixture::new("census-request-manifest-unsearchable");
     let dir = fixture.root.join("manifest");
     fs::create_dir_all(&dir).expect("an empty manifest directory");
@@ -1495,8 +1512,25 @@ async fn bars_names_every_unreadable_census_when_no_readable_census_holds_the_na
 /// directory tests, this needs a process the permission binds, which a root
 /// process is not.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+#[test]
+fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_permission_change_on_a_manifest_file_is_seen_on_the_next_request",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a test runtime")
+                .block_on(
+                    a_permission_change_on_a_manifest_file_is_seen_on_the_next_request_body(),
+                );
+        },
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-manifest-file-mode");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
@@ -2091,6 +2125,15 @@ fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() 
 #[cfg(unix)]
 #[test]
 fn a_fault_its_stamp_can_see_is_cached() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_fault_its_stamp_can_see_is_cached",
+        a_fault_its_stamp_can_see_is_cached_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_fault_its_stamp_can_see_is_cached_body() {
     use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-kept-faults");
@@ -2935,7 +2978,7 @@ fn what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source() {
         (
             "Sink::emit_for_run",
             emit,
-            "let _terminated = inner.target.append(b\"\\n\");",
+            "inner.torn = inner.target.append(b\"\\n\").is_err();",
             &["ends the fragment"],
         ),
         (
@@ -3853,4 +3896,39 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
         kept_nifty(&fixture).is_some_and(|(_, again)| Arc::ptr_eq(&kept.1, &again)),
         "the held name's next call met its calendar"
     );
+}
+
+/// **`/calendar.json` is built once per census snapshot, feed and name, and a
+/// refusal or an unheld name is built every time.** W1-api5-5, D-2286.
+///
+/// The repeat is the same body without a build; a name the feed's census does
+/// not hold is answered and never kept, so request text cannot grow the memo;
+/// and a new snapshot, as a pull leaves, drops every kept answer.
+#[tokio::test]
+async fn calendar_json_is_built_once_per_snapshot() {
+    let fixture = nifty_store("census-request-calendar-memo");
+    let memo = &fixture.site.calendar_memo;
+    let start = memo.builds();
+    let (status, first) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{first}");
+    assert!(first.contains(r#""sessions":1"#), "{first}");
+    assert_eq!(fixture.calendar_answer("feed=dhan").await.1, first);
+    assert_eq!(memo.builds() - start, 1, "the repeat built nothing");
+    let (status, named) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{named}");
+    assert_eq!(
+        fixture.calendar_answer("feed=dhan&symbol=NIFTY").await.1,
+        named
+    );
+    assert_eq!(memo.builds() - start, 2, "a held name is kept too");
+    for _ in 0..3 {
+        let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NOSUCH").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    }
+    assert_eq!(memo.builds() - start, 5, "an unheld name is never kept");
+    assert_eq!(memo.len(), 2, "and holds no slot");
+    cold(&fixture);
+    assert_eq!(fixture.calendar_answer("feed=dhan").await.1, first);
+    assert_eq!(memo.builds() - start, 6, "a new snapshot builds again");
+    assert_eq!(memo.len(), 1, "and dropped the older snapshot's answers");
 }

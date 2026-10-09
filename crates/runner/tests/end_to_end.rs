@@ -200,13 +200,17 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         folds.folds.iter().map(|f| f.out_of_sample.worst).collect(),
         vec![0; folds.folds.len()],
     ];
-    let rc = bootstrap::reality_check(&series, 200, 7, bootstrap::DEFAULT_BLOCK);
-    let spa = bootstrap::spa(&series, 200, 7, bootstrap::DEFAULT_BLOCK);
+    // One fold is one period, and there are fewer folds than `DEFAULT_BLOCK`,
+    // which D-1990 refuses as a block longer than the sample. The block is the
+    // fold count at most.
+    let block = bootstrap::DEFAULT_BLOCK.min(folds.folds.len()).max(1);
+    let rc = bootstrap::reality_check(&series, 200, 7, block);
+    let spa = bootstrap::spa(&series, 200, 7, block);
     assert!(
         rc.is_some() && spa.is_some(),
         "aligned series must produce verdicts"
     );
-    let named = bootstrap::romano_wolf(&series, 200, 7, bootstrap::DEFAULT_BLOCK, 50_000);
+    let named = bootstrap::romano_wolf(&series, 200, 7, block, 50_000);
     assert!(
         named.len() <= series.len(),
         "the stepdown cannot reject more strategies than exist"
@@ -221,7 +225,7 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         Some(&exits),
         Some(&folds),
         Some(&overfit),
-        Some((rc.as_ref(), spa.as_ref(), named.len())),
+        Some((rc.as_ref(), spa.as_ref(), Some(named.len()))),
         6,
     );
     for section in [

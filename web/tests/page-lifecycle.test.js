@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
 import { createPageRequests, watchVisible } from '../src/lib/page-requests.js';
 import { pooled } from '../src/lib/pooled.js';
+import { generationOf, mergePages, nextOrdinal, pageFor } from '../src/lib/audit-pages.js';
+import * as refusal from '../src/lib/refusal.js';
 
 /** @param {string} route @param {string[]} names */
 function functions(route, names) {
@@ -62,23 +64,32 @@ test('the actual Autopilot reader cannot publish a response, error, or body afte
 
 /** @param {(url:string, options?:RequestInit)=>Promise<Response>} request */
 function auditPage(request) {
-  const { code } = functions('audit', ['read', 'refreshCurrent', 'refresh', 'readOlder', 'loadOlder']);
+  const { source, code } = functions('audit', ['read', 'refreshCurrent', 'refresh', 'readOlder', 'loadOlder']);
+  // `PAGE_ROWS` and the `$derived` `merged` are the page's own: the number is
+  // read from the source, and `merged` is recomputed on each read exactly as
+  // the page derives it (P1-06-03 made `readOlder` read both).
+  const rows = source.match(/const PAGE_ROWS = (\d+);/);
+  assert.ok(rows, 'audit: the actual PAGE_ROWS constant is required');
+  assert.match(source, /const merged = \$derived\(mergePages\(payload\?\.runs \?\? \[\], older\)\);/);
   const timer = clock();
-  const create = new Function('ask', 'createPageRequests', 'timer', `
+  const create = new Function('ask', 'createPageRequests', 'timer', 'mergePages', 'nextOrdinal', 'pageFor', 'generationOf', `
     const feeds={active:'A'}, document={hidden:false}, load={state:'idle',error:null};
     const auditRequests=createPageRequests(timer), olderRequests=createPageRequests(timer);
     let payload=null, samples=[], rtt=[], base=null, older=[], pagesHeld=1, loadingOlder=false, live=true;
     const SAMPLES=32, MAX_PAGES=16, hot=false, HOT_MS=2000, COLD_MS=8000;
+    const PAGE_ROWS=${rows[1]};
+    with ({ get merged() { return mergePages(payload?.runs ?? [], older); } }) {
     ${code}
     return {refresh,loadOlder,feeds,load,timer,auditRequests,olderRequests,
       state:()=>({payload,older,pagesHeld,loadingOlder}),
       stop:()=>{auditRequests.dispose();olderRequests.dispose();},
       hide:()=>{document.hidden=true;auditRequests.cancel();olderRequests.cancel();}};
+    }
   `);
-  return create(request, createPageRequests, timer);
+  return create(request, createPageRequests, timer, mergePages, nextOrdinal, pageFor, generationOf);
 }
 /** @param {string} label */
-const auditBody = (label) => ({ label, at: 10, store: { months: [], bars: 1, instrument_months: 1, generation: 1 }, runs: [label], journal: { pages: 3 } });
+const auditBody = (label) => ({ label, at: 10, store: { months: [], bars: 1, instrument_months: 1, generation: 1 }, runs: [{ ordinal: 500, label }], journal: { pages: 3, records: 501 } });
 
 test('the actual Audit stream coalesces rapid refresh and A → B → A changes without accepting the older A', async () => {
   /** @type {{url:string,signal:AbortSignal|null|undefined,reply:ReturnType<typeof deferred>}[]} */ const requests = [];
@@ -128,6 +139,7 @@ test('the actual Audit older-page response cannot append after changing feed or 
     else app.stop();
     old.resolve(Response.json(auditBody('stale older page')));
     await reading;
+    assert.equal(calls, 2, `${replacement}: the older page was really asked for, so the refusal is not vacuous`);
     assert.deepEqual(app.state().older, []);
     assert.equal(app.state().pagesHeld, 1);
     app.stop();
@@ -242,7 +254,7 @@ function ingestPage(request) {
   const { source, code } = functions('ingest', ['stopWatchingRun', 'resumeRunCurrent', 'resumeRun', 'pollRunCurrent', 'watchRun']);
   assert.match(source, /viewAlive = false;\s*resumeRequests.dispose\(\);\s*stopWatchingRun\(\)/);
   const timer = clock();
-  const create = new Function('request', 'createPageRequests', 'realWatchVisible', 'timer', `
+  const create = new Function('request', 'createPageRequests', 'realWatchVisible', 'timer', ...Object.keys(refusal), `
     const resumeRequests=createPageRequests(timer), POLL_MS=2000;
     let viewAlive=true,stopRunWatch=null,runWatchPromise=null,finishRunWatch=null,wake=()=>{};
     const document={visibilityState:'visible',addEventListener:(_,fn)=>{wake=fn;},removeEventListener:()=>{wake=()=>{};}};
@@ -255,7 +267,7 @@ function ingestPage(request) {
       hide:()=>{document.visibilityState='hidden';wake();}, show:()=>{document.visibilityState='visible';wake();},
       dispose:()=>{viewAlive=false;resumeRequests.dispose();stopWatchingRun();}};
   `);
-  return create(request, createPageRequests, watchVisible, timer);
+  return create(request, createPageRequests, watchVisible, timer, ...Object.values(refusal));
 }
 const runningIngest = () => ({ running: true, feeds: [{ legs: 2, legsDone: 1, doing: 'fixture progress' }] });
 

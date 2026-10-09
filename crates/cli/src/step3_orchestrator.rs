@@ -137,7 +137,8 @@ pub struct StoredCandidatePreAdmissionBoundsV1 {
 ///
 /// The request contains no raw market bytes, digest, calendar receipt, source
 /// commit, depth, fallback or pre-resolved result. `underlying` is validated by
-/// the canonical stored loader against the two-instrument sweep surface, and
+/// the canonical stored loader against the NSE sweep surface `CLAUDE.md` §1
+/// names (the two spot indices and the F&O cash equities), and
 /// `rung_name` is resolved by the existing stored timeframe authority.
 #[derive(Clone, Copy)]
 pub struct StoredCandidatePreAdmissionRequestV1<'a> {
@@ -496,6 +497,60 @@ pub(crate) struct BoundedStoredContextV1 {
     pub(crate) strict: Option<Arc<strict::Inputs>>,
 }
 
+impl BoundedStoredContextV1 {
+    /// Rows this context's Candidate signal column sweeps: the support
+    /// denominator a ledger sizes its threshold on (D-2103).
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of the Candidate column build.
+    pub(crate) fn candidate_swept_v1(
+        &self,
+        evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+    ) -> Result<u64, Step3OrchestratorRefusal> {
+        crate::candidate_universe::candidate_signal_swept_v1(
+            &self.signal.bars,
+            &self.daily.references,
+            &self.minute.bars,
+            self.rung_seconds,
+            evaluation,
+        )
+    }
+}
+
+/// Load one stored context exactly as a Candidate commit does and count the
+/// rows its signal column sweeps (D-2103). `ledger-all` sizes each rung's
+/// threshold on this for its sizing underlying.
+///
+/// # Errors
+///
+/// Every loader and column-build refusal, named by the stage that raised it.
+pub(crate) fn stored_candidate_swept_v1(
+    root: &Path,
+    vendor: Vendor,
+    (underlying, rung_name): (&str, &str),
+    (from, to): ((u16, u8), (u16, u8)),
+    bounds: StoredCandidatePreAdmissionBoundsV1,
+    evaluation: &crate::candidate_universe::CandidateEvaluationInputsV1,
+) -> Result<u64, Step3OrchestratorRefusal> {
+    let root = AdmittedRootV1::admit(root)?;
+    load_bounded_stored_context_from_spec_v1(
+        StoredContextLoadSpecV1 {
+            vendor,
+            underlying,
+            rung_name,
+            from,
+            to,
+            signal_bound: bounds.signal_records,
+            minute_bound: bounds.minute_records,
+            daily_bound: bounds.daily_records,
+        },
+        &root,
+        None,
+    )?
+    .candidate_swept_v1(evaluation)
+}
+
 #[path = "stored_family_v6.rs"]
 pub(crate) mod family_v6;
 #[path = "strict_v6_inputs.rs"]
@@ -654,6 +709,22 @@ pub(crate) struct CommittedStoredCandidatePreAdmissionV1 {
     committed: CommittedCandidatePreAdmissionV1,
     search: StoredSearchMemberV4,
     execution: RetainedStoredExecutionContextV1,
+    /// The first successful Execution V3 replay and the exact authenticated
+    /// Candidate rows it was computed from. D-0994.
+    execution_replay: ExecutionReplayMemoV1,
+}
+
+/// One remembered deterministic replay: its complete input row set and result.
+type ExecutionReplayMemoV1 = std::sync::OnceLock<(
+    Vec<AuthenticatedCandidatePopulationRowV1>,
+    CandidateExecutionReplayAuthorityV1,
+)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Full Execution V3 replays performed on this test thread. D-0994.
+    pub(crate) static EXECUTION_V3_REPLAYS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 impl CommittedStoredCandidatePreAdmissionV1 {
@@ -726,15 +797,50 @@ impl CommittedStoredCandidatePreAdmissionV1 {
 
     /// Rebuilds exact Runner terminal dispositions from this retained stored
     /// source and its freshly authenticated Candidate bytes.
+    ///
+    /// Every call re-proves the live inputs: the admitted root identity before
+    /// and after, a fresh read-only reopen and full authentication of the
+    /// Candidate ledger, and the strict source guard when one is retained.
+    /// What is not repeated is the replay itself once it has succeeded for the
+    /// exact same authenticated row set. That replay is a deterministic
+    /// function of this capability's private, immutable retained context and
+    /// Candidate receipt (no `&mut` path to either exists) plus those rows, so
+    /// recomputing it can only reproduce the remembered value. Before D-0994
+    /// the nested before/after reauthentication of Population V5, Execution V3
+    /// and Selection V5 re-ran it dozens of times per rung. A different row set
+    /// is never answered from the memo; it is replayed in full.
     pub(crate) fn execution_v3_replay_authority(
         &self,
     ) -> Result<CandidateExecutionReplayAuthorityV1, Step3OrchestratorRefusal> {
         self.root
             .require_same("before Candidate Execution V3 replay authentication")?;
         let rows = self.authenticated_candidate_population_rows()?;
-        let authority = self.execution.execution_v3_replay(&self.committed, &rows)?;
+        let authority = self.memoized_execution_v3_replay(&rows)?;
         self.root
             .require_same("after Candidate Execution V3 replay authentication")?;
+        Ok(authority)
+    }
+
+    /// The memo door behind [`Self::execution_v3_replay_authority`]. Only the
+    /// first successful replay is remembered, keyed by its complete row set.
+    fn memoized_execution_v3_replay(
+        &self,
+        rows: &[AuthenticatedCandidatePopulationRowV1],
+    ) -> Result<CandidateExecutionReplayAuthorityV1, Step3OrchestratorRefusal> {
+        self.execution.stored.require_current()?;
+        if let Some((remembered_rows, authority)) = self.execution_replay.get()
+            && remembered_rows.as_slice() == rows
+        {
+            return Ok(authority.clone());
+        }
+        #[cfg(test)]
+        EXECUTION_V3_REPLAYS.with(|count| count.set(count.get().saturating_add(1)));
+        let authority = self.execution.execution_v3_replay(&self.committed, rows)?;
+        // A lost race or an earlier different row set keeps the first memo;
+        // this call still returns its own freshly replayed authority.
+        let _first_success_only = self
+            .execution_replay
+            .set((rows.to_vec(), authority.clone()));
         Ok(authority)
     }
 
@@ -2976,12 +3082,24 @@ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
 }
 
 /// Strict institutional door; ordinary callers retain the historical contract.
-pub(crate) fn commit_strict_candidate_pre_admission_authority_v1(
+///
+/// It consumes the strict context the rung's sizing census already loaded
+/// when one is offered (D-1683), and loads one when given `None`. Before
+/// D-1683 this door was `commit_strict_candidate_pre_admission_authority_v1`
+/// and always loaded.
+///
+/// # Errors
+///
+/// Every load, admission and commit refusal, plus a sized context that names another
+/// root, vendor, family, rung, span, bound or configuration, or whose sources
+/// changed since sizing.
+pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     config: &crate::audited_range_command::StrictConfig,
+    sized: Option<strict::SizedNifty>,
 ) -> Result<family_v6::StoredFamilyV6, String> {
     let commit = VerifiedBuildCommitV1::current()?;
-    commit_family_with_inputs_v6(request, commit, &|_, _, _| {}, Some(config), true)
+    commit_family_from_v6(request, commit, &|_, _, _| {}, Some(config), true, sized)
 }
 
 fn commit_stored_with_verified_build_v1(
@@ -3012,8 +3130,29 @@ fn commit_family_with_inputs_v6(
     config: Option<&crate::audited_range_command::StrictConfig>,
     allow_extinct: bool,
 ) -> Result<family_v6::StoredFamilyV6, String> {
+    commit_family_from_v6(
+        request,
+        verified_commit,
+        on_level,
+        config,
+        allow_extinct,
+        None,
+    )
+}
+
+fn commit_family_from_v6(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    config: Option<&crate::audited_range_command::StrictConfig>,
+    allow_extinct: bool,
+    sized: Option<strict::SizedNifty>,
+) -> Result<family_v6::StoredFamilyV6, String> {
     let mut root = AdmittedRootV1::admit(request.root)?;
-    let context = load_bounded_stored_context_v1(&request, &root, config)?;
+    let context = match sized {
+        Some(sized) => sized.into_context_for(&request, &root, config)?,
+        None => load_bounded_stored_context_v1(&request, &root, config)?,
+    };
     root.strict.clone_from(&context.strict);
     let attempt = strict::begin(&context, &request, verified_commit.0)?;
     let result = commit_loaded_stored_v1(
@@ -3364,8 +3503,12 @@ fn requested_execution_range(
         if day < first_day {
             continue;
         }
+        // NOT `break`: the pass keeps checking order to the last bar. With a
+        // `break` the check stopped at the first bar past `last_day`, so
+        // `[100, 103, 101]` over `100..=102` silently returned day 100 alone
+        // and the comment above was false (D-1626). Still one pass, O(bars).
         if day > last_day {
-            break;
+            continue;
         }
         if first.is_none() {
             first = Some(index);
@@ -4211,7 +4354,7 @@ mod tests {
     use runner::excursion::Side;
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-        RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+        RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
     };
     use store::file::BarFile;
     use store::format::Bar;
@@ -4615,7 +4758,7 @@ mod tests {
                 .map_err(|why| format!("fixture ratio limits refused: {why}"))?,
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -4680,6 +4823,17 @@ mod tests {
         })
     }
 
+    /// The evaluation inputs `fixture_request` sweeps under, for sizing.
+    pub(super) fn sizing_evaluation()
+    -> Result<crate::candidate_universe::CandidateEvaluationInputsV1, Step3OrchestratorRefusal>
+    {
+        Ok(crate::candidate_universe::CandidateEvaluationInputsV1 {
+            widths: Widths::pinned().map_err(|why| format!("fixture widths refused: {why:?}"))?,
+            availability: Availability::Absent,
+            thresholds: Thresholds::CLASSICAL,
+        })
+    }
+
     pub(super) fn fixture_request<'a>(
         root: &'a Path,
         underlying: &'a str,
@@ -4726,6 +4880,7 @@ mod tests {
             i64::from(context.rung_seconds).saturating_mul(1_000_000),
             request.widths,
             Calendar::charter(),
+            |day| context.minute.session_close_minute(day),
             &mut column,
         )
         .map_err(|why| format!("fixture exact-minute overlay refused: {why:?}"))?;
@@ -4805,6 +4960,71 @@ mod tests {
             StoredSpanLoadBoundV1::new(40_000)?,
             StoredSpanLoadBoundV1::new(128)?,
         )
+    }
+
+    /// D-0994: the replay is a deterministic function of immutable retained
+    /// inputs plus freshly authenticated rows, so it runs once per exact row
+    /// set; every call still re-reads and re-authenticates the live Candidate
+    /// ledger, and a different row set is never answered from the memo.
+    #[test]
+    fn execution_v3_replay_runs_once_per_exact_row_set_and_still_reauthenticates_live_inputs()
+    -> Result<(), Step3OrchestratorRefusal> {
+        let fixture = StoredSuccessFixture::new()?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let committed = committed_fixture_family(&fixture.source, "NIFTY", &long, &short)?;
+        let replays = || EXECUTION_V3_REPLAYS.with(std::cell::Cell::get);
+        let start = replays();
+
+        let first = committed.execution_v3_replay_authority()?;
+        assert_eq!(replays(), start + 1, "the first call replays in full");
+        let second = committed.execution_v3_replay_authority()?;
+        let third = committed.execution_v3_replay_authority()?;
+        assert_eq!(
+            replays(),
+            start + 1,
+            "unchanged authenticated rows reuse the one deterministic replay"
+        );
+        assert_eq!(second, first);
+        assert_eq!(third, first);
+
+        // The remembered value equals an independent full replay of the same rows.
+        let rows = committed.authenticated_candidate_population_rows()?;
+        let fresh = committed
+            .execution
+            .execution_v3_replay(&committed.committed, &rows)?;
+        assert_eq!(fresh, first);
+
+        // A different row set is replayed in full, never answered from the memo.
+        let shorter = rows
+            .get(..rows.len().saturating_sub(1))
+            .ok_or_else(|| "fixture produced no Candidate rows".to_owned())?;
+        assert!(
+            !shorter.is_empty(),
+            "the fixture must leave a non-empty prefix"
+        );
+        let different = committed.memoized_execution_v3_replay(shorter);
+        assert_eq!(replays(), start + 2, "a different row set must replay");
+        assert_ne!(different.as_ref().ok(), Some(&first));
+
+        // The memo never bypasses the live ledger: a flipped Candidate byte
+        // refuses even though a remembered replay exists.
+        let path = fixture.source.join("candidate-universe-rows-v1.bin");
+        let saved = fs::read(&path).map_err(|why| why.to_string())?;
+        let mut corrupted = saved.clone();
+        let last = corrupted
+            .last_mut()
+            .ok_or_else(|| "empty Candidate row file".to_owned())?;
+        *last ^= 1;
+        fs::write(&path, corrupted).map_err(|why| why.to_string())?;
+        assert!(committed.execution_v3_replay_authority().is_err());
+        assert_eq!(
+            replays(),
+            start + 2,
+            "a refused read never reaches the replay"
+        );
+        fs::write(&path, saved).map_err(|why| why.to_string())?;
+        Ok(())
     }
 
     fn first_selected_disposition(
@@ -5225,16 +5445,51 @@ mod tests {
             CommittedStoredObservationStatisticsV2::statistics_commit;
         let projection: ProjectionAccessor =
             CommittedStoredObservationStatisticsV2::projection_source;
-        std::hint::black_box((
-            entry,
-            nifty,
-            banknifty,
-            base_evidence,
-            observations,
-            observation,
-            statistics,
-            projection,
-        ));
+        // The coercions above prove the signatures and that the accessors
+        // retain the sources. Privacy is a property of the declarations, so it
+        // is asserted on the source text: every one of them is `pub(crate)`,
+        // none is `pub` (GAP14-66, D-1627 — this test used to assert nothing).
+        let source = include_str!("step3_orchestrator.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        for declaration in [
+            "struct CommittedStoredObservationStatisticsV2 {",
+            "fn commit_stored_observation_statistics_v2(",
+            "const fn nifty_source(&self)",
+            "const fn banknifty_source(&self)",
+            "const fn base_evidence(&self)",
+            "const fn observations(&self) -> &PairedCandidateObservationsV1",
+            "const fn observation_commit(&self)",
+            "const fn statistics_commit(&self)",
+            "const fn projection_source(&self)",
+        ] {
+            assert_eq!(
+                production
+                    .matches(&format!("pub(crate) {declaration}"))
+                    .count(),
+                1,
+                "{declaration} must be declared exactly once as pub(crate)"
+            );
+            assert_eq!(
+                production.matches(&format!("pub {declaration}")).count(),
+                0,
+                "{declaration} must not be public"
+            );
+        }
+        let retained = [
+            entry as usize,
+            nifty as usize,
+            banknifty as usize,
+            base_evidence as usize,
+            observations as usize,
+            observation as usize,
+            statistics as usize,
+            projection as usize,
+        ];
+        assert!(retained.iter().all(|address| *address != 0));
+        assert_ne!(nifty as usize, banknifty as usize);
     }
 
     #[test]
@@ -6304,6 +6559,25 @@ mod tests {
             requested_execution_subspan(&reordered, 100, 102),
             Err(why) if why.contains("not monotonically ordered")
         ));
+
+        // c4b-4, D-1626: disorder AFTER the first bar past the span is still
+        // refused, rather than silently cutting the span short.
+        let past_then_inside = [candle(100, 555), candle(103, 555), candle(101, 555)];
+        assert!(matches!(
+            requested_execution_subspan(&past_then_inside, 100, 102),
+            Err(why) if why.contains("not monotonically ordered")
+        ));
+        let late_disorder = [candle(100, 555), candle(105, 555), candle(104, 555)];
+        assert!(matches!(
+            requested_execution_subspan(&late_disorder, 100, 102),
+            Err(why) if why.contains("not monotonically ordered")
+        ));
+        // Ordered bars past the span are still excluded.
+        let ordered_tail = [candle(100, 555), candle(101, 555), candle(103, 555)];
+        assert_eq!(
+            requested_execution_subspan(&ordered_tail, 100, 102).map(<[_]>::len),
+            Ok(2)
+        );
     }
 
     #[test]

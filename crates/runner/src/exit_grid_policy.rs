@@ -7,8 +7,10 @@
 //! 3. the resolved rungs are replayed unchanged on later bars.
 //!
 //! No equity, future, option, reference index, BSE index, or unknown index can
-//! reach resolution. Those instruments may be stored, but `AGENTS.md` section
-//! 1 permits the sweep only for `NSE-NIFTY` and `NSE-BANKNIFTY`.
+//! reach resolution: this V1 policy resolves only `NSE-NIFTY` and
+//! `NSE-BANKNIFTY`. That is narrower than the sweep surface, which
+//! `CLAUDE.md` §1 widened to the F&O cash equities (D-0506); an equity is not
+//! resolved here.
 //!
 //! The resolver creates no tick and no execution price. Long stops sample
 //! `open - low` while long targets sample `high - open`; short swaps those two
@@ -50,20 +52,90 @@ const ONE_MINUTE_MICROS: i64 = 60_000_000;
 /// One civil day in microseconds.
 const DAY_MICROS: i64 = 24 * 60 * ONE_MINUTE_MICROS;
 
-/// First regular-session one-minute stamp, 09:15 IST.
+/// First regular-session one-minute stamp, 09:15 IST: `indicators`' copy of
+/// the open, the one the sweep side of the graph holds (D-3518). This was a
+/// private `9 * 60 + 15`, test-only and tied to nothing.
 #[cfg(test)]
-const REGULAR_OPEN_IST_MINUTE: i64 = 9 * 60 + 15;
+const REGULAR_OPEN_IST_MINUTE: i64 = indicators::SESSION_OPEN_MINUTE;
 
-/// Identity of the fill/cost behavior implemented by the current grid engine.
+/// Identity of the fill/cost behavior the grid engine implemented until
+/// D-1514. **Superseded and refused by name**: [`implemented_cost_model`]
+/// answers [`ExitGridErrorV1::SupersededCostModelIdV1`] for it.
 ///
 /// It means printed one-minute OHLC bounds, pessimistic adverse printed
 /// extremes, optimistic printed opens, level fills capped by opening gaps, and
-/// no invented outside-bar tick. V1 resolution refuses any other ID because
-/// merely hashing an arbitrary label would not prove which arithmetic produced
-/// the cell money.
+/// no invented outside-bar tick -- and, as the walk then built its paths, a
+/// hole (a refused record or a missing minute) ANYWHERE on a path up to its
+/// time exit un-priced every level exit on it, including one that closed the
+/// position before the hole. Its value is unchanged and never will be: it
+/// names the money every policy carrying it was resolved and priced with.
 #[must_use]
 pub fn printed_ohlcv_cost_model_id_v1() -> [u8; 32] {
     hash(b"brutex.runner.grid.printed-ohlcv-fill.v1.open-gap-before-retrace")
+}
+
+/// Identity of the fill/cost behavior the grid engine implemented from D-1514
+/// until D-4500. **Superseded and refused by name**: [`implemented_cost_model`]
+/// answers [`ExitGridErrorV1::SupersededCostModelIdV2`] for it.
+///
+/// Everything [`printed_ohlcv_cost_model_id_v1`] means, except the hole rule:
+/// a level exit strictly before a path's first hole is priced, and only a
+/// variant whose exit is at or after the hole is un-priced and blocks to the
+/// time exit (D-1514) -- where "hole" meant a refused record or a missing
+/// minute ON the path. A path whose own time exit had no price for any other
+/// reason (its horizon bar missing or refused, the slice or the 15:09 proof
+/// ending before its deadline, an exit record no fill could bracket) stayed
+/// block-only, so a stop before that time exit was un-priced too. Its value is
+/// unchanged and never will be: it names the money every policy carrying it was
+/// resolved and priced with.
+#[must_use]
+pub fn printed_ohlcv_cost_model_id_v2() -> [u8; 32] {
+    hash(b"brutex.runner.grid.printed-ohlcv-fill.v2.open-gap-before-retrace.priced-before-hole")
+}
+
+/// Identity of the fill/cost behavior implemented by the current grid engine.
+///
+/// Everything [`printed_ohlcv_cost_model_id_v2`] means, with one more kind of
+/// hole (D-4500): the place a path's own time exit has no price -- the first
+/// bar at or after a missing or refused horizon bar, one past the last bar of
+/// a slice or a 15:09 proof that ended before the deadline, or an exit record
+/// no fill can bracket. A level exit strictly before that place was decided by
+/// bars up to its own and is priced; a level-less variant, and one whose exit
+/// is at or after it, is un-priced and blocks to the time exit as before. That
+/// changes cell money wherever such a path exists -- each newly priced level
+/// exit adds a trade, its money, and the room it frees for a later signal -- so
+/// it is a new identity rather than V2 re-meant. Resolution refuses any other
+/// ID because merely hashing an arbitrary label would not prove which
+/// arithmetic produced the cell money.
+#[must_use]
+pub fn printed_ohlcv_cost_model_id_v3() -> [u8; 32] {
+    hash(
+        b"brutex.runner.grid.printed-ohlcv-fill.v3.open-gap-before-retrace.priced-before-hole.priced-before-unpriced-time-exit",
+    )
+}
+
+/// `Ok` only for the cost model this build implements,
+/// [`printed_ohlcv_cost_model_id_v3`]. The superseded
+/// [`printed_ohlcv_cost_model_id_v1`] and [`printed_ohlcv_cost_model_id_v2`]
+/// are each refused by their own name, so a policy resolved before D-1514 or
+/// before D-4500 says why it cannot be replayed rather than reading as an
+/// unknown label; anything else is [`ExitGridErrorV1::UnsupportedCostModelId`].
+///
+/// # Errors
+///
+/// [`ExitGridErrorV1::SupersededCostModelIdV1`],
+/// [`ExitGridErrorV1::SupersededCostModelIdV2`] or
+/// [`ExitGridErrorV1::UnsupportedCostModelId`].
+pub fn implemented_cost_model(id: [u8; 32]) -> Result<(), ExitGridErrorV1> {
+    if id == printed_ohlcv_cost_model_id_v3() {
+        Ok(())
+    } else if id == printed_ohlcv_cost_model_id_v2() {
+        Err(ExitGridErrorV1::SupersededCostModelIdV2)
+    } else if id == printed_ohlcv_cost_model_id_v1() {
+        Err(ExitGridErrorV1::SupersededCostModelIdV1)
+    } else {
+        Err(ExitGridErrorV1::UnsupportedCostModelId)
+    }
 }
 
 /// Canonical identity of every field in one [`InstrumentKey`].
@@ -223,6 +295,91 @@ impl<'a> ExecutionSeriesV1<'a> {
     }
 }
 
+/// The two per-slice digests an [`ExecutionRunV1`] is sealed against, computed
+/// from the actual bars ONCE (D-1143).
+///
+/// # Why this exists
+///
+/// [`ExecutionRunV1::new`] and [`ExecutionRunV1::new_with_daily_reference`]
+/// hash every signal and execution bar to check the run's data term, then hash
+/// the execution slice again for the run's execution digest. Both digests are
+/// facts about the SLICES, not about the run, and the callers that seal many
+/// runs over one slice -- the V4 walk-forward population (`validate.rs`
+/// `evaluate_one`, twice per closed mask), its OOS replay loop, and `cli`'s
+/// Boolean candidate catalogue (once per program and side) -- paid O(S + E)
+/// BLAKE3 per candidate for one answer. The Candidate universe and its
+/// Execution V3 replay are two more such callers: each sealed one run per
+/// `(closed mask, side)` and hashed the signal, minute-context and daily
+/// streams every time, so they now mint [`Self::of_daily_reference`] once per
+/// series and seal each run with [`ExecutionRunV1::with_digests`]. D-0990.
+///
+/// The fields are private and the only constructors hash real bars in this
+/// process, so a holder cannot forge a digest: [`ExecutionRunV1::with_digests`]
+/// checks a run against bytes exactly as `new` did, at O(1) per run. Proven
+/// equal by `runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`;
+/// the per-run time is UNVERIFIED as a measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecutionDigestsV1 {
+    expected_data_digest: [u8; 32],
+    execution_digest: [u8; 32],
+}
+
+impl ExecutionDigestsV1 {
+    /// The digests [`ExecutionRunV1::new`] computes: the composite data term
+    /// over `signal_bars` and optional `execution_bars`, and the exact
+    /// execution slice (`execution_bars`, or the signal bars when `None`).
+    #[must_use]
+    pub fn of(signal_bars: &[Candle], execution_bars: Option<&[Candle]>) -> Self {
+        Self {
+            expected_data_digest: crate::identity::data_digest_with_execution(
+                signal_bars,
+                execution_bars,
+            ),
+            execution_digest: crate::identity::data_digest(execution_bars.unwrap_or(signal_bars)),
+        }
+    }
+
+    /// The digests [`ExecutionRunV1::new_with_daily_reference`] computes, with
+    /// its subslice check, in its order.
+    ///
+    /// # Errors
+    ///
+    /// [`ExitGridErrorV1::DailyReferenceIdentityRefused`] for malformed daily
+    /// eligibility, and an evaluated slice absent from the context, exactly as
+    /// that constructor refuses them.
+    pub fn of_daily_reference(
+        signal_bars: &[Candle],
+        reference_minute_context: &[Candle],
+        evaluated_execution_1m: &[Candle],
+        reference: crate::identity::DailyReferenceBinding<'_>,
+    ) -> Result<Self, ExitGridErrorV1> {
+        let expected_data_digest = crate::identity::data_digest_with_daily_reference(
+            signal_bars,
+            reference_minute_context,
+            reference,
+        )
+        .map_err(ExitGridErrorV1::DailyReferenceIdentityRefused)?;
+        require_exact_execution_subslice(reference_minute_context, evaluated_execution_1m)?;
+        Ok(Self {
+            expected_data_digest,
+            execution_digest: crate::identity::data_digest(evaluated_execution_1m),
+        })
+    }
+
+    /// The data term a [`Run`] over these slices must carry.
+    #[must_use]
+    pub const fn data_digest(&self) -> [u8; 32] {
+        self.expected_data_digest
+    }
+
+    /// Digest of the exact execution slice every run sealed against these
+    /// digests carries as its execution term.
+    #[must_use]
+    pub const fn execution_digest(&self) -> [u8; 32] {
+        self.execution_digest
+    }
+}
+
 /// Canonical run identity sealed beside the execution bytes it names.
 ///
 /// A raw [`RunId`] is not sufficient authority: any 32 bytes have that type,
@@ -271,10 +428,23 @@ impl ExecutionRunV1 {
         signal_bars: &[Candle],
         execution_bars: Option<&[Candle]>,
     ) -> Result<Self, ExitGridErrorV1> {
-        let expected_data_digest =
-            crate::identity::data_digest_with_execution(signal_bars, execution_bars);
-        let exact_execution = execution_bars.unwrap_or(signal_bars);
-        Self::seal(run, exact_execution, expected_data_digest)
+        Self::with_digests(run, &ExecutionDigestsV1::of(signal_bars, execution_bars))
+    }
+
+    /// Seals `run` against slice digests computed once by
+    /// [`ExecutionDigestsV1`]: O(1) per run, and the same checks, in the same
+    /// order, with the same answer as the constructor that built `digests`.
+    /// Equality with per-run hashing:
+    /// `runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_digests(
+        run: &Run<'_>,
+        digests: &ExecutionDigestsV1,
+    ) -> Result<Self, ExitGridErrorV1> {
+        Self::seal(run, digests)
     }
 
     /// Seals a stored run whose result depends on signal, exact one-minute,
@@ -307,21 +477,16 @@ impl ExecutionRunV1 {
         evaluated_execution_1m: &[Candle],
         reference: crate::identity::DailyReferenceBinding<'_>,
     ) -> Result<Self, ExitGridErrorV1> {
-        let expected_data_digest = crate::identity::data_digest_with_daily_reference(
+        let digests = ExecutionDigestsV1::of_daily_reference(
             signal_bars,
             reference_minute_context,
+            evaluated_execution_1m,
             reference,
-        )
-        .map_err(ExitGridErrorV1::DailyReferenceIdentityRefused)?;
-        require_exact_execution_subslice(reference_minute_context, evaluated_execution_1m)?;
-        Self::seal(run, evaluated_execution_1m, expected_data_digest)
+        )?;
+        Self::seal(run, &digests)
     }
 
-    fn seal(
-        run: &Run<'_>,
-        exact_execution: &[Candle],
-        expected_data_digest: [u8; 32],
-    ) -> Result<Self, ExitGridErrorV1> {
+    fn seal(run: &Run<'_>, digests: &ExecutionDigestsV1) -> Result<Self, ExitGridErrorV1> {
         if run.timeframe.is_empty() {
             return Err(ExitGridErrorV1::MissingRunIdentity("timeframe"));
         }
@@ -334,7 +499,7 @@ impl ExecutionRunV1 {
         if run.direction == Direction::Undirected {
             return Err(ExitGridErrorV1::UndirectedExecutionRun);
         }
-        if run.data_digest != expected_data_digest {
+        if run.data_digest != digests.expected_data_digest {
             return Err(ExitGridErrorV1::RunDataDigestMismatch);
         }
         Ok(Self {
@@ -344,7 +509,7 @@ impl ExecutionRunV1 {
             direction: run.direction,
             feed_digest: hash(run.feed.as_bytes()),
             commit_digest: hash(run.commit.as_bytes()),
-            execution_digest: crate::identity::data_digest(exact_execution),
+            execution_digest: digests.execution_digest,
         })
     }
 
@@ -360,6 +525,9 @@ impl ExecutionRunV1 {
         self.mask
     }
 
+    /// Test-only since D-1495: the one production caller now digests once and
+    /// calls [`Self::require_matches_terms`] itself.
+    #[cfg(test)]
     fn require_matches(
         self,
         series: ExecutionSeriesV1<'_>,
@@ -377,11 +545,13 @@ impl ExecutionRunV1 {
     /// The five run-identity checks, in their fixed order, against series
     /// terms the caller has already digested.
     ///
-    /// [`Self::require_matches`] digests the series here and now, which is one
-    /// BLAKE3 pass over every execution bar. An attested door has already
-    /// proved those digests equal to its resolution's own, so it passes the
-    /// resolution's copies instead and pays no pass. Both callers reach one
-    /// list of checks; there is no second copy to drift.
+    /// The replay door's `OosReplaySliceV1` digests the series once and its
+    /// replays pass that digest here, reusing it for their own
+    /// `oos_data_digest` (D-1495, D-1811). An attested door has
+    /// already proved those digests equal to its resolution's own, so it
+    /// passes the resolution's copies instead and pays no pass. Every caller
+    /// reaches one list of checks; there is no second copy to drift. The
+    /// test-only `require_matches` digests and calls this.
     fn require_matches_terms(
         self,
         instrument: &InstrumentKey,
@@ -413,6 +583,18 @@ impl ExecutionRunV1 {
     }
 }
 
+/// Is `evaluated_execution_1m` an exact contiguous run of
+/// `reference_minute_context`?
+///
+/// # Cost (o1runner-3, D-1196)
+///
+/// Every production caller passes the evaluated slice as a VIEW into the
+/// context it was cut from, so its position is pointer arithmetic: the address
+/// offset over the element size, then one fat-pointer comparison of that
+/// window. O(1), no bar read. Only an equal slice held in separate memory
+/// takes the linear search and element-wise compare, and it accepts and
+/// refuses exactly what the fast path would have accepted or refused.
+/// Proven by `runner::exit_grid_policy::a_view_into_the_context_is_located_without_a_search`.
 fn require_exact_execution_subslice(
     reference_minute_context: &[Candle],
     evaluated_execution_1m: &[Candle],
@@ -420,6 +602,22 @@ fn require_exact_execution_subslice(
     let Some(first) = evaluated_execution_1m.first() else {
         return Err(ExitGridErrorV1::EmptyExecutionSeries);
     };
+    let offset = evaluated_execution_1m
+        .as_ptr()
+        .addr()
+        .checked_sub(reference_minute_context.as_ptr().addr());
+    let size = core::mem::size_of::<Candle>();
+    if let Some(offset) = offset
+        && offset % size == 0
+        && let Some(window) = (offset / size)
+            .checked_add(evaluated_execution_1m.len())
+            .and_then(|end| reference_minute_context.get(offset / size..end))
+        && core::ptr::eq(window, evaluated_execution_1m)
+    {
+        return Ok(());
+    }
+    #[cfg(test)]
+    SUBSLICE_SCANS.with(|n| n.set(n.get() + 1));
     let Some(start) = reference_minute_context.iter().position(|bar| bar == first) else {
         return Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext);
     };
@@ -430,6 +628,87 @@ fn require_exact_execution_subslice(
         return Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext);
     }
     Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Linear subslice searches taken on this thread (D-1196).
+    static SUBSLICE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod subslice_tests {
+    use super::{ExitGridErrorV1, SUBSLICE_SCANS, require_exact_execution_subslice};
+    use indicators::Candle;
+
+    fn bars(n: i64) -> Vec<Candle> {
+        (0..n)
+            .map(|m| {
+                Candle::new(
+                    m * 60_000_000,
+                    100 + m,
+                    110 + m,
+                    90 + m,
+                    105 + m,
+                    1,
+                    indicators::OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    fn scans() -> u64 {
+        SUBSLICE_SCANS.with(std::cell::Cell::get)
+    }
+
+    /// o1runner-3 / D-1196: a view into the context is located by address, with
+    /// no search; a copy is still judged exactly as before.
+    #[test]
+    fn a_view_into_the_context_is_located_without_a_search() {
+        let context = bars(400);
+        let before = scans();
+        for (from, to) in [(0, 400), (0, 1), (399, 400), (17, 250), (100, 101)] {
+            assert_eq!(
+                require_exact_execution_subslice(
+                    &context,
+                    context.get(from..to).unwrap_or_default()
+                ),
+                Ok(()),
+                "{from}..{to}"
+            );
+        }
+        assert_eq!(scans() - before, 0, "every view must take the O(1) path");
+
+        // A copy in other memory: accepted iff it equals a contiguous run.
+        let copy: Vec<Candle> = context.get(17..250).unwrap_or_default().to_vec();
+        assert_eq!(require_exact_execution_subslice(&context, &copy), Ok(()));
+        let mut forged = copy.clone();
+        if let Some(last) = forged.last_mut() {
+            last.close += 1;
+        }
+        assert_eq!(
+            require_exact_execution_subslice(&context, &forged),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+        assert_eq!(scans() - before, 2, "only the two copies searched");
+
+        // A view of a DIFFERENT buffer with equal bars is a copy, not a view.
+        let other = bars(400);
+        assert_eq!(
+            require_exact_execution_subslice(&context, other.get(5..9).unwrap_or_default()),
+            Ok(())
+        );
+        // Past the end, and empty, refuse as before.
+        let longer = bars(401);
+        assert_eq!(
+            require_exact_execution_subslice(&context, &longer),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+        assert_eq!(
+            require_exact_execution_subslice(&context, &[]),
+            Err(ExitGridErrorV1::EmptyExecutionSeries)
+        );
+    }
 }
 
 /// OOS execution input with an explicit first test bar.
@@ -818,9 +1097,7 @@ impl ExitGridPolicyV1 {
         &self,
         training_execution_1m: &[Candle],
     ) -> Result<ResolvedGridLevelsV1, ExitGridErrorV1> {
-        if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        implemented_cost_model(self.cost_model_id)?;
         if let ExecutionResolutionV1::UnsupportedSeconds(seconds) = self.execution_resolution {
             return Err(ExitGridErrorV1::UnsupportedExecutionResolution(seconds));
         }
@@ -1097,15 +1374,29 @@ impl ResolvedLaddersV1 {
 /// keeps this token, and hands it to
 /// [`ResolvedExitGridV1::evaluate_with_attested`] per run.
 ///
-/// The token holds borrows and fixed-size data only, so it is `Sync` and one
-/// of them can be shared across a parallel candidate loop. Its fields are
-/// private and it carries the digest of the resolution that minted it, so it
-/// cannot be built by hand and cannot be spent on another resolution.
+/// The token holds borrows, fixed-size data and one shared
+/// [`crate::trade::SliceFacts`], so it is `Sync` and one of them can be shared
+/// across a parallel candidate loop. Its fields are private and it carries the
+/// digest of the resolution that minted it, so it cannot be built by hand and
+/// cannot be spent on another resolution.
+///
+/// # The slice facts are attested once too (D-1141)
+///
+/// The per-run door used to build `SliceFacts::of(bars, column)` inside
+/// `grid::evaluate_resolved_policy_v1` on every call -- an O(B) `HashMap` of B
+/// timestamps, two prefix vectors of B + 1, the forced-exit table and a median
+/// pass -- so the "per-candidate half" re-read every bar per candidate. The
+/// facts are a function of the bars and the column alone, the two things this
+/// token already binds, so they are built here and shared behind an `Arc`.
+/// That is also why the token is `Clone` and no longer `Copy`. D-0741
+/// (W3-runner2-0) hoisted the same facts into this token on a parallel
+/// branch; the merged tree keeps this one field and every door, the expression
+/// pricing and coordinate materialization among them, reads it.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace times the
 /// attestation it hoists, so the saving is read from the source rather than
 /// measured. `CLAUDE.md` §3 rule 6.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct AttestedTrainingV1<'a> {
     resolution_digest: [u8; 32],
     bars: &'a [Candle],
@@ -1113,6 +1404,73 @@ pub struct AttestedTrainingV1<'a> {
     horizon: Horizon,
     column_digest: [u8; 32],
     evaluation_spec: EvaluationSpecToken,
+    facts: std::sync::Arc<crate::trade::SliceFacts>,
+}
+
+impl AttestedTrainingV1<'_> {
+    /// The per-slice facts built once at attestation.
+    pub(crate) fn facts(&self) -> &crate::trade::SliceFacts {
+        &self.facts
+    }
+
+    /// One level-less walk of `evaluated`'s mask over the attested slice, from
+    /// which every cell of its grid replays without re-walking.
+    ///
+    /// [`ResolvedExitGridV1::evaluate_with_attested`] already prices over the
+    /// facts this token derived once at attestation; before this door the
+    /// Candidate universe replayed each cell through
+    /// [`crate::grid::materialize_cell`], which derived the facts again per
+    /// CELL. Over a population of N closed masks with G cells per side that
+    /// was 2N(G + 1) derivations of one answer. This door lends the token's
+    /// facts to [`crate::grid::CellReplay::prepare`], so the walk and crossing
+    /// table are paid once per evaluated grid and each
+    /// [`crate::grid::CellReplay::materialize`] afterwards is independent of
+    /// the slice length. D-0990.
+    ///
+    /// # Errors
+    ///
+    /// [`ExitGridErrorV1::EvaluationResolutionMismatch`] when `evaluated` was
+    /// minted by another resolution, and
+    /// [`ExitGridErrorV1::TrainingSeriesMismatch`] when it priced another
+    /// column, horizon or evaluator.
+    pub fn cell_replay<'s>(
+        &'s self,
+        evaluated: &'s EvaluatedExitGridV1,
+    ) -> Result<crate::grid::CellReplay<'s>, ExitGridErrorV1> {
+        if evaluated.resolution_digest != self.resolution_digest {
+            return Err(ExitGridErrorV1::EvaluationResolutionMismatch);
+        }
+        if evaluated.column_digest != self.column_digest
+            || evaluated.horizon != self.horizon
+            || evaluated.evaluation_spec != self.evaluation_spec
+        {
+            return Err(ExitGridErrorV1::TrainingSeriesMismatch);
+        }
+        Ok(crate::grid::CellReplay::prepare(
+            self.bars,
+            self.column,
+            &evaluated.mask,
+            evaluated.horizon,
+            evaluated.side,
+            &evaluated.grid,
+            &self.facts,
+        ))
+    }
+}
+
+impl std::fmt::Debug for AttestedTrainingV1<'_> {
+    /// The facts are derived from `bars` and `column` and carry no `Debug`
+    /// of their own; every identity-bearing field is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttestedTrainingV1")
+            .field("resolution_digest", &self.resolution_digest)
+            .field("bars", &self.bars)
+            .field("column", &self.column)
+            .field("horizon", &self.horizon)
+            .field("column_digest", &self.column_digest)
+            .field("evaluation_spec", &self.evaluation_spec)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One complete grid produced by
@@ -1593,11 +1951,32 @@ pub struct GlobalReplayWitnessUniverseV1 {
     feed: Vendor,
     direction: CostDirection,
     first_oos: usize,
+    max_ambiguous_bars: u64,
+    max_gap_fills: u64,
     digest: [u8; 32],
     universe: ReplayedCandidateUniverseV1,
 }
 
 impl GlobalReplayWitnessUniverseV1 {
+    /// The frozen exit policy's ceiling on ambiguous one-minute bars, summed
+    /// over every trade of this stream the global scheduler admits.
+    ///
+    /// Captured from the same resolved grid that replayed the universe and
+    /// sealed by [`Self::require_integrity`], so a caller cannot widen it.
+    /// GAP15-19, D-1643.
+    #[must_use]
+    pub const fn max_ambiguous_bars(&self) -> u64 {
+        self.max_ambiguous_bars
+    }
+
+    /// The frozen exit policy's ceiling on level exits filled through an
+    /// opening gap, summed over the stream's globally admitted trades.
+    /// GAP15-19, D-1643.
+    #[must_use]
+    pub const fn max_gap_fills(&self) -> u64 {
+        self.max_gap_fills
+    }
+
     /// Exact swept spot index whose OOS bytes were replayed.
     #[must_use]
     pub const fn instrument(&self) -> InstrumentKey {
@@ -1660,6 +2039,7 @@ impl GlobalReplayWitnessUniverseV1 {
             self.feed,
             self.direction,
             self.first_oos,
+            [self.max_ambiguous_bars, self.max_gap_fills],
             &self.universe,
         );
         if self.digest == expected {
@@ -1993,6 +2373,8 @@ impl ResolvedExitGridV1 {
     /// run's five identity terms are checked against this resolution's own
     /// copies -- which the attestation proved equal to the series' -- so no
     /// bar is re-read and no byte is re-hashed here; what remains is the grid.
+    /// The slice facts come from the token too (D-0741), so no per-slice table
+    /// is rebuilt here either; the walk still visits every column row.
     ///
     /// # Errors
     ///
@@ -2022,6 +2404,7 @@ impl ResolvedExitGridV1 {
             attested.horizon,
             self.side(),
             self,
+            attested.facts(),
         )?;
         Ok(EvaluatedExitGridV1 {
             resolution_digest: self.digest,
@@ -2142,13 +2525,21 @@ impl ResolvedExitGridV1 {
                     crate::grid::merit(cell),
                 )
             }),
-            ExitGridSelectorV1::OperatorRule => admitted.max_by_key(|cell| {
-                (
-                    cell.reward_to_risk_bp(),
-                    cell.pessimistic,
-                    crate::grid::merit(cell),
-                )
-            }),
+            // run2-2, D-2606: the guard `Grid::by_reward_to_risk` already has.
+            // `reward_to_risk_bp` is `i64::MAX` for any cell that never lost,
+            // a winless all-flat cell included, so a cell with no winner is
+            // not a measured risk-reward and is never selected by this rule,
+            // and ties at the ceiling break on sample size before money.
+            ExitGridSelectorV1::OperatorRule => {
+                admitted.filter(|cell| cell.wins > 0).max_by_key(|cell| {
+                    (
+                        cell.reward_to_risk_bp(),
+                        cell.trades,
+                        cell.pessimistic,
+                        crate::grid::merit(cell),
+                    )
+                })
+            }
         };
         Ok(selected.map(|cell| self.seal_selection(evaluated, cell)))
     }
@@ -2360,7 +2751,44 @@ impl ResolvedExitGridV1 {
         selected: &SelectedExitV1,
         oos_run: ExecutionRunV1,
     ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
-        let universe = self.replay_selected_universe(oos, column, selected, oos_run)?;
+        self.replay_selected_with(oos, column, selected, oos_run)
+    }
+
+    /// [`Self::replay_selected`] over one OOS slice checked, hashed and indexed
+    /// ONCE for every candidate replayed on it (D-1811, W3-runner5-0).
+    ///
+    /// Every refusal is the one [`Self::replay_selected`] reports for the same
+    /// series, column and candidate, in the same order: the slice's verdicts
+    /// were taken when it was built and are read here at the position the
+    /// per-call check had. Crate-visible only: the V4 OOS loop is its one
+    /// caller.
+    pub(crate) fn replay_selected_on(
+        &self,
+        slice: &OosReplaySliceV1<'_>,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+    ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
+        let universe = self.replay_selected_universe_on(slice, selected, oos_run)?;
+        self.finish_replay(&universe)
+    }
+
+    fn replay_selected_with(
+        &self,
+        oos: OosExecutionSeriesV1<'_>,
+        column: &indicators::column::Column,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+    ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
+        let universe = self.replay_selected_universe_with(oos, column, selected, oos_run)?;
+        self.finish_replay(&universe)
+    }
+
+    /// The strict single-strategy tail both replay doors share: integrity,
+    /// no refused path, the quality ceilings, then the replay digest.
+    fn finish_replay(
+        &self,
+        universe: &ReplayedCandidateUniverseV1,
+    ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
         universe.require_integrity()?;
         if universe.pricing_refused_paths != 0 {
             return Err(ExitGridErrorV1::RefusedExecutionPaths {
@@ -2426,6 +2854,36 @@ impl ResolvedExitGridV1 {
         selected: &SelectedExitV1,
         oos_run: ExecutionRunV1,
     ) -> Result<ReplayedCandidateUniverseV1, ExitGridErrorV1> {
+        self.replay_selected_universe_with(oos, column, selected, oos_run)
+    }
+
+    fn replay_selected_universe_with(
+        &self,
+        oos: OosExecutionSeriesV1<'_>,
+        column: &indicators::column::Column,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+    ) -> Result<ReplayedCandidateUniverseV1, ExitGridErrorV1> {
+        // ONE PATH (D-1811). The per-call door builds the slice for itself
+        // and reads it exactly as the hoisting V4 loop does, so the two doors
+        // cannot drift apart in what they check or in which order.
+        self.replay_selected_universe_on(
+            &OosReplaySliceV1::new(oos, column, None),
+            selected,
+            oos_run,
+        )
+    }
+
+    /// Every check a replay makes before it prices, in the per-call door's
+    /// order, reading the slice's held verdicts at their original positions
+    /// (D-1811). Returns the OOS data digest the run was checked against.
+    fn replay_preconditions(
+        &self,
+        slice: &OosReplaySliceV1<'_>,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+    ) -> Result<[u8; 32], ExitGridErrorV1> {
+        let (oos, column) = (slice.oos, slice.column);
         self.require_runtime_integrity()?;
         if selected.resolution_digest != self.digest
             || selected.side != self.side()
@@ -2446,12 +2904,23 @@ impl ResolvedExitGridV1 {
         }
         let series = oos.series();
         self.require_matching_series(series)?;
-        oos_run.require_matches(series, selected.side)?;
+        // ONE BLAKE3 PASS OVER THE OOS BARS PER SLICE, NOT PER CANDIDATE
+        // (c4a-5, D-1495, D-1811). The slice digested the series, its feed and
+        // its commit when it was built; the five run-identity checks run here
+        // in their fixed order against those digests.
+        oos_run.require_matches_terms(
+            series.instrument(),
+            slice.feed_digest,
+            slice.commit_digest,
+            slice.execution_digest,
+            selected.side,
+        )?;
+        let oos_data_digest = slice.execution_digest;
+        let bars = series.bars();
         if oos_run.mask != selected.mask {
             return Err(ExitGridErrorV1::RunIdentityMismatch("mask"));
         }
-        let bars = series.bars();
-        validate_execution_bars(bars)?;
+        slice.bars_valid.clone()?;
         let first_oos = oos.first_oos();
         let first_test_stamp = bars.get(first_oos).map(|bar| bar.ts_micros).ok_or(
             ExitGridErrorV1::InvalidOosBoundary {
@@ -2468,9 +2937,9 @@ impl ResolvedExitGridV1 {
         if column.evaluation_spec_token() != Some(selected.evaluation_spec) {
             return Err(ExitGridErrorV1::EvaluationSpecMismatch);
         }
-        require_complete_acceptance(column, bars.len())?;
-        validate_column_sources(column, bars.len(), first_oos)?;
-        validate_arithmetic_envelope(bars, self)?;
+        slice.acceptance.clone()?;
+        slice.sources.clone()?;
+        validate_envelope_extremes(bars.len(), slice.extremes.clone(), &self.view())?;
         if !self.chosen_is_in_bounds(selected.coordinate) {
             return Err(ExitGridErrorV1::InvalidChosenCoordinate);
         }
@@ -2481,7 +2950,33 @@ impl ResolvedExitGridV1 {
         {
             return Err(ExitGridErrorV1::InvalidChosenCoordinate);
         }
+        Ok(oos_data_digest)
+    }
+
+    fn replay_selected_universe_on(
+        &self,
+        slice: &OosReplaySliceV1<'_>,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+    ) -> Result<ReplayedCandidateUniverseV1, ExitGridErrorV1> {
+        let oos_data_digest = self.replay_preconditions(slice, selected, oos_run)?;
+        let (oos, column) = (slice.oos, slice.column);
+        let bars = oos.series().bars();
         let ladders = self.ladders()?;
+        // BORROWED WHERE THE CALLER HOISTED THEM, BUILT WITH THE SLICE
+        // OTHERWISE (D-1184). A hoisted value that does not cover these bars
+        // is refused, never replaced by a fresh build.
+        let facts = match &slice.facts {
+            OosSliceFacts::Hoisted(facts) => {
+                if !facts.covers(bars) {
+                    return Err(ExitGridErrorV1::RunIdentityMismatch(
+                        "hoisted OOS slice facts do not cover the OOS series",
+                    ));
+                }
+                *facts
+            }
+            OosSliceFacts::Built(facts) => facts,
+        };
         let replay = crate::grid::replay_universe_v1(
             bars,
             column,
@@ -2490,10 +2985,10 @@ impl ResolvedExitGridV1 {
             selected.side,
             ladders.borrowed(),
             selected.coordinate,
+            facts,
         )?;
         let cell = replay.cell;
-        let oos_data_digest = crate::identity::data_digest(bars);
-        let column_digest = digest_column(column);
+        let column_digest = slice.column_digest;
         let digest = digest_replay_universe(
             oos_run.run_id,
             selected.selection_digest,
@@ -2555,13 +3050,26 @@ impl ResolvedExitGridV1 {
         let universe = self.replay_selected_universe(oos, column, selected, oos_run)?;
         universe.require_integrity()?;
         let instrument = *series.instrument();
-        let digest =
-            digest_global_replay_witness(&instrument, feed, direction, first_oos, &universe);
+        let ceilings = [
+            self.policy.max_ambiguous_bars(),
+            self.policy.max_gap_fills(),
+        ];
+        let digest = digest_global_replay_witness(
+            &instrument,
+            feed,
+            direction,
+            first_oos,
+            ceilings,
+            &universe,
+        );
+        let [max_ambiguous_bars, max_gap_fills] = ceilings;
         let witness = GlobalReplayWitnessUniverseV1 {
             instrument,
             feed,
             direction,
             first_oos,
+            max_ambiguous_bars,
+            max_gap_fills,
             digest,
             universe,
         };
@@ -2573,9 +3081,7 @@ impl ResolvedExitGridV1 {
         if !self.digest_is_valid() {
             return Err(ExitGridErrorV1::ResolutionDigestMismatch);
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        implemented_cost_model(self.policy.cost_model_id())?;
         Ok(())
     }
 
@@ -2722,6 +3228,21 @@ pub enum ExitGridErrorV1 {
     RunIdentityMismatch(&'static str),
     /// V1 grid arithmetic implements a different cost/fill model ID.
     UnsupportedCostModelId,
+    /// The policy names [`printed_ohlcv_cost_model_id_v1`], the model under
+    /// which a hole after a level exit un-priced that exit. This build prices
+    /// it (D-1514), so the policy must be resolved again under
+    /// [`printed_ohlcv_cost_model_id_v2`]; its old cells are not this build's.
+    /// **Amended by D-4500**: V2 is superseded in turn, so such a policy is
+    /// resolved again under [`printed_ohlcv_cost_model_id_v3`].
+    SupersededCostModelIdV1,
+    /// The policy names [`printed_ohlcv_cost_model_id_v2`], the model under
+    /// which a path whose own time exit had no price -- a missing or refused
+    /// horizon bar, a slice or 15:09 proof ending before the deadline, an
+    /// unfillable exit record -- un-priced every level exit on it, including a
+    /// stop that closed the position bars earlier. This build prices that exit
+    /// (D-4500), so the policy must be resolved again under
+    /// [`printed_ohlcv_cost_model_id_v3`]; its old cells are not this build's.
+    SupersededCostModelIdV2,
     /// An exact forced stop was zero or negative.
     InvalidForcedStop(Ppm),
     /// The instrument is storable but outside the two-index sweep surface.
@@ -3108,6 +3629,86 @@ fn encode_observed(
     // that lone move. Resolution below refuses when a requested rung lands on
     // zero; it never silently promotes the next positive sample.
     Ok(ppm)
+}
+
+/// Where an [`OosReplaySliceV1`]'s slice facts come from.
+enum OosSliceFacts<'a> {
+    /// Built by the caller for the exact pair, checked for cover at the
+    /// position the per-call door checked it (D-1184).
+    Hoisted(&'a crate::trade::SliceFacts),
+    /// Built with the slice.
+    Built(Box<crate::trade::SliceFacts>),
+}
+
+/// One OOS execution series and its column, checked, hashed and indexed ONCE
+/// for every candidate replayed on it (D-1811, W3-runner5-0).
+///
+/// The V4 anchored-search OOS loop replays every pending candidate (up to two
+/// per closed mask) over the same fold series and projected column. Each
+/// replay re-hashed the series (BLAKE3, O(E)) and the column (O(R)),
+/// re-validated every bar, recounted the acceptance verdicts, rechecked every
+/// source and rescanned the price extremes: O(E + R) per candidate for facts
+/// that depend on no candidate. This holds each verdict as it was found, the
+/// way `expression_oos::LaterExpressionSliceV1` does for the Boolean later
+/// period (D-1188), so `replay_selected_on` reports exactly the refusal, in
+/// exactly the order, `replay_selected` reports.
+///
+/// Fields are private and the one constructor reads the real bars and column,
+/// so a verdict or digest cannot be supplied from elsewhere.
+///
+/// # Cost
+///
+/// O(E + R) time to build for E bars and R column rows, plus the O(E) memory
+/// of one `SliceFacts` when none is hoisted. Each replay on it then pays
+/// O(1) for every check this holds. The one series hash per slice is counted
+/// by `runner::exit_grid_policy::tests::replays_on_one_oos_slice_equal_the_per_call_replay_for_every_fault`
+/// (AGB-03); the wall-clock saving is UNVERIFIED, not timed (`docs/06-limits.md`,
+/// the W3-runner5-0 entry).
+pub(crate) struct OosReplaySliceV1<'a> {
+    oos: OosExecutionSeriesV1<'a>,
+    column: &'a indicators::column::Column,
+    execution_digest: [u8; 32],
+    feed_digest: [u8; 32],
+    commit_digest: [u8; 32],
+    bars_valid: Result<(), ExitGridErrorV1>,
+    acceptance: Result<(), ExitGridErrorV1>,
+    sources: Result<(), ExitGridErrorV1>,
+    extremes: Result<(i64, i64), ExitGridErrorV1>,
+    column_digest: [u8; 32],
+    facts: OosSliceFacts<'a>,
+}
+
+impl<'a> OosReplaySliceV1<'a> {
+    /// Check, hash and index one OOS series and column once.
+    ///
+    /// `hoisted`, when given, must be `SliceFacts::of(bars, column)` for this
+    /// exact pair; one that does not cover the bars is refused by every replay
+    /// on this slice rather than replaced.
+    #[must_use]
+    pub(crate) fn new(
+        oos: OosExecutionSeriesV1<'a>,
+        column: &'a indicators::column::Column,
+        hoisted: Option<&'a crate::trade::SliceFacts>,
+    ) -> Self {
+        let series = oos.series();
+        let bars = series.bars();
+        Self {
+            oos,
+            column,
+            execution_digest: crate::identity::data_digest(bars),
+            feed_digest: hash(series.feed().as_bytes()),
+            commit_digest: hash(series.commit().as_bytes()),
+            bars_valid: validate_execution_bars(bars),
+            acceptance: require_complete_acceptance(column, bars.len()),
+            sources: validate_column_sources(column, bars.len(), oos.first_oos()),
+            extremes: envelope_extremes(bars),
+            column_digest: digest_column(column),
+            facts: hoisted.map_or_else(
+                || OosSliceFacts::Built(Box::new(crate::trade::SliceFacts::of(bars, column))),
+                OosSliceFacts::Hoisted,
+            ),
+        }
+    }
 }
 
 fn validate_execution_bars(bars: &[Candle]) -> Result<(), ExitGridErrorV1> {
@@ -3592,10 +4193,13 @@ fn digest_global_replay_witness(
     feed: Vendor,
     direction: CostDirection,
     first_oos: usize,
+    quality_ceilings: [u64; 2],
     universe: &ReplayedCandidateUniverseV1,
 ) -> [u8; 32] {
+    // An in-memory seal only, never persisted: the domain moves with the
+    // sealed fields. v2 adds the frozen quality ceilings (D-1643).
     let mut h = Hasher::new();
-    h.update(b"brutex.runner.global-replay-witness-universe.v1\0");
+    h.update(b"brutex.runner.global-replay-witness-universe.v2\0");
     h.update(&instrument_digest_v1(instrument));
     put_bytes(&mut h, feed.as_str().as_bytes());
     h.update(&[match direction {
@@ -3603,36 +4207,112 @@ fn digest_global_replay_witness(
         CostDirection::Short => 2,
     }]);
     put_usize(&mut h, first_oos);
+    for ceiling in quality_ceilings {
+        h.update(&ceiling.to_le_bytes());
+    }
     h.update(&universe.run_id.bytes());
     h.update(&universe.selected_digest);
     h.update(&universe.digest);
     h.finalize()
 }
 
-/// Stable V1 digest of every durable field in one indicator/execution column.
+/// Stable V1 digest of one indicator/execution column's durable fields, all but
+/// one. **Superseded by [`column_digest_v2`] for every digest this build
+/// computes but one (D-1812):** the signal-candle-stop source identity keeps
+/// V1 because its own namespace already hashes the `known()` rows.
 ///
-/// This is the sole codec used by grid evaluation and pre-admission durable
-/// adapters. It is O(column length), so callers compute it once at a structural
-/// boundary and retain the resulting fixed-size identity.
+/// **`Column::known()` is not hashed** (W3-runner2-8, D-1498). The per-bar
+/// availability masks are not among the bytes below, so two columns that
+/// differ only in which conditions have a certified answer share a V1 digest.
+///
+/// Kept, byte for byte, because records written before D-1812 carry it: a
+/// reader holding such a record and its column verifies it with this
+/// function, by name, or asks [`column_digest_codec`] which codec it is. Its
+/// meaning never changes; `column_digest_v1_never_moves_and_v2_binds_known`
+/// pins it.
+///
+/// O(column length).
 #[must_use]
 pub fn column_digest_v1(column: &indicators::column::Column) -> [u8; 32] {
     let mut h = Hasher::new();
     h.update(b"brutex.indicators.execution-column.v1");
-    put_usize(&mut h, column.bits().len());
-    for mask in column.bits() {
+    put_column_fields_v1(&mut h, column);
+    h.finalize()
+}
+
+/// Stable V2 digest of one indicator/execution column: every V1 field, then
+/// every `Column::known()` row (W3-runner2-8, D-1812).
+///
+/// Two columns with the same truth bits but different certified availability
+/// answer different questions -- an unknown condition must never be read as
+/// false -- so a digest that cannot tell them apart is not an identity of the
+/// column. V2 is V1's field sequence under its own domain tag, followed by
+/// the length of `known()` and each of its masks, so a V2 digest never equals
+/// a V1 digest of any column.
+///
+/// This is the codec used by grid evaluation, OOS replay, the walk-forward
+/// source identity and `cli`'s candidate descriptors. It is O(column length), so callers compute it once at a
+/// structural boundary and retain the resulting fixed-size identity.
+#[must_use]
+pub fn column_digest_v2(column: &indicators::column::Column) -> [u8; 32] {
+    let mut h = Hasher::new();
+    h.update(b"brutex.indicators.execution-column.v2");
+    put_column_fields_v1(&mut h, column);
+    put_usize(&mut h, column.known().len());
+    for mask in column.known() {
         put_mask(&mut h, *mask);
     }
-    put_usize(&mut h, column.sources().len());
+    h.finalize()
+}
+
+/// The codec a stored column digest was taken under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnDigestCodec {
+    /// [`column_digest_v1`]: written before D-1812, blind to `known()`.
+    V1,
+    /// [`column_digest_v2`]: what this build writes.
+    V2,
+}
+
+/// Which codec `stored` is a digest of `column` under, or `None` when it is
+/// neither -- a different column, or a corrupt digest (D-1812).
+///
+/// A reader re-verifying a record written before D-1812 calls this rather
+/// than comparing against [`column_digest_v2`] alone, so an old record is
+/// named as V1 instead of being reported as a changed column. Two O(column)
+/// passes at most; V2 is tried first.
+#[must_use]
+pub fn column_digest_codec(
+    column: &indicators::column::Column,
+    stored: [u8; 32],
+) -> Option<ColumnDigestCodec> {
+    if column_digest_v2(column) == stored {
+        Some(ColumnDigestCodec::V2)
+    } else if column_digest_v1(column) == stored {
+        Some(ColumnDigestCodec::V1)
+    } else {
+        None
+    }
+}
+
+/// The durable field sequence V1 hashes, shared by both codecs so V2 cannot
+/// drift from it. Changing this changes V1 and is forbidden (D-1812).
+fn put_column_fields_v1(h: &mut Hasher, column: &indicators::column::Column) {
+    put_usize(h, column.bits().len());
+    for mask in column.bits() {
+        put_mask(h, *mask);
+    }
+    put_usize(h, column.sources().len());
     for source in column.sources() {
-        put_usize(&mut h, *source);
+        put_usize(h, *source);
     }
     h.update(&[match column.sourced() {
         indicators::column::Sourced::Signal => 1,
         indicators::column::Sourced::Fill => 2,
     }]);
-    put_census(&mut h, column.census());
-    put_option_usize(&mut h, column.first_swept());
-    put_u64(&mut h, column.collided());
+    put_census(h, column.census());
+    put_option_usize(h, column.first_swept());
+    put_u64(h, column.collided());
     match column.evaluation_spec_token() {
         None => h.update(&[0]),
         Some(token) => {
@@ -3644,18 +4324,17 @@ pub fn column_digest_v1(column: &indicators::column::Column) -> [u8; 32] {
         None => h.update(&[0]),
         Some(accepted) => {
             h.update(&[1]);
-            put_usize(&mut h, accepted.len());
+            put_usize(h, accepted.len());
             for verdict in accepted.iter() {
                 h.update(&[u8::from(*verdict)]);
             }
         }
     }
-    put_census(&mut h, column.acceptance_census());
-    h.finalize()
+    put_census(h, column.acceptance_census());
 }
 
 fn digest_column(column: &indicators::column::Column) -> [u8; 32] {
-    column_digest_v1(column)
+    column_digest_v2(column)
 }
 
 fn require_complete_acceptance(
@@ -3719,19 +4398,17 @@ fn validate_column_sources(
     Ok(())
 }
 
-fn validate_arithmetic_envelope(
-    bars: &[Candle],
-    resolved: &ResolvedExitGridV1,
-) -> Result<(), ExitGridErrorV1> {
-    validate_arithmetic_envelope_view(bars, &resolved.view())
-}
-
 fn validate_arithmetic_envelope_view(
     bars: &[Candle],
     resolved: &ResolvedGridViewV1<'_>,
 ) -> Result<(), ExitGridErrorV1> {
-    let count = i128::try_from(bars.len())
-        .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;
+    validate_envelope_extremes(bars.len(), envelope_extremes(bars), resolved)
+}
+
+/// The two price extremes the arithmetic envelope reads: the highest high and
+/// the lowest open. One O(B) pass, which a caller pricing many resolutions on
+/// one series takes once (D-1188).
+fn envelope_extremes(bars: &[Candle]) -> Result<(i64, i64), ExitGridErrorV1> {
     let max_price = bars
         .iter()
         .map(|bar| bar.high)
@@ -3742,6 +4419,20 @@ fn validate_arithmetic_envelope_view(
         .map(|bar| bar.open)
         .min()
         .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
+    Ok((max_price, min_open))
+}
+
+/// [`validate_arithmetic_envelope_view`] over extremes already taken. The
+/// refusal order is the original's: the bar count, then an empty series, then
+/// each bound in turn.
+fn validate_envelope_extremes(
+    bars: usize,
+    extremes: Result<(i64, i64), ExitGridErrorV1>,
+    resolved: &ResolvedGridViewV1<'_>,
+) -> Result<(), ExitGridErrorV1> {
+    let count = i128::try_from(bars)
+        .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;
+    let (max_price, min_open) = extremes?;
     let money_bound = i128::from(max_price)
         .checked_mul(count)
         .and_then(|value| value.checked_mul(4))
@@ -4106,7 +4797,7 @@ mod tests {
             ratios,
             10_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             3,
             2,
@@ -4136,7 +4827,7 @@ mod tests {
             },
             max_cells: 1,
             selector: ExitGridSelectorV1::PessimisticTotal,
-            cost_model_id: printed_ohlcv_cost_model_id_v1(),
+            cost_model_id: printed_ohlcv_cost_model_id_v3(),
             forced_stop: ForcedStopV1::Disabled,
             max_ambiguous_bars: 0,
             max_gap_fills: 0,
@@ -4320,6 +5011,97 @@ mod tests {
             assert_ne!(
                 instrument_digest_v1(&baseline_option),
                 instrument_digest_v1(&changed_option)
+            );
+        }
+    }
+
+    /// D-1514, D-4500. The grid this build implements is cost model V3. A
+    /// policy that names V1 (a hole after a level exit un-priced that exit) or
+    /// V2 (an unpriced time exit un-priced every level exit before it) is
+    /// refused by that name before any level is resolved; an unknown label is
+    /// the generic refusal, and V3 resolves. The three identities are distinct.
+    #[test]
+    fn a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name() {
+        let ids = [
+            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
+        ];
+        for (at, left) in ids.iter().enumerate() {
+            for right in ids.get(at + 1..).unwrap_or_default() {
+                assert_ne!(left, right, "every cost model has its own identity");
+            }
+        }
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v3()),
+            Ok(())
+        );
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v2()),
+            Err(ExitGridErrorV1::SupersededCostModelIdV2)
+        );
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v1()),
+            Err(ExitGridErrorV1::SupersededCostModelIdV1)
+        );
+        assert_eq!(
+            implemented_cost_model([8; 32]),
+            Err(ExitGridErrorV1::UnsupportedCostModelId)
+        );
+        let input = bars(100);
+        assert!(policy().resolve(&nifty(), &input).is_ok());
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            (
+                printed_ohlcv_cost_model_id_v2(),
+                ExitGridErrorV1::SupersededCostModelIdV2,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut old = policy();
+            old.cost_model_id = id;
+            assert_eq!(
+                old.resolve(&nifty(), &input).map(|r| r.family()),
+                Err(refusal)
+            );
+        }
+    }
+
+    /// D-1514, D-4500. A resolution sealed under a superseded cost model (V1 or
+    /// V2), with a digest that reconciles, is still refused by the runtime
+    /// integrity check every resolved-grid door runs first, by name; an unknown
+    /// model is the generic refusal, and a broken seal is reported before
+    /// either.
+    #[test]
+    fn a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime() {
+        let input = bars(100);
+        let current = policy().resolve(&nifty(), &input).expect("V3 resolves");
+        assert_eq!(current.require_runtime_integrity(), Ok(()));
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            (
+                printed_ohlcv_cost_model_id_v2(),
+                ExitGridErrorV1::SupersededCostModelIdV2,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut sealed = current.clone();
+            sealed.policy.cost_model_id = id;
+            sealed.policy_digest = sealed.policy.digest();
+            sealed.digest = digest_resolved(&sealed);
+            assert!(sealed.digest_is_valid(), "the seal itself reconciles");
+            assert_eq!(sealed.require_runtime_integrity(), Err(refusal));
+            let mut broken = sealed;
+            broken.digest = [0; 32];
+            assert_eq!(
+                broken.require_runtime_integrity(),
+                Err(ExitGridErrorV1::ResolutionDigestMismatch)
             );
         }
     }
@@ -4636,6 +5418,7 @@ mod tests {
             targets: ladders.targets,
             trails: ladders.trails,
             refused_paths: 0,
+            refused_levels: None,
         };
         evaluated
     }
@@ -4786,6 +5569,118 @@ mod tests {
                 }
             ))
         );
+    }
+
+    /// D-1143. Sealing against hoisted `ExecutionDigestsV1` gives exactly
+    /// what the hashing constructors give -- the same capability, the same
+    /// refusals -- for one-stream, two-stream, three-stream, empty and
+    /// detached inputs, and many runs over one digest set agree with sealing
+    /// each from scratch.
+    #[test]
+    fn sealing_against_hoisted_digests_equals_hashing_per_run() {
+        let instrument = nifty();
+        let signal = bars(4);
+        let execution = shifted_bars(5, 1);
+        let run_for = |mask: ConditionMask, direction, data_digest| crate::identity::Run {
+            mask,
+            direction,
+            instrument: &instrument,
+            timeframe: "5min",
+            params: crate::identity::Params {
+                min_hits: 1,
+                ceiling: 10,
+                pair_budget: 10,
+                policy: 7,
+            },
+            data_digest,
+            commit: "test-commit",
+            feed: "test-feed",
+        };
+        for (sig, exe) in [
+            (&signal[..], None),
+            (&signal[..], Some(&execution[..])),
+            (&[][..], None),
+            (&[][..], Some(&execution[..])),
+        ] {
+            let digests = ExecutionDigestsV1::of(sig, exe);
+            assert_eq!(
+                digests.data_digest(),
+                crate::identity::data_digest_with_execution(sig, exe)
+            );
+            for bit in 0..3_u32 {
+                for direction in [Direction::Long, Direction::Short, Direction::Undirected] {
+                    let mask = ConditionMask::ZERO.with_bit(bit);
+                    for data in [digests.data_digest(), [9_u8; 32]] {
+                        let run = run_for(mask, direction, data);
+                        assert_eq!(
+                            ExecutionRunV1::with_digests(&run, &digests),
+                            ExecutionRunV1::new(&run, sig, exe),
+                        );
+                    }
+                }
+            }
+            // Reuse is idempotent.
+            let run = run_for(ConditionMask::ZERO, Direction::Long, digests.data_digest());
+            assert_eq!(
+                ExecutionRunV1::with_digests(&run, &digests),
+                ExecutionRunV1::with_digests(&run, &digests)
+            );
+        }
+
+        let daily = shifted_bars(2, -1);
+        let eligibility = [1_u8, 0];
+        let excluded = [20_382_i64];
+        let reference = crate::identity::DailyReferenceBinding {
+            daily_bars: &daily,
+            eligibility: &eligibility,
+            schema: 1,
+            eligibility_policy: 2,
+            gap_overlay_policy: 3,
+            excluded_ist_days: &excluded,
+            daily_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            minute_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: 4,
+        };
+        let digests =
+            ExecutionDigestsV1::of_daily_reference(&signal, &execution, &execution, reference);
+        let data = digests
+            .as_ref()
+            .map_or([0; 32], ExecutionDigestsV1::data_digest);
+        let run = run_for(ConditionMask::ZERO, Direction::Short, data);
+        assert_eq!(
+            digests.and_then(|d| ExecutionRunV1::with_digests(&run, &d)),
+            ExecutionRunV1::new_with_daily_reference(
+                &run, &signal, &execution, &execution, reference
+            ),
+        );
+        assert!(
+            ExecutionRunV1::new_with_daily_reference(
+                &run, &signal, &execution, &execution, reference
+            )
+            .is_ok()
+        );
+        // Malformed eligibility and a detached evaluated slice refuse at the
+        // digest constructor exactly as the hashing constructor refuses.
+        let malformed = crate::identity::DailyReferenceBinding {
+            eligibility: &eligibility[..1],
+            ..reference
+        };
+        let detached = shifted_bars(3, 400);
+        for (binding, evaluated) in [
+            (malformed, &execution[..]),
+            (reference, &detached[..]),
+            (reference, &[][..]),
+        ] {
+            let refused =
+                ExecutionDigestsV1::of_daily_reference(&signal, &execution, evaluated, binding);
+            assert!(refused.is_err());
+            assert_eq!(
+                refused.and_then(|d| ExecutionRunV1::with_digests(&run, &d)),
+                ExecutionRunV1::new_with_daily_reference(
+                    &run, &signal, &execution, evaluated, binding
+                ),
+            );
+        }
     }
 
     #[test]
@@ -5369,6 +6264,7 @@ mod tests {
             targets: ladders.targets,
             trails: ladders.trails,
             refused_paths: 0,
+            refused_levels: None,
         };
         let evaluated = resolved.evaluate_training_grid(
             &input,
@@ -5926,6 +6822,368 @@ mod tests {
         );
     }
 
+    /// D-0990: the stream-derived identity terms are sealed ONCE per series.
+    ///
+    /// `new_with_daily_reference` hashed the signal, context and daily streams
+    /// and the evaluated slice for every run; the Candidate universe built one
+    /// per `(closed mask, side)`. The sealed source must reproduce every run
+    /// exactly while hashing the daily-reference digest once in total, and must
+    /// not authorize a run over other streams.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one identity test keeps the equality, the count and every refusal of the sealed source together"
+    )]
+    #[test]
+    fn a_daily_reference_source_is_sealed_once_and_reproduces_every_run() {
+        let signal = bars(20);
+        let reference_context = shifted_bars(120, 1);
+        let evaluated_execution = reference_context[10..100].to_vec();
+        let daily = shifted_bars(2, -1);
+        let eligibility = [1_u8, 1];
+        let excluded = [20_382_i64];
+        let reference = crate::identity::DailyReferenceBinding {
+            daily_bars: &daily,
+            eligibility: &eligibility,
+            schema: 1,
+            eligibility_policy: 2,
+            gap_overlay_policy: 3,
+            excluded_ist_days: &excluded,
+            daily_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            minute_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: 4,
+        };
+        let digest = crate::identity::data_digest_with_daily_reference(
+            &signal,
+            &reference_context,
+            reference,
+        )
+        .expect("the complete daily binding");
+        let instrument = nifty();
+        let run_for = |bit: u32, direction| crate::identity::Run {
+            mask: ConditionMask::ZERO.with_bit(bit),
+            direction,
+            instrument: &instrument,
+            timeframe: "5min",
+            params: crate::identity::Params {
+                min_hits: 1,
+                ceiling: 10,
+                pair_budget: 10,
+                policy: 7,
+            },
+            data_digest: digest,
+            commit: "test-commit",
+            feed: "test-feed",
+        };
+
+        crate::identity::DAILY_REFERENCE_DIGESTS.with(|count| count.set(0));
+        let source = ExecutionDigestsV1::of_daily_reference(
+            &signal,
+            &reference_context,
+            &evaluated_execution,
+            reference,
+        )
+        .expect("the evaluated span is an exact context subslice");
+        let mut sealed = Vec::new();
+        for bit in 0..8 {
+            for direction in [Direction::Long, Direction::Short] {
+                sealed.push(
+                    ExecutionRunV1::with_digests(&run_for(bit, direction), &source)
+                        .expect("every run over the sealed streams seals"),
+                );
+            }
+        }
+        assert_eq!(
+            crate::identity::DAILY_REFERENCE_DIGESTS.with(std::cell::Cell::get),
+            1,
+            "sixteen runs over one series hash the three streams once, not once per run"
+        );
+        assert_eq!(source.data_digest(), digest);
+        assert_eq!(
+            source.execution_digest(),
+            crate::identity::data_digest(&evaluated_execution)
+        );
+        let mut index = 0;
+        for bit in 0..8 {
+            for direction in [Direction::Long, Direction::Short] {
+                let run = run_for(bit, direction);
+                assert_eq!(
+                    sealed.get(index).copied(),
+                    ExecutionRunV1::new_with_daily_reference(
+                        &run,
+                        &signal,
+                        &reference_context,
+                        &evaluated_execution,
+                        reference,
+                    )
+                    .ok(),
+                    "the sealed source is field-for-field the per-run constructor"
+                );
+                index += 1;
+            }
+        }
+        assert_eq!(
+            sealed.first().map(ExecutionRunV1::execution_digest),
+            Some(source.execution_digest())
+        );
+
+        // A source minted over OTHER streams carries another data digest, so
+        // the run's own `data_digest` term refuses it.
+        let other_signal = shifted_bars(20, 3);
+        let foreign = ExecutionDigestsV1::of_daily_reference(
+            &other_signal,
+            &reference_context,
+            &evaluated_execution,
+            reference,
+        )
+        .expect("the foreign streams are themselves well formed");
+        assert_ne!(foreign.data_digest(), source.data_digest());
+        assert_eq!(
+            ExecutionRunV1::with_digests(&run_for(0, Direction::Long), &foreign),
+            Err(ExitGridErrorV1::RunDataDigestMismatch)
+        );
+        // A source over another evaluated slice of the same context keeps the
+        // data digest and changes the execution digest the attested series
+        // later compares.
+        let narrower = ExecutionDigestsV1::of_daily_reference(
+            &signal,
+            &reference_context,
+            &reference_context[10..99],
+            reference,
+        )
+        .expect("a shorter exact subslice also seals");
+        assert_eq!(narrower.data_digest(), source.data_digest());
+        assert_ne!(narrower.execution_digest(), source.execution_digest());
+        // The ordinary run refusals still apply over a sealed source.
+        let undirected = run_for(0, Direction::Undirected);
+        assert_eq!(
+            ExecutionRunV1::with_digests(&undirected, &source),
+            Err(ExitGridErrorV1::UndirectedExecutionRun)
+        );
+        let untimed = crate::identity::Run {
+            timeframe: "",
+            ..run_for(0, Direction::Long)
+        };
+        assert_eq!(
+            ExecutionRunV1::with_digests(&untimed, &source),
+            Err(ExitGridErrorV1::MissingRunIdentity("timeframe"))
+        );
+        // Every stream refusal moved into the source unchanged.
+        assert_eq!(
+            ExecutionDigestsV1::of_daily_reference(&signal, &reference_context, &[], reference),
+            Err(ExitGridErrorV1::EmptyExecutionSeries)
+        );
+        let detached = shifted_bars(5, 9);
+        assert_eq!(
+            ExecutionDigestsV1::of_daily_reference(
+                &signal,
+                &reference_context,
+                &detached,
+                reference
+            ),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+        let malformed = crate::identity::DailyReferenceBinding {
+            eligibility: &eligibility[..1],
+            ..reference
+        };
+        assert_eq!(
+            ExecutionDigestsV1::of_daily_reference(
+                &signal,
+                &reference_context,
+                &evaluated_execution,
+                malformed
+            ),
+            Err(ExitGridErrorV1::DailyReferenceIdentityRefused(
+                crate::identity::DailyBindingRefusal::EligibilityLengthMismatch {
+                    daily: 2,
+                    eligibility: 1,
+                }
+            ))
+        );
+    }
+
+    /// D-0990: one attestation derives the slice facts once; pricing several
+    /// runs and replaying EVERY cell of every grid derives them zero more
+    /// times, and each replay is byte-identical to the one-off door.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one capability test keeps the count, the byte-identity, the zero-trade edge and every refusal together"
+    )]
+    #[test]
+    fn an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts() {
+        let input = crate::synthetic::sessions(6);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        // A mask that fires, and one that names every condition and so cannot.
+        let firing = ConditionMask::ZERO;
+        let silent = (0..60).fold(ConditionMask::ZERO, ConditionMask::with_bit);
+        let masks = [firing, silent];
+
+        let derived_before = crate::trade::slice_facts_derived_on_this_thread();
+        let replay = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        let mut evaluated = Vec::new();
+        let mut replayed = Vec::new();
+        for mask in &masks {
+            let run = test_execution_run(&instrument, mask, resolved.side(), &input)
+                .expect("the synthetic run seals");
+            let grid = resolved
+                .evaluate_with_attested(&replay, run)
+                .expect("the attested slice prices");
+            let cells = replay.cell_replay(&grid).expect("own grid replays");
+            let rows: Vec<_> = grid
+                .grid()
+                .cells
+                .iter()
+                .map(|cell| cells.materialize(cell))
+                .collect();
+            replayed.push(rows);
+            evaluated.push(grid);
+        }
+        assert_eq!(
+            crate::trade::slice_facts_derived_on_this_thread() - derived_before,
+            1,
+            "two runs and every cell of both grids share the one attested derivation"
+        );
+
+        for (mask, (grid, rows)) in masks.iter().zip(evaluated.iter().zip(&replayed)) {
+            let run = test_execution_run(&instrument, mask, resolved.side(), &input)
+                .expect("the synthetic run seals");
+            let attested = resolved
+                .attest_training(series, &column, Horizon::DEFAULT)
+                .expect("the exact training slice attests");
+            assert_eq!(
+                Ok(grid),
+                resolved.evaluate_with_attested(&attested, run).as_ref(),
+                "the hoisted-facts door is the per-run door, field for field"
+            );
+            assert_eq!(rows.len(), grid.grid().cells.len());
+            let facts = crate::trade::SliceFacts::of(&input, &column);
+            for (cell, replayed_rows) in grid.grid().cells.iter().zip(rows) {
+                let one_off = crate::grid::materialize_cell(
+                    &input,
+                    &column,
+                    mask,
+                    Horizon::DEFAULT,
+                    resolved.side(),
+                    grid.grid(),
+                    cell,
+                );
+                assert_eq!(replayed_rows, &one_off, "the replay is the one-off door");
+                assert_eq!(
+                    crate::grid::materialize_cell_over(
+                        &input,
+                        &column,
+                        mask,
+                        Horizon::DEFAULT,
+                        resolved.side(),
+                        grid.grid(),
+                        cell,
+                        &facts,
+                    ),
+                    one_off
+                );
+                assert_eq!(
+                    replayed_rows.as_ref().map(Vec::len).ok(),
+                    Some(usize::try_from(cell.trades).expect("trade count fits usize")),
+                    "every cell reconciles to its own trade count"
+                );
+            }
+        }
+        assert!(
+            evaluated.first().is_some_and(|grid| grid
+                .grid()
+                .cells
+                .iter()
+                .any(|cell| cell.trades > 0)),
+            "the firing mask must exercise a non-empty replay"
+        );
+        assert!(
+            evaluated.get(1).is_some_and(|grid| grid
+                .grid()
+                .cells
+                .iter()
+                .all(|cell| cell.trades == 0)),
+            "the every-condition mask is the zero-trade edge"
+        );
+
+        // A cell the grid did not produce is refused, never re-chosen.
+        let grid = evaluated.first().expect("firing grid");
+        let cells = replay.cell_replay(grid).expect("own grid replays");
+        let mut forged = grid
+            .grid()
+            .cells
+            .iter()
+            .find(|cell| cell.trades > 0)
+            .copied()
+            .expect("a trading cell exists");
+        forged.trades += 1;
+        assert!(cells.materialize(&forged).is_err());
+
+        // A grid minted by another resolution, or over another horizon, is
+        // refused before any walk.
+        let mut changed = input.clone();
+        if let Some(bar) = changed.first_mut() {
+            bar.volume = bar.volume.saturating_add(1);
+        }
+        let other = policy()
+            .resolve(&instrument, &changed)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let foreign = other
+            .evaluate_training_grid(
+                &changed,
+                &test_column(&changed),
+                &firing,
+                Horizon::DEFAULT,
+                other.side(),
+            )
+            .expect("the other resolution prices its own slice");
+        assert_eq!(
+            replay.cell_replay(&foreign).err(),
+            Some(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+        let shorter = Horizon::bars(5).expect("a five-bar horizon");
+        let other_horizon = resolved
+            .evaluate_training_grid(&input, &column, &firing, shorter, resolved.side())
+            .expect("the same resolution prices another horizon");
+        assert_eq!(
+            replay.cell_replay(&other_horizon).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        // Each arm of the series check refuses alone: a grid differing only in
+        // its column digest, and one differing only in its evaluation spec.
+        let mut other_column = grid.clone();
+        other_column.column_digest[0] ^= 1;
+        assert_eq!(
+            replay.cell_replay(&other_column).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        let mut thresholds = Thresholds::CLASSICAL;
+        thresholds.long_body = thresholds.long_body.saturating_add(1);
+        let changed_spec = test_column_with_thresholds(&input, thresholds)
+            .evaluation_spec_token()
+            .expect("a changed threshold still seals a spec");
+        assert_ne!(changed_spec, grid.evaluation_spec);
+        let mut other_spec = grid.clone();
+        other_spec.evaluation_spec = changed_spec;
+        assert_eq!(
+            replay.cell_replay(&other_spec).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        assert!(
+            replay.cell_replay(grid).is_ok(),
+            "the untouched grid still replays"
+        );
+        assert_eq!(replay.horizon, Horizon::DEFAULT);
+    }
+
     /// The attested door is the single-shot door split in two, and the split
     /// changes nothing a caller can observe: the same bytes come out, and a
     /// token can be spent only on the resolution that minted it.
@@ -5976,6 +7234,51 @@ mod tests {
         assert_eq!(
             other.evaluate_with_attested(&attested, run),
             Err(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+    }
+
+    /// W3-runner2-0 (D-0741): the per-slice facts are derived once, by the
+    /// attestation, and pricing a run over the token derives none.
+    #[test]
+    fn pricing_runs_over_one_attestation_derives_the_slice_facts_once() {
+        let input = bars(100);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        let run = test_execution_run(&instrument, &ConditionMask::ZERO, resolved.side(), &input)
+            .expect("the synthetic run seals");
+
+        let before_attest = crate::trade::slice_facts_derived_on_this_thread();
+        let attested = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        let after_attest = crate::trade::slice_facts_derived_on_this_thread();
+
+        let first = resolved.evaluate_with_attested(&attested, run);
+        assert!(first.is_ok());
+        for _ in 0..4 {
+            assert_eq!(resolved.evaluate_with_attested(&attested, run), first);
+        }
+        assert_eq!(
+            crate::trade::slice_facts_derived_on_this_thread() - after_attest,
+            0,
+            "five runs priced over one token must not re-derive the slice facts"
+        );
+        assert_eq!(after_attest - before_attest, 1, "attestation derives once");
+        // The single-shot door attests afresh, so it derives exactly once and
+        // prices the same bytes.
+        assert_eq!(
+            resolved.evaluate_training_grid_attested(series, &column, Horizon::DEFAULT, run),
+            first
+        );
+        assert_eq!(
+            crate::trade::slice_facts_derived_on_this_thread() - after_attest,
+            1
         );
     }
 
@@ -6194,6 +7497,376 @@ mod tests {
         );
     }
 
+    fn hex32(bytes: [u8; 32]) -> String {
+        bytes
+            .iter()
+            .fold(String::with_capacity(64), |mut out, byte| {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
+                out
+            })
+    }
+
+    /// The column codec's byte layout, composed here from the field
+    /// primitives independently of the codec under test, so a codec that
+    /// drops or reorders a field disagrees with it.
+    fn reference_column_encoding(tag: &[u8], column: &Column, known: bool) -> [u8; 32] {
+        let mut h = Hasher::new();
+        h.update(tag);
+        put_usize(&mut h, column.bits().len());
+        for mask in column.bits() {
+            put_mask(&mut h, *mask);
+        }
+        put_usize(&mut h, column.sources().len());
+        for source in column.sources() {
+            put_usize(&mut h, *source);
+        }
+        h.update(&[match column.sourced() {
+            indicators::column::Sourced::Signal => 1,
+            indicators::column::Sourced::Fill => 2,
+        }]);
+        put_census(&mut h, column.census());
+        put_option_usize(&mut h, column.first_swept());
+        put_u64(&mut h, column.collided());
+        match column.evaluation_spec_token() {
+            None => h.update(&[0]),
+            Some(token) => {
+                h.update(&[1]);
+                h.update(token.fingerprint_v1().as_bytes());
+            }
+        }
+        match column.acceptance() {
+            None => h.update(&[0]),
+            Some(accepted) => {
+                h.update(&[1]);
+                put_usize(&mut h, accepted.len());
+                for verdict in accepted.iter() {
+                    h.update(&[u8::from(*verdict)]);
+                }
+            }
+        }
+        put_census(&mut h, column.acceptance_census());
+        if known {
+            put_usize(&mut h, column.known().len());
+            for mask in column.known() {
+                put_mask(&mut h, *mask);
+            }
+        }
+        h.finalize()
+    }
+
+    /// D-1812 (W3-runner2-8): V1's bytes never move, and V2 binds `known()`.
+    ///
+    /// The V1 pin was captured from the codec before D-1812 existed, on this
+    /// fixture; V1 must keep answering it so a record stored under V1 stays
+    /// verifiable by name. V2 is checked against an independent composition
+    /// of its layout, which includes every `known()` row.
+    #[test]
+    fn column_digest_v1_never_moves_and_v2_binds_known() {
+        let input = crate::synthetic::sessions(6);
+        let column = test_column(&input);
+        assert!(
+            column
+                .known()
+                .iter()
+                .any(|known| *known != ConditionMask::ZERO),
+            "the fixture certifies some answers, so `known()` has bytes to bind"
+        );
+        assert_eq!(
+            hex32(column_digest_v1(&column)),
+            "1ba1662e35431cac4da390e4102ec1bf2875421c59a8ea04a99a93036619cb4b",
+            "V1 is the codec every record stored before D-1812 carries"
+        );
+        assert_eq!(
+            column_digest_v1(&column),
+            reference_column_encoding(b"brutex.indicators.execution-column.v1", &column, false),
+            "and V1 hashes no `known()` byte: the omission W3-runner2-8 names, kept as V1's meaning"
+        );
+        assert_eq!(
+            column_digest_v2(&column),
+            reference_column_encoding(b"brutex.indicators.execution-column.v2", &column, true),
+            "V2 is V1's fields under its own tag, then every `known()` row"
+        );
+        assert_ne!(
+            column_digest_v2(&column),
+            reference_column_encoding(b"brutex.indicators.execution-column.v2", &column, false),
+            "so dropping `known()` from V2 changes its answer"
+        );
+        assert_ne!(column_digest_v2(&column), column_digest_v1(&column));
+        assert_eq!(
+            digest_column(&column),
+            column_digest_v2(&column),
+            "the grid, the replay and every new identity use V2"
+        );
+        assert_eq!(
+            column_digest_codec(&column, column_digest_v2(&column)),
+            Some(ColumnDigestCodec::V2)
+        );
+        assert_eq!(
+            column_digest_codec(&column, column_digest_v1(&column)),
+            Some(ColumnDigestCodec::V1),
+            "a stored V1 digest is recognised by name"
+        );
+        let other = test_column(&input[..input.len() / 2]);
+        assert_eq!(column_digest_codec(&other, column_digest_v2(&column)), None);
+        assert_eq!(column_digest_codec(&other, column_digest_v1(&column)), None);
+        assert_eq!(column_digest_codec(&column, [0; 32]), None);
+        let empty = Column::default();
+        assert_ne!(column_digest_v2(&empty), column_digest_v1(&empty));
+        assert_eq!(
+            column_digest_codec(&empty, column_digest_v1(&empty)),
+            Some(ColumnDigestCodec::V1)
+        );
+    }
+
+    /// D-1811 (W3-runner5-0): the refusal each multi-fault OOS replay reports,
+    /// pinned through the public per-call door only, so it compiles and holds
+    /// on the tree before D-1811 as well. Hoisting the slice's checks out of
+    /// the candidate loop must not change one of them.
+    #[test]
+    fn the_oos_replay_refusal_order_is_pinned_for_multi_fault_inputs() {
+        let training = crate::synthetic::sessions(6);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &training)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let selected = selected_for(&resolved, &training)
+            .expect("the fixture seals one policy-admitted training coordinate");
+        let mut clean = crate::synthetic::sessions(6);
+        for bar in &mut clean {
+            bar.ts_micros = bar
+                .ts_micros
+                .saturating_add(8_i64.saturating_mul(crate::synthetic::DAY_MICROS));
+            bar.high = bar.open;
+            bar.low = bar.open;
+            bar.close = bar.open;
+        }
+        let mut corrupt = clean.clone();
+        if let Some(bar) = corrupt.get_mut(5) {
+            bar.high = bar.low.saturating_sub(1);
+        }
+        let mut off_minute_and_corrupt = corrupt.clone();
+        if let Some(bar) = off_minute_and_corrupt.get_mut(2) {
+            bar.ts_micros = bar.ts_micros.saturating_add(1);
+        }
+        let mut torn = selected.clone();
+        torn.side = crate::excursion::Side::Short;
+        let other_mask = ConditionMask::ZERO.with_bit(3);
+        let answer = |bars: &[Candle], mask: &ConditionMask, side, sel: &SelectedExitV1| {
+            let series =
+                ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], bars)
+                    .expect("complete source identity");
+            let oos = OosExecutionSeriesV1::new(series, 0).expect("the first bar begins OOS");
+            let run = test_execution_run(&instrument, mask, side, bars).expect("the run seals");
+            resolved
+                .replay_selected(oos, &test_column(bars), sel, run)
+                .map(|replay| replay.cell().is_some())
+        };
+        let long = resolved.side();
+        let short = crate::excursion::Side::Short;
+        let zero = ConditionMask::ZERO;
+        assert_eq!(
+            answer(&corrupt, &zero, long, &torn),
+            Err(ExitGridErrorV1::SelectionDigestMismatch),
+            "a torn selection outranks a corrupt bar"
+        );
+        assert_eq!(
+            answer(&corrupt, &zero, short, &selected),
+            Err(ExitGridErrorV1::RunIdentityMismatch("direction")),
+            "a foreign side outranks a corrupt bar"
+        );
+        assert_eq!(
+            answer(&corrupt, &other_mask, long, &selected),
+            Err(ExitGridErrorV1::RunIdentityMismatch("mask")),
+            "a foreign mask outranks a corrupt bar"
+        );
+        assert_eq!(
+            answer(&corrupt, &zero, long, &selected),
+            Err(ExitGridErrorV1::CorruptExecutionCandle { index: 5 }),
+        );
+        assert!(
+            matches!(
+                answer(&off_minute_and_corrupt, &zero, long, &selected),
+                Err(ExitGridErrorV1::OffMinuteTimestamp { index: 2, .. })
+            ),
+            "the earliest faulty bar is named, whatever its fault"
+        );
+        assert!(answer(&clean, &zero, long, &selected).is_ok());
+    }
+
+    /// D-1811 (W3-runner5-0): replaying on one OOS slice built once is the
+    /// per-call replay, value for value and refusal for refusal, and hashes
+    /// the OOS bars once however many candidates replay on it.
+    ///
+    /// The series variants carry one or more faults each, and the candidates
+    /// carry their own (a torn selection, a foreign mask, commit or side), so
+    /// a reordered check would report a different refusal for some pair.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of series faults crossed with candidate faults, each compared against the per-call door"
+    )]
+    fn replays_on_one_oos_slice_equal_the_per_call_replay_for_every_fault() {
+        let training = crate::synthetic::sessions(6);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &training)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let selected = selected_for(&resolved, &training)
+            .expect("the fixture seals one policy-admitted training coordinate");
+        let mut clean = crate::synthetic::sessions(6);
+        for bar in &mut clean {
+            bar.ts_micros = bar
+                .ts_micros
+                .saturating_add(8_i64.saturating_mul(crate::synthetic::DAY_MICROS));
+            bar.high = bar.open;
+            bar.low = bar.open;
+            bar.close = bar.open;
+        }
+        let mut corrupt = clean.clone();
+        if let Some(bar) = corrupt.get_mut(5) {
+            bar.high = bar.low.saturating_sub(1);
+        }
+        let mut off_minute_and_corrupt = corrupt.clone();
+        if let Some(bar) = off_minute_and_corrupt.get_mut(2) {
+            bar.ts_micros = bar.ts_micros.saturating_add(1);
+        }
+        let mut extreme = clean.clone();
+        if let Some(bar) = extreme.get_mut(3) {
+            bar.high = i64::MAX;
+            bar.close = i64::MAX;
+        }
+        let mut overlapping = clean.clone();
+        for bar in &mut overlapping {
+            bar.ts_micros = bar
+                .ts_micros
+                .saturating_sub(8_i64.saturating_mul(crate::synthetic::DAY_MICROS));
+        }
+        let variants: [(&str, &[Candle], usize); 6] = [
+            ("clean", &clean, 0),
+            ("clean, later boundary", &clean, 40),
+            ("corrupt bar", &corrupt, 0),
+            ("off-minute and corrupt", &off_minute_and_corrupt, 0),
+            ("price at i64::MAX", &extreme, 0),
+            ("overlaps training", &overlapping, 0),
+        ];
+        let mut torn = selected.clone();
+        torn.side = crate::excursion::Side::Short;
+        let other_mask = ConditionMask::ZERO.with_bit(3);
+        let mut refusals = 0_usize;
+        let mut priced = 0_usize;
+        for (name, bars, first_oos) in variants {
+            let column = test_column(bars);
+            let series =
+                ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], bars)
+                    .expect("the variant has a complete source identity");
+            let oos =
+                OosExecutionSeriesV1::new(series, first_oos).expect("the boundary indexes a bar");
+            let runs = [
+                (
+                    "canonical",
+                    test_execution_run(&instrument, &ConditionMask::ZERO, resolved.side(), bars),
+                ),
+                (
+                    "foreign mask",
+                    test_execution_run(&instrument, &other_mask, resolved.side(), bars),
+                ),
+                (
+                    "foreign side",
+                    test_execution_run(
+                        &instrument,
+                        &ConditionMask::ZERO,
+                        crate::excursion::Side::Short,
+                        bars,
+                    ),
+                ),
+                (
+                    "foreign feed",
+                    test_execution_run_for_feed(
+                        &instrument,
+                        &ConditionMask::ZERO,
+                        resolved.side(),
+                        bars,
+                        "other-feed",
+                    ),
+                ),
+            ];
+            crate::identity::DATA_DIGESTS.with(|count| count.set(0));
+            let slice = OosReplaySliceV1::new(oos, &column, None);
+            let built = crate::identity::DATA_DIGESTS.with(std::cell::Cell::get);
+            let mut on_slice = Vec::new();
+            for (run_name, run) in &runs {
+                let Ok(run) = run else { continue };
+                for (sel_name, sel) in [("selected", &selected), ("torn", &torn)] {
+                    on_slice.push((
+                        *run_name,
+                        sel_name,
+                        resolved.replay_selected_on(&slice, sel, *run),
+                    ));
+                }
+            }
+            assert_eq!(
+                crate::identity::DATA_DIGESTS.with(std::cell::Cell::get),
+                built,
+                "{name}: no replay on the slice hashes the OOS bars again"
+            );
+            assert_eq!(built, 1, "{name}: the slice hashes its bars once");
+            for (run_name, sel_name, answer) in on_slice {
+                let run = runs
+                    .iter()
+                    .find(|(candidate, _)| *candidate == run_name)
+                    .and_then(|(_, run)| run.as_ref().ok())
+                    .copied()
+                    .expect("only sealed runs were replayed");
+                let sel = if sel_name == "torn" { &torn } else { &selected };
+                assert_eq!(
+                    answer,
+                    resolved.replay_selected(oos, &column, sel, run),
+                    "{name} / {run_name} / {sel_name}: the slice door is the per-call door"
+                );
+                if answer.is_ok() {
+                    priced += 1;
+                } else {
+                    refusals += 1;
+                }
+            }
+            // Hoisted facts for this exact pair answer the same; facts for a
+            // different series are refused, never replaced.
+            let facts = crate::trade::SliceFacts::of(bars, &column);
+            let hoisted = OosReplaySliceV1::new(oos, &column, Some(&facts));
+            let run = runs[0]
+                .1
+                .as_ref()
+                .copied()
+                .expect("the canonical run seals");
+            assert_eq!(
+                resolved.replay_selected_on(&hoisted, &selected, run),
+                resolved.replay_selected(oos, &column, &selected, run),
+                "{name}: hoisted facts change nothing"
+            );
+            let short = bars.get(..bars.len().saturating_sub(1)).unwrap_or_default();
+            let foreign = crate::trade::SliceFacts::of(short, &test_column(short));
+            let mismatched = OosReplaySliceV1::new(oos, &column, Some(&foreign));
+            let per_call = resolved.replay_selected(oos, &column, &selected, run);
+            let answer = resolved.replay_selected_on(&mismatched, &selected, run);
+            if per_call.is_ok() {
+                assert_eq!(
+                    answer,
+                    Err(ExitGridErrorV1::RunIdentityMismatch(
+                        "hoisted OOS slice facts do not cover the OOS series"
+                    )),
+                    "{name}: facts that do not cover the series are refused"
+                );
+            } else {
+                assert_eq!(answer, per_call, "{name}: an earlier refusal still wins");
+            }
+        }
+        assert!(
+            priced > 0,
+            "some pair prices, so equality is not only of refusals"
+        );
+        assert!(refusals > priced, "and most pairs carry a fault");
+    }
+
     #[test]
     fn candidate_universe_digest_binds_every_path_and_legacy_replay_stays_strict() {
         let training = crate::synthetic::sessions(6);
@@ -6234,9 +7907,17 @@ mod tests {
             &execution,
         )
         .expect("the canonical OOS run");
+        crate::identity::DATA_DIGESTS.with(|count| count.set(0));
         let universe = resolved
             .replay_selected_universe(oos, &execution_column, &selected, run)
             .expect("pricing refusals remain conservative occupancy evidence");
+        let passes = crate::identity::DATA_DIGESTS.with(std::cell::Cell::get);
+        assert_eq!(passes, 1, "one replay hashes its OOS bars once (c4a-5)");
+        let held = crate::identity::data_digest(&execution);
+        assert_eq!(
+            universe.oos_data_digest, held,
+            "and still carries their digest"
+        );
 
         assert!(universe.digest_is_valid());
         assert_eq!(universe.require_integrity(), Ok(()));
@@ -6291,6 +7972,32 @@ mod tests {
             torn.require_integrity(),
             Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch)
         );
+    }
+
+    /// D-1643: the frozen quality ceilings travel with the witness, from the
+    /// same resolved policy (3 and 2 in this fixture), and are sealed.
+    fn witness_seals_its_frozen_quality_ceilings(
+        torn: &mut GlobalReplayWitnessUniverseV1,
+        policy: [u64; 2],
+    ) {
+        assert_eq!(torn.max_ambiguous_bars(), 3);
+        assert_eq!(torn.max_gap_fills(), 2);
+        assert_eq!([torn.max_ambiguous_bars(), torn.max_gap_fills()], policy);
+        for widen in [0, 1] {
+            if widen == 0 {
+                torn.max_ambiguous_bars = u64::MAX;
+            } else {
+                torn.max_gap_fills = u64::MAX;
+            }
+            assert_eq!(
+                torn.require_integrity(),
+                Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch),
+                "a widened quality ceiling breaks the opaque successor seal"
+            );
+            torn.max_ambiguous_bars = 3;
+            torn.max_gap_fills = 2;
+            assert_eq!(torn.require_integrity(), Ok(()));
+        }
     }
 
     #[test]
@@ -6351,8 +8058,14 @@ mod tests {
         assert_eq!(witness.selected_exit_digest(), selected.selection_digest);
         assert!(!witness.candidates().is_empty());
         assert_ne!(witness.universe_digest(), [0; 32]);
-
         let mut torn = witness;
+        witness_seals_its_frozen_quality_ceilings(
+            &mut torn,
+            [
+                resolved.policy().max_ambiguous_bars(),
+                resolved.policy().max_gap_fills(),
+            ],
+        );
         torn.first_oos = 1;
         assert_eq!(
             torn.require_integrity(),
@@ -6386,6 +8099,77 @@ mod tests {
                 ))
             ),
             "an arbitrary feed string is never relabelled as stored vendor authority"
+        );
+    }
+
+    #[test]
+    fn operator_rule_never_selects_a_winless_cell_at_the_ratio_ceiling() {
+        // run2-2, D-2606: every cell but one is winless and exactly flat, so
+        // its `reward_to_risk_bp` is `i64::MAX`. The one measured cell (smallest
+        // win 300 against a worst loss 100, ratio 300) must be selected.
+        let mut cfg = policy();
+        cfg.max_ambiguous_bars = 0;
+        cfg.max_gap_fills = 0;
+        cfg.selector = ExitGridSelectorV1::OperatorRule;
+        let input = bars(100);
+        let resolved = cfg
+            .resolve(&nifty(), &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let ladders = resolved.ladders().unwrap_or_else(|_| ResolvedLaddersV1 {
+            stops: Ladder::new(vec![1]).unwrap_or_default(),
+            targets: Ladder::new(vec![1]).unwrap_or_default(),
+            trails: Ladder::new(vec![1]).unwrap_or_default(),
+        });
+        let mut cells = Vec::new();
+        assert!(resolved.visit_coordinates(|chosen| {
+            cells.push(Cell {
+                stop: chosen.stop,
+                target: chosen.target,
+                tsl: chosen.tsl,
+                ttp: chosen.ttp,
+                trades: 10,
+                ..Cell::default()
+            });
+            true
+        }));
+        let admitted: Vec<usize> = (0..cells.len())
+            .filter(|&at| cells.get(at).is_some_and(|cell| resolved.admits(cell)))
+            .collect();
+        assert!(admitted.len() >= 2, "the fixture admits several cells");
+        let measured_at = admitted.last().copied().unwrap_or_default();
+        if let Some(slot) = cells.get_mut(measured_at) {
+            slot.wins = 4;
+            slot.min_win = 300;
+            slot.worst_trade = -100;
+            slot.pessimistic = 50;
+        }
+        let measured = cells.get(measured_at).copied().unwrap_or_default();
+        assert_eq!(measured.reward_to_risk_bp(), 300);
+        let evaluated = resolved.evaluate_training_grid(
+            &input,
+            &test_column(&input),
+            &ConditionMask::ZERO,
+            Horizon::DEFAULT,
+            resolved.side(),
+        );
+        assert!(evaluated.is_ok());
+        let Some(mut evaluated) = evaluated.ok() else {
+            return;
+        };
+        evaluated.grid = Grid {
+            cells,
+            signals: 10,
+            stops: ladders.stops,
+            targets: ladders.targets,
+            trails: ladders.trails,
+            refused_paths: 0,
+            refused_levels: None,
+        };
+        assert_eq!(
+            resolved
+                .select(&evaluated)
+                .map(|selected| selected.map(|value| *value.training_cell())),
+            Ok(Some(measured))
         );
     }
 
@@ -6443,6 +8227,7 @@ mod tests {
             targets: ladders.targets,
             trails: ladders.trails,
             refused_paths: 0,
+            refused_levels: None,
         };
         let evaluated = resolved.evaluate_training_grid(
             &input,
@@ -6584,5 +8369,34 @@ mod tests {
             unsupported.resolve(&nifty(), &bars(100)),
             Err(ExitGridErrorV1::UnsupportedExecutionResolution(5))
         );
+    }
+
+    /// AS-09 (P12-04, D-1793). The selector byte `ExitGridPolicyV1::digest`
+    /// hashes is pinned by VALUE, not round-tripped: it enters every recorded
+    /// exit-grid policy identity, so a coordinated renumbering would move
+    /// every identity already on disk and §3 rule 8 forbids it. No test
+    /// asserted these four literals before this one. The digest is also
+    /// required to separate all four selectors, so the byte is shown to reach
+    /// the identity rather than merely to exist.
+    #[test]
+    fn the_identity_selector_byte_keeps_its_four_literal_tags() {
+        let all = [
+            (ExitGridSelectorV1::PessimisticTotal, 1_u8),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 2),
+            (ExitGridSelectorV1::GuaranteedFloor, 3),
+            (ExitGridSelectorV1::OperatorRule, 4),
+        ];
+        let mut digests = Vec::new();
+        for (selector, tag) in all {
+            assert_eq!(selector_byte(selector), tag, "{selector:?}");
+            let mut with = policy();
+            with.selector = selector;
+            digests.push(with.digest());
+        }
+        for (index, one) in digests.iter().enumerate() {
+            for other in digests.iter().skip(index + 1) {
+                assert_ne!(one, other, "two selectors share a policy identity");
+            }
+        }
     }
 }

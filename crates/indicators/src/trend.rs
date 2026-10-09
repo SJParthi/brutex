@@ -1,7 +1,7 @@
 //! Moving averages, swing levels, `SuperTrend` and market structure.
 //!
-//! **14 vocabulary positions**: 0–5, 56–59, 64–65 and 72–73 — the last of the 232
-//! live positions that had no computation behind them.
+//! **14 vocabulary positions**: 0–5, 56–59, 64–65 and 72–73 — when written, the
+//! last of the then 232 live positions that had no computation behind them.
 //!
 //! # Every threshold here is UNVERIFIED, and that is stated rather than hidden
 //!
@@ -169,6 +169,9 @@ const _: () = assert!(RING % 2 == 1, "a fractal window needs a middle");
 pub struct Ema {
     period: i128,
     scaled: i128,
+    /// The scaled sum of the prices folded so far, read only while the first
+    /// `period` are being folded: the seed is their simple mean (D-1542).
+    seed_sum: i128,
     /// Candles folded, saturating. Read only by [`Ema::warm`], which is what keeps a
     /// two-candle seed from being emitted as a 200-period measurement.
     folded: u64,
@@ -182,6 +185,7 @@ impl Ema {
         Self {
             period,
             scaled: 0,
+            seed_sum: 0,
             folded: 0,
             seeded: false,
         }
@@ -189,12 +193,17 @@ impl Ema {
 
     /// Fold one price in.
     ///
-    /// Seeded with the first price rather than a simple average of the first `period`.
-    /// That is a convention and it is stated: seeding with an SMA needs `period`
-    /// candles of buffer, which would make the state grow with the period and cost the
-    /// constant-space property for no gain in a long run. The two agree to within the
-    /// smoothing constant after a few periods — which is why [`Ema::warm`] exists and
-    /// why no vocabulary position is emitted before it is true.
+    /// **Seeded with the simple mean of the first `period` prices**, then the
+    /// recursion, which is the standard (TA-Lib) seed. Until `period` prices have
+    /// been folded the value is the running mean of those folded so far.
+    ///
+    /// This was seeded with the FIRST price, on the argument that an SMA seed
+    /// "needs `period` candles of buffer". It does not: a running sum is one
+    /// `i128`, so the state stays constant-size. With the one-price seed the warm
+    /// gate opened while that price still carried `(1 - 2/(n+1))^(n-1)` of the
+    /// weight, about 13.8% of an EMA200, so a warm `close_below_ema200` could
+    /// be set against a level that was mostly where the run started
+    /// (hunt-indicators-1, D-1542).
     pub fn fold(&mut self, price: i64) {
         // Counted before either early return below, because both of them absorb the
         // candle: the seeding branch and the degenerate-period branch each `return`, and
@@ -202,8 +211,12 @@ impl Ema {
         // seed — which is exactly the run of candles this counter has to measure.
         self.folded = self.folded.saturating_add(1);
         let target = i128::from(price).saturating_mul(SCALE);
-        if !self.seeded {
-            self.scaled = target;
+        let count = i128::from(self.folded);
+        if !self.seeded || count <= self.period {
+            // THE SEED, A RUNNING MEAN. `count` is at least one here: it was
+            // incremented above.
+            self.seed_sum = self.seed_sum.saturating_add(target);
+            self.scaled = self.seed_sum.div_euclid(count.max(1));
             self.seeded = true;
             return;
         }
@@ -211,12 +224,30 @@ impl Ema {
         if denominator <= 0 {
             return;
         }
-        // ema += (target - ema) * 2 / (n + 1), all integer. `div_euclid` and not `/`:
-        // the numerator is negative whenever price is below the average, and
-        // truncation toward zero would bias the average upward on every down step.
+        // ema += (target - ema) * 2 / (n + 1), all integer, TRUNCATED TOWARD
+        // ZERO (ind1-2, D-2613). This was `div_euclid`, which floors: an up step
+        // fell short of the exact one but a down step overshot it, so after a fall
+        // the average reached a flat price exactly and `close_below_ema` went
+        // silent forever, while after the mirror-image rise it stalled below and
+        // `close_above_ema` stayed set. The exact average never reaches the price
+        // from either side. Truncation keeps the state strictly on the side it
+        // approaches from, as the exact one is, and is symmetric under reflecting
+        // price: each step falls short of the exact step by under one scaled unit
+        // in BOTH directions.
         let delta = target.saturating_sub(self.scaled);
-        let step = delta.saturating_mul(2).div_euclid(denominator);
+        let step = delta.saturating_mul(2) / denominator;
         self.scaled = self.scaled.saturating_add(step);
+    }
+
+    /// The average in millionths of a paisa ([`SCALE`]), unfloored, or `None`
+    /// before the first candle.
+    ///
+    /// What a side test compares against (ind1-2, D-2613): `value` floors, and
+    /// a close equal to the floor of a fractional average is BELOW it, which a
+    /// compare against the floored paisa reported as "on" it.
+    #[must_use]
+    pub const fn scaled(&self) -> Option<i128> {
+        if self.seeded { Some(self.scaled) } else { None }
     }
 
     /// The average in paisa, or `None` before the first candle.
@@ -230,9 +261,9 @@ impl Ema {
 
     /// True once `period` candles have been folded.
     ///
-    /// The seed is the first price, so until then the average is that price plus a
-    /// handful of steps — a fact about where the run started rather than about the
-    /// market. Measured: a state fed 10,000 paisa and then 20,000 set
+    /// Until then the average is the mean of fewer than `period` prices — a fact
+    /// about where the run started rather than about the market. At warm it is
+    /// exactly the simple mean of the first `period` (D-1542). Measured: a state fed 10,000 paisa and then 20,000 set
     /// `close_above_ema200`, where the "200-period average" was the previous close.
     ///
     /// **Separate from [`Ema::value`] on purpose, and this is the part a fix gets
@@ -252,6 +283,9 @@ impl Ema {
 pub struct Atr {
     period: i128,
     scaled: i128,
+    /// The scaled sum of the true ranges folded so far, read only while the
+    /// first `period` are being folded: Wilder's seed is their mean (D-1542).
+    seed_sum: i128,
     previous_close: Option<i64>,
     /// Candles folded, saturating. Read only by [`Atr::warm`].
     folded: u64,
@@ -265,6 +299,7 @@ impl Atr {
         Self {
             period,
             scaled: 0,
+            seed_sum: 0,
             previous_close: None,
             folded: 0,
             seeded: false,
@@ -297,22 +332,27 @@ impl Atr {
 
     /// Fold one candle in.
     ///
-    /// The first candle seeds the range at its own high-low span — there is no previous
-    /// close to gap from — so the seed is a one-candle range wearing a `period`-candle
-    /// label until [`Atr::warm`] is true.
+    /// The first candle's true range is its own high-low span — there is no previous
+    /// close to gap from. **Wilder's seed is the mean of the first `period` true
+    /// ranges**, then `1/n` smoothing; until `period` are folded the value is the
+    /// running mean of those so far. It was seeded from the first candle's range
+    /// alone, which still carried about 38.7% of an ATR10 at warm
+    /// (hunt-indicators-1, D-1542).
     pub fn fold(&mut self, candle: &Candle) {
         // Counted first, for the same reason as in `Ema::fold`: the seeding branch below
         // absorbs a candle without reaching the smoothing step.
         self.folded = self.folded.saturating_add(1);
         let tr = self.true_range(candle).saturating_mul(SCALE);
-        if self.seeded {
+        let count = i128::from(self.folded);
+        if self.seeded && count > self.period {
             let denominator = self.period;
             if denominator > 0 {
                 let delta = tr.saturating_sub(self.scaled);
                 self.scaled = self.scaled.saturating_add(delta.div_euclid(denominator));
             }
         } else {
-            self.scaled = tr;
+            self.seed_sum = self.seed_sum.saturating_add(tr);
+            self.scaled = self.seed_sum.div_euclid(count.max(1));
             self.seeded = true;
         }
         self.previous_close = Some(candle.close);
@@ -353,7 +393,9 @@ pub enum Trend {
 pub struct SuperTrend {
     atr: Atr,
     multiplier: i128,
-    stop: Option<i64>,
+    /// The stop held EXACTLY, as a numerator over [`STOP_UNIT`]: the midpoint, the
+    /// held ATR and the band are never rounded to a paisa on the way (D-3403).
+    stop: Option<i128>,
     trend: Trend,
 }
 
@@ -370,9 +412,24 @@ impl SuperTrend {
     }
 
     /// The stop's price, or `None` before it is established.
+    /// The stop, floored to a whole paisa for reporting. The bits do not compare
+    /// against this: see [`Self::side_of`].
     #[must_use]
-    pub const fn stop(&self) -> Option<i64> {
+    pub fn stop(&self) -> Option<i64> {
         self.stop
+            .and_then(|held| i64::try_from(held.div_euclid(STOP_UNIT)).ok())
+    }
+
+    /// Which side of the HELD stop `close` sits on, or `None` with no stop.
+    ///
+    /// The stop is `(high + low) / 2 ± atr · mult / 1000`, which is a fraction of a
+    /// paisa in general. It used to be built from a floored midpoint, a floored ATR
+    /// and a floored band, so a close could sit on the wrong side of it by up to
+    /// `mult / 1000` paisa plus a half — not merely on it (D-3403).
+    #[must_use]
+    pub fn side_of(&self, close: i64) -> Option<core::cmp::Ordering> {
+        self.stop
+            .map(|held| i128::from(close).saturating_mul(STOP_UNIT).cmp(&held))
     }
 
     /// Which side of it the market is on.
@@ -386,8 +443,10 @@ impl SuperTrend {
     /// The stop itself exists from the first candle and [`SuperTrend::stop`] keeps
     /// reporting it, because the ratchet needs a level to move from and the seed is the
     /// only level there is. This answers the different question positions 64 and 65
-    /// actually ask: whether that level is yet a `period`-candle range rather than the
-    /// first candle's own high-low span.
+    /// actually ask: whether the ATR under the band is yet a `period`-candle range
+    /// rather than the first candle's own high-low span. It does not promise the level
+    /// has moved off the seed — the ratchet keeps the seeded stop until a new band
+    /// passes it or the trend flips (D-3401).
     #[must_use]
     pub fn warm(&self) -> bool {
         self.atr.warm()
@@ -396,14 +455,23 @@ impl SuperTrend {
     /// Fold one candle in, moving or flipping the stop.
     pub fn fold(&mut self, candle: &Candle) {
         self.atr.fold(candle);
-        let Some(atr) = self.atr.value() else { return };
-        let mid = i128::from(candle.high).midpoint(i128::from(candle.low));
-        let band = i128::from(atr)
+        // `value` is the availability gate only — an ATR `i64` cannot hold has no
+        // band (F-87AB98). The band itself is built from the held ATR.
+        if self.atr.value().is_none() {
+            return;
+        }
+        // All three over STOP_UNIT = 2 · SCALE · 1000: `(h + l) / 2` and
+        // `(atr / SCALE) · (mult / 1000)` become integers, exactly.
+        let mid = (i128::from(candle.high).saturating_add(i128::from(candle.low)))
+            .saturating_mul(SCALE * 1000);
+        let band = self
+            .atr
+            .scaled
             .saturating_mul(self.multiplier)
-            .div_euclid(1000);
+            .saturating_mul(2);
         let upper = mid.saturating_add(band);
         let lower = mid.saturating_sub(band);
-        let close = i128::from(candle.close);
+        let close = i128::from(candle.close).saturating_mul(STOP_UNIT);
 
         let Some(previous) = self.stop else {
             // Seed on the side the first candle implies, so the first emitted bit is
@@ -414,10 +482,9 @@ impl SuperTrend {
                 (Trend::Down, upper)
             };
             self.trend = trend;
-            self.stop = i64::try_from(stop).ok();
+            self.stop = representable(stop);
             return;
         };
-        let previous = i128::from(previous);
 
         let (trend, stop) = match self.trend {
             Trend::Up => {
@@ -437,10 +504,22 @@ impl SuperTrend {
             }
         };
         self.trend = trend;
-        if let Ok(next) = i64::try_from(stop) {
-            self.stop = Some(next);
-        }
+        // Same policy as the seed: a stop `i64` cannot hold is absent, not the previous
+        // leg's level kept under the new trend. The next candle then reseeds, exactly as
+        // it does after an unrepresentable seed.
+        self.stop = representable(stop);
     }
+}
+
+/// The denominator the `SuperTrend` stop is held over: `2 · SCALE · 1000`, so the
+/// midpoint's half, the ATR's six digits and the multiplier's thousandths are all
+/// whole numbers (D-3403).
+const STOP_UNIT: i128 = 2 * SCALE * 1000;
+
+/// A held stop whose paisa floor `i64` cannot hold is absent, the policy the seed
+/// and the flip share (C4-INDICATORS-01).
+fn representable(held: i128) -> Option<i128> {
+    i64::try_from(held.div_euclid(STOP_UNIT)).ok().map(|_| held)
 }
 
 /// A confirmed swing, and the window it was confirmed in.
@@ -742,7 +821,9 @@ pub struct TrendState {
     thresholds: TrendThresholds,
 }
 
-const _: () = assert!(core::mem::size_of::<TrendState>() <= 512);
+// 544 bytes since D-1542 gave each `Ema` (and the `Atr` inside `SuperTrend`) a
+// running seed sum; the ceiling moved from 512 to 576, 32 bytes of slack.
+const _: () = assert!(core::mem::size_of::<TrendState>() <= 576);
 
 impl Default for TrendState {
     fn default() -> Self {
@@ -921,15 +1002,20 @@ impl TrendState {
         // and nothing downstream could tell that bit from one backed by two hundred
         // candles. Folding the gate into `value` instead would have starved
         // `SuperTrend::fold` of its seed — see `Ema::warm`.
+        //
+        // EXACT, NOT FLOORED (ind1-2, D-2613): the close is lifted to the
+        // average's own scale and compared with the unfloored state, so a close
+        // equal to the floor of a fractional average reads as below it.
+        let close_scaled = i128::from(close).saturating_mul(SCALE);
         if self.fast.warm()
-            && let Some(fast) = self.fast.value()
+            && let Some(fast) = self.fast.scaled()
         {
-            mask = side(mask, close, fast, 0, 1);
+            mask = side(mask, close_scaled, fast, 0, 1);
         }
         if self.slow.warm()
-            && let Some(slow) = self.slow.value()
+            && let Some(slow) = self.slow.scaled()
         {
-            mask = side(mask, close, slow, 2, 3);
+            mask = side(mask, close_scaled, slow, 2, 3);
         }
         // 4–5: the averages against each other. BOTH must have folded their own period,
         // so the slow one governs and this pair is the last of the six to speak. Gating
@@ -937,7 +1023,7 @@ impl TrendState {
         // which is a statement about the seed and not about the market.
         if self.fast.warm()
             && self.slow.warm()
-            && let (Some(fast), Some(slow)) = (self.fast.value(), self.slow.value())
+            && let (Some(fast), Some(slow)) = (self.fast.scaled(), self.slow.scaled())
         {
             mask = side(mask, fast, slow, 4, 5);
         }
@@ -945,11 +1031,13 @@ impl TrendState {
         // 64–65: close against the trailing stop, once the range under the band is an
         // `atr_period`-candle measurement. The seeded stop comes off ONE candle's
         // high-low span, so before this the side price sits on is a fact about the first
-        // candle of the run.
+        // candle of the run. After it the ratchet may still CARRY that seed level until
+        // a band passes it or the trend flips: the gate is on the ATR, not on the level
+        // (D-1542 seeds at the first candle by choice; D-3401).
         if self.supertrend.warm()
-            && let Some(stop) = self.supertrend.stop()
+            && let Some(ordering) = self.supertrend.side_of(close)
         {
-            mask = side(mask, close, stop, 64, 65);
+            mask = side_by(mask, ordering, 64, 65);
         }
 
         // 72–73: near a confirmed swing. `Kind::Near`, so `vocab` gates the band.
@@ -1013,11 +1101,27 @@ fn set(mask: ConditionMask, index: u16) -> ConditionMask {
 /// average would report itself as beneath it — the same defect that made position 227
 /// fire on every zero-body bar and handed an undirected tri-star to the bearish bit.
 /// Making it structural means it cannot be forgotten at the fourth call site.
-fn side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16) -> ConditionMask {
+fn side<T: Ord + Copy>(
+    mask: ConditionMask,
+    value: T,
+    level: T,
+    above: u16,
+    below: u16,
+) -> ConditionMask {
+    side_by(mask, value.cmp(&level), above, below)
+}
+
+/// [`side`] on an ordering already decided, for a level held below a paisa.
+fn side_by(
+    mask: ConditionMask,
+    ordering: core::cmp::Ordering,
+    above: u16,
+    below: u16,
+) -> ConditionMask {
     // A `match` on the ordering rather than an `if` chain: `Ordering` has exactly
     // three variants, so the compiler checks the equality arm exists instead of a
     // reader having to notice it does.
-    match value.cmp(&level) {
+    match ordering {
         core::cmp::Ordering::Greater => set(mask, above),
         core::cmp::Ordering::Less => set(mask, below),
         core::cmp::Ordering::Equal => mask,
@@ -1128,6 +1232,26 @@ mod tests {
         );
     }
 
+    /// THE `period`-TH TRUE RANGE IS SEEDED BY THE EXACT MEAN, NOT SMOOTHED.
+    /// G18-rest-04, D-2071.
+    ///
+    /// Folding the `period`-th range by Wilder's step instead of into the seed
+    /// sum differs only by the floor the running mean already took: true ranges
+    /// 4, 0, 0, 0 into ATR(4) are a mean of exactly one paisa, while the step
+    /// from the floored three-bar mean (1.333333) lands on 0.999999 and reads
+    /// as zero. `count > period` against `count >= period` is that difference.
+    #[test]
+    fn the_period_th_range_completes_the_seed_mean_exactly() {
+        let mut atr = Atr::new(4);
+        atr.fold(&candle(0, 4, 0, 0));
+        for ts in 1..4 {
+            atr.fold(&candle(ts, 0, 0, 0));
+        }
+        assert_eq!(atr.scaled, SCALE, "the mean of 4, 0, 0, 0 is one paisa");
+        assert_eq!(atr.value(), Some(1));
+        assert!(atr.warm());
+    }
+
     fn candle(ts: i64, high: i64, low: i64, close: i64) -> Candle {
         Candle {
             ts_micros: ts,
@@ -1142,6 +1266,53 @@ mod tests {
 
     fn tol() -> Tolerance {
         vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
+    }
+
+    /// AN AVERAGE IS WARM ON THE SIMPLE MEAN OF ITS FIRST `period` PRICES, NOT
+    /// ON A ONE-PRICE SEED. hunt-indicators-1, D-1542.
+    ///
+    /// Seeded from one price and declared warm after `period` folds, an EMA200
+    /// still carried about 13.8% of its first price at warm. The standard seed
+    /// is the SMA of the first `period` values, then the recursion.
+    #[test]
+    fn an_average_is_warm_on_the_simple_mean_of_its_first_period() {
+        let mut e = Ema::new(4);
+        for price in [10_000, 20_000, 30_000] {
+            e.fold(price);
+            assert!(!e.warm(), "three of four prices folded");
+        }
+        e.fold(40_000);
+        assert!(e.warm());
+        assert_eq!(e.value(), Some(25_000), "the SMA of the first four prices");
+        e.fold(50_000);
+        // 25,000 + (50,000 - 25,000) * 2 / 5
+        assert_eq!(
+            e.value(),
+            Some(35_000),
+            "then the recursion, from that seed"
+        );
+    }
+
+    /// THE SAME FOR WILDER'S ATR: THE MEAN OF THE FIRST `period` TRUE RANGES,
+    /// THEN 1/n SMOOTHING. hunt-indicators-1, D-1542.
+    #[test]
+    fn a_range_is_warm_on_the_mean_of_its_first_period_of_true_ranges() {
+        let mut a = Atr::new(3);
+        // True ranges 100 (high-low, no previous close), 300, 200.
+        a.fold(&candle(0, 1_100, 1_000, 1_050));
+        a.fold(&candle(1, 1_300, 1_000, 1_200));
+        assert!(!a.warm());
+        a.fold(&candle(2, 1_250, 1_050, 1_100));
+        assert!(a.warm());
+        assert_eq!(a.value(), Some(200), "the mean of 100, 300 and 200");
+        // True range 500 (previous close 1,100 to a high of 1,600).
+        a.fold(&candle(3, 1_600, 1_300, 1_500));
+        // 200 + (500 - 200) / 3
+        assert_eq!(
+            a.value(),
+            Some(300),
+            "then Wilder smoothing, from that seed"
+        );
     }
 
     /// A series at one price leaves the average exactly on that price — no float drift.
@@ -1228,6 +1399,54 @@ mod tests {
             !mask.get(4) && !mask.get(5),
             "ema20 == ema200 sets neither 4 nor 5"
         );
+    }
+
+    /// ind1-2, D-2613: the audit's mirror pair. 200 bars at 10,000 or 30,000
+    /// paisa, then 1,000 at 20,000: the exact averages approach 20,000 from
+    /// below and from above and never reach it, so a rise must keep
+    /// `close_above_ema*` (0, 2) and the mirror fall must keep `close_below_ema*`
+    /// (1, 3). Before, the fall reported neither: the floored step reached the
+    /// price exactly from above, and the floored level hid the side.
+    #[test]
+    fn a_flat_price_after_a_rise_and_after_a_fall_report_mirror_sides() {
+        let run = |start: i64| {
+            let mut t = TrendState::default();
+            for i in 0..1_200_i64 {
+                let price = if i < 200 { start } else { 20_000 };
+                t.step(&candle(i * 60_000_000, price, price, price), tol())
+                    .expect("sane candle");
+            }
+            t.bits(20_000, tol())
+        };
+        let after_rise = run(10_000);
+        let after_fall = run(30_000);
+        assert!(
+            after_rise.get(0) && !after_rise.get(1),
+            "above ema20 after a rise"
+        );
+        assert!(
+            after_rise.get(2) && !after_rise.get(3),
+            "above ema200 after a rise"
+        );
+        assert!(
+            after_fall.get(1) && !after_fall.get(0),
+            "below ema20 after a fall"
+        );
+        assert!(
+            after_fall.get(3) && !after_fall.get(2),
+            "below ema200 after a fall"
+        );
+
+        // And the state itself stays on the side it approaches from.
+        let mut up = Ema::new(20);
+        let mut down = Ema::new(20);
+        for i in 0..1_200 {
+            up.fold(if i < 200 { 10_000 } else { 20_000 });
+            down.fold(if i < 200 { 30_000 } else { 20_000 });
+        }
+        let target = 20_000 * SCALE;
+        assert!(up.scaled().expect("seeded") < target);
+        assert!(down.scaled().expect("seeded") > target);
     }
 
     /// A rising series puts the fast average above the slow one.
@@ -1495,6 +1714,20 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(run(), first, "a rerun disagreed");
         }
+        // P1-13-01: the equality holds for any deterministic body, a constant
+        // or an always-refusing one included (`filter_map(.ok())` turns the
+        // latter into `[] == []`). Every candle must step, and the run must
+        // not be constant.
+        assert_eq!(first.len(), series.len(), "every fixture candle must step");
+        assert!(
+            first
+                .iter()
+                .skip(1)
+                .zip(first.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every candle produced an identical result, so this test would pass \
+             on a body that ignores its input entirely"
+        );
     }
 
     /// `bits` is a function of the bar, so asking twice gives the same answer.
@@ -2252,15 +2485,17 @@ mod the_stop_on_both_sides {
         );
     }
 
-    /// A stop that will not fit `i64` is refused, and the last good one stands.
+    /// A flip whose new stop will not fit `i64` leaves the stop absent, never stale.
     ///
     /// `supertrend_mult` is a public `i128` with no ceiling, so the band is only as
     /// bounded as its caller. The multiplier below is not one any operator would set: it
     /// is the coarse thing that puts `mid + band` past the top of `i64` while every price
     /// stays ordinary paisa, which is the only way to reach the conversion's failing arm.
-    /// A wrapped stop would be a plausible wrong price, which §4 bans outright.
+    /// A wrapped stop would be a plausible wrong price, which §4 bans outright; so would
+    /// the previous leg's stop kept under the new trend, which is on the wrong side of
+    /// price and would decide positions 64/65 and the next bar's flip (ET-indicators-4).
     #[test]
-    fn a_stop_that_will_not_fit_i64_is_refused_and_the_last_good_one_stands() {
+    fn a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale() {
         let mut s = SuperTrend::new(TrendThresholds {
             supertrend_mult: 1_000_000_000_000_000_000_000,
             ..TrendThresholds::CLASSICAL
@@ -2285,8 +2520,17 @@ mod the_stop_on_both_sides {
         assert_eq!(s.trend(), Trend::Down, "the flip itself is still recorded");
         assert_eq!(
             s.stop(),
-            Some(2_500_000),
-            "an unrepresentable band must leave the last good stop in place, never wrap it"
+            None,
+            "an unrepresentable flip must leave no stop, not the long leg's stop under a short trend"
+        );
+        // Under the stale stop this close above 2_500_000 would flip straight back to
+        // long on the old leg's level. With the stop absent the candle reseeds instead,
+        // and that band is out of range too, so the stop stays absent.
+        s.fold(&bar(120_000_000, 2_501_000, 2_499_000, 2_500_500));
+        assert_eq!(
+            s.stop(),
+            None,
+            "an out-of-range band keeps the stop absent on the next candle as well"
         );
     }
 
@@ -2629,5 +2873,158 @@ mod a_period_is_folded_before_it_is_named {
                  anything later — or never — is a live condition the sweep cannot reach"
             );
         }
+    }
+}
+
+// XPERM-03 (D-3403): the SuperTrend stop is held exactly — midpoint, ATR and band
+// are never rounded to a paisa before the close is compared with it. A sibling
+// module, like `the_stop_on_both_sides`.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod supertrend_exact {
+    use super::*;
+
+    fn bar(minute: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: minute * 60_000_000,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    fn tol() -> Tolerance {
+        vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
+    }
+
+    /// A naive `SuperTrend` over exact fractions. The ATR is the documented one —
+    /// a running mean of the true range, then Wilder's `1/n`, held to six digits
+    /// below a paisa — recomputed here independently; everything after it is
+    /// exact: the stop is kept as a numerator over `2 · 10^6 · 1000`.
+    struct Naive {
+        period: i128,
+        multiplier: i128,
+        atr: i128,
+        sum: i128,
+        count: i128,
+        previous_close: Option<i128>,
+        up: bool,
+        stop: Option<i128>,
+    }
+
+    const UNIT: i128 = 2 * 1_000_000 * 1000;
+
+    impl Naive {
+        fn fold(&mut self, high: i128, low: i128, close: i128) {
+            let mut tr = high - low;
+            if let Some(p) = self.previous_close {
+                tr = tr.max((high - p).abs()).max((p - low).abs());
+            }
+            self.count += 1;
+            if self.count <= self.period {
+                self.sum += tr * 1_000_000;
+                self.atr = self.sum.div_euclid(self.count);
+            } else {
+                self.atr += (tr * 1_000_000 - self.atr).div_euclid(self.period);
+            }
+            self.previous_close = Some(close);
+            // (h + l) / 2 and atr / 10^6 · mult / 1000, both over UNIT.
+            let mid = (high + low) * 1_000_000 * 1000;
+            let band = self.atr * self.multiplier * 2;
+            let (upper, lower, close) = (mid + band, mid - band, close * UNIT);
+            self.stop = Some(match (self.stop, self.up) {
+                (None, _) => {
+                    self.up = close >= mid;
+                    if self.up { lower } else { upper }
+                }
+                (Some(s), true) if close < s => {
+                    self.up = false;
+                    upper
+                }
+                (Some(s), true) => lower.max(s),
+                (Some(s), false) if close > s => {
+                    self.up = true;
+                    lower
+                }
+                (Some(s), false) => upper.min(s),
+            });
+        }
+    }
+
+    /// The refutation's own trace. Bars 0–9 hold the ATR at exactly 1 paisa; bar 10
+    /// flips the trend down with a Wilder ATR of exactly 1.4, so the stop is
+    /// 96.5 + 4.2 = 100.7. Floored, it was 96 + 3 = 99, and a close of 100 set 64
+    /// (above) where it sits below the stop.
+    #[test]
+    fn a_close_under_the_exact_stop_is_below_it_whatever_the_floors_said() {
+        let mut t = TrendState::new(TrendThresholds::CLASSICAL);
+        for i in 0..10 {
+            t.step(&bar(i, 101, 100, 101), tol()).expect("sane");
+        }
+        let m = t.step(&bar(10, 97, 96, 96), tol()).expect("sane");
+        assert!(
+            m.get(65) && !m.get(64),
+            "96 is under the seeded stop: {m:?}"
+        );
+        let m = t.bits(100, tol());
+        assert!(m.get(65) && !m.get(64), "100 < 100.7: {m:?}");
+        let m = t.bits(101, tol());
+        assert!(m.get(64) && !m.get(65), "101 > 100.7: {m:?}");
+        assert_eq!(
+            t.supertrend.stop(),
+            Some(100),
+            "the reported level floors 100.7"
+        );
+    }
+
+    /// Differential: 3,000 bars of a deterministic walk (seeded LCG, steps of a few
+    /// paisa so the fractional parts matter), every bar's 64/65 against the naive
+    /// oracle's side, and every warm bar decided one way or the other.
+    #[test]
+    fn bits_64_and_65_agree_with_an_exact_naive_supertrend_on_a_long_walk() {
+        let thresholds = TrendThresholds::CLASSICAL;
+        let mut t = TrendState::new(thresholds);
+        let mut naive = Naive {
+            period: thresholds.atr_period,
+            multiplier: thresholds.supertrend_mult,
+            atr: 0,
+            sum: 0,
+            count: 0,
+            previous_close: None,
+            up: true,
+            stop: None,
+        };
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |span: i64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            i64::try_from(seed >> 33).expect("31 bits") % span
+        };
+        let mut price: i64 = 10_000;
+        let mut compared = 0_u32;
+        for minute in 0..3_000_i64 {
+            price += next(7) - 3;
+            let high = price + next(4);
+            let low = price - next(4);
+            let close = low + next(high - low + 1);
+            let candle = bar(minute, high, low, close);
+            let mask = t.step(&candle, tol()).expect("sane");
+            if minute >= i64::try_from(thresholds.atr_period).expect("a small period") {
+                let stop = naive.stop.expect("seeded on the first bar");
+                let exact = i128::from(close) * UNIT;
+                assert_eq!(
+                    (mask.get(64), mask.get(65)),
+                    (exact > stop, exact < stop),
+                    "minute {minute}: close {close} against {stop}/{UNIT}"
+                );
+                compared += 1;
+            }
+            naive.fold(i128::from(high), i128::from(low), i128::from(close));
+        }
+        assert_eq!(compared, 2_990);
     }
 }

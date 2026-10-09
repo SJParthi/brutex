@@ -354,7 +354,13 @@ impl TradeDirectionV1 {
 /// Exact closure classification inherited from the uncapped Apriori walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ClosureV1 {
-    /// No immediate superset had equal support.
+    /// No immediate superset the sweep built had equal support:
+    /// `runner::ClosureVerdict::Closed`. **Amended by D-4503 (audit
+    /// AC-whp-cx-2):** this said "No immediate superset had equal support",
+    /// but a superset `engine`'s join prunes as uninformative under
+    /// `vocab::implication` can have equal support and is never built, so it
+    /// cannot disqualify this itemset; it only restates it. Closed relative to
+    /// the informative lattice the sweep walks, not to every frequent set.
     Closed,
     /// An equal-support immediate superset represents this itemset.
     Redundant,
@@ -2512,6 +2518,18 @@ struct PopulationPaths {
     receipt_v4: PathBuf,
 }
 
+/// `<root>/results/population-write.lock`, the one lock every population,
+/// admission, execution and Selection V4 writer and joined reader holds.
+///
+/// The only place this path is built (D-3506): four writers built it in a
+/// private `lock_path` and two readers inline, and a rename in one of them
+/// would have locked a file no other writer locks while every write still
+/// succeeded. `cli/tests/one_path_authority.rs` counts the construction.
+#[must_use]
+pub(crate) fn population_write_lock(root: &Path) -> PathBuf {
+    root.join("results").join("population-write.lock")
+}
+
 /// Open population row/receipt files and their in-memory exact indexes.
 #[derive(Debug)]
 pub struct PopulationLedger {
@@ -2578,7 +2596,7 @@ impl PopulationLedger {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        population_write_lock(root)
     }
 
     /// Opens existing population files without creating any path.
@@ -3141,6 +3159,7 @@ impl PopulationLedger {
                 ));
             }
             self.require_exact_existing(rows, receipt, expected)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
             self.row_file.sync_all().map_err(|why| {
                 format!("the existing population rows could not be synced: {why}")
             })?;
@@ -3150,8 +3169,10 @@ impl PopulationLedger {
             return Ok(PopulationCommit::Reused);
         }
 
+        self.discard_unreceipted_trailing_block(&receipt.population_id, rows)?;
         if self.raw_blocks.contains_key(&receipt.population_id) {
             self.require_exact_existing(rows, receipt, expected)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
             self.row_file.sync_all().map_err(|why| {
                 format!("the prepared population block could not be synced: {why}")
             })?;
@@ -3212,6 +3233,7 @@ impl PopulationLedger {
                 ));
             }
             self.require_exact_existing(rows, &v2, expected)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
             self.row_file.sync_all().map_err(|why| {
                 format!("the existing population rows could not be synced: {why}")
             })?;
@@ -3225,8 +3247,10 @@ impl PopulationLedger {
             return Ok(PopulationCommit::Reused);
         }
 
+        self.discard_unreceipted_trailing_block(&v2.population_id, rows)?;
         if self.raw_blocks.contains_key(&v2.population_id) {
             self.require_exact_existing(rows, &v2, expected)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
             self.row_file.sync_all().map_err(|why| {
                 format!("the prepared population block could not be synced: {why}")
             })?;
@@ -3280,6 +3304,7 @@ impl PopulationLedger {
                 ));
             }
             self.require_exact_existing(rows, &v2, expected)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
             self.row_file.sync_all().map_err(|why| {
                 format!("the existing population rows could not be synced: {why}")
             })?;
@@ -3348,6 +3373,74 @@ impl PopulationLedger {
         self.require_exact_block(actual.block, &receipt.population_id, rows)
     }
 
+    /// Cuts the LAST row block when no receipt of any version names it and
+    /// it is not exactly the offered rows (D-1905, D-1906; pop1-1). A crash
+    /// between write chunks leaves a whole-row prefix the old code indexed as
+    /// a short block and then refused as "different row facts" forever; a
+    /// foreign receipt-less block wedged the same way. Under the writer lock
+    /// neither was ever acknowledged, so both are scratch and the caller
+    /// rewrites the whole block.
+    fn discard_unreceipted_trailing_block(
+        &mut self,
+        population_id: &[u8; 32],
+        rows: &[PopulationRowV1],
+    ) -> Result<(), PopulationRefusal> {
+        let Some(actual) = self.raw_blocks.get(population_id).copied() else {
+            return Ok(());
+        };
+        // DEFENCE IN DEPTH, NOT A REACHABLE BRANCH: every absorbed receipt is
+        // checked against its block's ordered row digest and the offered rows
+        // against the same receipt, so a receipted block already equals `rows`
+        // and the exact check below would keep it. Only a failed read could
+        // send one to the cut, and an acknowledged block must never be cut.
+        // Written as one comparison of the three lookups, so no `||` mutant of
+        // it exists that no test could reach; its `!=` is held by the cut
+        // tests (G18-cli-b-11, D-2023).
+        let receipted = [
+            self.receipts.contains_key(population_id),
+            self.receipts_v3.contains_key(population_id),
+            self.receipts_v4.contains_key(population_id),
+        ];
+        if receipted != [false; 3] {
+            return Ok(());
+        }
+        let rows_end = self
+            .row_scanned
+            .checked_sub(HEADER)
+            .ok_or_else(|| "population row file ended before its header".to_owned())?
+            / ROW_STRIDE;
+        if actual.block.first.checked_add(actual.block.count) != Some(rows_end) {
+            return Ok(());
+        }
+        // THE BYTES ALONE DECIDE: `BlockFacts` is a pure function of `first`
+        // and the row payloads, so equal bytes at `actual.block` are equal
+        // facts, and a facts comparison before them could never disagree
+        // (G18-cli-b-11, D-2023).
+        if self
+            .require_exact_block(actual.block, population_id, rows)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let at = actual
+            .block
+            .first
+            .checked_mul(ROW_STRIDE)
+            .and_then(|bytes| bytes.checked_add(HEADER))
+            .ok_or_else(|| "population row offset overflowed u64".to_owned())?;
+        crate::fixed_tail::discard_orphan(
+            &self.row_file,
+            &self.row_path,
+            at,
+            &format!("population {}", hex(population_id)),
+        )?;
+        self.raw_blocks.remove(population_id);
+        self.row_scanned = at;
+        self.row_generation =
+            validated_generation(&self.row_file, &self.row_path, at, "population row file")?;
+        Ok(())
+    }
+
     fn append_rows(
         &mut self,
         rows: &[PopulationRowV1],
@@ -3401,8 +3494,9 @@ impl PopulationLedger {
                 .write_all(encoded)
                 .map_err(|why| rollback_message(&self.row_file, at, "population rows", &why))?;
         }
-        self.row_file
-            .sync_all()
+        // A failed barrier cuts every row this call wrote and is never
+        // confirmed by a second barrier (D-1900, pop1-4).
+        crate::fixed_tail::sync_or_roll_back(&self.row_file, &self.row_path, at, File::sync_all)
             .map_err(|why| format!("the new population rows could not be synced: {why}"))?;
         let first = at
             .checked_sub(HEADER)
@@ -3443,7 +3537,13 @@ impl PopulationLedger {
                 &why,
             )
         })?;
-        self.receipt_file.sync_all().map_err(|why| {
+        crate::fixed_tail::sync_or_roll_back(
+            &self.receipt_file,
+            &self.receipt_path,
+            at,
+            File::sync_all,
+        )
+        .map_err(|why| {
             format!("the new population completion receipt could not be synced: {why}")
         })?;
         self.receipt_scanned = at.saturating_add(RECEIPT_STRIDE);
@@ -3473,7 +3573,7 @@ impl PopulationLedger {
         let raw = receipt.to_bytes()?;
         file.write_all(&raw)
             .map_err(|why| rollback_message(file, at, "population V3 completion receipt", &why))?;
-        file.sync_all()
+        crate::fixed_tail::sync_or_roll_back(file, &self.receipt_v3_path, at, File::sync_all)
             .map_err(|why| format!("the new population V3 receipt could not be synced: {why}"))?;
         self.receipt_v3_scanned = at.saturating_add(RECEIPT_V3_STRIDE);
         self.receipt_v3_generation = Some(validated_generation(
@@ -3502,7 +3602,7 @@ impl PopulationLedger {
         let raw = receipt.to_bytes()?;
         file.write_all(&raw)
             .map_err(|why| rollback_message(file, at, "population V4 completion receipt", &why))?;
-        file.sync_all()
+        crate::fixed_tail::sync_or_roll_back(file, &self.receipt_v4_path, at, File::sync_all)
             .map_err(|why| format!("the new population V4 receipt could not be synced: {why}"))?;
         self.receipt_v4_scanned = at.saturating_add(RECEIPT_V4_STRIDE);
         self.receipt_v4_generation = Some(validated_generation(
@@ -3537,20 +3637,34 @@ impl PopulationLedger {
         }
         let new_blocks =
             index_rows_range(&mut self.row_file, &self.row_path, self.row_scanned, len)?;
+        // VALIDATE THE WHOLE BATCH, THEN INSERT (determinism-3, D-2637). The
+        // loop inserted while it checked, so a refusal left every block the
+        // map happened to visit first in the index, and named whichever
+        // duplicate the map's random order reached first: a retry on the same
+        // handle then named a different population, or a block that was never
+        // duplicated at all. The duplicate named is now the FILE-FIRST one
+        // (lowest first row), and nothing is inserted until none is found.
+        let mut first_duplicate: Option<(u64, [u8; 32])> = None;
+        for (identity, facts) in &new_blocks {
+            if self.raw_blocks.contains_key(identity)
+                && first_duplicate.is_none_or(|(first, _)| facts.block.first < first)
+            {
+                first_duplicate = Some((facts.block.first, *identity));
+            }
+        }
+        if let Some((_, identity)) = first_duplicate {
+            return Err(format!(
+                "{} gained a duplicate/non-contiguous block for population {}",
+                self.row_path.display(),
+                hex(&identity)
+            ));
+        }
         reserve_map(
             &mut self.raw_blocks,
             new_blocks.len(),
             "population-block index",
         )?;
-        for (identity, facts) in new_blocks {
-            if self.raw_blocks.insert(identity, facts).is_some() {
-                return Err(format!(
-                    "{} gained a duplicate/non-contiguous block for population {}",
-                    self.row_path.display(),
-                    hex(&identity)
-                ));
-            }
-        }
+        self.raw_blocks.extend(new_blocks);
         self.row_scanned = len;
         self.row_generation =
             validated_generation(&self.row_file, &self.row_path, len, "population row file")?;
@@ -4631,6 +4745,16 @@ fn index_receipts_v4(
     Ok(receipts)
 }
 
+/// A receipt map's entries in identity order, not the per-process random order
+/// of `HashMap` iteration, so the first bad population a reconciliation
+/// refuses is the same one in every process. O(n log n) over an O(n) cold open.
+/// audit-20261003 hunt-conc-3, D-1565.
+fn in_identity_order<V>(map: &HashMap<[u8; 32], V>) -> Vec<(&[u8; 32], &V)> {
+    let mut ordered: Vec<_> = map.iter().collect();
+    ordered.sort_unstable_by_key(|(identity, _)| **identity);
+    ordered
+}
+
 fn reconcile_receipts(
     blocks: &HashMap<[u8; 32], BlockFacts>,
     receipts: &HashMap<[u8; 32], CompletionReceiptV2>,
@@ -4641,7 +4765,7 @@ fn reconcile_receipts(
         receipts.len(),
         "reconciled committed-population index",
     )?;
-    for (identity, receipt) in receipts {
+    for (identity, receipt) in in_identity_order(receipts) {
         let facts = blocks.get(identity);
         validate_receipt_v2_against_facts(receipt, facts)?;
         let block = facts.map_or(PopulationBlock { first: 0, count: 0 }, |held| held.block);
@@ -4667,7 +4791,7 @@ fn reconcile_receipts_v3(
         receipts.len(),
         "reconciled authoritative V3 population index",
     )?;
-    for (identity, receipt) in receipts {
+    for (identity, receipt) in in_identity_order(receipts) {
         let v2 = receipt.v2();
         if let Some(audit) = audit_v2.get(identity)
             && *audit != v2
@@ -4703,7 +4827,7 @@ fn reconcile_receipts_v4(
         receipts.len(),
         "reconciled authoritative V4 population index",
     )?;
-    for (identity, receipt) in receipts {
+    for (identity, receipt) in in_identity_order(receipts) {
         let v3 = receipt.v3();
         let v2 = v3.v2();
         let held_v2 = audit_v2.get(identity).ok_or_else(|| {
@@ -4848,18 +4972,17 @@ fn ensure_header(
     magic: [u8; 8],
     version: u32,
 ) -> Result<(), PopulationRefusal> {
-    let len = measured_len(file, path)?;
-    if len != 0 {
-        return Ok(());
-    }
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&magic)?;
     encoder.u32(version)?;
     encoder.zeros(4)?;
     encoder.finish()?;
-    file.write_all(&header)
-        .and_then(|()| file.sync_all())
+    // conc5-1 (D-2644): the shared writer header rule. Called only from the
+    // writer's open, under its exclusive lock; the directory is synced by
+    // that caller.
+    crate::fixed_tail::init_or_heal_header(file, path, &header, File::sync_all)
+        .map(drop)
         .map_err(|why| {
             format!(
                 "{} could not receive a durable header: {why}",
@@ -5457,6 +5580,43 @@ mod tests {
     use crate::stored::{CompleteCalendarReceiptV2, calendar_receipt_v2};
     use std::fs::OpenOptions;
     use std::io::{Seek as _, SeekFrom, Write as _};
+
+    /// `docs/02-store-format.md` §28 states the population row this build
+    /// writes: its magic, version, stride, payload width and seal row.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_population_row_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 28. Population rows")
+            .expect("the population-row section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(
+            " — `results/population-v1.bin`, version {}\n",
+            super::ROW_VERSION
+        )));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = core::str::from_utf8(&super::ROW_MAGIC).expect("the magic is ASCII");
+        assert!(section.contains(&format!(
+            "The {}-byte header is `{magic}` at `0..8`, version `{}` at `8..12`",
+            super::HEADER,
+            super::ROW_VERSION
+        )));
+        assert!(section.contains(&format!(
+            "Each row is {} bytes: a {}-byte payload and an {}-byte seal.",
+            super::ROW_STRIDE,
+            super::ROW_PAYLOAD_BYTES,
+            super::SEAL_BYTES
+        )));
+        assert!(section.contains(&format!("`16 + n*{}`", super::ROW_STRIDE)));
+        assert!(section.contains(&format!(
+            "| {} | {} | first eight BLAKE3 bytes over `0..{}` |",
+            super::ROW_PAYLOAD_BYTES,
+            super::SEAL_BYTES,
+            super::ROW_PAYLOAD_BYTES
+        )));
+    }
 
     fn root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -6812,18 +6972,162 @@ mod tests {
         changed[1].metrics.average_loss = changed[1].metrics.average_loss.saturating_add(1);
         let changed_receipt = self::receipt(population_id, &changed);
         let mut ledger = PopulationLedger::open(&mismatch_root).expect("orphan reader");
-        let why = ledger
-            .append_complete(&changed, &changed_receipt)
-            .expect_err("different orphan");
-        assert!(why.contains("different row facts"), "{why}");
+        // pop2-4 / rule 4, D-1905: the receipt-less orphan is scratch. Its
+        // bytes are never blessed; the writer cuts them and writes its own.
         assert_eq!(
-            std::fs::metadata(PopulationLedger::receipt_path(&mismatch_root))
-                .expect("receipt metadata")
+            ledger
+                .append_complete(&changed, &changed_receipt)
+                .expect("a different orphan is cut and rewritten"),
+            PopulationCommit::Written
+        );
+        assert_eq!(
+            std::fs::metadata(PopulationLedger::row_path(&mismatch_root))
+                .expect("row metadata")
                 .len(),
-            super::HEADER,
-            "a mismatched orphan gets no commit receipt"
+            super::HEADER + 2 * super::ROW_STRIDE,
+            "the orphan was replaced, not extended"
+        );
+        assert_eq!(
+            ledger
+                .page(&population_id, 0, 25)
+                .expect("page")
+                .expect("committed")
+                .rows,
+            changed.to_vec()
         );
         let _ = std::fs::remove_dir_all(&mismatch_root);
+    }
+
+    /// pop1-1, D-1906: a crash between write chunks leaves a whole-row
+    /// prefix of the block; the exact rerun now completes it.
+    #[test]
+    fn a_whole_row_prefix_of_the_exact_block_is_completed_by_the_rerun() {
+        let root = root("row-prefix");
+        let _ = std::fs::remove_dir_all(&root);
+        drop(PopulationLedger::open(&root).expect("headers"));
+        let population_id = digest(16);
+        let rows = two_rows(population_id);
+        let mut row_file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        row_file
+            .write_all(&rows[0].to_bytes().expect("row bytes"))
+            .and_then(|()| row_file.sync_all())
+            .expect("prefix row");
+        drop(row_file);
+        let receipt = receipt(population_id, &rows);
+        let mut ledger = PopulationLedger::open(&root).expect("prefix reader");
+        assert_eq!(
+            ledger
+                .append_complete(&rows, &receipt)
+                .expect("the exact rerun completes the prefix"),
+            PopulationCommit::Written
+        );
+        assert_eq!(
+            std::fs::metadata(PopulationLedger::row_path(&root))
+                .expect("row metadata")
+                .len(),
+            super::HEADER + 2 * super::ROW_STRIDE
+        );
+        drop(ledger);
+        let mut reopened = PopulationLedger::open_read(&root).expect("reopens");
+        assert_eq!(
+            reopened
+                .page(&population_id, 0, 25)
+                .expect("page")
+                .expect("committed")
+                .rows,
+            rows.to_vec()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// pop1-1, D-1906: an exact receipt-less block is KEPT and only its
+    /// receipt is written; it is never cut and rewritten, so a barrier fault
+    /// armed on the row file never fires. G18-cli-b-11, D-2023.
+    #[test]
+    fn an_exact_receipt_less_block_is_kept_not_rewritten() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let root = root("orphan-kept");
+        let _ = std::fs::remove_dir_all(&root);
+        drop(PopulationLedger::open(&root).expect("headers"));
+        let population_id = digest(23);
+        let rows = two_rows(population_id);
+        let mut row_file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        for row in rows {
+            row_file
+                .write_all(&row.to_bytes().expect("row bytes"))
+                .expect("orphan row");
+        }
+        row_file.sync_all().expect("orphan sync");
+        drop(row_file);
+        let before = std::fs::read(PopulationLedger::row_path(&root)).expect("orphan bytes");
+        let receipt = receipt(population_id, &rows);
+        let mut ledger = PopulationLedger::open(&root).expect("orphan writer");
+        let armed = Armed::arm(
+            &PopulationLedger::row_path(&root).display().to_string(),
+            Kind::Sync,
+        );
+        assert_eq!(
+            ledger.append_complete(&rows, &receipt),
+            Ok(PopulationCommit::Written)
+        );
+        assert!(
+            Armed::pending(),
+            "the exact orphan was cut and rewritten instead of kept"
+        );
+        drop(armed);
+        assert_eq!(
+            std::fs::read(PopulationLedger::row_path(&root)).expect("kept bytes"),
+            before
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// pop1-4, D-1900: a failed row or receipt barrier cuts what that call
+    /// wrote instead of leaving whole rows a later call "confirms" with a
+    /// second barrier; the exact rerun then writes cleanly.
+    #[test]
+    fn a_failed_row_or_receipt_barrier_is_cut_and_never_confirmed() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        for (case, receipt_file) in [false, true].into_iter().enumerate() {
+            let root = root(&format!("failed-barrier-{case}"));
+            let _ = std::fs::remove_dir_all(&root);
+            drop(PopulationLedger::open(&root).expect("headers"));
+            let population_id = digest(17);
+            let rows = two_rows(population_id);
+            let receipt = receipt(population_id, &rows);
+            let target = if receipt_file {
+                PopulationLedger::receipt_path(&root)
+            } else {
+                PopulationLedger::row_path(&root)
+            };
+            let mut ledger = PopulationLedger::open(&root).expect("writer");
+            let armed = Armed::arm(&target.display().to_string(), Kind::Sync);
+            let why = ledger
+                .append_complete(&rows, &receipt)
+                .expect_err("the injected barrier refuses");
+            assert!(!Armed::pending(), "case {case} fired");
+            drop(armed);
+            assert!(why.contains("injected sync fault"), "{why}");
+            assert_eq!(
+                std::fs::metadata(&target).expect("metadata").len(),
+                super::HEADER,
+                "case {case}: the unconfirmed bytes are cut"
+            );
+            drop(ledger);
+            let mut rerun = PopulationLedger::open(&root).expect("writer reopens");
+            assert_eq!(
+                rerun.append_complete(&rows, &receipt),
+                Ok(PopulationCommit::Written),
+                "case {case}: the exact rerun writes"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
@@ -7819,6 +8123,138 @@ mod tests {
             "{why}"
         );
         drop(stale_reader);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// audit-20261003 hunt-conc-3: the V2 reconciliation refuses the lowest
+    /// bad identity, not whichever one a freshly seeded `HashMap` yields first.
+    #[test]
+    fn reconcile_refuses_the_lowest_bad_population_whatever_the_map_order() {
+        for _ in 0..32 {
+            let mut receipts = std::collections::HashMap::new();
+            for seed in 1..=16_u8 {
+                let population_id = digest(seed);
+                receipts.insert(
+                    population_id,
+                    receipt(population_id, &two_rows(population_id)),
+                );
+            }
+            let why = super::reconcile_receipts(&std::collections::HashMap::new(), &receipts)
+                .expect_err("every receipt lacks its rows");
+            assert!(why.contains(&super::hex(&digest(1))), "{why}");
+        }
+    }
+
+    /// determinism-3 (D-2637): a foreign append of two duplicated blocks and
+    /// fresh ones is refused by the FILE-FIRST duplicate, on every retry, and
+    /// leaves the writer's block index exactly as it was. On the old code the
+    /// refusal named whichever duplicate the map's random order reached first
+    /// and inserted every block visited before it, so across eight fresh maps
+    /// the named identity or the index size differed.
+    #[test]
+    fn a_foreign_duplicate_block_is_refused_by_its_first_identity_and_a_retry_names_the_same_one() {
+        for round in 0..8_u8 {
+            let root = root(&format!("foreign-duplicate-{round}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let (p, q) = (digest(21), digest(22));
+            let mut ledger = PopulationLedger::open(&root).expect("ledger");
+            for id in [p, q] {
+                let rows = two_rows(id);
+                ledger
+                    .append_complete(&rows, &receipt(id, &rows))
+                    .expect("committed");
+            }
+            assert_eq!(ledger.raw_blocks.len(), 2);
+            // Foreign rows in file order: Q again, P again, then fresh R, S, T.
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(PopulationLedger::row_path(&root))
+                .expect("row file");
+            for id in [q, p, digest(23), digest(24), digest(25)] {
+                for row in two_rows(id) {
+                    file.write_all(&row.to_bytes().expect("row bytes"))
+                        .expect("foreign row");
+                }
+            }
+            file.sync_all().expect("foreign rows durable");
+            drop(file);
+            let fresh = two_rows(digest(26));
+            let fresh_receipt = receipt(digest(26), &fresh);
+            for attempt in 0..2 {
+                let why = ledger
+                    .append_complete(&fresh, &fresh_receipt)
+                    .expect_err("a duplicated block refuses");
+                assert!(
+                    why.contains(&super::hex(&q)),
+                    "round {round} attempt {attempt}: the file-first duplicate is named: {why}"
+                );
+                assert!(!why.contains(&super::hex(&p)), "{why}");
+                assert_eq!(
+                    ledger.raw_blocks.len(),
+                    2,
+                    "round {round} attempt {attempt}: no block was inserted"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// determinism-3 (D-2637): a foreign append with no duplicate is absorbed
+    /// whole, and an append with exactly one duplicate names that one.
+    #[test]
+    fn a_foreign_append_is_absorbed_whole_or_refused_by_its_one_duplicate() {
+        let root = root("foreign-clean");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut ledger = PopulationLedger::open(&root).expect("ledger");
+        let p = digest(31);
+        let rows = two_rows(p);
+        ledger
+            .append_complete(&rows, &receipt(p, &rows))
+            .expect("committed");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        for id in [digest(32), digest(33)] {
+            for row in two_rows(id) {
+                file.write_all(&row.to_bytes().expect("row bytes"))
+                    .expect("foreign row");
+            }
+        }
+        drop(file);
+        let r = digest(34);
+        let fresh = two_rows(r);
+        // The orphans are receipt-less; whatever the append decides about
+        // them, the index first absorbed both without a duplicate refusal.
+        let outcome = ledger.append_complete(&fresh, &receipt(r, &fresh));
+        if let Err(why) = &outcome {
+            assert!(!why.contains("gained a duplicate"), "{why}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        let root = self::root("foreign-one-duplicate");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut ledger = PopulationLedger::open(&root).expect("ledger");
+        let rows = two_rows(p);
+        ledger
+            .append_complete(&rows, &receipt(p, &rows))
+            .expect("committed");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(PopulationLedger::row_path(&root))
+            .expect("row file");
+        for id in [digest(35), p] {
+            for row in two_rows(id) {
+                file.write_all(&row.to_bytes().expect("row bytes"))
+                    .expect("foreign row");
+            }
+        }
+        drop(file);
+        let why = ledger
+            .append_complete(&fresh, &receipt(r, &fresh))
+            .expect_err("the one duplicate refuses");
+        assert!(why.contains(&super::hex(&p)), "{why}");
+        assert_eq!(ledger.raw_blocks.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

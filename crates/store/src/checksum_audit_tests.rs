@@ -58,7 +58,14 @@ impl Drop for Fixture {
 }
 fn bar(index: usize) -> Bar {
     Bar {
-        ts_micros: i64::try_from(index + 1).expect("small fixture") * 60_000_000,
+        // Inside the fixture's own month, 2025-05 IST: the write boundary
+        // refuses a stamp outside the month its path names (D-0915), and these
+        // were 1970 minutes in a 2025-05 file.
+        ts_micros: YearMonth::new(2025, 5)
+            .expect("month")
+            .ist_bounds_micros()
+            .0
+            + i64::try_from(index + 1).expect("small fixture") * 60_000_000,
         open: 100,
         high: 120,
         low: 90,
@@ -251,13 +258,19 @@ fn strict_extent_and_presence_refusals_never_change_source_bytes() {
         .expect("open")
         .audit_checksums(exact)
         .expect("exact bound");
-    for kind in [FileKind::Checksums, FileKind::Lock] {
-        let path = fixture.named(kind);
-        let saved = fs::read(&path).expect("existing");
-        fs::remove_file(&path).expect("inject missing");
-        assert!(fixture.audited().is_err());
-        fs::write(&path, saved).expect("restore");
-    }
+    let path = fixture.named(FileKind::Checksums);
+    let saved = fs::read(&path).expect("existing");
+    fs::remove_file(&path).expect("inject missing");
+    assert!(fixture.audited().is_err());
+    fs::write(&path, saved).expect("restore");
+    // A MISSING LOCK IS RE-CREATED BY THE READER, not refused (store1-1,
+    // D-2551): an absent `.lock` is made empty with `create_new` and held
+    // shared, so a later writer must respect it. The audit then holds that
+    // lock like any other, and no source byte changes.
+    let lock = fixture.named(FileKind::Lock);
+    fs::remove_file(&lock).expect("inject missing");
+    fixture.audited().expect("the reader re-creates the lock");
+    assert_eq!(fs::read(&lock).expect("re-created"), Vec::<u8>::new());
     for len in [0, crc.len() - 1, crc.len() + 4] {
         let mut changed = crc.clone();
         changed.resize(len, 0);
@@ -379,7 +392,10 @@ fn aliases_and_unsealed_legacy_data_never_gain_a_strict_receipt() {
     let file = fixture.open().expect("ordinary open");
     let mut header = file.header();
     drop(file);
+    // An unsealed month is a VERSION-2 month: version 3 refuses a slot
+    // without the flag (D-1571), and its geometry is version 2's.
     header.flags = 0;
+    header.format_version = 2;
     let commit = header.commit().expect("legacy header image");
     let file = fs::OpenOptions::new()
         .write(true)
@@ -401,7 +417,9 @@ fn source_changes_after_the_initial_snapshot_cannot_mint_cold_audit_authority() 
         let path = fixture.named(FileKind::Bars);
         if change_header {
             let mut header = file.header();
+            // Unsealed means version 2 since D-1571; the geometry is the same.
             header.flags = 0;
+            header.format_version = 2;
             let commit = header.commit().expect("valid changed header image");
             let writer = fs::OpenOptions::new()
                 .write(true)
@@ -496,4 +514,37 @@ fn a_post_snapshot_crc_truncation_names_the_read_and_preserves_faulted_bytes() {
     for (path, bytes) in &unchanged {
         assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
     }
+}
+
+/// CE-90 / D-2791: bytes past the commit, the interrupted-append state the
+/// store format calls benign, are refused under their own name and byte
+/// counts -- not under one sentence covering five causes -- and the bytes are
+/// left as they were. A SHORT extent is still the generic refusal.
+#[test]
+fn bytes_past_the_commit_are_refused_as_an_interrupted_append_by_name() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new(74);
+    let data = fs::read(fixture.named(FileKind::Bars)).expect("data");
+    let mut longer = data.clone();
+    longer.resize(data.len() + 56, 0);
+    fs::write(fixture.named(FileKind::Bars), &longer).expect("bytes past the commit");
+    let why = fixture.audited().err().expect("still refused");
+    assert!(why.contains("interrupted append"), "{why}");
+    assert!(
+        why.contains(&format!(
+            "data {} bytes against {} committed",
+            longer.len(),
+            data.len()
+        )),
+        "{why}"
+    );
+    assert_eq!(
+        fs::read(fixture.named(FileKind::Bars)).expect("kept"),
+        longer
+    );
+    let mut shorter = data.clone();
+    shorter.truncate(data.len() - 1);
+    fs::write(fixture.named(FileKind::Bars), &shorter).expect("short extent");
+    let why = fixture.audited().err().expect("a short extent is refused");
+    assert!(!why.contains("interrupted append"), "{why}");
 }

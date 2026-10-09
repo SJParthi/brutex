@@ -40,8 +40,9 @@
 //!
 //! **The months run in PARALLEL, and the totals do not.** Each instrument-month
 //! is wholly independent — its own file, its own evaluator, its own ladder, its
-//! own identity — so the walk is `par_iter`, and wall-clock divides by the core
-//! count rather than the work being done one core at a time as it was.
+//! own identity — so each chunk's loading and sweeping is `par_iter`, and
+//! wall-clock divides by the core count rather than the work being done one core
+//! at a time as it was. Only the filing is sequential.
 //!
 //! The parallelism is over MONTHS and not over candidates, and that is forced
 //! rather than chosen: gate 22 pins `vocab indicators engine` to `vocab` alone,
@@ -50,14 +51,18 @@
 //! candidates via rayon" while **no crate in the workspace took that arrow** —
 //! the sweep was entirely single-threaded. This is the axis `cli` owns.
 //!
-//! §3 rule 5 survives by shape, and it takes THREE properties, not two. Indexed
+//! §3 rule 5 survives by shape, and it takes FOUR properties, not two. Indexed
 //! `collect` preserves order; [`Tally`] is folded sequentially over the collected
-//! rows rather than mutated from the workers; and each month is given an
+//! rows rather than mutated from the workers; each month is given an
 //! explicit [`BATCH_CEILING`] so its halt point is a stated constant rather than
-//! the machine free memory. The third was missing at first and it was the one
-//! that mattered: `engine::Ladder` halts on a real `try_reserve` probe, so N
-//! concurrent ladders would each halt at a point decided by what the others held
-//! — making depth, kept and completed scheduling-dependent. D-0234.
+//! the machine free memory; and no worker writes the ledger or begins an
+//! attempt -- [`sweep_chunk`] begins a chunk's attempts as one input-ordered
+//! group and files its months one at a time in input order (D-1701). The third
+//! was missing at first and it mattered: `engine::Ladder` halts on a real
+//! `try_reserve` probe, so N concurrent ladders would each halt at a point
+//! decided by what the others held — making depth, kept and completed
+//! scheduling-dependent. D-0234. The fourth was missing until D-1701: the
+//! ledger rows and attempt tokens followed thread completion (GAP13-13).
 
 use crate::stored;
 use core::fmt::Write as _;
@@ -70,8 +75,9 @@ use store::catalog::{self, Held};
 ///
 /// # Why the whole-store sweep needs its own ceiling
 ///
-/// `engine::DEFAULT_CEILING` is `1 << 26` and its own doc prices that at
-/// **8 GiB** — more than an ordinary machine has. So on a single sweep the
+/// `engine::DEFAULT_CEILING` is `1 << 27` (this said `1 << 26`, the value
+/// before D-0304; corrected by D-1440) and its own doc's table prices `2^26`
+/// at **8 GiB**, so `2^27` is more still — more than an ordinary machine has. So on a single sweep the
 /// constant never binds and the real bound is `Ladder::cannot_grow`, a genuine
 /// `try_reserve` probe. `engine::Breach::Memory`'s doc states that as the
 /// design: the sweep *"uses what a 4 GB machine has and what a 48 GB machine
@@ -325,11 +331,11 @@ fn sweep_under(
         offered: u64::try_from(wanted.len()).unwrap_or(u64::MAX),
         ..Tally::default()
     };
-    // THE 54,000 SWEEPS, IN PARALLEL, AND STILL BYTE-IDENTICAL.
+    // THE 54,000 SWEEPS, IN PARALLEL, AND STILL IN ONE ORDER.
     //
     // Each instrument-month is wholly independent: its own file, its own
-    // evaluator, its own ladder, its own run identity. Nothing is shared and
-    // nothing is written. This was a `for` loop on one core while `rayon` sat in
+    // evaluator, its own ladder, its own run identity. Nothing is shared, and
+    // the workers write nothing but each attempt's own depth rows. This was a `for` loop on one core while `rayon` sat in
     // the workspace manifest with no crate taking the arrow at all.
     //
     // WHY THE PARALLELISM IS HERE AND NOT OVER CANDIDATES, which is where the
@@ -339,13 +345,20 @@ fn sweep_under(
     // not expressible without a law change. This axis is `cli`'s own and needs
     // none.
     //
-    // DETERMINISM (§3 rule 5) IS HELD BY SHAPE, NOT BY LUCK. Two properties do
-    // it, and both are needed:
+    // DETERMINISM (§3 rule 5) IS HELD BY SHAPE, NOT BY LUCK. Three properties
+    // do it, and all are needed:
     //   * `map(..).collect()` on an INDEXED parallel iterator preserves order,
     //     so `rows` is the same sequence whatever order the threads finish in;
     //   * the `Tally` is folded SEQUENTIALLY over `rows` below rather than
-    //     mutated from the workers, so no counter depends on scheduling.
-    // A rerun therefore produces the same bytes, which is what makes reruns safe.
+    //     mutated from the workers, so no counter depends on scheduling;
+    //   * nothing durable is written from a worker: `sweep_chunk` begins each
+    //     chunk's attempts in one input-ordered group and files each month's
+    //     ledger row and terminal sequentially, in input order. Until D-1701
+    //     the workers appended both, so the ledger's row order and the attempt
+    //     tokens followed thread completion while this comment said "the same
+    //     bytes" (GAP13-13).
+    // A rerun therefore produces the same report and the same row order; the
+    // ledger's completion timestamps are wall-clock and differ, as they must.
     // SHARE CPU AS WELL AS MEMORY. `par_iter` can keep at most the Rayon pool's
     // workers active at once; declaring the full catalog length would divide a
     // fourteen-core machine by 54,000 even though only fourteen months can be
@@ -353,13 +366,17 @@ fn sweep_under(
     // preventing N outer sweeps from each spawning one worker per machine core.
     let concurrent = wanted.len().min(rayon::current_num_threads()).max(1);
     let _sharing = crate::SharedBy::these(concurrent);
-    let rows: Vec<Row> = wanted
-        .par_iter()
-        .map(|held| one(root, held, min_hits, commit))
-        .collect();
+    // IN CHUNKS OF THAT WIDTH, so the months whose attempts are begun together
+    // are the months that can run together, and memory stays what one month per
+    // worker holds. Each chunk files its months in input order (D-1701).
+    let mut rows: Vec<Row> = Vec::with_capacity(wanted.len());
+    for chunk in wanted.chunks(concurrent) {
+        rows.extend(sweep_chunk(root, chunk, min_hits, commit));
+    }
     for row in &rows {
         tally.fold(row);
     }
+    note_tally(&tally);
     at_least_one_filed(&holdings.census, tally.offered, &rows)?;
 
     // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
@@ -379,6 +396,53 @@ fn sweep_under(
         &tally,
         &rows,
     ))
+}
+
+/// The walk's own tally, at Warn when any month refused (conc13-7, D-2643).
+///
+/// Only swept months emitted anything (`stored month swept`, Info), so a walk
+/// with refused months logged nothing but its successes and the refused count
+/// lived in stdout alone. Emitted here, after the sequential fold, once per
+/// walk -- never from a worker and never inside a month.
+///
+/// Each refused month's own Warn is [`note_refused`]'s (OBSV-06, D-3205),
+/// written as the month is folded. This wrote a second "stored month refused"
+/// for the same month until the merge of the two branches that each added one
+/// left one writer (D-4661).
+fn note_tally(tally: &Tally) {
+    let walked = if tally.refused > 0 {
+        telemetry::Event::warn("cli.sweep", "stored walk tallied")
+    } else {
+        telemetry::Event::info("cli.sweep", "stored walk tallied")
+    };
+    crate::note(
+        &walked
+            .with("offered", tally.offered)
+            .with("swept", tally.swept)
+            .with("refused", tally.refused),
+    );
+}
+
+/// How many months a rendered `sweep-all` page's tally line says refused
+/// (conc13-7, D-2643): the column-zero `N swept · M refused · ...` line
+/// [`render`] prints. Month rows are indented and their names escaped, so no
+/// stored name can forge one. Zero when the page carries no tally.
+pub(crate) fn refused_months(text: &str) -> u64 {
+    for line in text.lines() {
+        let Some((swept, rest)) = line.split_once(" swept · ") else {
+            continue;
+        };
+        if swept.is_empty() || !swept.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Some((refused, _)) = rest.split_once(" refused · ") else {
+            continue;
+        };
+        if let Ok(count) = refused.parse::<u64>() {
+            return count;
+        }
+    }
+    0
 }
 
 /// Nothing, when a month was swept and filed or none was offered; the run's
@@ -421,15 +485,204 @@ fn at_least_one_filed(walk: &catalog::Census, offered: u64, rows: &[Row]) -> Res
     Err(why.trim_end().to_owned())
 }
 
-/// Sweeps one instrument-month. Pure: it reads the store and returns a row.
+/// One instrument-month loaded and identified. No attempt is begun and nothing
+/// is written: [`sweep_chunk`] begins every attempt of a chunk afterwards, in
+/// input order.
+struct Prepared<'h> {
+    held: &'h Held,
+    label: String,
+    loaded: stored::Loaded,
+    daily: stored::DailyContext,
+    exact_minute: stored::ExactMinuteContext,
+    signal_length: i64,
+    ladder: Ladder,
+    id: runner::identity::RunId,
+}
+
+/// One instrument-month swept under its begun attempt, not yet filed.
+struct Swept<'h> {
+    held: &'h Held,
+    /// The feed and the CANONICAL instrument the identity was built from
+    /// (`loaded.vendor`, `loaded.key.underlying`), so the ledger row names what
+    /// the identity names and not the word the catalogue listed (AC-whp-law-0,
+    /// D-1661).
+    feed: String,
+    underlying: String,
+    label: String,
+    id: runner::identity::RunId,
+    attempt: crate::sweep_evidence::Attempt,
+    outcome: runner::StreamedOutcome,
+    kept: usize,
+    depth: usize,
+    completed: bool,
+}
+
+impl Row {
+    /// A month that refused before its sweep ran.
+    const fn refused_before(label: String, identity: Option<String>, why: String) -> Self {
+        Self {
+            label,
+            bars: 0,
+            depth: 0,
+            kept: 0,
+            completed: false,
+            identity,
+            refused: Some(why),
+            ran: false,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test seam: the symbol whose sweep is held back, so the months of a
+    /// chunk finish in a different order from their input order. D-1701.
+    static SLOW_SYMBOL: core::cell::RefCell<Option<String>> = const { core::cell::RefCell::new(None) };
+}
+
+/// Hold back every later sweep of `symbol` started by THIS thread's
+/// [`sweep_under`] call. Test-only; `None` clears it.
+#[cfg(test)]
+pub(crate) fn slow_symbol(symbol: Option<&str>) {
+    SLOW_SYMBOL.with(|slow| *slow.borrow_mut() = symbol.map(str::to_owned));
+}
+
+/// Whether the test seam holds `symbol` back: exactly the named symbol, and
+/// nothing when no symbol is named. A function of its own so its choice is
+/// asserted directly (G18-cli-a-02, D-2003): the ordering test passes whichever
+/// month is slow, so it could not see the seam slow the WRONG months.
+#[cfg(test)]
+fn held_back(slow: Option<&str>, symbol: &str) -> bool {
+    slow == Some(symbol)
+}
+
+/// One chunk of at most the rayon pool's width, in four phases, so that
+/// everything durable happens in INPUT order whatever order the threads finish
+/// in (GAP13-13, D-1701).
 ///
-/// Takes no `&mut Tally`. That parameter was what stopped the walk above being
-/// parallel, and removing it is what `Tally::fold` exists for.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
-)]
+/// 1. Load and identify each month, in parallel. Pure: nothing is written.
+/// 2. Begin every identified month's attempt with one `begin_many`, in input
+///    order, so attempt tokens follow input order.
+/// 3. Build the column and sweep each month under its attempt, in parallel.
+///    The only writes are each attempt's own depth rows, in its own file.
+/// 4. File each swept month -- ledger row, then the attempt's terminal -- one
+///    at a time, in input order.
+///
+/// Until this, `one` did all four inside the rayon worker, so the ledger rows,
+/// the attempt tokens and the journal's terminals were appended in thread
+/// completion order and `cli results` listed one store's identical rerun
+/// differently. A begin refusal refuses exactly the months it left without an
+/// attempt, by name; the months it began still sweep.
+///
+/// The cost of the order is a barrier per chunk: a chunk's slowest month holds
+/// the next chunk back. `docs/06-limits.md` states it.
+fn sweep_chunk(root: &std::path::Path, chunk: &[&Held], min_hits: u64, commit: &str) -> Vec<Row> {
+    #[cfg(test)]
+    let slow = SLOW_SYMBOL.with(|slow| slow.borrow().clone());
+    let prepared: Vec<Result<Prepared<'_>, Row>> = chunk
+        .par_iter()
+        .map(|held| prepare(root, held, min_hits, commit))
+        .collect();
+    let identities: Vec<[u8; 32]> = prepared
+        .iter()
+        .filter_map(|p| p.as_ref().ok().map(|p| p.id.bytes()))
+        .collect();
+    let mut begun = Vec::with_capacity(identities.len());
+    let refusal = crate::sweep_evidence::begin_many(
+        root,
+        &identities,
+        crate::sweep_evidence::Operation::Sweep,
+        &mut begun,
+    )
+    .err();
+    let mut attempts = begun.into_iter();
+    let staged: Vec<Result<(Prepared<'_>, crate::sweep_evidence::Attempt), Row>> = prepared
+        .into_iter()
+        .map(|p| {
+            let p = p?;
+            match attempts.next() {
+                Some(attempt) => Ok((p, attempt)),
+                None => Err(Row::refused_before(
+                    p.label,
+                    Some(p.id.hex()),
+                    refusal.clone().unwrap_or_else(|| {
+                        "sweep evidence admitted fewer attempts than months identified".to_owned()
+                    }),
+                )),
+            }
+        })
+        .collect();
+    let swept: Vec<Result<Swept<'_>, Row>> = staged
+        .into_par_iter()
+        .map(|staged| {
+            let (p, attempt) = staged?;
+            #[cfg(test)]
+            if held_back(slow.as_deref(), p.held.symbol.as_str()) {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            sweep_prepared(p, attempt)
+        })
+        .collect();
+    // `swept` is in input order and one entry per month of `chunk`, so the
+    // zip pairs each row with the month it reports on.
+    swept
+        .into_iter()
+        .zip(chunk)
+        .map(|(swept, held)| {
+            let row = match swept {
+                Ok(swept) => file_swept(root, swept, min_hits),
+                Err(row) => row,
+            };
+            note_refused(held, &row);
+            row
+        })
+        .collect()
+}
+
+/// One `Warn` per refused instrument-month, with its reason (OBSV-06, D-3205).
+///
+/// The report's `REFUSED` row was the only trace: the log held "stored month
+/// swept" for a month whose filing then failed, and nothing at all for a month
+/// refused before its sweep, so `/logs` could not show, or be searched for, the
+/// refusals D-0226 named. At the same per-month boundary "stored month swept"
+/// uses, in input order, never inside a sweep.
+fn note_refused(held: &Held, row: &Row) {
+    let Some(reason) = row.refused.as_deref() else {
+        return;
+    };
+    crate::note(
+        &telemetry::Event::warn("cli.sweep", "stored month refused")
+            .with("feed", held.vendor.as_str())
+            .with("label", row.label.as_str())
+            .with("identity", row.identity.as_deref().unwrap_or(""))
+            .with("swept", row.ran)
+            .with("reason", reason),
+    );
+}
+
+/// One instrument-month through all four phases of [`sweep_chunk`]: the
+/// tests' door to a single month. Production sweeps whole chunks.
+#[cfg(test)]
 fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
+    sweep_chunk(root, &[held], min_hits, commit)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            Row::refused_before(
+                String::new(),
+                None,
+                "a one-month chunk returned no row".to_owned(),
+            )
+        })
+}
+
+/// Loads and identifies one instrument-month, or refuses it by name.
+fn prepare<'h>(
+    root: &std::path::Path,
+    held: &'h Held,
+    min_hits: u64,
+    commit: &str,
+) -> Result<Prepared<'h>, Row> {
     // THE SYMBOL IS A DIRECTORY'S NAME, ESCAPED. The feed, rung and month are
     // parsed before a holding exists; the symbol directory is not, and it can
     // be called anything a filesystem admits. Printed raw, one named
@@ -457,16 +710,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     if let Ok(key) = stored::swept_index(&held.symbol)
         && let Some(why) = stored::misfiled(&key, &held.exchange, &held.segment, &held.symbol)
     {
-        return Row {
-            label,
-            bars: 0,
-            depth: 0,
-            kept: 0,
-            completed: false,
-            identity: None,
-            refused: Some(why),
-            ran: false,
-        };
+        return Err(Row::refused_before(label, None, why));
     }
     let loaded = match stored::load(
         root,
@@ -478,16 +722,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(loaded) => loaded,
         Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            };
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let daily = match stored::load_daily_context(
@@ -502,16 +737,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(daily) => daily,
         Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            };
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let exact_minute = match stored::load_exact_minute_context(
@@ -526,53 +752,27 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(context) => context,
         Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            };
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let signal_length = match stored::rung_length_micros(held.timeframe.as_str()) {
         Ok(length) => length,
         Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            };
+            return Err(Row::refused_before(label, None, why));
         }
     };
     let digest = match crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily) {
         Ok(digest) => digest,
         Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-                ran: false,
-            };
+            return Err(Row::refused_before(label, None, why));
         }
     };
     // A STATED CEILING, BECAUSE THE DEFAULT ONE IS THE MACHINE'S FREE MEMORY.
     //
     // This was `Ladder::with_min_hits(min_hits)` alone, which leaves
-    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 26`,
-    // priced by its own doc at 8 GiB, more than an ordinary machine has. So the
+    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 27`
+    // (written here as `1 << 26` until D-1440), more than the 8 GiB its own doc
+    // prices `2^26` at, so more than an ordinary machine has. So the
     // bound that actually binds is not the constant: it is `cannot_grow`, a real
     // `try_reserve` probe. `Breach::Memory`'s doc says that is deliberate — the
     // sweep "uses what a 4 GB machine has and what a 48 GB machine has,
@@ -600,20 +800,22 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     //
     // Built from the ladder that ACTUALLY RAN rather than from `min_hits` as
     // typed — `Params::of` reads the ladder, so a zero the ladder raised to one
-    // is recorded as the one that ran. Same construction as `sweep_stored`, so
-    // sweeping a month here and sweeping it alone produce the same 64 hex
-    // characters, which is the only thing that makes the two reports comparable.
+    // is recorded as the one that ran.
+    //
+    // IT IS NOT `sweep-stored`'s IDENTITY FOR THE SAME MONTH, and this said it
+    // was: "the same 64 hex characters, which is the only thing that makes the
+    // two reports comparable" (W2-cli1-5, D-1701). It cannot be. This digest is
+    // `stored_anchored_digest` over the signal, exact-minute and daily streams,
+    // and this ladder carries `BATCH_CEILING`; `sweep-stored` binds the
+    // one-minute execution series into its digest (`stored_executed_digest`)
+    // and sweeps under the machine's derived ceiling and its minute-gap policy.
+    // Different inputs to the hash, so never equal: the two ledger rows cannot
+    // be joined by identity. What does compare across them is the feed, the
+    // instrument, the month and the combination (mask) each row names.
     let id = runner::identity::identity(&runner::identity::Run {
-        // `Default::default()` and not the named path, for the reason
-        // `crate::sweep_stored` gives at its own call site: spelling
-        // `ConditionMask` needs a `vocab` arrow that `CLAUDE.md` §5 does not
-        // draw for `cli`, and adding one to satisfy a lint would be the silent
-        // scope change §3 rule 2 forbids.
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the named path would add a dependency arrow §5 does not draw"
-        )]
-        mask: Default::default(),
+        // The named path: `cli` depends on `vocab` directly (CLAUDE.md §5,
+        // D-0683), so no lint suppression is needed to spell it. D-1706.
+        mask: vocab::ConditionMask::default(),
         direction: runner::identity::Direction::Undirected,
         instrument: &loaded.key,
         timeframe: loaded.timeframe,
@@ -625,26 +827,33 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         // two feeds' rows for one instrument-month from carrying one identity.
         feed: loaded.vendor.as_str(),
     });
+    Ok(Prepared {
+        held,
+        label,
+        loaded,
+        daily,
+        exact_minute,
+        signal_length,
+        ladder,
+        id,
+    })
+}
 
-    let attempt = match crate::sweep_evidence::begin(
-        root,
-        id.bytes(),
-        crate::sweep_evidence::Operation::Sweep,
-    ) {
-        Ok(attempt) => attempt,
-        Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: Some(id.hex()),
-                refused: Some(why),
-                ran: false,
-            };
-        }
-    };
+/// Builds one month's column and sweeps it under its begun attempt.
+fn sweep_prepared(
+    prepared: Prepared<'_>,
+    attempt: crate::sweep_evidence::Attempt,
+) -> Result<Swept<'_>, Row> {
+    let Prepared {
+        held,
+        label,
+        loaded,
+        daily,
+        exact_minute,
+        signal_length,
+        ladder,
+        id,
+    } = prepared;
     let availability = crate::stored::vwap_availability(&loaded.key);
     let column = match crate::stored_anchored_column(
         &loaded.bars,
@@ -655,16 +864,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(column) => column,
         Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: Some(id.hex()),
-                refused: Some(why),
-                ran: false,
-            };
+            return Err(Row::refused_before(label, Some(id.hex()), why));
         }
     };
     let outcome = Sweeper::new(ladder).run_prepared_streamed_reporting(
@@ -700,15 +900,43 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             .with("kept", u64::try_from(kept).unwrap_or(u64::MAX))
             .with("completed", completed),
     );
+    Ok(Swept {
+        held,
+        feed: loaded.vendor.as_str().to_owned(),
+        underlying: loaded.key.underlying.as_str().to_owned(),
+        label,
+        id,
+        attempt,
+        outcome,
+        kept,
+        depth,
+        completed,
+    })
+}
 
-    // AND THE LEDGER, WHICH IS THE HALF THE EVENT ABOVE COULD NOT BE.
+/// Files one swept month -- its ledger row, then its attempt's terminal -- and
+/// returns its row. Called in input order only.
+fn file_swept(root: &std::path::Path, swept: Swept<'_>, min_hits: u64) -> Row {
+    let Swept {
+        held,
+        feed,
+        underlying,
+        label,
+        id,
+        attempt,
+        outcome,
+        kept,
+        depth,
+        completed,
+    } = swept;
+    // AND THE LEDGER, WHICH IS THE HALF THE SWEEP'S EVENT COULD NOT BE.
     //
-    // The comment on `id` says this identity is built "same construction as
-    // `sweep_stored`, so sweeping a month here and sweeping it alone produce the
-    // same 64 hex characters, which is the only thing that makes the two
-    // reports comparable." They were comparable in the REPORT and nowhere else:
-    // the row was never appended, so nothing could put the two side by side,
-    // which is what comparable is for.
+    // This month's row was never appended until this was written, so nothing
+    // could put a batch month beside the same month swept by `sweep-stored`.
+    // It can now -- by feed, instrument, month and combination, NOT by
+    // identity: the two identities differ by construction (the digest and the
+    // ceiling, see `prepare`), so a join on the 64 hex characters finds nothing
+    // (W2-cli1-5, D-1701).
     //
     // THIS NEEDED THE STREAMED WALK FIRST, and that is why it is landing now
     // rather than with the other three verbs. `Sweep` carries no count of
@@ -722,8 +950,8 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         crate::record_swept_run(
             crate::Recording {
                 root,
-                feed: loaded.vendor.as_str(),
-                underlying: held.symbol.as_str(),
+                feed: feed.as_str(),
+                underlying: underlying.as_str(),
                 timeframe: held.timeframe.as_str(),
                 from: (held.month.year(), held.month.month()),
                 to: (held.month.year(), held.month.month()),
@@ -839,6 +1067,12 @@ fn census_lines(out: &mut String, walk: &catalog::Census, offered: u64) {
             walk.unknown_vendor, walk.unknown_rung
         );
     }
+    // THE ENTRIES THE CATALOG SAW AND OFFERED TO NOBODY: a locked directory, a
+    // symbolic link it does not follow, a non-UTF-8 name, a FIFO or socket.
+    // Counted since D-0765 to D-0769 and printed nowhere until D-0769, so a
+    // locked symbol directory's months were absent from this report without a
+    // line naming them.
+    out.push_str(&walk.unoffered_report());
 }
 
 /// One line per instrument-month, and its identity under each month that
@@ -1060,6 +1294,102 @@ mod tests {
         assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
     }
 
+    /// Every `cli.sweep` record from sequence `from` onward carrying `message`,
+    /// read back through the shipped reader on the shared test sink.
+    fn swept_events(from: u64, message: &str) -> Vec<telemetry::Record> {
+        let sink = crate::ledger_all::tests::sink();
+        let dir = sink
+            .path()
+            .parent()
+            .expect("the sink writes its file inside a directory")
+            .to_path_buf();
+        let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("cli.sweep");
+        telemetry::tail(&dir, sink.keep_files(), &query)
+            .records
+            .into_iter()
+            .filter(|record| record.seq >= from && record.message == message)
+            .collect()
+    }
+
+    /// OBSV-06 (D-3205): **a month refused before its sweep is one Warn event
+    /// with its reason.** The report printed a `REFUSED` row; the log, which
+    /// is what `/logs` and an operator searching by label read, held nothing
+    /// of it -- D-0226 named "not a refusal" as a thing the sweep failed to
+    /// log, and this half was never closed.
+    #[test]
+    fn a_month_refused_before_sweeping_is_logged_with_its_reason() {
+        let root = scratch("refused-logged");
+        for rel in [
+            "groww/NSE/INDEX/NIFTY/1min/2026-08.bin",
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let from = crate::ledger_all::tests::mark();
+        let _refused = sweep_under(&root, "groww", "1min", 100, "deadbeef");
+        let _ = std::fs::remove_dir_all(&root);
+        let events = swept_events(from, "stored month refused");
+        let mine: Vec<&telemetry::Record> = events
+            .iter()
+            .filter(|e| {
+                ["groww NIFTY 1min 2026-08", "groww RELIANCE 1min 2026-08"]
+                    .iter()
+                    .any(|label| crate::ledger_all::tests::says(e, "label", label))
+            })
+            .collect();
+        assert_eq!(mine.len(), 2, "one event per refused month: {events:?}");
+        for event in mine {
+            assert_eq!(event.level, telemetry::Level::Warn);
+            assert!(
+                crate::ledger_all::tests::says(event, "feed", "groww"),
+                "{event:?}"
+            );
+            assert!(
+                crate::ledger_all::tests::says(event, "reason", "could not be read from the store"),
+                "the month's own reason: {event:?}"
+            );
+            assert_eq!(
+                event
+                    .field("swept")
+                    .and_then(telemetry::OwnedValue::as_bool),
+                Some(false),
+                "refused BEFORE sweeping: {event:?}"
+            );
+        }
+    }
+
+    /// OBSV-07 (D-3206): **`sweep-stored`'s refusal is one Warn event with its
+    /// reason.** The verb printed `refused: …` and the log held only the
+    /// generic "command finished" with `phase=refused` and no reason, so
+    /// `/logs` could not say why a single-month sweep refused.
+    #[test]
+    fn a_refused_sweep_stored_is_logged_with_its_reason() {
+        let from = crate::ledger_all::tests::mark();
+        let text = crate::sweep_stored("groww", "NIFTY", "2min", 2026, 3, 100);
+        assert!(text.starts_with("refused: "), "{text}");
+        let events: Vec<telemetry::Record> = swept_events(from, "stored month refused")
+            .into_iter()
+            .filter(|e| crate::ledger_all::tests::says(e, "label", "groww NIFTY 2min 2026-03"))
+            .collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event = events.first().expect("one");
+        assert_eq!(event.level, telemetry::Level::Warn);
+        assert!(
+            crate::ledger_all::tests::says(event, "feed", "groww"),
+            "{event:?}"
+        );
+        let reason = text
+            .trim_end()
+            .strip_prefix("refused: ")
+            .expect("the printed reason");
+        assert!(
+            crate::ledger_all::tests::says(event, "reason", reason.get(..60).unwrap_or(reason)),
+            "the same reason the operator was shown: {event:?} vs {text}"
+        );
+    }
+
     /// **A walk whose one swept month could not be filed says it swept, and
     /// names why it was not filed.** D-0696.
     ///
@@ -1073,6 +1403,7 @@ mod tests {
     fn a_walk_whose_swept_month_could_not_be_filed_says_it_swept() {
         let _knobs = crate::knobs::serially();
         crate::knobs::clear_all();
+        let from = crate::ledger_all::tests::mark();
         let (ledger, why) = crate::audited_stored::with_warmed_store(|root| {
             let full = root.join("bars/zerodha/NSE/INDEX/BANKNIFTY/1min/2025-05.bin");
             std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
@@ -1110,6 +1441,29 @@ mod tests {
                 "{label} is named: {why}"
             );
         }
+        // OBSV-06: the month that swept and could not be filed says so in the
+        // log too -- after its "stored month swept", not instead of it.
+        let unfiled: Vec<telemetry::Record> = swept_events(from, "stored month refused")
+            .into_iter()
+            .filter(|e| crate::ledger_all::tests::says(e, "label", "zerodha NIFTY 1min 2025-05"))
+            .collect();
+        assert_eq!(unfiled.len(), 1, "{unfiled:?}");
+        let unfiled = unfiled.first().expect("one");
+        assert!(
+            crate::ledger_all::tests::says(unfiled, "reason", "not recorded: "),
+            "{unfiled:?}"
+        );
+        assert_eq!(
+            unfiled
+                .field("swept")
+                .and_then(telemetry::OwnedValue::as_bool),
+            Some(true),
+            "it swept, then refused while being filed: {unfiled:?}"
+        );
+        assert!(
+            crate::ledger_all::tests::says(unfiled, "identity", ""),
+            "the identity it swept under is named: {unfiled:?}"
+        );
         // April's own reason says its month was not swept; the run's line
         // says no such thing of the run.
         assert!(
@@ -1488,6 +1842,63 @@ mod tests {
             &[],
         );
         assert!(!quiet.contains("were not offered"), "{quiet}");
+    }
+
+    /// **The report names what the catalog saw and offered to nobody.** D-0769.
+    ///
+    /// `census_lines` printed `spot`, `unknown_vendor` and `unknown_rung` only,
+    /// so a locked symbol directory and a linked one were absent from a
+    /// sweep-all report without a line naming them (found by a review). The
+    /// line is the catalog's own `unoffered_report`, and a census with none
+    /// of those buckets prints no such line.
+    #[test]
+    fn the_report_names_the_entries_the_catalog_did_not_offer() {
+        let tally = Tally::default();
+        let census = store::catalog::Census {
+            seen: 2,
+            unreadable: 1,
+            linked: 1,
+            ..store::catalog::Census::default()
+        };
+        let text = render("groww", "1min", 100, "deadbeef", "", &census, &tally, &[]);
+        assert!(text.contains(&census.unoffered_report()), "{text}");
+        assert!(
+            text.contains("could not read 1 director(ies) or entr(ies), did not follow 1"),
+            "{text}"
+        );
+        let quiet = render(
+            "groww",
+            "1min",
+            100,
+            "deadbeef",
+            "",
+            &store::catalog::Census::default(),
+            &tally,
+            &[],
+        );
+        assert!(!quiet.contains("NOT OFFERED"), "{quiet}");
+    }
+
+    /// **A linked symbol directory is named on a real sweep-all run.** D-0769.
+    ///
+    /// D-0766 stopped the catalog following a link, so a symbol directory that
+    /// is a link is no longer offered. This pins that the run says so rather
+    /// than printing one fewer month and nothing else.
+    #[test]
+    fn a_sweep_over_a_store_with_a_linked_symbol_directory_names_the_link() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let text = crate::audited_stored::with_warmed_store(|root| {
+            let index = root.join("bars/zerodha/NSE/INDEX");
+            std::os::unix::fs::symlink(index.join("NIFTY"), index.join("BANKNIFTY"))
+                .expect("a symlink is creatable");
+            sweep_under(root, "zerodha", "1min", u64::MAX, "deadbeef").expect("the run completes")
+        });
+        crate::knobs::clear_all();
+        assert!(
+            text.contains("did not follow 1 symbolic link(s)"),
+            "the linked directory is named: {text}"
+        );
     }
 
     /// A ceiling breach is reported as a floor on depth, not as an answer.

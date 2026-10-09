@@ -12,9 +12,10 @@
 //!
 //! The two numbers in that formula are **not** read from this module by the
 //! read path. They come from [`crate::layout::Layout`], selected by the file's
-//! own `format_version`. The constants here are version 2's definition, and
-//! `store::unit::the_constants_are_the_current_versions_layout` pins them to
-//! it.
+//! own `format_version`. The geometric constants here are version 2's
+//! definition, which version 3 (D-1571) shares byte for byte; [`MAGIC`] and
+//! [`FORMAT_VERSION`] are version 3's, and
+//! `store::unit::the_constants_are_the_current_versions_layout` pins them.
 //!
 //! # Why this is version 2 and not an edited version 1
 //!
@@ -109,11 +110,24 @@ const _: () = assert!(MAX_SLOT_COUNT == 2 && MAX_SLOTS == 2);
 /// named as such instead of being reported as an absurd version number.
 pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXB";
 
-/// Identifies a version-2 bar file.
-pub const MAGIC: [u8; 8] = *b"BRUTEXB2";
+/// Identifies a version-2 bar file. Read, never written, since D-1571.
+pub const MAGIC_V2: [u8; 8] = *b"BRUTEXB2";
 
-/// The only format version this build writes.
-pub const FORMAT_VERSION: u16 = 2;
+/// Identifies a bar file of the version this build writes: version 3.
+///
+/// Version 3 has version 2's geometry byte for byte. What it adds is a rule:
+/// **its block checksums are mandatory.** A version-3 slot whose `flags` lacks
+/// [`FLAG_CHECKSUMS`] is refused on read and on commit
+/// ([`FormatError::ChecksumsRequired`]), so clearing that one bit and
+/// recomputing the slot CRCs no longer turns verification off for a sealed
+/// month (audit-20261003 attackdata-8). A version-2 file keeps version 2's
+/// meaning, flag optional, and is never rewritten as version 3 — `CLAUDE.md`
+/// §3 rule 8. D-1571.
+pub const MAGIC: [u8; 8] = *b"BRUTEXB3";
+
+/// The only format version this build writes: 3 since D-1571. Version 2 is
+/// still read at its own row of [`crate::layout::Layout::KNOWN`].
+pub const FORMAT_VERSION: u16 = 3;
 
 /// Versions that existed and are no longer readable by this build.
 ///
@@ -702,12 +716,23 @@ impl Row for Greek {
     /// The overlay answers `true` because a spot and a volatility constrain
     /// nothing about one another. A greeks row is different: a non-finite
     /// derivative is not a reading, and it must never reach the disk.
+    ///
+    /// **AND INSIDE THE DOMAIN THE PRICER ACCEPTS.** `greeks` refuses a spot or
+    /// a volatility that is not positive (`NotPositive`), so a row carrying one
+    /// was not produced by it: a spot of -5 paisa or a volatility of zero was
+    /// committed as a reading. Only those two, because they are the two the
+    /// pricer itself refuses; no range is invented for the derivatives.
+    /// audit-20261003 attackdata-2, D-1524.
     fn is_sane(&self) -> bool {
-        self.is_finite()
+        self.is_finite() && self.spot > 0 && self.volatility > 0.0
     }
 
     fn bad_counts(&self) -> Option<(i64, i64)> {
         None
+    }
+
+    fn same_bytes(&self, other: &Self) -> bool {
+        self.image() == other.image()
     }
 }
 
@@ -837,8 +862,9 @@ impl Bar {
     ///   pins all 56 bytes of one record as a literal array. A body that
     ///   returns zeros — or any other bytes — fails it.
     /// - `store::unit::the_image_is_little_endian_and_each_field_owns_its_own_offset`
-    ///   holds up the byte order this comment claims, and walks all 448
-    ///   (field, byte) positions so no two fields can swap.
+    ///   holds up the byte order this comment claims, and walks all 56
+    ///   (field, byte) positions — seven fields of eight bytes
+    ///   each — so no two fields can swap.
     /// - `store::unit::decoding_the_image_returns_the_record_byte_for_byte`
     ///   round-trips every boundary a record has, [`OI_NULL`] included.
     ///
@@ -944,9 +970,9 @@ pub trait Row: Copy + PartialEq {
     ///
     /// A [`Bar`] has four prices that must bracket each other. An [`Overlay`]
     /// has no such relation — a spot and a volatility constrain nothing about
-    /// one another, and an all-zero overlay is a legal reading — so it answers
-    /// `true` because there is genuinely nothing to violate, not because the
-    /// check was skipped.
+    /// one another, and an all-zero overlay is a legal reading — but neither
+    /// field may be negative unless it is the [`OI_NULL`] absent marker
+    /// (STO-1, D-2607).
     fn is_sane(&self) -> bool;
 
     /// The two counts, when one of them is impossible.
@@ -959,6 +985,16 @@ pub trait Row: Copy + PartialEq {
     /// `None` when the counts are fine, and `None` for an [`Overlay`], which
     /// carries no counts to be wrong about.
     fn bad_counts(&self) -> Option<(i64, i64)>;
+
+    /// Whether `other` has exactly this record's bytes.
+    ///
+    /// The writer's duplicate check, and NOT `PartialEq`: a [`Greek`]'s fields
+    /// are `f64`, where `-0.0 == 0.0` although the two images differ, so a
+    /// re-run with different bytes was answered "already present, byte for
+    /// byte". Required rather than defaulted, so a new record kind cannot
+    /// inherit the float comparison by omission. audit-20261003 attackdata-2,
+    /// D-1524.
+    fn same_bytes(&self, other: &Self) -> bool;
 }
 
 impl Row for Bar {
@@ -987,6 +1023,10 @@ impl Row for Bar {
             Some((self.volume, self.open_interest))
         }
     }
+
+    fn same_bytes(&self, other: &Self) -> bool {
+        self.image() == other.image()
+    }
 }
 
 impl Row for Overlay {
@@ -1004,12 +1044,20 @@ impl Row for Overlay {
         Self::decode(bytes)
     }
 
+    /// Neither a spot price nor a volatility is ever negative, so each field
+    /// is [`OI_NULL`] (absent) or at least zero. A negative spot or IV was
+    /// committed before this check (STO-1, D-2607).
     fn is_sane(&self) -> bool {
-        true
+        (self.spot == OI_NULL || self.spot >= 0)
+            && (self.iv_micros == OI_NULL || self.iv_micros >= 0)
     }
 
     fn bad_counts(&self) -> Option<(i64, i64)> {
         None
+    }
+
+    fn same_bytes(&self, other: &Self) -> bool {
+        self.image() == other.image()
     }
 }
 
@@ -1117,6 +1165,31 @@ pub enum FormatError {
     /// Trusting the counter over the file length would read past the end and
     /// return whatever bytes happened to be there.
     CounterExceedsFile,
+    /// `n_valid` claims more records than the file's month can hold on its
+    /// rung's grid, so no writer could have committed it.
+    ///
+    /// The file-length bound alone let a sparse file and a CRC-valid slot open
+    /// with a counter in the billions, and every reader that sized a vector or
+    /// a loop from it did so from a number the writer can never reach: the api
+    /// aborted on the allocation (CE-61, D-2685).
+    CounterExceedsMonth {
+        /// The counter the header claims.
+        n_valid: u64,
+        /// The most records the month holds on the rung's grid.
+        slots: u64,
+    },
+    /// A non-empty header's timestamp range leaves the file's month.
+    ///
+    /// The writer admits no bar outside the month (D-0915), so a header that
+    /// says otherwise is a header fault. Refused here, it is named as one,
+    /// rather than surfacing later as an overlap that names the wrong batch
+    /// (CE-63, D-2685).
+    RangeOutsideMonth {
+        /// The header's first timestamp.
+        first_ts_micros: i64,
+        /// The header's last timestamp.
+        last_ts_micros: i64,
+    },
     /// Appending would push `n_valid` past `u64::MAX`.
     CounterOverflow,
     /// The generation counter cannot be advanced again.
@@ -1134,6 +1207,20 @@ pub enum FormatError {
         previous: i64,
         /// The timestamp that did not follow it.
         next: i64,
+    },
+    /// The committed header's `last_ts_micros` is not the stamp of the last
+    /// record it counts.
+    ///
+    /// `append` decides whether a batch FOLLOWS the month from that one header
+    /// field. A slot whose checksum is good but whose range is wrong steered a
+    /// bar stamped behind held records into the file as a commit, leaving the
+    /// month out of order and every later bisection answering a neighbour.
+    /// Refused before anything is written. audit-20261004 store-1, D-3140.
+    LastStampDisagrees {
+        /// What the header advertises.
+        header: i64,
+        /// What record `n_valid - 1` actually carries.
+        record: i64,
     },
     /// A slot's stored checksum does not match its bytes.
     SlotChecksum {
@@ -1197,6 +1284,31 @@ pub enum FormatError {
         /// Which field of the declaration is impossible.
         field: &'static str,
     },
+    /// A slot's reserved tail, bytes `60..64`, is not zero.
+    ///
+    /// `docs/02-store-format.md` §2: reserved bytes are zero and stay zero, and
+    /// a future field takes reserved space in a **new version**, never by
+    /// reinterpreting this one. The checksum covers those bytes, so a slot that
+    /// reaches this refusal was *written* that way: by a writer that broke the
+    /// format, not by a flipped bit. Carries the four bytes, little-endian.
+    /// D-1353.
+    ReservedNotZero(u32),
+    /// A slot's `flags` sets a bit its version does not define.
+    ///
+    /// Bit 0 ([`FLAG_CHECKSUMS`]) is the only one. A file declaring a property
+    /// this build has never heard of cannot be read as if it declared none.
+    /// Refused on the write side too, so no slot this build commits can reach
+    /// it. D-1354.
+    UnknownFlags(u32),
+    /// A slot of a version whose block checksums are mandatory does not set
+    /// [`FLAG_CHECKSUMS`].
+    ///
+    /// Version 3 is born sealed and stays sealed, so a version-3 slot without
+    /// the flag was written that way on purpose: clearing it would turn block
+    /// verification off while the `.crc` sat beside the month, ignored
+    /// (audit-20261003 attackdata-8). Carries the version. Refused on the
+    /// write side too. D-1571.
+    ChecksumsRequired(u16),
     /// No slot in the header region decoded.
     ///
     /// Not a torn tail — a torn tail is unobservable. This means every copy of
@@ -1231,11 +1343,28 @@ impl std::fmt::Display for FormatError {
             Self::CounterExceedsFile => {
                 f.write_str("n_valid claims more records than the file holds")
             }
+            Self::CounterExceedsMonth { n_valid, slots } => write!(
+                f,
+                "n_valid claims {n_valid} records and the file's month holds at \
+                 most {slots} on its rung's grid"
+            ),
+            Self::RangeOutsideMonth {
+                first_ts_micros,
+                last_ts_micros,
+            } => write!(
+                f,
+                "the header's range {first_ts_micros}..={last_ts_micros} (UTC \
+                 micros) leaves the file's month"
+            ),
             Self::CounterOverflow => f.write_str("n_valid would overflow u64"),
             Self::GenerationExhausted => f.write_str("header generation cannot advance past u64"),
             Self::TimestampsOutOfOrder { previous, next } => {
                 write!(f, "timestamp {next} does not follow {previous}")
             }
+            Self::LastStampDisagrees { header, record } => write!(
+                f,
+                "header last timestamp {header} is not its last record's {record}"
+            ),
             Self::SlotChecksum { stored, computed } => {
                 write!(f, "header slot checksum {stored:#010x} != {computed:#010x}")
             }
@@ -1263,6 +1392,18 @@ impl std::fmt::Display for FormatError {
             Self::DegenerateLayout { field } => {
                 write!(f, "layout field {field} is not a geometry a file can have")
             }
+            Self::ReservedNotZero(bytes) => write!(
+                f,
+                "header slot reserved bytes are {bytes:#010x}, must be zero"
+            ),
+            Self::UnknownFlags(flags) => write!(
+                f,
+                "header flags {flags:#010x} set a bit this version does not define"
+            ),
+            Self::ChecksumsRequired(version) => write!(
+                f,
+                "format version {version} requires block checksums and this slot does not declare them"
+            ),
             Self::NoValidHeader => f.write_str("no header slot survived; the header is unreadable"),
         }
     }

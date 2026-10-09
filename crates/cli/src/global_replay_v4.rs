@@ -2,6 +2,9 @@
 //! Actual zero-through-25 prefixes replace V3's mandatory 200-winner topology.
 //! V1/V2/V3 files are never opened. No loose caller-authored replay row is an
 //! authority. The shared Runner scheduler owns inclusive global occupancy.
+//! Each stream's globally admitted ambiguous bars and gap fills are summed
+//! against its frozen exit-policy ceilings, and the replay refuses past
+//! either, as V1 did (D-1643).
 //! Whole replay, sorting, authentication and persistence are input-dependent.
 use std::collections::HashMap;
 use std::path::Path;
@@ -225,10 +228,7 @@ fn commit_recorded(
         sum.checked_add(codec::count(snapshot.winners.len())?)
             .ok_or_else(|| "Global Replay V4 selected count overflow".to_owned())
     })?;
-    let candidate_budget =
-        bounds.records.checked_sub(10 + selected_count).ok_or(
-            "Global Replay V4 record cap cannot hold its exact roster and selected streams",
-        )? / 2;
+    let candidate_budget = candidate_budget(bounds.records, selected_count)?;
     let witnesses = selection.replay(snapshots, request, candidate_budget, observer)?;
     let prepared = prepare(snapshots, witnesses, request, bounds, store_root)?;
     prepared.strict_inputs.require_current()?;
@@ -288,6 +288,7 @@ fn prepare(
         );
     }
     let mut attempts = Vec::new();
+    let mut quality = Vec::new();
     let mut witnesses = witnesses.into_iter();
     let mut stream = 0_u64;
     for snapshot in snapshots {
@@ -298,6 +299,11 @@ fn prepare(
             let (cohort, stored_witness, replay) = held.into_parts();
             replay.require_integrity().map_err(|why| why.to_string())?;
             let constituent = exact_constituent(snapshot, winner, &replay)?;
+            quality.try_reserve(1).map_err(|why| why.to_string())?;
+            quality.push(StreamQuality::frozen(
+                replay.max_ambiguous_bars(),
+                replay.max_gap_fills(),
+            ));
             push(
                 &mut records,
                 &codec::witness(stream, snapshot, winner, cohort, stored_witness, &replay)?,
@@ -325,7 +331,7 @@ fn prepare(
         root: store_root,
         months: HashMap::new(),
     };
-    let mut audit = schedule(&attempts, &mut records, bounds, &mut vix)?;
+    let mut audit = schedule(&attempts, &mut quality, &mut records, bounds, &mut vix)?;
     audit.witnesses = stream;
     audit.candidates = codec::count(attempts.len())?;
     // Reference-only VIX rows do not enter economic identity.
@@ -433,6 +439,27 @@ fn check_candidate(
     Ok(())
 }
 
+/// Candidates the record ceiling can hold in the worst case.
+///
+/// Each replayed candidate writes a candidate row and a decision row, and an
+/// admitted priceable decision also writes a VIX row (`account_decision`). The
+/// budget divided by two ignored that third row, so a replay admitted under the
+/// budget could still hit the ceiling in `push` after all OOS work was done
+/// (GAP15-18). Dividing by three makes the pre-replay check sufficient:
+/// `10 + selected + 3 × budget <= records`. D-1637.
+fn candidate_budget(records: u64, selected_count: u64) -> Result<u64, String> {
+    let fixed = selected_count
+        .checked_add(10)
+        .ok_or("Global Replay V4 selected count overflow")?;
+    Ok(records
+        .checked_sub(fixed)
+        .ok_or("Global Replay V4 record cap cannot hold its exact roster and selected streams")?
+        / RECORDS_PER_CANDIDATE)
+}
+
+/// Candidate row, decision row and, when admitted and priceable, a VIX row.
+const RECORDS_PER_CANDIDATE: u64 = 3;
+
 fn push(
     records: &mut Vec<Record>,
     row: &Record,
@@ -449,6 +476,24 @@ fn push(
 trait VixLookup {
     fn stamp(&mut self, feed: Vendor, ts: i64) -> Result<VixStamp, String>;
 }
+/// The most VIX months a Global Replay V4 run holds at once (CE-8, D-1769).
+const VIX_MONTHS_HELD: usize = 4;
+
+/// Drops the held month with the earliest `(month, feed)` while `held` is at
+/// `cap`, so one insert after it never takes the map past `cap`.
+fn make_room<V>(held: &mut HashMap<(Vendor, store::path::YearMonth), V>, cap: usize) {
+    while held.len() >= cap.max(1) {
+        let Some(oldest) = held
+            .keys()
+            .copied()
+            .min_by_key(|(feed, month)| (*month, *feed))
+        else {
+            return;
+        };
+        held.remove(&oldest);
+    }
+}
+
 struct VixCatalog<'a> {
     root: &'a Path,
     months: HashMap<(Vendor, store::path::YearMonth), VixReferenceMonth>,
@@ -459,10 +504,28 @@ impl VixLookup for VixCatalog<'_> {
             .map_err(|why| why.to_string())?;
         let month = moment.day().year_month().map_err(|why| why.to_string())?;
         if !self.months.contains_key(&(feed, month)) {
+            // BOUNDED, OLDEST OUT. Every opened month was kept for the whole
+            // replay, about 2.86 MB each, so a ten-year span held hundreds of
+            // MB that no record bound counted (CE-8, D-1769). Trades are
+            // stamped in entry order, entry then exit, so only the month being
+            // walked and the one after it are live; the oldest held month is
+            // dropped before a new one opens. A month asked for again is
+            // re-opened from the same file, so the stamp is unchanged and only
+            // the read repeats. The scan is over at most `VIX_MONTHS_HELD`
+            // keys, a constant.
+            //
+            // WAITED FOR, BOUNDED, NEVER ABSENCE (replay-5, D-2636). The open
+            // happens after the whole replay, and CE-8's eviction re-opens a
+            // month later still, so a VIX pull holding the month for a moment
+            // refused a multi-hour run at its end. A writer is waited for a
+            // constant second; past it the refusal names the month as busy.
+            // It is never turned into an absent stamp.
+            make_room(&mut self.months, VIX_MONTHS_HELD);
             self.months.try_reserve(1).map_err(|why| why.to_string())?;
             self.months.insert(
                 (feed, month),
-                VixReferenceMonth::open(self.root, feed, month)?,
+                VixReferenceMonth::open_waiting(self.root, feed, month)
+                    .map_err(crate::vix_reference::VixOpenRefusal::into_reason)?,
             );
         }
         self.months
@@ -472,8 +535,63 @@ impl VixLookup for VixCatalog<'_> {
     }
 }
 
+/// One stream's globally admitted exit quality against its frozen ceilings.
+///
+/// Global Replay V1 summed the ambiguous bars and gap fills of every trade the
+/// global scheduler admitted for a stream and refused the replay when either
+/// passed the frozen exit policy's `max_ambiguous_bars` / `max_gap_fills`.
+/// V3 and V4 checked only each row (`<= 1`), so a stream could publish with
+/// more ambiguous or gap-filled trades than the policy it was selected under
+/// allows (GAP15-19). This restores V1's rule: the ceilings come sealed in
+/// the Runner witness, are indexed by stream, and each admitted priceable
+/// trade adds in O(1), proven by
+/// `cli::tests::admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings`
+/// (in `global_replay_v4::tests`; AGA-01). D-1643.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamQuality {
+    max_ambiguous_bars: u64,
+    max_gap_fills: u64,
+    admitted_ambiguous_bars: u64,
+    admitted_gap_fills: u64,
+}
+impl StreamQuality {
+    const fn frozen(max_ambiguous_bars: u64, max_gap_fills: u64) -> Self {
+        Self {
+            max_ambiguous_bars,
+            max_gap_fills,
+            admitted_ambiguous_bars: 0,
+            admitted_gap_fills: 0,
+        }
+    }
+
+    /// Adds one globally admitted priceable trade; refuses past a ceiling.
+    fn absorb(&mut self, stream: u64, price: PriceProjection) -> Result<(), String> {
+        self.admitted_ambiguous_bars = self
+            .admitted_ambiguous_bars
+            .checked_add(price.ambiguous_bars())
+            .ok_or("Global Replay V4 admitted ambiguous-bar count overflow")?;
+        self.admitted_gap_fills = self
+            .admitted_gap_fills
+            .checked_add(price.gap_fills())
+            .ok_or("Global Replay V4 admitted gap-fill count overflow")?;
+        if self.admitted_ambiguous_bars > self.max_ambiguous_bars
+            || self.admitted_gap_fills > self.max_gap_fills
+        {
+            return Err(format!(
+                "Global Replay V4 stream {stream} globally admitted quality {}/{} exceeds its frozen ceilings {}/{} (ambiguous bars/gap fills)",
+                self.admitted_ambiguous_bars,
+                self.admitted_gap_fills,
+                self.max_ambiguous_bars,
+                self.max_gap_fills
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn schedule(
     attempts: &[Attempt],
+    quality: &mut [StreamQuality],
     records: &mut Vec<Record>,
     bounds: GlobalReplayV4Bounds,
     vix: &mut impl VixLookup,
@@ -525,6 +643,7 @@ fn schedule(
             account_decision(
                 attempt,
                 decision.disposition,
+                quality,
                 &mut audit,
                 records,
                 bounds,
@@ -571,6 +690,7 @@ fn schedule_group(
 fn account_decision(
     attempt: &Attempt,
     disposition: Disposition,
+    quality: &mut [StreamQuality],
     audit: &mut GlobalReplayV4Audit,
     records: &mut Vec<Record>,
     bounds: GlobalReplayV4Bounds,
@@ -585,6 +705,11 @@ fn account_decision(
     audit.pricing_refused += u64::from(attempt.candidate.pricing_refused());
     if matches!(disposition, Disposition::Admitted { .. }) {
         if let PathProjection::Priceable(price) = attempt.candidate.path() {
+            usize::try_from(attempt.stream)
+                .ok()
+                .and_then(|stream| quality.get_mut(stream))
+                .ok_or("Global Replay V4 admitted a trade of a stream with no frozen ceilings")?
+                .absorb(attempt.stream, price)?;
             let row = price.row();
             let entry = vix.stamp(attempt.feed, row.entry_micros)?;
             let exit = vix.stamp(attempt.feed, row.exit_micros)?;

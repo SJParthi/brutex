@@ -1,12 +1,38 @@
 import { ask } from './ask.js';
 import { decodeCensus } from './store-census-wire.js';
 import { fetchWithBusyRetry } from '../../saved-backtest/requests.js';
+import { reasonOf } from './refusal.js';
 
 export const STORE_CENSUS_MS = 30_000;
 
 /**
- * @typedef {{ok: boolean, status: number, body: any[] | null, headers: Headers}} CensusAnswer
+ * `reason` is the server's own sentence for a refused read; `degraded` is the
+ * `x-brutex-census-degraded` header when it is non-empty.
+ * @typedef {{ok: boolean, status: number, body: any[] | null, headers: Headers,
+ *   reason?: string | null, degraded?: string | null}} CensusAnswer
  */
+
+export const CENSUS_DEGRADED_HEADER = 'x-brutex-census-degraded';
+
+/**
+ * A DEGRADED CENSUS IS NOT THE CURRENT STORE, AND IS REFUSED AS ONE (CE-77,
+ * D-1786). The server answers 200 for a manifest whose newest generation
+ * failed its checksum, with the generation it could still recover and the
+ * reason in this header (`census.rs`, `VendorCensus::degraded`): a month a
+ * later generation committed is not in those rows. Every selected-feed reader
+ * folded them as the store with no mark, so /db, /markets, /terminal and the
+ * backtest form showed committed months as never pulled. The HEAD survey
+ * (`feed-summary.js`) already refused it; the GET path now does the same.
+ * @param {Headers} headers
+ * @returns {string | null} the refusal sentence, or null when not degraded
+ */
+export function degradedRefusal(headers) {
+  const degraded = headers.get(CENSUS_DEGRADED_HEADER);
+  if (degraded === null || degraded.trim() === '') return null;
+  return `the census is DEGRADED (${degraded.trim()}): the server could only recover an older ` +
+    'generation of the manifest, so months a later generation committed are missing from it. ' +
+    'It is refused rather than drawn as the current store';
+}
 
 /**
  * Share the request AND the parsed body. Keep at most one completed selected
@@ -52,9 +78,22 @@ export function createCensusLoader(request = ask, ceilingMs = STORE_CENSUS_MS, o
         // avoids another parse, fold and complete database decoration.
         const headers = new Headers(previous.headers);
         result.headers.forEach((value, key) => headers.set(key, value));
+        const stale = degradedRefusal(headers);
+        if (stale) return { ok: false, status: 304, body: null, headers, reason: stale, degraded: headers.get(CENSUS_DEGRADED_HEADER) };
         return { ok: true, status: 304, body: previous.body, headers };
       }
-      if (!result.ok) return { ok: false, status: result.status, body: null, headers: result.headers };
+      if (!result.ok) {
+        // THE REASON IS READ, NOT DROPPED (CE-83, D-1789). A 429/503 names
+        // itself in `{"error":...}`; an unreadable census answers 503 with an
+        // empty array and puts its sentence in `x-brutex-census-note`.
+        const reason = (await reasonOf(result)) ?? result.headers.get('x-brutex-census-note');
+        return { ok: false, status: result.status, body: null, headers: result.headers, reason: reason || null };
+      }
+      const stale = degradedRefusal(result.headers);
+      if (stale) {
+        return { ok: false, status: result.status, body: null, headers: result.headers,
+          reason: stale, degraded: result.headers.get(CENSUS_DEGRADED_HEADER) };
+      }
       const body = await decodeCensus(await result.json(), feed, controller.signal);
       return { ok: true, status: result.status, body, headers: result.headers };
     })();
@@ -94,4 +133,17 @@ export function createCensusLoader(request = ask, ceilingMs = STORE_CENSUS_MS, o
   }
 
   return { load };
+}
+
+/**
+ * The sentence a refused census read is shown as: the status and the server's
+ * own reason (or the degraded refusal), never the status alone. CE-83.
+ * @param {CensusAnswer} answer
+ * @returns {string}
+ */
+export function censusFailure(answer) {
+  if (answer.degraded) return `/store.json: ${answer.reason}`;
+  return answer.reason
+    ? `/store.json answered HTTP ${answer.status}: ${answer.reason}`
+    : `/store.json answered HTTP ${answer.status} and named no reason`;
 }

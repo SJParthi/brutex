@@ -87,29 +87,40 @@ impl<'a> Args<'a> {
 }
 
 pub(crate) fn stored(args: &[&str], out: &mut String) -> u8 {
-    match Args::parse(args).and_then(|args| run(&args)) {
-        Ok(report) => {
-            out.push_str(&report);
-            crate::OK
-        }
-        Err(why) => crate::refuse(out, &why),
-    }
+    report(Args::parse(args), out)
 }
 
 pub(crate) fn priced(args: &[&str], out: &mut String) -> u8 {
-    let result = (|| {
+    let parsed = (|| {
         let mut parsed = Args::parse(args.get(..9).ok_or("missing search arguments")?)?;
         parsed.pricing = Some(crate::expression_pricing::Plan::parse(
             args.get(9..).ok_or("missing pricing arguments")?,
         )?);
-        run(&parsed)
+        Ok(parsed)
     })();
-    match result {
+    report(parsed, out)
+}
+
+/// Arguments, then work, each with its own code: an argument this build does
+/// not understand is `MISUSED` with the usage; a refusal once every argument
+/// parsed and named something real is the work's, and is `FAILED` without it
+/// (P8-03, D-2722).
+fn report(parsed: Result<Args<'_>, String>, out: &mut String) -> u8 {
+    let checked = parsed.and_then(|args| {
+        let span = Some(((args.year, args.month), (args.year, args.month)));
+        crate::stored_words(args.feed, Some(args.underlying), Some(args.rung), span)?;
+        Ok(args)
+    });
+    let args = match checked {
+        Ok(args) => args,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match run(&args) {
         Ok(report) => {
             out.push_str(&report);
             crate::OK
         }
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 
@@ -528,6 +539,15 @@ fn execute(
 ) -> Result<State, String> {
     let start_count = state.candidates;
     let start_work = state.work;
+    // A SEARCH ALREADY EXHAUSTED HAS NOTHING NEW TO RECORD. The loop below
+    // takes no step, and publishing anyway appended one more checkpoint per
+    // rerun -- each one a journal reservation, a history link `verify_history`
+    // walks twice, and bytes on disk a rerun was meant not to change (§3 rule
+    // 5). The grammar and Boolean campaigns already return here.
+    // audit-20261003 hunt-cli-b-1, D-1562.
+    if state.exhausted && previous.0 != 0 {
+        return Ok(state);
+    }
     while !state.exhausted
         && state.candidates - start_count < budgets.0
         && state.work - start_work < budgets.1

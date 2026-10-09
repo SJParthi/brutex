@@ -107,16 +107,43 @@ pub(crate) fn prepare_in_namespace(
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(display(why)),
     }
-    let owner = Flock::try_lock(
-        crate::readonly_file::open(&owner_path).map_err(display)?,
-        owner_path.clone(),
-    )
-    .map_err(|why| format!("Boolean candidate namespace already owned or lock refused: {why}"))?;
+    // A READER IS NOT ANOTHER PUBLISHER (expr-2, indexstop-2, D-2620). A
+    // dashboard's `ReadLease` holds this lock shared for one projection, and
+    // one `try_lock` let it refuse the re-publication of a content-addressed
+    // child a resumed rung or an index-stop invocation needed, after every
+    // source was loaded. The lock is asked again for a bounded second through
+    // a `try_clone` of one open description; a publisher or reader that holds
+    // it past that is still refused, by the same `OWNER_REFUSED` prefix so
+    // `lost_owner_race` reads it unchanged.
+    let opened = crate::readonly_file::open(&owner_path).map_err(display)?;
+    let owner = crate::lock_wait::patiently(|| {
+        Flock::try_lock(
+            opened.try_clone().map_err(std::fs::TryLockError::Error)?,
+            owner_path.clone(),
+        )
+    })
+    .map_err(|why| {
+        format!("{OWNER_REFUSED}: {why}; busy (a reader or another publisher held it past the one-second wait); retry")
+    })?;
+    drop(opened);
     let generation = crate::result_set::file_generation(&owner, &owner_path)?;
     if owner.metadata().map_err(display)?.len() != 0 {
         return Err("Boolean candidate owner contains unexpected bytes".to_owned());
     }
-    write_or_equal(&directory_path.join("body.bin"), body)?;
+    let body_path = directory_path.join("body.bin");
+    if committed(&directory_path)? {
+        write_or_equal(&body_path, body)?;
+    } else {
+        // No whole receipt: nothing here was ever published, and this caller
+        // holds the owner lock, so a torn receipt and any earlier body are
+        // scratch from an attempt that was cut short. Rewrite them rather
+        // than compare: a capture that reads a growing store (the VIX
+        // companion) is not byte-identical on retry, and refusing would
+        // wedge the identity for good (D-1760).
+        discard(&directory_path.join("complete.bin"))?;
+        discard(&body_path)?;
+        write_or_equal(&body_path, body)?;
+    }
     File::open(&directory_path)
         .map_err(display)?
         .sync_all()
@@ -133,6 +160,40 @@ pub(crate) fn prepare_in_namespace(
     })
 }
 
+/// The length of a whole completion receipt.
+const RECEIPT_BYTES: usize = 112;
+const RECEIPT_LEN: u64 = RECEIPT_BYTES as u64;
+
+/// The prefix of the refusal `prepare_in_namespace` returns when another
+/// holder has the owner lock, before this call wrote any byte.
+const OWNER_REFUSED: &str = "Boolean candidate namespace already owned or lock refused";
+
+/// Whether `why` is `prepare_in_namespace`'s owner-lock refusal, the only
+/// failure that leaves this call's own bytes unwritten (D-1908).
+pub(crate) fn lost_owner_race(why: &str) -> bool {
+    why.starts_with(OWNER_REFUSED)
+}
+
+/// Whether `directory` holds a whole completion receipt, so its body is
+/// published history. A missing or shorter receipt is an attempt that was
+/// cut short before `finish` returned.
+pub(crate) fn committed(directory: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(directory.join("complete.bin")) {
+        Ok(meta) => Ok(meta.len() == RECEIPT_LEN),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(why) => Err(display(why)),
+    }
+}
+
+/// Removes an uncommitted file. A symbolic link is unlinked, never followed.
+fn discard(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(why) => Err(display(why)),
+    }
+}
+
 pub(super) fn verify(
     directory: &Path,
     identity: [u8; 32],
@@ -141,7 +202,7 @@ pub(super) fn verify(
     completion: [u8; 32],
 ) -> Result<(), String> {
     let expected = receipt(identity, payload, bytes);
-    let before = read_exact(&directory.join("complete.bin"), 112)?;
+    let before = read_exact(&directory.join("complete.bin"), RECEIPT_LEN)?;
     if before != expected || hash(&before) != completion {
         return Err("Boolean completion receipt changed".to_owned());
     }
@@ -149,7 +210,7 @@ pub(super) fn verify(
     if body.len() as u64 != bytes || hash(&body) != payload {
         return Err("Boolean candidate body no longer matches completion".to_owned());
     }
-    let after = read_exact(&directory.join("complete.bin"), 112)?;
+    let after = read_exact(&directory.join("complete.bin"), RECEIPT_LEN)?;
     if before != after {
         return Err("Boolean completion changed during body verification".to_owned());
     }
@@ -157,7 +218,7 @@ pub(super) fn verify(
 }
 
 fn receipt(identity: [u8; 32], payload: [u8; 32], bytes: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(112);
+    let mut out = Vec::with_capacity(RECEIPT_BYTES);
     out.extend_from_slice(b"BRBLCM01");
     out.extend_from_slice(&identity);
     out.extend_from_slice(&payload);
@@ -186,29 +247,59 @@ fn directory(parent: &Path, path: &Path) -> Result<(), String> {
         .map_err(display)
 }
 
+/// Writes `body` once and accepts only an identical existing file. Callers
+/// reach it for a body only once that body is committed history or the
+/// scratch from an earlier attempt has been discarded, so any difference
+/// here is a different publication and is refused.
 fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
-            file.write_all(body).map_err(display)?;
-            file.sync_all().map_err(display)?;
-            let before = crate::result_set::file_generation(&file, path)?;
-            if file.metadata().map_err(display)?.len() != body.len() as u64 {
-                return Err("Boolean evidence write was not retained".to_owned());
+            // WITHDRAWN, NOT LEFT (ledgers-2, D-1915). A file this call created
+            // whose write or barrier failed stayed whole-length in the page
+            // cache, and the next run reused it as committed history: a
+            // receipt is `committed` by its length alone, and a barrier on a
+            // fresh descriptor cannot prove what a failed one did not.
+            let written = file
+                .write_all(body)
+                .map_err(display)
+                .and_then(|()| retained(&file, path, body.len()));
+            if let Err(why) = written {
+                drop(file);
+                return Err(match std::fs::remove_file(path) {
+                    Ok(()) => format!("{why}; the unacknowledged file was withdrawn"),
+                    Err(withdraw) => format!(
+                        "{why}; withdrawing the unacknowledged file ALSO failed: {withdraw}"
+                    ),
+                });
             }
-            crate::result_set::require_generation_unchanged(
-                before,
-                crate::result_set::file_generation(&file, path)?,
-                path,
-            )
+            Ok(())
         }
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
             if read_exact(path, body.len() as u64)? != body {
                 return Err("Boolean evidence already exists with different or incomplete bytes; history preserved".to_owned());
             }
+            // The reused file is synced too, so a reuse never reports success
+            // over bytes no barrier of this run reached (ledgers-2, D-1915).
+            File::open(path)
+                .and_then(|file| file.sync_all())
+                .map_err(display)?;
             Ok(())
         }
         Err(why) => Err(display(why)),
     }
+}
+
+fn retained(file: &File, path: &Path, bytes: usize) -> Result<(), String> {
+    crate::fixed_tail::sync_all_hooked(file, path).map_err(display)?;
+    let before = crate::result_set::file_generation(file, path)?;
+    if file.metadata().map_err(display)?.len() != bytes as u64 {
+        return Err("Boolean evidence write was not retained".to_owned());
+    }
+    crate::result_set::require_generation_unchanged(
+        before,
+        crate::result_set::file_generation(file, path)?,
+        path,
+    )
 }
 
 pub(super) fn read_exact(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -414,3 +505,7 @@ fn cell(out: &mut Vec<u8>, value: &runner::grid::Cell) {
     signed(out, value.worst_trade);
     signed(out, value.max_drawdown);
 }
+
+#[cfg(test)]
+#[path = "boolean_candidate_persistence_tests.rs"]
+mod persistence_tests;

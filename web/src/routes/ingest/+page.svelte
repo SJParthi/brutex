@@ -10,7 +10,7 @@
    *
    * 2. A run that refused 407 of 785 instruments showed ONE reason. The
    *    receipt renders `done.failures.iter().take(5)` — five, and the run's
-   *    own `Members failed` count is beside it, so the page can SEE that it
+   *    own `Failure diagnostics` count is beside it, so the page can SEE that it
    *    was truncated and say so instead of implying the list is complete.
    *
    * 3. The bar length was not askable. `api::ingest::parse_spot` has read a
@@ -43,6 +43,7 @@
   import Picker from '$lib/Picker.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
+  import { IST_OFFSET_MS, SESSION_MINUTES } from '$lib/ist.js';
   // `untrack`, because one effect on this page must react to a FEED CHANGE and
   // to nothing else — see the rung-drop effect for why an effect that reacts to
   // its own write is a hazard rather than a nicety.
@@ -64,7 +65,7 @@
     watchStore,
     foldMonths
   } from '$lib/store.svelte.js';
-  import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  import { failureCount, notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
   // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
   //
   // `readFolder` declares its own `const ask` for probing folder segments. A
@@ -81,6 +82,7 @@
   import { ask as request } from '$lib/ask.js';
   import { createPageRequests, watchVisible } from '$lib/page-requests.js';
   import { exact } from '$lib/money.js';
+  import { commandReply, headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
   // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
@@ -90,7 +92,9 @@
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
-  import { foldMinuteOwed } from '$lib/calendar-owed.js';
+  import { createCalendarLoader, emptyCalendar, foldMinuteOwed } from '$lib/calendar-owed.js';
+  import { emptyPilot, failedPilot, foldIngestStatus, pilotNotice } from '$lib/ingest-status.js';
+  import { feedMeter, landedOf } from '$lib/run-card.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -496,7 +500,7 @@
   /** @type {Rung[]} */
   const RUNGS = [
     { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
-    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
+    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: SESSION_MINUTES },
     { dir: '1day', label: '1 day', phrase: 'one day', stored: true, per: 1 }
   ];
 
@@ -932,7 +936,6 @@
   // remove: `01/07/2025` is 1 July here and 7 January in half the world.
 
   const DAY_MS = 86_400_000;
-  const IST_OFFSET_MS = 19_800_000; // +05:30, and India has no daylight saving.
 
   /** The IST date of a moment, as `YYYY-MM-DD`. */
   function istDay(ms = Date.now()) {
@@ -1028,90 +1031,28 @@
   /**
    * The exchange calendar, as the store knows it.
    *
-   * @type {{
-   *   first: string, last: string,
-   *   owed: Map<string, number|null>,
-   *   indexOwed: Map<string, number|null>,
-   *   from: string[], clashes: number, why: string
-   * }}
+   * @type {import('$lib/calendar-owed.js').Calendar}
    */
-  let calendar = $state({
-    first: '',
-    last: '',
-    owed: new Map(),
-    indexOwed: new Map(),
-    from: [],
-    clashes: 0,
-    why: ''
-  });
+  let calendar = $state(emptyCalendar(''));
 
-  /** An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date here. */
-  /** @param {number} day */
-  function isoOfEpochDay(day) {
-    return new Date(day * 86_400_000).toISOString().slice(0, 10);
-  }
-
-  /** @param {string|null} feed */
-  async function loadCalendar(feed) {
-    if (!feed) return;
-    try {
-      const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
-        cache: 'no-store'
-      });
-      if (!response.ok) {
-        calendar = {
-          first: '',
-          last: '',
-          owed: new Map(),
-          indexOwed: new Map(),
-          from: [],
-          clashes: 0,
-          why: `/calendar.json answered ${response.status}`
-        };
-        return;
-      }
-      const body = await response.json();
-      /** @type {Map<string, number|null>} */
-      const owed = new Map();
-      /** @type {Map<string, number|null>} */
-      const indexOwed = new Map();
-      for (const entry of body?.days ?? []) {
-        const day = isoOfEpochDay(entry.day);
-        owed.set(day, entry.owed ?? null);
-        // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
-        // carry the index-specific field and therefore cannot prove a common
-        // index denominator on the systems-outage day. Falling back to `owed`
-        // would silently restore the false 166-hole claim D-0420 refuses.
-        indexOwed.set(day, entry.indexOwed ?? null);
-      }
-      calendar = {
-        first: owed.size ? isoOfEpochDay(body.firstDay) : '',
-        last: owed.size ? isoOfEpochDay(body.lastDay) : '',
-        owed,
-        indexOwed,
-        from: body?.derivedFrom ?? [],
-        clashes: (body?.disagreements ?? []).length,
-        why: owed.size ? '' : 'the store holds no bars for this feed'
-      };
-    } catch (error) {
-      calendar = {
-        first: '',
-        last: '',
-        owed: new Map(),
-        indexOwed: new Map(),
-        from: [],
-        clashes: 0,
-        why:
-          error instanceof Error
-            ? `the calendar request failed (${error.message})`
-            : 'the calendar request failed'
-      };
+  // THE READ IS TICKETED (CE-71, D-2732). It had no request token: a slower
+  // answer for the previous feed replaced the current feed's calendar, and the
+  // previous calendar stood under the new feed (or under no feed) while nothing
+  // had answered. `createCalendarLoader` clears to "not loaded" on every feed
+  // change and lands an answer only while its ticket is current.
+  const calendarRequests = createPageRequests();
+  const calendarLoader = createCalendarLoader({
+    request,
+    requests: calendarRequests,
+    apply: (next) => {
+      calendar = next;
     }
-  }
+  });
+  onDestroy(() => calendarRequests.dispose());
 
   $effect(() => {
     const feed = feeds.active;
-    untrack(() => loadCalendar(feed));
+    untrack(() => void calendarLoader.load(feed));
   });
 
   const DAYNAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -1145,7 +1086,28 @@
   /** Whether the derived calendar actually covers a day, or the page is guessing weekends. */
   /** @param {string} isoDay */
   function holidaysKnownFor(isoDay) {
-    return calendar.owed.size > 0 && isoDay >= calendar.first && isoDay <= calendar.last;
+    return (
+      calendar.owed.size > 0 &&
+      isoDay >= calendar.first &&
+      isoDay <= calendar.last &&
+      !calendar.withheld.has(isoDay)
+    );
+  }
+  /** Whether `/calendar.json` withheld this day: inside its span, never proved shut. D-1507. */
+  /** @param {string} isoDay */
+  function isWithheld(isoDay) {
+    return calendar.withheld.has(isoDay);
+  }
+  /**
+   * WHY THIS DAY'S SESSION IS A GUESS, for the day it is asked about. A withheld
+   * day is inside the measured span, so the span sentence would be false for it.
+   *
+   * @param {string} isoDay
+   */
+  function calendarGapFor(isoDay) {
+    return isWithheld(isoDay)
+      ? `the exchange calendar WITHHOLDS ${dayLabel(isoDay)}: this feed's daily bars for its month were not read or failed their checks, so whether NSE traded is unknown — a weekday is ASSUMED to be a session, and it is not shown as a holiday`
+      : calendarGap;
   }
 
   /**
@@ -1174,7 +1136,9 @@
     return (
       calendar.owed.size > 0 &&
       ym >= calendar.first.slice(0, 7) &&
-      ym <= calendar.last.slice(0, 7)
+      ym <= calendar.last.slice(0, 7) &&
+      // A month with a withheld day has no measured denominator. D-1507.
+      !calendar.withheldMonths.has(ym)
     );
   }
 
@@ -1634,14 +1598,14 @@
     // route can parse and keeps whichever answer; a feed that has neither says
     // so in the server's words, and a third segment is a row on this list.
     readFolder(wire)
-      .then(({ ok, data, segment }) => {
+      .then(({ ok, data, segment, why }) => {
         if (!live) return;
         // A HALT IS KEPT AS A HALT. `ok` is false for every refusal the server
         // makes, and the body carries `path` on the ones that have one — so
         // the page can name the folder rather than saying "nothing found".
         folderReach = ok
           ? { wire, state: 'read', body: data, why: null, segment }
-          : { wire, state: 'halted', body: data, why: data?.refused ?? 'refused', segment };
+          : { wire, state: 'halted', body: data, why, segment };
       })
       .catch((why) => {
         if (!live) return;
@@ -1698,10 +1662,24 @@
   /** @param {string} wire */
   async function readFolder(wire) {
     /** @param {string | null} segment */
+    // A REFUSAL IS READ AS TEXT AND NAMED (F4, D-3221). `r.json()` on a
+    // plain-text request-bounds or cross-site refusal threw a parse error that
+    // replaced the reason; a JSON one was shown as its bare `refused`. `why`
+    // carries route, status and reason; `data` stays the parsed body (or null)
+    // so a halt can still name its folder. A 200 that is not JSON still throws.
     const ask = async (segment) => {
       const at = segment ? `&segment=${segment}` : '';
       const r = await request(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
-      return { ok: r.ok, data: await r.json(), segment };
+      if (r.ok) return { ok: true, data: await r.json(), segment, why: null };
+      const text = await r.text();
+      /** @type {any} */
+      let data = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // Not JSON: the reason is the text itself, quoted by `reasonOfText`.
+      }
+      return { ok: false, data, segment, why: refusalSentence('/folder.json', r.status, reasonOfText(text)) };
     };
     const first = await ask(null);
     if (first.ok || !AMBIGUOUS.test(String(first.data?.refused ?? ''))) return first;
@@ -2560,7 +2538,7 @@
   const ceilReason = $derived.by(() => {
     const today = istToday;
     const guessing = !holidaysKnownFor(today)
-      ? ` Note that ${calendarGap}.`
+      ? ` Note that ${calendarGapFor(today)}.`
       : '';
     if (isSession(today) && istMin < CLOSE_MIN) {
       return `Today, ${dayLabel(today)}, is a trading session and it has not closed yet — NSE closes 15:30 IST and it is ${pad(Math.floor(istMin / 60))}:${pad(istMin % 60)} — so no feed has a final bar for it. The newest day that can be asked for is ${dayLabel(maxDay)}, the last session that closed.${guessing}`;
@@ -2723,7 +2701,12 @@
    * away with the rest.
    */
   const outsideHolidayTable = $derived(
-    windowOk && (!holidaysKnownFor(from) || !holidaysKnownFor(to))
+    windowOk &&
+      (!holidaysKnownFor(from) ||
+        !holidaysKnownFor(to) ||
+        // A withheld day INSIDE the window is a guess too. One step per
+        // withheld day, never per window day. D-1507.
+        [...calendar.withheld].some((d) => d >= from && d <= to))
   );
 
   /**
@@ -4053,8 +4036,11 @@
       const answers = await Promise.all(
         list.map((f) =>
           request(`/instruments.json?feed=${encodeURIComponent(f.wire)}`)
-            .then((r) => {
-              if (!r.ok) throw new Error(`${f.display}: /instruments.json answered HTTP ${r.status}`);
+            .then(async (r) => {
+              // THE SERVER'S REASON, NOT ITS STATUS ALONE (W2, D-3212): an
+              // unreadable census is stamped in the headers, an unknown feed
+              // names itself in the body.
+              if (!r.ok) throw new Error(`${f.display}: ${await headerRefusalFrom('/instruments.json', r)}`);
               return r.json();
             })
             .then((rows) => ({ feed: f, rows }))
@@ -4585,35 +4571,40 @@
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
   /**
+   * THE FOLD IS `$lib/ingest-status.js` (CE-79, D-1787): a refused or failed
+   * read clears the flight and the halts rather than keeping the previous
+   * answer, the 503's `error` is named, and `surveyed` / `blocked_by` are
+   * carried so an empty list is never read as "nothing halted".
    * @type {{
    *   at: number,
    *   inFlight: PilotFlight | null,
    *   feeds: PilotFeed[],
    *   state: string,
+   *   surveyed: boolean | null,
+   *   blockedBy: string | null,
    *   error: string | null,
    *   busy: boolean
    * }}
    */
-  let pilot = $state({ at: 0, inFlight: null, feeds: [], state: '', error: null, busy: false });
+  let pilot = $state(emptyPilot());
   let pilotAsked = false;
+  const pilotSays = $derived(pilotNotice(pilot));
 
   async function readPilot() {
     if (pilot.busy) return;
     pilot = { ...pilot, busy: true, error: null };
     try {
       const r = await request('/ingest/status.json');
-      if (!r.ok) throw new Error(`/ingest/status.json answered HTTP ${r.status}`);
-      const j = await r.json();
-      pilot = {
-        at: Date.now(),
-        inFlight: j.in_flight ?? null,
-        feeds: Array.isArray(j.waiting_on) ? j.waiting_on : [],
-        state: String(j.state ?? ''),
-        error: null,
-        busy: false
-      };
+      /** @type {unknown} */
+      let body;
+      try {
+        body = await r.json();
+      } catch {
+        body = undefined;
+      }
+      pilot = foldIngestStatus(r.status, body, Date.now());
     } catch (why) {
-      pilot = { ...pilot, busy: false, error: String(why) };
+      pilot = failedPilot(`/ingest/status.json could not be read: ${why instanceof Error ? why.message : String(why)}`);
     }
   }
 
@@ -5397,7 +5388,7 @@
    */
   /** @param {CensusRow} row */
   async function pullRow(row) {
-    if (phase === 'running') return;
+    if (phase === 'running' || pressing) return;
     const span = shortSpan(row);
     if (!span) return;
     await runPull(
@@ -5413,6 +5404,15 @@
   // decides what the right-hand column shows.
 
   let phase = $state('idle');
+  /**
+   * HELD FROM THE PRESS UNTIL `phase` IS SET, synchronously, before the first
+   * `await`. `phase` turns `running` only after the pre-run census, which takes
+   * hundreds of milliseconds, so a guard on `phase` alone let a second press
+   * through: two snapshots and either a false pre-run error or two
+   * `POST /pull/run`, the loser of which set `done` over a live run and hid
+   * Stop. conc18-1.
+   */
+  let pressing = $state(false);
   let startedAt = $state(0);
   let finishedAt = $state(0);
   /**
@@ -5466,6 +5466,9 @@
   let live = $state(/** @type {StoreFold | null} */ (null));
   /** @type {string | null} */
   let pollError = $state(null);
+  /** A stop the server took but could not record durably. Its own state, so
+   *  a poll's `pollError = null` cannot wipe it (OBSV-09, D-3208). */
+  let stopWarning = $state('');
   let lastGrowthAt = $state(0);
   /** {t, units, rows} samples, newest last. Bounded — only the tail is kept. */
   /** @type {{ t: number, units: number, rows: number }[]} */
@@ -5481,9 +5484,13 @@
   const rowsGained = $derived(
     baseline && live ? Math.max(0, live.rows - baseline.rows) : 0
   );
-  const unitsLeft = $derived(Math.max(0, expectedUnits - (baseline?.units ?? 0) - unitsDone));
+  // NULL WITHOUT A BASELINE, NOT 0 (F6, D-3223). A run picked up on load
+  // whose "before" reading failed has nothing to subtract from: this read
+  // `baseline?.units ?? 0`, so the card drew "0% · 0/N", said nothing had
+  // landed, and extrapolated an ETA over every unit as if none were done.
+  const unitsLeft = $derived(baseline ? Math.max(0, expectedUnits - baseline.units - unitsDone) : null);
   const share = $derived(
-    expectedUnits > 0 ? Math.min(1, (baseline ? baseline.units + unitsDone : 0) / expectedUnits) : 0
+    expectedUnits > 0 ? (baseline ? Math.min(1, (baseline.units + unitsDone) / expectedUnits) : null) : 0
   );
 
   /**
@@ -5501,7 +5508,7 @@
     return gained / secs;
   });
 
-  const etaSecs = $derived(rate && unitsLeft > 0 ? Math.round(unitsLeft / rate) : null);
+  const etaSecs = $derived(rate && unitsLeft !== null && unitsLeft > 0 ? Math.round(unitsLeft / rate) : null);
 
   /**
    * THE GOVERNOR IS NOT VISIBLE FROM HERE, and this is the closest honest thing
@@ -5683,11 +5690,9 @@
 
   /** Every `Failed` row the receipt carried — the server sends at most five. */
   const namedFailures = $derived((receipt?.facts ?? []).filter((f) => f.k === 'Failed'));
-  const failedCount = $derived.by(() => {
-    const raw = factValue.get('Members failed');
-    const parsed = Number(String(raw ?? '').replace(/[^0-9]/g, ''));
-    return Number.isFinite(parsed) ? parsed : 0;
-  });
+  // `Failure diagnostics`, through `$lib/receipt.js`: the key the server
+  // emits, pinned against `server.rs` by `tests/receipt.test.js` (P17-01).
+  const failedCount = $derived(failureCount(receipt?.facts ?? []));
   /**
    * THE TRUNCATION, STATED. `landed_answer` writes
    * `for f in done.failures.iter().take(5)`, so a run with 407 failures puts
@@ -5846,7 +5851,7 @@
         group = GROUP.silent;
         reason =
           hiddenFailures > 0
-            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failed member(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
+            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failure diagnostic(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
             : 'The run reported no failure for this instrument and the store gained nothing for it. It was named by the universe and is not accounted for.';
         tone = 'warn';
       }
@@ -6287,7 +6292,7 @@
     // end, and past that the page says so rather than projecting.
     const approx = holidaysKnownFor(isoDay)
       ? ''
-      : ` · ${calendarGap}`;
+      : ` · ${calendarGapFor(isoDay)}`;
     const ceiling = isoDay === maxDay ? ` · the newest day that can be asked for. ${ceilReason}` : '';
     return `${dayLabel(isoDay)} · ${ns ?? 'trading session'}${approx}${ceiling}`;
   }
@@ -6583,14 +6588,19 @@
     try {
       const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!r.ok) return;
+      if (!r.ok) throw new Error(await refusalFrom('/pull/run.json', r));
       doc = await r.json();
       if (!ticket.current()) return;
-    } catch {
+    } catch (why) {
       /* A status this page could not read is not a run this page may claim.
          The Pull button stays offered; the server refuses it by name if a run
          really is going, which is a better answer than a page that locked
-         itself out on one failed read. */
+         itself out on one failed read.
+         BUT IT IS SAID (F4, D-3221). This returned silently on a non-2xx and
+         on a throw alike, so a page that could not tell whether a run was
+         going looked exactly like one that had checked and found none. */
+      if (!ticket.current()) return;
+      pollError = `Whether a pull run is already going could not be read: ${why instanceof Error ? why.message : String(why)}. Pull stays offered; the server refuses a second run by name.`;
       return;
     }
     if (doc?.running !== true) return;
@@ -6624,7 +6634,7 @@
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
-    if (problems.length > 0 || phase === 'running') return;
+    if (problems.length > 0 || phase === 'running' || pressing) return;
 
     /* THE SAME LIST THE PAGE COUNTS, AND THAT IS THE WHOLE POINT.
      *
@@ -6672,6 +6682,9 @@
 
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every count the
     // card shows is a difference against it.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6680,6 +6693,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -6699,7 +6714,9 @@
         body: form,
         signal: controller.signal
       });
-      const answer = await r.json();
+      // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222): a plain-text
+      // request-bounds refusal was a JSON parse error here.
+      const { body: answer, reason } = await commandReply(r);
       if (!r.ok || answer?.started !== true) {
         /* REFUSED, AND THE SERVER SAID WHY. A refusal here is a decision — a
            run already in flight, or a leg that could not be read — not a
@@ -6707,9 +6724,17 @@
            rather than looping. */
         netError =
           answer?.why ??
-          `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
+          (r.ok
+            ? `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`
+            : refusalSentence('/pull/run', r.status, reason));
         phase = 'done';
         finishedAt = Date.now();
+        releaseWatch?.();
+        releaseWatch = null;
+        /* 409 IS "A RUN IS ALREADY IN FLIGHT". That run is real and this page
+           must show it, not a finished card with Stop gone: pick it up exactly
+           as a page load does. The refusal stays in `netError`. conc18-1. */
+        if (r.status === 409) await resumeRun();
         return;
       }
     } catch (why) {
@@ -6753,7 +6778,8 @@
       try {
         const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
         if (!ticket.current()) return;
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        // The body's reason, not the status alone (F4, D-3221).
+        if (!r.ok) throw new Error(await refusalFrom('/pull/run.json', r));
         doc = await r.json();
         if (!ticket.current()) return;
         if (!doc || typeof doc.running !== 'boolean' || !Array.isArray(doc.feeds) ||
@@ -6854,7 +6880,7 @@
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
-    if (bodies.length === 0 || phase === 'running') return;
+    if (bodies.length === 0 || phase === 'running' || pressing) return;
 
     receipt = null;
     receipts = [];
@@ -6870,6 +6896,9 @@
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every outcome
     // below is a difference against it; without one there is nothing to
     // subtract and the page would have to guess.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6878,6 +6907,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -7113,13 +7144,42 @@
        answer is a control the operator presses again. */
     stopAsked = true;
     aborted = true;
+    stopWarning = '';
     let said;
+    let unpersisted = '';
     try {
       const r = await request('/pull/run/stop', { ms: 10_000, method: 'POST' });
-      if (!r.ok) throw new Error(`the server answered HTTP ${r.status}`);
-      said = await r.json();
+      if (!r.ok) {
+        /* A 503 CAN STILL BE A STOP THAT WAS TAKEN. The server sets the
+           in-memory flag first and answers `stopping:true,
+           stop_persisted:false` when it could not record the STOP durably:
+           the run winds down, and the STOP will not survive a restart. That
+           is a delivered stop with a durability warning, not an undelivered
+           one -- and the warning is the operator's to read (OBSV-09, D-3208).
+           Any other failure is still undelivered.
+           READ AS TEXT, ONCE. Origin admission and the form check refuse a
+           POST in text/plain before this handler runs, so a JSON-only read
+           dropped the one sentence that said why the stop did not land. The
+           undelivered branch names the route, the status and that reason
+           (OBSV-26, D-3224). */
+        const text = await r.text().catch(() => '');
+        /** @type {any} */ let body = null;
+        try { body = JSON.parse(text); } catch { body = null; }
+        if (body?.stopping === true && body?.stop_persisted === false) {
+          said = body;
+          unpersisted = typeof body.error === 'string' && body.error.trim() !== ''
+            ? body.error.trim()
+            : 'The STOP was not durably recorded.';
+        } else {
+          throw new Error(refusalSentence('/pull/run/stop', r.status, reasonOfText(text)));
+        }
+      } else {
+        said = await r.json();
+      }
     } catch (why) {
       stopAsked = false;
+      // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
+      aborted = false;
       pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
       return;
     }
@@ -7130,9 +7190,13 @@
        done nothing. */
     if (said?.stopping !== true) {
       stopAsked = false;
+      aborted = false;
       pollError =
         'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
+    }
+    if (unpersisted) {
+      stopWarning = `Stop taken, but not saved: ${unpersisted} The run is winding down now; after a server restart it may not stay stopped.`;
     }
     controller?.abort();
   }
@@ -7148,6 +7212,8 @@
     sent = { done: 0, of: 0, label: '' };
     askedKeys = new Set();
     netError = null;
+    pollError = null;
+    stopWarning = '';
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
@@ -8513,7 +8579,7 @@
             {/if}
 
             <div class="actions">
-              <button class="btn primary" type="submit" disabled={phase === 'running'}>
+              <button class="btn primary" type="submit" disabled={phase === 'running' || pressing}>
                 {#if phase === 'running'}
                   <span class="spin ring" aria-hidden="true"></span> Running…
                 {:else}
@@ -8577,6 +8643,28 @@
 
             </div>
 
+            <!-- THE RUN'S OWN REFUSALS, SAID OUT LOUD. `netError` (a refused or
+                 unreachable `/pull/run`, a pre-run census that failed, a dropped
+                 leg) and `pollError` (an unreadable run status, a Stop the
+                 server never took, a census poll that failed) were written by
+                 every handler and rendered nowhere, so a press that failed
+                 looked like a press that did nothing. Shown whatever `phase`
+                 is. conc18-2, CLAUDE.md §4. -->
+            {#if netError}
+              <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
+            {/if}
+            {#if stopWarning}
+              <p class="note wrap warn" role="alert" data-run-error="stop">{stopWarning}</p>
+            {/if}
+            {#if pollError}
+              <p class="note wrap warn" role="alert" data-run-error="poll">
+                {#if phase === 'running'}The progress shown is the last reading this page took. {/if}{pollError}
+              </p>
+            {/if}
+            {#if phase === 'done' && aborted && !netError}
+              <p class="note wrap" data-run-error="stopped">Stopped at your request. What landed before the stop is counted below.</p>
+            {/if}
+
             <!-- ══════════════ HOW FAR THROUGH THE RUN IS ══════════════
 
                  THIS IS THE ARITHMETIC THE PAGE ALREADY DID AND NEVER SHOWED.
@@ -8626,14 +8714,28 @@
                        LENGTH. The bar is read at a glance and the figures are
                        read when the glance raises a question; neither is
                        sufficient alone, and they are the same division. -->
-                  <span
-                    class="prog-n mono"
-                    title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
-                  >
-                    <b>{n(Math.round(share * 100))}%</b>
-                    · {n((baseline?.units ?? 0) + unitsDone)}/{n(expectedUnits)}
-                  </span>
+                  {#if share === null}
+                    <span class="prog-n mono warn">progress not measured</span>
+                  {:else}
+                    <span
+                      class="prog-n mono"
+                      title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
+                    >
+                      <b>{n(Math.round(share * 100))}%</b>
+                      · {n((baseline?.units ?? Number.NaN) + unitsDone)}/{n(expectedUnits)}
+                    </span>
+                  {/if}
                 </div>
+                {#if share === null}
+                  <!-- F6, D-3223: no baseline, so no fraction, no meter and no
+                       "nothing landed yet" -- each would be a difference
+                       against a reading that was never taken. -->
+                  <p class="prog-f warn" role="status">
+                    Progress is not measured: the store could not be read when this page picked the run
+                    up, so there is no before-reading to subtract from. The run's own status above is
+                    still the server's.
+                  </p>
+                {:else}
                 <div
                   class="meter tall"
                   role="progressbar"
@@ -8684,6 +8786,7 @@
                     >
                   {/if}
                 </div>
+                {/if}
               </div>
             {/if}
             <!-- WHAT THE MULTI-PASS RUN DID, AND WHY IT STOPPED.
@@ -8706,9 +8809,11 @@
                  with nothing behind it in the other direction, and it is the
                  first thing an operator asks about. -->
             {#if runState && (runState.running || runState.passes > 0)}
+              <!-- NEVER A DELTA FROM A NULL OR A NEGATIVE ONE (CE-81): see `landedOf`. -->
+              {@const landed = landedOf(runState.rowsAtStart, runState.rowsNow)}
               <div class="runcard">
                 <div class="runtop">
-                  <span><b>{n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
+                  <span title={landed.why}>{#if landed.count === null}{landed.lead}{:else}<b>{n(landed.count)}</b>{/if} bar(s) {landed.kind === 'dropped' ? 'FEWER than at the start — the census total fell, so nothing is claimed as landed' : 'landed'}</span>
                   <span>pass <b>{n(runState.passes)}</b></span>
                   {#if runState.retries > 0}<span><b>{n(runState.retries)}</b> retried</span>{/if}
                   <span class="runwhere">{runState.running ? (runState.stopping ? 'stopping at the next leg' : 'running on the server') : 'finished'}</span>
@@ -8716,6 +8821,7 @@
                 <table class="runfeeds">
                   <tbody>
                     {#each runState.feeds ?? [] as f (f.vendor)}
+                      {@const meter = feedMeter(f)}
                       <tr>
                         <td class="rf-v">{feedName(f.vendor)}</td>
                         <!-- ══ THE FEED'S OWN PROGRESS, AS A LENGTH ══
@@ -8741,13 +8847,16 @@
                               aria-hidden="true"
                               ><i
                                 class="fill"
-                                class:up={f.finished || (f.legsDone ?? 0) >= (f.legs ?? 0)}
+                                class:up={meter.up}
+                                class:halt={meter.halted}
                                 style="width:{Math.min(100, ((f.legsDone ?? 0) / f.legs) * 100)}%"
                               ></i></i
                             >
                           {/if}
                         </td>
-                        <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
+                        <!-- `skipped` IS RENDERED NOW (CE-81). A halted feed finishes with
+                             `skipped = legs - legsDone`; '—' there read as done. -->
+                        <td class="rf-d">{#if meter.skipped > 0}<span class="rf-halt">halted · {n(meter.skipped)} leg(s) skipped</span>{:else}{f.finished ? '—' : (f.doing || 'waiting for its turn')}{/if}</td>
                         <!-- ══ THE VENDOR'S OWN WORDS, NOT A GUESS ABOUT THEM ══
                              This read `retrying after a failure` for EVERY
                              `lastError`, and threw the error itself away.
@@ -8979,6 +9088,16 @@
              The DOT carries that (tone + `live`), the timestamp carries when,
              and the word is drawn only when it is not `measured` — i.e. only
              when something is wrong and the reader must be told in words. -->
+        <!-- THE LADDER'S OWN STATE, WHEN IT CANNOT BE TRUSTED (CE-79). The
+             fail and retry verdicts below are read from /ingest/status.json;
+             a refused read or a survey that has not happened is said here,
+             in the server's words, rather than left as "no halt". -->
+        {#if pilotSays}
+          <p class="caution" class:loud={pilotSays.tone === 'bad'} role="alert">
+            <span class="tag {pilotSays.tone === 'bad' ? 'down' : 'warn'}">{pilotSays.head}</span>
+            <span class="msg">{pilotSays.text}</span>
+          </p>
+        {/if}
         <div class="prov" aria-live="polite" title={provenance.detail}>
           <i class="dot {provenance.tone}" class:live={provenance.live}></i>
           {#if provenance.tone !== 'up'}
@@ -9578,7 +9697,7 @@
                           <button
                             class="btn sm"
                             type="button"
-                            disabled={phase === 'running' || problems.length > 0 || sp === null}
+                            disabled={phase === 'running' || pressing || problems.length > 0 || sp === null}
                             title={phase === 'running'
                               ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
                               : problems.length > 0
@@ -10103,6 +10222,7 @@
             class:cursor={d === cal.cursor}
             class:oth={d.slice(0, 7) !== calView}
             class:nos={noSessionWhy(d) !== null}
+            class:unk={isWithheld(d)}
             class:now={d === maxDay}
             onclick={() => commit(d)}
           >
@@ -11305,6 +11425,13 @@
     color: var(--dim);
     font-weight: var(--w-mid);
   }
+  /* WITHHELD IS NEITHER A SESSION NOR A HOLIDAY. `/calendar.json` could not
+     speak for the day, so it carries a dotted underline — a mark of its own,
+     not the light "no session" one — and its tooltip says why. D-1507. */
+  .cday.unk {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
   .cday:disabled {
     /* --faint, which is now AA in its own right. Genuinely inactive, and the
        line-through remains the primary mark rather than the colour. */
@@ -11956,6 +12083,10 @@
   .cscroll td .meter .fill.up,
   td.rf-n .meter .fill.up {
     background: var(--up);
+  }
+  /* A HALTED FEED'S PARTIAL BAR IS NOT SUCCESS AND NOT MERELY PENDING (CE-81). */
+  td.rf-n .meter .fill.halt {
+    background: var(--down);
   }
   /* The cell that holds a fill is its own containing block — see the single
      `.cscroll td.num` rule further down, which now carries `position: relative`

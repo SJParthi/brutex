@@ -715,4 +715,199 @@ mod tests {
             compare_unsigned(AdmissionStatusV1::Admitted, ObservedU64V1::Measured(0), 0).is_ok()
         );
     }
+
+    /// The body of the one item whose signature is `signature`: from the
+    /// signature to the first line that closes at the signature's own indent.
+    fn body<'a>(source: &'a str, signature: &str) -> &'a str {
+        assert_eq!(
+            source.matches(signature).count(),
+            1,
+            "{signature} names exactly one item"
+        );
+        let start = source.find(signature).expect("the signature is present");
+        let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+        let indent = &source[line_start..start];
+        let close = format!("\n{indent}}}\n");
+        let end = source[start..]
+            .find(&close)
+            .expect("the item closes at its own indent");
+        &source[start..start + end + close.len()]
+    }
+
+    /// W2-cli15-0: A SELECTION V6 READ REPLAYS ITS POPULATION SOURCE, AND THE
+    /// LIMITS DOCUMENT SAYS HOW MANY TIMES.
+    ///
+    /// Nothing said that a V6 winner read re-runs the Execution V3 exit-grid
+    /// replay. Each factor below is a call site counted in the source, and
+    /// `docs/06-limits.md` states their product and quotes each call.
+    #[test]
+    fn a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so() {
+        let selection = include_str!("selection_v6.rs");
+        let source = include_str!("selection_v6_source.rs");
+        let execution = include_str!("execution_v4.rs");
+        let population = include_str!("population_v6.rs");
+        let limits = include_str!("../../../docs/06-limits.md");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        let prepare = "Prepared::from_execution(";
+        let top = body(
+            selection,
+            "fn authenticated(&mut self) -> Result<(Vec<SelectionV6Winner>, Block), String>",
+        );
+        assert_eq!(top.matches(prepare).count(), 2, "{top}");
+        let public = body(
+            selection,
+            "pub(crate) fn top_twenty_five(&mut self) -> Result<Vec<SelectionV6Winner>, String>",
+        );
+        assert_eq!(
+            public.matches("self.authenticated()?").count(),
+            1,
+            "{public}"
+        );
+        let ten = body(
+            selection,
+            "pub(crate) fn top_ten(&mut self) -> Result<Vec<SelectionV6Winner>, String>",
+        );
+        assert_eq!(ten.matches("self.top_twenty_five()?").count(), 1, "{ten}");
+        let snapshot = body(
+            selection,
+            "pub(crate) fn snapshot(&mut self) -> Result<SelectionV6Snapshot, String>",
+        );
+        // D-1848 (W2-cli14-2): the snapshot takes its envelope from the block
+        // the authenticated read proved, with no third preparation or scan.
+        assert_eq!(snapshot.matches(prepare).count(), 0, "{snapshot}");
+        assert!(!snapshot.contains("require_committed("), "{snapshot}");
+        assert_eq!(snapshot.matches("self.authenticated()?").count(), 1);
+        let witnesses = body(selection, "pub(crate) fn stored_oos_witnesses(");
+        assert_eq!(
+            witnesses.matches("self.snapshot()?").count(),
+            2,
+            "{witnesses}"
+        );
+        let commit = body(selection, "pub(crate) fn commit_stored_selection_v6(");
+        assert_eq!(commit.matches(prepare).count(), 2, "{commit}");
+
+        let from = body(production, "pub(super) fn from_execution(");
+        assert_eq!(
+            from.matches("source.selection_v6_source()?").count(),
+            1,
+            "{from}"
+        );
+        let join = body(execution, "pub(crate) fn selection_v6_source(");
+        assert_eq!(
+            join.matches("self.population_execution_source()?").count(),
+            2,
+            "{join}"
+        );
+        let retained = body(execution, "fn population_execution_source(");
+        assert_eq!(
+            retained.matches(".execution_v4_source()").count(),
+            1,
+            "{retained}"
+        );
+        let replay = body(population, "pub(crate) fn execution_v4_source(");
+        assert_eq!(
+            replay.matches("self.upstream.authenticate()?").count(),
+            2,
+            "{replay}"
+        );
+        assert_eq!(
+            replay
+                .matches("candidate_source.execution_v3_replay_authority()?")
+                .count(),
+            1,
+            "{replay}"
+        );
+        let authenticate = body(
+            population,
+            "fn authenticate(&mut self) -> Result<AuthenticatedPopulationV6UpstreamV1, PopulationV6Refusal>",
+        );
+        assert_eq!(
+            authenticate
+                .matches("authenticate_candidate_authorities(&self.candidates)?")
+                .count(),
+            2,
+            "{authenticate}"
+        );
+        assert_eq!(
+            authenticate.matches(".population_source()").count(),
+            2,
+            "{authenticate}"
+        );
+
+        the_repeated_full_reads_are_counted(join, top, selection, replay);
+
+        the_limits_section_quotes_each_call(
+            limits,
+            &[selection, production, execution, population],
+        );
+    }
+
+    /// The full reads each layer repeats besides the Population replays: one
+    /// Execution V4 disposition read per `selection_v6_source`, one Selection V6
+    /// committed-block scan per `top_twenty_five`, one Population projection
+    /// per `execution_v4_source`.
+    fn the_repeated_full_reads_are_counted(join: &str, top: &str, selection: &str, replay: &str) {
+        assert_eq!(
+            join.matches(".ordered_authenticated_dispositions()?;")
+                .count(),
+            1,
+            "{join}"
+        );
+        assert_eq!(
+            top.matches("require_committed(&self.root, self.bounds, &before.block()?)?;")
+                .count(),
+            1,
+            "{top}"
+        );
+        let committed = body(selection, "fn require_committed(");
+        assert_eq!(
+            committed
+                .matches("scan(&mut file, &path, bounds, expected)")
+                .count(),
+            1,
+            "{committed}"
+        );
+        assert_eq!(
+            replay
+                .matches("let (source, families, population_rows) = self.population.projection()?;")
+                .count(),
+            1,
+            "{replay}"
+        );
+    }
+
+    /// The D-0918 limits section quotes every call it counts, and each quoted
+    /// call is a real line in one of `sources`.
+    fn the_limits_section_quotes_each_call(limits: &str, sources: &[&str]) {
+        let heading = "## A Selection V6 read replays its Population source four times — D-0918";
+        let section = limits
+            .split_once(heading)
+            .map(|(_, after)| after.split("\n## ").next().unwrap_or(after))
+            .expect("docs/06-limits.md states the Selection V6 read cost");
+        for quoted in [
+            "`Prepared::from_execution(&mut self.source, self.policy)?`",
+            "`Self::from_source(&source.selection_v6_source()?, policy)`",
+            "`let source_before = self.population_execution_source()?;`",
+            "`let source_after = self.population_execution_source()?;`",
+            "`let before = self.upstream.authenticate()?;`",
+            "`let after = self.upstream.authenticate()?;`",
+            "`let replay = candidate_source.execution_v3_replay_authority()?;`",
+            "`authenticate_candidate_authorities(&self.candidates)?`",
+            "`.ordered_authenticated_dispositions()?;`",
+            "`require_committed(&self.root, self.bounds, &before.block()?)?;`",
+            "`scan(&mut file, &path, bounds, expected)`",
+            "`let (source, families, population_rows) = self.population.projection()?;`",
+            "a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so",
+        ] {
+            assert!(section.contains(quoted), "the section quotes {quoted}");
+            let code = quoted.trim_matches('`');
+            if code.contains('(') {
+                assert!(
+                    sources.iter().any(|file| file.contains(code)),
+                    "{code} is a real source line"
+                );
+            }
+        }
+    }
 }

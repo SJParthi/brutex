@@ -75,6 +75,7 @@ fn identity(bars: &[indicators::Candle], min_hits: u64) -> runner::identity::Run
 
 fn options(root: &Path) -> crate::AuditOptions<'_> {
     crate::AuditOptions {
+        fold_support: runner::validate::FoldSupport::Scaled,
         prepared_column: None,
         replay: None,
         execution: None,

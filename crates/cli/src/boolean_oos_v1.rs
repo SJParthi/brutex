@@ -2,15 +2,17 @@
 //! Completion proves a measured comparison, never admission or portfolio selection.
 use super::{
     BooleanCoordinateV1, Bounds, Chosen, CommittedBooleanFamilyV1, Completion, Direction,
-    ExecutionSeriesV1, Expression, ExpressionExecutionRunV1, Hasher, Horizon, Operation, Params,
-    Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side, Source, StrictConfig,
-    catalog_words, cohort_digest, display, grid_context, hash, load_source, persistence,
-    prepare_column, reference, refuse, validate_request,
+    ExecutionDigestsV1, ExecutionSeriesV1, Expression, ExpressionExecutionRunV1, Hasher, Horizon,
+    Operation, Params, Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side,
+    Source, StrictConfig, catalog_words, cohort_digest, display, grid_context, hash, load_source,
+    persistence, prepare_column, refuse, slice_digests, validate_request,
 };
-use runner::exit_grid_policy::expression_execution::later_period::EvaluatedExpressionOosV1;
 use runner::exit_grid_policy::expression_execution::later_period::validation::{
     BoundFixedTrainingFoldsV1, FixedTrainingFoldPlanV1, FixedTrainingFoldProjectionV1,
-    FixedTrainingFoldV1, LaterSessionWindowV1,
+    FixedTrainingFoldV1, LaterFoldMapV1, LaterSessionWindowV1,
+};
+use runner::exit_grid_policy::expression_execution::later_period::{
+    EvaluatedExpressionOosV1, LaterExpressionSliceV1,
 };
 
 #[path = "boolean_oos_reader.rs"]
@@ -422,6 +424,22 @@ fn compute(
     )
     .map_err(display)?;
     let (mut computed, mut remaining) = prepare_rows(training, request, sessions.days.len())?;
+    // ONE LATER SLICE AND ONE FOLD INDEX FOR EVERY PROGRAM AND SIDE (D-1188).
+    // Each iteration re-validated and re-hashed the same later bars and column,
+    // rebuilt their `SliceFacts` and re-indexed every bar into its fold. None
+    // of that depends on the program or the side, so it is done here once and
+    // each verdict is still reported where the per-call path reported it.
+    let later = LaterExpressionSliceV1::new(series, &column);
+    let fold_map = validation
+        .map(|asked| LaterFoldMapV1::new(asked.windows, execution, &column, asked.mapping_bytes))
+        .transpose()?;
+    // ONE SET OF SLICE DIGESTS FOR EVERY PROGRAM AND SIDE (D-1831). Each group
+    // used to mint its run through `new_with_daily_reference`, which hashed
+    // the three streams, searched the minute context for the separately
+    // loaded execution slice and hashed that slice: O(S + M + D + E) per
+    // program x side, none of it depending on the program or the side. Taken
+    // on first use, so a family with no anchor still hashes nothing.
+    let mut hoisted = None;
     for (group, anchor) in training.anchors.iter().enumerate() {
         let program = training
             .programs
@@ -439,7 +457,21 @@ fn compute(
         {
             return Err("Boolean later anchor differs from original directional run".into());
         }
-        let run = execution_run(request, source, identity, commit, program, resolved.side())?;
+        let digests = slice_digests(
+            &mut hoisted,
+            source,
+            series,
+            "Boolean later daily identity:",
+        )?;
+        let run = execution_run(
+            request,
+            source,
+            identity,
+            commit,
+            program,
+            resolved.side(),
+            &digests,
+        )?;
         let attempt = crate::sweep_evidence::begin(
             request.output,
             run.run_id().bytes(),
@@ -457,11 +489,14 @@ fn compute(
                     )
                 })
                 .transpose()?;
-            let evaluated = resolved.evaluate_expression_oos(anchor, series, &column, &run)?;
+            let evaluated = resolved.evaluate_expression_oos_on(anchor, &later, &run)?;
             let bound = plan
                 .as_ref()
                 .zip(validation)
-                .map(|(plan, validation)| plan.bind(&evaluated, validation.mapping_bytes))
+                .zip(fold_map.as_ref())
+                .map(|((plan, validation), map)| {
+                    plan.bind_with(&evaluated, map, validation.mapping_bytes)
+                })
                 .transpose()?;
             append_rows(
                 training,
@@ -506,14 +541,9 @@ fn execution_run(
     commit: &str,
     program: &Expression,
     side: Side,
+    digests: &ExecutionDigestsV1,
 ) -> Result<ExpressionExecutionRunV1, String> {
-    let data_digest = runner::identity::data_digest_with_daily_reference(
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        reference(source),
-    )
-    .map_err(|why| format!("Boolean later daily identity: {why:?}"))?;
-    ExpressionExecutionRunV1::new_with_daily_reference(
+    ExpressionExecutionRunV1::with_digests(
         &Run {
             mask: program.referenced(),
             direction: if side == Side::Long {
@@ -530,15 +560,12 @@ fn execution_run(
                 policy: 1,
             }
             .with_policy(&catalog_words(identity)),
-            data_digest,
+            data_digest: digests.data_digest(),
             commit,
             feed: request.vendor.as_str(),
         },
         program,
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        execution(source),
-        reference(source),
+        digests,
     )
 }
 #[expect(
@@ -556,6 +583,9 @@ fn append_rows(
     remaining: &mut Remaining,
     computed: &mut Computed,
 ) -> Result<(), String> {
+    // One program walk for every coordinate this group materializes outside a
+    // fold binding (D-1833); a binding holds its own.
+    let replay = evaluated.coordinate_replay();
     for (ordinal, cell) in evaluated.grid().cells.iter().enumerate() {
         let original = training
             .rows
@@ -580,7 +610,7 @@ fn append_rows(
                 let (trades, projection) = bound.materialize_coordinate(selected, ordinal)?;
                 (trades, Some(projection))
             }
-            None => (evaluated.materialize(ordinal)?, None),
+            None => (replay.materialize(ordinal)?, None),
         };
         let periods = sessions.observe(bars, cell, &trades)?;
         let mut h = Hasher::new();

@@ -145,8 +145,14 @@ fn a_sweep_runs_end_to_end_and_says_its_bars_were_generated() {
 
 #[test]
 fn the_threshold_search_runs_end_to_end() {
+    // SIX SESSIONS, AND THE SEARCH'S OWN NUMBERS ARE READ (P1-10-01). This ran
+    // `auto 2` and checked only the provenance banner, which `auto` prints
+    // whatever it found. MEASURED: two sessions are 750 bars against a 1,876
+    // bar warm-up, so `auto 2` swept 0 bars, walked 0 ladders, chose threshold
+    // `NONE`, said `NOTHING MEASURED` -- and the test passed. Six sessions is
+    // the first count that clears the warm-up, as for the sweep test above.
     let out = command("auto")
-        .args(["auto", "2"])
+        .args(["auto", "6"])
         .output()
         .expect("the binary runs");
     assert!(out.status.success(), "a valid auto exits zero");
@@ -154,6 +160,24 @@ fn the_threshold_search_runs_end_to_end() {
     assert!(
         text.contains("THESE BARS ARE GENERATED"),
         "provenance travels"
+    );
+    let swept = row_number(&text, "swept").expect("the BARS block reports swept");
+    assert!(swept > 0, "the search read no bars:\n{text}");
+    let threshold = row_number(&text, "threshold chosen")
+        .expect("the SEARCH block names a numeric threshold, not NONE");
+    assert!(threshold > 0, "no threshold was found:\n{text}");
+    let ladders = row_number(&text, "ladders walked").expect("the SEARCH block counts ladders");
+    assert!(ladders > 0, "no ladder was walked:\n{text}");
+    let combinations =
+        row_number(&text, "combinations found").expect("the LADDER block must report a count");
+    assert!(combinations > 0, "the chosen ladder found nothing:\n{text}");
+    assert!(
+        text.contains("the frontier went extinct, which is the answer"),
+        "the chosen rung must reach extinction:\n{text}"
+    );
+    assert!(
+        !text.contains("NOTHING MEASURED") && !text.contains("REFUSED"),
+        "the search declared it measured nothing or refused:\n{text}"
     );
 }
 
@@ -224,4 +248,131 @@ fn a_missing_store_refuses_before_logging_or_dispatch() {
     );
     assert!(!root.exists(), "the missing store was not created");
     assert!(!logs.exists(), "the log sink was not installed");
+}
+
+/// **An argument that is not UTF-8 is refused as a misuse, not a panic.**
+/// probeapi-3, D-0998.
+///
+/// `main` collected `std::env::args()`, which panics on the first argument
+/// that is not valid Unicode: exit 101, a Rust backtrace hint on stderr, and
+/// none of the normal exit lines. It now reads `args_os`, refuses by name with
+/// `MISUSED`, prints where its events went as every run does, and records the
+/// refusal in the log.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_is_refused_by_name_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let logs = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-log-nonutf8-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&logs);
+    let out = command("nonutf8")
+        .arg("sweep")
+        .arg(std::ffi::OsStr::from_bytes(b"6\xff"))
+        .arg("200")
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(cli::MISUSED)),
+        "a word that is not text is a misuse:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        stdout.contains("refused: argument 2 is not valid UTF-8"),
+        "the refusal names which argument:\n{stdout}"
+    );
+    assert!(stdout.contains("usage:"), "and prints the usage:\n{stdout}");
+    assert!(
+        stdout.contains("events ->"),
+        "the normal exit line still says where events went:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("THESE BARS ARE GENERATED"),
+        "nothing was dispatched:\n{stdout}"
+    );
+    let logged = std::fs::read_dir(&logs)
+        .expect("the log directory exists")
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        logged.contains("not valid UTF-8"),
+        "the refusal is in the log:\n{logged}"
+    );
+}
+
+/// **A closed stdout is said on stderr, never a panic.** v53-2, D-1484.
+///
+/// `cli sweep 6 100 | true` exited 101 with a panic backtrace. The pipe's
+/// read end is closed BEFORE the child starts, so the first write fails with
+/// EPIPE every time rather than when a race happens to lose.
+#[test]
+fn a_closed_stdout_is_said_on_stderr_and_never_panics() {
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let logs = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-log-closed-stdout-{}",
+        std::process::id()
+    ));
+    let _stale = std::fs::remove_dir_all(&logs);
+    let out = command("closed-stdout")
+        .args(["sweep", "6", "200"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(cli::OK)),
+        "a reader that closed the pipe leaves the run's own code:\n{said}"
+    );
+    assert!(!said.contains("panicked"), "{said}");
+    assert!(said.contains("stdout is not writable"), "{said}");
+    assert!(said.contains("closed the pipe"), "{said}");
+
+    // AND THE FAILURE IS LOGGED, ONCE (P1-17-03). C-V53-02 says each failure
+    // emits one `cli.output` event, and nothing read the log: deleting the
+    // `note(..)` in `cli::deliver` left this green. The run's own log
+    // directory is read back.
+    let events = output_events(&logs);
+    assert_eq!(
+        events.len(),
+        1,
+        "one `cli.output` event for the one failed write:\n{events:#?}\n{said}"
+    );
+    let event = events.first().map_or("", String::as_str);
+    assert!(
+        event.contains("\"level\":\"warn\"") && event.contains("\"exit\":0"),
+        "a WARN that records the exit code the run kept: {event}"
+    );
+    let _cleaned = std::fs::remove_dir_all(&logs);
+}
+
+/// Every `cli.output` line written under `dir`, at any depth.
+fn output_events(dir: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                found.extend(
+                    text.lines()
+                        .filter(|line| line.contains("\"target\":\"cli.output\""))
+                        .map(str::to_owned),
+                );
+            }
+        }
+    }
+    found
 }

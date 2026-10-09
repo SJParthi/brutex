@@ -60,7 +60,14 @@
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
+  // THE LOCALE AND THE ZONE ARE NAMED, NEVER INHERITED (CE-72, D-2733): a bare
+  // `toLocaleString()` printed a master file's time in the host's zone with no
+  // label and its byte count in the host's digit grouping.
+  import { group } from '$lib/money.js';
+  import { stampLabel } from '$lib/dates.js';
   import * as prefix from '$lib/prefix.js';
+  import { refusalFrom } from '$lib/refusal.js';
+  import { mastersStatusRefused } from '$lib/masters-status.js';
 
   /* ====================================================================
      THE PAYLOAD
@@ -100,7 +107,16 @@
    * `masters.restart` because that object describes ONE refresh press, while
    * this is a standing fact about the server and is true on arrival.
    */
-  let restartNeeded = $state(false);
+  let restartNeeded = $state(/** @type {boolean | null} */ (false));
+  /**
+   * WHY THE MASTER FILES COULD NOT BE LISTED, or ''. CE-82, D-1788: a 503
+   * from `/masters/status.json` names its reason in `refusal`, and this page
+   * returned without reading it -- the four-file table vanished with no
+   * sentence, and a restart banner from an earlier read stayed up. A failed
+   * read now clears the list, sets the restart flag to UNKNOWN (`null`), and
+   * shows the server's words.
+   */
+  let statusWhy = $state('');
   const masterRequests = createPageRequests();
   const joinRequests = createPageRequests();
   onDestroy(() => { masterRequests.dispose(); joinRequests.dispose(); });
@@ -110,9 +126,15 @@
     try {
       const response = await ask('/masters/status.json', { signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!response.ok) return;
+      if (!response.ok) {
+        const why = await refusalFrom('/masters/status.json', response);
+        if (!ticket.current()) return;
+        ({ onDisk, restartNeeded, statusWhy } = mastersStatusRefused(why));
+        return;
+      }
       const body = await response.json();
       if (!ticket.current()) return;
+      statusWhy = '';
       onDisk = body.masters ?? [];
       /* THE RESTART FLAG COMES FROM HERE, AND IT WAS BEING THROWN AWAY.
          Two routes carry a `restart_required` and only one of them means
@@ -126,14 +148,19 @@
          The Rust-rendered `/masters` page has always read the truthful one, so
          the two front ends disagreed about whether a stale master was visible.
          They now agree. */
-      restartNeeded = Boolean(body.restart_required);
-    } catch {
+      // `null` when a master could not be read (OBSV-02, D-3201): the flag is
+      // then unknown, never a guessed false.
+      restartNeeded = body.restart_required === null ? null : Boolean(body.restart_required);
+    } catch (error) {
       if (!ticket.current()) return;
-      // A STATUS READ THAT FAILS IS NOT THIS PAGE'S SUBJECT. The join's own
-      // refusal already says what is missing; a second red banner about the
-      // same absence would be noise, and inventing a state for it would be
-      // worse than saying nothing.
-      onDisk = [];
+      // A FAILED STATUS READ IS NAMED, AND THE RESTART FLAG IT FED BECOMES
+      // UNKNOWN. This used to clear the list silently and keep the previous
+      // `restartNeeded`, so a stale "restart required" could outlive the
+      // server's answer (CE-82). Keeping an old answer is the stale value §4
+      // bans; the honest state is "not known", said in words.
+      ({ onDisk, restartNeeded, statusWhy } = mastersStatusRefused(
+        `/masters/status.json could not be read: ${error instanceof Error ? error.message : String(error)}`
+      ));
     }
   }
 
@@ -151,6 +178,16 @@
       // than any other request this console makes. Timing out at 15 s would
       // report a working ladder as a wedged server.
       const response = await ask('/masters/refresh', { method: 'POST', ms: 90_000 });
+      // A REFUSAL THAT IS NOT JSON IS NAMED, NOT PARSED (F4, D-3221). The
+      // request-bounds and cross-site layers refuse in plain text before the
+      // handler runs; `response.json()` threw on it, and the catch below then
+      // said "The refresh keeps running on the server" about a refresh that
+      // was never dispatched. Every JSON answer is read as before.
+      if (!response.ok && !(response.headers.get('content-type') ?? '').includes('json')) {
+        masters = { phase: 'done', rows: [], why: await refusalFrom('/masters/refresh', response), universe: '' };
+        await readMasters();
+        return;
+      }
       const body = await response.json();
       /* THE 502 AND THE THREE FIELDS THAT EXPLAIN IT WERE ALL BEING IGNORED.
          `mastersrun.rs:592` answers 502 whenever
@@ -198,12 +235,18 @@
       // avoid drawing.
       await fetchJoin(feeds.active);
     } catch (error) {
+      // THE SERVER DID NOT STOP WHEN THIS PAGE DID (P3-01-04, D-1974). The
+      // refresh runs on its own task, so a timeout here leaves it recording
+      // every source to /logs and re-parsing the universe. Say so, and re-read
+      // what is on disk rather than leaving the pre-refresh table up.
+      const said = error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.';
       masters = {
         phase: 'done',
         rows: [],
-        why: error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.',
+        why: `${said} The refresh keeps running on the server: each source's outcome is written to /logs, and the table below is re-read now. Press Refresh again only after it shows the files written.`,
         universe: ''
       };
+      await readMasters();
     }
   }
 
@@ -232,14 +275,32 @@
      rather than seconds because the work legitimately takes them.
      ==================================================================== */
 
-  /** @type {{ phase: 'idle'|'running'|'done', body: any, why: string }} */
-  let crawl = $state({ phase: 'idle', body: null, why: '' });
+  /** @type {{ phase: 'idle'|'running'|'done', body: any, why: string, feed: string | null }} */
+  let crawl = $state({ phase: 'idle', body: null, why: '', feed: null });
+  /**
+   * THE CRAWL IS FEED-SPECIFIC, SO A FEED CHANGE RETIRES IT. The join counts
+   * and the publishable verdict are against ONE feed's master; nothing cleared
+   * them on a switch, so feed A's result sat under feed B, and a switch made
+   * during the five-minute crawl landed A's answer straight into B's view.
+   * Each press takes a generation, the feed effect below bumps it and resets
+   * the section, and a reply from a retired generation is dropped. conc18-5.
+   */
+  let crawlSeq = 0;
+
+  $effect(() => {
+    feeds.active;
+    untrack(() => {
+      crawlSeq += 1;
+      crawl = { phase: 'idle', body: null, why: '', feed: null };
+    });
+  });
 
   async function resolveUniverse() {
     if (crawl.phase === 'running') return;
     const feed = feeds.active;
     if (!feed) return;
-    crawl = { phase: 'running', body: null, why: '' };
+    const seq = ++crawlSeq;
+    crawl = { phase: 'running', body: null, why: '', feed };
     try {
       // FIVE MINUTES. A crawl of ~148 documents over one polite connection
       // is minutes of real work, and the console's default 15 s would
@@ -251,8 +312,10 @@
         body: `feed=${encodeURIComponent(feed)}`
       });
       const body = await response.json();
+      if (seq !== crawlSeq) return;
       crawl = {
         phase: 'done',
+        feed,
         body,
         /* `ok:false` CARRIES ITS OWN REASON and the status may still be 200:
            the route answers a refusal as a document rather than as an HTTP
@@ -274,8 +337,10 @@
         why: (body?.why ?? '') || (body?.ok === false ? 'the crawl refused and gave no reason' : '')
       };
     } catch (error) {
+      if (seq !== crawlSeq) return;
       crawl = {
         phase: 'done',
+        feed,
         body: null,
         why: error instanceof Error ? error.message : 'The crawl threw a value that is not an Error.'
       };
@@ -322,13 +387,9 @@
         // absent, and the server puts its path in the message. Throwing that
         // away and printing the status code would turn a one-line fix into a
         // search.
-        let why = `/indexmap.json answered ${response.status}.`;
-        try {
-          const body = await response.json();
-          if (body?.error) why = String(body.error);
-        } catch {
-          /* Not JSON. The status line above is all there is to say. */
-        }
+        // `refusalFrom` reads `error`, `refused` and `refusal`: the unknown-
+        // feed 400 sends `refused`, which `body.error` never saw (CE-83).
+        const why = await refusalFrom('/indexmap.json', response);
         if (!ticket.current() || feeds.active !== feed) return;
         load = { phase: 'failed', body: null, why };
         return;
@@ -605,10 +666,13 @@
             <div class="mstate">
               {#if file.present}
                 <span class="ok">on disk</span>
-                <span class="dim">{file.bytes.toLocaleString()} bytes</span>
+                <span class="dim">{group(file.bytes)} bytes</span>
                 {#if file.modified_unix_millis}
-                  <span class="dim">{new Date(file.modified_unix_millis).toLocaleString()}</span>
+                  <span class="dim">{stampLabel(file.modified_unix_millis)} IST</span>
                 {/if}
+              {:else if file.unreadable}
+                <span class="no">unreadable</span>
+                <span class="dim">{file.unreadable}</span>
               {:else}
                 <span class="no">absent</span>
               {/if}
@@ -618,7 +682,7 @@
                 <span class="dim">asking…</span>
               {:else if done?.written}
                 <span class="ok">{done.changed ? 'updated' : 'unchanged'}</span>
-                <span class="dim">{done.bytes.toLocaleString()} bytes</span>
+                <span class="dim">{group(done.bytes)} bytes</span>
               {:else if done?.skipped}
                 <span class="skip">skipped</span><span class="dim">{done.refusal}</span>
               {:else if done}
@@ -650,6 +714,13 @@
       </div>
     {/if}
 
+    {#if statusWhy}
+      <div class="refusal" role="alert">
+        <span class="rlabel">The master files could not be listed</span>
+        <p>{statusWhy}</p>
+        <p>Whether a restart is needed to pick up newer masters is unknown until this route answers.</p>
+      </div>
+    {/if}
     {#if masters.why}
       <p class="mwhy">{masters.why}</p>
     {/if}
@@ -769,7 +840,7 @@
       {/if}
 
       <p class="mnotes">
-        digest {crawl.body.digest} · key {crawl.body.key} · identity {crawl.body.identity} · day
+        feed {crawl.body.feed ?? crawl.feed} · digest {crawl.body.digest} · key {crawl.body.key} · identity {crawl.body.identity} · day
         {crawl.body.day}
       </p>
     {/if}

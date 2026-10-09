@@ -477,7 +477,15 @@ fn index_stop_vix_corrupt_publication_prevents_completed_native_attempt_without_
         .join(crate::identity_hex(&saved.identity()))
         .join("body.bin");
     let native = fs::read(&native_path).map_err(display)?;
-    fs::write(directory(&fixture, &saved).join("complete.bin"), b"torn").map_err(display)?;
+    // A WHOLE receipt with the wrong bytes is corrupt published history and
+    // still refuses; a SHORTER one is an attempt cut short, which D-1760
+    // resumes (`index_stop_vix_publication_cut_short_before_its_receipt_resumes`).
+    let receipt = directory(&fixture, &saved).join("complete.bin");
+    let mut corrupt = fs::read(&receipt).map_err(display)?;
+    if let Some(first) = corrupt.first_mut() {
+        *first ^= 0xff;
+    }
+    fs::write(&receipt, corrupt).map_err(display)?;
     let context = loaded.prepare(limits())?;
     assert!(
         crate::index_stop::produce_catalog(
@@ -627,65 +635,179 @@ fn index_stop_vix_repeated_minute_scratch_is_admitted_before_cold_validation() -
     Ok(())
 }
 
+/// A torn month is the month's own state and is published as unavailable. A
+/// month a WRITER holds is not: see
+/// `a_vix_month_held_by_a_writer_publishes_nothing` (replay-1, D-2636). This
+/// test covered both and asserted the locked case published unavailability,
+/// which was the defect.
 #[test]
-fn index_stop_vix_corrupt_and_locked_reference_months_publish_explicit_unavailability()
--> Result<(), String> {
-    for locked in [false, true] {
-        let fixture = Fixture::new()?;
-        let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
-        seed(&fixture, Vendor::Zerodha, 0, false)?;
-        let month = YearMonth::new(2025, 5).map_err(display)?;
-        let key = InstrumentKey::index(Exchange::Nse, "INDIAVIX").map_err(display)?;
-        let path = StorePath::for_key(
-            Vendor::Zerodha,
-            &key,
-            Timeframe::MINUTE_1,
-            month,
-            FileKind::Bars,
-        )
-        .map_err(display)?;
-        let owner = if locked {
-            Some(
-                BarFile::open_or_create(&fixture.root, path, symbol_id("INDIAVIX"))
-                    .map_err(display)?,
-            )
-        } else {
-            fs::write(
-                vix_path(&fixture, Vendor::Zerodha)?,
-                b"torn reference month",
-            )
-            .map_err(display)?;
-            None
-        };
-        let context = loaded.prepare(limits())?;
-        let saved = crate::index_stop::produce_catalog(
-            &fixture.output,
-            &loaded,
-            &context,
-            &programs()?,
-            loaded.days(),
-            limits(),
-        )?;
-        let reader = open(&fixture, &saved)?;
-        reader.with_current(|view| {
-            assert_eq!(view.metadata().exact_stamps, 0);
-            assert_eq!(view.metadata().absent_stamps, 0);
-            assert!(view.metadata().unavailable_stamps > 0);
-            let row = view.page(0, 0, 1)?.rows.first().ok_or("native trade")?;
-            assert_eq!(row.entry, Stamp::Unavailable);
-            let month = view.month(row.month_index)?;
-            assert_eq!(month.snapshot_digest, None);
-            assert_eq!(month.unavailable_code(), Some("reference_month_refused"));
-            assert!(
-                month
-                    .unavailable_reason
-                    .as_ref()
-                    .is_some_and(|reason| !reason.is_empty())
-            );
-            Ok(())
-        })?;
-        drop(owner);
-    }
+fn index_stop_vix_corrupt_reference_month_publishes_explicit_unavailability() -> Result<(), String>
+{
+    let fixture = Fixture::new()?;
+    let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
+    seed(&fixture, Vendor::Zerodha, 0, false)?;
+    fs::write(
+        vix_path(&fixture, Vendor::Zerodha)?,
+        b"torn reference month",
+    )
+    .map_err(display)?;
+    let context = loaded.prepare(limits())?;
+    let saved = crate::index_stop::produce_catalog(
+        &fixture.output,
+        &loaded,
+        &context,
+        &programs()?,
+        loaded.days(),
+        limits(),
+    )?;
+    let reader = open(&fixture, &saved)?;
+    reader.with_current(|view| {
+        assert_eq!(view.metadata().exact_stamps, 0);
+        assert_eq!(view.metadata().absent_stamps, 0);
+        assert!(view.metadata().unavailable_stamps > 0);
+        let row = view.page(0, 0, 1)?.rows.first().ok_or("native trade")?;
+        assert_eq!(row.entry, Stamp::Unavailable);
+        let month = view.month(row.month_index)?;
+        assert_eq!(month.snapshot_digest, None);
+        assert_eq!(month.unavailable_code(), Some("reference_month_refused"));
+        assert!(
+            month
+                .unavailable_reason
+                .as_ref()
+                .is_some_and(|reason| !reason.is_empty())
+        );
+        Ok(())
+    })
+}
+
+/// indexstop-1, D-2621: a VIX month whose lock a writer holds at capture time
+/// is a fact about that instant, not about the month. The capture refuses,
+/// nothing is published (no receipt, so `committed` stays false), and the
+/// retry after the writer lets go captures the month whole: exact stamps, no
+/// unavailable month. On the old code `load_month` saved the "another writer
+/// holds" refusal as the month's permanent `unavailable_reason` and
+/// `publish` returned `Ok`, so the first refusal below was never returned,
+/// and every retry then answered with that saved companion under its receipt
+/// (D-1760).
+#[test]
+fn a_locked_vix_month_refuses_publication_and_the_retry_captures_it() -> Result<(), String> {
+    let (fixture, _, saved) = saved(Some((Vendor::Zerodha, 0, false)))?;
+    let directory = directory(&fixture, &saved);
+    let catalog = Catalog::open(
+        &fixture.output,
+        saved.identity(),
+        bounds().bytes,
+        bounds().records,
+    )?;
+    // Withdraw the companion the fixture published, as a run cut short
+    // before its receipt leaves it, so the next `publish` captures again.
+    fs::remove_file(directory.join("complete.bin")).map_err(display)?;
+    assert!(!persistence::committed(&directory)?);
+    let key = InstrumentKey::index(Exchange::Nse, "INDIAVIX").map_err(display)?;
+    let path = StorePath::for_key(
+        Vendor::Zerodha,
+        &key,
+        Timeframe::MINUTE_1,
+        YearMonth::new(2025, 5).map_err(display)?,
+        FileKind::Bars,
+    )
+    .map_err(display)?;
+    let writer =
+        BarFile::open_or_create(&fixture.root, path, symbol_id("INDIAVIX")).map_err(display)?;
+    let refused = publish(
+        &fixture.output,
+        &fixture.root,
+        Vendor::Zerodha,
+        &catalog,
+        bounds(),
+    )
+    .err()
+    .ok_or("a held VIX month must refuse the capture")?;
+    assert!(refused.contains("busy, not unavailable"), "{refused}");
+    assert!(refused.contains("another writer holds"), "{refused}");
+    assert!(
+        !persistence::committed(&directory)?,
+        "a lock refusal publishes nothing"
+    );
+    drop(writer);
+    let reader = publish(
+        &fixture.output,
+        &fixture.root,
+        Vendor::Zerodha,
+        &catalog,
+        bounds(),
+    )?;
+    assert!(persistence::committed(&directory)?);
+    reader.with_current(|view| {
+        assert!(view.metadata().exact_stamps > 0);
+        assert_eq!(view.metadata().unavailable_stamps, 0);
+        let row = view.page(0, 0, 1)?.rows.first().ok_or("native trade")?;
+        let month = view.month(row.month_index)?;
+        assert!(month.unavailable_reason.is_none());
+        assert!(month.snapshot_digest.is_some());
+        Ok(())
+    })
+}
+
+/// replay-1 (D-2636): a VIX month a writer holds for longer than the bounded
+/// wait publishes NOTHING; once the writer closes, a retry publishes the
+/// month with its records. On the old code the held month was captured as a
+/// durable `unavailable_reason` month, so the first `produce_catalog` returned
+/// `Ok` and `expect_err` failed.
+#[test]
+fn a_vix_month_held_by_a_writer_publishes_nothing() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
+    seed(&fixture, Vendor::Zerodha, 0, false)?;
+    let month = YearMonth::new(2025, 5).map_err(display)?;
+    let key = InstrumentKey::index(Exchange::Nse, "INDIAVIX").map_err(display)?;
+    let path = StorePath::for_key(
+        Vendor::Zerodha,
+        &key,
+        Timeframe::MINUTE_1,
+        month,
+        FileKind::Bars,
+    )
+    .map_err(display)?;
+    let owner =
+        BarFile::open_or_create(&fixture.root, path, symbol_id("INDIAVIX")).map_err(display)?;
+    let context = loaded.prepare(limits())?;
+    let refused = crate::index_stop::produce_catalog(
+        &fixture.output,
+        &loaded,
+        &context,
+        &programs()?,
+        loaded.days(),
+        limits(),
+    )
+    .err()
+    .ok_or("a writer-held VIX month must refuse, not publish unavailability")?;
+    assert!(refused.contains("another writer holds"), "{refused}");
+    assert!(refused.contains("busy, not unavailable"), "{refused}");
+    let namespace = fixture.output.join(NAMESPACE);
+    assert!(
+        !namespace.exists() || inventory(&namespace)?.is_empty(),
+        "no companion byte was published for a busy month"
+    );
+    drop(owner);
+    let context = loaded.prepare(limits())?;
+    let saved = crate::index_stop::produce_catalog(
+        &fixture.output,
+        &loaded,
+        &context,
+        &programs()?,
+        loaded.days(),
+        limits(),
+    )?;
+    let reader = open(&fixture, &saved)?;
+    reader.with_current(|view| {
+        assert_eq!(view.metadata().unavailable_stamps, 0);
+        let row = view.page(0, 0, 1)?.rows.first().ok_or("native trade")?;
+        let month = view.month(row.month_index)?;
+        assert!(month.records.is_some_and(|records| records > 0));
+        assert!(month.unavailable_reason.is_none());
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -720,6 +842,60 @@ fn index_stop_vix_full_capture_budget_refuses_before_any_companion_publication()
     assert!(why.contains("requires"));
     assert!(!directory.exists());
     assert_eq!(inventory(&fixture.root)?, before);
+    Ok(())
+}
+
+#[test]
+fn index_stop_vix_publication_cut_short_before_its_receipt_resumes() -> Result<(), String> {
+    let (fixture, _, saved) = saved(None)?;
+    let directory = directory(&fixture, &saved);
+    let whole = fs::read(directory.join("body.bin")).map_err(display)?;
+    let receipt = fs::read(directory.join("complete.bin")).map_err(display)?;
+    let catalog = Catalog::open(
+        &fixture.output,
+        saved.identity(),
+        bounds().bytes,
+        bounds().records,
+    )?;
+    // A kill after `prepare_in_namespace` created the directory, part-way
+    // through the body, and before `finish` wrote the receipt (D-1760).
+    // The last case is a whole body from a capture that saw another VIX
+    // store, beside a torn receipt: still scratch, never published.
+    let mut other = whole.clone();
+    if let Some(last) = other.last_mut() {
+        *last ^= 1;
+    }
+    for (body, torn) in [
+        (whole.get(..0).unwrap_or_default(), 0),
+        (whole.get(..whole.len() / 2).unwrap_or_default(), 0),
+        (other.as_slice(), 40),
+    ] {
+        fs::remove_file(directory.join("complete.bin")).map_err(display)?;
+        fs::write(directory.join("body.bin"), body).map_err(display)?;
+        if torn > 0 {
+            fs::write(
+                directory.join("complete.bin"),
+                receipt.get(..torn).unwrap_or_default(),
+            )
+            .map_err(display)?;
+        }
+        let reader = publish(
+            &fixture.output,
+            &fixture.root,
+            Vendor::Zerodha,
+            &catalog,
+            bounds(),
+        )?;
+        assert_eq!(reader.image.meta.feed, "zerodha");
+        assert_eq!(
+            fs::read(directory.join("body.bin")).map_err(display)?,
+            whole
+        );
+        assert_eq!(
+            fs::read(directory.join("complete.bin")).map_err(display)?,
+            receipt
+        );
+    }
     Ok(())
 }
 
@@ -779,4 +955,29 @@ fn index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error
         }
     }
     Ok(())
+}
+
+/// ledgers-1, D-1908: the committed-receipt answer is reachable only from the
+/// owner-lock race. This call's own failure, a failed receipt barrier
+/// included, is returned. Measured on the source because a failed barrier
+/// after the receipt's bytes are visible cannot be produced here.
+#[test]
+#[expect(clippy::expect_used, reason = "a missing function is a failed fixture")]
+fn only_a_lost_owner_race_is_answered_by_the_committed_receipt() {
+    let source = include_str!("index_stop_vix.rs");
+    let (_, publish) = source
+        .split_once("pub(crate) fn publish(")
+        .expect("publish exists");
+    let publish = publish
+        .split_once("\nfn saved(")
+        .map_or(publish, |(body, _)| body);
+    assert!(
+        !publish.contains("Err(_) if persistence::committed"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("Err(why) if persistence::lost_owner_race(&why) => return Ok(Some(why)),")
+    );
+    assert!(publish.contains("Some(why) if persistence::committed(&directory)? =>"));
+    assert!(publish.contains("Err(why) => return Err(why),"));
 }

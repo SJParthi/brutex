@@ -20,9 +20,12 @@
 //! ranking, including its complete deterministic tie order.  The selection
 //! itself is O(C) over C combined dispositions and uses O(C) temporary
 //! uniqueness/projection state in this persistence core.  Opening/reopening is
-//! O(F) in explicitly bounded file bytes.  Exact lookup after open is one
-//! expected/amortized-O(1) `HashMap` probe; Rust's `HashMap` does not promise
-//! worst-case O(1).  Hashing, filesystem latency, selection, persistence,
+//! O(F) in explicitly bounded file bytes.  Exact lookup after open is O(F)
+//! too: `structural_receipt` runs `require_unchanged` first, which re-reads
+//! and BLAKE3-hashes every byte of both the rows file and the Completions
+//! file, and only then makes one expected/amortized-O(1) `HashMap` probe;
+//! Rust's `HashMap` does not promise worst-case O(1).  The probe is O(1); the
+//! lookup is not.  Hashing, filesystem latency, selection, persistence,
 //! recovery and a complete run are not O(1).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
@@ -31,7 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -96,10 +99,8 @@ const COMPLETION_FILE: &str = "global-selection-completions-v5.bin";
 const LOCK_FILE: &str = "global-selection-v5.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(MAX_TOP == REQUESTED_TOP);
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == SELECTION_V5_ROW_BYTES);
@@ -2096,17 +2097,28 @@ impl SelectionV5Ledger {
         if let Some(existing) = self.receipts.get(&prepared.selection_id).copied() {
             return self.reuse_existing(prepared, existing);
         }
-        let trailing = self.trailing.clone().unwrap_or(TrailingSelectionV5 {
+        if let Some(trailing) = self.trailing.clone() {
+            self.withdraw_trailing(prepared, &trailing)?;
+        }
+        let trailing = TrailingSelectionV5 {
             first_row_record: self.row_records,
             rows: Vec::new(),
-        });
-        Self::require_exact_prefix(prepared, &trailing)?;
+        };
         self.require_append_bound(prepared, &trailing)?;
-        self.append_row_suffix(prepared, trailing.rows.len())?;
-        self.rows
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Selection V5 winner rows: {why}"))?;
+        let block_start = trailing
+            .first_row_record
+            .checked_mul(SELECTION_V5_ROW_BYTES as u64)
+            .ok_or_else(|| "Selection V5 row offset overflowed".to_owned())?;
+        self.append_row_suffix(prepared, 0)?;
+        // A failed barrier cuts the block back and is remembered for this
+        // process; a second barrier never confirms it (ledgers-2, D-2556).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.rows.file,
+            &self.rows.path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Selection V5 winner rows: {why}"))?;
         self.rows.refresh()?;
         self.row_records = self.rows.record_count()?;
         self.require_unchanged()?;
@@ -2146,6 +2158,10 @@ impl SelectionV5Ledger {
                 hex32(existing.selection_id)
             ));
         }
+        // A path whose barrier failed in this process is never confirmed by
+        // a second one (ledgers-2, D-2556).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.rows.path)?;
+        crate::fixed_tail::refuse_after_failed_barrier(&self.completions.path)?;
         self.rows
             .file
             .sync_data()
@@ -2154,6 +2170,39 @@ impl SelectionV5Ledger {
         sync_directory(&self.root_file, &self.root)?;
         self.require_unchanged()?;
         Ok(SelectionV5StructuralCommit::Reused(existing))
+    }
+
+    /// Cuts the receipt-less trailing rows before this append writes: this
+    /// exact retry's own prefix is rewritten rather than vouched for, and
+    /// another identity's is discarded with a warn event rather than refusing
+    /// the rung for good (pop2-4, ledgerall-1, ledgers-2, D-2556).
+    fn withdraw_trailing(
+        &mut self,
+        prepared: &PreparedSelectionV5,
+        trailing: &TrailingSelectionV5,
+    ) -> Result<(), SelectionV5Refusal> {
+        let at = trailing
+            .first_row_record
+            .checked_mul(SELECTION_V5_ROW_BYTES as u64)
+            .ok_or_else(|| "Selection V5 row offset overflowed".to_owned())?;
+        if Self::require_exact_prefix(prepared, trailing).is_ok() {
+            self.rows
+                .file
+                .set_len(at)
+                .and_then(|()| self.rows.file.sync_all())
+                .map_err(|why| format!("cannot cut Selection V5 retry prefix: {why}"))?;
+        } else {
+            crate::fixed_tail::discard_orphan(
+                &self.rows.file,
+                &self.rows.path,
+                at,
+                "Selection V5 winner rows that are not this exact retry",
+            )?;
+        }
+        self.rows.refresh()?;
+        self.row_records = self.rows.record_count()?;
+        self.trailing = None;
+        Ok(())
     }
 
     fn require_exact_prefix(
@@ -2220,11 +2269,18 @@ impl SelectionV5Ledger {
         first_row_record: u64,
     ) -> Result<(), SelectionV5Refusal> {
         let completion = prepared.expected_completion(self.completion_records, first_row_record)?;
+        let completion_start = self
+            .completion_records
+            .checked_mul(SELECTION_V5_COMPLETION_BYTES as u64)
+            .ok_or_else(|| "Selection V5 Completion offset overflowed".to_owned())?;
         append_raw(&mut self.completions.file, &completion.encode()?)?;
-        self.completions
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Selection V5 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completions.file,
+            &self.completions.path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Selection V5 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completions.refresh()?;
         self.completion_records = self.completions.record_count()?;
@@ -3025,10 +3081,32 @@ fn sync_directory(file: &File, root: &Path) -> Result<(), SelectionV5Refusal> {
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), SelectionV5Refusal> {
-    file.seek(SeekFrom::End(0))
+    append_with_rollback(file, raw, Write::write_all)
+}
+
+/// Appends one record, and on a write error (ENOSPC, EIO, a short write)
+/// truncates the file back to its length before it, as Admission V3/V4 do
+/// (D-0916). Whole-record prefixes are already recovered as an exact-retry
+/// orphan; a partial record was not, and wedged the ledger for good (D-1622).
+fn append_with_rollback(
+    file: &mut File,
+    raw: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), SelectionV5Refusal> {
+    let end = file
+        .seek(SeekFrom::End(0))
         .map_err(|why| format!("cannot seek Selection V5 append: {why}"))?;
-    file.write_all(raw)
-        .map_err(|why| format!("cannot append Selection V5 record: {why}"))
+    let Err(why) = write(file, raw) else {
+        return Ok(());
+    };
+    match file.set_len(end) {
+        Ok(()) => Err(format!(
+            "cannot append Selection V5 record: {why}; truncated back to {end} bytes"
+        )),
+        Err(rollback) => Err(format!(
+            "cannot append Selection V5 record: {why}; truncation back to {end} bytes also failed: {rollback}"
+        )),
+    }
 }
 
 fn read_fixed_at<const N: usize>(
@@ -4163,8 +4241,43 @@ mod tests {
         assert_eq!(directory_bytes(root.path()), before);
     }
 
+    /// c4b-5, D-1622: a short write truncates back, so later opens and the
+    /// exact rerun still succeed byte-identically.
     #[test]
-    fn every_exact_winner_prefix_recovers_but_foreign_or_reordered_prefix_refuses() {
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestRoot::new("append-rollback");
+        let fixture = prepared(30);
+        commit_prepared_for_test(root.path(), bounds(), &fixture).expect("first commit");
+        let before = directory_bytes(root.path());
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.path().join(name))
+                .expect("open committed Selection V5 file");
+            let refusal = append_with_rollback(&mut file, &[0x5a; 1_000], |file, raw| {
+                file.write_all(raw.get(..377).expect("partial"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed write must refuse");
+            assert!(
+                refusal.contains("injected short write") && refusal.contains("truncated back"),
+                "refusal `{refusal}` must name the write error and the rollback"
+            );
+            drop(file);
+            assert_eq!(directory_bytes(root.path()), before);
+        }
+        let reused =
+            commit_prepared_for_test(root.path(), bounds(), &fixture).expect("exact rerun reuses");
+        assert!(!reused.was_written());
+        assert_eq!(directory_bytes(root.path()), before);
+    }
+
+    /// pop2-4 / ledgerall-1, D-2556: an exact prefix is completed, and a
+    /// foreign or reordered receipt-less prefix is discarded rather than
+    /// refusing every later Selection on the rung.
+    #[test]
+    fn every_exact_winner_prefix_recovers_and_a_foreign_or_reordered_prefix_is_discarded() {
         let fixture = prepared(30);
         for prefix in 0..=fixture.rows.len() {
             let root = TestRoot::new(&format!("prefix-{prefix}"));
@@ -4189,7 +4302,12 @@ mod tests {
         .expect("write foreign orphan");
         let mut writer = SelectionV5Ledger::open_write(root.path(), bounds())
             .expect("valid foreign prefix can be inspected");
-        assert!(writer.append(&fixture).is_err());
+        assert!(
+            writer
+                .append(&fixture)
+                .expect("a foreign prefix is scratch")
+                .was_written()
+        );
 
         let root = TestRoot::new("reordered-prefix");
         create_empty_files(root.path());
@@ -4203,7 +4321,47 @@ mod tests {
         .expect("write reordered orphan");
         let mut writer = SelectionV5Ledger::open_write(root.path(), bounds())
             .expect("structurally canonical reordered prefix opens");
-        assert!(writer.append(&fixture).is_err());
+        assert!(
+            writer
+                .append(&fixture)
+                .expect("a reordered prefix is scratch")
+                .was_written()
+        );
+    }
+
+    /// ledgers-2, D-2556: a failed row or Completion barrier cuts the block,
+    /// and the exact retry over its own prefix issues a barrier of its own.
+    #[test]
+    fn a_failed_selection_v5_barrier_is_cut_and_the_retry_rewrites() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let fixture = prepared(30);
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new("failed-v5-selection-barrier");
+            create_empty_files(root.path());
+            {
+                let _armed = Armed::arm(name, Kind::Sync);
+                assert!(commit_prepared_for_test(root.path(), bounds(), &fixture).is_err());
+            }
+            if name == COMPLETION_FILE {
+                let _armed = Armed::arm(ROW_FILE, Kind::Sync);
+                assert!(commit_prepared_for_test(root.path(), bounds(), &fixture).is_err());
+                assert!(!Armed::pending(), "the retry issued its own barrier");
+            }
+            for file in [ROW_FILE, COMPLETION_FILE] {
+                assert_eq!(
+                    std::fs::metadata(root.path().join(file))
+                        .expect("measure")
+                        .len(),
+                    0,
+                    "{name}: {file} is cut back"
+                );
+            }
+            assert!(
+                commit_prepared_for_test(root.path(), bounds(), &fixture)
+                    .expect("the exact rerun writes")
+                    .was_written()
+            );
+        }
     }
 
     #[test]
@@ -4346,5 +4504,56 @@ mod tests {
             );
             assert_eq!(std::fs::read(path).expect("reread restored file"), original);
         }
+    }
+
+    /// W2-cli14-0: the module doc called exact lookup after open a single
+    /// average-case hash probe while `structural_receipt` rehashes both files
+    /// first. Pins the corrected claim to the live mechanism it describes.
+    #[test]
+    fn module_doc_states_lookup_is_o_f_because_it_rehashes_both_files() {
+        let source = include_str!("selection_v5.rs");
+        let doc = source
+            .lines()
+            .take_while(|line| line.starts_with("//!"))
+            .map(|line| line.trim_start_matches("//!").trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !doc.contains("Exact lookup after open is one"),
+            "module doc still claims an O(1) lookup: {doc}"
+        );
+        assert!(doc.contains("Exact lookup after open is O(F)"), "{doc}");
+        assert!(
+            doc.contains("The probe is O(1); the lookup is not."),
+            "{doc}"
+        );
+
+        let production = source
+            .split("\nmod tests {\n")
+            .next()
+            .expect("production source precedes the test module");
+        let lookup = production
+            .split("fn structural_receipt(\n")
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .expect("structural_receipt body");
+        assert!(lookup.contains(".require_unchanged()"), "{lookup}");
+        assert!(
+            lookup.contains("self.receipts.get(selection_id)"),
+            "{lookup}"
+        );
+        assert!(production.contains(
+            "self.rows.require_unchanged()?;\n        self.completions.require_unchanged()?;"
+        ));
+        let generation = production
+            .split("fn measured_generation(\n")
+            .nth(1)
+            .expect("measured_generation body");
+        assert!(generation.contains("let mut remaining = len;"));
+        assert!(generation.contains("while remaining != 0"));
+        assert!(generation.contains("hasher.update(chunk);"));
+        assert!(production.contains(
+            "let observed = measured_generation(&mut duplicate, &self.path, self.max_bytes, self.label)?;"
+        ));
     }
 }

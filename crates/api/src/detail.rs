@@ -16,6 +16,9 @@ pub const MAX_CONCURRENT: usize = 4;
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum verified rows belonging to one run that a request will hold.
 pub const MAX_RESULT_ROWS: u64 = 4_096;
+// The frontier writer refuses a TOP above this same count before a run, so a
+// run never commits frontier rows this reader then refuses whole. CE-19, D-1981.
+const _: () = assert!(cli::frontier::MAX_ROWS as u64 == MAX_RESULT_ROWS);
 /// Maximum rows rendered in one response page.
 pub const MAX_PAGE_ROWS: u64 = 256;
 /// Maximum zero-based page accepted at the HTTP boundary.
@@ -25,25 +28,99 @@ pub const MAX_QUERY_BYTES: usize = 512;
 /// Maximum JSON bytes returned by a successful or partial detail response.
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Calendar derivations (`/calendar.json`, `/gaps.json`'s peer vote) that may
+/// be queued or running at once on the blocking pool.
+///
+/// A pool of its own, not [`MAX_CONCURRENT`]'s: a page polling the calendar
+/// must not be refused because sweep detail reads are busy, nor the reverse.
+/// Concurrent misses on one series share one derivation
+/// (`calendar_of::Cache`), so this bounds blocking threads, not derivations
+/// per key. W1-api2-11, D-1443.
+pub const MAX_CALENDAR_CONCURRENT: usize = 8;
 
-/// One admitted detail request.  Dropping it always returns the slot.
-pub(crate) struct Permit;
+/// Operator routes that read a folder or the masters directory
+/// (`/folder.json`, `/indexmap.json`) and may be queued or running at once on
+/// the blocking pool.
+///
+/// A pool of its own for the reason [`MAX_CALENDAR_CONCURRENT`] has one: a
+/// page asking what a folder holds must not be refused because sweep detail
+/// reads or calendar derivations are busy. W1-api2-11, D-1508.
+pub const MAX_STORE_READ_CONCURRENT: usize = 8;
+
+/// Log tail reads (`/logs.json`, `/logs`) that may be queued or running at
+/// once on the blocking pool.
+///
+/// A pool of its own for the reason [`MAX_CALENDAR_CONCURRENT`] has one: the
+/// backtest page polls `/logs.json` every two seconds per running sweep, and
+/// that poll must neither be refused because a folder read is busy nor fill
+/// the pool a folder read needs. Each admitted read walks at most
+/// `2 × crate::logs::SCAN_BYTES` of NDJSON (`docs/06-limits.md`, D-2327), so this
+/// count is what bounds the log bytes being decoded at once. log-3, P1-04-02,
+/// D-2327.
+pub const MAX_LOG_READ_CONCURRENT: usize = 4;
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a reader cache's mutex was free when this thread reached its
+    /// cold open, as [`note_slot_free`] last saw it. Test builds only.
+    /// expr-3, cand-2, D-2576.
+    pub(crate) static SLOT_FREE_AT_OPEN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Records whether `slot` can be locked right now, from the cold-open point
+/// of a reader cache (expr-3, cand-2, D-2576). A cache that still held its own
+/// guard there would park every other detail permit behind one cold open; the
+/// probe retries briefly, so a different thread's momentary take or put-back
+/// is not mistaken for this thread's own hold. Test builds only.
+#[cfg(test)]
+pub(crate) fn note_slot_free<T>(slot: &std::sync::Mutex<T>) {
+    let mut free = false;
+    for _ in 0..10_000 {
+        if !matches!(slot.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+            free = true;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    SLOT_FREE_AT_OPEN.with(|cell| cell.set(Some(free)));
+}
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static STORE_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static LOG_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// One admitted request in one pool.  Dropping it always returns the slot.
+pub(crate) struct Permit(&'static AtomicUsize);
 
 impl Permit {
     fn try_take() -> Option<Self> {
-        ACTIVE
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_CONCURRENT).then_some(active.saturating_add(1))
-            })
-            .ok()
-            .map(|_| Self)
+        Self::try_take_from(&ACTIVE, MAX_CONCURRENT)
+    }
+
+    fn try_take_from(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
+        pool.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < max).then_some(active.saturating_add(1))
+        })
+        .ok()
+        .map(|_| Self(pool))
+    }
+
+    /// A slot for work an already-admitted request owes, taken past the cap.
+    ///
+    /// It is never refused, and it still counts: while it is held,
+    /// [`Permit::try_take`] sees one more active task and refuses new work
+    /// sooner. D-1445.
+    fn owed() -> Self {
+        ACTIVE.fetch_add(1, Ordering::AcqRel);
+        Self(&ACTIVE)
     }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let previous = ACTIVE.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "a detail permit is released exactly once");
     }
 }
@@ -69,12 +146,124 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = Permit::try_take().ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a calendar derivation outside Tokio's worker pool, in the calendar
+/// pool of [`MAX_CALENDAR_CONCURRENT`] slots. W1-api2-11, D-1443.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every calendar slot is
+/// occupied, or [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_calendar<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&CALENDAR_ACTIVE, MAX_CALENDAR_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs an operator route's folder or masters read outside Tokio's worker
+/// pool, in its own pool of [`MAX_STORE_READ_CONCURRENT`] slots. W1-api2-11,
+/// D-1508.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every slot is occupied, or
+/// [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_store_read<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a `/logs.json` or `/logs` tail walk outside Tokio's worker pool, in
+/// its own pool of [`MAX_LOG_READ_CONCURRENT`] slots. log-3, P1-04-02, D-2327.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every slot is occupied, or
+/// [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_log_read<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// The status and JSON body a route answers when its blocking work was not
+/// admitted (429) or could not be joined (503), naming `what` and its bound.
+/// D-1508.
+#[must_use]
+pub fn admission_refused(
+    what: &str,
+    bound: usize,
+    why: &RunError,
+) -> (axum::http::StatusCode, String) {
+    let status = if matches!(why, RunError::Saturated) {
+        axum::http::StatusCode::TOO_MANY_REQUESTS
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = serde_json::json!({
+        "error": format!(
+            "{what} not admitted ({why:?}): at most {bound} run at once, off the async \
+             workers; retry"
+        )
+    });
+    (status, body.to_string())
+}
+
+async fn admitted<T, F>(permit: Permit, work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    // THE CALLER'S LOG RUN CROSSES TO THE BLOCKING THREAD (sobs-14, D-4451).
+    // The scope is a thread-local set while a future is polled, and the work
+    // runs on another thread, so an event written inside it would otherwise
+    // lose the run of the request that asked for it.
+    let run = telemetry::current_run();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _scope = run.map(telemetry::enter);
         work()
     })
     .await
     .map_err(|why| RunError::Join(why.to_string()))
+}
+
+/// Runs blocking work an already-admitted request OWES, outside Tokio's
+/// worker pool, without refusing it when every slot is taken.
+///
+/// For the invocation journal's terminal record only: the handler has already
+/// run, so refusing the write that records its outcome cannot undo it and
+/// used to leave a false `Cancelled`. The slot it takes is counted against
+/// [`run`]'s admission but bypasses its cap, so at most one owed task exists
+/// per audited request whose handler has returned; `docs/06-limits.md`
+/// (D-1445) states that this count is bounded by in-flight requests, not by
+/// [`MAX_CONCURRENT`]. UNVERIFIED: no bench times this path.
+///
+/// # Errors
+///
+/// Returns [`RunError::Join`] when Tokio cannot join the blocking task. It
+/// never returns [`RunError::Saturated`].
+pub(crate) async fn run_owed<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    admitted(Permit::owed(), work).await
 }
 
 /// Refuses a detail query before any parser allocates from an unbounded URI.
@@ -171,6 +360,25 @@ impl Selector {
         root: Result<std::path::PathBuf, String>,
         query: &str,
     ) -> Result<Self, String> {
+        // THE SAME EXACTNESS EVERY SIBLING DETAIL ROUTE HOLDS. This read only
+        // its three keys through `param`, so `offset=256` (the boolean routes'
+        // spelling) or a typo like `pgae=3` was answered page 0 under 200,
+        // again and again. Unknown, repeated and empty keys now refuse
+        // (P1-01-04, D-1765).
+        query_is_bounded(query)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if value.is_empty()
+                || !matches!(key, "identity" | "page" | "limit")
+                || !seen.insert(key)
+            {
+                return Err(format!(
+                    "unknown, repeated or empty detail query field {key:?}; this \
+                     route reads identity, page and limit"
+                ));
+            }
+        }
         let page = Page::parse(query)?;
         let root = root?;
         let identity = crate::trades::from_hex_public(&crate::server::param(query, "identity"))
@@ -183,6 +391,8 @@ impl Selector {
     }
 }
 
+/// A canonical unsigned decimal: `+3` and `003` are refused, as
+/// `candidatejson::integer` refuses them, rather than read as 3 (D-1765).
 fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     let value = crate::server::param(query, name);
     if value.is_empty() {
@@ -190,8 +400,10 @@ fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     }
     value
         .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
         .map(Some)
-        .map_err(|_| format!("`{name}` must be an unsigned decimal integer"))
+        .ok_or_else(|| format!("`{name}` must be a canonical unsigned decimal integer"))
 }
 
 /// Bounds every file a fresh detail request will index before it opens one.
@@ -256,6 +468,48 @@ pub fn window(total: usize, page: Page) -> Result<Window, String> {
             "run owns {total_u64} detail rows; one request verifies at most {MAX_RESULT_ROWS}. No prefix was read or exposed"
         ));
     }
+    seek_window(total, page)
+}
+
+/// [`window`] for a reader that SEEKS to one page and never holds the result.
+///
+/// [`MAX_RESULT_ROWS`] bounds what a request holds and verifies, and it is the
+/// right refusal for a reader that loads every row of a run before it slices
+/// one page. A fixed-stride reader that seeks to `offset` and reads at most
+/// `page.limit` rows holds one page whatever the total, so the cap protects
+/// nothing there, and applying it refused every page of a result above 4,096
+/// rows, page 0 included: an audit keeps `audit_keep()` ranked rows, 10,000 by
+/// default, so its ranked evidence was never readable (W1-api6-5, D-0954).
+///
+/// The total is still bounded, by the caller's byte cap on the file it seeks
+/// in, and the page by [`MAX_PAGE_ROWS`]. Every other check is [`window`]'s:
+/// a page past a non-empty result, or any non-zero page of an empty one, is
+/// refused rather than returned as a plausible empty list. O(1) arithmetic,
+/// pinned at every boundary by
+/// `api::detail::a_seeked_window_has_no_hold_cap_and_keeps_every_other_refusal`.
+///
+/// ONE MORE REFUSAL, because [`Page::parse`] still caps the page NUMBER at
+/// [`MAX_PAGE`]: at `limit` rows a page, only `(MAX_PAGE + 1) * limit` rows
+/// are addressable. A result larger than that is refused on every page with
+/// the smallest limit that reaches all of it, rather than served with a
+/// `next_page` the parser would then refuse. At the default 256 that is
+/// 1,048,576 rows, more than any 64 MiB file of 64-byte or wider rows holds.
+///
+/// # Errors
+///
+/// Refuses a result the requested limit cannot page to its end, an offset
+/// outside the result, or a coordinate that cannot be represented on this
+/// machine.
+pub fn seek_window(total: usize, page: Page) -> Result<Window, String> {
+    let total_u64 = u64::try_from(total).unwrap_or(u64::MAX);
+    let addressable = MAX_PAGE.saturating_add(1).saturating_mul(page.limit);
+    if total_u64 > addressable {
+        let needed = total_u64.div_ceil(MAX_PAGE.saturating_add(1));
+        return Err(format!(
+            "result owns {total_u64} rows and `limit={}` addresses only the first {addressable} of them within page {MAX_PAGE}; ask `limit={needed}` or more. No prefix was read or exposed",
+            page.limit
+        ));
+    }
     let offset = page.offset();
     if total == 0 && page.number > 0 {
         return Err(format!(
@@ -291,6 +545,17 @@ pub(crate) async fn apart_from_slot_owners() -> tokio::sync::MutexGuard<'static,
     TEST_SERIAL.lock().await
 }
 
+/// Takes every slot that is free right now, for a test that must saturate the
+/// pool from inside a request it is already running.
+///
+/// Asks for the serial guard so it cannot race [`hold_every_slot`]. Other
+/// tests that use a slot without that guard may still hold some, which is why
+/// this takes what is free rather than exactly [`MAX_CONCURRENT`].
+#[cfg(test)]
+pub(crate) fn take_every_free_slot(_apart: &tokio::sync::MutexGuard<'static, ()>) -> Vec<Permit> {
+    std::iter::from_fn(Permit::try_take).collect()
+}
+
 #[cfg(test)]
 pub(crate) struct HeldSlots {
     _serial: tokio::sync::MutexGuard<'static, ()>,
@@ -307,6 +572,31 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
         _serial: serial,
         _permits: permits,
     })
+}
+
+/// Takes every log-read slot that is free, for a test that must see
+/// `/logs.json` and `/logs` refused at admission. Asks for the serial guard,
+/// and every test that sends a log read holds that guard too, so while it is
+/// held this takes all [`MAX_LOG_READ_CONCURRENT`] and nothing else can.
+#[cfg(test)]
+pub(crate) fn take_every_log_read_slot(
+    _apart: &tokio::sync::MutexGuard<'static, ()>,
+) -> Vec<Permit> {
+    std::iter::from_fn(|| Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT))
+        .collect()
+}
+
+/// Takes every store-read slot that is free, for a test that must see a
+/// store-reading route refused at admission (resources-4, P1-04-01, D-2593).
+/// Asks for the serial guard so it cannot race [`hold_every_slot`] or the
+/// other pool-holding tests; it takes what is free rather than exactly
+/// [`MAX_STORE_READ_CONCURRENT`], and the caller asserts what it got.
+#[cfg(test)]
+pub(crate) fn take_every_store_read_slot(
+    _apart: &tokio::sync::MutexGuard<'static, ()>,
+) -> Vec<Permit> {
+    std::iter::from_fn(|| Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT))
+        .collect()
 }
 
 /// One long-lived read handle on a results file, refreshed per request.
@@ -337,11 +627,18 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 ///
 /// # Any refusal from `refresh` drops the handle
 ///
-/// A shrunken file, a torn tail, a duplicate identity, a file moved aside on a
-/// format-version bump -- each is a reason the handle no longer describes what
-/// is on disk. The answer is one fresh `open`, which is the single O(rows) path
-/// a cache should ever take, and the refusal that caused it is never swallowed:
-/// if the reopen also fails, that error is the response.
+/// A shrunken file, a torn tail, a file replaced or moved aside under its path
+/// -- each is a reason the handle no longer describes what is on disk. The
+/// answer is one fresh `open`, which is the single O(rows) path a cache should
+/// ever take, and the refusal that caused it is never swallowed: if the reopen
+/// also fails, that error is the response.
+///
+/// A recorded integrity failure (a bad seal, an invalid schema, a
+/// non-contiguous duplicate identity) is a refusal for `Frontier::refresh`,
+/// which still refuses on it first. It is NOT one for `Trades::refresh` since
+/// D-0919: that refresh records the damage the way a cold open does and keeps
+/// its handle, and it refuses instead when the path names a file other than the
+/// one it holds, so a reviewed repair renamed into place is reopened.
 ///
 /// A root that differs from the cached one is treated the same way. There is
 /// one store root per process, so this is a guard against a future caller
@@ -354,8 +651,38 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 /// on a warm cache, so it is now stricter than it needs to be -- but lifting it
 /// is a separate decision about what an unbounded results file should cost,
 /// and this change does not make it.
+///
+/// # Which lock is held, and for how long (D-2309)
+///
+/// The slot behind `inner` holds an `Arc` to the handle's own mutex, and the
+/// slot lock is held only to read, install or clear that `Arc`: O(1), never
+/// across `open`, `refresh` or `f`. A cold `open` -- O(history), up to
+/// [`MAX_SCAN_BYTES`] -- runs holding no lock at all, and a fresh handle is
+/// locked by its opener before it is installed, so `f` sees it before any
+/// other request can refresh it. Two requests that both find no usable handle
+/// both open; the later install replaces the earlier, and each serves the
+/// handle it opened and checked. That duplicated open is the stated price.
+///
+/// `refresh` and `f` run under the HANDLE's mutex, so requests for one
+/// handle still take its growth branch -- D-1560's O(indexed bytes) re-hash
+/// -- one at a time. That is not removed: `refresh` mutates the handle, and a
+/// second request that waits is served the already-refreshed handle, where
+/// refreshing beside it would pay the same re-hash again. Proved by `api::detail::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`.
 pub struct Cached<T> {
-    inner: std::sync::Mutex<Option<(std::path::PathBuf, T)>>,
+    inner: std::sync::Mutex<Option<(std::path::PathBuf, Slot<T>)>>,
+}
+
+/// One handle, shared between the slot and every request using it.
+type Slot<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+/// READ THROUGH A POISONED LOCK, for the reason `calendar_of` gives: a panic
+/// while holding it means some other request died, and the handle is still a
+/// handle. Refusing to look would make one panicked request cost every later
+/// one the walk this exists to remove.
+fn lock_through_poison<V>(mutex: &std::sync::Mutex<V>) -> std::sync::MutexGuard<'_, V> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl<T> Cached<T> {
@@ -365,6 +692,29 @@ impl<T> Cached<T> {
         Self {
             inner: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The handle cached for `root`, if any: one O(1) look under the slot lock,
+    /// released before the caller touches the handle. Proved by `api::detail::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`.
+    fn cached_for(&self, root: &std::path::Path) -> Option<Slot<T>> {
+        match lock_through_poison(&self.inner).as_ref() {
+            Some((at, slot)) if at.as_path() == root => Some(std::sync::Arc::clone(slot)),
+            _ => None,
+        }
+    }
+
+    /// Install a handle `open` has just returned and run `f` on it. The
+    /// handle's own lock is taken BEFORE it is published, so no other request
+    /// refreshes it before `f` has run; the slot lock is held only for the
+    /// O(1) store, and never while waiting on a handle's lock. Proved by `api::detail::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`.
+    fn install<R>(&self, root: &std::path::Path, opened: T, f: impl FnOnce(&mut T) -> R) -> R {
+        let slot: Slot<T> = std::sync::Arc::new(std::sync::Mutex::new(opened));
+        let mut handle = lock_through_poison(&slot);
+        // The replaced handle is dropped after the slot lock is released.
+        let replaced = lock_through_poison(&self.inner)
+            .replace((root.to_path_buf(), std::sync::Arc::clone(&slot)));
+        drop(replaced);
+        f(&mut handle)
     }
 
     /// Run `f` against a handle on `root`, refreshing a cached one or opening
@@ -385,26 +735,18 @@ impl<T> Cached<T> {
         refresh: impl FnOnce(&mut T) -> Result<(), String>,
         f: impl FnOnce(&mut T) -> R,
     ) -> Result<R, String> {
-        // READ THROUGH A POISONED LOCK, for the reason `calendar_of` gives: a
-        // panic while holding it means some other request died, and the handle
-        // is still a handle. Refusing to look would make one panicked request
-        // cost every later one the walk this exists to remove.
-        let mut held = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, handle)) = held.as_mut()
-            && at.as_path() == root
-            && refresh(handle).is_ok()
-        {
-            return Ok(f(handle));
+        if let Some(slot) = self.cached_for(root) {
+            let mut handle = lock_through_poison(&slot);
+            if refresh(&mut handle).is_ok() {
+                return Ok(f(&mut handle));
+            }
         }
-        // Absent, a different root, or a refresh that refused: open fresh. The
-        // slot is overwritten rather than cleared first, so a failed `open`
-        // leaves whatever was there -- which the next request refreshes and
-        // judges again on its own terms.
-        let (_, handle) = held.insert((root.to_path_buf(), open()?));
-        Ok(f(handle))
+        // Absent, a different root, or a refresh that refused: open fresh,
+        // holding no lock. The slot is overwritten rather than cleared first,
+        // so a failed `open` leaves whatever was there -- which the next
+        // request refreshes and judges again on its own terms.
+        let opened = open()?;
+        Ok(self.install(root, opened, f))
     }
 
     /// Uses a refreshed handle, exposing any failed generation or integrity
@@ -421,21 +763,25 @@ impl<T> Cached<T> {
         refresh: impl FnOnce(&mut T) -> Result<(), String>,
         f: impl FnOnce(&mut T) -> R,
     ) -> Result<R, String> {
-        let mut held = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, handle)) = held.as_mut()
-            && at.as_path() == root
-        {
-            if let Err(why) = refresh(handle) {
-                *held = None;
+        if let Some(slot) = self.cached_for(root) {
+            let mut handle = lock_through_poison(&slot);
+            if let Err(why) = refresh(&mut handle) {
+                drop(handle);
+                // Discard the refused handle -- unless a racing open has
+                // already replaced it with one that passed its own checks.
+                let mut held = lock_through_poison(&self.inner);
+                if held
+                    .as_ref()
+                    .is_some_and(|(_, cached)| std::sync::Arc::ptr_eq(cached, &slot))
+                {
+                    *held = None;
+                }
                 return Err(why);
             }
-            return Ok(f(handle));
+            return Ok(f(&mut handle));
         }
-        let (_, handle) = held.insert((root.to_path_buf(), open()?));
-        Ok(f(handle))
+        let opened = open()?;
+        Ok(self.install(root, opened, f))
     }
 }
 
@@ -455,7 +801,9 @@ static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 
 /// Refreshes both parent indexes once and returns one owned receipt, with
 /// the instrument its ledger parent names, before the caller refreshes any
-/// child. Cold open is O(history); warm refresh is O(new parent rows), with
+/// child. Cold open is O(history); warm refresh is O(new parent rows), or
+/// O(indexed bytes + new rows) when the ledger or the receipt file grew
+/// (D-1560, D-3305, D-3318), with
 /// each file still subject to the HTTP byte ceiling.
 ///
 /// # Errors
@@ -482,7 +830,8 @@ static LEDGER: Cached<cli::results::Results> = Cached::new();
 /// child: `/sweep-evidence.json` and the AND-mask `/candidate-trades.json`.
 /// It reads the ledger alone, so a damaged receipt sidecar cannot refuse a
 /// saved attempt that never had a receipt. Cold open is O(history); warm
-/// refresh is O(new rows), under the same byte ceiling. Nothing is created:
+/// refresh is O(new rows), or O(indexed bytes + new rows) when the ledger grew
+/// (D-1560, D-3305), under the same byte ceiling. Nothing is created:
 /// an absent or empty ledger is answered before any open.
 ///
 /// AN EMPTY LEDGER IS AN ABSENCE, as `cli::results::Results::open_read` says
@@ -548,6 +897,77 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
     Ok(())
 }
 
+/// Whether a Boolean observation route must authenticate its saved body again
+/// rather than project from the reader its single slot holds. W1-api1-5, D-1444.
+///
+/// `held` is whether the slot holds a reader for exactly this root, identity,
+/// model and budget. A pinned request (`pinned`) over a held reader reuses it
+/// and lets the projection refuse a changed generation, as it always did. An
+/// unpinned request -- every first page -- used to authenticate afresh every
+/// time; it now reuses a held reader whose `current` check passes (the same
+/// generation and lease check a warm page makes) and authenticates again only
+/// when that check refuses. `current` is not called when nothing is held or the
+/// request is pinned. What a cold admission still costs is stated in
+/// `docs/06-limits.md` under D-1444 and is UNVERIFIED as a measurement.
+pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> bool) -> bool {
+    !held || (!pinned && !current())
+}
+
+/// ONE RETAINED READER, TAKEN OUT BY A REQUEST AND PUT BACK WHEN IT ENDS
+/// (locks-2, D-1912).
+///
+/// The five index-stop JSON caches held a process-wide `try_lock` guard across
+/// the whole render, a cold `Reader::open` included. `spawn_blocking` cannot be
+/// cancelled, so a request the page had just abandoned kept the slot until its
+/// verification finished, and the same viewer's next click was refused 503
+/// "busy". The mutex is now held only to take the entry out and to put it back:
+/// a request that finds the slot empty opens its own reader, and the last one
+/// to finish is the one retained. Concurrency stays bounded by `run`'s
+/// admission, not by this slot.
+pub(crate) struct Checkout<'slot, T> {
+    slot: &'slot std::sync::Mutex<Option<T>>,
+    value: Option<T>,
+}
+
+impl<'slot, T> Checkout<'slot, T> {
+    /// Empties `slot` into this request. The lock is released on return.
+    pub(crate) fn take(slot: &'slot std::sync::Mutex<Option<T>>) -> Self {
+        // A poisoned slot holds a plain `Option`; no invariant spans the
+        // panic, and the shipped binary aborts on panic regardless.
+        let value = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Self { slot, value }
+    }
+}
+
+impl<T> std::ops::Deref for Checkout<'_, T> {
+    type Target = Option<T>;
+    fn deref(&self) -> &Option<T> {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Checkout<'_, T> {
+    fn deref_mut(&mut self) -> &mut Option<T> {
+        &mut self.value
+    }
+}
+
+impl<T> Drop for Checkout<'_, T> {
+    /// Puts a still-admitted entry back. An entry this request evicted stays
+    /// out.
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            *self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -557,9 +977,126 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
 )]
 mod tests {
     use super::{
-        Cached, IDENTITY_REFUSAL, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, Selector,
-        preflight, run, window,
+        Cached, IDENTITY_REFUSAL, LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT, MAX_PAGE,
+        MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_RESULT_ROWS, MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT,
+        Ordering, Page, Permit, RunError, STORE_READ_ACTIVE, Selector, admission_refused,
+        must_admit, preflight, run, run_calendar, run_log_read, run_store_read, seek_window,
+        window,
     };
+
+    /// locks-2, D-1912: a request that finds the retained reader taken out is
+    /// not refused; it starts empty, and the entry is back once the first
+    /// request ends. An evicted entry is not put back.
+    #[test]
+    fn a_checked_out_reader_never_refuses_the_next_request() {
+        let slot = std::sync::Mutex::new(Some(7_u8));
+        let first = super::Checkout::take(&slot);
+        assert_eq!(*first, Some(7));
+        let second = super::Checkout::take(&slot);
+        assert_eq!(*second, None);
+        drop(second);
+        drop(first);
+        let mut third = super::Checkout::take(&slot);
+        assert_eq!(*third, Some(7));
+        *third = None;
+        drop(third);
+        assert_eq!(*slot.lock().unwrap(), None);
+    }
+
+    /// locks-2, D-1912: no index-stop cache holds its slot across the render.
+    #[test]
+    fn no_index_stop_cache_holds_its_slot_across_the_render() {
+        for source in [
+            include_str!("indexstopvixjson.rs"),
+            include_str!("indexstopcandlesjson.rs"),
+            include_str!("indexstopqualificationjson.rs"),
+            include_str!("indexstopjson.rs"),
+            include_str!("indexstoprankingjson.rs"),
+        ] {
+            assert!(!source.contains(".try_lock()"));
+            assert!(source.contains("crate::detail::Checkout::take(CACHE.get_or_init("));
+        }
+    }
+
+    /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-1444.
+    ///
+    /// Nothing held: admit, and the currency check is never asked (there is
+    /// no reader to ask). Held and pinned: reuse without asking, so the
+    /// projection's own check is what refuses a changed generation. Held and
+    /// unpinned: reuse exactly when the reader is current.
+    #[test]
+    fn a_held_reader_is_reused_when_pinned_or_current_and_admitted_again_otherwise() {
+        for pinned in [false, true] {
+            for current in [false, true] {
+                let mut asked = 0;
+                assert!(
+                    must_admit(false, pinned, || {
+                        asked += 1;
+                        current
+                    }),
+                    "nothing held: pinned={pinned} current={current}"
+                );
+                assert_eq!(asked, 0, "nothing held is never asked about currency");
+                let mut asked = 0;
+                let admit = must_admit(true, pinned, || {
+                    asked += 1;
+                    current
+                });
+                assert_eq!(
+                    admit,
+                    !pinned && !current,
+                    "pinned={pinned} current={current}"
+                );
+                assert_eq!(
+                    asked,
+                    usize::from(!pinned),
+                    "pinned={pinned}: asked once if unpinned"
+                );
+            }
+        }
+    }
+
+    /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
+    /// SLOT.** W1-api2-11, D-1443. Driven on a pool of the test's own, so no
+    /// route test sharing the real pools can see it.
+    #[test]
+    fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static POOL: AtomicUsize = AtomicUsize::new(0);
+        let first = super::Permit::try_take_from(&POOL, 2).expect("one of two");
+        let second = super::Permit::try_take_from(&POOL, 2).expect("two of two");
+        assert!(
+            super::Permit::try_take_from(&POOL, 2).is_none(),
+            "a third is refused"
+        );
+        assert_eq!(POOL.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(POOL.load(Ordering::Acquire), 1);
+        let third = super::Permit::try_take_from(&POOL, 2).expect("the freed slot");
+        drop((second, third));
+        assert_eq!(POOL.load(Ordering::Acquire), 0, "every slot returned");
+        assert!(
+            super::Permit::try_take_from(&POOL, 0).is_none(),
+            "a zero bound admits nothing"
+        );
+        assert_eq!(
+            POOL.load(Ordering::Acquire),
+            0,
+            "and a refusal takes nothing"
+        );
+    }
+
+    /// **A CALENDAR DERIVATION RUNS OFF THE ASYNC WORKER.** W1-api2-11,
+    /// D-1443. On a current-thread runtime the worker is the test's own
+    /// thread, so work that reports another thread ran on the blocking pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_calendar_derivation_runs_off_the_async_worker() {
+        let worker = std::thread::current().id();
+        let ran_on = super::run_calendar(|| std::thread::current().id())
+            .await
+            .expect("admitted");
+        assert_ne!(ran_on, worker, "the blocking pool, not the async worker");
+    }
 
     /// ONLY AN ABSENT LEDGER IS AN ABSENCE.
     ///
@@ -603,7 +1140,7 @@ mod tests {
         let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
         assert_eq!(
             Selector::parse(unset(), "identity=x&page=banana").err(),
-            Some("`page` must be an unsigned decimal integer".to_owned())
+            Some("`page` must be a canonical unsigned decimal integer".to_owned())
         );
         assert_eq!(
             Selector::parse(unset(), "identity=x").err(),
@@ -627,6 +1164,39 @@ mod tests {
                 limit: 3
             }
         );
+    }
+
+    /// The selector is exact the way every sibling detail route is: an
+    /// unknown key (the boolean routes' `offset`, a typo), a repeated key, an
+    /// empty value and a non-canonical integer all refuse instead of answering
+    /// page 0 (P1-01-04, D-1765).
+    #[test]
+    fn a_detail_selector_refuses_unknown_keys_and_non_canonical_integers() {
+        let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
+        let id = "ab".repeat(32);
+        for query in [
+            format!("identity={id}&offset=256"),
+            format!("identity={id}&pgae=3"),
+            format!("identity={id}&page=1&page=2"),
+            format!("identity={id}&page="),
+            format!("identity={id}&limit"),
+        ] {
+            let why = Selector::parse(set(), &query).err().unwrap_or_default();
+            assert!(why.contains("detail query field"), "{query}: {why}");
+        }
+        for (query, field) in [
+            (format!("identity={id}&page=%2B1"), "`page`"),
+            (format!("identity={id}&page=003"), "`page`"),
+            (format!("identity={id}&limit=016"), "`limit`"),
+        ] {
+            let why = Selector::parse(set(), &query).err().unwrap_or_default();
+            assert!(
+                why.contains(field) && why.contains("canonical"),
+                "{query}: {why}"
+            );
+        }
+        assert!(Selector::parse(set(), &format!("identity={id}&page=0&limit=16")).is_ok());
+        assert!(Page::parse("page=%2B1").is_err());
     }
 
     #[test]
@@ -656,6 +1226,72 @@ mod tests {
             cache.with_verified(root, || Ok(9), |_| Err("must open".to_owned()), |v| *v),
             Ok(9)
         );
+    }
+
+    /// THE SLOT LOCK IS NOT HELD ACROSS AN OPEN, A REFRESH OR `f`. D-2309.
+    ///
+    /// Every closure below takes the slot's own mutex with `try_lock`, which
+    /// fails while the lock is held: before D-2309 the cold `open` and the
+    /// O(indexed bytes) `refresh` ran under it, so a request for the handle
+    /// waited behind both. And a cold `open` can use the same cache for
+    /// another root while it runs -- the call would deadlock if the open
+    /// held the slot -- after which its own install still lands and is served.
+    #[test]
+    fn the_slot_lock_is_free_while_a_handle_opens_or_refreshes() {
+        let cache: Cached<u32> = Cached::new();
+        let root = std::path::Path::new("/slot-lock-root");
+        let free = |cache: &Cached<u32>| cache.inner.try_lock().is_ok();
+
+        let opened = cache.with_verified(
+            root,
+            || {
+                assert!(free(&cache), "a cold open runs outside the slot lock");
+                let other = cache.with(
+                    std::path::Path::new("/slot-lock-other"),
+                    || Ok(5),
+                    |_| Ok(()),
+                    |h| *h,
+                );
+                assert_eq!(other, Ok(5), "another root is served during the open");
+                Ok(7)
+            },
+            |_| Err("nothing was cached for this root".to_owned()),
+            |h| {
+                assert!(free(&cache), "`f` on a fresh handle runs outside it");
+                *h
+            },
+        );
+        assert_eq!(opened, Ok(7), "the open that ran second is installed");
+
+        let refreshed = cache.with_verified(
+            root,
+            || Err("the handle is cached".to_owned()),
+            |h| {
+                assert!(free(&cache), "a verified refresh runs outside it");
+                *h += 1;
+                Ok(())
+            },
+            |h| {
+                assert!(free(&cache), "`f` on a cached handle runs outside it");
+                *h
+            },
+        );
+        assert_eq!(refreshed, Ok(8));
+
+        let reopened = cache.with(
+            root,
+            || {
+                assert!(free(&cache), "a reopen after a refusal runs outside it");
+                Ok(11)
+            },
+            |_| {
+                assert!(free(&cache), "a refresh runs outside it");
+                Err("the file shrank".to_owned())
+            },
+            |h| *h,
+        );
+        assert_eq!(reopened, Ok(11));
+        assert!(free(&cache), "nothing is left holding the slot");
     }
 
     /// A CACHED HANDLE IS OPENED ONCE, REFRESHED AFTER, AND REOPENED ON A REFUSAL.
@@ -828,6 +1464,124 @@ mod tests {
         assert!(window(2, Page::parse("page=1&limit=2").expect("page")).is_err());
     }
 
+    /// A seeked page is bounded by its own limit, not by the hold cap, and it
+    /// still refuses every coordinate `window` refuses. W1-api6-5, D-0954.
+    #[test]
+    fn a_seeked_window_has_no_hold_cap_and_keeps_every_other_refusal() {
+        let page = |query: &str| Page::parse(query).expect("a valid page");
+        let held = usize::try_from(MAX_RESULT_ROWS).expect("fits");
+        let pages = usize::try_from(MAX_PAGE + 1).expect("fits");
+        // The hold cap: `window` still refuses one row past it, at page 0.
+        assert!(window(held, page("")).is_ok());
+        let refused = window(held + 1, page("")).expect_err("held cap");
+        assert!(
+            refused.contains("one request verifies at most"),
+            "{refused}"
+        );
+        // A seeked window over the same totals is a page, not a refusal.
+        for total in [held, held + 1, 10_000] {
+            let first = seek_window(total, page("")).expect("page 0");
+            assert_eq!((first.start, first.end, first.complete), (0, 256, false));
+            assert_eq!(first.next_page, Some(1));
+            let last_page = (total - 1) / 256;
+            let last = seek_window(total, page(&format!("page={last_page}"))).expect("last");
+            assert_eq!(
+                (last.start, last.end, last.next_page),
+                (last_page * 256, total, None)
+            );
+            assert!(seek_window(total, page(&format!("page={}", last_page + 1))).is_err());
+        }
+        // The empty result: page 0 only, and it is complete.
+        let empty = seek_window(0, page("")).expect("empty page 0");
+        assert_eq!(
+            (empty.start, empty.end, empty.complete, empty.next_page),
+            (0, 0, true, None)
+        );
+        assert!(seek_window(0, page("page=1")).is_err());
+        // Addressability: exactly (MAX_PAGE + 1) * limit rows is pageable to
+        // its last row at the largest page number; one more is refused on
+        // page 0 with the smallest limit that would reach it.
+        let reach = pages * usize::try_from(MAX_PAGE_ROWS).expect("fits");
+        let deepest = seek_window(reach, page(&format!("page={MAX_PAGE}"))).expect("deepest");
+        assert_eq!((deepest.end, deepest.next_page), (reach, None));
+        let over = seek_window(reach + 1, page("")).expect_err("past the deepest page");
+        assert!(
+            over.contains(&format!("ask `limit={}`", MAX_PAGE_ROWS + 1)),
+            "{over}"
+        );
+        let narrow = seek_window(pages + 1, page("limit=1")).expect_err("limit 1");
+        assert!(narrow.contains("ask `limit=2`"), "{narrow}");
+        assert!(seek_window(pages, page(&format!("page={MAX_PAGE}&limit=1"))).is_ok());
+        // usize::MAX is a total no page can reach, and refusing it cannot overflow.
+        assert!(seek_window(usize::MAX, page("")).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_store_read_runs_off_the_worker_and_refuses_past_its_bound() {
+        let _serial = super::TEST_SERIAL.lock().await;
+        let worker = std::thread::current().id();
+        let blocking = run_store_read(|| std::thread::current().id())
+            .await
+            .expect("admitted store read");
+        assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+        // Hold every slot; the next is refused before it queues, and a
+        // released slot admits again. D-1508.
+        let held: Vec<Permit> = (0..MAX_STORE_READ_CONCURRENT)
+            .map(|_| {
+                Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
+                    .expect("a free slot")
+            })
+            .collect();
+        assert_eq!(run_store_read(|| ()).await, Err(RunError::Saturated));
+        // The other pools are not this one's.
+        assert_eq!(run_calendar(|| 7).await, Ok(7));
+        drop(held);
+        assert_eq!(run_store_read(|| 9).await, Ok(9));
+        assert_eq!(STORE_READ_ACTIVE.load(Ordering::Acquire), 0);
+    }
+
+    /// A log read runs on a blocking thread, and past
+    /// [`MAX_LOG_READ_CONCURRENT`] it is refused before it queues, without
+    /// touching the other pools. log-3, P1-04-02, D-2327.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_log_read_runs_off_the_worker_and_refuses_past_its_bound() {
+        let apart = super::apart_from_slot_owners().await;
+        let worker = std::thread::current().id();
+        let blocking = run_log_read(|| std::thread::current().id())
+            .await
+            .expect("admitted log read");
+        assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+        let held = super::take_every_log_read_slot(&apart);
+        assert_eq!(held.len(), 4, "this test owns every log-read slot");
+        assert_eq!(MAX_LOG_READ_CONCURRENT, 4);
+        assert_eq!(run_log_read(|| ()).await, Err(RunError::Saturated));
+        // The other pools are not this one's.
+        assert_eq!(run_calendar(|| 7).await, Ok(7));
+        drop(held);
+        assert_eq!(run_log_read(|| 9).await, Ok(9));
+        assert_eq!(LOG_READ_ACTIVE.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_refused_admission_names_what_its_bound_and_why() {
+        let (status, body) = admission_refused("folder read", 8, &RunError::Saturated);
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            body.contains("folder read not admitted (Saturated): at most 8"),
+            "{body}"
+        );
+        let (status, body) =
+            admission_refused("folder read", 8, &RunError::Join("gone".to_owned()));
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("gone"), "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert!(
+            parsed
+                .get("error")
+                .is_some_and(serde_json::Value::is_string)
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn admitted_work_runs_off_the_tokio_worker() {
         let _serial = super::TEST_SERIAL.lock().await;
@@ -836,5 +1590,29 @@ mod tests {
             .await
             .expect("admitted blocking task");
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+    }
+
+    /// sobs-14, D-4451: BLOCKING WORK KEEPS THE LOG RUN OF THE REQUEST THAT
+    /// ASKED FOR IT, through each admission (`run`, `run_store_read`,
+    /// `run_owed`), and work asked for outside any run carries none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_work_keeps_the_callers_log_run() {
+        let _serial = super::TEST_SERIAL.lock().await;
+        let inside = telemetry::in_run(4_454_001, run(telemetry::current_run))
+            .await
+            .expect("admitted blocking task");
+        assert_eq!(inside, Some(4_454_001));
+        let read = telemetry::in_run(4_454_002, run_store_read(telemetry::current_run))
+            .await
+            .expect("admitted store read");
+        assert_eq!(read, Some(4_454_002));
+        let owed = telemetry::in_run(4_454_003, super::run_owed(telemetry::current_run))
+            .await
+            .expect("owed blocking task");
+        assert_eq!(owed, Some(4_454_003));
+        let outside = run(telemetry::current_run)
+            .await
+            .expect("admitted blocking task");
+        assert_eq!(outside, None);
     }
 }

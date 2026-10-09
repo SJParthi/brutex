@@ -191,13 +191,29 @@ fn plan(legs: Vec<Leg>, today: Day) -> Result<Vec<Record>, String> {
         }
     }
     let mut out: Vec<_> = bodies.into_iter().map(record).collect();
-    out.sort_by_key(|item| {
-        (
-            server::param(&item.body, "granularity") != "1day",
-            item.body.clone(),
-        )
-    });
+    scope_order(&mut out, scope_rank);
     Ok(out)
+}
+
+/// Where a window sorts in its plan: every daily window first, then by body.
+fn scope_rank(row: &Record) -> (bool, String) {
+    (
+        server::param(&row.body, "granularity") != "1day",
+        row.body.clone(),
+    )
+}
+
+/// Put windows in plan order, computing each row's rank exactly ONCE.
+///
+/// The rank parses the body and clones it. `sort_by_key` recomputes it for
+/// both sides of every comparison, so ordering `n` windows parsed and cloned a
+/// body once per comparison side on the request that plans them and on every
+/// seal check, up to the 100,000-window bound: 1,032 ranks for 80 unsorted
+/// windows, counted. `sort_by_cached_key` computes
+/// `n` ranks and sorts those; it is stable as `sort_by_key` is, so the order
+/// and therefore every plan identity is unchanged. D-1381.
+fn scope_order<K: Ord>(rows: &mut [Record], rank: impl FnMut(&Record) -> K) {
+    rows.sort_by_cached_key(rank);
 }
 
 fn root(site: &Site) -> PathBuf {
@@ -302,12 +318,7 @@ fn validate_seal(
                 .to_owned(),
         );
     }
-    scans.sort_by_key(|row| {
-        (
-            server::param(&row.body, "granularity") != "1day",
-            row.body.clone(),
-        )
-    });
+    scope_order(&mut scans, scope_rank);
     let scope = scope_identity(&scans);
     if control.body == CONTROL_BODY {
         if scope != id {
@@ -462,6 +473,7 @@ fn prepare_successor(site: &Site, asked: &Submission) -> Result<(), String> {
                 .to_owned(),
         );
     }
+    let mut missing = Vec::new();
     for row in &asked.units {
         if let Some(existing) = journal.latest.get(&row.key) {
             if existing != row {
@@ -471,9 +483,11 @@ fn prepare_successor(site: &Site, asked: &Submission) -> Result<(), String> {
                 );
             }
         } else {
-            journal.append(row.clone()).map_err(failure)?;
+            missing.push(row.clone());
         }
     }
+    // ONE SYNC FOR THE WHOLE SCOPE, not one per window. D-1380.
+    journal.append_new(missing).map_err(failure)?;
     let mut control = record(seal.clone());
     control.key = CONTROL;
     if journal.latest.get(&CONTROL) != Some(&control) {
@@ -517,10 +531,16 @@ async fn prepare_reply(site: Loaded, asked: Submission, headers: JsonHeaders) ->
     let predecessor = asked.successor.as_ref().map(|(id, _)| hex(*id));
     // Journal syncs can take time. The blocking worker also survives a browser
     // disconnect; it still cannot claim a run or reach any source/vendor path.
-    let prepared = tokio::task::spawn_blocking(move || prepare_successor(&site, &asked))
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
+    // NAMED INSIDE THE WORKER, which a browser disconnect does not cancel, so
+    // the refusal reaches the log whether or not anybody reads the reply.
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_successor(&site, &asked).inspect_err(|why| {
+            note_blocked(StatusCode::SERVICE_UNAVAILABLE, "prepare", Some(id), why);
+        })
+    })
+    .await
+    .map_err(|dead| task_died("prepare", id, &dead))
+    .and_then(|result| result);
     match prepared {
         Ok(()) => (StatusCode::CREATED, headers, serde_json::json!({
             "started":false,"prepared":true,"plan":hex(id),"windows":count,
@@ -543,22 +563,44 @@ fn update(site: &Site, edit: impl FnOnce(&mut Progress)) {
     }
 }
 
+/// The refusal for a recovery start while a run holds the slot.
+const TWICE: &str = "a pull already owns the run slot; recovery was not started twice";
+
 fn claim(site: &Site, recovery: Option<([u8; 32], bool)>) -> Result<(), String> {
+    // THE CLEAR IS PERSISTED BEFORE THE SLOT IS TAKEN, NOT UNDER IT. Its
+    // journal open, append and up to four fsyncs used to run while this
+    // function held `site.run`, so every poll of `/pull/run.json`, every
+    // chain's progress write and the autopilot's round blocked a Tokio worker
+    // on the device for the whole chain. The plan is not active until the slot
+    // is claimed below, so no STOP can target it in the gap: the clear and the
+    // claim stay atomic with respect to `pull_run_stop`. recovery-5, D-2504.
+    if let Some((id, true)) = recovery {
+        if slot_running(site) {
+            return Err(TWICE.to_owned());
+        }
+        crate::recovery_control::clear_stop(site, id)?;
+    }
     let mut held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if held.as_ref().is_some_and(Progress::running) {
-        return Err("a pull already owns the run slot; recovery was not started twice".to_owned());
+        return Err(TWICE.to_owned());
     }
-    if let Some((id, explicit)) = recovery {
-        if explicit {
-            crate::recovery_control::clear_stop(site, id)?;
-        }
+    if let Some((id, _)) = recovery {
         crate::recovery_control::activate(site, id);
     }
     *held = Some(Progress::claimed());
     Ok(())
+}
+
+/// Whether a run holds the slot, read and released at once.
+fn slot_running(site: &Site) -> bool {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(Progress::running)
 }
 
 fn stopping(site: &Site) -> bool {
@@ -582,6 +624,7 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     let asked = match result {
         Ok(asked) => asked,
         Err(why) => {
+            note_blocked(StatusCode::BAD_REQUEST, "request", None, &why);
             return (
                 StatusCode::BAD_REQUEST,
                 headers,
@@ -596,9 +639,32 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
         // activation pointer, reads source bars, or enters the worker.
         return prepare_reply(site, asked, headers).await;
     }
+    // A PRESS THAT WILL BE REFUSED 409 PAYS NOTHING FIRST. The preflight
+    // replays the plan's journal and the recovery history, O(history), on a
+    // blocking thread, and it ran BEFORE `claim` looked at the slot: every
+    // press while a pull or another recovery ran paid the whole replay to be
+    // told "already owns the run slot", and repeated presses queued replays
+    // on the blocking pool. This probe is one lock read and is advisory only:
+    // `claim` below stays the authority, so a run that starts between the two
+    // is still refused there. P1-04-04, D-2592.
+    //
+    // AND IT IS A REFUSAL LIKE `claim`'s, SO IT IS LOGGED LIKE ONE: stage
+    // `slot`, the plan named (sobs-8, D-4448). Without this the probe turned
+    // the logged 409 back into a silent one. D-2592 and D-4448 met here;
+    // D-4628.
+    if slot_running(&site) {
+        note_blocked(StatusCode::CONFLICT, "slot", Some(id), TWICE);
+        return (
+            StatusCode::CONFLICT,
+            headers,
+            serde_json::json!({"started":false,"why":TWICE}).to_string(),
+        );
+    }
     let preflight_site = Loaded::clone(&site);
     let preflight = tokio::task::spawn_blocking(move || {
-        preflight_submission(&preflight_site, &asked)?;
+        preflight_submission(&preflight_site, &asked).inspect_err(|why| {
+            note_blocked(StatusCode::SERVICE_UNAVAILABLE, "preflight", Some(id), why);
+        })?;
         Ok::<_, String>(asked)
     })
     .await
@@ -616,6 +682,7 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
         }
     };
     if let Err(why) = claim(&site, Some((id, true))) {
+        note_blocked(StatusCode::CONFLICT, "slot", Some(id), &why);
         return (
             StatusCode::CONFLICT,
             headers,
@@ -626,9 +693,11 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     // seed syncs must not leave a claimed run with no worker. The response
     // still waits for the durable activation result, not mere acceptance.
     let units = asked.successor.is_none().then_some(asked.units);
+    // `activate_durable` names its own refusal, inside the detached task; a
+    // task that died before it could is named here.
     let prepared = tokio::spawn(activate_durable(site, id, units))
         .await
-        .map_err(failure)
+        .map_err(|dead| task_died("activation", id, &dead))
         .and_then(|result| result);
     if let Err(why) = prepared {
         return (
@@ -664,11 +733,62 @@ async fn activate_durable(
             update(&site, |progress| {
                 progress.finished = Some(format!("Recovery BLOCKED: {why}"));
             });
+            note_blocked(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "activation",
+                Some(id),
+                &why,
+            );
             return Err(why);
         }
     };
     let _task = tokio::spawn(drive(site, id, Ok(prepared), true));
     Ok(())
+}
+
+/// A recovery that was asked for and did not start, with why, on the surface
+/// that outlives the reply (sobs-8, D-4448).
+///
+/// # What was kept only in memory
+///
+/// Every refusal of `/pull/recovery` (a body that is not a plan, a preflight
+/// the saved history refuses, a run slot already held, a preparation refused,
+/// an activation BLOCKED) was the HTTP reply's `why` and, for a blocked
+/// activation, `Progress::finished`, which the next press overwrites and a
+/// restart loses. `api.request` logs the status and never the reason. One
+/// event per refused request, at the boundary: never per window.
+///
+/// `Error` for a refusal on this server's side (5xx), `Warn` for one the
+/// request can fix (4xx). `stage` names which check refused; `plan` is the
+/// plan's 64-hex identity, or empty when the body never named one.
+fn note_blocked(code: StatusCode, stage: &str, plan: Option<[u8; 32]>, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if code.is_server_error() {
+                telemetry::Level::Error
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.recovery",
+            "recovery blocked",
+        )
+        .with("stage", telemetry::Value::Str(stage))
+        .with("status", telemetry::Value::Uint(u64::from(code.as_u16())))
+        .with(
+            "plan",
+            telemetry::Value::Str(&plan.map_or_else(String::new, hex)),
+        )
+        .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// A recovery task that ended before it could name its own refusal (a panic
+/// in a build that unwinds, or a runtime shutting down): the runtime's words,
+/// logged once with the stage it died in, and returned for the reply.
+fn task_died(stage: &str, id: [u8; 32], dead: &tokio::task::JoinError) -> String {
+    let why = failure(dead);
+    note_blocked(StatusCode::SERVICE_UNAVAILABLE, stage, Some(id), &why);
+    why
 }
 
 /// Only an already-seeded, explicitly activated plan may resume at boot.
@@ -711,6 +831,13 @@ pub(crate) fn resume(site: Loaded) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fails the next `seeded` on this thread after its pointer journal is
+    /// open and before the pointer is appended: the crash window of D-2762.
+    static FAIL_BEFORE_POINTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journal, String> {
     if !site.store_root.is_dir() {
         return Err(
@@ -734,11 +861,12 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
         Journal::create_new(&path).map_err(failure)?
     };
     if let Some(units) = units {
-        for item in units {
-            if !journal.latest.contains_key(&item.key) {
-                journal.append(item).map_err(failure)?;
-            }
-        }
+        // ONE SYNC FOR THE WHOLE SEED, not one per window. D-1380.
+        let missing: Vec<_> = units
+            .into_iter()
+            .filter(|item| !journal.latest.contains_key(&item.key))
+            .collect();
+        journal.append_new(missing).map_err(failure)?;
     } else if !journal.latest.contains_key(&CONTROL) {
         return Err("recovery plan was not durably seeded; no vendor work is allowed".to_owned());
     }
@@ -759,7 +887,32 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
     } else {
         drop(Journal::create_new(&attempts).map_err(failure)?);
     }
-    let mut active = Journal::open(&active_path(site)).map_err(failure)?;
+    // THE FIRST POINTER IS STAGED, NEVER WRITTEN INTO AN EMPTY `active.bin`.
+    // `active_history` refuses an empty pointer file, and every entry point
+    // goes through it, so a crash or a failed append between creating that
+    // file and writing its first record used to wedge recovery for good. The
+    // first activation now writes its pointer under a staging name and links
+    // it into place only once the record is durable; `active.bin` either does
+    // not exist or holds a pointer. A staging file left by such a crash was
+    // never linked, so it never stood for an activation and is replaced.
+    // D-2762, recovery-2.
+    let active_file = active_path(site);
+    let first = !active_file.try_exists().map_err(failure)?;
+    let staging = root(site).join("active.bin.first");
+    let mut active = if first {
+        match std::fs::remove_file(&staging) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => return Err(failure(why)),
+        }
+        Journal::create_new(&staging).map_err(failure)?
+    } else {
+        Journal::open_existing(&active_file).map_err(failure)?
+    };
+    #[cfg(test)]
+    if FAIL_BEFORE_POINTER.with(std::cell::Cell::take) {
+        return Err("injected failure before the activation pointer was written".to_owned());
+    }
     let seal = journal.latest.get(&CONTROL).ok_or("missing plan seal")?;
     let pointer_body = if seal.body == CONTROL_BODY {
         hex(id)
@@ -777,6 +930,13 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
         .checked_add(1)
         .ok_or("recovery activation sequence overflow")?;
     active.append(pointer).map_err(failure)?;
+    if first {
+        drop(active);
+        // `hard_link`, not `rename`: it refuses rather than replaces an
+        // `active.bin` that appeared since the check above.
+        std::fs::hard_link(&staging, &active_file).map_err(failure)?;
+        std::fs::remove_file(&staging).map_err(failure)?;
+    }
     std::fs::File::open(root(site))
         .and_then(|file| file.sync_all())
         .map_err(failure)?;
@@ -784,6 +944,47 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
         .and_then(|file| file.sync_all())
         .map_err(failure)?;
     Ok(journal)
+}
+
+/// What a finished recovery worker answers, given the run's own answer and
+/// whether its terminal control record was written.
+///
+/// The control append's `?` used to return ITS error and drop the run's, so a
+/// plan that blocked on, say, a refused vendor window was reported as only
+/// "No space left on device", and the operator acted on the wrong cause. Both
+/// are kept now: the run's reason first, the record's failure after it. A run
+/// that succeeded but could not record its end is a failure, because the next
+/// process will not see it as finished. conc:recovery-6, D-2798.
+///
+/// The same finding was fixed on zero/next as [`with_terminal`] (recovery-6,
+/// D-2503); the merge keeps both. A run that failed and could not record its
+/// end reads through it ("<cause>; terminal state not recorded: <append
+/// error>"); a run that succeeded and could not record its end keeps the
+/// sentence above, which names that the recovery finished.
+fn terminal_outcome(
+    answer: Result<String, String>,
+    sealed: Result<(), String>,
+) -> Result<String, String> {
+    match (answer, sealed) {
+        (Ok(_), Err(record)) => Err(format!(
+            "the recovery finished, but its end could not be recorded: {record}"
+        )),
+        (answer, sealed) => with_terminal(answer, sealed),
+    }
+}
+
+/// The run's own answer and its terminal control append, combined so that a
+/// refused terminal append never hides the error that ended the run.
+///
+/// The usual reason `execute` fails mid-run is a refused plan-journal append,
+/// which poisons the journal; the terminal append then fails with "poisoned",
+/// and returning that alone replaced the root cause (a full disk, an I/O
+/// error) everywhere it is shown. recovery-6, D-2503.
+fn with_terminal<T>(answer: Result<T, String>, terminal: Result<(), String>) -> Result<T, String> {
+    match (answer, terminal) {
+        (Err(ran), Err(sealed)) => Err(format!("{ran}; terminal state not recorded: {sealed}")),
+        (answer, terminal) => terminal.and(answer),
+    }
 }
 
 async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, explicit: bool) {
@@ -798,20 +999,26 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
             .and_then(|file| file.sync_all())
             .map_err(failure)?;
         let answer = execute(&worker_site, &mut journal, &mut attempts, explicit).await;
-        let mut control = journal
+        let sealed = journal
             .latest
             .get(&CONTROL)
             .cloned()
-            .ok_or("missing plan seal")?;
-        control.status = if answer.is_ok() {
-            Status::Verified
-        } else {
-            Status::Blocked
-        };
-        journal.append(control).map_err(failure)?;
-        answer
+            .ok_or_else(|| "missing plan seal".to_owned())
+            .and_then(|mut control| {
+                control.status = if answer.is_ok() {
+                    Status::Verified
+                } else {
+                    Status::Blocked
+                };
+                journal.append(control).map_err(failure)
+            });
+        terminal_outcome(answer, sealed)
     });
     let result = worker.await.map_err(failure).and_then(|result| result);
+    // A BLOCKED RECOVERY ENDS AT ERROR, NOT INFO. It was Info either way, so
+    // `/logs?level=warn` hid every blocked plan and its reason. conc13-1,
+    // D-2595.
+    let level = recovery_end_level(&result);
     let text = result.unwrap_or_else(|why| format!("Recovery BLOCKED: {why}. Existing source data is preserved; this is not complete coverage."));
     crate::recovery_control::idle(&site);
     update(&site, |progress| {
@@ -822,10 +1029,20 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
         }
     });
     let _ = telemetry::emit(
-        &telemetry::Event::info("pull.recovery", "recovery ended")
+        &telemetry::Event::new(level, "pull.recovery", "recovery ended")
             .with("plan", telemetry::Value::Str(&hex(id)))
             .with("summary", telemetry::Value::Str(&text)),
     );
+}
+
+/// The level a recovery's end is logged at: Info when it verified, Error when
+/// it was blocked (conc13-1, D-2595).
+const fn recovery_end_level<T>(result: &Result<T, String>) -> telemetry::Level {
+    if result.is_ok() {
+        telemetry::Level::Info
+    } else {
+        telemetry::Level::Error
+    }
 }
 
 fn load_lifecycle(
@@ -870,7 +1087,7 @@ async fn execute(
     attempts: &mut Journal,
     explicit: bool,
 ) -> Result<String, String> {
-    let starting_rows = crate::pullrun::rows_now(site);
+    let starting_rows = crate::pullrun::rows_now_off_worker(site).await;
     let keys: Vec<_> = journal
         .order
         .iter()
@@ -917,6 +1134,7 @@ async fn execute(
         // Reconcile each exact window on explicit resume; do not trust an old
         // green checkpoint after independent store changes. Child budgets stay.
         let assessment = assess(site, &item.body, &lifecycle).await;
+        let mut refused = None;
         match assessment {
             Ok(mut found) => {
                 for day in &found.retry_days {
@@ -934,19 +1152,15 @@ async fn execute(
                 item.status = Status::Blocked;
                 item.diagnostics = 1;
                 note(&item.body, &why);
-                let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
-                site.journal()
-                    .append(&crate::audit::Record::member_failure(
-                        crate::audit::Scope::Spot,
-                        std::time::SystemTime::now(),
-                        symbol(&asked)?,
-                        asked.window,
-                        &why,
-                    ))
-                    .map_err(failure)?;
+                refused = Some(why);
             }
         }
-        journal.append(item).map_err(failure)?;
+        if let Some(why) = refused {
+            let body = item.body.clone();
+            record_blocked(journal, item, || audit_receipt(site, &body, &why))?;
+        } else {
+            journal.append(item).map_err(failure)?;
+        }
         update(site, |progress| {
             if let Some(feed) = progress.feeds.first_mut() {
                 feed.legs_done = feed.legs_done.saturating_add(1);
@@ -970,6 +1184,42 @@ async fn execute(
         "Reconciliation finished: {} stored windows verified against measured schedule; {} not applicable; {} unverified; {} missing/blocked. This is NOT complete historical coverage or point-in-time identity proof. Details: /pull/recovery.json and /audit. No source data was replaced.",
         counts.0, counts.1, counts.2, counts.3
     ))
+}
+
+/// The `/audit` receipt for a window the plan could not resolve.
+fn audit_receipt(site: &Loaded, body: &str, why: &str) -> Result<(), String> {
+    let asked = checked(body, ingest::today_ist().map_err(failure)?)?;
+    site.journal()
+        .append(&crate::audit::Record::member_failure(
+            crate::audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            symbol(&asked)?,
+            asked.window,
+            why,
+        ))
+        .map_err(failure)
+}
+
+/// Records a window the plan could not resolve: the plan's own Blocked item
+/// FIRST, then the `/audit` receipt `receipt` writes.
+///
+/// The receipt's `?` ran before the item's append, so an audit journal that
+/// refused the receipt (busy, full) aborted the plan with the window never
+/// marked Blocked in it: the next resume found it still Queued and the
+/// operator's plan said nothing about it. The receipt's failure still ends the
+/// pass, loudly and by name; it no longer erases the plan's record.
+/// conc:recauto-2, D-2798.
+fn record_blocked(
+    journal: &mut Journal,
+    item: Record,
+    receipt: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    journal.append(item).map_err(failure)?;
+    receipt().map_err(|why| {
+        format!(
+            "the window is recorded Blocked in the plan, but its /audit receipt was refused: {why}"
+        )
+    })
 }
 
 fn note(body: &str, why: &str) {
@@ -1004,6 +1254,63 @@ fn scope_key(asked: &SpotRequest) -> Result<String, String> {
     ))
 }
 
+/// The plan scope a stored attempt belongs to, read from its body alone.
+///
+/// The same key [`scope_key`] gives for a body [`checked`] accepts, but without
+/// asking the current build whether it still would: a symbol a later universe
+/// retired still names its own scope, so it can be skipped by every plan it is
+/// not part of (hunt-api-4, D-1584).
+fn stored_scope_key(body: &str) -> Result<String, String> {
+    let named = server::params(body, "member");
+    let [member] = named.as_slice() else {
+        return Err("recovery unit must name exactly one symbol".to_owned());
+    };
+    let member = brutex_core::symbol::Symbol::new(member.trim()).map_err(failure)?;
+    let rung = ingest::parse_granularity(&server::param(body, "granularity"))
+        .ok_or("recovery unit names no rung this build reads")?;
+    let from = ingest::parse_day_field(body, "from").map_err(failure)?;
+    Ok(format!(
+        "{}|{}|{}",
+        member.as_str(),
+        rung.dir(),
+        from.year_month().map_err(failure)?
+    ))
+}
+
+/// The shared ledger's rows in its stable first-appearance order.
+/// recovery-3, D-2503.
+///
+/// Named `pending_in_order` on zero/next; renamed in the merge with PR #74's
+/// [`pending_in_order`], which fixed the same finding (conc:recovery-3,
+/// D-2798) and now filters this walk.
+fn ledger_in_order(attempts: &Journal) -> impl Iterator<Item = &Record> {
+    attempts
+        .order
+        .iter()
+        .filter_map(|key| attempts.latest.get(key))
+}
+
+/// The attempts a reconcile pass retries, in the journal's first-appearance
+/// order.
+///
+/// `latest` is a `HashMap`, whose walk order is seeded per process, so walking
+/// it sent the same interrupted requests to the vendor in a different order on
+/// every run and wrote the plan journal's bytes in that order too: two runs
+/// over one store were not byte-identical (`CLAUDE.md` §3 rule 5). `order` is
+/// the journal's own replayed key order, stable across restarts. One `get` per
+/// key. conc:recovery-3, D-2798; recovery-3, D-2503.
+fn pending_in_order(attempts: &Journal, explicit: bool) -> Vec<Record> {
+    ledger_in_order(attempts)
+        .filter(|row| {
+            matches!(
+                row.status,
+                Status::Queued | Status::InFlight | Status::Unverified
+            ) || (explicit && row.status == Status::Blocked)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Reconcile requests interrupted after storage but before their receipt, even
 /// if the parent's gap has disappeared. A lost receipt never invents new-row
 /// counts or marks the old request clean. Explicit reactivation may retry a
@@ -1028,21 +1335,26 @@ async fn reconcile_pending(
             .or_default()
             .push(asked.window);
     }
-    let pending: Vec<_> = attempts
-        .latest
-        .values()
-        .filter(|row| {
-            matches!(
-                row.status,
-                Status::Queued | Status::InFlight | Status::Unverified
-            ) || (explicit && row.status == Status::Blocked)
-        })
-        .cloned()
-        .collect();
-    for mut item in pending {
+    // FIRST-SEEN ORDER, NOT HASH ORDER. `latest` is a `HashMap` with a
+    // per-process seed, so two runs over one attempts.bin reassessed and
+    // appended in different orders and wrote different bytes (§3 rule 5), and
+    // a STOP mid-loop left a different set unreconciled. `order` is the
+    // journal's own stable first-appearance order. recovery-3, D-2503;
+    // conc:recovery-3, D-2798.
+    for mut item in pending_in_order(attempts, explicit) {
         if stopping(site) {
             return Err("stopped while reconciling interrupted requests".to_owned());
         }
+        // THE PLAN'S SCOPE FIRST, THEN THIS BUILD'S RULES (hunt-api-4,
+        // D-1584). The ledger is shared and append-only, and `checked` asks the
+        // CURRENT F&O table and window limits — which a later build changes.
+        // Checked first, one row naming a since-retired symbol refused every
+        // plan's reconciliation, forever. A row outside this plan's scopes is
+        // now skipped before it is judged; a row inside them is judged as
+        // strictly as before.
+        let Some(windows) = scopes.get(&stored_scope_key(&item.body)?) else {
+            continue;
+        };
         let asked = checked(&item.body, today)?;
         if item.key != key(&item.body)
             || asked.window.days() != 1
@@ -1050,29 +1362,18 @@ async fn reconcile_pending(
         {
             return Err("shared attempt has invalid identity or non-day scope".to_owned());
         }
-        if !scopes.get(&scope_key(&asked)?).is_some_and(|windows| {
-            windows.iter().any(|window| {
-                asked.window.from() >= window.from() && asked.window.to() <= window.to()
-            })
-        }) {
+        if !windows
+            .iter()
+            .any(|window| asked.window.from() >= window.from() && asked.window.to() <= window.to())
+        {
             continue;
         }
         match assess(site, &item.body, lifecycle).await {
-            Ok(found) => {
-                item.missing = found.missing;
-                item.unverified = found.unverified;
-                item.diagnostics = item.diagnostics.saturating_add(found.evidence_issues);
-                item.status = if found.retry_days.is_empty() {
-                    // Complete source readback does not reconstruct a lost HTTP
-                    // receipt, so this state remains explicitly qualified.
-                    item.diagnostics = item.diagnostics.saturating_add(1);
-                    Status::Unverified
-                } else if item.attempts >= ATTEMPT_LIMIT {
-                    Status::Exhausted
-                } else {
-                    Status::Queued
-                };
-            }
+            Ok(found) => match reassessed(&item, &found) {
+                Some(next) => item = next,
+                // NOTHING NEW TO RECORD (W1-api4-6, D-1500).
+                None => continue,
+            },
             Err(why) => {
                 item.status = Status::Blocked;
                 item.diagnostics = item.diagnostics.saturating_add(1);
@@ -1082,6 +1383,42 @@ async fn reconcile_pending(
         append_attempt(journal, attempts, item)?;
     }
     Ok(())
+}
+
+/// What one pending attempt's reassessment records, or `None` when it would
+/// record nothing new.
+///
+/// **A rerun over an unchanged store appends nothing (W1-api4-6, D-1500).**
+/// `Unverified` stays pending so that a later change, such as a gap that
+/// reappears, is picked up. But every rerun that found the same facts added the
+/// evidence count and one more to `diagnostics` again and appended the record
+/// to both journals, so an idle store grew its journal and its diagnostic count
+/// on every pass, against `CLAUDE.md` §3 rule 5. An `Unverified` attempt that
+/// reassesses to the same missing and unverified quantities with no day to
+/// retry is now left as it is.
+fn reassessed(item: &Record, found: &Assessment) -> Option<Record> {
+    if found.retry_days.is_empty()
+        && item.status == Status::Unverified
+        && item.missing == found.missing
+        && item.unverified == found.unverified
+    {
+        return None;
+    }
+    let mut next = item.clone();
+    next.missing = found.missing;
+    next.unverified = found.unverified;
+    next.diagnostics = next.diagnostics.saturating_add(found.evidence_issues);
+    next.status = if found.retry_days.is_empty() {
+        // Complete source readback does not reconstruct a lost HTTP
+        // receipt, so this state remains explicitly qualified.
+        next.diagnostics = next.diagnostics.saturating_add(1);
+        Status::Unverified
+    } else if next.attempts >= ATTEMPT_LIMIT {
+        Status::Exhausted
+    } else {
+        Status::Queued
+    };
+    Some(next)
 }
 
 #[derive(Default, Debug)]
@@ -1503,12 +1840,26 @@ async fn retry_day(
         if stopping(site) {
             return Err("stopped before the next source request".to_owned());
         }
+        // EVERYTHING THAT CAN REFUSE BEFORE THE NETWORK RUNS BEFORE THE
+        // RESERVATION. A reserved attempt is durable and is never refunded, so
+        // a seat held by the autopilot, a hand pull or an F&O walk used to cost
+        // this day one of its three attempts with no request ever sent. The
+        // seat is taken here and handed to `recovery_spot`, which no longer
+        // takes its own; a busy seat refuses with the budget untouched.
+        // D-2761, recovery-1.
+        let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
+        let Some(seat) = site.autopilot.take_seat(asked.feed) else {
+            return Err(
+                "the selected feed already has an active pull; no attempt was reserved and \
+                 this day's retry budget is unchanged"
+                    .to_owned(),
+            );
+        };
         if !reserve(&mut item) {
             break;
         }
         append_attempt(journal, attempts, item.clone())?;
-        let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
-        let run = server::recovery_spot(site, &asked).await?;
+        let run = server::recovery_spot(site, &asked, seat).await?;
         item.committed = item
             .committed
             .saturating_add(run.total.bars_committed as u64);
@@ -1541,7 +1892,7 @@ async fn retry_day(
             !current.retry_days.is_empty(),
         );
         append_attempt(journal, attempts, item.clone())?;
-        let stored_rows = crate::pullrun::rows_now(site);
+        let stored_rows = crate::pullrun::rows_now_off_worker(site).await;
         update(site, |progress| {
             progress.rows_now = stored_rows;
             progress.retries = progress
@@ -1750,6 +2101,70 @@ fn page_html(
 mod tests {
     use super::*;
 
+    /// **A RERUN OVER AN UNCHANGED STORE RECORDS NOTHING (W1-api4-6, D-1500).**
+    ///
+    /// An `Unverified` attempt that reassesses to the same quantities with no
+    /// day to retry yields no record, however many evidence issues are seen
+    /// and however often. Any change still records: a different missing or
+    /// unverified count, a day to retry (queued, or exhausted at the limit),
+    /// and a first `Unverified` verdict from `Queued` or `InFlight`.
+    #[test]
+    fn an_unchanged_unverified_attempt_records_nothing_on_a_rerun() {
+        let mut held = record("target=equities&member=ABC".to_owned());
+        held.status = Status::Unverified;
+        held.missing = 3;
+        held.unverified = 2;
+        held.diagnostics = 7;
+        let same = Assessment {
+            missing: 3,
+            unverified: 2,
+            evidence_issues: u64::MAX,
+            ..Assessment::default()
+        };
+        for _ in 0..3 {
+            assert!(
+                reassessed(&held, &same).is_none(),
+                "nothing new, nothing appended"
+            );
+        }
+
+        let moved = Assessment { missing: 4, ..same };
+        let next = reassessed(&held, &moved).expect("a changed count records");
+        assert_eq!(next.missing, 4);
+        assert_eq!(next.status, Status::Unverified);
+        assert_eq!(next.diagnostics, u64::MAX, "saturates rather than wraps");
+
+        let day = Day::new(2024, 1, 2).expect("a day");
+        let retry = Assessment {
+            retry_days: vec![day],
+            ..Assessment {
+                missing: 3,
+                unverified: 2,
+                ..Assessment::default()
+            }
+        };
+        assert_eq!(
+            reassessed(&held, &retry).expect("retry").status,
+            Status::Queued
+        );
+        held.attempts = ATTEMPT_LIMIT;
+        assert_eq!(
+            reassessed(&held, &retry).expect("retry").status,
+            Status::Exhausted
+        );
+
+        for first in [Status::Queued, Status::InFlight] {
+            let mut fresh = record("target=equities&member=ABC".to_owned());
+            fresh.status = first;
+            let next = reassessed(&fresh, &Assessment::default()).expect("first verdict");
+            assert_eq!(next.status, Status::Unverified, "{first:?}");
+            assert_eq!(
+                next.diagnostics, 1,
+                "{first:?}: the lost receipt is counted once"
+            );
+        }
+    }
+
     fn date(year: u16, month: u8, day: u8) -> Day {
         Day::new(year, month, day).unwrap()
     }
@@ -1832,6 +2247,153 @@ mod tests {
         drop(journal);
         assert!(seeded(&site, key("unseeded"), None).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A FIRST ACTIVATION THAT DIES BEFORE ITS POINTER WEDGES NOTHING.**
+    /// D-2762, recovery-2.
+    ///
+    /// The failure is injected after the pointer journal is open and before
+    /// the pointer is appended, which is where a kill, ENOSPC or EIO landed.
+    /// Before D-2762 that left a 0-byte `active.bin`, which `active_history`
+    /// refuses, so every later start, prepare and boot resume refused forever.
+    #[test]
+    fn a_first_activation_that_fails_before_its_pointer_leaves_no_empty_pointer_file() {
+        let root = crate::scratch::path("recovery-first-pointer");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+
+        FAIL_BEFORE_POINTER.with(|fail| fail.set(true));
+        let failed = seeded(&site, id, Some(units.clone()));
+        assert!(failed.is_err(), "the injected failure must surface");
+        drop(failed);
+        assert!(
+            !active_path(&site).exists(),
+            "an activation with no pointer must not leave a pointer file"
+        );
+        active_history(&site).expect("a failed first activation must not wedge recovery");
+
+        let journal = seeded(&site, id, Some(units)).expect("the retry activates");
+        drop(journal);
+        let history = active_history(&site).expect("one recorded activation");
+        assert_eq!(history.latest[&id].attempts, 1, "activated exactly once");
+        assert!(
+            !super::root(&site).join("active.bin.first").exists(),
+            "the staging name does not outlive the install"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// What one start of an already-seeded plan replays, COUNTED rather than
+    /// argued. W1-api4-0 and W1-api4-1; D-0907; `docs/06-limits.md`.
+    ///
+    /// `start` runs `preflight_submission` and then `seeded`, the blocking half
+    /// of an activation; `drive` then opens `attempts.bin` once more. This test
+    /// runs the first two exactly as `start` does and records every replay the
+    /// journal module performs on this thread. Each of the three journals is
+    /// replayed three times, and every replay reads every record the file
+    /// holds -- so the cost of one press grows with the history, not with the
+    /// plan. This pins the stated limit: a change that removes a replay fails
+    /// here and has to correct the limit it states.
+    #[test]
+    fn one_start_replays_each_journal_three_times_and_every_record_each_time() {
+        use crate::recovery_journal::REPLAYS;
+        let dir = crate::scratch::path("recovery-replay-count");
+        std::fs::create_dir_all(&dir).unwrap();
+        let site = Site::load(&dir.join("missing-masters"), &dir);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        // The first activation, then history that every later press re-reads.
+        let mut journal = seeded(&site, id, Some(units.clone())).unwrap();
+        let mut row = units[0].clone();
+        for _ in 0..40 {
+            row.unchanged += 1;
+            journal.append(row.clone()).unwrap();
+        }
+        drop(journal);
+        let mut attempts = Journal::open_existing(&root(&site).join("attempts.bin")).unwrap();
+        for n in 0..25 {
+            attempts.append(record(format!("other-plan-{n}"))).unwrap();
+        }
+        drop(attempts);
+        let records = |path: PathBuf| std::fs::metadata(path).unwrap().len() / 1_024;
+        let plan_records = records(plan_path(&site, id));
+        let attempt_records = records(root(&site).join("attempts.bin"));
+        let active_records = records(active_path(&site));
+        assert!(plan_records > 40 && attempt_records == 25 && active_records == 1);
+
+        REPLAYS.with(|seen| seen.borrow_mut().clear());
+        let asked = Submission {
+            id,
+            units: units.clone(),
+            successor: None,
+            prepare_only: false,
+        };
+        preflight_submission(&site, &asked).unwrap();
+        drop(seeded(&site, id, Some(units)).unwrap());
+        let seen = REPLAYS.with(core::cell::RefCell::take);
+
+        let replays_of = |name: &str| -> Vec<u64> {
+            seen.iter()
+                .filter(|(file, _)| file == name)
+                .map(|(_, read)| *read)
+                .collect()
+        };
+        let plan_name = format!("{}.bin", hex(id));
+        assert_eq!(replays_of(&plan_name), vec![plan_records; 3], "{seen:?}");
+        assert_eq!(
+            replays_of("attempts.bin"),
+            vec![attempt_records; 3],
+            "{seen:?}"
+        );
+        assert_eq!(
+            replays_of("active.bin"),
+            vec![active_records; 3],
+            "{seen:?}"
+        );
+        assert_eq!(seen.len(), 9, "no other journal is replayed: {seen:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `preflight_plan`'s replay of `attempts.bin` binds no result, and it is
+    /// still the check that refuses a start once the shared ledger is gone.
+    /// D-0907 keeps that replay rather than dropping it as wasted work.
+    #[test]
+    fn preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing() {
+        let dir = crate::scratch::path("recovery-preflight-ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        let site = Site::load(&dir.join("missing-masters"), &dir);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        drop(seeded(&site, id, Some(units.clone())).unwrap());
+        let asked = Submission {
+            id,
+            units,
+            successor: None,
+            prepare_only: false,
+        };
+        preflight_submission(&site, &asked).unwrap();
+        std::fs::remove_file(root(&site).join("attempts.bin")).unwrap();
+        let why = preflight_submission(&site, &asked).unwrap_err();
+        assert!(
+            why.contains("shared recovery attempt history is unavailable; budgets cannot be reset"),
+            "{why}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -1970,10 +2532,474 @@ mod tests {
             events
                 .iter()
                 .any(|event| crate::emitted::says(event, "plan", &hex(id))
-                    && crate::emitted::says(event, "summary", "Recovery BLOCKED"))
+                    && crate::emitted::says(event, "summary", "Recovery BLOCKED")
+                    // conc13-1, D-2595: a blocked end is Error, not Info, so
+                    // `/logs?level=warn` shows it. Info on the old code.
+                    && event.level == telemetry::Level::Error)
+        );
+        assert_eq!(
+            recovery_end_level(&Ok::<(), String>(())),
+            telemetry::Level::Info
+        );
+        assert_eq!(
+            recovery_end_level(&Err::<(), String>(String::new())),
+            telemetry::Level::Error
         );
         assert!(!site.run.lock().unwrap().as_ref().unwrap().running());
         assert!(!root.exists());
+    }
+
+    /// **An unresolved window is recorded Blocked in the plan even when its
+    /// `/audit` receipt is refused.** conc:recauto-2, D-2798.
+    #[test]
+    fn a_refused_audit_receipt_does_not_erase_the_blocked_window() {
+        let root = crate::scratch::path("recovery-blocked-first");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut item = record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "scan",
+        ));
+        item.status = Status::Blocked;
+        let key = item.key;
+        let why = record_blocked(&mut plan, item.clone(), || {
+            Err("audit journal is busy".to_owned())
+        })
+        .unwrap_err();
+        assert!(
+            why.contains("recorded Blocked") && why.ends_with("audit journal is busy"),
+            "{why}"
+        );
+        assert_eq!(
+            plan.latest.get(&key).map(|row| row.status),
+            Some(Status::Blocked)
+        );
+        drop(plan);
+        let reopened = Journal::open(&root.join("plan.bin")).unwrap();
+        assert_eq!(
+            reopened.latest.get(&key).map(|row| row.status),
+            Some(Status::Blocked),
+            "durably, before the receipt was tried"
+        );
+        drop(reopened);
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut ran = false;
+        record_blocked(&mut plan, item, || {
+            ran = true;
+            Ok(())
+        })
+        .expect("a written receipt");
+        assert!(ran, "the receipt is still written");
+        drop(plan);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A failed terminal record never replaces the reason a recovery ended.**
+    /// conc:recovery-6, D-2798. All four combinations.
+    #[test]
+    fn a_failed_terminal_record_keeps_the_reason_the_run_ended() {
+        let ok = || Ok::<String, String>("Recovery complete".to_owned());
+        let blocked = || Err::<String, String>("vendor refused a window".to_owned());
+        let full = || Err::<(), String>("No space left on device".to_owned());
+        assert_eq!(terminal_outcome(ok(), Ok(())), ok());
+        assert_eq!(terminal_outcome(blocked(), Ok(())), blocked());
+        let both = terminal_outcome(blocked(), full()).unwrap_err();
+        assert!(
+            both.starts_with("vendor refused a window;")
+                && both.ends_with("No space left on device"),
+            "{both}"
+        );
+        let unrecorded = terminal_outcome(ok(), full()).unwrap_err();
+        assert!(
+            unrecorded.contains("could not be recorded")
+                && unrecorded.ends_with("No space left on device"),
+            "{unrecorded}"
+        );
+    }
+
+    /// **A reconcile pass retries interrupted attempts in the journal's own
+    /// order, every run.** conc:recovery-3, D-2798. Thirty-two keys make a
+    /// `HashMap` walk that matches insertion order vanishingly unlikely, and
+    /// every status is covered: only `Queued`, `InFlight` and `Unverified` are
+    /// retried, `Blocked` only on an explicit reactivation, and a key appended
+    /// twice keeps its first position with its latest state.
+    #[test]
+    fn interrupted_attempts_are_reconciled_in_journal_order() {
+        let root = crate::scratch::path("recovery-pending-order");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut attempts = Journal::open(&root.join("attempts.bin")).unwrap();
+        let statuses = [
+            Status::Queued,
+            Status::InFlight,
+            Status::Unverified,
+            Status::Blocked,
+            Status::Verified,
+            Status::Exhausted,
+        ];
+        let mut written = Vec::new();
+        for day in 1..=32_u32 {
+            let mut row = record(canonical(
+                "NIFTY",
+                "1min",
+                Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+                &format!("gap{day}"),
+            ));
+            row.status = statuses[day as usize % statuses.len()];
+            attempts.append(row.clone()).unwrap();
+            written.push(row);
+        }
+        // The first key again, now Unverified: its place stays first.
+        let mut first = written[0].clone();
+        first.status = Status::Unverified;
+        attempts.append(first.clone()).unwrap();
+        written[0] = first;
+        for explicit in [false, true] {
+            let want: Vec<[u8; 32]> = written
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.status,
+                        Status::Queued | Status::InFlight | Status::Unverified
+                    ) || (explicit && row.status == Status::Blocked)
+                })
+                .map(|row| row.key)
+                .collect();
+            let got: Vec<[u8; 32]> = pending_in_order(&attempts, explicit)
+                .iter()
+                .map(|row| row.key)
+                .collect();
+            assert_eq!(got, want, "explicit={explicit}");
+            assert!(!got.is_empty());
+        }
+        assert_eq!(
+            pending_in_order(&attempts, false)[0].status,
+            Status::Unverified,
+            "the latest state of a key, at its first position"
+        );
+        drop(attempts);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// sobs-8, D-4448: A RECOVERY TASK THAT DIES BEFORE IT CAN NAME ITS
+    /// REFUSAL IS NAMED FOR IT, with the runtime's words, the stage and the
+    /// plan, and the same words go back to the reply.
+    #[tokio::test]
+    async fn a_recovery_task_that_dies_is_named_with_its_stage() {
+        let _installed = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        let dead = tokio::spawn(async { panic!("sobs8 task panic") })
+            .await
+            .expect_err("the task panicked");
+        let why = task_died("activation", [0x5a; 32], &dead);
+        assert!(why.contains("sobs8 task panic"), "{why}");
+        let logged: Vec<_> = crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+            .into_iter()
+            .filter(|event| crate::emitted::says(event, "why", "sobs8 task panic"))
+            .collect();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let event = &logged[0];
+        assert_eq!(event.level, telemetry::Level::Error);
+        assert!(crate::emitted::says(event, "stage", "activation"));
+        assert!(crate::emitted::counts(event, "status", 503));
+        assert!(crate::emitted::says(event, "plan", &hex([0x5a; 32])));
+    }
+
+    /// sobs-8, D-4448: EVERY REFUSED RECOVERY NAMES ITS REASON IN THE LOG, not
+    /// only in the reply and in memory: a body that is not a plan (Warn), a
+    /// held run slot (Warn), a preflight the history refuses (Error), a
+    /// refused preparation (Error) and a BLOCKED activation (Error), each one
+    /// `pull.recovery` "recovery blocked" carrying its stage, plan and why.
+    #[tokio::test]
+    async fn every_refused_recovery_names_its_stage_and_reason_in_the_log() {
+        let _installed = crate::emitted::sink();
+        a_bad_body_and_a_held_slot_are_logged_at_warn().await;
+        a_refused_preflight_and_preparation_are_logged_at_error().await;
+        a_blocked_activation_is_logged_at_error().await;
+    }
+
+    /// Every "recovery blocked" line at `stage` written since `from`.
+    fn blocked(from: u64, stage: &str) -> Vec<telemetry::Record> {
+        crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+            .into_iter()
+            .filter(|event| crate::emitted::says(event, "stage", stage))
+            .collect()
+    }
+
+    /// A body that is not a plan (400), and a held run slot (409): both Warn.
+    async fn a_bad_body_and_a_held_slot_are_logged_at_warn() {
+        // A BODY THAT IS NOT A PLAN: 400, Warn, no plan named.
+        let root = crate::scratch::path("sobs8-request");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let from = crate::emitted::mark();
+        let (status, _, answer) =
+            start(State(Loaded::clone(&site)), "invalid=sobs8".to_owned()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        let request: Vec<_> = blocked(from, "request")
+            .into_iter()
+            .filter(|event| crate::emitted::counts(event, "status", 400))
+            .collect();
+        assert!(!request.is_empty(), "the malformed body is logged");
+        assert!(
+            request
+                .iter()
+                .all(|event| event.level == telemetry::Level::Warn)
+        );
+        let reply: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert!(
+            request.iter().any(|event| crate::emitted::says(
+                event,
+                "why",
+                reply["why"].as_str().unwrap()
+            )),
+            "the reply's own reason is the logged one: {request:?}"
+        );
+
+        // A HELD RUN SLOT: 409, Warn, the plan named.
+        let scratch = crate::scratch::path("sobs8-slot");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let site = Loaded::new(Site::load(&scratch.join("missing-masters"), &scratch));
+        let selected = leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30));
+        let body = encoded_leg(&selected);
+        let id = scope_identity(&plan(vec![selected], today()).unwrap());
+        claim(&site, None).unwrap();
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        let slot = blocked(from, "slot");
+        assert!(
+            slot.iter()
+                .any(|event| event.level == telemetry::Level::Warn
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(event, "why", "already owns the run slot")),
+            "{slot:?}"
+        );
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// A preflight the saved history refuses (503), and a preparation whose
+    /// predecessor was never activated here (503): both Error.
+    async fn a_refused_preflight_and_preparation_are_logged_at_error() {
+        // A PREFLIGHT THE SAVED HISTORY REFUSES: 503, Error.
+        let (scratch, site, body, id) = missing_fixture("sobs8-preflight");
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), body.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let preflight = blocked(from, "preflight");
+        assert!(
+            preflight
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::counts(event, "status", 503)
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(event, "why", "original window states")),
+            "{preflight:?}"
+        );
+
+        // A PREPARATION REFUSED: the predecessor was never activated here.
+        let request = successor_form(&body, [3; 32], [4; 32], true);
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(
+            !blocked(from, "request").is_empty(),
+            "a successor naming another scope is refused as a request: {answer}"
+        );
+        let request = successor_form(&body, id, [4; 32], true);
+        let fresh = crate::scratch::path("sobs8-prepare");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let empty = Loaded::new(Site::load(&fresh.join("missing-masters"), &fresh));
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&empty)), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let prepare = blocked(from, "prepare");
+        assert!(
+            prepare
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::says(
+                        event,
+                        "why",
+                        "not recorded in active recovery history"
+                    )),
+            "{prepare:?}"
+        );
+        std::fs::remove_dir_all(&fresh).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// An activation whose source store is not a directory: Error, and nothing
+    /// is created.
+    async fn a_blocked_activation_is_logged_at_error() {
+        // A BLOCKED ACTIVATION: the source store is not a directory.
+        let gone = crate::scratch::path("sobs8-activation");
+        let site = Loaded::new(Site::load(
+            &gone.join("missing-masters"),
+            &gone.join("absent"),
+        ));
+        let id = key("sobs8 activation fixture");
+        let from = crate::emitted::mark();
+        let refused = activate_durable(Loaded::clone(&site), id, Some(Vec::new()))
+            .await
+            .expect_err("a missing store root blocks the activation");
+        let activation = blocked(from, "activation");
+        assert!(
+            activation
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(
+                        event,
+                        "why",
+                        "configured source store is unavailable"
+                    )),
+            "{activation:?}"
+        );
+        assert!(
+            refused.contains("configured source store is unavailable"),
+            "{refused}"
+        );
+        assert!(!gone.join("absent").exists(), "nothing was created");
+    }
+
+    /// audit-20261003 hunt-api-4, D-1584: ONE RETIRED SYMBOL CANNOT BLOCK
+    /// EVERY PLAN. The shared attempt ledger holds an `Unverified` row naming a
+    /// symbol this build's F&O table does not carry (a later build retired it;
+    /// D-0682 shows the table does change). A plan for NIFTY, in another month
+    /// and rung, must not be refused because of it: rows are filtered by plan
+    /// scope BEFORE the current build's rules are asked about them.
+    #[tokio::test]
+    async fn a_retired_symbol_outside_the_plan_does_not_block_it() {
+        let root = crate::scratch::path("recovery-retired-symbol");
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        plan.append(record(canonical(
+            "NIFTY",
+            "1day",
+            Window::new(date(2026, 8, 30), date(2026, 8, 30)).unwrap(),
+            "scan",
+        )))
+        .unwrap();
+        let retired = canonical(
+            "ZZRETIRED",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "gap",
+        );
+        let now = ingest::today_ist().unwrap();
+        assert!(
+            checked(&retired, now).is_err(),
+            "the fixture names a symbol this build refuses"
+        );
+        let mut attempts = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        let mut stale = record(retired);
+        stale.status = Status::Unverified;
+        attempts.append(stale).unwrap();
+        let ran = execute(&site, &mut plan, &mut attempts, false).await;
+        if let Err(why) = &ran {
+            assert!(
+                !why.contains("recovery requires explicit F&O spot members"),
+                "a row outside this plan blocked it: {why}"
+            );
+        }
+        drop((plan, attempts));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A PENDING DAY OUTSIDE EVERY PLAN WINDOW IS LEFT ALONE.** The scope
+    /// key is a month, so a plan for 10..12 August shares it with a pending
+    /// attempt for the 7th or the 13th. Only a day inside one of the plan's
+    /// windows is reassessed; one either side of it is skipped and appends
+    /// nothing, while a day inside does. G18-api-11.
+    #[tokio::test]
+    async fn a_pending_day_outside_the_plan_window_is_not_reassessed() {
+        let root = crate::scratch::path("recovery-outside-window");
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let scan = record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(date(2026, 8, 10), date(2026, 8, 12)).unwrap(),
+            "scan",
+        ));
+        let keys = vec![scan.key];
+        plan.append(scan).unwrap();
+        let day = |d: u8| {
+            record(canonical(
+                "NIFTY",
+                "1min",
+                Window::new(date(2026, 8, d), date(2026, 8, d)).unwrap(),
+                "gap",
+            ))
+        };
+        let path = super::root(&site).join("attempts.bin");
+        let mut attempts = Journal::open(&path).unwrap();
+        // The day before the window opens and the day after it closes.
+        attempts.append(day(7)).unwrap();
+        attempts.append(day(13)).unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+        reconcile_pending(&site, &mut plan, &mut attempts, &keys, &None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "a day outside the plan's window was reassessed"
+        );
+        assert_eq!(attempts.latest[&day(7).key], day(7));
+        assert_eq!(attempts.latest[&day(13).key], day(13));
+        // The control: a day inside the window, its first and its last, IS.
+        for inside in [10, 12] {
+            attempts.append(day(inside)).unwrap();
+            let before = std::fs::metadata(&path).unwrap().len();
+            reconcile_pending(&site, &mut plan, &mut attempts, &keys, &None, false)
+                .await
+                .unwrap();
+            assert!(
+                std::fs::metadata(&path).unwrap().len() > before,
+                "day {inside} lies inside the window and is reassessed"
+            );
+        }
+        drop((plan, attempts));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The scope read from a stored body is the scope the checked parse gives,
+    /// so filtering on it first changes which rows are skipped and nothing else.
+    #[test]
+    fn a_stored_scope_matches_the_checked_scope() {
+        for (sym, dir) in [("NIFTY", "1day"), ("M&M", "1min")] {
+            let body = canonical(
+                sym,
+                dir,
+                Window::new(date(2026, 8, 3), date(2026, 8, 3)).unwrap(),
+                "gap",
+            );
+            assert_eq!(
+                stored_scope_key(&body).unwrap(),
+                scope_key(&checked(&body, today()).unwrap()).unwrap()
+            );
+        }
+        let retired = canonical(
+            "ZZRETIRED",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "gap",
+        );
+        assert!(checked(&retired, today()).is_err());
+        assert!(
+            stored_scope_key(&retired)
+                .unwrap()
+                .starts_with("ZZRETIRED|1min|")
+        );
+        assert!(stored_scope_key("target=fno&granularity=1min&from=2026-07-01").is_err());
     }
 
     #[test]
@@ -2005,6 +3031,306 @@ mod tests {
         drop(journal);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    /// PENDING ROWS ARE RECONCILED IN THE LEDGER'S OWN ORDER. recovery-3,
+    /// D-2503.
+    ///
+    /// The rows came from `HashMap::values`, whose order is per-process
+    /// random, so two runs over the same ledger wrote different bytes. Rows
+    /// appended in a known order must come back in exactly that order.
+    #[test]
+    fn pending_rows_come_back_in_first_seen_order() {
+        let root = crate::scratch::path("recovery-pending-order");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut attempts = Journal::open(&root.join("attempts.bin")).unwrap();
+        let bodies: Vec<String> = (1..=28u8)
+            .map(|day| {
+                canonical(
+                    "NIFTY",
+                    "1day",
+                    Window::new(date(2026, 2, day), date(2026, 2, day)).unwrap(),
+                    "gap",
+                )
+            })
+            .collect();
+        for body in &bodies {
+            attempts.append(record(body.clone())).unwrap();
+        }
+        let seen: Vec<&str> = ledger_in_order(&attempts)
+            .map(|row| row.body.as_str())
+            .collect();
+        let wanted: Vec<&str> = bodies.iter().map(String::as_str).collect();
+        assert_eq!(seen, wanted);
+        drop(attempts);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// AN EXPLICIT START PERSISTS ITS CLEAR WITHOUT HOLDING THE RUN SLOT.
+    /// recovery-5, D-2504.
+    ///
+    /// The clear's journal open, append and fsyncs ran under `site.run`, so
+    /// every slot reader waited on the device. The slot is only READ before
+    /// the clear (and released at once); the guard that installs the claim is
+    /// taken after it. Read from `claim`'s own source, because a test cannot
+    /// hold the slot without also blocking the read that must precede the
+    /// clear. The behaviour is pinned beside it: the clear lands, the claim
+    /// succeeds once, and a second explicit claim is refused before it
+    /// persists anything.
+    #[test]
+    fn an_explicit_claim_persists_its_clear_outside_the_run_lock() {
+        let body = include_str!("recovery.rs")
+            .split_once("\nfn claim(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        let cleared = body.find("clear_stop(site, id)").unwrap();
+        let guarded = body.find("let mut held").unwrap();
+        assert!(
+            cleared < guarded,
+            "the clear must be persisted before the run guard is taken"
+        );
+        let root = crate::scratch::path("recovery-claim-unlocked");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let id = key("claim-unlocked");
+        claim(&site, Some((id, true))).unwrap();
+        assert!(!crate::recovery_control::is_stopped(&site, id).unwrap());
+        assert!(slot_running(&site));
+        let twice = claim(&site, Some((id, true))).unwrap_err();
+        assert!(twice.contains("not started twice"), "{twice}");
+        let implicit = claim(&site, None).unwrap_err();
+        assert!(implicit.contains("not started twice"), "{implicit}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// P1-04-04, D-2592. The request below activates a successor that was
+    /// never prepared, so its preflight refuses 503. On the old code the
+    /// preflight (an O(history) replay) ran BEFORE the slot was looked at, so
+    /// with a pull holding the slot this press answered that 503; it now
+    /// answers 409 before any replay, writes nothing, and once the slot is
+    /// free the same press reaches the preflight again (503), proving the
+    /// order rather than a changed answer.
+    #[tokio::test]
+    async fn a_recovery_press_while_a_pull_runs_is_refused_before_any_journal_replay() {
+        let (scratch, site, body, old) = missing_fixture("recovery-busy-preflight");
+        let request = successor_form(&body, old, [53; 32], false);
+        let before = history_bytes(&site);
+        *site.run.lock().unwrap() = Some(Progress::claimed());
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert!(answer.contains("already owns the run slot"), "{answer}");
+        assert!(answer.contains(r#""started":false"#), "{answer}");
+        assert_eq!(
+            history_bytes(&site),
+            before,
+            "a refused press writes nothing"
+        );
+        // A FINISHED run in the slot is not a running one: the probe admits.
+        site.run.lock().unwrap().as_mut().unwrap().finished = Some(String::from("done"));
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert!(!answer.contains("already owns the run slot"), "{answer}");
+        *site.run.lock().unwrap() = None;
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert_eq!(history_bytes(&site), before, "the preflight writes nothing");
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// A REFUSED TERMINAL APPEND KEEPS THE ERROR THAT ENDED THE RUN.
+    /// recovery-6, D-2503.
+    #[test]
+    fn a_refused_terminal_append_keeps_the_root_cause() {
+        let both = with_terminal::<()>(
+            Err("No space left on device".to_owned()),
+            Err("journal is poisoned".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            both,
+            "No space left on device; terminal state not recorded: journal is poisoned"
+        );
+        assert_eq!(
+            with_terminal::<()>(Err("ran".to_owned()), Ok(())),
+            Err("ran".to_owned())
+        );
+        assert_eq!(
+            with_terminal(Ok(1), Err("sealed".to_owned())),
+            Err("sealed".to_owned())
+        );
+        assert_eq!(with_terminal(Ok(7), Ok(())), Ok(7));
+    }
+
+    /// **A BUSY SEAT COSTS NO ATTEMPT.** D-2761, recovery-1.
+    ///
+    /// The feed's seat is held, as an autopilot tick, a hand `/pull/spot` or an
+    /// F&O walk holds it. `retry_day` must refuse BEFORE it reserves: before
+    /// D-2761 it made an `InFlight` attempt durable in the shared ledger and
+    /// only then met the seat, so each collision spent one of the day's three
+    /// never-refunded attempts with no request sent.
+    #[tokio::test]
+    async fn a_held_feed_seat_refuses_retry_day_without_charging_its_budget() {
+        let root = crate::scratch::path("recovery-seat-before-reserve");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut attempts = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        let day = date(2026, 8, 27);
+        let parent = canonical("NIFTY", "1day", Window::new(day, day).unwrap(), "scan");
+        let feed = checked(&parent, today()).unwrap().feed;
+
+        let held = site.autopilot.take_seat(feed).expect("the seat is free");
+        let refused = retry_day(&site, &mut plan, &mut attempts, &parent, day, &None).await;
+        drop(held);
+
+        let why = refused.expect_err("a held seat must refuse");
+        assert!(why.contains("no attempt was reserved"), "{why}");
+        assert!(
+            attempts.latest.is_empty(),
+            "the shared budget was charged for a request never sent: {:?}",
+            attempts
+                .latest
+                .values()
+                .map(|row| row.attempts)
+                .collect::<Vec<_>>()
+        );
+        assert!(plan.latest.is_empty(), "nothing was reserved in the plan");
+        drop((plan, attempts));
+        let reopened = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        assert!(reopened.latest.is_empty(), "nothing durable was charged");
+        assert!(
+            site.autopilot.take_seat(feed).is_some(),
+            "the refusal leaves no seat behind"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A BLOCKED SOURCE REQUEST IS AUDITED, RECORDED AT ITS OWN STATUS, AND
+    /// STOPS THE DAY.** R1286-api-06, D-4134.
+    ///
+    /// With the seat free, `retry_day` reserves one attempt and hands the seat
+    /// to `server::recovery_spot`, which runs the broker path and appends the
+    /// audit record BEFORE it answers. A test site may never reach a live
+    /// broker, so that run is blocked with `503`: the audit journal gains
+    /// exactly one `Spot` record refusing this day's window, the attempt is
+    /// recorded `Blocked` at `503`, and the day stops with the
+    /// budget-preserving refusal. A `recovery_spot` that answered an empty run
+    /// without running the broker path would leave no audit record, record a
+    /// `502` nobody received, and treat the empty receipt as a clean one.
+    #[tokio::test]
+    async fn a_blocked_source_request_is_audited_and_stops_the_day() {
+        let root = crate::scratch::path("recovery-spot-audited");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut attempts = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        let day = date(2026, 8, 27);
+        let parent = canonical("NIFTY", "1day", Window::new(day, day).unwrap(), "scan");
+        let audit = crate::audit::Journal::at(&site.store_root);
+        assert_eq!(
+            audit.look(),
+            crate::audit::Log::Absent,
+            "premise: no record"
+        );
+
+        // BOUNDED, so a run that is not blocked fails here rather than waiting
+        // out `RETRY_WAIT` between attempts.
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            retry_day(&site, &mut plan, &mut attempts, &parent, day, &None),
+        )
+        .await
+        .expect("a blocked request answers at once, with no retry wait");
+        assert_eq!(
+            ran,
+            Err(
+                "source request blocked, stopped or credentials unavailable; inspect /audit; \
+                 budgets preserved"
+                    .to_owned()
+            )
+        );
+
+        assert_eq!(attempts.latest.len(), 1, "one unit was attempted");
+        let item = attempts.latest.values().next().unwrap().clone();
+        assert_eq!(item.status, Status::Blocked);
+        assert_eq!(item.attempts, 1, "one attempt reserved, none refunded");
+        assert_eq!(item.http_status, 503, "the run's own refusal status");
+        assert_eq!(item.committed, 0);
+        assert_eq!(plan.latest[&item.key], item, "the plan holds the same row");
+
+        let crate::audit::Log::Held { records, torn, .. } = audit.look() else {
+            panic!("the blocked run was not audited: {:?}", audit.look());
+        };
+        assert_eq!(
+            (records, torn),
+            (1, None),
+            "one whole record, no member failures"
+        );
+        let entry = audit.page(records, 0, 1).unwrap().remove(0);
+        let record = entry.decoded.unwrap();
+        assert_eq!(record.scope, crate::audit::Scope::Spot);
+        assert_eq!(record.outcome, crate::audit::Outcome::NotStarted);
+        assert!(
+            record
+                .note
+                .starts_with("this process may not reach a live broker"),
+            "{}",
+            record.note
+        );
+        let days = day.days_from_epoch();
+        assert_eq!((record.from_days, record.to_days), (days, days));
+        drop((plan, attempts));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A STAGING NAME THAT WILL NOT BE REMOVED REFUSES WITH ITS OWN REASON.**
+    /// R1286-api-07, D-4135.
+    ///
+    /// D-2762 removes a staging file a crashed first activation left behind,
+    /// and only `NotFound` — nothing there — is not a refusal. Here the staging
+    /// name is a DIRECTORY, which `remove_file` refuses with `EISDIR`. The
+    /// activation must stop on that sentence, before any pointer journal is
+    /// opened: carrying on would refuse later with `create_new`'s "File
+    /// exists", naming a symptom of the obstacle instead of the obstacle.
+    #[test]
+    fn a_staging_name_that_cannot_be_removed_refuses_with_its_own_reason() {
+        let root = crate::scratch::path("recovery-staging-directory");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        let staging = super::root(&site).join("active.bin.first");
+        std::fs::create_dir_all(&staging).unwrap();
+        let removal = std::fs::remove_file(&staging).unwrap_err();
+        assert_ne!(
+            removal.kind(),
+            std::io::ErrorKind::NotFound,
+            "premise: removing the staging name fails for another reason"
+        );
+
+        let refused = seeded(&site, id, Some(units)).map(drop);
+        assert_eq!(refused, Err(removal.to_string()));
+        assert!(staging.is_dir(), "the obstacle is named, not removed");
+        assert!(
+            !active_path(&site).exists(),
+            "no activation pointer was written"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2308,10 +3634,16 @@ mod tests {
     }
 
     fn missing_fixture(name: &str) -> (PathBuf, Loaded, String, [u8; 32]) {
+        missing_fixture_for(
+            name,
+            leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30)),
+        )
+    }
+
+    fn missing_fixture_for(name: &str, selected: Leg) -> (PathBuf, Loaded, String, [u8; 32]) {
         let scratch = crate::scratch::path(name);
         std::fs::create_dir(&scratch).unwrap();
         let site = Loaded::new(Site::load(&scratch.join("missing-masters"), &scratch));
-        let selected = leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30));
         let body = encoded_leg(&selected);
         let units = plan(vec![selected], today()).unwrap();
         let id = scope_identity(&units);
@@ -2330,6 +3662,126 @@ mod tests {
         drop(attempts);
         std::fs::remove_file(plan_path(&site, id)).unwrap();
         (scratch, site, body, id)
+    }
+
+    /// ORDERING A PLAN RANKS EACH WINDOW ONCE. D-1381.
+    ///
+    /// The rank parses and clones a body. Counted, not timed: before D-1381,
+    /// on this unsorted order, 4 rows took 12 ranks and 80 rows took 1,032.
+    #[test]
+    fn ordering_a_plan_ranks_each_window_exactly_once_at_any_size() {
+        for (from, windows) in [(date(2026, 7, 1), 2), (date(2023, 5, 1), 40)] {
+            let mut units = plan(
+                vec![
+                    leg("NIFTY", "1min", from, date(2026, 8, 31)),
+                    leg("NIFTY", "1day", from, date(2026, 8, 31)),
+                ],
+                today(),
+            )
+            .unwrap();
+            assert_eq!(units.len(), 2 * windows);
+            let ordered = units.clone();
+            // The order a seal check meets: `validate_seal` collects its rows
+            // from a `HashMap`. Ordering by the blake3 work key is a fixed,
+            // effectively unsorted permutation.
+            units.sort_by_key(|row| row.key);
+            assert_ne!(units, ordered);
+            let mut ranked = 0_usize;
+            scope_order(&mut units, |row| {
+                ranked += 1;
+                scope_rank(row)
+            });
+            assert_eq!(
+                ranked,
+                units.len(),
+                "one rank per window, {windows} windows"
+            );
+            assert_eq!(units, ordered, "same order, so the same plan identity");
+            assert_eq!(scope_identity(&units), scope_identity(&ordered));
+            assert!(
+                units[..windows]
+                    .iter()
+                    .all(|row| server::param(&row.body, "granularity") == "1day")
+            );
+        }
+        let mut none: Vec<Record> = Vec::new();
+        scope_order(&mut none, |_| panic!("an empty plan ranks nothing"));
+        assert!(none.is_empty());
+    }
+
+    /// SEEDING SYNCS ONCE FOR THE WHOLE PLAN, NOT ONCE PER WINDOW. D-1380.
+    ///
+    /// `POST /pull/recovery` waits for `seeded`, and each of its window rows
+    /// was its own `Journal::append`, which is one `sync_all`. A forty-window
+    /// plan therefore cost thirty-eight more record syncs than a two-window
+    /// one, up to 100,000 for the largest plan the bound admits. Counted on
+    /// this thread by `recovery_journal::counted`, never timed.
+    #[test]
+    fn seeding_a_plan_costs_the_same_record_syncs_for_two_windows_as_for_forty() {
+        let mut seen = Vec::new();
+        for (name, from) in [
+            ("recovery-seed-syncs-2", date(2026, 7, 1)),
+            ("recovery-seed-syncs-40", date(2023, 5, 1)),
+        ] {
+            let scratch = crate::scratch::path(name);
+            let _ = std::fs::remove_dir_all(&scratch);
+            std::fs::create_dir_all(&scratch).unwrap();
+            let site = Site::load(&scratch.join("missing-masters"), &scratch);
+            let units = plan(vec![leg("NIFTY", "1min", from, date(2026, 8, 31))], today()).unwrap();
+            let windows = units.len();
+            let id = scope_identity(&units);
+            crate::recovery_journal::counted::take_syncs();
+            let journal = seeded(&site, id, Some(units)).unwrap();
+            let syncs = crate::recovery_journal::counted::take_syncs();
+            assert_eq!(
+                journal.latest.len(),
+                windows + 1,
+                "every window and the seal"
+            );
+            drop(journal);
+            // A rerun seeds nothing new and still succeeds: idempotent.
+            let again = seeded(&site, id, None).unwrap();
+            assert_eq!(again.latest.len(), windows + 1);
+            drop(again);
+            seen.push((windows, syncs));
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+        assert_eq!((seen[0].0, seen[1].0), (2, 40), "{seen:?}");
+        // One batch, the seal, the activation pointer.
+        assert_eq!(seen[0].1, 3, "{seen:?}");
+        assert_eq!(seen[0].1, seen[1].1, "{seen:?}");
+    }
+
+    /// PREPARING A SUCCESSOR SYNCS ONCE FOR ITS WHOLE SCOPE. D-1380.
+    #[test]
+    fn preparing_a_successor_costs_the_same_record_syncs_for_two_windows_as_for_forty() {
+        let mut seen = Vec::new();
+        for (name, from) in [
+            ("recovery-prepare-syncs-2", date(2026, 7, 1)),
+            ("recovery-prepare-syncs-40", date(2023, 5, 1)),
+        ] {
+            let _ = std::fs::remove_dir_all(crate::scratch::path(name));
+            let (scratch, site, body, old) =
+                missing_fixture_for(name, leg("NIFTY", "1day", from, date(2026, 8, 31)));
+            let asked = submission(&successor_form(&body, old, [41; 32], true), today()).unwrap();
+            crate::recovery_journal::counted::take_syncs();
+            prepare_successor(&site, &asked).unwrap();
+            let syncs = crate::recovery_journal::counted::take_syncs();
+            let saved = crate::recovery_journal::snapshot(&plan_path(&site, asked.id)).unwrap();
+            assert_eq!(saved.latest.len(), asked.units.len() + 1);
+            validate_seal(&saved.latest, asked.id).unwrap();
+            // Idempotent: a repeat appends and syncs nothing.
+            let before = history_bytes(&site);
+            prepare_successor(&site, &asked).unwrap();
+            assert_eq!(crate::recovery_journal::counted::take_syncs(), 0);
+            assert_eq!(history_bytes(&site), before);
+            seen.push((asked.units.len(), syncs));
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+        assert_eq!((seen[0].0, seen[1].0), (2, 40), "{seen:?}");
+        // One batch and the seal.
+        assert_eq!(seen[0].1, 2, "{seen:?}");
+        assert_eq!(seen[0].1, seen[1].1, "{seen:?}");
     }
 
     fn history_bytes(site: &Site) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
@@ -2684,6 +4136,8 @@ mod tests {
         );
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         let id = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(&root).unwrap();
         let mut file = store::file::BarFile::open_or_create(&root, path, id).unwrap();
         let ts = (i64::from(date(2026, 8, 27).days_from_epoch()) * 86_400 + 9 * 3600 + 15 * 60
             - pull::session::IST_OFFSET_SECS)

@@ -3,7 +3,7 @@
 use super::*;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
 };
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -198,7 +198,7 @@ pub(crate) fn policy(side: Side) -> Result<ExitGridPolicyV1, String> {
         RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
         32,
         ExitGridSelectorV1::PessimisticTotal,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,
@@ -541,5 +541,162 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
     );
     assert_eq!(sessions.days.len(), 42);
     assert!(sessions.days.len().is_multiple_of(2));
+    Ok(())
+}
+
+/// D-1143, source shape: `produce_side` runs once per program and side and
+/// must seal its run against the catalogue's hoisted digests rather than hash
+/// the signal, minute and daily bars again. The answers are byte-identical, so
+/// only the source tells the two apart.
+#[test]
+fn produce_side_hashes_no_slice() {
+    let source = include_str!("boolean_candidate_v1.rs");
+    let at = source.find("fn produce_side<");
+    assert!(at.is_some(), "produce_side must exist");
+    let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+    let body = rest
+        .get(..rest.find("\n}\n").unwrap_or(rest.len()))
+        .unwrap_or_default();
+    assert!(body.contains("ExpressionExecutionRunV1::with_digests(&run, program, digests)"));
+    for hashing in [
+        "data_digest_with_daily_reference(",
+        "new_with_daily_reference(",
+        "ExecutionDigestsV1::of",
+    ] {
+        assert!(
+            !body.contains(hashing),
+            "produce_side must not call {hashing}"
+        );
+    }
+}
+
+/// o1runner-1 / D-1193: a catalogue attests its training slice once per
+/// resolution, not once per program x side. Three programs over two sides
+/// re-attested six times before the fix; they must attest exactly twice.
+#[test]
+fn a_catalogue_attests_its_training_slice_once_per_side() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    assert_eq!(programs.len(), 3);
+    let before = ATTESTATIONS.with(std::cell::Cell::get);
+    let first = fixture.produce("NIFTY", &programs)?;
+    let after = ATTESTATIONS.with(std::cell::Cell::get);
+    assert_eq!(first.programs(), programs);
+    assert_eq!(
+        after - before,
+        2,
+        "one attestation per side, not per program"
+    );
+    Ok(())
+}
+
+std::thread_local! {
+    /// Source digests [`super::slice_digests`] has
+    /// hashed on this thread.
+    pub(super) static DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// TRAINING attestations [`super::PricedSide`] has made on this thread.
+    pub(super) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A refusal the next TRAINING attestation on this thread returns instead
+    /// of attesting, once.
+    static ATTEST_FAULT: std::cell::RefCell<Option<Box<dyn FnOnce() -> String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>) {
+    counter.with(|count| count.set(count.get() + 1));
+}
+
+/// Source digests and TRAINING attestations made on this thread so far.
+pub(super) fn passes() -> (u64, u64) {
+    (
+        DIGESTS.with(std::cell::Cell::get),
+        ATTESTATIONS.with(std::cell::Cell::get),
+    )
+}
+
+/// cli's own passes over a TRAINING family's source: [`super::slice_digests`]
+/// hashes the three streams once and [`super::PricedSide`] attests each side's
+/// slice once, however many programs the catalog holds, where cli used to do
+/// both afresh for every program × side. W2-cli2-3.
+///
+/// On the merged tree the digest is [`super::slice_digests`] (D-1143), and
+/// `produce_side` seals each run with `ExpressionExecutionRunV1::with_digests`,
+/// so the runner pass W3-runner2-3 that D-0711 recorded as open is closed on
+/// this TRAINING path too; `produce_side_hashes_no_slice` pins that shape.
+#[test]
+fn cli_digests_a_familys_source_once_and_attests_each_side_once() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    let before = passes();
+    let family = fixture.produce("NIFTY", &programs)?;
+    let after = passes();
+    let priced = family
+        .rows()
+        .iter()
+        .map(|row| (row.program_index(), row.side() == Side::Short))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(priced.len(), 6, "three programs, both sides, all priced");
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 2));
+    Ok(())
+}
+
+/// The injected refusal, if one is installed, taken so it fires once.
+pub(super) fn attest_fault() -> Option<String> {
+    ATTEST_FAULT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|fault| fault())
+}
+
+/// **A TRAINING attestation that refuses is refused inside the first
+/// program's first-side attempt, not ahead of the program loop.** The first
+/// attestation is made to refuse. When it runs, the newest evidence attempt
+/// is that side's `Expression` attempt, still running; after the refusal that
+/// exact attempt is `Refused`, the family's own attempt is `Refused` after
+/// it, and only the one attestation was tried. An attestation hoisted ahead
+/// of the loop would run with the family's `BooleanCandidates` attempt newest
+/// and no `Expression` attempt begun. W2-cli2-3, D-0716.
+#[test]
+fn a_refused_attestation_is_recorded_inside_the_first_sides_attempt() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    let output = fixture.output.clone();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let during = std::rc::Rc::clone(&seen);
+    ATTEST_FAULT.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            *during.borrow_mut() = Some(crate::sweep_evidence::latest(&output, 1 << 20));
+            "injected TRAINING attestation refusal".to_owned()
+        }));
+    });
+    let before = passes();
+    let refused = fixture
+        .produce("NIFTY", &programs)
+        .err()
+        .ok_or("family completed")?;
+    assert!(
+        refused.contains("injected TRAINING attestation refusal"),
+        "{refused}"
+    );
+    assert_eq!(passes().1 - before.1, 1, "one attestation tried");
+    let side = seen
+        .borrow_mut()
+        .take()
+        .ok_or("the attestation never ran")??
+        .ok_or("no attempt existed when the attestation ran")?;
+    assert_eq!(
+        (side.operation, side.completion),
+        (Operation::Expression, Completion::Running)
+    );
+    let recorded =
+        crate::sweep_evidence::read_attempt(&fixture.output, side.identity, side.attempt, 1 << 20)?
+            .ok_or("the side's attempt vanished")?;
+    assert_eq!(recorded.completion, Completion::Refused);
+    let family =
+        crate::sweep_evidence::latest(&fixture.output, 1 << 20)?.ok_or("no family attempt")?;
+    assert_eq!(
+        (family.operation, family.completion),
+        (Operation::BooleanCandidates, Completion::Refused)
+    );
+    assert!(family.attempt < side.attempt);
     Ok(())
 }

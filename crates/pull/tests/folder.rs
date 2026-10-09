@@ -29,6 +29,9 @@
               that cannot panic cannot fail."
 )]
 
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -407,6 +410,7 @@ fn a_row_whose_timestamp_is_not_a_moment_refuses_the_whole_reach() {
             volume: 0,
             open_interest: None,
         }],
+        skipped: pull::fetch::DecodeSkips::default(),
     };
     let why = folder::reach_of(std::slice::from_ref(&member))
         .expect_err("i64::MIN is not a moment on any calendar");
@@ -441,11 +445,13 @@ fn the_reach_of_a_walk_is_one_pass_over_its_rows() {
             path: PathBuf::from("/bought/A.csv"),
             instrument: "A".to_owned(),
             rows: rows(&[later]),
+            skipped: pull::fetch::DecodeSkips::default(),
         },
         Member {
             path: PathBuf::from("/bought/B.csv"),
             instrument: "B".to_owned(),
             rows: rows(&[earlier]),
+            skipped: pull::fetch::DecodeSkips::default(),
         },
     ];
     let reach = folder::reach_of(&members).expect("both are moments");
@@ -604,6 +610,15 @@ fn the_second_rung_has_a_directory_and_folds_onward_to_the_coarser_ones() {
 #[cfg(unix)]
 #[test]
 fn an_unreadable_folder_halts_loudly_and_names_the_path() {
+    support::where_permission_binds(
+        "an_unreadable_folder_halts_loudly_and_names_the_path",
+        an_unreadable_folder_halts_loudly_and_names_the_path_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn an_unreadable_folder_halts_loudly_and_names_the_path_body() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = Scratch::new();
@@ -687,6 +702,32 @@ fn two_members_naming_one_instrument_are_counted_rather_than_hidden() {
     assert_eq!(census.collisions, 1, "and the duplicate is REPORTED");
 }
 
+/// CE-67: stems that differ only in case are ONE series at ingest, which keys by
+/// `Symbol::new` and folds ASCII case, so the census counts them as a collision.
+/// Before, `reliance` and `RELIANCE` reported `collisions: 0`.
+#[test]
+fn stems_that_differ_only_in_case_are_counted_as_a_collision() {
+    let members = vec![
+        member("RELIANCE", 1_664_768_701),
+        member("reliance", 1_664_509_500),
+        member("TCS", 1_664_768_701),
+    ];
+    let census = folder::census_of(&members, Vec::new()).expect("all are moments");
+    assert_eq!(
+        census.instruments,
+        vec![
+            "RELIANCE".to_owned(),
+            "TCS".to_owned(),
+            "reliance".to_owned()
+        ],
+        "names are listed as the files spell them"
+    );
+    assert_eq!(
+        census.collisions, 1,
+        "ingest merges the two, so it is REPORTED"
+    );
+}
+
 /// AN EMPTY FOLDER CENSUSES TO AN EMPTY LIST, NOT TO A REFUSAL.
 ///
 /// The same distinction `Reach::Empty` exists for: a folder that is there and
@@ -728,6 +769,7 @@ fn member(instrument: &str, stamp: i64) -> Member {
             volume: 0,
             open_interest: None,
         }],
+        skipped: pull::fetch::DecodeSkips::default(),
     }
 }
 
@@ -888,6 +930,33 @@ fn the_walk_descends_into_group_folders_rather_than_skipping_them() {
     };
     assert_eq!(files, 2);
     assert_eq!(earliest, day(2022, 9, 30));
+}
+
+/// CE-21, D-1769: a member whose folder is exactly one level inside the bound
+/// is walked — the GDFL shape `GFDLNFO_.../Futures/-I/` inside one wrapper
+/// folder, which the old bound of four skipped.
+#[test]
+fn a_gdfl_tree_inside_one_wrapper_folder_is_still_walked() {
+    let scratch = Scratch::new();
+    let root = scratch.dir("one-wrapper");
+    let mut at = root.clone();
+    for level in 1..archive::MAX_DEPTH {
+        at = at.join(format!("l{level}"));
+    }
+    assert_eq!(
+        archive::MAX_DEPTH - 1,
+        4,
+        "wrapper / GFDLNFO_... / Futures / -I is four folders below the root"
+    );
+    fs::create_dir_all(&at).expect("a wrapped tree");
+    fs::write(at.join("AT_LIMIT.csv"), TWO_DAYS).expect("a member at the limit");
+
+    let census = folder::read_census(&root, Feed::TrueData, Columns::TrueDataIndex)
+        .expect("the walk reads it");
+    assert!(
+        !census.instruments.is_empty(),
+        "a member one level inside the bound is walked"
+    );
 }
 
 /// THE DESCENT IS BOUNDED, and a member past the bound is COUNTED not dropped.

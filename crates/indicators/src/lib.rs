@@ -1,46 +1,61 @@
 //! Bars in, condition bits out.
 //!
-//! This is the crate `CLAUDE.md` §5 names and that did not exist until now, so
-//! **eleven of the vocabulary's 232 live positions become computable here and
-//! the other 221 remain names.** That ratio is the honest state of the engine and
-//! is stated first rather than buried.
+//! This is the crate `CLAUDE.md` §5 names, and every live position in the
+//! vocabulary is computed here. The table below is read by
+//! `tests/module_doc_counts.rs` and checked against the code: each row against
+//! the `positions()` of the source it names, the rows together against
+//! [`evaluator::Evaluator::positions`], and the summary against the live mask.
 //!
 //! # What is implemented
 //!
-//! | Module | Positions | Count |
+//! | Source | Positions | Count |
 //! |---|---|---:|
 //! | [`CurDayFib`] — the current-session Fibonacci ladder | 121–131 | 11 |
-//! | [`daily`] — the pivot ladder, the CPR, and yesterday's high and low | 7–18, 54–55, 60–62, 74–85, 178–189 | 41 |
+//! | [`daily`] — the pivot ladder, the CPR, CPR width and yesterday's high and low | 7–18, 54–55, 60–63, 74–85, 178–189, 274–275 | 44 |
+//! | [`fib`] — previous-day ladders both ways, and [`fib::Prev5`] | 20–24, 26–29, 69–71, 106–120 | 27 |
 //! | [`orb`] — the opening range at four windows | 86–105 | 20 |
-//! | [`fib`] — previous-day ladders, both directions | 19–29, 69–70, 106–109 | 15 |
-//! | [`fib::Prev5`] — the five completed sessions | 110–120 | 11 |
 //! | [`pattern`] — all 62 candlestick patterns | 153–177, 198–234 | 62 |
 //! | [`session`] — bar shape, prior run, day position, time of day, day type, opening gap | 30–51, 66–68 | 25 |
 //! | [`vwap`] — session VWAP and three sigma bands | 52–53, 143–152, 190–197 | 20 |
+//! | [`gap`] — the opening-gap Fibonacci ladder | 132–142 | 11 |
+//! | [`trend`] — EMA, `SuperTrend`, swings and market structure | 0–5, 56–59, 64–65, 72–73 | 14 |
+//! | [`evaluator`] — level crossings and their ordinals, from `vocab::table::CROSSINGS` | 280–364 | 85 |
+//! | [`evaluator`] — close against the day's open, structure in force | 276–279 | 4 |
+//! | [`evaluator`] — the weekday rows | 365–369 | 5 |
 //!
-//! **52 of the vocabulary'''s 232 live positions are computable. 180 remain names.**
+//! **328 of the vocabulary's 328 live positions are computable.** Every other position
+//! in the table is not live (`vocab::table::LIVE` excludes it) and is never set.
 //!
 //! # The three rules this crate exists to keep
 //!
 //! 1. **No look-ahead** (§3 rule 7). At bar *N* the evaluator may read bars
-//!    `0..=N` and nothing later. [`PastPrefix`] enforces it by removing the
-//!    future from the borrow, so a look-ahead read is a compile error rather than
-//!    a bounds check that might be skipped.
+//!    `0..=N` and nothing later. What holds it is the shape of the fold:
+//!    [`column::Column::build`] hands the evaluator one bar at a time and the
+//!    evaluator keeps its own running state, so a later bar is not in scope when
+//!    an earlier one folds. [`PastPrefix`] exists for a caller that indexes a
+//!    slice rather than streams it, and has no production caller today; it
+//!    enforces nothing on the fold. A new consumer that takes `&[Candle]` and
+//!    indexes into it inherits no protection from either (D-0212, D-0947).
 //! 2. **An anchor never includes the bar it is measured against.** The order is
 //!    reset, then emit, then fold — fused into [`CurDayFib::step`] so a caller
 //!    cannot transpose them. Folding first puts the close inside its own anchor
 //!    range by construction, which kills every rung outside that range.
-//! 3. **Integers only** (§7). Not one `f32` or `f64`, and no division on the
-//!    evaluation path: the rung test is cross-multiplied, so there is no rounding
-//!    policy for two platforms to disagree about.
+//! 3. **Integers only** (§7). Not one `f32` or `f64` on the evaluation path: the
+//!    rung tests are cross-multiplied, so there is no rounding policy for two
+//!    platforms to disagree about.
 //!
 //! # Cost
 //!
-//! Per bar: one session comparison, eleven cross-multiplied rung tests, two
-//! extreme updates. No loop whose length depends on the data, no allocation, and
-//! a fixed state whose size is asserted at compile time. Measured on the proof
-//! harness at 24.4 → 22.4 nanoseconds per bar across a 100× larger input — level,
-//! which is the evidence for §3 rule 4 rather than a claim about it.
+//! Per bar: every family above folds once into fixed-size state (the
+//! evaluator's size is asserted at compile time), and the crossing pass is
+//! `CROSSINGS.len()` iterations, a constant of this crate's vocabulary.
+//! `vwap::isqrt_i128` is bounded, not flat (`docs/06-limits.md` §51). Cited, not
+//! re-measured here: `C-I-01` holds one `Evaluator::step` level at 1.009× from
+//! 1,000 to 200,000 candles folded, and `C-I-05` read one `step` at 404,052 to
+//! 496,491 ps on an Apple M4 Pro laptop (`docs/06-limits.md`, the D-0690
+//! section). This header used to quote 24.4 → 22.4 ns per bar, a figure from
+//! when the crate computed the current-day ladder alone; it is not the cost of
+//! a bar today.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -80,8 +95,21 @@ pub const CURDAY_RUNGS: [i32; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 161
 /// offset rather than a second copy of the number. `crates/pull/src/fold.rs`
 /// records what a UTC-anchored grid cost when it shipped: every daily bar moved
 /// back one calendar day, and the store held 20 records stamped on a SUNDAY on
-/// an exchange that trades Monday to Friday. One definition, three crates.
+/// an exchange that ordinarily trades Monday to Friday. One definition, three
+/// crates.
 pub const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+
+/// Minutes from IST midnight to the regular NSE open, 09:15.
+///
+/// `pub` for the reason [`IST_OFFSET_MICROS`] is: `orb` counts its windows
+/// from it, and `runner`'s resampler and synthetic sessions anchor on it, so
+/// the sweep side of the graph holds ONE copy. `pull::session`,
+/// `pull::calendar` and `store::path` hold the same number on the other side,
+/// which this crate may not name (gate 22). `orb` and `runner::resample` each
+/// kept a private copy and `runner::synthetic` spelled it as a bare `555`,
+/// tied to nothing; `crates/cli/tests/one_session_open.rs` now holds this one
+/// to `pull::session::SESSION_OPEN_MINUTE`. D-3518.
+pub const SESSION_OPEN_MINUTE: i64 = 9 * 60 + 15;
 const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
 /// The IST calendar-day number for a timestamp.
@@ -121,9 +149,11 @@ pub fn ist_day(ts_micros: i64) -> i64 {
 /// store holds nothing before 1970, but a `%` here would be correct only by
 /// accident of the data.
 ///
-/// NSE trades Monday to Friday, and a Saturday or Sunday bar sets NOTHING
-/// rather than being folded into an adjacent day: `docs/03-vocabulary.md` §4 —
-/// an unknowable condition is unset, not guessed.
+/// NSE ordinarily trades Monday to Friday, and the vocabulary names those five
+/// days and no others. A Saturday or Sunday bar — six charter-recorded weekend
+/// sessions exist, below — sets NOTHING rather than being folded into an
+/// adjacent day, by design (D-0694): `docs/03-vocabulary.md` §4 — a condition
+/// the vocabulary cannot name is unset, not guessed.
 ///
 /// # The reason this used to give was false, and the charter says so
 ///
@@ -165,7 +195,8 @@ pub const fn weekday_bit(ts_micros: i64) -> Option<u16> {
         4 => Some(365), // Monday
         5 => Some(366), // Tuesday
         6 => Some(367), // Wednesday
-        // 2 and 3 are Saturday and Sunday: NSE does not trade them.
+        // 2 and 3 are Saturday and Sunday. NSE has traded six recorded weekend
+        // sessions (charter §3); no weekday bit names one, by design (D-0694).
         _ => None,
     }
 }
@@ -1757,13 +1788,29 @@ impl Candle {
         if let Err(why) = self.check() {
             return Err(why);
         }
-        // Containment above proves low <= open, close <= high and low <= high.
-        // Therefore all four prices are positive exactly when low is positive;
-        // repeating the other sign comparisons adds no distinct refusal case.
-        if self.low <= 0 {
+        // ALL FOUR, THROUGH ONE PREDICATE (Z1-slice08-F3, D-2542). This tested
+        // `low` alone and leaned on the containment clauses above, while the
+        // variant's doc says "all four fields are tested, not `low` alone" so
+        // the predicate does not depend on another clause being true. The
+        // four-way test lives in `any_price_not_positive`, which a test calls
+        // with containment broken, so each comparison is killable there.
+        if self.any_price_not_positive() {
             return Err(Corrupt::PriceNotPositive);
         }
         Ok(())
+    }
+
+    /// Is any of the four prices zero or below?
+    ///
+    /// The whole of [`Corrupt::PriceNotPositive`]'s test, with no dependency on
+    /// the ordering or containment clauses of [`Self::check`]: a record with
+    /// `low = 1` and `close = 0` answers `true` here although only a broken
+    /// containment could produce it. [`Self::check_evaluable`] and the
+    /// evaluator's own step both call this, so the two cannot drift.
+    /// Four compares, no loop.
+    #[must_use]
+    pub(crate) const fn any_price_not_positive(&self) -> bool {
+        self.open <= 0 || self.high <= 0 || self.low <= 0 || self.close <= 0
     }
 
     /// `high - low`, or `None` when the subtraction leaves `i64`.
@@ -1941,8 +1988,10 @@ mod candle {
     /// `open == 0 && high == 0 && low == 0 && close == 0` is true of that bar
     /// too. A guard that fires on one zero and a guard that fires only on four
     /// are different refusals, and nothing here could tell them apart. The
-    /// current check refuses any nonpositive low after containment proves it is
-    /// the minimum price; the fixtures still pin each zero-price case.
+    /// current check refuses any one nonpositive price of the four, through
+    /// `Candle::any_price_not_positive`, without leaning on containment
+    /// (Z1-slice08-F3, D-2542; it tested `low` alone for a while); the
+    /// fixtures still pin each zero-price case.
     ///
     /// # Each fixture isolates ONE zero, and `check` must still accept it
     ///
@@ -1982,6 +2031,60 @@ mod candle {
         }
     }
 
+    /// THE POSITIVITY PREDICATE TESTS ALL FOUR PRICES WITHOUT LEANING ON
+    /// CONTAINMENT.
+    ///
+    /// Z1-slice08-F3, D-2542. `Corrupt::PriceNotPositive`'s doc says all four
+    /// fields are tested so the predicate never depends on another clause; the
+    /// code tested `low` alone. Here containment is deliberately broken —
+    /// `low = 1, close = 0` is not a bar `check` admits — and the predicate is
+    /// asked directly. Every one of 5^4 = 625 assignments of
+    /// `{i64::MIN, -1, 0, 1, i64::MAX}` to the four prices is enumerated, so
+    /// each `||` and each `<=` is the only clause deciding at least one case.
+    /// On the old code there was no four-way predicate to call; the
+    /// `low`-only test it stood for answers `false` on `low = 1, close = 0`,
+    /// which the first assertion refuses.
+    #[test]
+    fn price_not_positive_does_not_depend_on_containment() {
+        let lone_zero_close = Candle::new(0, 1, 1, 1, 0, 0, OI_NULL);
+        assert!(lone_zero_close.any_price_not_positive());
+        let values = [i64::MIN, -1, 0, 1, i64::MAX];
+        let mut cases = 0_u32;
+        let mut refused = 0_u32;
+        for open in values {
+            for high in values {
+                for low in values {
+                    for close in values {
+                        let candle = Candle::new(0, open, high, low, close, 0, OI_NULL);
+                        let mut nonpositive = 0_u32;
+                        for price in [open, high, low, close] {
+                            if price <= 0 {
+                                nonpositive += 1;
+                            }
+                        }
+                        assert_eq!(
+                            candle.any_price_not_positive(),
+                            nonpositive > 0,
+                            "o{open} h{high} l{low} c{close}"
+                        );
+                        // And `check_evaluable` is exactly `check`, then this.
+                        let expected = match candle.check() {
+                            Err(why) => Err(why),
+                            Ok(()) if nonpositive > 0 => Err(Corrupt::PriceNotPositive),
+                            Ok(()) => Ok(()),
+                        };
+                        assert_eq!(candle.check_evaluable(), expected);
+                        cases += 1;
+                        refused += u32::from(nonpositive > 0);
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 625);
+        // Only the 2^4 all-positive assignments pass.
+        assert_eq!(refused, 625 - 16);
+    }
+
     /// The weekday map, checked against dates a reader can verify.
     ///
     /// 1970-01-01 was a Thursday, which is what makes `day % 7 == 0` Thursday.
@@ -2008,9 +2111,10 @@ mod candle {
         assert_eq!(crate::weekday_bit(start + 2 * day), Some(367), "wednesday");
         assert_eq!(crate::weekday_bit(start + 3 * day), Some(368), "thursday");
         assert_eq!(crate::weekday_bit(start + 4 * day), Some(369), "friday");
-        // NSE DOES NOT TRADE THESE, so nothing is set rather than a neighbour
-        // being guessed. A weekend bar in an equity series is a store defect and
-        // folding it into Friday would hide the only symptom of it.
+        // NO WEEKDAY BIT NAMES A WEEKEND, so nothing is set rather than a
+        // neighbour being guessed. NSE has traded six charter-recorded weekend
+        // sessions, and folding one into Friday would put a Saturday's bars in a
+        // Friday condition's numerator (D-0694).
         assert_eq!(crate::weekday_bit(start + 5 * day), None, "saturday");
         assert_eq!(crate::weekday_bit(start + 6 * day), None, "sunday");
         // And the week closes.

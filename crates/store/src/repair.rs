@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::file::{BarFile, StoreError, survey};
+use crate::file::{Admission, BarFile, StoreError, survey};
 use crate::flock::Flock;
 use crate::format::Bar;
 use crate::header::Header;
@@ -73,6 +73,10 @@ pub enum RepairError {
     Conflict,
     /// Reserved or unexplained files have no valid completion receipt.
     Incomplete(PathBuf),
+    /// Another publisher holds this ordinal's reservation right now. Nothing
+    /// was abandoned: retry the SAME ordinal once it finishes (store2-1,
+    /// D-2551).
+    Busy(PathBuf),
     /// The receipt is damaged, foreign, or disagrees with the bar header.
     InvalidReceipt(PathBuf),
     /// A filesystem operation failed. Once receipt writing starts the complete
@@ -103,6 +107,11 @@ impl fmt::Display for RepairError {
                 write!(f, "incomplete repair at {}; preserved", path.display())
             }
             Self::InvalidReceipt(path) => write!(f, "invalid repair receipt at {}", path.display()),
+            Self::Busy(path) => write!(
+                f,
+                "repair revision {} is being published by another caller; retry the same ordinal",
+                path.display()
+            ),
             Self::Io {
                 path,
                 operation,
@@ -248,6 +257,10 @@ pub fn publish(
         return Err(RepairError::RowLimit);
     }
     survey(merged)?;
+    // THE SAME PATH-DERIVED ADMISSION `BarFile::append` asks (D-0915): a
+    // revision is a write boundary too, and a merged bar outside the month or
+    // off the rung's grid would otherwise publish through it.
+    Admission::new(path.month(), path.timeframe().secs()).admit(merged)?;
     check_header(expected_source)?;
     let revision_root = revision.root(root);
     let physical = path.to_path_buf(&revision_root);
@@ -255,6 +268,11 @@ pub fn publish(
     let reservation = physical.with_extension("reserved-v1");
     // Completed retries never rewrite any evidence, including their receipt.
     if exists(&reservation)? {
+        // A LIVE PUBLISHER is not an abandoned one. Its reservation is
+        // exclusively locked from the moment the name exists until its
+        // receipt is synced, so a shared lock taken here either waits for
+        // nobody or says `Busy`; `Incomplete` below then means abandoned.
+        let settled = settled_reservation(&reservation)?;
         let reader = RevisionReader::open(root, path, symbol_id, revision)?;
         if reader.source_header() != expected_source
             || reader.header().n_valid != merged.len() as u64
@@ -267,6 +285,12 @@ pub fn publish(
             }
         }
         sync_revision(root, path, &revision_root, &receipt_path)?;
+        io_at(
+            settled.release().map_err(io::Error::from),
+            &reservation,
+            "release reservation lock",
+            true,
+        )?;
         return Ok(Published::Reused);
     }
 
@@ -344,19 +368,15 @@ fn write_revision(
         "create revision directories",
         false,
     )?;
-    // create_new is the one-writer reservation. It is never removed, including
+    // The reservation is the one-writer claim. It is never removed, including
     // after an interrupted write. No competing publisher can reopen this pair.
-    let reserved = io_at(
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&reservation),
-        &reservation,
-        "reserve revision",
-        false,
-    )?;
-    io_at(reserved.sync_all(), &reservation, "sync reservation", false)?;
-    for kind in [FileKind::Bars, FileKind::Checksums, FileKind::Lock] {
+    let reserved = reserve(&reservation)?;
+    for kind in [
+        FileKind::Bars,
+        FileKind::Checksums,
+        FileKind::Lock,
+        FileKind::TimeIndex,
+    ] {
         let sibling = path.with_file(kind).to_path_buf(&revision_root);
         if exists(&sibling)? {
             return Err(RepairError::Incomplete(sibling));
@@ -397,6 +417,13 @@ fn write_revision(
     )?;
     io_at(marker.sync_all(), &receipt_path, "sync receipt", true)?;
     sync_ancestors(directory, root, true)?;
+    drop(writer);
+    io_at(
+        reserved.release().map_err(io::Error::from),
+        &reservation,
+        "release reservation lock",
+        true,
+    )?;
     Ok(Published::Created)
 }
 
@@ -445,6 +472,62 @@ fn shared_lock(path: PathBuf) -> Result<Flock<File>, RepairError> {
         Ok(held) => Ok(held),
         Err(TryLockError::WouldBlock) => Err(StoreError::Locked { path }.into()),
         Err(TryLockError::Error(error)) => io_at(Err(error), &path, "lock shared", false),
+    }
+}
+
+/// Creates the reservation already EXCLUSIVELY LOCKED (store2-1, D-2551).
+///
+/// The file is created and locked under a per-process scratch name and only
+/// then linked to its reservation name, so no caller can ever find the
+/// reservation unlocked while its publisher lives: a lost race is
+/// [`RepairError::Busy`], never an I/O failure that says nothing was
+/// published, and never `Incomplete` for a publication still in progress.
+fn reserve(reservation: &Path) -> Result<Flock<File>, RepairError> {
+    let scratch = reservation.with_extension(format!("reserving-v1-{}", std::process::id()));
+    let created = io_at(
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&scratch),
+        &scratch,
+        "create reservation",
+        false,
+    )?;
+    let held = io_at(
+        Flock::lock(created, reservation.to_path_buf()),
+        &scratch,
+        "lock reservation",
+        false,
+    )?;
+    let linked = fs::hard_link(&scratch, reservation);
+    let removed = fs::remove_file(&scratch);
+    match linked {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(RepairError::Busy(reservation.to_path_buf()));
+        }
+        result => io_at(result, reservation, "reserve revision", false)?,
+    }
+    io_at(removed, &scratch, "remove reservation scratch", false)?;
+    io_at(held.sync_all(), reservation, "sync reservation", false)?;
+    Ok(held)
+}
+
+/// A shared lock on an existing reservation, or [`RepairError::Busy`] while
+/// its publisher still holds it exclusively (store2-1, D-2551).
+fn settled_reservation(reservation: &Path) -> Result<Flock<File>, RepairError> {
+    let file = io_at(
+        File::open(reservation),
+        reservation,
+        "open reservation",
+        false,
+    )?;
+    match Flock::try_lock_shared(file, reservation.to_path_buf()) {
+        Ok(held) => Ok(held),
+        Err(TryLockError::WouldBlock) => Err(RepairError::Busy(reservation.to_path_buf())),
+        Err(TryLockError::Error(error)) => {
+            io_at(Err(error), reservation, "lock reservation", false)
+        }
     }
 }
 

@@ -47,3 +47,26 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(equity_statement_tests::) | test(the_ordinary_stored_sweep_) | test(a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity) | test(every_stored_report_over_a_stock_states_corporate_actions_are_unchecked) | test(a_pool_with_a_stock_states_corporate_actions_are_unchecked) | test(the_stock_inventory_states_corporate_actions_are_unchecked) | test(the_equity_note_is_decided_by_the_kind) | test(a_walk_offering_a_stock_states_corporate_actions_are_unchecked) | test(a_stock_search_states_corporate_actions_are_unchecked) | test(a_stock_research_scope_states_corporate_actions_are_unchecked) | test(states_corporate_actions_inside_its_findings) | test(the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder_alone) | test(a_holed_day_the_signal_rung_does_not_hold_withholds_nothing_and_is_not_named) | test(a_listing_that_prints_a_stock_states_gross_and_corporate_actions)'
 priority = 100
+
+# D-4180: the pure turn rule and the deadline-bounded fan-out, first. Run 1286
+# timed out on nine `ordered.rs` mutants that these two tests catch in
+# milliseconds or at their own 30 s deadline: in name order an earlier test
+# reached the same never-granted turn first and waited with no bound, so the
+# shard spent its whole test timeout there. This changes order only: every
+# test still runs, and none is filtered, skipped, retried or ignored.
+[[profile.default.overrides]]
+filter = 'test(=ordered::tests::a_lane_never_waits_on_its_own_slot) | test(=ordered::tests::turns_are_granted_in_round_then_input_order_within_a_deadline)'
+priority = 100
+
+# D-4180: the tests written for run 1286's cli and api survivors (D-4100,
+# D-4101, D-4130..D-4135). Each fails in seconds under its mutant, but in name
+# order most run late in a lib suite that takes tens of minutes, and a mutant
+# is not reported caught until its first failure. Run first, a caught mutant
+# costs seconds. This changes order only: every test still runs.
+[[profile.default.overrides]]
+filter = 'test(=selection_v6::tests::a_page_past_the_end_never_computes_its_offset_even_one_that_overflows) | test(=pool::tests::a_shown_cell_that_never_traded_prices_as_no_cell) | test(=expression_search::tests::the_priced_verb_exits_misused_for_its_arguments_and_failed_for_its_work) | test(=pool_oos::tests::the_walked_judge_refuses_an_empty_family_by_name_whichever_half_is_empty) | test(=pool_oos::tests::a_per_session_figure_is_the_truncated_mean_and_zero_over_no_session) | test(=pool_oos::tests::the_table_prints_each_rows_per_session_means) | test(=results::tests::a_part_record_from_an_interrupted_write_is_refused_and_counted) | test(=candidate_universe::population_base_evidence_v2::ledger::projection_tests::a_retired_name_probe_that_cannot_answer_refuses_the_root) | test(=r1286_cli_tests::a_windows_folded_series_is_exactly_the_withheld_bars_before_it_and_its_own) | test(=anchored_search_lineage_v4::tests::an_append_past_the_pair_bound_is_refused_before_any_byte_is_written)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'test(=sweeprun::tests::a_record_landing_between_the_two_reads_keeps_the_whole_window) | test(=bars::window_tests::the_reading_path_names_the_first_damaged_file_in_time_order) | test(=server::tests::a_free_permit_completes_on_its_first_poll_without_a_timer) | test(=server::tests::the_front_end_and_universe_banner_lines_say_what_was_found) | test(=recovery::tests::a_blocked_source_request_is_audited_and_stops_the_day) | test(=recovery::tests::a_staging_name_that_cannot_be_removed_refuses_with_its_own_reason)'
+priority = 100

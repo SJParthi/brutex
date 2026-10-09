@@ -1,4 +1,4 @@
-//! The bit table. 280 positions, and the index **is** the identity.
+//! The bit table. 370 positions, and the index **is** the identity.
 //!
 //! # The rule that outranks every other rule in this file
 //!
@@ -27,6 +27,11 @@
 //! | 190–197 | 8 | VWAP bands 2 and 3, completed |
 //! | 198–234 | 37 | the rest of the classical candlestick set |
 //! | 235–273 | 39 | the current-FORMING-day pivot family, 13 levels x 3 relations |
+//! | 274–275 | 2 | the CPR width class as two more positions |
+//! | 276–279 | 4 | the session open and the structure in force |
+//! | 280–313 | 34 | crossing edges, 17 levels x 2 directions (CX-01) |
+//! | 314–364 | 51 | crossing ordinals, 17 levels x first / second / later |
+//! | 365–369 | 5 | the weekday |
 //!
 //! # Tombstones
 //!
@@ -58,7 +63,7 @@
 //!
 //! A tombstone **keeps its index forever** and always evaluates false.
 //! Retiring frees nothing: position 6 is still position 6, and the next
-//! condition appends at [`NEXT_FREE`], which is 280 today and only ever grows.
+//! condition appends at [`NEXT_FREE`], which is 370 today and only ever grows.
 //! That is modelled in the type -- [`BitStatus`] --
 //! rather than in a comment, and [`set_exact`] refuses a retired index instead
 //! of setting it.
@@ -1087,7 +1092,7 @@ pub const TABLE: [BitDef; 370] = [
     // crossing bars: exactly one on a bar that crosses, none on a bar that does
     // not, which is what makes them safe to AND with anything else.
     //
-    // Per SESSION, reset in the rollover beside `previous_mask` -- an overnight
+    // Per SESSION, reset in the rollover beside `last_side` -- an overnight
     // change of side is a gap and not a test of the level.
     plain(314, "first_cross_ema20"),
     plain(315, "second_cross_ema20"),
@@ -1142,7 +1147,10 @@ pub const TABLE: [BitDef; 370] = [
     plain(364, "third_plus_cross_day_open"),
     // ---- 365–369. Day of week. -----------------------------------------
     //
-    // NSE trades Monday to Friday, so five bits and no more. They are `plain`
+    // NSE ordinarily trades Monday to Friday, so five bits and no more. Six
+    // charter-recorded weekend sessions (`docs/00-charter.md` §3) set none of
+    // them, by design (D-0694): a session the vocabulary cannot name is
+    // unnamed, not folded into a neighbour. They are `plain`
     // rather than banded because a weekday is exact: a bar is on Tuesday or it
     // is not, and there is no near-Tuesday.
     //
@@ -1170,8 +1178,8 @@ pub const TABLE: [BitDef; 370] = [
 ///
 /// Each tuple is `(above, below, crossed_up, crossed_down)`. The first two are
 /// the shipped state positions; the last two are set by
-/// `indicators::Evaluator` when the corresponding state position was clear on
-/// the previous bar and is set on this one.
+/// `indicators::Evaluator` when the corresponding state position is set on this
+/// bar and the last definite side earlier in the session was the other one (CX-01).
 ///
 /// # Why this lives in `vocab` and not in `indicators`
 ///
@@ -1203,7 +1211,8 @@ pub struct LevelCrossing {
     pub above: u16,
     /// `close_below_X` — the state on the other side.
     pub below: u16,
-    /// `crossed_up_X` — the EDGE: `above` clear on the previous bar, set now.
+    /// `crossed_up_X` — the EDGE: `above` set now, and the last definite side earlier in
+    /// this session was `below` (CX-01). A bar on neither side changes nothing.
     pub up: u16,
     /// `crossed_down_X` — the same for `below`.
     pub down: u16,
@@ -1258,7 +1267,7 @@ pub struct LevelCrossing {
 /// # Reset at the session boundary, like the crossing itself
 ///
 /// The count is per SESSION. `indicators::Evaluator` clears it in the rollover
-/// beside `previous_mask`, for the same reason: an overnight change of side is a
+/// beside `last_side`, for the same reason: an overnight change of side is a
 /// gap, not a test of the level, and this engine is intraday-only by
 /// `CLAUDE.md` §1.
 pub const CROSSINGS: [LevelCrossing; 17] = [
@@ -1418,12 +1427,14 @@ pub const CROSSINGS: [LevelCrossing; 17] = [
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
-/// [`ConditionMask::BITS`] is 384, and the **19** positions between are
+/// [`ConditionMask::BITS`] is 384, and the **14** positions between are
 /// unallocated headroom, not free-for-all space.
 ///
 /// It read 104 until the crossing family took the table from 280 to 314. The
-/// number is pinned in `vocab::tests::the_version_is_the_widened_table` so this
-/// sentence cannot drift again without a red test.
+/// number is pinned in `vocab::tests::the_version_is_the_widened_table`, and
+/// this sentence still drifted to 19 because that test never read it.
+/// `the_present_tense_position_counts_in_this_crates_prose_match_the_table`
+/// does.
 pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition
@@ -1577,6 +1588,166 @@ pub fn definition(index: u16) -> Option<&'static BitDef> {
     TABLE.get(usize::from(index))
 }
 
+/// Slots in [`NAME_INDEX`]: a power of two, so a hash folds with a mask, and
+/// at least twice the row count, so an empty slot always ends a probe.
+///
+/// 2,048 and not 1,024, measured: at 1,024 (36% full) the names' shared
+/// prefixes clustered to a worst hit of 11 probes and a worst miss of 13; at
+/// 2,048 they are 4 and 7. Half-full is a termination bound, not a cost one.
+const NAME_SLOTS: usize = 2048;
+const _: () = assert!(NAME_SLOTS.is_power_of_two() && COUNT * 2 <= NAME_SLOTS);
+
+/// The longest name in [`TABLE`]. A longer token cannot equal any of them, so
+/// [`index_of`] answers it without hashing.
+const MAX_NAME_BYTES: usize = longest_name(&TABLE);
+
+// NO LOOP IN A CONSTANT (D-2083). `MAX_NAME_BYTES`, `fnv1a` and `name_index`
+// run at COMPILE time, and each was a `while` loop. Gate 18 compiles every
+// mutant with `--cap-lints true`, which turns rustc's long-running-evaluation
+// lint into a warning: a mutant that stopped the loop's progress (`i += 1` to
+// `*=`, `at + 1` to `at * 1`, a probe that waits for an empty slot to fill)
+// never finished BUILDING, and two CI shards of run 1283 hit the four-hour
+// limit with thirty other mutants unexamined behind them. Each is now a
+// recursion: a mutant that stops progress exceeds the evaluator's stack-frame
+// limit, a hard error rather than a lint, so it fails to build at once; at run
+// time, where `fnv1a` and `name_index` are also called, it overflows the stack
+// and fails its test. The recursions are shallow by construction: names are
+// short, rows are halved (depth about nine for 370), and a probe is at most
+// four slots long, measured below.
+
+/// The longest name among `rows`, halving the rows so the depth is their
+/// base-two logarithm. Empty is 0.
+const fn longest_name(rows: &[BitDef]) -> usize {
+    match rows {
+        [] => 0,
+        [only] => only.name.len(),
+        _ => {
+            let (low, high) = rows.split_at(rows.len() / 2);
+            let low = longest_name(low);
+            // The larger of the two, raised by however far `high` passes
+            // `low`: a `>` comparison here had `>=` as an equivalent mutant.
+            low + longest_name(high).saturating_sub(low)
+        }
+    }
+}
+
+/// FNV-1a: no dependency, and `const`, so [`NAME_INDEX`] is built by the
+/// compiler. A collision costs one extra probe, never a wrong answer, because
+/// the probe compares the whole name.
+const fn fnv1a(bytes: &[u8]) -> u64 {
+    fnv1a_from(0xcbf2_9ce4_8422_2325, bytes)
+}
+
+/// `hash` carried over `bytes`, one byte per frame, consuming the slice.
+const fn fnv1a_from(hash: u64, bytes: &[u8]) -> u64 {
+    match bytes {
+        [] => hash,
+        [first, rest @ ..] => fnv1a_from(
+            (hash ^ *first as u64).wrapping_mul(0x0000_0100_0000_01b3),
+            rest,
+        ),
+    }
+}
+
+/// The slot a hash folds to.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "masked to at most NAME_SLOTS - 1 before the cast"
+)]
+const fn home(hash: u64) -> usize {
+    (hash & (NAME_SLOTS as u64 - 1)) as usize
+}
+
+/// Every row's name, open-addressed by FNV-1a with linear probing; each
+/// occupied slot holds `row + 1`, and `0` is empty. Built at compile time.
+/// A name held by two rows keeps the lower row, which is what a scan of
+/// [`TABLE`] in row order finds first: rows are inserted in row order, so the
+/// lower one takes the earlier slot on the shared probe and [`index_of`] stops
+/// there. No comparison is needed to get that, and none is made -- a
+/// duplicate-name branch here compared nothing any table could observe, and
+/// Gate 18 found its `held - 1` to `held / 1` mutant surviving.
+static NAME_INDEX: [u16; NAME_SLOTS] = name_index(&TABLE);
+
+/// [`NAME_INDEX`] over any `table`, so the duplicate-name rule above is tested
+/// on a table that has a duplicate, which [`TABLE`] does not.
+const fn name_index(table: &[BitDef]) -> [u16; NAME_SLOTS] {
+    place_rows(table, [0_u16; NAME_SLOTS], 0, table.len())
+}
+
+/// Rows `from..to` of `table` placed into `slots` in row order, by halving
+/// the range, so the depth is the base-two logarithm of the row count.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every index is below its range's end or masked to the table, and \
+              this is evaluated at compile time, where an out-of-range index is \
+              a build error rather than a runtime panic"
+)]
+const fn place_rows(
+    table: &[BitDef],
+    mut slots: [u16; NAME_SLOTS],
+    from: usize,
+    to: usize,
+) -> [u16; NAME_SLOTS] {
+    match to - from {
+        0 => slots,
+        1 => {
+            let at = free_slot(&slots, home(fnv1a(table[from].name.as_bytes())));
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "COUNT is far below u16::MAX"
+            )]
+            {
+                slots[at] = (from + 1) as u16;
+            }
+            slots
+        }
+        span => {
+            let middle = from + span / 2;
+            place_rows(table, place_rows(table, slots, from, middle), middle, to)
+        }
+    }
+}
+
+/// The first empty slot at or after `at`, wrapping: linear probing, one slot
+/// per frame.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`at` is masked to the table, and this is evaluated at compile \
+              time, where an out-of-range index is a build error"
+)]
+const fn free_slot(slots: &[u16; NAME_SLOTS], at: usize) -> usize {
+    if slots[at] == 0 {
+        at
+    } else {
+        free_slot(slots, (at + 1) & (NAME_SLOTS - 1))
+    }
+}
+
+/// The position whose name is `name`, tombstone or not.
+///
+/// One hash over at most the longest name's bytes and a probe over a
+/// compile-time table, measured at no more than 4 slots for a name and 7 for
+/// any other token by
+/// `table::tests::every_name_is_found_by_its_index_and_no_other_token_is`,
+/// instead of a scan of all 370 rows per token. A token longer than any name
+/// is refused before it is hashed. Liveness is the caller's check.
+#[must_use]
+pub fn index_of(name: &str) -> Option<u16> {
+    if name.len() > MAX_NAME_BYTES {
+        return None;
+    }
+    let mut at = home(fnv1a(name.as_bytes()));
+    for _ in 0..NAME_SLOTS {
+        let row = usize::from(*NAME_INDEX.get(at)?).checked_sub(1)?;
+        let def = TABLE.get(row)?;
+        if def.name == name {
+            return Some(def.index);
+        }
+        at = (at + 1) & (NAME_SLOTS - 1);
+    }
+    None
+}
+
 /// The name at `index`, tombstone or not. A retired name is history and is
 /// still reported, because a stored mask from before the retirement still
 /// carries the position.
@@ -1728,6 +1899,165 @@ pub fn set_near(
 )]
 mod tests {
     use super::*;
+
+    /// Probes `index_of` takes for `name`: slots read until it answers.
+    #[expect(clippy::indexing_slicing, reason = "slots are masked into range")]
+    fn probes(name: &str) -> usize {
+        let mut at = home(fnv1a(name.as_bytes()));
+        let mut read = 1;
+        while let Some(row) = usize::from(NAME_INDEX[at]).checked_sub(1) {
+            if TABLE[row].name == name {
+                return read;
+            }
+            at = (at + 1) & (NAME_SLOTS - 1);
+            read += 1;
+        }
+        read
+    }
+
+    /// NAME LOOKUP IS ONE HASH AND A SHORT PROBE, AND IT ANSWERS WHAT THE ROW
+    /// SCAN ANSWERED. Audit o1engine-24.
+    ///
+    /// `Expression::parse` turned each name into its position by scanning all
+    /// 370 rows. `index_of` must give, for every row's name, exactly the
+    /// position a scan in row order finds first, and `None` for every token no
+    /// row carries: the empty token, a prefix, a suffix, a case change, a
+    /// padded name, a decimal, and tokens one byte and 4 KiB past the longest
+    /// name. Measured probe lengths are pinned: the worst hit and the worst
+    /// miss over every slot a token can hash to.
+    /// **A name held by two rows resolves to the lower row.** [`TABLE`] has
+    /// no duplicate, so this builds [`name_index`] over a table that does:
+    /// rows 0 and 2 share a name and row 1 sits between them. Walking the
+    /// shared probe from the name's home, the first slot naming it holds row
+    /// 0, and row 2 is still indexed further along, so no row is lost.
+    #[test]
+    #[expect(clippy::indexing_slicing, reason = "slots are masked into range")]
+    fn a_name_held_by_two_rows_resolves_to_the_lower_row() {
+        let table = [plain(0, "twice"), plain(1, "between"), plain(2, "twice")];
+        let slots = name_index(&table);
+        assert_eq!(slots.iter().filter(|&&slot| slot != 0).count(), 3);
+        let mut at = home(fnv1a(b"twice"));
+        let mut rows = Vec::new();
+        while slots[at] != 0 {
+            let row = usize::from(slots[at] - 1);
+            if table[row].name == "twice" {
+                rows.push(row);
+            }
+            at = (at + 1) & (NAME_SLOTS - 1);
+        }
+        assert_eq!(rows, [0, 2]);
+    }
+
+    #[test]
+    fn every_name_is_found_by_its_index_and_no_other_token_is() {
+        let mut worst_hit = 0;
+        for row in &TABLE {
+            let scanned = TABLE.iter().find(|r| r.name == row.name).map(|r| r.index);
+            assert_eq!(index_of(row.name), scanned, "{}", row.name);
+            assert_eq!(index_of(row.name), Some(row.index), "{}", row.name);
+            worst_hit = worst_hit.max(probes(row.name));
+        }
+        let first = TABLE[0].name;
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        let huge = "a".repeat(4096);
+        for miss in [
+            "",
+            &first[..first.len() - 1],
+            &format!("{first}x"),
+            &first.to_uppercase(),
+            &format!(" {first}"),
+            "0",
+            "not_a_condition",
+            long.as_str(),
+            huge.as_str(),
+        ] {
+            assert_eq!(index_of(miss), None, "{miss:?}");
+        }
+        assert!(TABLE.iter().any(|r| r.name.len() == MAX_NAME_BYTES));
+        assert!(TABLE.iter().all(|r| r.name.len() <= MAX_NAME_BYTES));
+        let worst_miss = (0..NAME_SLOTS)
+            .map(|start| {
+                let mut at = start;
+                let mut read = 1;
+                while NAME_INDEX.get(at).is_some_and(|&slot| slot != 0) {
+                    at = (at + 1) & (NAME_SLOTS - 1);
+                    read += 1;
+                }
+                read
+            })
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            NAME_INDEX.iter().filter(|&&slot| slot != 0).count(),
+            COUNT,
+            "every row's name is held once"
+        );
+        assert!(
+            worst_hit <= 4 && worst_miss <= 7,
+            "{worst_hit} {worst_miss}"
+        );
+    }
+
+    /// **THE NAME INDEX IS EXACTLY THE ONE A PLAIN LOOP BUILDS.** G18-rest-28,
+    /// D-2083.
+    ///
+    /// An independent reference -- FNV-1a and linear probing written as
+    /// ordinary runtime loops, rows inserted in row order -- builds the index
+    /// over [`TABLE`], and the compiled [`NAME_INDEX`] must equal it slot for
+    /// slot. That pins the hash, the fold, the probe direction, the insertion
+    /// order and the stored `row + 1` together; a mutant that changed any of
+    /// them while keeping lookups self-consistent is refused here. FNV-1a is
+    /// pinned to its published 64-bit vectors, so the reference cannot drift
+    /// with the code it checks.
+    #[test]
+    fn the_name_index_is_exactly_what_a_plain_loop_builds() {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let reference_hash = |bytes: &[u8]| {
+            bytes.iter().fold(OFFSET, |hash, &byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+            })
+        };
+        for (text, hash) in [
+            ("", 0xcbf2_9ce4_8422_2325_u64),
+            ("a", 0xaf63_dc4c_8601_ec8c),
+            ("foobar", 0x8594_4171_f739_67e8),
+        ] {
+            assert_eq!(reference_hash(text.as_bytes()), hash, "{text:?}");
+            assert_eq!(fnv1a(text.as_bytes()), hash, "{text:?}");
+        }
+        let mut slots = vec![0_u16; NAME_SLOTS];
+        for (row, def) in TABLE.iter().enumerate() {
+            let hash = reference_hash(def.name.as_bytes());
+            let mut at = usize::try_from(hash % NAME_SLOTS as u64).expect("below the slot count");
+            while slots.get(at) != Some(&0) {
+                at = (at + 1) % NAME_SLOTS;
+            }
+            if let Some(slot) = slots.get_mut(at) {
+                *slot = u16::try_from(row + 1).expect("COUNT fits a u16");
+            }
+        }
+        assert_eq!(NAME_INDEX.to_vec(), slots);
+        assert_eq!(name_index(&TABLE).to_vec(), slots, "and at run time");
+    }
+
+    /// **THE RECURSIONS' BASE CASES ARE THEIR OWN ANSWERS.** G18-rest-29,
+    /// D-2083. An empty table has no longest name and an empty index, the
+    /// empty byte string hashes to the offset basis, and a free slot is its
+    /// own answer. The halving never reaches an empty range while building
+    /// [`NAME_INDEX`], so these are what make that arm observable.
+    #[test]
+    fn the_empty_cases_answer_without_recursing() {
+        assert_eq!(longest_name(&[]), 0);
+        assert_eq!(longest_name(&TABLE[..1]), TABLE[0].name.len());
+        assert_eq!(longest_name(&TABLE), MAX_NAME_BYTES);
+        assert_eq!(name_index(&[]), [0_u16; NAME_SLOTS]);
+        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        let mut slots = [0_u16; NAME_SLOTS];
+        assert_eq!(free_slot(&slots, NAME_SLOTS - 1), NAME_SLOTS - 1);
+        slots[NAME_SLOTS - 1] = 1;
+        assert_eq!(free_slot(&slots, NAME_SLOTS - 1), 0, "the probe wraps");
+    }
 
     /// A tolerance for the tests, pinned locally. It is deliberately NOT
     /// The pinned constants: neither is the sentinel, and

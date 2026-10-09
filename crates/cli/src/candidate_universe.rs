@@ -10,9 +10,13 @@
 //!
 //! The two files are fixed-stride and independently versioned. Opening is
 //! O(rows + receipts) and builds a bounded hash index. After open, a structural
-//! audit lookup and one row seek are O(1) in record count (plus bounded file
-//! generation checks); a page is O(page length), and the sealed internal append
-//! is O(new rows). No whole-ledger operation is described as O(1).
+//! audit lookup and one row seek are O(1) in record count (plus bounded,
+//! metadata-only file generation checks); a page is O(page length), and an
+//! append on an already-open handle is O(new rows). The production append door
+//! opens the ledger once per call, so one production append costs
+//! O(rows + receipts) for that open plus O(new rows) to write the block and
+//! re-read it from disk (D-1680). No whole-ledger operation is described as
+//! O(1).
 //!
 //! Crate-internal production preparation is available only through
 //! [`CandidateUniverseProductionSourceV1`]. That opaque source bundle rebuilds
@@ -69,12 +73,12 @@ use indicators::vwap::Availability;
 use pull::session::Day;
 use runner::excursion::Side;
 use runner::exit_grid_policy::{
-    ExecutionDispositionV1, ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1,
-    ExitGridSelectorV1, ForcedStopV1, GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1,
-    RangeResolutionV1, RationalPercentileV1, ResolvedExitGridV1, ValidatedExitGridV1,
-    column_digest_v1, instrument_digest_v1,
+    AttestedTrainingV1, ExecutionDigestsV1, ExecutionDispositionV1, ExecutionResolutionV1,
+    ExecutionRunV1, ExecutionSeriesV1, ExitGridSelectorV1, ForcedStopV1,
+    GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1, RangeResolutionV1, RationalPercentileV1,
+    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v2, instrument_digest_v1,
 };
-use runner::grid::{Cell, Chosen, Ttp, materialize_cell};
+use runner::grid::{Cell, CellReplay, Chosen, Ttp};
 use runner::identity::{DailyReferenceBinding, Direction, Params, Run};
 use runner::outcome::Horizon;
 use runner::validate::{
@@ -640,8 +644,8 @@ impl CandidateUniverseDescriptorV1 {
         require_column_sources("execution", execution_column, execution_series.bars().len())?;
         let signal_stream = CandidateSignalStreamV1::from_bars(signal_bars)?;
         let execution_stream = CandidateExecutionStreamV1::from_series(execution_series)?;
-        let signal_column_digest = column_digest_v1(signal_column);
-        let execution_column_digest = column_digest_v1(execution_column);
+        let signal_column_digest = column_digest_v2(signal_column);
+        let execution_column_digest = column_digest_v2(execution_column);
         require_nonzero_digest("candidate signal column", signal_column_digest)?;
         require_nonzero_digest("candidate execution column", execution_column_digest)?;
         let mut descriptor = Self {
@@ -921,8 +925,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         .map_err(|why| format!("candidate daily data identity refused: {why:?}"))?;
         let signal_stream = CandidateSignalStreamV1::from_bars(signal_bars)?;
         let execution_stream = CandidateExecutionStreamV1::from_series(execution_series)?;
-        let signal_column_digest = column_digest_v1(&signal_column);
-        let execution_column_digest = column_digest_v1(&execution_column);
+        let signal_column_digest = column_digest_v2(&signal_column);
+        let execution_column_digest = column_digest_v2(&execution_column);
         let mut source = Self {
             family,
             rung_seconds,
@@ -1045,8 +1049,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         {
             return Err("candidate production exact stream identity changed".to_owned());
         }
-        if self.signal_column_digest != column_digest_v1(&self.signal_column)
-            || self.execution_column_digest != column_digest_v1(&self.execution_column)
+        if self.signal_column_digest != column_digest_v2(&self.signal_column)
+            || self.execution_column_digest != column_digest_v2(&self.execution_column)
         {
             return Err("candidate production exact column identity changed".to_owned());
         }
@@ -1215,6 +1219,8 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
         minute_load_bound: StoredSpanLoadBoundV1,
         daily_load_bound: StoredSpanLoadBoundV1,
     ) -> Result<Self, CandidateUniverseRefusal> {
+        #[cfg(test)]
+        OOS_SOURCE_BUILDS.with(|count| count.set(count.get().saturating_add(1)));
         require_rung(rung_seconds)?;
         require_series_family(family, execution_series)?;
         if execution_series.calendar_digest() != crate::stored::calendar_policy_digest_v2() {
@@ -1463,7 +1469,7 @@ fn derive_global_replay_oos_source_id(source: &CandidateGlobalReplayOosSourceV1<
     hasher.update(&source.signal_calendar.digest());
     hasher.update(&source.execution_calendar.digest());
     hasher.update(&source.data_digest);
-    hasher.update(&column_digest_v1(&source.execution_column));
+    hasher.update(&column_digest_v2(&source.execution_column));
     if let Some(spec) = source.execution_column.evaluation_spec_token() {
         hasher.update(spec.fingerprint_v1().as_bytes());
     }
@@ -1559,12 +1565,8 @@ impl CandidateSearchColumnBuilderV1<'_> {
         }
         let final_close_minute = prefix
             .last()
-            .map(|bar| {
-                bar.ts_micros
-                    .saturating_add(signal_length_micros)
-                    .saturating_sub(60_000_000)
-            })
-            .ok_or_else(|| "candidate Search V4 requested an empty signal prefix".to_owned())?;
+            .ok_or_else(|| "candidate Search V4 requested an empty signal prefix".to_owned())
+            .and_then(|bar| session_close_minute_v1(bar.ts_micros, signal_length_micros))?;
         while self
             .reference_minute_context
             .get(cursor.minute_end)
@@ -1644,6 +1646,34 @@ pub(crate) fn build_candidate_columns(
     Ok((signal_column, execution_column))
 }
 
+/// The rows Candidate production's signal column sweeps over these inputs,
+/// read from that column's own census, warm-up excluded (D-2103).
+///
+/// This runs the one builder below, so a ledger sizing its support on it asks
+/// exactly the fold its Candidate commit will sweep; there is no second count.
+/// O(signal + daily + minute), one column build. **UNVERIFIED as a measured
+/// bound**; read off the source.
+///
+/// # Errors
+///
+/// Every refusal of that build.
+pub(crate) fn candidate_signal_swept_v1(
+    signal_bars: &[Candle],
+    daily_references: &[DailyReference],
+    reference_minute_context: &[Candle],
+    rung_seconds: u32,
+    evaluation: &CandidateEvaluationInputsV1,
+) -> Result<u64, CandidateUniverseRefusal> {
+    build_candidate_signal_column(
+        signal_bars,
+        daily_references,
+        reference_minute_context,
+        rung_seconds,
+        evaluation,
+    )
+    .map(|column| column.census().swept)
+}
+
 /// Builds one exact anchored signal column from the typed daily reference and
 /// exact-minute ORB/`GapFib` context accepted by Candidate production.
 ///
@@ -1686,6 +1716,7 @@ fn build_candidate_signal_column(
         signal_length_micros,
         evaluation.widths,
         Calendar::charter(),
+        crate::stored::nse_session_close_minute,
         &mut signal_column,
     )
     .map_err(|why| {
@@ -2657,8 +2688,11 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
         &self.base_evidence
     }
 
-    /// Commits the complete block through the private writer and reopens it
-    /// read-only before returning success.
+    /// Commits the complete block through the private writer, then re-reads
+    /// and re-seals that block and its receipt from disk through the same
+    /// handle after a generation recheck, before returning success. One full
+    /// open, O(rows + receipts), plus O(new rows); before D-1680 the writer
+    /// was dropped and a second full read-only open followed.
     ///
     /// # Errors
     ///
@@ -2676,7 +2710,7 @@ impl<'a> ProducedCandidateUniverseV1<'a> {
     }
 
     /// Persists the same-pass Base records only after the exact Candidate
-    /// completion has itself been freshly reopened.
+    /// completion has itself been re-read from disk (D-1680).
     pub(crate) fn append_base_evidence_and_reopen(
         &self,
         root: &Path,
@@ -2713,10 +2747,21 @@ pub(crate) fn pair_candidate_base_evidence_v2(
 /// # Cost
 ///
 /// The total is input-dependent: one naturally-extinct sweep plus one complete
-/// grid evaluation and validation per `(closed mask, direction)`. Every grid
-/// cell is then replayed over its exact execution series by `materialize_cell`;
-/// its resulting `TradeRow` sequence is folded once for Base Evidence and once
-/// for accepted-session observations before the rows are dropped. Only the
+/// grid evaluation and validation per `(closed mask, direction)`.
+///
+/// Everything that no mask can change is sealed ONCE, on the first closed
+/// mask, by `hoist_execution_series`: the three-stream data digest and the
+/// evaluated slice's digest (`ExecutionDigestsV1`, Θ(S + M + D + E)),
+/// and one attestation plus one `SliceFacts` derivation per resolved side
+/// (`AttestedTrainingV1`, Θ(E) each). Per `(closed mask, direction)` what remains
+/// is the O(1) run seal, two level-less column walks (one prices the grid, one
+/// is held by `runner::grid::CellReplay` with its crossing table for the
+/// cells), Θ(rows) each, and the grid's own work. Each grid cell is then
+/// replayed from that held walk, O(candidate paths) per cell (D-1141) and
+/// independent of the slice length; its resulting `TradeRow`
+/// sequence is folded once for Base Evidence and once for accepted-session
+/// observations before the rows are dropped. Retained rows grow geometrically
+/// (amortised O(1) per row). D-0990; `docs/06-limits.md` §147. Only the
 /// final Candidate/Base record projections are fixed-cost. Retained Candidate
 /// rows and fixed Base records are linear in the complete
 /// closed-frontier-by-grid population, observation space also depends on its
@@ -2808,20 +2853,25 @@ pub(crate) fn produce_candidate_universe_v1<'a>(
         .map_err(|why| why.to_string())?;
     let mut base_builder = BaseEvidenceBuilderV2::new(base_bounds);
     let mut rows = Vec::new();
+    let inputs = CandidateExecutionInputsV1 {
+        signal_bars,
+        reference_minute_context,
+        daily_reference,
+        execution_series,
+        execution_column: &execution_column,
+        long_exit_grid,
+        short_exit_grid,
+        horizon,
+    };
+    let mut hoisted = None;
     let population_run =
         sweeper.run_prepared_population_by_reporting(signal_column, on_level, |member| {
             expand_population_member(
                 member,
                 &descriptor,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                &execution_column,
-                long_exit_grid,
-                short_exit_grid,
-                horizon,
+                &inputs,
+                &mut hoisted,
                 rung_seconds,
                 bounds,
                 &mut rows,
@@ -3144,7 +3194,8 @@ pub(crate) fn verify_population_v5_canonical_record(
 #[cfg(test)]
 pub(crate) use tests::population_v5_test_canonical_candidate_record_for_identity;
 
-/// Crate-internal result of a typed append followed by exact read-only reopen.
+/// Crate-internal result of a typed append followed by an exact re-read of the
+/// committed block from disk (D-1680).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CandidateUniverseProductionCommitV1 {
     /// New row bytes and then a new receipt were synced.
@@ -3337,6 +3388,8 @@ impl CandidateUniverseLedgerV1 {
     }
 
     fn scan(&mut self) -> Result<(), CandidateUniverseRefusal> {
+        #[cfg(test)]
+        LEDGER_SCANS.with(|count| count.set(count.get().saturating_add(1)));
         verify_header(
             &mut self.row_file,
             ROW_MAGIC,
@@ -3650,11 +3703,56 @@ impl CandidateUniverseLedgerV1 {
         }
     }
 
+    /// Where the block starts: the end of the ledger, or the first row of an
+    /// orphan of this exact retry, cut back so the block is written whole.
+    fn cut_orphan_for_rewrite(
+        &mut self,
+        receipt: &CandidateUniverseReceiptV1,
+        prepared: &PreparedCandidateUniverseV1,
+    ) -> Result<u64, CandidateUniverseRefusal> {
+        let Some(orphan) = self.orphan else {
+            return Ok(self.total_rows);
+        };
+        if orphan.universe_id != receipt.universe_id() {
+            return Err(format!(
+                "candidate row tail belongs to {}, not requested {}; no fallback may hide it",
+                hex32(orphan.universe_id),
+                hex32(receipt.universe_id())
+            ));
+        }
+        if orphan.row_count > receipt.row_count {
+            return Err(format!(
+                "candidate orphan has {} rows, longer than exact retry {}",
+                orphan.row_count, receipt.row_count
+            ));
+        }
+        let prefix = usize::try_from(orphan.row_count)
+            .map_err(|_| "candidate orphan prefix does not fit usize".to_owned())?;
+        compare_rows(
+            &mut self.row_file,
+            orphan.first_row,
+            prepared
+                .rows
+                .get(..prefix)
+                .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
+        )?;
+        // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915): the orphan
+        // may be the bytes of a run whose barrier failed, and a barrier
+        // on this descriptor cannot prove them durable. The block is
+        // cut back and written again whole; the bytes are identical.
+        let start = candidate_row_offset(orphan.first_row)?;
+        self.row_file
+            .set_len(start)
+            .and_then(|()| self.row_file.sync_all())
+            .map_err(|why| format!("cannot cut candidate orphan for rewrite: {why}"))?;
+        Ok(orphan.first_row)
+    }
+
     fn append_complete_locked(
         &mut self,
         prepared: &PreparedCandidateUniverseV1,
     ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-        self.require_unchanged()?;
+        self.rescan_if_grown()?;
         let receipt = prepared.receipt;
         receipt.validate()?;
         if receipt.row_count > self.bounds.max_rows {
@@ -3675,6 +3773,10 @@ impl CandidateUniverseLedgerV1 {
                 existing.first_row,
                 prepared.rows.as_slice(),
             )?;
+            // A path whose barrier failed in this process is never reused as
+            // committed history (ledgers-2, D-1915).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.receipt_path)?;
             return Ok(CandidateUniverseProductionCommitV1::Reused(existing));
         }
         let current_universes = u64::try_from(self.audits.len())
@@ -3685,35 +3787,10 @@ impl CandidateUniverseLedgerV1 {
                 self.bounds.max_universes
             ));
         }
-        let (first_row, prefix) = match self.orphan {
-            Some(orphan) => {
-                if orphan.universe_id != receipt.universe_id() {
-                    return Err(format!(
-                        "candidate row tail belongs to {}, not requested {}; no fallback may hide it",
-                        hex32(orphan.universe_id),
-                        hex32(receipt.universe_id())
-                    ));
-                }
-                if orphan.row_count > receipt.row_count {
-                    return Err(format!(
-                        "candidate orphan has {} rows, longer than exact retry {}",
-                        orphan.row_count, receipt.row_count
-                    ));
-                }
-                let prefix = usize::try_from(orphan.row_count)
-                    .map_err(|_| "candidate orphan prefix does not fit usize".to_owned())?;
-                compare_rows(
-                    &mut self.row_file,
-                    orphan.first_row,
-                    prepared
-                        .rows
-                        .get(..prefix)
-                        .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
-                )?;
-                (orphan.first_row, orphan.row_count)
-            }
-            None => (self.total_rows, 0),
-        };
+        // An orphan is cut back and rewritten whole, so nothing is prefixed.
+        let first_row = self.cut_orphan_for_rewrite(&receipt, prepared)?;
+        let prefix = 0_u64;
+        let block_start = candidate_row_offset(first_row)?;
         let desired_total = first_row
             .checked_add(receipt.row_count)
             .ok_or_else(|| "candidate append row total overflowed u64".to_owned())?;
@@ -3732,9 +3809,13 @@ impl CandidateUniverseLedgerV1 {
                 .get(prefix_usize..)
                 .ok_or_else(|| "candidate append prefix exceeds prepared rows".to_owned())?,
         )?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync candidate rows: {why}"))?;
+        // A failed barrier cuts the block back (ledgers-2, D-1915).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block_start,
+            File::sync_data,
+        )?;
         self.total_rows = desired_total;
         self.orphan = Some(OrphanBlockV1 {
             universe_id: receipt.universe_id(),
@@ -3742,15 +3823,136 @@ impl CandidateUniverseLedgerV1 {
             row_count: receipt.row_count,
         });
         self.row_generation = file_generation(&self.row_file, &self.row_path)?;
+        let receipt_start = self
+            .receipt_file
+            .metadata()
+            .map_err(|why| format!("cannot stat candidate completions: {why}"))?
+            .len();
         append_receipt(&mut self.receipt_file, &receipt)?;
-        self.receipt_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync candidate completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.receipt_file,
+            &self.receipt_path,
+            receipt_start,
+            File::sync_data,
+        )?;
         let audit = CandidateUniverseReopenAuditV1 { first_row, receipt };
         self.audits.insert(receipt.universe_id(), audit);
         self.orphan = None;
         self.receipt_generation = file_generation(&self.receipt_file, &self.receipt_path)?;
         Ok(CandidateUniverseProductionCommitV1::Written(audit))
+    }
+
+    /// Re-reads one just-committed block from disk through this handle and
+    /// returns its indexed audit, under the shared lock.
+    ///
+    /// This replaces a second full open after a production append (D-1680):
+    /// the open that preceded the append already validated every older row
+    /// and completion, so only the new block and its receipt are re-read. The
+    /// three file generations are rechecked first, the physical row and
+    /// receipt counts must equal what this handle wrote, the block's rows are
+    /// re-sealed against its receipt, and the last stored receipt must be the
+    /// committed one when the commit wrote it. O(block rows).
+    ///
+    /// # Errors
+    ///
+    /// Refuses a stale or replaced file, a physical count this handle did not
+    /// write, an absent universe, a receipt or row that differs on disk, or a
+    /// lock failure.
+    fn reverify_committed(
+        &mut self,
+        committed: &CandidateUniverseProductionCommitV1,
+    ) -> Result<CandidateUniverseReopenAuditV1, CandidateUniverseRefusal> {
+        self.writer_lock
+            .lock_shared()
+            .map_err(|why| format!("cannot take shared candidate reverify lock: {why}"))?;
+        let result = self.reverify_committed_locked(committed);
+        let released = self
+            .writer_lock
+            .unlock()
+            .map_err(|why| format!("cannot release candidate reverify lock: {why}"));
+        match (result, released) {
+            (Ok(audit), Ok(())) => Ok(audit),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    fn reverify_committed_locked(
+        &mut self,
+        committed: &CandidateUniverseProductionCommitV1,
+    ) -> Result<CandidateUniverseReopenAuditV1, CandidateUniverseRefusal> {
+        self.require_unchanged()?;
+        let expected = committed.audit();
+        let physical_rows = record_count(
+            &self.row_file,
+            CANDIDATE_ROW_STRIDE_V1,
+            self.bounds.max_rows,
+            "candidate rows",
+        )?;
+        let receipt_count = record_count(
+            &self.receipt_file,
+            CANDIDATE_RECEIPT_STRIDE_V1,
+            self.bounds.max_universes,
+            "candidate completions",
+        )?;
+        let indexed = u64::try_from(self.audits.len())
+            .map_err(|_| "candidate index size does not fit u64".to_owned())?;
+        if physical_rows != self.total_rows || receipt_count != indexed {
+            return Err(format!(
+                "candidate ledger holds {physical_rows} rows and {receipt_count} completions on disk, not the {} and {indexed} this append committed",
+                self.total_rows
+            ));
+        }
+        let audit = self
+            .audits
+            .get(&expected.universe_id())
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "candidate production universe {} disappeared after receipt-last append",
+                    hex32(expected.universe_id())
+                )
+            })?;
+        if matches!(committed, CandidateUniverseProductionCommitV1::Written(_)) {
+            // The indexed universe was found, so `receipt_count == indexed >= 1`.
+            let last = receipt_count.saturating_sub(1);
+            if read_receipt(&mut self.receipt_file, last)? != audit.receipt {
+                return Err(format!(
+                    "candidate production universe {} is not the last stored completion",
+                    hex32(expected.universe_id())
+                ));
+            }
+        }
+        validate_file_block(&mut self.row_file, audit.first_row, &audit.receipt)?;
+        self.require_unchanged()?;
+        Ok(audit)
+    }
+
+    /// The append's freshness rule (conc10-2, D-2647): unchanged files go on
+    /// as before; files that are the SAME files (device and inode) and only
+    /// GREW -- another writer appended whole universes between this handle's
+    /// open and its append -- are re-scanned whole under the exclusive lock
+    /// this append already holds, exactly as an open would; anything else (a
+    /// replaced, shrunk or same-length-mutated file, or a changed lock file)
+    /// still refuses as stale.
+    ///
+    /// Two `ledger-v6`/`ledger-all` runs whose opens interleaved made the
+    /// second appender refuse "cached audit is stale" after its whole
+    /// preparation, even for an exact reuse of the first one's universe. The
+    /// rescan is the open's own cost, O(rows + completions), paid only when
+    /// another writer moved the files.
+    fn rescan_if_grown(&mut self) -> Result<(), CandidateUniverseRefusal> {
+        if self.require_unchanged().is_ok() {
+            return Ok(());
+        }
+        require_generation(self.lock_generation, &self.writer_lock, &self.lock_path)?;
+        let rows = file_generation(&self.row_file, &self.row_path)?;
+        let receipts = file_generation(&self.receipt_file, &self.receipt_path)?;
+        if !grew_in_place(self.row_generation, rows)
+            || !grew_in_place(self.receipt_generation, receipts)
+        {
+            return self.require_unchanged();
+        }
+        self.scan()
     }
 
     fn require_unchanged(&self) -> Result<(), CandidateUniverseRefusal> {
@@ -3797,23 +3999,36 @@ fn append_produced_candidate_universe_v1(
     bounds: CandidateUniverseBoundsV1,
     produced: &ProducedCandidateUniverseV1<'_>,
 ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-    let root = root.as_ref();
-    let mut ledger = CandidateUniverseLedgerV1::open(root, bounds)?;
-    let committed = ledger.append_complete(&produced.prepared)?;
-    let expected = committed.audit();
-    drop(ledger);
+    append_prepared_and_reverify(root.as_ref(), bounds, &produced.prepared)
+}
 
-    let reopened = CandidateUniverseLedgerV1::open_read(root, bounds)?
-        .reopen_audit(&expected.universe_id())?
-        .ok_or_else(|| {
-            format!(
-                "candidate production universe {} disappeared after receipt-last append",
-                hex32(expected.universe_id())
-            )
-        })?;
-    if reopened != expected || reopened.receipt() != produced.prepared.receipt {
+/// One production append: one full open, the append, then a re-read of only
+/// the committed block through the same handle. O(R + C) for the open plus
+/// O(new rows); before D-1680 a second full `open_read` made it
+/// 2 x O(R + C) + O(new rows).
+fn append_prepared_and_reverify(
+    root: &Path,
+    bounds: CandidateUniverseBoundsV1,
+    prepared: &PreparedCandidateUniverseV1,
+) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
+    let mut ledger = CandidateUniverseLedgerV1::open(root, bounds)?;
+    let committed = ledger.append_complete(prepared)?;
+    let expected = committed.audit();
+    let reopened = ledger.reverify_committed(&committed)?;
+    drop(ledger);
+    // TWO CHECKS, NOT ONE `||` (G18-cli-a-05, D-2004). Either inequality alone
+    // refuses; a joined guard let a mutant require both, and no honest fixture
+    // can make the committed block reopen differently from its own audit. Each
+    // comparison now stands alone, so the happy path itself proves each one.
+    if reopened != expected {
         return Err(format!(
             "candidate production universe {} did not reopen with the exact prepared semantic bytes",
+            hex32(expected.universe_id())
+        ));
+    }
+    if reopened.receipt() != prepared.receipt {
+        return Err(format!(
+            "candidate production universe {} reopened with a receipt other than the prepared one",
             hex32(expected.universe_id())
         ));
     }
@@ -3958,6 +4173,80 @@ fn require_exact_execution_subspan(
         );
     }
     Ok(())
+}
+
+/// The exact minute at which the signal bar opened at `bar_ts_micros` closes.
+///
+/// The store folds every intraday rung on a grid anchored at the 09:15 open,
+/// so a rung that does not divide the 375-minute session (2, 10, 30 and 60
+/// min) ends the day with a SHORT bar: the 60-minute bar stamped 15:15 holds
+/// only 15:15-15:29. Its close is therefore the last minute of the bucket that
+/// the measured session actually traded, not `ts + rung - 1min` (16:14), which
+/// no minute context can hold. D-1449.
+///
+/// The session comes from [`pull::calendar::kind_of`], the same authority the
+/// stored calendar receipt and bucket geometry use, never from a literal. The
+/// close is the latest minute of the bucket inside any measured window; that
+/// also covers a disaster-recovery Saturday whose bucket meets a window end.
+/// A day the calendar does not report open with measured windows, or a bucket
+/// that meets no window, is refused naming why.
+///
+/// O(1): one bounded calendar lookup plus a walk over at most
+/// [`pull::calendar::MAX_WINDOWS`] windows. Exercised at every rung and
+/// measured window end by
+/// `cli::candidate_universe::session_close_minute_clamps_to_every_measured_window_end`.
+fn session_close_minute_v1(
+    bar_ts_micros: i64,
+    signal_length_micros: i64,
+) -> Result<i64, CandidateUniverseRefusal> {
+    const MINUTE_MICROS: i64 = 60_000_000;
+    const DAY_MICROS: i64 = 86_400_000_000;
+    if signal_length_micros < MINUTE_MICROS || signal_length_micros % MINUTE_MICROS != 0 {
+        return Err(format!(
+            "candidate Search V4 signal length {signal_length_micros} micros is not a whole number of minutes"
+        ));
+    }
+    let day = indicators::ist_day(bar_ts_micros);
+    let day_start = day
+        .checked_mul(DAY_MICROS)
+        .and_then(|micros| micros.checked_sub(indicators::IST_OFFSET_MICROS))
+        .ok_or_else(|| format!("candidate Search V4 IST day {day} overflowed microseconds"))?;
+    let offset = bar_ts_micros
+        .checked_sub(day_start)
+        .filter(|offset| offset % MINUTE_MICROS == 0)
+        .ok_or_else(|| {
+            format!("candidate Search V4 signal bar {bar_ts_micros} is not on a whole IST minute")
+        })?;
+    let open_minute = offset / MINUTE_MICROS;
+    let bucket_last_minute = open_minute
+        .checked_add(signal_length_micros / MINUTE_MICROS - 1)
+        .ok_or_else(|| "candidate Search V4 signal bucket overflowed".to_owned())?;
+    let session = match pull::calendar::kind_of(day) {
+        pull::calendar::DayKind::Open(session) => session,
+        other => {
+            return Err(format!(
+                "candidate Search V4 signal bar {bar_ts_micros} is on IST day {day}, which has no measured session window ({other:?})"
+            ));
+        }
+    };
+    let close_minute = session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .filter(|window| {
+            i64::from(window.from) <= bucket_last_minute && i64::from(window.to) >= open_minute
+        })
+        .map(|window| i64::from(window.to).min(bucket_last_minute))
+        .max()
+        .ok_or_else(|| {
+            format!(
+                "candidate Search V4 signal bar {bar_ts_micros} opens a bucket that meets no measured session window on IST day {day}"
+            )
+        })?;
+    close_minute
+        .checked_mul(MINUTE_MICROS)
+        .and_then(|micros| day_start.checked_add(micros))
+        .ok_or_else(|| "candidate Search V4 closing minute overflowed".to_owned())
 }
 
 fn signal_length_micros(rung_seconds: u32) -> Result<i64, CandidateUniverseRefusal> {
@@ -4348,11 +4637,25 @@ fn build_execution_v3_replay_authority(
                 authenticated.len()
             )
         })?;
+    let inputs = CandidateExecutionInputsV1 {
+        signal_bars: source.signal_bars,
+        reference_minute_context: source.reference_minute_context,
+        daily_reference: source.daily_reference,
+        execution_series: source.execution_series,
+        execution_column: &source.execution_column,
+        long_exit_grid: source.long_exit_grid,
+        short_exit_grid: source.short_exit_grid,
+        horizon: source.horizon,
+    };
+    let mut hoisted = None;
     let mut group_start = 0_usize;
     while group_start < rows.len() {
+        let series = hoisted_execution_series(&mut hoisted, &inputs)?;
         replay_execution_side(
             source,
             params,
+            &series.run_source,
+            &series.long,
             &rows,
             authenticated,
             group_start,
@@ -4368,6 +4671,8 @@ fn build_execution_v3_replay_authority(
         replay_execution_side(
             source,
             params,
+            &series.run_source,
+            &series.short,
             &rows,
             authenticated,
             short_start,
@@ -4502,13 +4807,11 @@ fn try_clone_percentiles(
     clippy::too_many_arguments,
     reason = "one exact directional replay keeps the authenticated row slice, side resolution and append target explicit"
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one directional fold keeps row identity, exact evaluation and disposition append in a single fail-closed sequence"
-)]
 fn replay_execution_side(
     source: &CandidateUniverseProductionSourceV1<'_>,
     params: Params,
+    run_source: &ExecutionDigestsV1,
+    attested: &AttestedTrainingV1<'_>,
     rows: &[CandidateUniverseRowV1],
     authenticated: &[AuthenticatedCandidatePopulationRowV1],
     start: usize,
@@ -4545,21 +4848,10 @@ fn replay_execution_side(
         commit: source.execution_series.commit(),
         feed: source.execution_series.feed(),
     };
-    let execution_run = ExecutionRunV1::new_with_daily_reference(
-        &run,
-        source.signal_bars,
-        source.reference_minute_context,
-        source.execution_series.bars(),
-        source.daily_reference,
-    )
-    .map_err(|why| format!("Candidate Execution V3 exact run refused: {why:?}"))?;
+    let execution_run = ExecutionRunV1::with_digests(&run, run_source)
+        .map_err(|why| format!("Candidate Execution V3 exact run refused: {why:?}"))?;
     let evaluated = resolved
-        .evaluate_training_grid_attested(
-            source.execution_series,
-            &source.execution_column,
-            source.horizon,
-            execution_run,
-        )
+        .evaluate_with_attested(attested, execution_run)
         .map_err(|why| format!("Candidate Execution V3 complete grid refused: {why:?}"))?;
     let validated = resolved
         .validate_evaluation(&evaluated)
@@ -4646,22 +4938,132 @@ fn rung_label(rung_seconds: u32) -> Result<&'static str, CandidateUniverseRefusa
     }
 }
 
+/// The exact streams, slice and resolutions every `(closed mask, side)` grid
+/// of one Candidate block is priced against. No mask can change any of them.
+#[derive(Clone, Copy)]
+struct CandidateExecutionInputsV1<'s> {
+    signal_bars: &'s [Candle],
+    reference_minute_context: &'s [Candle],
+    daily_reference: DailyReferenceBinding<'s>,
+    execution_series: ExecutionSeriesV1<'s>,
+    execution_column: &'s Column,
+    long_exit_grid: &'s ResolvedExitGridV1,
+    short_exit_grid: &'s ResolvedExitGridV1,
+    horizon: Horizon,
+}
+
+/// The series-invariant execution authority, sealed once per Candidate block.
+///
+/// Before D-0990 every `(closed mask, side)` re-hashed the signal, minute
+/// context and daily streams (`ExecutionRunV1::new_with_daily_reference`),
+/// re-attested the execution slice (`evaluate_training_grid_attested`) and
+/// rebuilt the slice facts once for the grid and once more for every cell
+/// (`materialize_cell`). All of that is a function of the streams alone.
+struct HoistedExecutionV1<'s> {
+    run_source: ExecutionDigestsV1,
+    long: AttestedTrainingV1<'s>,
+    short: AttestedTrainingV1<'s>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`CandidateGlobalReplayOosSourceV1::new`] calls on
+    /// this thread.
+    pub(crate) static OOS_SOURCE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of `CandidateUniverseLedgerV1::scan` calls (one per
+    /// full open) on this thread.
+    static LEDGER_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`hoist_execution_series`] calls on this thread.
+    static SERIES_HOISTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Θ(S + M + D + E) for the sealed run source plus, per side, one attestation
+/// and one `SliceFacts` derivation. Called once per Candidate block.
+fn hoist_execution_series<'s>(
+    inputs: &CandidateExecutionInputsV1<'s>,
+) -> Result<HoistedExecutionV1<'s>, CandidateUniverseRefusal> {
+    #[cfg(test)]
+    SERIES_HOISTS.with(|count| count.set(count.get().saturating_add(1)));
+    let run_source = ExecutionDigestsV1::of_daily_reference(
+        inputs.signal_bars,
+        inputs.reference_minute_context,
+        inputs.execution_series.bars(),
+        inputs.daily_reference,
+    )
+    .map_err(|why| format!("candidate execution run sources refused: {why:?}"))?;
+    let long = inputs
+        .long_exit_grid
+        .attest_training(
+            inputs.execution_series,
+            inputs.execution_column,
+            inputs.horizon,
+        )
+        .map_err(|why| format!("candidate Long execution slice attestation refused: {why:?}"))?;
+    let short = inputs
+        .short_exit_grid
+        .attest_training(
+            inputs.execution_series,
+            inputs.execution_column,
+            inputs.horizon,
+        )
+        .map_err(|why| format!("candidate Short execution slice attestation refused: {why:?}"))?;
+    Ok(HoistedExecutionV1 {
+        run_source,
+        long,
+        short,
+    })
+}
+
+/// The hoisted authority, sealed on first use so a block that retires no
+/// closed mask (or replays no row) refuses exactly what it refused before.
+fn hoisted_execution_series<'h, 's>(
+    slot: &'h mut Option<HoistedExecutionV1<'s>>,
+    inputs: &CandidateExecutionInputsV1<'s>,
+) -> Result<&'h HoistedExecutionV1<'s>, CandidateUniverseRefusal> {
+    let hoisted = match slot.take() {
+        Some(hoisted) => hoisted,
+        None => hoist_execution_series(inputs)?,
+    };
+    Ok(slot.insert(hoisted))
+}
+
+/// Reserves one directional grid's rows with geometric growth.
+///
+/// `try_reserve_exact` grew the retained buffer by exactly one grid width per
+/// `(closed mask, side)`, so every grid moved the whole buffer. `try_reserve`
+/// keeps `Vec`'s amortised-O(1) append (`CLAUDE.md` §3 rule 4); the configured
+/// `max_rows` bound is checked by the caller before this runs. D-0990, proven by
+/// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`
+/// (CUH-04).
+fn reserve_directional_grid_rows<T>(
+    rows: &mut Vec<T>,
+    additional: usize,
+) -> Result<(), CandidateUniverseRefusal> {
+    rows.try_reserve(additional).map_err(|why| {
+        format!(
+            "candidate could not reserve {additional} rows for one complete directional grid: {why}"
+        )
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
-    reason = "both complete side resolutions and all canonical execution-run identity sources remain explicit"
+    reason = "the hoisted series authority and every append target remain explicit"
 )]
-fn expand_population_member(
+fn expand_population_member<'s>(
     member: PopulationMember,
     descriptor: &CandidateUniverseDescriptorV1,
     params: Params,
-    signal_bars: &[Candle],
-    reference_minute_context: &[Candle],
-    daily_reference: DailyReferenceBinding<'_>,
-    execution_series: ExecutionSeriesV1<'_>,
-    execution_column: &Column,
-    long_exit_grid: &ResolvedExitGridV1,
-    short_exit_grid: &ResolvedExitGridV1,
-    horizon: Horizon,
+    inputs: &CandidateExecutionInputsV1<'s>,
+    hoisted: &mut Option<HoistedExecutionV1<'s>>,
     rung_seconds: u32,
     bounds: CandidateUniverseBoundsV1,
     rows: &mut Vec<CandidateUniverseRowV1>,
@@ -4680,24 +5082,23 @@ fn expand_population_member(
             let support = measure_mask_support_v2(
                 runner::replay_mask::stored_words(&member.item.mask),
                 member.item.hits,
-                signal_bars,
+                inputs.signal_bars,
                 support_signal_column,
                 base_bounds,
             )
             .map_err(|why| why.to_string())?;
+            let series = hoisted_execution_series(hoisted, inputs)?;
             expand_population_side(
                 member,
                 descriptor,
                 TradeDirectionV1::Long,
                 Direction::Long,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                execution_column,
-                long_exit_grid,
-                horizon,
+                &series.run_source,
+                inputs.execution_series,
+                &series.long,
+                inputs.long_exit_grid,
+                inputs.horizon,
                 rung_seconds,
                 bounds,
                 rows,
@@ -4711,13 +5112,11 @@ fn expand_population_member(
                 TradeDirectionV1::Short,
                 Direction::Short,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                execution_column,
-                short_exit_grid,
-                horizon,
+                &series.run_source,
+                inputs.execution_series,
+                &series.short,
+                inputs.short_exit_grid,
+                inputs.horizon,
                 rung_seconds,
                 bounds,
                 rows,
@@ -4739,11 +5138,9 @@ fn expand_population_side(
     trade_direction: TradeDirectionV1,
     run_direction: Direction,
     params: Params,
-    signal_bars: &[Candle],
-    reference_minute_context: &[Candle],
-    daily_reference: DailyReferenceBinding<'_>,
+    run_source: &ExecutionDigestsV1,
     execution_series: ExecutionSeriesV1<'_>,
-    execution_column: &Column,
+    attested: &AttestedTrainingV1<'_>,
     resolved: &ResolvedExitGridV1,
     horizon: Horizon,
     rung_seconds: u32,
@@ -4766,11 +5163,7 @@ fn expand_population_side(
     }
     let additional = usize::try_from(resolved.cell_count())
         .map_err(|_| "candidate resolved grid width does not fit usize".to_owned())?;
-    rows.try_reserve_exact(additional).map_err(|why| {
-        format!(
-            "candidate could not reserve {additional} rows for one complete directional grid: {why}"
-        )
-    })?;
+    reserve_directional_grid_rows(rows, additional)?;
 
     let run = Run {
         mask: member.item.mask,
@@ -4782,14 +5175,7 @@ fn expand_population_side(
         commit: execution_series.commit(),
         feed: execution_series.feed(),
     };
-    let execution_run = ExecutionRunV1::new_with_daily_reference(
-        &run,
-        signal_bars,
-        reference_minute_context,
-        execution_series.bars(),
-        daily_reference,
-    )
-    .map_err(|why| {
+    let execution_run = ExecutionRunV1::with_digests(&run, run_source).map_err(|why| {
         format!(
             "candidate {:?} execution run refused mask {:?}: {why:?}",
             trade_direction,
@@ -4797,7 +5183,7 @@ fn expand_population_side(
         )
     })?;
     let evaluated = resolved
-        .evaluate_training_grid_attested(execution_series, execution_column, horizon, execution_run)
+        .evaluate_with_attested(attested, execution_run)
         .map_err(|why| {
             format!(
                 "candidate {:?} complete grid evaluation refused mask {:?}: {why:?}",
@@ -4826,6 +5212,9 @@ fn expand_population_side(
     let validated = resolved.validate_evaluation(&evaluated).map_err(|why| {
         format!("candidate {trade_direction:?} complete grid integrity refused: {why:?}")
     })?;
+    let cells = attested
+        .cell_replay(&evaluated)
+        .map_err(|why| format!("candidate {trade_direction:?} cell replay refused: {why:?}"))?;
     append_validated_grid_rows(
         member,
         descriptor,
@@ -4833,7 +5222,7 @@ fn expand_population_side(
         &evaluated,
         &validated,
         execution_series.bars(),
-        execution_column,
+        &cells,
         rows,
         observations,
         support,
@@ -4852,12 +5241,17 @@ fn append_validated_grid_rows(
     evaluated: &runner::exit_grid_policy::EvaluatedExitGridV1,
     validated: &ValidatedExitGridV1<'_>,
     execution_bars: &[Candle],
-    execution_column: &Column,
+    cells: &CellReplay<'_>,
     rows: &mut Vec<CandidateUniverseRowV1>,
     observations: &mut CandidateObservationBuilderV1,
     support: MaskSupportEvidenceV2,
     base_builder: &mut BaseEvidenceBuilderV2,
 ) -> Result<(), CandidateUniverseRefusal> {
+    // `cells` holds one walk and one crossing table for the whole grid, over
+    // the slice facts the block's attestation derived once, so each cell is
+    // O(C) (D-1141, D-0990). `materialize_cell` per cell rebuilt the slice
+    // facts, the walk and the crossings for every cell: O(cells x B) per
+    // member-side.
     for ordinal in 0..evaluated.grid().cells.len() {
         let cell = validated.cell(ordinal).ok_or_else(|| {
             format!(
@@ -4887,16 +5281,7 @@ fn append_validated_grid_rows(
         };
         row.candidate_semantic_digest = candidate_semantic_digest(descriptor, &row);
         row.validate(Some(descriptor))?;
-        let trades = materialize_cell(
-            execution_bars,
-            execution_column,
-            &member.item.mask,
-            evaluated.horizon(),
-            evaluated.side(),
-            evaluated.grid(),
-            cell,
-        )
-        .map_err(|why| {
+        let trades = cells.materialize(cell).map_err(|why| {
             format!("candidate {direction:?} cell {ordinal} exact trade replay refused: {why}")
         })?;
         base_builder
@@ -5920,17 +6305,25 @@ fn ensure_header(
     stride: u64,
     path: &Path,
 ) -> Result<(), CandidateUniverseRefusal> {
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat candidate file {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&header_bytes(magic, kind, stride)))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
+    // conc5-1 (D-2644): one header rule. A failed header write or barrier is
+    // cut back to nothing and remembered, and an all-zero or torn header the
+    // writer's own failure left is re-initialised instead of refused forever.
+    let init = crate::fixed_tail::init_or_heal_header(
+        file,
+        path,
+        &header_bytes(magic, kind, stride),
+        File::sync_data,
+    )
+    .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
+    // conc11-1 (D-2645): a file this writer just made non-empty keeps its
+    // directory entry across a power cut, as D-1903 gave the Step-3 ledgers.
+    if init == crate::fixed_tail::HeaderInit::Written {
+        crate::fixed_tail::sync_parent_directory(path)?;
     }
-    verify_header(file, magic, kind, stride, path)
+    verify_header(file, magic, kind, stride, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER_BYTES_V1, stride, &[]).map(drop)
 }
 
 fn verify_header(
@@ -5971,6 +6364,14 @@ fn verify_header(
         &raw[32..64],
         digest_domain(HEADER_DOMAIN, &raw[..32]),
     )
+}
+
+/// The byte offset of candidate row `index` in the row file.
+fn candidate_row_offset(index: u64) -> Result<u64, CandidateUniverseRefusal> {
+    index
+        .checked_mul(CANDIDATE_ROW_STRIDE_V1)
+        .and_then(|bytes| bytes.checked_add(HEADER_BYTES_V1))
+        .ok_or_else(|| "candidate row offset overflowed u64".to_owned())
 }
 
 fn record_count(
@@ -6250,6 +6651,20 @@ fn generation_of(metadata: &std::fs::Metadata) -> FileGenerationV1 {
     }
 }
 
+/// Whether `observed` is `expected` itself, or the same file (device and
+/// inode) strictly longer: appended to, never replaced, cut or rewritten at
+/// the same length (conc10-2, D-2647).
+fn grew_in_place(expected: FileGenerationV1, observed: FileGenerationV1) -> bool {
+    if observed == expected {
+        return true;
+    }
+    #[cfg(unix)]
+    if observed.device != expected.device || observed.inode != expected.inode {
+        return false;
+    }
+    observed.len > expected.len
+}
+
 fn require_generation(
     expected: FileGenerationV1,
     file: &File,
@@ -6290,7 +6705,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v1,
+        printed_ohlcv_cost_model_id_v3,
     };
     use runner::identity::ReferenceIntegrity;
 
@@ -6737,6 +7152,141 @@ mod tests {
         (audit, base)
     }
 
+    /// ledgers-2, D-1915: a failed Base record or completion barrier is cut
+    /// back, so no later barrier on a fresh descriptor vouches for it; the
+    /// exact rerun then writes.
+    #[test]
+    fn a_failed_base_barrier_is_cut_and_the_rerun_writes() {
+        for name in [
+            "base-evidence-records-v3.bin",
+            "base-evidence-completions-v3.bin",
+        ] {
+            let root = test_dir();
+            let bounds = BaseEvidenceLedgerBoundsV2::new(32, 8).expect("nonzero Base bounds");
+            let (candidate, base) = candidate_base_fixture(47, InstrumentFamilyV1::Nifty);
+            {
+                let _armed = crate::fixed_tail::fault::Armed::arm(
+                    name,
+                    crate::fixed_tail::fault::Kind::Sync,
+                );
+                assert!(
+                    append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                        .is_err(),
+                    "{name}"
+                );
+            }
+            let completions =
+                std::fs::metadata(root.path().join("base-evidence-completions-v3.bin"))
+                    .expect("measure completions")
+                    .len();
+            // No completion RECORD survives: the file holds at most its
+            // header. Since conc5-1 (D-2644) the header barrier is hooked too,
+            // so a fault armed on a fresh ledger can fire there and leave the
+            // file cut to nothing instead of header-only.
+            assert!(
+                completions == 0 || completions == 64,
+                "{name}: no completion survives a failed barrier ({completions} bytes)"
+            );
+            let written =
+                append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                    .expect("the exact rerun writes");
+            assert!(
+                matches!(written, BaseEvidenceProductionCommitV2::Written(_)),
+                "{name}"
+            );
+        }
+    }
+
+    /// W2-cli10-0, D-4467: one Base append scans the ledger ONCE, in its
+    /// writer's open, written or reused; the fresh reopen reads only the
+    /// committed completion and its block. It still refuses a damaged block, a
+    /// replaced file, a shortened record file and a vanished completion put
+    /// down between the writer's release and the reopen.
+    #[test]
+    fn a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage() {
+        use super::population_base_evidence_v2::reopen_probe;
+        type Attack = (&'static str, fn(&std::path::Path));
+        let bounds = BaseEvidenceLedgerBoundsV2::new(64, 8).expect("nonzero Base bounds");
+        let (first_candidate, first_base) = candidate_base_fixture(71, InstrumentFamilyV1::Nifty);
+        let (candidate, base) = candidate_base_fixture(72, InstrumentFamilyV1::Nifty);
+
+        let root = test_dir();
+        let first =
+            append_and_reopen_base_evidence_v2(root.path(), bounds, &first_candidate, &first_base)
+                .expect("the first family commits")
+                .audit();
+        let before = reopen_probe::scans();
+        let written = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+            .expect("the second family commits after the first");
+        assert!(matches!(
+            written,
+            BaseEvidenceProductionCommitV2::Written(_)
+        ));
+        assert_eq!(reopen_probe::scans() - before, 1, "the writer's open only");
+        let before = reopen_probe::scans();
+        let reused = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+            .expect("the exact retry reuses");
+        assert!(matches!(reused, BaseEvidenceProductionCommitV2::Reused(_)));
+        assert_eq!(reopen_probe::scans() - before, 1, "the writer's open only");
+        assert_eq!(written.audit(), reused.audit());
+        let full = BaseEvidenceLedgerReaderV2::open(root.path(), bounds)
+            .expect("a full fresh open")
+            .audit(candidate.universe_id())
+            .expect("generation checked")
+            .expect("the second family is complete");
+        assert_eq!(
+            full,
+            written.audit(),
+            "the bounded reopen derives what a scan derives"
+        );
+        assert_ne!(full, first, "the second block, not the first");
+
+        let attacks: [Attack; 4] = [
+            ("record seal does not match payload", |root| {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(root.join("base-evidence-records-v3.bin"))
+                    .expect("record file opens");
+                file.seek(SeekFrom::Start(64 + 120)).expect("payload seeks");
+                let mut byte = [0_u8; 1];
+                file.read_exact(&mut byte).expect("payload reads");
+                file.seek(SeekFrom::Start(64 + 120)).expect("payload seeks");
+                file.write_all(&[byte[0] ^ 0xA5]).expect("payload corrupts");
+            }),
+            ("no longer names the Base file this append wrote", |root| {
+                let path = root.join("base-evidence-records-v3.bin");
+                let displaced = root.join("base-evidence-records-v3.displaced");
+                std::fs::rename(&path, &displaced).expect("the written inode is displaced");
+                std::fs::copy(&displaced, &path).expect("same bytes at a new inode");
+            }),
+            ("beyond physical record count", |root| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(root.join("base-evidence-records-v3.bin"))
+                    .expect("record file opens")
+                    .set_len(64)
+                    .expect("the block is cut");
+            }),
+            ("disappeared after receipt-last append", |root| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(root.join("base-evidence-completions-v3.bin"))
+                    .expect("completion file opens")
+                    .set_len(64)
+                    .expect("the completion is cut");
+            }),
+        ];
+        for (expected, attack) in attacks {
+            let root = test_dir();
+            reopen_probe::between(attack);
+            let why = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                .expect_err("damage between the append and the reopen refuses")
+                .to_string();
+            assert!(why.contains(expected), "{expected}: {why}");
+        }
+    }
+
     #[test]
     fn durable_base_is_receipt_last_idempotent_fixed_offset_and_zero_row_safe() {
         let root = test_dir();
@@ -6769,7 +7319,26 @@ mod tests {
         assert_ne!(first.candidate_semantic_id(), [0; 32]);
         assert_ne!(first.candidate_row_digest(), [0; 32]);
         assert_ne!(first.trade_rows_digest(), [0; 32]);
-        let _ = first.admission_values();
+        // THE PROJECTION'S ADMISSION VALUES ARE THE SEALED RECORD'S (P1-10-04).
+        // This was `let _ = first.admission_values();`, the only call to the
+        // projection's accessor in the workspace, so a decode that filled the
+        // values from the wrong fields or the wrong record was never seen.
+        let sealed = base
+            .records()
+            .first()
+            .copied()
+            .expect("the fixture seals one record per candidate row")
+            .admission_values()
+            .expect("the fixture's Base record projects");
+        assert_eq!(first.admission_values(), &sealed);
+        assert!(
+            matches!(
+                first.admission_values().support_hits,
+                runner::admission::ObservedU64V1::Measured(hits) if hits > 0
+            ),
+            "the decoded support is a measured, non-zero count, so the equality \
+             above compares values and not two defaults"
+        );
         assert!(matches!(
             reader.record(&audit, audit.record_count()),
             Err(BaseEvidenceLedgerRefusalV2::BoundExceeded {
@@ -6840,7 +7409,7 @@ mod tests {
         let orphan_root = test_dir();
         append_and_reopen_base_evidence_v2(orphan_root.path(), bounds, &candidate, &base)
             .expect("fixture Base commit succeeds");
-        let completion_path = orphan_root.path().join("base-evidence-completions-v2.bin");
+        let completion_path = orphan_root.path().join("base-evidence-completions-v3.bin");
         OpenOptions::new()
             .write(true)
             .open(&completion_path)
@@ -6860,7 +7429,7 @@ mod tests {
             .expect("foreign-orphan fixture commits");
         OpenOptions::new()
             .write(true)
-            .open(foreign_root.path().join("base-evidence-completions-v2.bin"))
+            .open(foreign_root.path().join("base-evidence-completions-v3.bin"))
             .expect("completion opens")
             .set_len(64)
             .expect("completion is removed after records");
@@ -6881,7 +7450,7 @@ mod tests {
         let swap_root = test_dir();
         append_and_reopen_base_evidence_v2(swap_root.path(), bounds, &candidate, &base)
             .expect("swap fixture commits");
-        let record_path = swap_root.path().join("base-evidence-records-v2.bin");
+        let record_path = swap_root.path().join("base-evidence-records-v3.bin");
         let raw = std::fs::read(&record_path).expect("record file reads");
         let mut swapped = raw.clone();
         swapped[64..1_088].copy_from_slice(&raw[1_088..2_112]);
@@ -6898,7 +7467,7 @@ mod tests {
         let corrupt_root = test_dir();
         append_and_reopen_base_evidence_v2(corrupt_root.path(), bounds, &candidate, &base)
             .expect("corruption fixture commits");
-        let corrupt_path = corrupt_root.path().join("base-evidence-records-v2.bin");
+        let corrupt_path = corrupt_root.path().join("base-evidence-records-v3.bin");
         let mut corrupt = OpenOptions::new()
             .read(true)
             .write(true)
@@ -6928,7 +7497,7 @@ mod tests {
             .expect("pre-change Candidate completion exists");
         OpenOptions::new()
             .append(true)
-            .open(stale_root.path().join("base-evidence-records-v2.bin"))
+            .open(stale_root.path().join("base-evidence-records-v3.bin"))
             .expect("record path opens independently")
             .write_all(&[0])
             .expect("record generation changes");
@@ -6952,10 +7521,10 @@ mod tests {
             .expect("replacement fixture commits");
         let mut replacement_reader = BaseEvidenceLedgerReaderV2::open(replaced_root.path(), bounds)
             .expect("reader opens before named path replacement");
-        let path = replaced_root.path().join("base-evidence-records-v2.bin");
+        let path = replaced_root.path().join("base-evidence-records-v3.bin");
         let displaced = replaced_root
             .path()
-            .join("base-evidence-records-v2.displaced");
+            .join("base-evidence-records-v3.displaced");
         std::fs::rename(&path, &displaced).expect("opened inode is displaced");
         std::fs::copy(&displaced, &path).expect("same bytes appear at a new inode");
         let replacement_refusal = replacement_reader
@@ -7021,11 +7590,11 @@ mod tests {
             &nifty_base,
         )
         .expect("reserved-byte fixture commits");
-        let completion_path = reserve_root.path().join("base-evidence-completions-v2.bin");
+        let completion_path = reserve_root.path().join("base-evidence-completions-v3.bin");
         let mut completion = std::fs::read(&completion_path).expect("completion bytes read");
         completion[64 + 464] = 1;
         let seal = digest_domain(
-            b"brutex-base-evidence-v2-completion-seal\0",
+            b"brutex-base-evidence-v3-completion-seal\0",
             &completion[64..64 + 480],
         );
         completion[64 + 480..64 + 512].copy_from_slice(&seal);
@@ -7310,7 +7879,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("one broad exact ratio interval"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -7685,18 +8254,22 @@ mod tests {
         )
         .expect("fixture Base Evidence bounds are explicit");
         let mut expanded_base_builder = BaseEvidenceBuilderV2::new(expanded_base_bounds);
+        let inputs = CandidateExecutionInputsV1 {
+            signal_bars: source.signal_bars,
+            reference_minute_context: source.reference_minute_context,
+            daily_reference: source.daily_reference,
+            execution_series: source.execution_series,
+            execution_column: &source.execution_column,
+            long_exit_grid: source.long_exit_grid,
+            short_exit_grid: source.short_exit_grid,
+            horizon: source.horizon,
+        };
         expand_population_member(
             member,
             &descriptor,
             execution_run_params(&sweeper, &source),
-            source.signal_bars,
-            source.reference_minute_context,
-            source.daily_reference,
-            source.execution_series,
-            &source.execution_column,
-            source.long_exit_grid,
-            source.short_exit_grid,
-            source.horizon,
+            &inputs,
+            &mut None,
             source.rung_seconds,
             bounds,
             &mut expanded,
@@ -7938,6 +8511,139 @@ mod tests {
         (best_bit, best_support, ties)
     }
 
+    /// The Global Replay OOS source id is private and recomputed by
+    /// `require_integrity`; a constant derivation would make that recompute a
+    /// tautology, so every identity-bearing field it hashes must move it.
+    #[test]
+    fn global_replay_oos_source_identity_refuses_any_field_changed_after_construction() {
+        type Tamper = fn(&mut CandidateGlobalReplayOosSourceV1<'_>);
+        let fixture = ProductionFixture::new();
+        let mut source = CandidateGlobalReplayOosSourceV1::new(
+            InstrumentFamilyV1::Nifty,
+            60,
+            Horizon::DEFAULT,
+            fixture.span,
+            fixture.signal_calendar,
+            fixture.execution_calendar,
+            fixture.execution(),
+            &fixture.daily_references,
+            &fixture.context,
+            fixture.daily_binding(),
+            fixture.series(),
+            Widths::pinned().expect("fixture uses measured widths"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+            StoredSpanLoadBoundV1::new(
+                u64::try_from(fixture.execution().len()).expect("signal length fits u64"),
+            )
+            .expect("signal load ceiling is nonzero"),
+            StoredSpanLoadBoundV1::new(
+                u64::try_from(fixture.context.len()).expect("minute length fits u64"),
+            )
+            .expect("minute load ceiling is nonzero"),
+            StoredSpanLoadBoundV1::new(
+                u64::try_from(fixture.daily_bars.len()).expect("daily length fits u64"),
+            )
+            .expect("daily load ceiling is nonzero"),
+        )
+        .expect("the production fixture is a valid OOS source");
+        source
+            .require_integrity()
+            .expect("the untampered OOS source passes its own integrity check");
+        assert_eq!(
+            source.source_id,
+            derive_global_replay_oos_source_id(&source),
+            "construction stores the derived id"
+        );
+
+        let tampered: [(&str, Tamper); 4] = [
+            ("rung", |s| s.rung_seconds = 120),
+            ("signal ceiling", |s| {
+                s.signal_load_bound =
+                    StoredSpanLoadBoundV1::new(s.signal_load_bound.max_records().saturating_add(1))
+                        .expect("raised ceiling is nonzero");
+            }),
+            ("minute ceiling", |s| {
+                s.minute_load_bound =
+                    StoredSpanLoadBoundV1::new(s.minute_load_bound.max_records().saturating_add(1))
+                        .expect("raised ceiling is nonzero");
+            }),
+            ("daily ceiling", |s| {
+                s.daily_load_bound =
+                    StoredSpanLoadBoundV1::new(s.daily_load_bound.max_records().saturating_add(1))
+                        .expect("raised ceiling is nonzero");
+            }),
+        ];
+        let original = (
+            source.rung_seconds,
+            source.signal_load_bound,
+            source.minute_load_bound,
+            source.daily_load_bound,
+        );
+        let mut ids = vec![source.source_id];
+        for (label, tamper) in tampered {
+            tamper(&mut source);
+            let refusal = source.require_integrity().expect_err(label);
+            assert!(
+                refusal.contains("source identity changed after construction"),
+                "{label}: {refusal}"
+            );
+            ids.push(derive_global_replay_oos_source_id(&source));
+            (
+                source.rung_seconds,
+                source.signal_load_bound,
+                source.minute_load_bound,
+                source.daily_load_bound,
+            ) = original;
+            source
+                .require_integrity()
+                .expect("restoring the field restores the identity");
+        }
+        let distinct = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), distinct, "every tampered field moves the id");
+    }
+
+    #[test]
+    fn production_source_refuses_either_column_digest_that_is_not_the_v2_digest_of_its_column() {
+        let fixture = ProductionFixture::new();
+        let mut source = fixture.source();
+        source.validate().expect("the untampered fixture validates");
+
+        let signal_v2 = source.signal_column_digest;
+        let execution_v2 = source.execution_column_digest;
+        assert_eq!(signal_v2, column_digest_v2(&source.signal_column));
+        assert_eq!(execution_v2, column_digest_v2(&source.execution_column));
+
+        // The V1 digest of the very same column is a stale codec, not this
+        // column's production identity.
+        let signal_v1 = runner::exit_grid_policy::column_digest_v1(&source.signal_column);
+        let execution_v1 = runner::exit_grid_policy::column_digest_v1(&source.execution_column);
+        assert_ne!(signal_v1, signal_v2);
+        assert_ne!(execution_v1, execution_v2);
+
+        for (label, signal, execution) in [
+            ("signal only", signal_v1, execution_v2),
+            ("execution only", signal_v2, execution_v1),
+            ("signal foreign", digest(211), execution_v2),
+            ("execution foreign", signal_v2, digest(212)),
+        ] {
+            source.signal_column_digest = signal;
+            source.execution_column_digest = execution;
+            let refusal = source.validate().expect_err(label);
+            assert!(
+                refusal.contains("exact column identity changed"),
+                "{label}: {refusal}"
+            );
+        }
+        source.signal_column_digest = signal_v2;
+        source.execution_column_digest = execution_v2;
+        source
+            .validate()
+            .expect("restoring both digests validates again");
+    }
+
     #[test]
     fn opaque_production_source_refuses_foreign_policy_column_grid_calendar_feed_and_commit() {
         let fixture = ProductionFixture::new();
@@ -8161,6 +8867,272 @@ mod tests {
                 original
             );
         }
+    }
+
+    /// Folds exact minutes into open-anchored rung bars the way the store's
+    /// `pull::fold` does: buckets start at 09:15 IST, so a rung that does not
+    /// divide 375 leaves a SHORT final bar (60min: 15:15 holds 15:15-15:29).
+    fn open_anchored_rung_bars(minutes: &[Candle], rung_minutes: i64) -> Vec<Candle> {
+        let mut bars: Vec<Candle> = Vec::new();
+        let mut key = None;
+        for minute in minutes {
+            let day = indicators::ist_day(minute.ts_micros);
+            let day_start = day
+                .saturating_mul(DAY_MICROS)
+                .saturating_sub(indicators::IST_OFFSET_MICROS);
+            let of_day = minute.ts_micros.saturating_sub(day_start) / MINUTE_MICROS;
+            let bucket = (of_day - 555).div_euclid(rung_minutes);
+            if key == Some((day, bucket)) {
+                let last = bars.last_mut().expect("an open bucket has a bar");
+                last.high = last.high.max(minute.high);
+                last.low = last.low.min(minute.low);
+                last.close = minute.close;
+                last.volume = last.volume.saturating_add(minute.volume);
+            } else {
+                key = Some((day, bucket));
+                bars.push(Candle {
+                    ts_micros: day_start
+                        .saturating_add((555 + bucket * rung_minutes) * MINUTE_MICROS),
+                    ..*minute
+                });
+            }
+        }
+        bars
+    }
+
+    fn search_builder_over<'a>(
+        signal: &'a [Candle],
+        daily_references: &'a [DailyReference],
+        context: &'a [Candle],
+        rung_seconds: u32,
+    ) -> CandidateSearchColumnBuilderV1<'a> {
+        CandidateSearchColumnBuilderV1 {
+            full_signal: signal,
+            daily_references,
+            reference_minute_context: context,
+            rung_seconds,
+            evaluation: CandidateEvaluationInputsV1 {
+                widths: Widths::pinned().expect("fixture uses measured widths"),
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            },
+            cursors: [CandidateCausalPrefixCursorV1::default(); 2],
+        }
+    }
+
+    fn two_open_days_in_january_2025() -> (i64, i64) {
+        let start = i64::from(
+            Day::new(2025, 1, 1)
+                .expect("fixture day is valid")
+                .days_from_epoch(),
+        );
+        let mut open = (start..start + 20).filter(|day| matches!(kind_of(*day), DayKind::Open(_)));
+        let prior = open.next().expect("January 2025 has an open day");
+        let day = open.next().expect("January 2025 has a second open day");
+        assert_eq!(
+            kind_of(day),
+            DayKind::Open(pull::calendar::Session::full()),
+            "the fixture day is a standard 09:15-15:29 session"
+        );
+        (prior, day)
+    }
+
+    /// D-1449. A Search V4 prefix ending on the store's short final bar of a
+    /// session (rungs 2, 10, 30 and 60 min) demands its close at the session's
+    /// last minute, 15:29, not at `ts + rung - 1min`, which lies after the close.
+    #[test]
+    fn search_v4_prefix_ending_on_the_short_final_bar_closes_at_the_session_last_minute() {
+        let (prior, day) = two_open_days_in_january_2025();
+        let (_, _, references) = daily_reference_fixture(prior, day);
+        let context = minute_bars(day, day);
+        let session_last = context.last().expect("the day has minutes").ts_micros;
+        let day_start = day
+            .saturating_mul(DAY_MICROS)
+            .saturating_sub(indicators::IST_OFFSET_MICROS);
+        assert_eq!(
+            session_last,
+            day_start + i64::from(pull::calendar::LAST_MINUTE) * MINUTE_MICROS
+        );
+        // (rung minutes, bars in the day, stamp of the final bar as IST minute)
+        for (rung, bars, final_stamp) in [
+            (60_i64, 7_usize, 15 * 60 + 15),
+            (30, 13, 15 * 60 + 15),
+            (10, 38, 15 * 60 + 25),
+            (2, 188, 15 * 60 + 29),
+            (15, 25, 15 * 60 + 15),
+            (5, 75, 15 * 60 + 25),
+            (1, 375, 15 * 60 + 29),
+        ] {
+            let signal = open_anchored_rung_bars(&context, rung);
+            assert_eq!(signal.len(), bars, "rung {rung} bar count");
+            assert_eq!(
+                signal.last().expect("bars").ts_micros,
+                day_start + final_stamp * MINUTE_MICROS,
+                "rung {rung} final stamp"
+            );
+            let rung_seconds = u32::try_from(rung * 60).expect("rung fits");
+            let mut builder = search_builder_over(&signal, &references, &context, rung_seconds);
+            builder
+                .build(&signal)
+                .unwrap_or_else(|why| panic!("rung {rung} prefix refused: {why}"));
+            assert_eq!(
+                builder.cursors[0].minute_end,
+                context.len(),
+                "rung {rung} binds the minute context through 15:29 and no further"
+            );
+            assert_eq!(builder.cursors[0].last_signal_len, signal.len());
+
+            // The bar before the final one is a full bucket: its close is exact
+            // and unclamped, so the cursor stops a whole final bucket short.
+            let mut earlier = search_builder_over(&signal, &references, &context, rung_seconds);
+            let prefix = &signal[..signal.len() - 1];
+            earlier
+                .build(prefix)
+                .unwrap_or_else(|why| panic!("rung {rung} earlier prefix refused: {why}"));
+            let final_open = signal.last().expect("bars").ts_micros;
+            let bound = context
+                .iter()
+                .position(|bar| bar.ts_micros >= final_open)
+                .expect("final bucket has minutes");
+            assert_eq!(
+                earlier.cursors[0].minute_end, bound,
+                "rung {rung} earlier bound"
+            );
+        }
+    }
+
+    /// A short final bar whose 15:29 minute is absent is still refused: the
+    /// clamp moves the demanded close to the session's end, it never relaxes it.
+    #[test]
+    fn search_v4_short_final_bar_without_its_1529_minute_is_still_refused() {
+        let (prior, day) = two_open_days_in_january_2025();
+        let (_, _, references) = daily_reference_fixture(prior, day);
+        let full = minute_bars(day, day);
+        let signal = open_anchored_rung_bars(&full, 60);
+        let truncated = &full[..full.len() - 1];
+        let mut builder = search_builder_over(&signal, &references, truncated, 3_600);
+        let why = builder
+            .build(&signal)
+            .expect_err("a missing 15:29 minute must refuse");
+        let expected = full.last().expect("minutes").ts_micros;
+        assert_eq!(
+            why,
+            format!(
+                "candidate Search V4 lacks exact closing minute {expected} for its signal prefix"
+            )
+        );
+        assert_eq!(
+            builder.cursors[0].last_signal_len, 0,
+            "a refusal commits nothing"
+        );
+    }
+
+    fn ist_minute_micros(day: i64, minute: i64) -> i64 {
+        day * DAY_MICROS - indicators::IST_OFFSET_MICROS + minute * MINUTE_MICROS
+    }
+
+    /// D-1449: the close is the latest minute of the open-anchored bucket that
+    /// the measured session traded, on standard, irregular and Muhurat days.
+    #[test]
+    fn session_close_minute_clamps_to_every_measured_window_end() {
+        let (_, standard) = two_open_days_in_january_2025();
+        let cases = [
+            // (day, bucket open minute, rung minutes, expected close minute)
+            (standard, 915, 60, 929),
+            (standard, 855, 60, 914),
+            (standard, 915, 30, 929),
+            (standard, 925, 10, 929),
+            (standard, 915, 10, 924),
+            (standard, 928, 2, 929),
+            (standard, 915, 15, 929),
+            (standard, 925, 5, 929),
+            (standard, 929, 1, 929),
+            (standard, 555, 1, 555),
+            // 2024-03-02 disaster-recovery Saturday: 09:15-09:59 and 11:30-12:29.
+            (19_784, 555, 60, 599),
+            (19_784, 675, 60, 734),
+            (19_784, 735, 60, 749),
+            // 2021-02-24 outage: 09:15-11:39 and 15:45-16:59.
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 675, 60, 699),
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 915, 60, 974),
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 975, 60, 1_019),
+            // 2025-10-21 Muhurat, 13:45-14:44 on the 09:15-anchored grid.
+            (20_382, 795, 60, 854),
+            (20_382, 855, 60, 884),
+        ];
+        for (day, open, rung, close) in cases {
+            assert_eq!(
+                session_close_minute_v1(ist_minute_micros(day, open), rung * MINUTE_MICROS),
+                Ok(ist_minute_micros(day, close)),
+                "day {day} bucket {open} rung {rung}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_close_minute_refuses_without_a_measured_window() {
+        let (_, standard) = two_open_days_in_january_2025();
+        let sunday = i64::from(
+            Day::new(2025, 1, 5)
+                .expect("fixture day is valid")
+                .days_from_epoch(),
+        );
+        assert_eq!(kind_of(sunday), DayKind::Closed);
+        for (day, kind) in [
+            (sunday, "Closed"),
+            (18_580, "OpenLengthUnmeasured"),
+            (pull::calendar::LAST_DAY + 1, "Unmeasured"),
+        ] {
+            let ts = ist_minute_micros(day, 915);
+            assert_eq!(
+                session_close_minute_v1(ts, 60 * MINUTE_MICROS),
+                Err(format!(
+                    "candidate Search V4 signal bar {ts} is on IST day {day}, which has no measured session window ({kind})"
+                ))
+            );
+        }
+        // A bucket wholly between the two windows of a two-window day.
+        let gap = ist_minute_micros(19_784, 615);
+        assert_eq!(
+            session_close_minute_v1(gap, 60 * MINUTE_MICROS),
+            Err(format!(
+                "candidate Search V4 signal bar {gap} opens a bucket that meets no measured session window on IST day 19784"
+            ))
+        );
+        // Before the open and after the close of a standard day.
+        for minute in [554, 930] {
+            assert!(
+                session_close_minute_v1(ist_minute_micros(standard, minute), MINUTE_MICROS)
+                    .expect_err("outside the session")
+                    .contains("meets no measured session window")
+            );
+        }
+        // Malformed lengths and a timestamp off the minute grid.
+        let ts = ist_minute_micros(standard, 915);
+        for length in [0, MINUTE_MICROS - 1, MINUTE_MICROS + 1, -MINUTE_MICROS] {
+            assert_eq!(
+                session_close_minute_v1(ts, length),
+                Err(format!(
+                    "candidate Search V4 signal length {length} micros is not a whole number of minutes"
+                ))
+            );
+        }
+        assert_eq!(
+            session_close_minute_v1(ts + 1, MINUTE_MICROS),
+            Err(format!(
+                "candidate Search V4 signal bar {} is not on a whole IST minute",
+                ts + 1
+            ))
+        );
+        // Extremes: neither end of i64 panics or wraps into a session.
+        for extreme in [i64::MIN, i64::MAX] {
+            assert!(session_close_minute_v1(extreme, MINUTE_MICROS).is_err());
+        }
+        assert_eq!(
+            session_close_minute_v1(ts, i64::MAX - i64::MAX % MINUTE_MICROS),
+            Ok(ist_minute_micros(standard, 929)),
+            "the widest whole-minute length still closes at 15:29"
+        );
     }
 
     #[test]
@@ -8404,6 +9376,322 @@ mod tests {
         );
     }
 
+    /// ledgers-2, D-1915: a failed candidate row or completion barrier is cut
+    /// back, so no later barrier vouches for it; the exact rerun writes.
+    #[test]
+    fn a_failed_candidate_barrier_is_cut_and_the_rerun_writes() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        for name in [ROW_FILE, RECEIPT_FILE] {
+            let root = test_dir();
+            let offered = prepared(52);
+            let mut ledger =
+                CandidateUniverseLedgerV1::open(root.path(), bounds).expect("ledger opens");
+            {
+                let _armed = crate::fixed_tail::fault::Armed::arm(
+                    name,
+                    crate::fixed_tail::fault::Kind::Sync,
+                );
+                assert!(ledger.append_complete(&offered).is_err(), "{name}");
+            }
+            drop(ledger);
+            assert_eq!(
+                std::fs::metadata(root.path().join(RECEIPT_FILE))
+                    .expect("measure completions")
+                    .len(),
+                HEADER_BYTES_V1,
+                "{name}: no completion survives a failed barrier"
+            );
+            let mut ledger =
+                CandidateUniverseLedgerV1::open(root.path(), bounds).expect("ledger reopens");
+            assert!(
+                matches!(
+                    ledger
+                        .append_complete(&offered)
+                        .expect("the exact rerun writes"),
+                    CandidateUniverseProductionCommitV1::Written(_)
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_append_scans_the_ledger_once_and_rereads_only_its_block() {
+        // W2-cli3-4 / D-1680: before, every production append ran two full
+        // O(R + C) opens (`open`, then a fresh `open_read`).
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let first = prepared(60);
+        LEDGER_SCANS.with(|count| count.set(0));
+        let written = append_prepared_and_reverify(root.path(), bounds, &first)
+            .expect("an append onto an empty ledger writes and reverifies");
+        assert!(matches!(
+            written,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(written.audit().first_row(), 0);
+        assert_eq!(written.audit().receipt(), *first.receipt());
+        assert_eq!(
+            LEDGER_SCANS.with(std::cell::Cell::get),
+            1,
+            "one full open per production append, not two"
+        );
+
+        let second = prepared(61);
+        LEDGER_SCANS.with(|count| count.set(0));
+        let appended = append_prepared_and_reverify(root.path(), bounds, &second)
+            .expect("a second universe appends after the first");
+        assert!(matches!(
+            appended,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(appended.audit().first_row(), first.receipt().row_count());
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 1);
+
+        LEDGER_SCANS.with(|count| count.set(0));
+        let reused = append_prepared_and_reverify(root.path(), bounds, &first)
+            .expect("an exact retry of an older universe is reused");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        assert_eq!(reused.audit(), written.audit());
+        assert_eq!(LEDGER_SCANS.with(std::cell::Cell::get), 1);
+
+        let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+            .expect("a fresh reader sees both completions");
+        assert_eq!(
+            fresh
+                .reopen_audit(&second.receipt().universe_id())
+                .expect("generations hold"),
+            Some(appended.audit())
+        );
+    }
+
+    /// conc10-2 (D-2647): two writers whose opens interleaved both commit.
+    /// B opened before A appended; B's append re-scans the grown files under
+    /// its lock and writes after A's block, and B's exact retry of A's
+    /// universe is `Reused`. A same-length rewrite or a replaced file still
+    /// refuses as stale. On the old code B's first append refused "changed
+    /// since open; cached audit is stale".
+    #[test]
+    fn interleaved_writers_both_commit_after_a_rescan_of_grown_files() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let mut a = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("A opens");
+        let mut b = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("B opens");
+        let first = prepared(70);
+        let second = prepared(71);
+        let written = a.append_complete(&first).expect("A commits");
+        assert!(matches!(
+            written,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        let after = b
+            .append_complete(&second)
+            .expect("B re-scans A's growth and commits");
+        assert!(matches!(
+            after,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(after.audit().first_row(), first.receipt().row_count());
+        let reused = b.append_complete(&first).expect("B reuses A's universe");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        assert_eq!(reused.audit(), written.audit());
+        // A, now behind B, re-scans too and reuses B's universe.
+        let reused = a.append_complete(&second).expect("A reuses B's universe");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds).expect("reader");
+        assert_eq!(
+            fresh
+                .reopen_audit(&second.receipt().universe_id())
+                .expect("generations hold"),
+            Some(after.audit())
+        );
+
+        // A same-length rewrite is not growth: still stale.
+        let mut c = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("C opens");
+        let row_path = root.path().join(ROW_FILE);
+        let raw = std::fs::read(&row_path).expect("rows");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&row_path, &raw).expect("same bytes, same length, rewritten");
+        assert!(
+            c.append_complete(&prepared(72))
+                .expect_err("a same-length rewrite refuses")
+                .contains("changed since open")
+        );
+
+        // A replaced file (new inode, longer) is not growth either.
+        let replaced = test_dir();
+        let mut d = CandidateUniverseLedgerV1::open(replaced.path(), bounds).expect("D opens");
+        let path = replaced.path().join(ROW_FILE);
+        let mut bytes = std::fs::read(&path).expect("rows");
+        let displaced = replaced.path().join("rows.displaced");
+        std::fs::rename(&path, &displaced).expect("displaced");
+        bytes.extend_from_slice(&[0_u8; 3]);
+        std::fs::write(&path, &bytes).expect("a new, longer inode");
+        assert!(d.append_complete(&prepared(73)).is_err());
+
+        // The rule itself, exhaustively over its four shapes.
+        let base = file_generation(
+            &std::fs::File::open(&displaced).expect("displaced opens"),
+            &displaced,
+        )
+        .expect("generation");
+        assert!(grew_in_place(base, base));
+        let mut longer = base;
+        longer.len += 1;
+        assert!(grew_in_place(base, longer));
+        let mut shorter = base;
+        shorter.len = shorter.len.saturating_sub(1);
+        assert!(!grew_in_place(base, shorter) || base.len == 0);
+        let mut moved = longer;
+        moved.inode = moved.inode.wrapping_add(1);
+        assert!(!grew_in_place(base, moved));
+    }
+
+    #[test]
+    fn reverify_committed_refuses_every_disagreement_with_the_disk() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+
+        // A foreign write between the append and the re-read changes the
+        // row file's generation and refuses.
+        let foreign_root = test_dir();
+        let mut foreign = CandidateUniverseLedgerV1::open(foreign_root.path(), bounds)
+            .expect("foreign fixture opens");
+        let committed = foreign
+            .append_complete(&prepared(62))
+            .expect("foreign fixture commits");
+        let mut external = open_file(&foreign_root.path().join(ROW_FILE), true, false)
+            .expect("external writer opens");
+        external.seek(SeekFrom::End(0)).expect("external seeks");
+        external
+            .write_all(&[0_u8; 1])
+            .and_then(|()| external.sync_data())
+            .expect("external byte persists");
+        drop(external);
+        assert!(
+            foreign
+                .reverify_committed(&committed)
+                .expect_err("a foreign modification must refuse")
+                .contains("changed since open")
+        );
+
+        // A row that differs on disk while the cached generation was made to
+        // match (the ABA a metadata generation cannot see) is still refused,
+        // because the block itself is re-read and re-sealed.
+        let aba_root = test_dir();
+        let mut aba =
+            CandidateUniverseLedgerV1::open(aba_root.path(), bounds).expect("aba fixture opens");
+        let committed = aba
+            .append_complete(&prepared(63))
+            .expect("aba fixture commits");
+        let row_path = aba_root.path().join(ROW_FILE);
+        let mut corrupt = open_file(&row_path, true, false).expect("row file reopens");
+        let fact_offset = HEADER_BYTES_V1 + 248;
+        let mut byte = [0_u8; 1];
+        corrupt
+            .seek(SeekFrom::Start(fact_offset))
+            .and_then(|_| corrupt.read_exact(&mut byte))
+            .expect("fact byte reads");
+        byte[0] ^= 1;
+        corrupt
+            .seek(SeekFrom::Start(fact_offset))
+            .and_then(|_| corrupt.write_all(&byte))
+            .and_then(|()| corrupt.sync_data())
+            .expect("fact mutation persists");
+        drop(corrupt);
+        aba.row_generation =
+            file_generation(&aba.row_file, &row_path).expect("generation remeasures");
+        assert!(
+            aba.reverify_committed(&committed)
+                .expect_err("a corrupt committed row must refuse")
+                .contains("seal")
+        );
+    }
+
+    #[test]
+    fn reverify_committed_refuses_counts_absences_and_order_it_did_not_write() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        // A physical row count this handle did not write refuses, as does a
+        // completion count that differs from the index.
+        let count_root = test_dir();
+        let mut counted = CandidateUniverseLedgerV1::open(count_root.path(), bounds)
+            .expect("count fixture opens");
+        let committed = counted
+            .append_complete(&prepared(64))
+            .expect("count fixture commits");
+        counted.total_rows += 1;
+        assert!(
+            counted
+                .reverify_committed(&committed)
+                .expect_err("rows on disk differ from the committed total")
+                .contains("rows and 1 completions on disk")
+        );
+        counted.total_rows -= 1;
+        let bogus = prepared(65).receipt;
+        counted.audits.insert(
+            bogus.universe_id(),
+            CandidateUniverseReopenAuditV1 {
+                first_row: 0,
+                receipt: bogus,
+            },
+        );
+        assert!(
+            counted
+                .reverify_committed(&committed)
+                .expect_err("completions on disk differ from the index")
+                .contains("not the")
+        );
+        counted.audits.remove(&bogus.universe_id());
+        counted
+            .reverify_committed(&committed)
+            .expect("the restored handle reverifies");
+
+        // A universe absent from the index, with counts that still agree,
+        // refuses by name.
+        assert!(
+            counted
+                .reverify_committed(&CandidateUniverseProductionCommitV1::Written(
+                    CandidateUniverseReopenAuditV1 {
+                        first_row: 0,
+                        receipt: *prepared(66).receipt(),
+                    }
+                ))
+                .expect_err("an absent universe refuses")
+                .contains("disappeared")
+        );
+
+        // A Written commit that is not the last stored completion refuses.
+        let order_root = test_dir();
+        let mut ordered = CandidateUniverseLedgerV1::open(order_root.path(), bounds)
+            .expect("order fixture opens");
+        let older = ordered
+            .append_complete(&prepared(67))
+            .expect("older commits");
+        ordered
+            .append_complete(&prepared(68))
+            .expect("newer commits");
+        assert!(
+            ordered
+                .reverify_committed(&older)
+                .expect_err("an older Written commit is not the last completion")
+                .contains("not the last stored completion")
+        );
+        assert_eq!(
+            ordered
+                .reverify_committed(&CandidateUniverseProductionCommitV1::Reused(older.audit()))
+                .expect("a Reused older block re-reads cleanly"),
+            older.audit()
+        );
+    }
+
     #[test]
     fn ragged_corrupt_and_stale_files_fail_closed() {
         let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
@@ -8420,9 +9708,24 @@ mod tests {
         ragged.sync_data().expect("ragged byte syncs");
         drop(ragged);
         assert!(
-            CandidateUniverseLedgerV1::open(ragged_root.path(), bounds)
-                .expect_err("ragged fixed-stride file must refuse")
+            CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
+                .expect_err("a reader refuses the ragged fixed-stride file")
                 .contains("ragged")
+        );
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(
+            CandidateUniverseLedgerV1::open(ragged_root.path(), bounds)
+                .expect("the writer cuts the ragged tail"),
+        );
+        assert_eq!(
+            std::fs::metadata(ragged_root.path().join(ROW_FILE))
+                .expect("measure")
+                .len(),
+            HEADER_BYTES_V1
+        );
+        drop(
+            CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
+                .expect("a reader opens the healed ledger"),
         );
 
         let corrupt_root = test_dir();
@@ -8520,5 +9823,267 @@ mod tests {
                 "replacement of {name} did not fail closed"
             );
         }
+    }
+
+    fn production_body(name: &str) -> &'static str {
+        let source = include_str!("candidate_universe.rs");
+        let tests_start = source
+            .find("\nmod tests {")
+            .expect("the test module exists");
+        let production = &source[..tests_start];
+        let start = production
+            .find(&format!("\nfn {name}("))
+            .or_else(|| production.find(&format!("\nfn {name}<")))
+            .or_else(|| production.find(&format!("\npub(crate) fn {name}<")))
+            .unwrap_or_else(|| panic!("{name} exists"));
+        let rest = &production[start + 1..];
+        let end = rest.find("\n}\n").expect("the function closes");
+        &rest[..end]
+    }
+
+    /// D-0990: every series-invariant term on the per-(closed mask, side) path
+    /// is hoisted. The per-mask bodies may not re-hash the streams, re-attest
+    /// the slice, rebuild the slice facts through the one-off replay door, or
+    /// grow the retained row vector by an exact increment.
+    #[test]
+    fn candidate_grid_paths_hoist_every_series_invariant_out_of_the_mask_loop() {
+        for name in [
+            "expand_population_side",
+            "append_validated_grid_rows",
+            "replay_execution_side",
+        ] {
+            let body = production_body(name);
+            for banned in [
+                "new_with_daily_reference(",
+                "evaluate_training_grid_attested(",
+                "attest_training",
+                "ExecutionDigestsV1::of_daily_reference(",
+                "= materialize_cell(",
+                "SliceFacts::of(",
+                "try_reserve_exact(",
+            ] {
+                assert!(
+                    !body.contains(banned),
+                    "{name} repeats a series-invariant term per mask: {banned}"
+                );
+            }
+        }
+        for (name, required) in [
+            ("expand_population_side", "with_digests("),
+            ("expand_population_side", "evaluate_with_attested("),
+            ("expand_population_side", ".cell_replay("),
+            ("append_validated_grid_rows", "cells.materialize("),
+            ("replay_execution_side", "with_digests("),
+            ("replay_execution_side", "evaluate_with_attested("),
+        ] {
+            assert!(
+                production_body(name).contains(required),
+                "{name} must use the hoisted door {required}"
+            );
+        }
+        let hoist = production_body("hoist_execution_series");
+        assert!(hoist.contains("ExecutionDigestsV1::of_daily_reference("));
+        assert_eq!(hoist.matches("attest_training(").count(), 2);
+    }
+
+    /// D-0990: one directional grid's rows are reserved with GEOMETRIC growth.
+    ///
+    /// `try_reserve_exact` grew the retained buffer by exactly one grid width
+    /// per `(closed mask, side)`, so every append of a new grid moved the whole
+    /// buffer: Θ(rows retained) per grid, the amortised-O(1) guarantee of
+    /// `CLAUDE.md` §3 rule 4 lost. Sixty-four one-row grids must therefore
+    /// change capacity at most ⌈log2 64⌉ + 1 times, never sixty-four; it is
+    /// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`,
+    /// invariant
+    /// row CUH-04.
+    #[test]
+    fn retained_candidate_rows_grow_geometrically_per_directional_grid() {
+        let mut rows: Vec<u64> = Vec::new();
+        let mut reallocations = 0_u32;
+        let mut capacity = rows.capacity();
+        for value in 0..64_u64 {
+            reserve_directional_grid_rows(&mut rows, 1).expect("one row reserves");
+            if rows.capacity() != capacity {
+                reallocations += 1;
+                capacity = rows.capacity();
+            }
+            rows.push(value);
+        }
+        assert_eq!(rows.len(), 64);
+        assert!(
+            reallocations <= 7,
+            "{reallocations} reallocations for 64 one-row grids is exact, not geometric, growth"
+        );
+        // A grid wider than the spare capacity still reserves all of it.
+        reserve_directional_grid_rows(&mut rows, 1_000).expect("a wide grid reserves");
+        assert!(rows.capacity() - rows.len() >= 1_000);
+        // An impossible reservation is a named refusal, not an abort.
+        let refused = reserve_directional_grid_rows(&mut rows, usize::MAX)
+            .expect_err("usize::MAX rows cannot be reserved");
+        assert!(refused.contains("could not reserve"), "{refused}");
+    }
+
+    /// D-0990: the series-invariant execution authority is sealed exactly once
+    /// per Candidate block, however many closed masks are expanded through it,
+    /// for production and for Execution V3 replay; a rerun is byte-identical.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture proves the per-member reuse, the production count, the rerun and the replay count together"
+    )]
+    #[test]
+    fn candidate_production_seals_the_execution_series_once_for_every_closed_mask() {
+        let fixture = ProductionFixture::new();
+        let source = fixture.source();
+        let (frequent_bit, max_singleton_support, _) =
+            maximum_nontrivial_live_singleton_support(&source.signal_column);
+        let ladder = engine::Ladder::with_min_hits(max_singleton_support);
+        let sweeper = Sweeper::new(ladder);
+        let bounds = CandidateUniverseBoundsV1::new(1_000_000, 4)
+            .expect("production fixture bounds are explicit");
+
+        // Several closed members through ONE hoisted slot: one seal in total,
+        // and every member's rows identical to the first's.
+        let identities = production_identities(&source, &sweeper).expect("typed identities");
+        let descriptor = CandidateUniverseDescriptorV1::new(
+            source.family,
+            source.rung_seconds,
+            source.horizon,
+            source.requested_span,
+            &identities,
+            source.signal_calendar,
+            source.execution_calendar,
+            source.signal_bars,
+            &source.signal_column,
+            source.execution_series,
+            &source.execution_column,
+        )
+        .expect("production descriptor");
+        let member = PopulationMember {
+            item: engine::Itemset {
+                mask: vocab::ConditionMask::ZERO.with_bit(frequent_bit),
+                hits: max_singleton_support,
+            },
+            closure: ClosureVerdict::Closed,
+        };
+        let inputs = CandidateExecutionInputsV1 {
+            signal_bars: source.signal_bars,
+            reference_minute_context: source.reference_minute_context,
+            daily_reference: source.daily_reference,
+            execution_series: source.execution_series,
+            execution_column: &source.execution_column,
+            long_exit_grid: source.long_exit_grid,
+            short_exit_grid: source.short_exit_grid,
+            horizon: source.horizon,
+        };
+        let base_bounds = BaseEvidenceBoundsV2::new(
+            bounds.max_rows(),
+            source.minute_load_bound.max_records(),
+            source.signal_load_bound.max_records(),
+            source.signal_load_bound.max_records(),
+        )
+        .expect("fixture Base Evidence bounds");
+        SERIES_HOISTS.with(|count| count.set(0));
+        let mut hoisted = None;
+        let mut expansions = Vec::new();
+        for _ in 0..4 {
+            let mut rows = Vec::new();
+            let mut observations = CandidateObservationBuilderV1::from_exact_execution(
+                source.execution_calendar,
+                source.execution_series.bars(),
+                &source.execution_column,
+            )
+            .expect("fixture observations");
+            let mut base_builder = BaseEvidenceBuilderV2::new(base_bounds);
+            expand_population_member(
+                member,
+                &descriptor,
+                execution_run_params(&sweeper, &source),
+                &inputs,
+                &mut hoisted,
+                source.rung_seconds,
+                bounds,
+                &mut rows,
+                &mut observations,
+                &source.signal_column,
+                base_bounds,
+                &mut base_builder,
+            )
+            .expect("a closed member expands through the hoisted authority");
+            expansions.push(rows);
+        }
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "four closed members on two sides seal the streams and attest each side once"
+        );
+        let first = expansions.first().expect("one expansion");
+        assert!(!first.is_empty());
+        assert!(expansions.iter().all(|rows| rows == first));
+        // A redundant member never seals anything.
+        SERIES_HOISTS.with(|count| count.set(0));
+        let mut untouched = None;
+        expand_population_member(
+            PopulationMember {
+                closure: ClosureVerdict::Redundant,
+                ..member
+            },
+            &descriptor,
+            execution_run_params(&sweeper, &source),
+            &inputs,
+            &mut untouched,
+            source.rung_seconds,
+            bounds,
+            &mut Vec::new(),
+            &mut CandidateObservationBuilderV1::from_exact_execution(
+                source.execution_calendar,
+                source.execution_series.bars(),
+                &source.execution_column,
+            )
+            .expect("fixture observations"),
+            &source.signal_column,
+            base_bounds,
+            &mut BaseEvidenceBuilderV2::new(base_bounds),
+        )
+        .expect("a redundant member is skipped");
+        assert!(untouched.is_none());
+        assert_eq!(SERIES_HOISTS.with(std::cell::Cell::get), 0);
+
+        SERIES_HOISTS.with(|count| count.set(0));
+        let produced = produce_candidate_universe_v1(&sweeper, source, bounds, &|_, _, _| {})
+            .expect("an uncapped naturally-extinct production walk completes");
+        assert!(produced.population_run().closed >= 1);
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "production seals the series once"
+        );
+        let rerun =
+            produce_candidate_universe_v1(&sweeper, fixture.source(), bounds, &|_, _, _| {})
+                .expect("the exact rerun completes");
+        assert_eq!(
+            rerun.receipt(),
+            produced.receipt(),
+            "a rerun is byte-identical"
+        );
+
+        let root = test_dir();
+        let written = produced
+            .append_and_reopen(root.path(), bounds)
+            .expect("typed production writes rows then receipt and reopens");
+        let ledger = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+            .expect("the completed Candidate ledger reopens read-only");
+        let authenticated = ledger
+            .complete_population_rows(&written.audit())
+            .expect("the completed Candidate rows authenticate");
+        SERIES_HOISTS.with(|count| count.set(0));
+        fixture
+            .source()
+            .execution_v3_replay_authority(ladder, written.audit().receipt(), &authenticated)
+            .expect("the retained source reproduces exact Runner terminal dispositions");
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "Execution V3 replay seals the series once for every authenticated group"
+        );
     }
 }

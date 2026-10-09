@@ -69,6 +69,9 @@
 //! Opening reads the whole file once, O(rows), to learn where each block starts.
 //! That is the same trade [`crate::results`] already makes for its duplicate
 //! check, and it happens once per process rather than once per question.
+//! For the writer that holds because `cli` keeps one handle per process and
+//! refreshes it by the delta (`with_cached_handle` in `lib.rs`); until p12num-1
+//! (D-1777) every recorded run reopened it, Θ(rows) per run.
 //! A read-only [`Frontier::of_run`] also opens/indexes `runs.bin` and
 //! `detail-sets.bin` to prove public commit and exact cardinality. On a fresh
 //! HTTP handle that proof is O(total ledger rows + total receipts), before the
@@ -178,7 +181,7 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 
 /// Bytes per row.
 ///
-/// 144, and the last eight are the seal. The layout is in [`Row::to_bytes`], and
+/// 280, and the last eight are the seal (format version 7; this doc said 144). The layout is in [`Row::to_bytes`], and
 /// `the_stride_is_exactly_what_the_writer_writes` asserts this constant against
 /// what that function actually fills rather than against a hand count.
 pub const STRIDE: u64 = 280;
@@ -187,6 +190,27 @@ pub const STRIDE: u64 = 280;
 pub const STRIDE_BYTES: usize = 280;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
+
+/// The most frontier rows one run may write: the number `api` verifies and
+/// serves for one run (`api::detail::MAX_RESULT_ROWS`, which asserts it equals
+/// this). A `TOP` above it wrote rows `/frontier.json` and `/top` then refused
+/// whole, so it is refused before the run instead. CE-19, D-1981.
+pub const MAX_ROWS: usize = 4_096;
+
+/// Refuses a `TOP` the frontier cannot carry to a reader.
+///
+/// # Errors
+///
+/// Names the requested count and [`MAX_ROWS`] when `top` is zero or above it.
+pub fn admit_top(top: usize) -> Result<(), String> {
+    if top == 0 || top > MAX_ROWS {
+        return Err(format!(
+            "TOP is {top} and must be 1 to {MAX_ROWS}, the most frontier rows one run \
+             can serve; nothing was swept"
+        ));
+    }
+    Ok(())
+}
 
 /// Bytes of `blake3` kept as the seal.
 ///
@@ -217,11 +241,12 @@ const HEADER_RESERVED: core::ops::Range<usize> = 12..HEADER_BYTES;
 ///
 /// # Every field is either the key or something a comparison needs
 ///
-/// There is no P&L here and that is deliberate. A frontier row records what the
-/// SWEEP found — the combination, how often it fired, and the two statistics the
-/// cut can be made on. What a trade of it would have earned is the exit grid's
-/// answer and lives on [`crate::results::Record`], one per run, because the grid
-/// is only ever run on the chosen combination.
+/// A frontier row records what the SWEEP found — the combination, how often it
+/// fired, and the statistics the cut can be made on — AND the chosen exit-grid
+/// cell's raw money fields (`trades`, `cell_wins`, `pessimistic`, `worst_trade`,
+/// `max_drawdown`, `min_win`), which are zero when that cell traded nothing.
+/// This said "there is no P&L here"; the money fields were added and the
+/// sentence was not removed (Z1-slice18-F2, D-1771).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
     /// Which run this row belongs to — the nine-term identity §3 rule 3 names.
@@ -435,8 +460,9 @@ impl Row {
         // THE FILL-HEADROOM RULE, in the four bytes reserved for exactly this:
         // a later rule needing to say what judged the row. i32, not i64, because
         // that is the space the reserve left and a headroom in hundredths never
-        // approaches two billion. Saturating, so an impossible value clamps to a
-        // refusal rather than wrapping into a pass.
+        // approaches two billion. `append` refuses a row whose value does not
+        // fit before encoding it (D-1623), so the saturation below is never
+        // reached on a written row; it remains only so `to_bytes` stays total.
         //
         // NOT round-tripping it was the alternative, and it was wrong: the row
         // stores its rule set so a reader knows what judged it, and a field that
@@ -872,54 +898,90 @@ impl Frontier {
     ///
     /// # Errors
     ///
-    /// Refuses when the directory cannot be made, the file cannot be opened,
-    /// the magic is not `BRUTEXFR`, the version is one this build does not
-    /// write, or the length does not divide by the stride -- each named, and
-    /// nothing written in any of them.
+    /// Refuses when the directory cannot be made, the file cannot be opened
+    /// or locked, the magic is not `BRUTEXFR`, or the version is one this
+    /// build does not write -- each named, and nothing written in any of
+    /// them. A torn tail past the last whole row is cut, under the exclusive
+    /// lock, with a `cli.ledger` event (D-1901).
     pub fn open(root: &Path) -> Result<Self, Refusal> {
         let dir = root.join("results");
-        std::fs::create_dir_all(&dir)
+        // Every directory this makes is made durable (sobs-12, D-4461).
+        crate::fixed_tail::create_dir_all_durable(&dir)
             .map_err(|why| format!("the results directory could not be made: {why}"))?;
         let path = Self::path(root);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-
-        let len = file
-            .metadata()
-            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
-            .len();
-
-        if len == 0 {
-            write_fresh_header(&mut file, &path)?;
-            return Ok(Self {
-                file,
-                path,
-                root: root.to_path_buf(),
-                require_parent: false,
-                blocks: std::collections::HashMap::new(),
-                scanned: HEADER,
-                write_refusal: None,
-            });
-        }
-        check_header(&mut file, &path, len)?;
-        let Indexed {
-            blocks,
-            write_refusal,
-        } = index_of(&mut file, len)?;
-        Ok(Self {
+        // THE WRITER'S OPEN HOLDS THE EXCLUSIVE LOCK while it measures, cuts
+        // a torn tail and indexes (D-1901, sweep-2). Unlocked, the length could
+        // land inside another writer's live append, and cutting THAT would
+        // destroy a write in progress.
+        file.lock()
+            .map_err(|why| format!("the frontier file could not be locked: {why}"))?;
+        let mut frontier = Self {
             file,
             path,
             root: root.to_path_buf(),
             require_parent: false,
+            blocks: std::collections::HashMap::new(),
+            scanned: HEADER,
+            write_refusal: None,
+        };
+        let indexed = frontier.index_locked();
+        let released = frontier
+            .file
+            .unlock()
+            .map_err(|why| format!("the frontier file could not be unlocked: {why}"));
+        indexed.and(released).map(|()| frontier)
+    }
+
+    /// [`Self::open`]'s body under the exclusive lock.
+    ///
+    /// A torn tail -- bytes past the last whole row -- is never a row: a
+    /// frontier block is exposed only under a committed result-set receipt
+    /// and ledger row, both written after this file's block is whole and
+    /// synced. So the writer cuts it, says so, and carries on. Read-only opens
+    /// still refuse it.
+    fn index_locked(&mut self) -> Result<(), Refusal> {
+        // An all-zero or torn header the writer's own failure left is cut to
+        // nothing and written again below (conc5-1, D-2644).
+        crate::fixed_tail::heal_interrupted_header(
+            &self.file,
+            &self.path,
+            &crate::fixed_tail::sixteen_byte_header(MAGIC, VERSION),
+        )?;
+        crate::fixed_tail::heal_torn_tail(
+            &self.file,
+            &self.path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
+        let len = self
+            .file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
+            .len();
+        if len == 0 {
+            // The new name is made durable BEFORE the header is written
+            // (sobs-12, D-4461): a kill between the two leaves an empty file,
+            // which the next writer treats as new and barriers again.
+            crate::fixed_tail::sync_parent(&self.path)?;
+            return write_fresh_header(&mut self.file, &self.path);
+        }
+        check_header(&mut self.file, &self.path, len)?;
+        let Indexed {
             blocks,
-            scanned: len,
             write_refusal,
-        })
+        } = index_of(&mut self.file, len)?;
+        self.blocks = blocks;
+        self.scanned = len;
+        self.write_refusal = write_refusal;
+        Ok(())
     }
 
     /// How many rows the file holds. **O(1)** — arithmetic on the length.
@@ -1041,7 +1103,7 @@ impl Frontier {
 
     /// [`Self::append_all`]'s work, with the lock already held.
     fn append_locked(&mut self, rows: &[Row]) -> Result<u64, Refusal> {
-        self.append_locked_with(rows, std::io::Write::write_all)
+        self.append_locked_with(rows, std::io::Write::write_all, File::sync_all)
     }
 
     /// The append body with an injectable write used to prove partial-write
@@ -1050,7 +1112,17 @@ impl Frontier {
         &mut self,
         rows: &[Row],
         write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<u64, Refusal> {
+        // A tail another writer's killed append left since this handle opened
+        // is cut here, under the exclusive lock (D-1901).
+        crate::fixed_tail::heal_torn_tail(
+            &self.file,
+            &self.path,
+            HEADER,
+            STRIDE,
+            &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+        )?;
         // This handle may have been opened before another process appended.
         // Refresh while holding the same exclusive lock that protects the
         // write, then repeat duplicate rejection against current disk state.
@@ -1073,6 +1145,21 @@ impl Frontier {
             .map_err(|why| format!("the frontier file could not be seeked: {why}"))?;
         let first = end.saturating_sub(HEADER) / STRIDE;
 
+        // THE STORED RULE MUST BE THE APPLIED RULE. Bytes 196..200 hold the
+        // fill-headroom rule as an i32, and the knob parses an i64. A run judged
+        // at 3,000,000,000 bp used to store 2,147,483,647, so the row named a
+        // rule that did not judge it and a re-judge could flip its verdict.
+        // Refused before any byte is written (D-1623).
+        for row in rows {
+            if i32::try_from(row.rules.min_fill_headroom_bp).map_or(true, |bp| bp < 0) {
+                return Err(format!(
+                    "run {} was judged at min_fill_headroom_bp {}, which the frontier row's four-byte field cannot store exactly (0..={}); refusing rather than recording a rule that did not judge it",
+                    hex(&row.identity),
+                    row.rules.min_fill_headroom_bp,
+                    i32::MAX
+                ));
+            }
+        }
         let mut buffer: Vec<u8> = Vec::with_capacity(rows.len() * STRIDE_BYTES);
         for row in rows {
             buffer.extend_from_slice(&row.to_bytes());
@@ -1083,18 +1170,14 @@ impl Frontier {
         // on every later open, hiding older committed blocks and preventing an
         // exact rerun from recovering. `end` was measured under the exclusive
         // lock, so truncating to it removes only this call's uncommitted bytes.
-        write(&mut self.file, &buffer).map_err(|why| match self.file.set_len(end) {
-            Ok(()) => format!(
-                "the frontier rows could not be written: {why}. The partial write was rolled back to byte {end}, so every older whole row remains readable"
-            ),
-            Err(and) => format!(
-                "the frontier rows could not be written: {why}. Rolling the partial write back to byte {end} ALSO failed: {and}. The file may now end mid-row and is refused until its tail is repaired"
-            ),
-        })?;
+        crate::fixed_tail::write_at_end(&mut self.file, &self.path.display(), end, &buffer, write)
+            .map_err(|why| format!("the frontier rows could not be written: {why}"))?;
         // FLUSHED BEFORE THE COUNT IS REPORTED. A count taken from a length the
-        // operating system has not committed is a number that can shrink.
-        self.file
-            .sync_all()
+        // operating system has not committed is a number that can shrink. A
+        // failed barrier cuts the block too: on Linux the failed pages stay
+        // readable but clean, so keeping them let a lookup find the block and
+        // a second barrier "confirm" it (resources-1, D-1900).
+        crate::fixed_tail::sync_or_roll_back(&self.file, &self.path, end, sync)
             .map_err(|why| format!("the frontier rows could not be flushed: {why}"))?;
 
         // THE INDEX LEARNS ABOUT THE BLOCK IT JUST WROTE, so a process that
@@ -1129,21 +1212,52 @@ impl Frontier {
     /// handle and opening fresh, which is the one O(rows) path a cache should
     /// ever take.
     ///
+    /// **A read-only handle refreshes exactly as [`Self::open_read_bounded`]
+    /// indexes.** A bad seal, a sealed row with an invalid schema and a
+    /// non-contiguous duplicate are recorded and skipped, never refused, so a
+    /// handle opened over damaged history stays O(delta) per refresh. Until
+    /// W2-cli5-0 this ran the writer's integrity gate first, so every refresh
+    /// of such a handle was refused, `api`'s cache dropped it, and the next
+    /// request reopened it at O(rows): a refusal and a full walk alternated.
+    /// `a_read_only_handle_over_damaged_history_refreshes_by_the_delta` pins
+    /// the refreshed index to a fresh open's. A writer handle keeps the strict
+    /// path, which refuses. D-0913.
+    ///
+    /// **A read-only refresh holds the SHARED lock** while it measures and
+    /// reads, as [`Self::read`] does and `results::Results::refresh` does.
+    /// `append_all` writes under the exclusive lock, so the refresh waits for
+    /// an append in progress rather than seeing part of one. Recording damage
+    /// instead of refusing makes this necessary: a torn row read outside the
+    /// lock would be indexed as a bad seal and kept in a cached handle that no
+    /// longer drops itself.
+    /// `a_read_only_refresh_waits_for_an_append_in_progress` pins it.
+    ///
     /// # Errors
     ///
-    /// The same refusals `absorb_new_rows` makes: a shrunken file, a ragged
-    /// tail, an unreadable row, or a duplicate identity whose blocks are not
+    /// Both kinds refuse a shrunken file, a ragged tail or an unreadable row,
+    /// and a read-only handle also refuses a shared-lock or unlock failure.
+    /// A writer handle also refuses the damage it has already recorded, a bad
+    /// seal, an invalid schema or a duplicate identity whose blocks are not
     /// contiguous.
     pub fn refresh(&mut self) -> Result<(), Refusal> {
-        self.absorb_new_rows()
+        if !self.require_parent {
+            return self.absorb_new_rows();
+        }
+        self.file.lock_shared().map_err(|why| {
+            format!("the frontier file could not be locked for refreshing: {why}")
+        })?;
+        let absorbed = self.absorb_read_only();
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the frontier file could not be unlocked: {why}"));
+        absorbed.and(released)
     }
 
-    /// Absorbs whole rows appended since this handle opened.
-    ///
-    /// O(rows appended by other writers), which is zero on the ordinary
-    /// result-set path because its outer lock serialises all four children.
-    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
-        self.refuse_integrity_failure_for_write()?;
+    /// The whole-row length a refresh may absorb up to, or the reason there
+    /// is none: the file shrank below what this handle already indexed, or
+    /// its length is not a header plus whole rows.
+    fn absorbable_len(&self) -> Result<u64, Refusal> {
         let len = self
             .file
             .metadata()
@@ -1162,6 +1276,38 @@ impl Frontier {
                 self.path.display()
             ));
         }
+        Ok(len)
+    }
+
+    /// A read-only handle's refresh: the rows past `scanned`, each indexed by
+    /// [`index_row`], the one rule [`index_of`] applies at open.
+    fn absorb_read_only(&mut self) -> Result<(), Refusal> {
+        let len = self.absorbable_len()?;
+        let at = self.scanned;
+        self.file
+            .seek(SeekFrom::Start(at))
+            .map_err(|why| format!("frontier row at byte {at} could not be seeked: {why}"))?;
+        let mut buffered = std::io::BufReader::new(&mut self.file);
+        let mut raw = [0_u8; STRIDE_BYTES];
+        while self.scanned.saturating_add(STRIDE) <= len {
+            let at = self.scanned;
+            buffered
+                .read_exact(&mut raw)
+                .map_err(|why| format!("frontier row at byte {at} could not be read: {why}"))?;
+            let index = at.saturating_sub(HEADER) / STRIDE;
+            index_row(&mut self.blocks, &mut self.write_refusal, index, &raw);
+            self.scanned = self.scanned.saturating_add(STRIDE);
+        }
+        Ok(())
+    }
+
+    /// Absorbs whole rows appended since this handle opened.
+    ///
+    /// O(rows appended by other writers), which is zero on the ordinary
+    /// result-set path because its outer lock serialises all four children.
+    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
+        self.refuse_integrity_failure_for_write()?;
+        let len = self.absorbable_len()?;
 
         let mut raw = [0_u8; STRIDE_BYTES];
         while self.scanned.saturating_add(STRIDE) <= len {
@@ -1239,6 +1385,9 @@ impl Frontier {
     /// Names a shared-lock, durability-barrier, or unlock failure. A caller
     /// must not promote the child to the public ledger after any such refusal.
     pub fn confirm_durable(&mut self) -> Result<(), Refusal> {
+        // A barrier that already failed on this file in this process is never
+        // confirmed by a second one (resources-1, D-1900).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.path)?;
         self.file
             .lock_shared()
             .map_err(|why| format!("the frontier file could not be locked for syncing: {why}"))?;
@@ -1594,7 +1743,8 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
     //
     // A `BufReader` does not change the O(rows) walk -- only a persisted or
     // cached index does that -- but it divides the syscall count by the rows
-    // that fit in a buffer: at 208 bytes and the default 8 KiB, 39 per read.
+    // that fit in a buffer: at `STRIDE_BYTES` (280) and the default 8 KiB, 29 per
+    // read.
     // The borrow is scoped so the `File`'s cursor is free afterwards, and every
     // later reader seeks explicitly before it reads.
     let mut buffered = std::io::BufReader::new(&mut *file);
@@ -1604,50 +1754,62 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
         buffered
             .read_exact(&mut raw)
             .map_err(|why| format!("row {index} could not be read while indexing: {why}"))?;
-        if !Row::seal_matches(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("whole frontier row {index} whose integrity seal failed")
-            });
-            continue;
-        }
-        // A valid seal makes the identity bytes trustworthy, but it does not
-        // make an unknown schema byte meaningful. Decode every sealed row so a
-        // fresh writer inherits the same refusal a stale writer would have seen.
-        let mut identity = [0_u8; 32];
-        identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
-        if let Err(why) = Row::from_bytes(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("frontier row {index} is sealed but its schema is invalid: {why}")
-            });
-        }
-
-        match blocks.get_mut(&identity) {
-            Some(block) if block.first.saturating_add(block.count) == index => {
-                block.count = block.count.saturating_add(1);
-            }
-            Some(_) => {
-                write_refusal.get_or_insert_with(|| {
-                    format!(
-                        "frontier row {index} starts a non-contiguous duplicate block for run {}",
-                        hex(&identity)
-                    )
-                });
-            }
-            None => {
-                blocks.insert(
-                    identity,
-                    Block {
-                        first: index,
-                        count: 1,
-                    },
-                );
-            }
-        }
+        index_row(&mut blocks, &mut write_refusal, index, &raw);
     }
     Ok(Indexed {
         blocks,
         write_refusal,
     })
+}
+
+/// Index one whole row at `index`, recording the first integrity failure
+/// rather than refusing. Shared by [`index_of`] at open and by a read-only
+/// handle's refresh, so the two cannot index the same bytes differently.
+fn index_row(
+    blocks: &mut std::collections::HashMap<[u8; 32], Block>,
+    write_refusal: &mut Option<Refusal>,
+    index: u64,
+    raw: &[u8; STRIDE_BYTES],
+) {
+    if !Row::seal_matches(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("whole frontier row {index} whose integrity seal failed")
+        });
+        return;
+    }
+    // A valid seal makes the identity bytes trustworthy, but it does not
+    // make an unknown schema byte meaningful. Decode every sealed row so a
+    // fresh writer inherits the same refusal a stale writer would have seen.
+    let mut identity = [0_u8; 32];
+    identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
+    if let Err(why) = Row::from_bytes(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("frontier row {index} is sealed but its schema is invalid: {why}")
+        });
+    }
+
+    match blocks.get_mut(&identity) {
+        Some(block) if block.first.saturating_add(block.count) == index => {
+            block.count = block.count.saturating_add(1);
+        }
+        Some(_) => {
+            write_refusal.get_or_insert_with(|| {
+                format!(
+                    "frontier row {index} starts a non-contiguous duplicate block for run {}",
+                    hex(&identity)
+                )
+            });
+        }
+        None => {
+            blocks.insert(
+                identity,
+                Block {
+                    first: index,
+                    count: 1,
+                },
+            );
+        }
+    }
 }
 
 /// Writes the sixteen-byte header of a fresh file, and proves it was kept.
@@ -1661,9 +1823,17 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
         .get_mut(8..12)
         .ok_or_else(|| "the header is shorter than its version".to_owned())?
         .copy_from_slice(&VERSION.to_le_bytes());
-    file.write_all(&header)
-        .map_err(|why| format!("the header could not be written: {why}"))?;
-    file.sync_all()
+    // A failed write or barrier is cut back to nothing, and a failed barrier
+    // remembered (conc5-1, D-2644), so the next open writes it again.
+    file.write_all(&header).map_err(|why| {
+        crate::fixed_tail::roll_back(
+            file,
+            &path.display(),
+            0,
+            &format!("the header could not be written: {why}"),
+        )
+    })?;
+    crate::fixed_tail::sync_all_or_roll_back(file, path, 0)
         .map_err(|why| format!("the header could not be flushed: {why}"))?;
     // READ BACK, because a successful write is not proof that anything was
     // stored — the same check `crate::results::write_fresh_header` makes and for
@@ -1771,8 +1941,8 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
         let spare = body % STRIDE;
         return Err(format!(
             "{} has {spare} bytes past its last whole row — an append was \
-             interrupted. {whole} whole rows are intact; the remainder is left \
-             alone. Nothing was written.",
+             interrupted. {whole} whole rows are intact; a reader leaves the \
+             remainder alone, and the next writer cuts it under its lock. Nothing was written.",
             path.display()
         ));
     }
@@ -1790,7 +1960,8 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
 mod tests {
     use super::{
         DIRECTION_AT, Frontier, HEADER_BYTES, HEADER_RESERVED, MAGIC, PAYLOAD_BYTES, ROW_RESERVED,
-        Row, SEAL_BYTES, STRIDE, STRIDE_BYTES, seal_of,
+        Row, SEAL_BYTES, STRIDE, STRIDE_BYTES, VERDICT_CHECKED, VERDICT_UNCHECKED, VERSION,
+        Verdict, seal_of,
     };
 
     fn root(tag: &str) -> std::path::PathBuf {
@@ -1850,6 +2021,19 @@ mod tests {
     /// This is the test that would have caught it. `record_frontier` writes the
     /// top `top` by ranking lens and consults no rule at all, so nothing between
     /// the sweep and the browser ever asked whether the best row was any good.
+    /// CE-19, D-1981: the writer's TOP bound is the reader's row bound,
+    /// admitted at it and refused one past it.
+    #[test]
+    fn a_top_is_admitted_up_to_the_reader_bound_and_refused_past_it() {
+        assert_eq!(super::MAX_ROWS, 4_096);
+        assert_eq!(super::admit_top(1), Ok(()));
+        assert_eq!(super::admit_top(super::MAX_ROWS), Ok(()));
+        for bad in [0, super::MAX_ROWS + 1, usize::MAX] {
+            let why = super::admit_top(bad).expect_err("outside the bound");
+            assert!(why.contains(&format!("TOP is {bad}")), "{why}");
+        }
+    }
+
     #[test]
     fn the_top_ranked_row_fails_the_operators_rules() {
         let v = measured_rank_one().verdict(&crate::Rules::operator());
@@ -1911,6 +2095,241 @@ mod tests {
         assert!(!v.priced, "trades == 0 is the only value that says so");
         assert!(!v.admitted, "and it is not admitted on a zero drawdown");
         assert!(!v.win_rate && !v.reward_to_risk && !v.return_over_drawdown);
+        // CE-42, D-2653: both unanswerable rules stay NAMED on an unpriced
+        // row, as the browser's frontier check requires of every row.
+        assert!(v.stop_unchecked, "the stop rule was not evaluated");
+        assert!(
+            v.protective_exits_unchecked,
+            "an unpriced row said its protective exits were checked"
+        );
+        assert!(!v.trades && !v.assurance && !v.avg_payoff);
+        assert!(v.stop_unchecked && v.protective_exits_unchecked && v.fill_headroom_unchecked);
+        assert!(v.checked().iter().all(|(_, holds)| !holds));
+        assert_eq!(
+            v.unchecked(),
+            [
+                ("stop", true),
+                ("protective_exits", true),
+                ("fill_headroom", true)
+            ],
+            "the served unchecked list names every unanswerable rule as unchecked"
+        );
+    }
+
+    /// `docs/02-store-format.md` §13 states the version, the stride and the
+    /// seal offset this build writes. It described version 4 (272-byte rows,
+    /// seal at 264) three versions after the code moved (P1-16-02, D-1763).
+    #[test]
+    fn the_store_format_doc_states_the_frontier_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 13. Ranked frontier")
+            .expect("the frontier section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — `results/frontier.bin`, version {VERSION}\n")));
+        assert!(section.contains(&format!("little-endian version `{VERSION}` at `8..12`")));
+        assert!(section.contains(&format!("Each row is {STRIDE} bytes.")));
+        assert!(section.contains(&format!(
+            "| {PAYLOAD_BYTES} | {SEAL_BYTES} | first eight BLAKE3 bytes over `0..{PAYLOAD_BYTES}` |"
+        )));
+        assert!(section.contains(&format!("| {DIRECTION_AT} | 1 | direction:")));
+        assert!(section.contains(&format!(
+            "| {} | {} | `min_fill_headroom_bp`, `i32`",
+            ROW_RESERVED.start,
+            ROW_RESERVED.len()
+        )));
+    }
+
+    /// The row's cell, with every field a row stores and nothing else.
+    fn cell_of(row: &Row) -> runner::grid::Cell {
+        runner::grid::Cell {
+            trades: row.trades,
+            wins: row.cell_wins,
+            pessimistic: row.pessimistic,
+            worst_trade: row.worst_trade,
+            max_drawdown: row.max_drawdown,
+            min_win: row.min_win,
+            gross_win: row.gross_win,
+            gross_loss: row.gross_loss,
+            ..Default::default()
+        }
+    }
+
+    /// W2-cli5-4, D-1810: the verdict IS `Rules::admits` on every term a row
+    /// can answer, and names every term it cannot.
+    ///
+    /// The three terms a row cannot answer (worst MAE, protective exits, fill
+    /// headroom) are switched off in the rules here, so `admits` decides on
+    /// exactly the terms the verdict answers. Before D-1810 the verdict
+    /// ignored `min_avg_rr_bp` and this failed on the first row whose average
+    /// win fell short of the floor.
+    #[test]
+    fn the_verdict_is_rules_admits_on_every_term_a_row_can_answer() {
+        let shapes: [(u64, u64, i64, i64, i64, i64, i64); 9] = [
+            // trades, wins, gross_win, gross_loss, min_win, worst_trade, dd
+            (100, 95, 505_000, -5_000, 400, -100, 1_000),
+            (868, 3, 900, -273_649, 295, -3_035, 329_165),
+            (40, 40, 80_000, 0, 1_000, 0, 0),
+            (40, 0, 0, -80_000, 0, -5_000, 80_000),
+            (10, 5, 500, -2_000, 100, -400, 300),
+            (1, 1, i64::MAX, 0, i64::MAX, 0, 0),
+            (
+                u64::MAX,
+                u64::MAX / 2,
+                i64::MAX,
+                i64::MIN,
+                1,
+                i64::MIN,
+                i64::MAX,
+            ),
+            (3, 2, 600, -150, 300, -150, 150),
+            (1_000, 999, 999_000, -1, 1_000, -1, 1),
+        ];
+        let floors = [i64::MIN, -1, 0, 1, 100, 200, 400, 10_000, i64::MAX];
+        let bases = [crate::Rules::operator(), crate::Rules::elite(400, 25)];
+        let mut admitted = 0_u32;
+        let mut refused_only_on_payoff = 0_u32;
+        for base in bases {
+            for avg in floors {
+                let unanswerable_off = crate::Rules {
+                    max_mae_ppm: 0,
+                    require_protective_exits: false,
+                    min_fill_headroom_bp: 0,
+                    min_avg_rr_bp: avg,
+                    ..base
+                };
+                let payoff_only = crate::Rules {
+                    min_rr_bp: 0,
+                    min_win_rate_bp: 0,
+                    min_trades: 0,
+                    min_assurance_bp: 0,
+                    min_ret_over_dd_bp: 0,
+                    ..unanswerable_off
+                };
+                for (rules, which) in [
+                    (payoff_only, "payoff only"),
+                    (unanswerable_off, "every answerable rule"),
+                ] {
+                    for (trades, wins, gw, gl, mw, wt, dd) in shapes {
+                        let row = Row {
+                            trades,
+                            cell_wins: wins,
+                            gross_win: gw,
+                            gross_loss: gl,
+                            pessimistic: gw.saturating_add(gl),
+                            min_win: mw,
+                            worst_trade: wt,
+                            max_drawdown: dd,
+                            ..row(1, 1)
+                        };
+                        let v = row.verdict(&rules);
+                        let cell = cell_of(&row);
+                        assert_eq!(
+                            v.admitted,
+                            rules.admits(&cell),
+                            "{which}: avg floor {avg}, row {trades}/{wins}/{gw}/{gl}: \
+                             the frontier's PASS must be `Rules::admits`"
+                        );
+                        assert_eq!(
+                            v.admitted,
+                            v.checked().iter().all(|(_, holds)| *holds),
+                            "`admitted` is the conjunction of exactly the checked rules"
+                        );
+                        assert!(v.fill_headroom_unchecked && v.stop_unchecked);
+                        admitted += u32::from(v.admitted);
+                        let others = v.win_rate
+                            && v.reward_to_risk
+                            && v.return_over_drawdown
+                            && v.trades
+                            && v.assurance;
+                        refused_only_on_payoff += u32::from(others && !v.avg_payoff);
+                    }
+                }
+            }
+        }
+        assert!(
+            admitted > 0,
+            "some row passes, so the comparison is not vacuous"
+        );
+        assert!(
+            refused_only_on_payoff > 0,
+            "some row passes the five old rules and fails only average payoff -- \
+             the row the page used to show as PASS"
+        );
+    }
+
+    /// The names the API serves are the verdict's own, once each, and the
+    /// checked set and the unchecked set do not overlap.
+    #[test]
+    fn the_served_rule_names_are_the_verdicts_fields_once_each() {
+        let v = Verdict::default();
+        let checked: Vec<&str> = v.checked().iter().map(|(name, _)| *name).collect();
+        assert_eq!(checked, VERDICT_CHECKED.to_vec());
+        assert_eq!(
+            VERDICT_CHECKED,
+            [
+                "win_rate",
+                "reward_to_risk",
+                "return_over_drawdown",
+                "trades",
+                "assurance",
+                "avg_payoff"
+            ]
+        );
+        assert_eq!(
+            VERDICT_UNCHECKED,
+            ["stop", "protective_exits", "fill_headroom"]
+        );
+        let mut all: Vec<&str> = VERDICT_CHECKED
+            .iter()
+            .chain(VERDICT_UNCHECKED.iter())
+            .copied()
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), VERDICT_CHECKED.len() + VERDICT_UNCHECKED.len());
+        assert!(!all.contains(&"all") && !all.contains(&"priced"));
+        let priced = Row {
+            trades: 3,
+            cell_wins: 2,
+            gross_win: 600,
+            gross_loss: -150,
+            pessimistic: 450,
+            min_win: 300,
+            worst_trade: -150,
+            max_drawdown: 150,
+            ..row(1, 1)
+        }
+        .verdict(&crate::Rules {
+            min_avg_rr_bp: 1_000,
+            ..crate::Rules::operator()
+        });
+        let named: Vec<(&str, bool)> = priced.checked().to_vec();
+        assert_eq!(
+            named,
+            vec![
+                ("win_rate", priced.win_rate),
+                ("reward_to_risk", priced.reward_to_risk),
+                ("return_over_drawdown", priced.return_over_drawdown),
+                ("trades", priced.trades),
+                ("assurance", priced.assurance),
+                ("avg_payoff", priced.avg_payoff),
+            ]
+        );
+        assert!(
+            !priced.avg_payoff,
+            "300 avg win over 150 avg loss is 2x, under a 10x floor"
+        );
+        assert_eq!(
+            priced.unchecked().to_vec(),
+            vec![
+                ("stop", priced.stop_unchecked),
+                ("protective_exits", priced.protective_exits_unchecked),
+                ("fill_headroom", priced.fill_headroom_unchecked),
+            ]
+        );
+        assert!(priced.priced);
     }
 
     /// The stride is what the writer writes, not what a comment claims.
@@ -1987,6 +2406,38 @@ mod tests {
         let raw = want.to_bytes();
         assert!(Row::seal_matches(&raw), "a fresh row matches its own seal");
         assert_eq!(Row::from_bytes(&raw).expect("valid schema"), want);
+    }
+
+    /// c4b-2, D-1623: a headroom the four-byte field cannot hold is refused
+    /// before a byte is written, never clamped into a different stored rule.
+    #[test]
+    fn an_unstorable_fill_headroom_is_refused_not_clamped() {
+        let dir = root("headroom-bound");
+        let mut store = Frontier::open(&dir).expect("a fresh file opens");
+        let path = dir.join("results").join("frontier.bin");
+        let before = std::fs::read(&path).expect("header bytes");
+        for bad in [
+            i64::from(i32::MAX) + 1,
+            3_000_000_000,
+            i64::MAX,
+            -1,
+            i64::MIN,
+        ] {
+            let mut over = row(0x41, 1);
+            over.rules.min_fill_headroom_bp = bad;
+            let refusal = store.append_all(&[over]).expect_err("must refuse");
+            assert!(refusal.contains("min_fill_headroom_bp"), "{refusal}");
+            assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+        }
+        let mut edge = row(0x42, 1);
+        edge.rules.min_fill_headroom_bp = i64::from(i32::MAX);
+        assert_eq!(store.append_all(&[edge]).expect("i32::MAX fits"), 1);
+        drop(store);
+        let mut reopened = Frontier::open_read(&dir).expect("reopen");
+        let stored = reopened.read(0).expect("the row reads back");
+        assert_eq!(stored.identity, edge.identity);
+        assert_eq!(stored.rules.min_fill_headroom_bp, i64::from(i32::MAX));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn reseal(raw: &mut [u8; STRIDE_BYTES]) {
@@ -2101,6 +2552,152 @@ mod tests {
         assert!(
             duplicate.contains("already has a frontier block"),
             "{duplicate}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W2-cli5-0, D-0913: a read-only handle opened over damaged history must
+    /// refresh by absorbing only the new rows, indexing them exactly as a
+    /// fresh read-only open over the whole file would. It used to refuse every
+    /// refresh with the writer's integrity gate, so `api`'s cached handle was
+    /// dropped and reopened, O(rows), on every other request and the request
+    /// between them was refused.
+    #[test]
+    fn a_read_only_handle_over_damaged_history_refreshes_by_the_delta() {
+        let dir = root("read-only-damaged-refresh");
+        let path = Frontier::path(&dir);
+        let kept = row(0x71, 1);
+        {
+            let mut store = Frontier::open(&dir).expect("a fresh file opens");
+            store.append_all(&[kept]).expect("the healthy prefix");
+        }
+        let mut corrupt = row(0x72, 1).to_bytes();
+        *corrupt.get_mut(40).expect("a sealed payload byte") ^= 0x80;
+        append_raw(&path, &[corrupt]);
+
+        let mut reader = Frontier::open_read(&dir).expect("damaged history still opens read-only");
+        reader
+            .refresh()
+            .expect("nothing new: a read-only refresh must not refuse over damage it opened past");
+
+        let mut invalid = row(0x74, 1).to_bytes();
+        *invalid.get_mut(DIRECTION_AT).expect("the direction byte") = 2;
+        reseal(&mut invalid);
+        append_raw(
+            &path,
+            &[
+                row(0x73, 1).to_bytes(),
+                row(0x73, 2).to_bytes(),
+                corrupt,
+                invalid,
+                row(0x71, 2).to_bytes(),
+                row(0x75, 1).to_bytes(),
+            ],
+        );
+        reader
+            .refresh()
+            .expect("new rows past damage are absorbed, not refused");
+        reader.refresh().expect("a second refresh is a no-op");
+
+        let fresh = Frontier::open_read(&dir).expect("a fresh read-only open");
+        for identity in [0x71, 0x72, 0x73, 0x74, 0x75] {
+            assert_eq!(
+                reader.block(&[identity; 32]),
+                fresh.block(&[identity; 32]),
+                "run {identity:#x}: the refreshed index must equal a fresh open"
+            );
+        }
+        assert_eq!(
+            reader.block(&[0x71; 32]),
+            Some(super::Block { first: 0, count: 1 }),
+            "the repeated 0x71 row at 6 never widens its first block across 2..6"
+        );
+        assert_eq!(
+            reader.block(&[0x73; 32]),
+            Some(super::Block { first: 2, count: 2 })
+        );
+        assert_eq!(
+            reader.block(&[0x72; 32]),
+            None,
+            "a bad seal is never indexed"
+        );
+        assert_eq!(
+            reader.block(&[0x74; 32]),
+            Some(super::Block { first: 5, count: 1 }),
+            "a sealed invalid row is indexed and diagnosed at read time, as at open"
+        );
+        assert_eq!(
+            reader.block(&[0x75; 32]),
+            Some(super::Block { first: 7, count: 1 })
+        );
+        assert!(
+            reader
+                .read(5)
+                .expect_err("the invalid row is still diagnosed")
+                .contains("schema is invalid")
+        );
+        let mut writer = Frontier::open(&dir).expect("a writer opens over the damage");
+        let why = writer
+            .refresh()
+            .expect_err("a writer handle keeps the strict refresh");
+        assert!(why.contains("Append-only history is damaged"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W2-cli5-0, D-0913: a read-only refresh holds the shared lock, so it
+    /// waits for an append in progress under the exclusive lock instead of
+    /// indexing the half-written row as a bad seal. The peer lays down a whole
+    /// row's length of zeros under the lock, which is what an unlocked reader
+    /// could see mid-append, and only then writes the real row and unlocks.
+    #[test]
+    fn a_read_only_refresh_waits_for_an_append_in_progress() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let dir = root("read-only-refresh-waits");
+        let path = Frontier::path(&dir);
+        {
+            let mut store = Frontier::open(&dir).expect("a fresh file opens");
+            store.append_all(&[row(0x61, 1)]).expect("the first row");
+        }
+        let mut reader = Frontier::open_read(&dir).expect("a read-only open");
+        let mut peer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the appending peer opens");
+        peer.lock().expect("the peer holds the exclusive lock");
+        let at = peer.seek(SeekFrom::End(0)).expect("the end of the file");
+        peer.write_all(&[0_u8; STRIDE_BYTES])
+            .expect("a whole row's length, not yet the row");
+        peer.flush().expect("the placeholder is visible");
+
+        let refreshing = std::thread::spawn(move || {
+            let refreshed = reader.refresh();
+            (reader, refreshed)
+        });
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(
+            !refreshing.is_finished(),
+            "a read-only refresh must not finish while an append holds the exclusive lock"
+        );
+        peer.seek(SeekFrom::Start(at))
+            .expect("back to the placeholder");
+        peer.write_all(&row(0x62, 1).to_bytes())
+            .expect("the real row replaces it");
+        peer.sync_all().expect("the row is durable");
+        peer.unlock().expect("the append is complete");
+
+        let (reader, refreshed) = refreshing.join().expect("the refresh thread");
+        refreshed.expect("the refresh absorbs the whole row");
+        assert_eq!(
+            reader.block(&[0x62; 32]),
+            Some(super::Block { first: 1, count: 1 }),
+            "the refresh saw the finished row, never the placeholder"
+        );
+        assert!(
+            reader.write_refusal.is_none(),
+            "no damage was recorded: {:?}",
+            reader.write_refusal
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2227,6 +2824,37 @@ mod tests {
         assert!(why.contains("reserved header byte"), "{why}");
         assert!(why.contains("12..16"), "{why}");
         assert!(why.contains("nothing was written"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RJ-02 (P12-02, D-1791): a version this build does not write is
+    /// REFUSED, never widened. The refusal names both versions and the exact
+    /// move-aside command, and the file is left byte for byte as it was.
+    #[test]
+    fn another_format_version_is_refused_and_left_untouched() {
+        let dir = root("header-version");
+        let path = Frontier::path(&dir);
+        drop(Frontier::open(&dir).expect("a fresh file opens"));
+        let mut bytes = std::fs::read(&path).expect("the header is readable");
+        let older = VERSION - 1;
+        bytes
+            .get_mut(8..12)
+            .expect("the version word")
+            .copy_from_slice(&older.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("the fixture is rewritten");
+
+        let why = Frontier::open(&dir).expect_err("another version must refuse");
+        assert!(
+            why.contains(&format!("frontier format version {older}")),
+            "{why}"
+        );
+        assert!(
+            why.contains(&format!("writes and reads version {VERSION}")),
+            "{why}"
+        );
+        assert!(why.contains(&format!("v{older}.bin")), "{why}");
+        assert!(why.contains("Nothing was written"), "{why}");
+        assert_eq!(std::fs::read(&path).expect("still readable"), bytes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2647,15 +3275,22 @@ mod tests {
             .len();
 
         let why = store
-            .append_locked_with(&[row(2, 1)], |file, bytes| {
-                file.write_all(bytes.get(..3).unwrap_or_default())?;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::StorageFull,
-                    "injected full filesystem after a three-byte prefix",
-                ))
-            })
+            .append_locked_with(
+                &[row(2, 1)],
+                |file, bytes| {
+                    file.write_all(bytes.get(..3).unwrap_or_default())?;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected full filesystem after a three-byte prefix",
+                    ))
+                },
+                std::fs::File::sync_all,
+            )
             .expect_err("the injected partial write refuses");
-        assert!(why.contains("rolled back"), "the recovery is named: {why}");
+        assert!(
+            why.contains("truncated back"),
+            "the recovery is named: {why}"
+        );
         assert_eq!(
             std::fs::metadata(Frontier::path(&dir))
                 .expect("the rolled-back file has metadata")
@@ -2707,7 +3342,7 @@ mod tests {
         file.write_all(&[0_u8; 3]).expect("a torn tail");
         drop(file);
 
-        let why = Frontier::open(&dir).expect_err("a ragged file is refused");
+        let why = Frontier::open_read(&dir).expect_err("a reader refuses a ragged file");
         assert!(
             why.contains('3'),
             "the refusal counts the spare bytes: {why}"
@@ -2715,6 +3350,64 @@ mod tests {
         assert!(
             why.contains('2'),
             "the refusal says how many whole rows are intact: {why}"
+        );
+        // sweep-2, D-1901: the writer, under the exclusive lock, cuts the
+        // three bytes that were never a row and the shared file records again.
+        let mut writer = Frontier::open(&dir).expect("the writer cuts the torn tail");
+        assert_eq!(writer.len().expect("a whole-row count"), 2);
+        assert_eq!(
+            std::fs::metadata(Frontier::path(&dir))
+                .expect("the cut file has metadata")
+                .len(),
+            super::HEADER + 2 * STRIDE
+        );
+        writer
+            .append_all(&[row(2, 1)])
+            .expect("a later run records");
+        drop(writer);
+        assert_eq!(
+            Frontier::open_read(&dir)
+                .expect("a reader opens the healed file")
+                .len()
+                .expect("a whole-row count"),
+            3
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// resources-1, D-1900: a failed barrier cuts the block it was meant to
+    /// make durable, and the file is never confirmed durable afterwards.
+    #[test]
+    fn a_failed_frontier_barrier_cuts_the_block_and_is_never_confirmed() {
+        let dir = root("failed-barrier");
+        let mut store = Frontier::open(&dir).expect("a fresh file opens");
+        store
+            .append_all(&[row(1, 1)])
+            .expect("the committed prefix appends");
+        let before = std::fs::metadata(Frontier::path(&dir))
+            .expect("the prefix has metadata")
+            .len();
+        let why = store
+            .append_locked_with(&[row(2, 1)], std::io::Write::write_all, |_| {
+                Err(std::io::Error::other("injected EIO at fsync"))
+            })
+            .expect_err("the injected barrier refuses");
+        assert!(why.contains("injected EIO at fsync"), "{why}");
+        assert_eq!(
+            std::fs::metadata(Frontier::path(&dir))
+                .expect("the cut file has metadata")
+                .len(),
+            before,
+            "the unconfirmed block is gone"
+        );
+        let mut reopened = Frontier::open(&dir).expect("the prefix reopens");
+        assert!(!reopened.holds(&[2; 32]), "nothing to promote");
+        let refused = reopened
+            .confirm_durable()
+            .expect_err("a failed barrier is never confirmed by a second");
+        assert!(
+            refused.contains("already failed in this process"),
+            "{refused}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2741,6 +3434,50 @@ mod tests {
         assert!(why.contains("16 bytes"), "hard ceiling: {why}");
         assert!(why.contains("No partial frontier index"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sobs-12, D-4461: the frontier writer makes the `results/` directory it
+    /// creates durable, and the new file's name durable BEFORE its header is
+    /// written. Each failed directory barrier is refused by name, and a retry
+    /// after one completes the file.
+    #[test]
+    fn a_new_frontiers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let r = root("durable-names");
+        let dir = r.join("results");
+        let path = Frontier::path(&r);
+
+        let armed = Armed::arm(&r.display().to_string(), Kind::DirectorySync);
+        let why = Frontier::open(&r).expect_err("the barrier on the root refuses");
+        assert!(
+            why.contains("the results directory could not be made")
+                && why.contains("injected directory sync fault"),
+            "{why}"
+        );
+        drop(armed);
+        assert!(
+            dir.is_dir() && !path.exists(),
+            "no file before its directory is durable"
+        );
+
+        let armed = Armed::arm(&dir.display().to_string(), Kind::DirectorySync);
+        let why = Frontier::open(&r).expect_err("the barrier on results/ refuses");
+        assert!(why.contains("injected directory sync fault"), "{why}");
+        drop(armed);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the file was created")
+                .len(),
+            0,
+            "no header is written before its name is durable"
+        );
+
+        drop(Frontier::open(&r).expect("a retry completes the file"));
+        assert_eq!(
+            std::fs::metadata(&path).expect("the frontier").len(),
+            u64::try_from(HEADER_BYTES).expect("a header length")
+        );
+        let _ = std::fs::remove_dir_all(&r);
     }
 }
 
@@ -2845,18 +3582,18 @@ impl Row {
 /// failure. The field is therefore not a `bool`. It is absent, and
 /// [`Self::stop_unchecked`] says so, because "we did not measure this" and "this
 /// passed" are the two things that must never render the same.
-/// # Why six booleans rather than the enum clippy asks for
+/// # Why these booleans rather than the enum clippy asks for
 ///
 /// `struct_excessive_bools` fires at three, and its remedy — split the type into
 /// variants — is right when the flags are a STATE that only some combinations of
-/// which are legal. These are not a state. They are five independent rules and
-/// their conjunction, every one of the thirty-two combinations is reachable, and
+/// which are legal. These are not a state. They are six independent rules and
+/// their conjunction, every one of the sixty-four combinations is reachable, and
 /// an operator reading `FAIL` needs to know WHICH rules failed. Collapsing them
-/// into variants would either enumerate thirty-two names or throw away the
+/// into variants would either enumerate sixty-four names or throw away the
 /// detail that makes the verdict worth showing.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "five independent rule outcomes and their conjunction; every \
+    reason = "six independent rule outcomes and their conjunction; every \
               combination is reachable and the page renders which ones failed"
 )]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2872,8 +3609,17 @@ pub struct Verdict {
     /// `assurance_bp >= Rules::min_assurance_bp` — the 95% lower bound on the
     /// rate, not the observed rate.
     pub assurance: bool,
-    /// Every rule above holds. **Not "every rule holds"** — see
-    /// [`Self::stop_unchecked`] and [`Self::protective_exits_unchecked`].
+    /// Average win over average loss clears `Rules::min_avg_rr_bp`.
+    ///
+    /// Answered from the row's `gross_win`, `gross_loss`, `cell_wins` and
+    /// `trades` by the same `Rules` method `Rules::admits` calls. Before
+    /// D-1810 the verdict left this rule out, so a row `admits` refuses could
+    /// be served as PASS (W2-cli5-4).
+    pub avg_payoff: bool,
+    /// Every rule above holds, exactly [`VERDICT_CHECKED`]. **Not "every rule
+    /// holds"** — see [`Self::stop_unchecked`],
+    /// [`Self::protective_exits_unchecked`] and
+    /// [`Self::fill_headroom_unchecked`].
     pub admitted: bool,
     /// Always `true`. The stop rule was not evaluated because the row does not
     /// carry `worst_mae`, and a reader must be told that rather than shown a
@@ -2903,10 +3649,65 @@ pub struct Verdict {
     /// reader needs is not the shape but the knowledge that this verdict does
     /// not speak for it.
     pub protective_exits_unchecked: bool,
+    /// Always `true`. `Rules::min_fill_headroom_bp` compares the cell's
+    /// OPTIMISTIC total with its pessimistic one, and [`Row`] stores no
+    /// optimistic total, so this verdict cannot answer it. Named rather than
+    /// passed, exactly like the stop. D-1810.
+    pub fill_headroom_unchecked: bool,
     /// Whether this combination was ever priced. An unpriced row fails every
     /// rule on zeros, which is honest but is not the same claim as "priced and
     /// it failed" — the reader needs both.
     pub priced: bool,
+}
+
+/// The rules a frontier [`Verdict`] answers, in the order
+/// [`Verdict::checked`] returns them. `admitted` is their conjunction.
+///
+/// # One list, served rather than copied (D-1810)
+///
+/// `api`'s `/frontier.json` writes `meets` from [`Verdict::checked`] and
+/// echoes this list and [`VERDICT_UNCHECKED`] in its envelope, and the
+/// browser's verifier checks `all` against the served list. Before D-1810 the
+/// browser restated five thresholds, the assurance formula and the
+/// conjunction, so adding a rule here would have made it refuse every valid
+/// answer -- the shape D-0288 refused for the vocabulary.
+pub const VERDICT_CHECKED: [&str; 6] = [
+    "win_rate",
+    "reward_to_risk",
+    "return_over_drawdown",
+    "trades",
+    "assurance",
+    "avg_payoff",
+];
+
+/// The `Rules::admits` terms a frontier [`Row`] cannot answer. Each is served
+/// as `<name>_unchecked: true` on every row, never as a pass.
+pub const VERDICT_UNCHECKED: [&str; 3] = ["stop", "protective_exits", "fill_headroom"];
+
+impl Verdict {
+    /// Every rule this verdict answered, named, in [`VERDICT_CHECKED`] order.
+    #[must_use]
+    pub const fn checked(&self) -> [(&'static str, bool); 6] {
+        [
+            (VERDICT_CHECKED[0], self.win_rate),
+            (VERDICT_CHECKED[1], self.reward_to_risk),
+            (VERDICT_CHECKED[2], self.return_over_drawdown),
+            (VERDICT_CHECKED[3], self.trades),
+            (VERDICT_CHECKED[4], self.assurance),
+            (VERDICT_CHECKED[5], self.avg_payoff),
+        ]
+    }
+
+    /// Every rule this verdict could not answer, each with its flag, in
+    /// [`VERDICT_UNCHECKED`] order.
+    #[must_use]
+    pub const fn unchecked(&self) -> [(&'static str, bool); 3] {
+        [
+            (VERDICT_UNCHECKED[0], self.stop_unchecked),
+            (VERDICT_UNCHECKED[1], self.protective_exits_unchecked),
+            (VERDICT_UNCHECKED[2], self.fill_headroom_unchecked),
+        ]
+    }
 }
 
 impl Row {
@@ -2918,37 +3719,57 @@ impl Row {
     /// found wanting.
     #[must_use]
     pub fn verdict(&self, rules: &crate::Rules) -> Verdict {
-        let d = self.derived();
-        if !d.priced {
+        if !self.derived().priced {
+            // EVERY UNCHECKED FLAG, AS ITS DOC SAYS: "Always `true`". This
+            // once set only `stop_unchecked`, so an unpriced row carried
+            // `protective_exits_unchecked: false` and the browser's check of
+            // `/frontier.json` refused the WHOLE frontier for any run whose
+            // TOP exceeded what `screen_cap` priced (CE-42, D-2653).
             return Verdict {
                 stop_unchecked: true,
+                protective_exits_unchecked: true,
+                fill_headroom_unchecked: true,
                 ..Verdict::default()
             };
         }
         let cell = runner::grid::Cell {
             trades: self.trades,
             wins: self.cell_wins,
+            pessimistic: self.pessimistic,
+            worst_trade: self.worst_trade,
+            max_drawdown: self.max_drawdown,
+            min_win: self.min_win,
+            gross_win: self.gross_win,
+            gross_loss: self.gross_loss,
             ..Default::default()
         };
-        let win_rate = d.win_rate_bp >= rules.min_win_rate_bp;
-        let reward_to_risk = d.reward_to_risk_bp >= rules.min_rr_bp;
-        let return_over_drawdown = d.return_over_drawdown >= rules.min_ret_over_dd_bp;
-        let trades = self.trades >= rules.min_trades;
-        let assurance = cell.assurance_bp() >= rules.min_assurance_bp;
+        // EVERY ANSWER BELOW IS THE `Rules` METHOD `Rules::admits` CALLS, so
+        // a rule is defined once (D-1810). Three more exist and none can be
+        // answered from a `Row`: the stop ceiling needs `worst_mae`, the
+        // protective-exit rule needs the exit shape and fill headroom needs
+        // the optimistic total. They are reported unchecked, never passed.
+        let win_rate = rules.win_rate_holds(&cell);
+        let reward_to_risk = rules.reward_to_risk_holds(&cell);
+        let return_over_drawdown = rules.return_over_drawdown_holds(&cell);
+        let trades = rules.trades_hold(&cell);
+        let assurance = rules.assurance_holds(&cell);
+        let avg_payoff = rules.avg_payoff_holds_for(&cell);
         Verdict {
             win_rate,
             reward_to_risk,
             return_over_drawdown,
             trades,
             assurance,
-            // FIVE RULES, AND THE NAME SAYS FIVE. Two more exist and neither
-            // can be answered from a `Row`: the stop ceiling needs `worst_mae`
-            // and the protective-exit rule needs the exit shape, and this type
-            // carries neither. Both are reported unchecked rather than folded
-            // in as passes.
-            admitted: win_rate && reward_to_risk && return_over_drawdown && trades && assurance,
+            avg_payoff,
+            admitted: win_rate
+                && reward_to_risk
+                && return_over_drawdown
+                && trades
+                && assurance
+                && avg_payoff,
             stop_unchecked: true,
             protective_exits_unchecked: true,
+            fill_headroom_unchecked: true,
             priced: true,
         }
     }

@@ -24,10 +24,10 @@
 //! 62 predicates, and changing one is a single edit whose blast radius is the
 //! struct's own documentation.
 //!
-//! Contrast position 63 `narrow_cpr_day`, which this crate refuses to compute at
-//! all: there, "narrow" has no conventional value either, and unlike a hammer the
-//! pattern literature offers none. Refusing is right when no convention exists;
-//! declaring is right when one does.
+//! Position 63 `narrow_cpr_day` took the same route: it was once refused because
+//! "narrow" has no conventional value, and it is now computed from cuts declared
+//! UNVERIFIED in `crate::daily::CprWidth`, beside 274 and 275. (This said the
+//! crate refuses to compute 63 at all; p11num-3, D-1775.)
 //!
 //! # Integers only, and no division
 //!
@@ -105,6 +105,18 @@ impl Thresholds {
     };
 }
 
+/// How far into the prior black body an in-neck close may reach, in
+/// thousandths of the PRIOR bar's range. 200 = 20%. **UNVERIFIED**, like every
+/// threshold here: it is the TA-Lib `Near` factor for `CDLINNECK`, taken on
+/// the one prior bar's range rather than on a five-bar average, and no source
+/// `docs/00-charter.md` records sets it.
+///
+/// A module constant and not a [`Thresholds`] field on purpose: the six fields
+/// are encoded into `brutex/eval/v1`, and a seventh would be a new spec
+/// version that re-keys every recorded run. The commit term of run identity
+/// already binds this value. D-1780.
+const IN_NECK_BAND: i128 = 200;
+
 /// One bar reduced to the quantities every predicate is written in.
 ///
 /// All `i128`, because a product of two `i64` prices does not fit an `i64` and the
@@ -165,11 +177,17 @@ impl Shape {
             self.close
         }
     }
-    /// The body's midpoint. `midpoint` and not `(a + b) / 2`: the sum of two
-    /// prices near the edge of the type overflows, and clippy is right that the
-    /// hand-written form is a latent bug even where these values cannot reach it.
-    const fn mid(&self) -> i128 {
-        self.open.midpoint(self.close)
+    /// TWICE the body's midpoint, `open + close`, compared with twice a price.
+    ///
+    /// It was `open.midpoint(close)`, which rounds a half-paisa midpoint DOWN: "close
+    /// below the midpoint" then refused a close equal to that floor though it sits
+    /// below the true midpoint, while "above" stayed exact — the bearish twins
+    /// (162, 164, 212) lost one price the bullish ones kept, and the rickshaw man's
+    /// centre leaned upward (D-3402). Doubling is the module's own cross-multiplied
+    /// form, with no division. The fields are `i128` widened from `i64` prices, so
+    /// neither the sum nor the doubled price can overflow.
+    const fn mid2(&self) -> i128 {
+        self.open + self.close
     }
 
     /// `body * 1000 <= range * permille`, the cross-multiplied form of
@@ -466,8 +484,7 @@ impl Patterns {
         {
             mask = set(mask, 224);
             // A rickshaw man is a long-legged doji whose body sits mid-range.
-            let centred =
-                (bar0.mid() - bar0.high.midpoint(bar0.low)).abs() * 1000 <= bar0.range * 100;
+            let centred = (bar0.mid2() - (bar0.high + bar0.low)).abs() * 1000 <= bar0.range * 200;
             if centred {
                 mask = set(mask, 226);
             }
@@ -523,16 +540,33 @@ impl Patterns {
         if star_shape && bar1.bullish() {
             mask = set(mask, 156);
         }
-        if bar1.bearish() && bar0.bullish() && bar0.open <= bar1.close && bar0.close >= bar1.open {
+        // ENGULFING NEEDS THE LARGER BODY AND HARAMI THE SMALLER ONE. Both
+        // containments are inclusive, so on an equal-body reversal -- common on
+        // a paisa grid -- 157 and 159 (or 158 and 160) lit together, a pattern
+        // and its opposite reading. The strict body comparison keeps the
+        // table's own words: "wholly contains" and "inside the previous LARGER"
+        // body (hunt-indicators-2, D-1543).
+        if bar1.bearish()
+            && bar0.bullish()
+            && bar0.open <= bar1.close
+            && bar0.close >= bar1.open
+            && bar0.body > bar1.body
+        {
             mask = set(mask, 157);
         }
-        if bar1.bullish() && bar0.bearish() && bar0.open >= bar1.close && bar0.close <= bar1.open {
+        if bar1.bullish()
+            && bar0.bearish()
+            && bar0.open >= bar1.close
+            && bar0.close <= bar1.open
+            && bar0.body > bar1.body
+        {
             mask = set(mask, 158);
         }
         if bar1.bearish()
             && bar0.bullish()
             && bar0.top() <= bar1.open
             && bar0.bottom() >= bar1.close
+            && bar0.body < bar1.body
         {
             mask = set(mask, 159);
         }
@@ -540,13 +574,14 @@ impl Patterns {
             && bar0.bearish()
             && bar0.top() <= bar1.close
             && bar0.bottom() >= bar1.open
+            && bar0.body < bar1.body
         {
             mask = set(mask, 160);
         }
         if bar1.bearish()
             && bar0.bullish()
             && bar0.open < bar1.low
-            && bar0.close > bar1.mid()
+            && 2 * bar0.close > bar1.mid2()
             && bar0.close < bar1.open
         {
             mask = set(mask, 161);
@@ -554,7 +589,7 @@ impl Patterns {
         if bar1.bullish()
             && bar0.bearish()
             && bar0.open > bar1.high
-            && bar0.close < bar1.mid()
+            && 2 * bar0.close < bar1.mid2()
             && bar0.close > bar1.open
         {
             mask = set(mask, 162);
@@ -595,39 +630,58 @@ impl Patterns {
         {
             mask = set(mask, if bar0.bullish() { 206 } else { 207 });
         }
-        if bar1.bullish() && bar0.bullish() && bar0.open == bar1.open {
+        // SEPARATING LINES ARE OPPOSITE COLOURS FROM ONE OPEN (Z1-slice08-F1,
+        // D-2540). Both bits required the two bars to share a colour, which is
+        // the "matching opens" shape, not separating lines: the bull form is a
+        // black bar then a white bar opening at the black bar's open, the bear
+        // form its mirror. The named shape never fired and an unnamed one did.
+        // A convention like every predicate here, UNVERIFIED against the
+        // charter, the same footing as D-1543's five.
+        if bar1.bearish() && bar0.bullish() && bar0.open == bar1.open {
             mask = set(mask, 208);
         }
-        if bar1.bearish() && bar0.bearish() && bar0.open == bar1.open {
+        if bar1.bullish() && bar0.bearish() && bar0.open == bar1.open {
             mask = set(mask, 209);
         }
         if bar1.bearish() && bar0.bullish() && bar0.open < bar1.low && bar0.close == bar1.low {
             mask = set(mask, 210);
         }
+        // IN-NECK and THRUSTING split the white bar's recovery at the band
+        // [`IN_NECK_BAND`] draws above the prior close: in-neck closes at the
+        // prior close or just into the black body, thrusting closes past that
+        // band and short of the body's midpoint. 211 accepted only the prior
+        // LOWER SHADOW, `low < close <= prior close`, which is neither shape
+        // (p11num-2, D-1780).
+        let into_body = (bar0.close - bar1.close) * 1000;
+        let band = bar1.range * IN_NECK_BAND;
         if bar1.bearish()
             && bar0.bullish()
             && bar0.open < bar1.low
-            && bar0.close > bar1.low
-            && bar0.close <= bar1.close
+            && bar0.close >= bar1.close
+            && into_body <= band
         {
             mask = set(mask, 211);
         }
         if bar1.bearish()
             && bar0.bullish()
             && bar0.open < bar1.low
-            && bar0.close > bar1.close
-            && bar0.close < bar1.mid()
+            && into_body > band
+            && 2 * bar0.close < bar1.mid2()
         {
             mask = set(mask, 212);
         }
         if bar1.bearish() && bar0.bearish() && bar0.close == bar1.close {
             mask = set(mask, 229);
         }
-        if bar1.bullish()
-            && bar0.bullish()
-            && bar0.is_small(thr)
-            && bar1.is_small(thr)
-            && bar0.body == bar1.body
+        // HOMING PIGEON: "a harami whose bodies share a colour", in the table's
+        // words -- two BLACK bodies, the second strictly inside the first. It
+        // was two white small bodies of identical size, which the classical
+        // shape never is (hunt-indicators-3, D-1543).
+        if bar1.bearish()
+            && bar0.bearish()
+            && bar0.top() <= bar1.open
+            && bar0.bottom() >= bar1.close
+            && bar0.body < bar1.body
         {
             mask = set(mask, 228);
         }
@@ -642,7 +696,7 @@ impl Patterns {
             && bar2.is_long(thr)
             && bar1.is_small(thr)
             && bar0.bullish()
-            && bar0.close > bar2.mid()
+            && 2 * bar0.close > bar2.mid2()
         {
             mask = set(mask, 163);
         }
@@ -650,7 +704,7 @@ impl Patterns {
             && bar2.is_long(thr)
             && bar1.is_small(thr)
             && bar0.bearish()
-            && bar0.close < bar2.mid()
+            && 2 * bar0.close < bar2.mid2()
         {
             mask = set(mask, 164);
         }
@@ -675,7 +729,10 @@ impl Patterns {
             && bar0.close < bar1.close
         {
             mask = set(mask, 166);
-            if bar0.open == bar1.open && bar1.open == bar2.open {
+            // IDENTICAL THREE CROWS: each crow opens at the previous crow's
+            // close. It required three EQUAL opens, which the classical shape
+            // never has (hunt-indicators-3, D-1543).
+            if bar1.open == bar2.close && bar0.open == bar1.close {
                 mask = set(mask, 230);
             }
         }
@@ -713,12 +770,18 @@ impl Patterns {
         {
             mask = set(mask, 199);
         }
+        // TASUKI GAPS: the third bar opens inside the second body and closes
+        // INSIDE the gap, leaving it open. Its close was only bounded by the
+        // first body, so a close that filled the gap still counted
+        // (hunt-indicators-3, D-1543).
         if bar2.bullish()
             && bar1.bullish()
             && bar0.bearish()
             && bar1.low > bar2.high
+            && bar0.open > bar1.open
+            && bar0.open < bar1.close
             && bar0.close < bar1.low
-            && bar0.close > bar2.bottom()
+            && bar0.close > bar2.high
         {
             mask = set(mask, 213);
         }
@@ -726,8 +789,10 @@ impl Patterns {
             && bar1.bearish()
             && bar0.bullish()
             && bar1.high < bar2.low
+            && bar0.open < bar1.open
+            && bar0.open > bar1.close
             && bar0.close > bar1.high
-            && bar0.close < bar2.top()
+            && bar0.close < bar2.low
         {
             mask = set(mask, 214);
         }
@@ -743,13 +808,21 @@ impl Patterns {
         if bar2.bearish() && bar1.bullish() && bar0.bearish() && bar0.close == bar2.close {
             mask = set(mask, 217);
         }
+        // UNIQUE THREE RIVER: a long black bar; a black harami-style bar whose
+        // body sits inside the first and whose low is lower; then a small
+        // white bar opening above that low and closing BELOW the second
+        // close. The third bar had to close above the second's open, the
+        // opposite of the classical shape (hunt-indicators-3, D-1543).
         if bar2.bearish()
             && bar2.is_long(thr)
             && bar1.bearish()
-            && bar1.open < bar2.close
+            && bar1.open <= bar2.open
+            && bar1.close > bar2.close
+            && bar1.low < bar2.low
             && bar0.bullish()
-            && bar0.open < bar1.close
-            && bar0.close > bar1.open
+            && bar0.is_small(thr)
+            && bar0.open > bar1.low
+            && bar0.close < bar1.close
         {
             mask = set(mask, 221);
         }
@@ -1009,80 +1082,78 @@ mod tests {
         );
     }
 
-    /// MATCHING OPENS: THE SHARED PRICE AND BOTH DIRECTIONS ARE ALL REQUIRED.
+    /// SEPARATING LINES: ONE SHARED OPEN AND OPPOSITE COLOURS, AND NOTHING ELSE.
     ///
-    /// Bits 208 and 209 fire when two bars open at the identical price and run
-    /// the same way. Three clauses, and unlike most pairs here **all three are
-    /// isolable** — a doji breaks either direction clause without touching the
-    /// shared open, and moving the open one paisa breaks only that.
+    /// Z1-slice08-F1, D-2540. Bit 208 is a black bar followed by a white bar
+    /// opening at the black bar's open; 209 is a white bar followed by a black
+    /// bar from the white bar's open. Both bits used to require the two bars to
+    /// share a colour ("matching opens"), so the named shape never fired: on the
+    /// old code the first assertion below fails (bear-then-bull lit nothing) and
+    /// the two-bullish case lit 208.
     ///
-    /// The equality is what makes this pattern rare and it is also what makes it
-    /// fragile: one paisa either side and it must not fire, which is the
-    /// assertion below.
+    /// The shared open is exact — one paisa either side and neither bit fires —
+    /// and every colour permutation of the two bars (rising, falling, doji ×
+    /// rising, falling, doji) is enumerated at the shared open, so exactly one
+    /// of the nine pairs sets 208, exactly one sets 209, and never both.
     #[test]
-    fn matching_opens_need_the_same_price_and_the_same_direction() {
-        // Both bars open at 100. Prior runs up to 200.
-        let up = at(10, 100, 210, 90, 200);
-        let same_up = |bar0: &Candle| -> bool {
+    fn separating_lines_take_opposite_colours_from_one_open() {
+        // (open, high, low, close) for a bar opening at 150, by colour.
+        type Bar = (i64, i64, i64, i64);
+        let colours: [(&str, Bar); 3] = [
+            ("white", (150, 260, 140, 250)),
+            ("black", (150, 160, 40, 50)),
+            ("doji", (150, 170, 130, 150)),
+        ];
+        let fires = |prior: (i64, i64, i64, i64), current: (i64, i64, i64, i64)| {
             let mut p = Patterns::default();
-            let _prev = ok(&mut p, &up);
-            ok(&mut p, bar0).get(208)
+            let _prev = ok(&mut p, &at(10, prior.0, prior.1, prior.2, prior.3));
+            let mask = ok(&mut p, &at(11, current.0, current.1, current.2, current.3));
+            (mask.get(208), mask.get(209))
         };
+        let mut lit_bull = 0_u32;
+        let mut lit_bear = 0_u32;
+        for (prior_name, prior) in colours {
+            for (current_name, current) in colours {
+                let (bull, bear) = fires(prior, current);
+                let want_bull = prior_name == "black" && current_name == "white";
+                let want_bear = prior_name == "white" && current_name == "black";
+                assert_eq!(bull, want_bull, "208 on {prior_name} then {current_name}");
+                assert_eq!(bear, want_bear, "209 on {prior_name} then {current_name}");
+                assert!(!(bull && bear), "both polarities on one bar");
+                lit_bull += u32::from(bull);
+                lit_bear += u32::from(bear);
+            }
+        }
+        assert_eq!((lit_bull, lit_bear), (1, 1), "exactly one pair each");
 
-        assert!(
-            same_up(&at(11, 100, 160, 95, 150)),
-            "two bullish bars opening at the identical price fire this bit"
-        );
-        assert!(
-            !same_up(&at(11, 101, 160, 95, 150)),
-            "one paisa above and the opens no longer MATCH; equality is exact \
-             and nothing rounds it"
-        );
-        assert!(
-            !same_up(&at(11, 99, 160, 95, 150)),
-            "and one paisa below is no match either"
-        );
-        assert!(
-            !same_up(&at(11, 100, 160, 95, 100)),
-            "a second bar that closed where it opened has not risen, so the two \
-             do not run the same way"
-        );
-
-        // The prior bar's own direction, negated with a doji so the shared open
-        // and the current bar are untouched.
-        let mut p = Patterns::default();
-        let _prev = ok(&mut p, &at(10, 100, 210, 90, 100));
-        assert!(
-            !ok(&mut p, &at(11, 100, 160, 95, 150)).get(208),
-            "a prior bar that closed where it opened has no direction to share"
-        );
-
-        // 209 is the mirror: two bearish bars from one open.
-        let down = at(10, 200, 210, 90, 100);
-        let same_down = |bar0: &Candle| -> bool {
-            let mut q = Patterns::default();
-            let _prev = ok(&mut q, &down);
-            ok(&mut q, bar0).get(209)
-        };
-
-        assert!(
-            same_down(&at(11, 200, 205, 140, 150)),
-            "two bearish bars opening at the identical price fire the mirror"
-        );
-        assert!(
-            !same_down(&at(11, 201, 205, 140, 150)),
-            "and one paisa off is not a match on this side either"
-        );
-        assert!(
-            !same_down(&at(11, 200, 205, 140, 200)),
-            "nor is a doji a fall"
-        );
+        // The open is exact: one paisa above or below the prior open, on
+        // either form, lights neither bit.
+        let black = (150, 160, 40, 50);
+        let white = (150, 260, 140, 250);
+        for nudge in [-1_i64, 1] {
+            let off_white = (150 + nudge, 260, 140, 250);
+            assert_eq!(
+                fires(black, off_white),
+                (false, false),
+                "208 nudged {nudge}"
+            );
+            let off_black = (150 + nudge, 160, 40, 50);
+            assert_eq!(
+                fires(white, off_black),
+                (false, false),
+                "209 nudged {nudge}"
+            );
+        }
+        // The named forms, once more by name.
+        assert_eq!(fires(black, white), (true, false), "bear then bull is 208");
+        assert_eq!(fires(white, black), (false, true), "bull then bear is 209");
     }
 
     /// THE PARTIAL-RECOVERY PATTERN: THREE PRICE CLAUSES, EACH AT ITS EDGE.
     ///
     /// Bit 212 needs a bar that gapped below the prior low, closed back above
-    /// the prior close, and yet failed to reach the prior body's midpoint. Those
+    /// the in-neck band over the prior close, and yet failed to reach the
+    /// prior body's midpoint. Those
     /// three prices bracket a narrow window, and each edge of it is a separate
     /// clause — an `&&` turned into `||` makes any one of them sufficient, which
     /// would fire this bit on bars that never recovered at all.
@@ -1093,7 +1164,8 @@ mod tests {
     /// only the threshold itself separates a strict comparison from a loose one.
     #[test]
     fn every_edge_of_the_partial_recovery_window_is_required() {
-        // bar1 bearish: open 200, close 100, low 90, mid 150.
+        // bar1 bearish: open 200, close 100, low 90, mid 150, range 120, so
+        // the in-neck band reaches 100 + 120 * 0.2 = 124.
         let prior = at(10, 200, 210, 90, 100);
         let fires = |bar0: &Candle| -> bool {
             let mut p = Patterns::default();
@@ -1102,35 +1174,43 @@ mod tests {
         };
 
         assert!(
-            fires(&at(11, 80, 125, 75, 120)),
-            "opening at 80 below the 90 low and closing at 120 -- above the 100 \
-             close, below the 150 midpoint -- satisfies all five clauses"
+            fires(&at(11, 80, 135, 75, 130)),
+            "opening at 80 below the 90 low and closing at 130 -- past the 124 \
+             band, below the 150 midpoint -- satisfies all five clauses"
         );
 
         // `bar0.open < bar1.low`
         assert!(
-            !fires(&at(11, 95, 125, 90, 120)),
+            !fires(&at(11, 95, 135, 90, 130)),
             "an open ABOVE the prior low never gapped down, so there is nothing \
              to recover from"
         );
         assert!(
-            !fires(&at(11, 90, 125, 85, 120)),
+            !fires(&at(11, 90, 135, 85, 130)),
             "and an open EXACTLY at the prior low has not gapped below it; `<=` \
              would accept this and `<` must not"
         );
 
-        // `bar0.close > bar1.close`
+        // `into_body > band`
         assert!(
             !fires(&at(11, 80, 125, 75, 95)),
             "a close BELOW the prior close recovered nothing"
         );
         assert!(
-            !fires(&at(11, 80, 125, 75, 100)),
-            "and a close EXACTLY at the prior close recovered nothing either -- \
-             `>=` would call this a recovery and `>` must not"
+            !fires(&at(11, 80, 125, 75, 120)),
+            "a close inside the band is in-neck, bit 211, not thrusting"
+        );
+        assert!(
+            !fires(&at(11, 80, 125, 75, 124)),
+            "and a close EXACTLY at the band's top is still in-neck -- `>=` \
+             would call this thrusting and `>` must not"
+        );
+        assert!(
+            fires(&at(11, 80, 130, 75, 125)),
+            "one paisa past the band is thrusting"
         );
 
-        // `bar0.close < bar1.mid()`
+        // `2 * bar0.close < bar1.mid2()`
         assert!(
             !fires(&at(11, 80, 165, 75, 160)),
             "a close ABOVE the midpoint is a full piercing, which is bit 161 -- \
@@ -1250,7 +1330,7 @@ mod tests {
              comparison is strict, and `>=` would accept this"
         );
 
-        // `bar0.close < bar1.mid()`: above it, then exactly at it.
+        // `2 * bar0.close < bar1.mid2()`: above it, then exactly at it.
         assert!(
             !fires(&at(11, 220, 225, 125, 160)),
             "a close ABOVE the prior body's midpoint has not clouded it"
@@ -1363,12 +1443,12 @@ mod tests {
     /// # Two of the five clauses cannot be isolated, and that is arithmetic
     ///
     /// `bar1.bearish()` and `bar0.bullish()` are entangled with the price
-    /// clauses beneath them. The pattern needs `bar0.close` above `bar1.mid()`
+    /// clauses beneath them. The pattern needs `bar0.close` above `bar1.mid2()`
     /// and below `bar1.open`, and `bar0.open` below `bar1.low` — so making
     /// `bar1` bullish moves `bar1.open` below `bar0.close` and breaks a second
     /// clause at the same time, and making `bar0` bearish needs its close below
     /// an open that is already below `bar1.low`, which puts the close under
-    /// `bar1.mid()` too. No single-clause negation exists for either, so they
+    /// `bar1.mid2()` too. No single-clause negation exists for either, so they
     /// are left to the three that do and recorded here rather than faked.
     #[test]
     fn every_price_clause_of_the_piercing_pattern_is_required_on_its_own() {
@@ -1397,7 +1477,7 @@ mod tests {
              still fire this bit"
         );
 
-        // Clause: `bar0.close > bar1.mid()`. 140 is under the 150 midpoint.
+        // Clause: `2 * bar0.close > bar1.mid2()`. 140 is under the 150 midpoint.
         assert!(
             !fires(&at(11, 80, 180, 75, 140)),
             "a close that failed to reclaim the prior body's midpoint has not \
@@ -2447,13 +2527,16 @@ mod exemplars {
             want: 208,
             name: "pat_separating_lines_bull",
             dark: 209,
-            bars: &[(1000, 1060, 990, 1050), (1000, 1080, 995, 1070)],
+            // A black bar, then a white bar from the black bar's open
+            // (Z1-slice08-F1, D-2540; this was two white bars).
+            bars: &[(1050, 1060, 990, 1000), (1050, 1120, 1040, 1110)],
         },
         Case {
             want: 209,
             name: "pat_separating_lines_bear",
             dark: 208,
-            bars: &[(1050, 1060, 990, 1000), (1050, 1055, 940, 950)],
+            // A white bar, then a black bar from the white bar's open.
+            bars: &[(1000, 1060, 990, 1050), (1000, 1010, 940, 950)],
         },
         Case {
             want: 210,
@@ -2467,24 +2550,29 @@ mod exemplars {
             want: 211,
             name: "pat_in_neck",
             dark: 210,
-            // Closes just above that low, and no higher than the prior close.
-            bars: &[(1100, 1110, 1000, 1010), (990, 1010, 985, 1005)],
+            // Closes just into the prior black body: one paisa above the prior
+            // close, inside the band of 20% of the prior range (110 * 0.2 = 22).
+            // This fixture closed at 1005, on the prior lower shadow, which is
+            // not the classical shape (p11num-2, D-1780).
+            bars: &[(1100, 1110, 1000, 1010), (990, 1015, 985, 1011)],
         },
         Case {
             want: 212,
             name: "pat_thrusting",
             dark: 211,
-            // Past the prior close, but short of the prior body's midpoint of 1055.
-            bars: &[(1100, 1110, 1000, 1010), (990, 1030, 985, 1020)],
+            // Past the in-neck band (1010 + 22 = 1032), but short of the prior
+            // body's midpoint of 1055.
+            bars: &[(1100, 1110, 1000, 1010), (990, 1045, 985, 1040)],
         },
         Case {
             want: 213,
             name: "pat_tasuki_gap_up",
             dark: 214,
+            // The third bar opens inside the second body and closes in the gap.
             bars: &[
                 (1000, 1060, 990, 1050),
                 (1100, 1160, 1090, 1150),
-                (1080, 1085, 1030, 1040),
+                (1120, 1125, 1070, 1075),
             ],
         },
         Case {
@@ -2494,7 +2582,7 @@ mod exemplars {
             bars: &[
                 (1050, 1060, 990, 1000),
                 (960, 970, 900, 910),
-                (980, 1020, 975, 1010),
+                (930, 985, 925, 980),
             ],
         },
         Case {
@@ -2574,12 +2662,12 @@ mod exemplars {
             want: 221,
             name: "pat_unique_three_river",
             dark: 163,
-            // The middle bar's body is 80 of a 95 range — far too big for the small
+            // The middle bar's body is 40 of a 115 range — too big for the small
             // star a morning star needs, which is the clause 163 fails here.
             bars: &[
                 (1100, 1100, 1000, 1000),
-                (990, 995, 900, 910),
-                (900, 1010, 895, 1000),
+                (1060, 1065, 950, 1020),
+                (970, 1000, 960, 980),
             ],
         },
         Case {
@@ -2636,9 +2724,10 @@ mod exemplars {
         Case {
             want: 228,
             name: "pat_homing_pigeon",
-            dark: 208,
-            // Two small bodies of 10 in a 90 range, and opens that differ.
-            bars: &[(1000, 1050, 960, 1010), (1005, 1055, 965, 1015)],
+            dark: 159,
+            // Two black bodies, the second inside the first: same colour, so
+            // the bullish harami at 159 stays dark.
+            bars: &[(1100, 1110, 990, 1000), (1080, 1085, 1010, 1020)],
         },
         Case {
             want: 229,
@@ -2652,10 +2741,11 @@ mod exemplars {
             want: 230,
             name: "pat_identical_three_crows",
             dark: 165,
+            // Each crow opens at the previous close.
             bars: &[
                 (1100, 1110, 1040, 1050),
-                (1100, 1105, 990, 1000),
-                (1100, 1102, 940, 950),
+                (1050, 1055, 990, 1000),
+                (1000, 1002, 940, 950),
             ],
         },
         Case {
@@ -2758,6 +2848,309 @@ mod exemplars {
         }
     }
 
+    /// AN EQUAL-BODY REVERSAL IS NEITHER AN ENGULFING NOR A HARAMI.
+    /// hunt-indicators-2, D-1543.
+    ///
+    /// The table names an engulfing body that "wholly contains" the previous
+    /// one and a harami body "inside the previous LARGER" one. Both predicates
+    /// were inclusive, so two bodies of equal extent lit 157 and 159 (or 158
+    /// and 160) on one bar: a pattern and its opposite reading at once.
+    #[test]
+    fn an_equal_body_reversal_lights_neither_engulfing_nor_harami() {
+        let bull = fold(&[(1100, 1120, 990, 1000), (1000, 1110, 980, 1100)]);
+        let bear = fold(&[(1000, 1110, 980, 1100), (1100, 1120, 990, 1000)]);
+        for (mask, positions) in [(bull, [157_u32, 159]), (bear, [158, 160])] {
+            for position in positions {
+                assert!(!mask.get(position), "{position} lit on equal bodies");
+            }
+        }
+    }
+
+    /// IN-NECK IS A CLOSE AT OR JUST INTO THE PRIOR BLACK BODY, NOT ON ITS
+    /// LOWER SHADOW. p11num-2, D-1780.
+    ///
+    /// The prior bar is (1100, 1110, 1000, 1010): range 110, so the band reaches
+    /// 1010 + 22 = 1032. The textbook in-neck closes one paisa above the prior
+    /// close and was filed under thrusting; a close on the lower shadow, which
+    /// is neither shape, was filed under in-neck.
+    #[test]
+    fn in_neck_closes_at_or_just_into_the_prior_body() {
+        let prior = (1100, 1110, 1000, 1010);
+        let lit = |close: i64| {
+            let mask = fold(&[prior, (990, close.max(1015), 985, close)]);
+            (mask.get(211), mask.get(212))
+        };
+        assert_eq!(
+            lit(1012),
+            (true, false),
+            "one paisa into the body is in-neck"
+        );
+        assert_eq!(
+            lit(1010),
+            (true, false),
+            "a close AT the prior close is in-neck"
+        );
+        assert_eq!(lit(1032), (true, false), "the band's top is still in-neck");
+        assert_eq!(lit(1033), (false, true), "past the band is thrusting");
+        assert_eq!(
+            lit(1005),
+            (false, false),
+            "a close on the prior lower shadow is neither"
+        );
+
+        // `bar0.open < bar1.low` is strict. An open one paisa under the prior
+        // low gapped below it and is in-neck; an open EXACTLY at that low did
+        // not gap, and `<=` would light 211 for it (G18-rest-03, D-2071).
+        let opened = |open: i64| fold(&[prior, (open, 1015, 985, 1012)]).get(211);
+        assert!(opened(999), "an open under the prior low gapped");
+        assert!(!opened(1000), "an open at the prior low never gapped");
+    }
+
+    /// FOUR PATTERNS FOLLOW THEIR CLASSICAL SHAPES, AND THE SHAPES THEY USED TO
+    /// ACCEPT NO LONGER FIRE. hunt-indicators-3, D-1543.
+    ///
+    /// Each pair is (classical shape, the shape the old predicate accepted).
+    #[test]
+    fn four_patterns_take_their_classical_shapes() {
+        let pairs: [(u32, &[Ohlc], &[Ohlc]); 5] = [
+            // Homing pigeon: two black bodies, the second inside the first.
+            // The old predicate wanted two WHITE bodies of identical size.
+            (
+                228,
+                &[(1100, 1110, 990, 1000), (1080, 1085, 1010, 1020)],
+                &[(1000, 1050, 960, 1010), (1005, 1055, 965, 1015)],
+            ),
+            // Identical three crows: each crow opens at the previous close.
+            // The old predicate wanted three EQUAL opens.
+            (
+                230,
+                &[
+                    (1100, 1110, 1040, 1050),
+                    (1050, 1055, 990, 1000),
+                    (1000, 1002, 940, 950),
+                ],
+                &[
+                    (1100, 1110, 1040, 1050),
+                    (1100, 1105, 990, 1000),
+                    (1100, 1102, 940, 950),
+                ],
+            ),
+            // Upside tasuki gap: the black third bar opens in the second body
+            // and closes INSIDE the gap. The old one let it close the gap.
+            (
+                213,
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1120, 1125, 1070, 1075),
+                ],
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1080, 1085, 1030, 1040),
+                ],
+            ),
+            // Downside tasuki gap, the mirror.
+            (
+                214,
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (930, 985, 925, 980),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (980, 1020, 975, 1010),
+                ],
+            ),
+            // Unique three river: long black, a black harami with a lower low,
+            // then a small white closing BELOW the second close. The old
+            // predicate wanted the third to close above the second's open.
+            (
+                221,
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (970, 1000, 960, 980),
+                ],
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (990, 995, 900, 910),
+                    (900, 1010, 895, 1000),
+                ],
+            ),
+        ];
+        for (position, classical, old) in pairs {
+            assert!(fold(classical).get(position), "{position}: classical shape");
+            assert!(!fold(old).get(position), "{position}: the old shape");
+        }
+    }
+
+    /// A pattern, its classical shape, and that shape with one clause failed.
+    type NearMisses = (u32, &'static [Ohlc], &'static [&'static [Ohlc]]);
+
+    /// The near misses `every_clause_of_the_reshaped_patterns_is_required_on_its_own`
+    /// walks: every one is the classical shape with exactly ONE clause failed.
+    const RESHAPED: [NearMisses; 4] = [
+        (
+            228,
+            &[(1100, 1110, 990, 1000), (1080, 1085, 1010, 1020)],
+            &[
+                // the second bar is white
+                &[(1100, 1110, 990, 1000), (1020, 1085, 1010, 1080)],
+                // its top clears the first open
+                &[(1100, 1110, 990, 1000), (1110, 1115, 1050, 1060)],
+                // its bottom falls under the first close
+                &[(1100, 1110, 990, 1000), (1080, 1085, 980, 990)],
+                // an equal body is not strictly inside
+                &[(1100, 1110, 990, 1000), (1100, 1105, 995, 1000)],
+            ],
+        ),
+        (
+            213,
+            &[
+                (1000, 1060, 990, 1050),
+                (1100, 1160, 1090, 1150),
+                (1120, 1125, 1070, 1075),
+            ],
+            &[
+                // opens AT the second open, not above it
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1100, 1105, 1070, 1075),
+                ],
+                // opens AT the second close, not below it
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1150, 1155, 1070, 1075),
+                ],
+                // closes AT the second low: the gap is not entered
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1120, 1125, 1085, 1090),
+                ],
+                // closes AT the first high: the gap is filled
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1120, 1125, 1055, 1060),
+                ],
+            ],
+        ),
+        (
+            214,
+            &[
+                (1050, 1060, 990, 1000),
+                (960, 970, 900, 910),
+                (930, 985, 925, 980),
+            ],
+            &[
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (960, 985, 925, 980),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (910, 985, 905, 980),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (930, 975, 925, 970),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (930, 995, 925, 990),
+                ],
+            ],
+        ),
+        (
+            221,
+            &[
+                (1100, 1100, 1000, 1000),
+                (1060, 1065, 950, 1020),
+                (970, 1000, 960, 980),
+            ],
+            &[
+                // the second close equals the first close
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1000),
+                    (970, 1000, 960, 980),
+                ],
+                // the second low equals the first low
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 1000, 1020),
+                    (1005, 1020, 1002, 1008),
+                ],
+                // the third bar is black
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (980, 1000, 960, 970),
+                ],
+                // the third body is 20 of a 30 range: not small
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (960, 985, 955, 980),
+                ],
+                // the third bar opens AT the second low
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (950, 1000, 945, 960),
+                ],
+                // the third bar closes AT the second close
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (1010, 1040, 1000, 1020),
+                ],
+            ],
+        ),
+    ];
+
+    /// EVERY CLAUSE OF THE FOUR RE-SHAPED PATTERNS IS REQUIRED ON ITS OWN, AND
+    /// EVERY STRICT BOUND IS STRICT.
+    ///
+    /// `four_patterns_take_their_classical_shapes` proves each classical shape
+    /// fires and the old shape does not; it does not prove each clause carries
+    /// weight. Every near miss below is the classical shape with exactly ONE
+    /// clause failed -- and where that clause is a strict comparison, failed by
+    /// equality -- so a joining `&&` read as `||`, or a `<` read as `<=`,
+    /// lights the bit on a shape the predicate refuses.
+    #[test]
+    fn every_clause_of_the_reshaped_patterns_is_required_on_its_own() {
+        let groups = RESHAPED;
+        for (position, classical, misses) in groups {
+            assert!(fold(classical).get(position), "{position}: classical shape");
+            for (index, miss) in misses.iter().enumerate() {
+                assert!(
+                    !fold(miss).get(position),
+                    "{position}: near miss {index} must stay dark"
+                );
+            }
+        }
+        // Identical three crows needs BOTH opens at the prior close: the third
+        // crow opening at 995 instead of 1000 is three black crows and no more.
+        let one_open_off = fold(&[
+            (1100, 1110, 1040, 1050),
+            (1050, 1055, 990, 1000),
+            (995, 1002, 940, 950),
+        ]);
+        assert!(one_open_off.get(166), "still three black crows");
+        assert!(!one_open_off.get(230), "one open off the prior close");
+    }
+
     #[test]
     fn every_named_exemplar_survives_price_translation_and_session_reset() {
         let mut checked = 0;
@@ -2826,5 +3219,156 @@ mod exemplars {
             !mask.get(226),
             "the body sits 80 off a 200 range: a rickshaw man's body is mid-range"
         );
+    }
+}
+
+// XPERM-02 (D-3402): every "beyond the midpoint" clause is decided on the doubled
+// sum, never on a midpoint rounded to a paisa. A sibling module for the same reason
+// `degenerate` is one.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod midpoint_exact {
+    use super::*;
+
+    /// One IST session, minute `m`.
+    fn bar(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: (50_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000,
+            open,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    fn masks(bars: &[Candle]) -> ConditionMask {
+        let mut p = Patterns::new(Thresholds::default());
+        let mut last = ConditionMask::ZERO;
+        for b in bars {
+            last = p.step(b).expect("sane bar");
+        }
+        last
+    }
+
+    /// Piercing (161) and dark cloud (162), exhaustively over wickless bars, against
+    /// a naive oracle that compares `2 · close` with `open + close` of the prior body.
+    /// With the midpoint floored, 162 refused a close equal to the floor of a
+    /// half-paisa midpoint, which the exact comparison accepts; 161 was exact only
+    /// by accident of the rounding direction.
+    #[test]
+    fn piercing_and_dark_cloud_agree_with_the_exact_midpoint() {
+        let mut compared = 0_u32;
+        let mut decided_by_the_half = 0_u32;
+        for o1 in 100..=110_i64 {
+            for c1 in 100..=110_i64 {
+                for o0 in 95..=115_i64 {
+                    for c0 in 95..=115_i64 {
+                        let m = masks(&[
+                            bar(0, o1, o1.max(c1), o1.min(c1), c1),
+                            bar(1, o0, o0.max(c0), o0.min(c0), c0),
+                        ]);
+                        let piercing = c1 < o1 && c0 > o0 && o0 < c1 && 2 * c0 > o1 + c1 && c0 < o1;
+                        let cloud = c1 > o1 && c0 < o0 && o0 > c1 && 2 * c0 < o1 + c1 && c0 > o1;
+                        assert_eq!(
+                            (m.get(161), m.get(162)),
+                            (piercing, cloud),
+                            "prior {o1}->{c1}, bar {o0}->{c0}"
+                        );
+                        if cloud && 2 * c0 == o1 + c1 - 1 {
+                            decided_by_the_half += 1;
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 11 * 11 * 21 * 21);
+        assert!(decided_by_the_half > 0, "the half-paisa case was reached");
+    }
+
+    /// Rickshaw man (226) against the exact centredness of a long-legged doji (224):
+    /// `|(open + close) − (high + low)| · 1000 <= range · 200`, every bar over an
+    /// eleven-paisa alphabet.
+    #[test]
+    fn the_rickshaw_man_centre_is_exact() {
+        let mut doji = 0_u32;
+        for low in 100..=110_i64 {
+            for high in low..=110 {
+                for open in low..=high {
+                    for close in low..=high {
+                        let m = masks(&[bar(0, open, high, low, close)]);
+                        if m.get(224) {
+                            let centred =
+                                ((open + close) - (high + low)).abs() * 1000 <= (high - low) * 200;
+                            assert_eq!(m.get(226), centred, "{open} {high} {low} {close}");
+                            doji += 1;
+                        } else {
+                            assert!(!m.get(226), "226 is a 224: {open} {high} {low} {close}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(doji > 0);
+        // The attack's bar: body mid 106.5 against range mid 105 is 15% off centre.
+        assert!(!masks(&[bar(0, 106, 110, 100, 107)]).get(226));
+        assert!(
+            !masks(&[bar(0, 104, 110, 100, 103)]).get(226),
+            "and its mirror"
+        );
+    }
+
+    /// Evening star (164) and in-neck's bearish sibling (212) at a half-paisa
+    /// midpoint, and the morning star (163) beside them.
+    #[test]
+    fn the_three_bar_and_neck_midpoints_are_exact() {
+        // 164: long up body 100->201 (mid 150.5), small middle, down bar closing 150.
+        let star = |c0: i64| {
+            masks(&[
+                bar(0, 100, 201, 100, 201),
+                bar(1, 210, 211, 209, 210),
+                bar(2, 200, 200, c0, c0),
+            ])
+        };
+        assert!(star(150).get(164), "150 < 150.5");
+        assert!(!star(151).get(164), "151 > 150.5");
+        // 163: long down body 201->100 (mid 150.5), up bar closing 151 and 150.
+        let morning = |c0: i64| {
+            masks(&[
+                bar(0, 201, 201, 100, 100),
+                bar(1, 90, 91, 89, 90),
+                bar(2, 95, c0, 95, c0),
+            ])
+        };
+        assert!(morning(151).get(163), "151 > 150.5");
+        assert!(!morning(150).get(163), "150 < 150.5");
+        // 212: down body 201->100 (mid 150.5), up bar from below the low closing 150.
+        let neck = |c0: i64| masks(&[bar(0, 201, 201, 100, 100), bar(1, 90, c0, 90, c0)]);
+        assert!(neck(150).get(212), "150 < 150.5");
+        assert!(!neck(151).get(212), "151 > 150.5");
+
+        // A WHOLE-paisa midpoint, closed on exactly: strictly beyond is the rule, so
+        // neither star fires on it, and one paisa past it fires. (`>=`/`<=` survived
+        // as mutants until these existed.)
+        let morning_even = |c0: i64| {
+            masks(&[
+                bar(0, 201, 201, 101, 101),
+                bar(1, 90, 91, 89, 90),
+                bar(2, 95, c0, 95, c0),
+            ])
+        };
+        assert!(!morning_even(151).get(163), "151 is ON the 151 midpoint");
+        assert!(morning_even(152).get(163), "152 > 151");
+        let star_even = |c0: i64| {
+            masks(&[
+                bar(0, 100, 202, 100, 202),
+                bar(1, 210, 211, 209, 210),
+                bar(2, 200, 200, c0, c0),
+            ])
+        };
+        assert!(!star_even(151).get(164), "151 is ON the 151 midpoint");
+        assert!(star_even(150).get(164), "150 < 151");
     }
 }

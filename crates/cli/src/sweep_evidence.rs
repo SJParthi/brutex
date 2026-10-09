@@ -50,6 +50,44 @@ fn barrier(
     file.sync_all()
 }
 
+/// Every evidence row write in this module passes here, so a test can make it
+/// write a prefix and then fail exactly as a full filesystem does.
+fn write_rows(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(result) = tests::write_rows(file, bytes) {
+        return result;
+    }
+    file.write_all(bytes)
+}
+
+/// Append `bytes` at the end of `file`, measured under the caller's held
+/// lock, and make them durable; return the offset they start at.
+///
+/// A write that fails part-way (a full filesystem extends the file and then
+/// errors) or a barrier that fails leaves bytes that are not a whole row. Left
+/// behind they make `shape` refuse the file -- for the shared journal and
+/// start index, every later attempt in the store. They are truncated back to
+/// that measured end, which removes only this call's bytes, and the refusal
+/// says whether the rollback held (the D-0426 wording, D-1741).
+fn append_rolled_back(file: &mut File, path: &Path, bytes: &[u8]) -> Result<u64, String> {
+    let end = file.seek(SeekFrom::End(0)).map_err(io_error)?;
+    write_rows(file, bytes)
+        .and_then(|()| barrier(file, path))
+        .map_err(|why| {
+            io_error(match file.set_len(end).and_then(|()| file.sync_all()) {
+                Ok(()) => format!(
+                    "{} could not be appended: {why}. The partial write was rolled back to byte {end}, so every older whole row remains readable",
+                    path.display()
+                ),
+                Err(and) => format!(
+                    "{} could not be appended: {why}. Rolling the partial write back to byte {end} ALSO failed: {and}. The file may now end mid-row and is refused until its tail is repaired",
+                    path.display()
+                ),
+            })
+        })?;
+    Ok(end)
+}
+
 /// The computation this attempt actually performs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -616,6 +654,7 @@ impl Attempt {
             let mut file = open_append(&path)?;
             file.lock().map_err(io_error)?;
             let result = (|| {
+                heal_torn::<RANK_BYTES>(&file, &path, RANKS)?;
                 let count = shape::<RANK_BYTES>(&mut file, &path, RANKS, true)?;
                 if count != 0 {
                     return Err(
@@ -623,13 +662,26 @@ impl Attempt {
                             .to_owned(),
                     );
                 }
-                file.seek(SeekFrom::End(0)).map_err(io_error)?;
+                // One block: a failure on any row, or on the barrier, cuts
+                // every row this call wrote (D-1900, cli2-1).
+                let block =
+                    crate::fixed_tail::start(&mut file, &path.display()).map_err(io_error)?;
                 for row in rows {
                     let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
-                    file.write_all(&raw).map_err(io_error)?;
+                    crate::fixed_tail::write_at_end(
+                        &mut file,
+                        &path.display(),
+                        block,
+                        &raw,
+                        write_rows,
+                    )
+                    .map_err(io_error)?;
                     digest.update(&raw);
                 }
-                barrier(&file, &path).map_err(io_error)
+                crate::fixed_tail::sync_or_roll_back(&file, &path, block, |file| {
+                    barrier(file, &path)
+                })
+                .map_err(io_error)
             })();
             let released = file.unlock().map_err(io_error);
             result.and(released)
@@ -827,6 +879,7 @@ pub fn finish_many(attempts: Vec<Attempt>, status: Completion) -> Result<(), Str
 
 /// Append global terminal rows in order under one write and one barrier.
 fn journal(root: &Path, terminals: &[Evidence]) -> Result<(), String> {
+    let _turn = crate::ordered::turn();
     append_events(&base(root).join("attempts.bin"), |_, _| {
         let mut rows = Vec::with_capacity(terminals.len().saturating_mul(EVENT_BYTES));
         for terminal in terminals {
@@ -1059,9 +1112,18 @@ fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let mut raw = [0_u8; 16 + EVENT_BYTES];
     raw[..16].copy_from_slice(&EVENT_HEADER);
     raw[16..].copy_from_slice(&event_bytes(evidence)?);
-    file.write_all(&raw)
-        .and_then(|()| barrier(&file, &path))
-        .map_err(io_error)
+    // A FAILED RESERVATION LEAVES NO FILE (h-cli-4, D-1854). The file is this
+    // token's own and was created just above, so the state before the attempt
+    // is "no file": a failed or short write is rolled back and the file
+    // removed, rather than left torn for `require_start` to refuse.
+    if let Err(why) = append_rolled_back(&mut file, &path, &raw) {
+        drop(file);
+        return Err(match fs::remove_file(&path) {
+            Ok(()) => format!("{why}; the reservation file was removed"),
+            Err(and) => format!("{why}; removing the reservation file also failed: {and}"),
+        });
+    }
+    Ok(())
 }
 
 fn require_start(root: &Path, evidence: Evidence, max_bytes: u64) -> Result<(), String> {
@@ -1176,6 +1238,14 @@ fn shape<const N: usize>(
     create: bool,
 ) -> Result<u64, String> {
     let mut len = file.metadata().map_err(io_error)?.len();
+    // AN EMPTY FILE HOLDS NO ROWS, exactly like an absent one (D-1741). It is
+    // what `open_append` leaves before its first write and what a refused
+    // first append leaves once its rollback cut header and rows together
+    // (D-1900, cli2-1); reading it as torn would turn one refused append into
+    // a refusal of every later read of that identity.
+    if len == 0 && !create {
+        return Ok(0);
+    }
     if len == 0 && create {
         let mut header = [0_u8; 16];
         header[..8].copy_from_slice(&magic);
@@ -1185,9 +1255,7 @@ fn shape<const N: usize>(
                 .map_err(|why| why.to_string())?
                 .to_le_bytes(),
         );
-        file.write_all(&header)
-            .and_then(|()| barrier(file, path))
-            .map_err(io_error)?;
+        append_rolled_back(file, path, &header)?;
         if let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }
@@ -1283,11 +1351,9 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
     let mut file = open_append(path)?;
     file.lock().map_err(io_error)?;
     let result = (|| {
+        heal_torn::<N>(&file, path, magic)?;
         let at = shape::<N>(&mut file, path, magic, true)?;
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(raw))
-            .and_then(|()| barrier(&file, path))
-            .map_err(io_error)?;
+        append_durable(&mut file, path, raw)?;
         Ok(at)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1295,6 +1361,41 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
         (Ok(at), Ok(())) => Ok(at),
         (Err(why), _) | (_, Err(why)) => Err(why),
     }
+}
+/// Appends `bytes` at the end and makes them durable. A write or barrier
+/// failure cuts the file back to where it ended before this call, so one
+/// ENOSPC or EIO no longer leaves a torn row that refuses every later start
+/// (D-1900, cli2-1).
+fn append_durable(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let end = crate::fixed_tail::start(file, &path.display()).map_err(io_error)?;
+    crate::fixed_tail::write_at_end(file, &path.display(), end, bytes, write_rows)
+        .map_err(io_error)?;
+    crate::fixed_tail::sync_or_roll_back(file, path, end, |file| barrier(file, path))
+        .map_err(io_error)
+}
+/// WRITER ONLY, under the exclusive lock: cut bytes past the last whole row.
+///
+/// Every row is acknowledged only after its whole stride passed its barrier,
+/// and tokens are counted from whole rows, so a sub-row tail names no token,
+/// no start and no acknowledged row. A kill inside `write(2)` leaves one, and
+/// until D-1901 it refused every later start for every identity, for good
+/// (sweep-2). Readers still refuse it; only a writer cuts it, and says so.
+///
+/// A file shorter than its header is cut to nothing for the same reason: its
+/// header and first rows are one write, and no row is acknowledged until that
+/// write passed its barrier.
+fn heal_torn<const N: usize>(file: &File, path: &Path, magic: [u8; 8]) -> Result<(), String> {
+    let stride = u32::try_from(N).map_err(|why| why.to_string())?;
+    let mut header = [0_u8; 16];
+    header[..8].copy_from_slice(&magic);
+    header[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    header[12..].copy_from_slice(&stride.to_le_bytes());
+    // An all-zero header-length file is an interrupted genesis too (conc5-1,
+    // D-2644), and is cut by the same shared rule as a strict prefix.
+    crate::fixed_tail::heal_interrupted_header(file, path, &header).map_err(io_error)?;
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER, u64::from(stride), &magic)
+        .map(|_| ())
+        .map_err(io_error)
 }
 fn event_bytes(e: Evidence) -> Result<[u8; EVENT_BYTES], String> {
     let mut raw = [0_u8; EVENT_BYTES];
@@ -1368,6 +1469,7 @@ fn append_events(
     let mut file = open_append(path)?;
     file.lock().map_err(io_error)?;
     let result = (|| {
+        heal_torn::<EVENT_BYTES>(&file, path, EVENTS)?;
         let started = file.metadata().map_err(io_error)?.len() == 0;
         let count = if started {
             0
@@ -1380,10 +1482,7 @@ fn append_events(
         } else {
             rows
         };
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| barrier(&file, path))
-            .map_err(io_error)?;
+        append_durable(&mut file, path, &bytes)?;
         if started && let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }
@@ -1399,6 +1498,8 @@ fn append_events(
 /// Allocate consecutive tokens with one journal append and one barrier: the
 /// journal is durable before any reservation can name one of them.
 fn allocate(root: &Path, starts: &mut [Evidence]) -> Result<(), String> {
+    // The shared journal: one ordered event of an `ordered::map` lane. D-1556.
+    let _turn = crate::ordered::turn();
     append_events(&base(root).join("attempts.bin"), |_, index| {
         let count = u64::try_from(starts.len()).unwrap_or(u64::MAX);
         let last = index
@@ -1421,7 +1522,7 @@ fn last_event(path: &Path, max_bytes: u64) -> Result<Option<Evidence>, String> {
     };
     file.lock_shared().map_err(io_error)?;
     let result = (|| {
-        bound(&file, max_bytes)?;
+        bound(HEADER + EVENT_BYTES as u64, max_bytes)?;
         let count = shape::<EVENT_BYTES>(&mut file, path, EVENTS, false)?;
         if count == 0 {
             return Ok(None);
@@ -1438,11 +1539,18 @@ fn last_event(path: &Path, max_bytes: u64) -> Result<Option<Evidence>, String> {
         (Err(why), _) | (_, Err(why)) => Err(why),
     }
 }
-fn bound(file: &File, max_bytes: u64) -> Result<(), String> {
-    let len = file.metadata().map_err(io_error)?.len();
-    if len > max_bytes {
+/// Refuses a read that would TOUCH more than `max_bytes` (r3-1, D-4465).
+///
+/// It measured the whole FILE, so a ranked file grown past the API's 64 MiB
+/// scan bound -- 335,545 rows at 200 bytes -- refused every page and every
+/// read of that identity, including the ones that touch nothing but its
+/// 16-byte header. No reader here reads more than a header, one event or one
+/// page of at most 4,096 rows, so a file's length is only arithmetic for its
+/// row count, and what is bounded is what is read.
+fn bound(touched: u64, max_bytes: u64) -> Result<(), String> {
+    if touched > max_bytes {
         return Err(format!(
-            "sweep evidence file is {len} bytes, beyond its {max_bytes}-byte read bound"
+            "this sweep evidence read would touch {touched} bytes, beyond its {max_bytes}-byte read bound"
         ));
     }
     Ok(())
@@ -1459,7 +1567,7 @@ fn count_optional<const N: usize>(
     };
     file.lock_shared().map_err(io_error)?;
     let result = (|| {
-        bound(&file, max_bytes)?;
+        bound(HEADER, max_bytes)?;
         shape::<N>(&mut file, path, magic, false)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1504,7 +1612,6 @@ fn page<const N: usize>(
     let mut file = Flock::lock_shared(file, path.as_path()).map_err(io_error)?;
     let generation = crate::result_set::file_generation(&file, &path)?;
     let result = (|| {
-        bound(&file, max_bytes)?;
         let count = shape::<N>(&mut file, &path, magic, false)?;
         if count != expected {
             return Err(
@@ -1514,6 +1621,11 @@ fn page<const N: usize>(
         let take = count
             .saturating_sub(offset)
             .min(u64::try_from(limit).unwrap_or(u64::MAX));
+        let stride = u64::try_from(N).map_err(|why| why.to_string())?;
+        bound(
+            HEADER.saturating_add(take.saturating_mul(stride)),
+            max_bytes,
+        )?;
         let mut rows = Vec::new();
         rows.try_reserve_exact(usize::try_from(take).map_err(|why| why.to_string())?)
             .map_err(|why| why.to_string())?;

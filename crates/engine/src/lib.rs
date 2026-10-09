@@ -40,7 +40,7 @@
 //!
 //! | operation | cost | why |
 //! |---|---|---|
-//! | mask evaluation | O(1) per bar in [`column::Column::support`] | one fixed-six-word [`vocab::ConditionMask::hits`] call per bar |
+//! | mask evaluation | O(1) per bar per candidate in [`column::Column::support_each`] | one fixed-six-word [`vocab::ConditionMask::hits`] call per bar per candidate, the column walked once per batch in 512-row blocks (D-4481) |
 //! | condition lookup | O(1) | direct index into `vocab`'s fixed table |
 //! | duplicate rejection | expected O(1) at k=1; **absent at k≥2** | one pre-sized `offered`-set insert at k=1; the injective prefix join needs no candidate set |
 //! | result append | O(1) amortised | `Vec::push`; k=1 reserves the offered width and later levels reserve a capped previous-frontier heuristic |
@@ -51,6 +51,13 @@
 //! live sweep bypassed it for a Theta(k) bitmap intersection. The column now owns
 //! row masks and calls `hits` exactly once per bar; the source guard and `C-E-02`
 //! bind the live path rather than a reference helper.
+//!
+//! **Since D-4481 the live path is [`column::Column::support_each`]**, which
+//! performs that same one `hits` per bar for each candidate of a batch, block by
+//! block, so the column is streamed once per batch rather than once per
+//! candidate (so1-1). [`column::Column::support`] keeps the one-candidate form
+//! as the reference the blocked count is tested against; the sweep no longer
+//! calls it.
 //!
 //! *Mask evaluation.* `hits` is constant and branchless. The old live
 //! [`column::Column::support`] intersected one bitmap per named position, so its
@@ -102,11 +109,111 @@ pub mod column;
 /// [`Sweep::levels`] keeps every survivor of every level to the end of the run,
 /// and that retention -- not the search space -- is what reached 7.4 GB and an
 /// exit 137 on a full-range sweep. [`keep::Streamed`] is the same walk holding
-/// two levels instead of all of them; [`keep::Best`] is the bounded retention a
-/// caller feeds from the level boundary. Neither is a depth parameter and the
-/// module header says why at length.
+/// two levels instead of all of them. What a caller keeps from the level
+/// boundary is the caller's own sink: the bounded retention this module once
+/// offered had no production caller and was removed (D-0762, D-4480). It is not
+/// a depth parameter and the module header says why at length.
 pub mod keep;
 pub mod resume;
+
+/// The rule-4 primitives as production runs them, exposed so
+/// `benches/ratio.rs` times the code the sweep calls rather than a copy of it.
+///
+/// # Why this module exists
+///
+/// `CLAUDE.md` §3 rule 4 names five per-operation costs and gate 8 measures
+/// them. Three of the engine's rows -- C-E-08 (one join pair), C-E-10 (k=1
+/// duplicate rejection) and C-E-11 (result append) -- used to build their OWN
+/// `HashSet`, `Vec` and `union().popcount()` loop inside the bench, so an O(n)
+/// regression in the production operation would have shipped with every row
+/// green. A bench target links only this crate's public surface, so the
+/// production operations are routed through the functions below and the bench
+/// calls the same functions. Nothing here is a second implementation: each
+/// item is the one the sweep itself calls. D-0924.
+pub mod primitives {
+    use core::hash::BuildHasher;
+    use std::collections::{HashSet, TryReserveError};
+
+    use vocab::ConditionMask;
+
+    use crate::{Itemset, JoinIndex, MaskSet, join_screen};
+
+    /// k=1 duplicate rejection: `false` when `position` was already offered.
+    ///
+    /// The one call `Ladder::first_level` makes per offered position. Expected
+    /// O(1) on a set pre-sized to the offered width; that is amortised hash
+    /// table evidence, not an adversarial worst-case bound. Measured by C-E-10
+    /// in `crates/engine/benches/ratio.rs`.
+    #[inline]
+    pub fn offer<S: BuildHasher>(offered: &mut HashSet<u32, S>, position: u32) -> bool {
+        offered.insert(position)
+    }
+
+    /// Result append: the one call the batch drain makes per frequent
+    /// candidate, into a vector the drain has already reserved for the whole
+    /// batch, so it never allocates on that path.
+    #[inline]
+    pub fn append(out: &mut Vec<Itemset>, item: Itemset) {
+        out.push(item);
+    }
+
+    /// The canonical level order: the one comparison sort each level's
+    /// survivors pass through before the level is published.
+    ///
+    /// Routed here so `benches/ratio.rs` FXD-08 times the production sort
+    /// rather than a copy of it (W3-engine1-1, D-4483). O(|F| log |F|) per
+    /// level, never per bar or per pair; `docs/06-limits.md` quotes FXD-08.
+    pub fn sort_level(level: &mut [Itemset]) {
+        crate::sort_canonically(level);
+    }
+
+    /// One prior frontier indexed exactly as the level join indexes it.
+    pub struct JoinProbe {
+        index: JoinIndex,
+    }
+
+    impl JoinProbe {
+        /// Index `previous` as `try_next_level_observing` does.
+        ///
+        /// # Errors
+        /// Allocation refusal while reserving the membership set or the keyed
+        /// prefix vector.
+        pub fn try_new(previous: &[Itemset]) -> Result<Self, TryReserveError> {
+            Ok(Self {
+                index: JoinIndex::try_new(previous)?,
+            })
+        }
+
+        /// Walk every pair of every prefix block through the production
+        /// per-pair screen. Returns `(pairs, survivors)`.
+        #[must_use]
+        pub fn screen_every_pair(&self) -> (u64, u64) {
+            screen_blocks(&self.index.frequent, &self.index.keyed)
+        }
+
+        /// Previous-frontier masks held after the join's own dedup.
+        #[must_use]
+        pub fn width(&self) -> usize {
+            self.index.keyed.len()
+        }
+    }
+
+    fn screen_blocks(frequent: &MaskSet, keyed: &[(ConditionMask, ConditionMask)]) -> (u64, u64) {
+        let mut pairs = 0_u64;
+        let mut survivors = 0_u64;
+        for block in keyed.chunk_by(|a, b| a.0 == b.0) {
+            for (offset, (_, a)) in block.iter().enumerate() {
+                for (_, b) in block.iter().skip(offset.saturating_add(1)) {
+                    pairs = pairs.saturating_add(1);
+                    if join_screen(frequent, a, b).is_some() {
+                        survivors = survivors.saturating_add(1);
+                    }
+                }
+            }
+        }
+        (pairs, survivors)
+    }
+}
 
 use core::hash::{BuildHasher, Hasher};
 use std::collections::{HashSet, TryReserveError};
@@ -136,8 +243,9 @@ const MASK_HASH_MIX: u64 = 0x517c_c1b7_2722_0a95;
 ///
 /// `std`'s `RandomState` draws a fresh seed per PROCESS, so the iteration order
 /// of a `HashSet` differs between two runs of the same input. Nothing in this
-/// crate iterates one — `seen` is asked only for `len` and for whether an insert
-/// was new — so that randomness never reached an answer. A fixed seed removes
+/// crate iterates one — the join's `MaskSet` of the previous frontier is asked
+/// only whether a subset is present (the `seen` duplicate set it was written
+/// for is deleted; D-1440) — so that randomness never reached an answer. A fixed seed removes
 /// the possibility rather than relying on it staying unreached, which is what
 /// `CLAUDE.md` §3 rule 5 is for.
 const MASK_HASH_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -163,7 +271,8 @@ impl BuildHasher for MaskHash {
 /// hold keys an attacker chose, and it pays several rounds per eight bytes to
 /// make collisions unfindable.
 ///
-/// Nothing about that applies to `seen`. Its keys are [`ConditionMask`]s the
+/// Nothing about that applies to the join's `MaskSet` (written for the deleted
+/// `seen` set, which hashed the same keys). Its keys are [`ConditionMask`]s the
 /// sweep generated itself from a fixed vocabulary — no caller, no request, no
 /// network reaches them — and each is 48 bytes of bits that are already spread.
 /// The work `SipHash` does is real and is spent defending against a threat that
@@ -180,7 +289,7 @@ impl BuildHasher for MaskHash {
 /// # What this does NOT change
 ///
 /// Collisions are still resolved by full key comparison inside the set, so a
-/// weaker hash cannot make `seen` admit a duplicate or reject a new candidate.
+/// weaker hash cannot make the subset prune answer a membership wrongly.
 /// It can only make lookups slower if the distribution were poor, which is why
 /// the rotate is there and why `the_mask_hasher_separates_orderings` measures it.
 #[derive(Clone, Copy, Debug)]
@@ -497,7 +606,7 @@ impl Frontier {
 /// where the frequent frontier empties, justified by anti-monotonicity. That
 /// argument is sound and it is **not a termination guarantee**. If a set of P
 /// positions co-occurs on at least `min_hits` bars, then every subset of it is
-/// frequent, [`every_subset_is_frequent`] never prunes, and the frontier at
+/// frequent, [`every_non_parent_subset_is_frequent`] never prunes, and the frontier at
 /// level k is `C(P, k)`. At P = 40 that is 137,846,528,820 itemsets at level 20
 /// — 7.7 TB — and correlated bits on a range-bound session are ordinary, not
 /// pathological. Before this type the only thing between that and the operator
@@ -610,12 +719,16 @@ impl Sweep {
     /// The depth the ladder reached before a level came back empty.
     ///
     /// Zero when no single condition met `min_hits`.
+    ///
+    /// **O(1), not a count over the levels.** The walk continues only while
+    /// the current level is non-empty, so an empty level can only be the last
+    /// one recorded: the depth is the level count, less one when the last
+    /// level is the empty one that ended the walk (Rust and O(1) sweep OE-5,
+    /// D-2304, AFG-04).
     #[must_use]
     pub fn depth(&self) -> usize {
-        self.levels
-            .iter()
-            .filter(|l| !l.frequent.is_empty())
-            .count()
+        let ended_empty = self.levels.last().is_some_and(|l| l.frequent.is_empty());
+        self.levels.len().saturating_sub(usize::from(ended_empty))
     }
 
     /// Every frequent combination found at every level.
@@ -647,7 +760,8 @@ impl Sweep {
 ///
 /// # Where the number comes from
 ///
-/// Bytes, not taste. A level holds each distinct candidate twice: once in `seen`
+/// Bytes, not taste. When this was measured a level held each distinct
+/// candidate twice: once in the `seen` duplicate set, since deleted (see below),
 /// as a [`ConditionMask`] key (48 bytes) and once, if it survives, in `out` as an
 /// [`Itemset`] (56 bytes). `hashbrown` carries roughly one slot in eight spare
 /// plus a control byte, so 128 bytes per candidate across both is a safe
@@ -757,19 +871,28 @@ pub const DEFAULT_CEILING: usize = 1 << 27;
 /// machine — while every run below 11% support was killed at 1,500 seconds.**
 /// Memory was never the binding constraint. Time was, and nothing counted it.
 ///
-/// `2^34` is 17.2 billion pair iterations. The per-pair cost is a mask union and
-/// a popcount, measured by `C-E-08` in `crates/engine/benches/ratio.rs`, so the
-/// budget is stated in the unit the bench measures rather than in seconds, which
-/// would be a claim about a machine rather than about the work.
+/// `2^34` is 17.2 billion pair iterations. The per-pair cost is the production
+/// screen -- a mask union, the subset prune and the meaning prune -- measured
+/// through `engine::primitives::JoinProbe` by `C-E-08` (flat across frontier
+/// width) and `C-E-12` (one subset probe flat across depth) in
+/// `crates/engine/benches/ratio.rs`. It said "a mask union and a popcount" and
+/// the bench timed exactly that stand-in while production ran neither the
+/// popcount nor any timed prune (D-0924). The subset prune makes the per-pair
+/// cost Theta(k), so a pair at k=40 is dearer than one at k=3 and this budget
+/// bounds work, not seconds; `docs/06-limits.md` names that. It is stated in
+/// the unit the bench measures rather than in seconds, which would be a claim
+/// about a machine rather than about the work.
 /// # IT CANNOT BIND AT THE SHIPPED CEILING, and that is recorded rather than
 /// left for the next reader to discover
 ///
 /// This budget exists because time was the binding constraint and nothing
 /// counted it. At the shipped constants it still does not, and the arithmetic
-/// is short: the prefix join makes `duplicates` a **measured zero** — every
-/// pair contributes exactly one distinct candidate — so `seen` grows one entry
-/// per pair walked. [`Ladder::exhausted`] tests `admitted + seen.len() >=
-/// ceiling` in the same loop that counts pairs, and [`DEFAULT_CEILING`] is
+/// is short: the prefix join is injective, so `duplicates` is a **structural
+/// zero** at k>=2 — proved by the join's shape and written as a literal, not
+/// counted (it was called a "measured" zero here, which it never was; D-1440) —
+/// and every pair contributes exactly one distinct candidate. [`Ladder::exhausted`]
+/// tests `admitted + emitted >= ceiling` before every pair is admitted, and
+/// [`DEFAULT_CEILING`] is
 /// `2^27` against this `2^34`. The ceiling is **128x smaller**, so it trips
 /// 128 pairs-worth of work before this budget is approached, and every
 /// default-configured halt reports [`Breach::Candidates`] — a MEMORY reason —
@@ -947,7 +1070,9 @@ impl Ladder {
         }
     }
 
-    /// The same ladder with a different per-level candidate ceiling.
+    /// The same ladder with a different candidate ceiling: CUMULATIVE across every
+    /// level past k=1, not per level, as `Ladder::exhausted` counts it
+    /// (Z1-slice09-F2, D-1771).
     ///
     /// A ceiling of zero is raised to one, for the reason
     /// [`Ladder::with_min_hits`] raises `min_hits`: a ceiling of zero refuses
@@ -966,7 +1091,8 @@ impl Ladder {
         }
     }
 
-    /// The per-level candidate ceiling this ladder will actually apply.
+    /// The cumulative candidate ceiling this ladder will actually apply, across
+    /// every level past k=1.
     #[must_use]
     pub const fn ceiling(&self) -> usize {
         self.ceiling
@@ -1077,11 +1203,14 @@ impl Ladder {
     ///
     /// Measured by `C-E-04`, in `crates/engine/benches/ratio.rs`.
     ///
-    /// Per candidate the work is one `HashSet` probe (O(1)), up to `k` subset
-    /// probes (O(k), and `k` is bounded by the vocabulary width), and one
-    /// support count, which walks the bars. Support counting is O(bars) because
-    /// it *is* the measurement. The join is O(|F|²) in the previous frontier,
-    /// which is Apriori's documented shape and not a hidden scan.
+    /// At k=1, one expected-O(1) `HashSet<u32>` insert per offered position.
+    /// At k>=2 there is no dedup probe, because the prefix join is injective
+    /// (D-1440); per candidate the work is `k − 2` expected-O(1) subset probes
+    /// (the two parents are skipped), a constant meaning check, and one support
+    /// count, which walks the bars. Support counting is O(bars) because it *is*
+    /// the measurement. The join walks `Σ |B|²/2` pairs over the previous
+    /// frontier's prefix blocks `B`, which is Apriori's documented shape and not
+    /// a hidden scan (p7num-2, D-2666).
     ///
     /// # Termination
     ///
@@ -1396,8 +1525,21 @@ impl Ladder {
         // support 0 or at support == bars is named in the output rather than
         // dropped. A support-0 position poisons its whole subtree; a support-1
         // position partitions nothing.
-        let mut first: Vec<Itemset> = reserved(live.len())?;
-        // Both counted inside the loop below, so every entry in `live` increments exactly
+        // The survivors are DISTINCT live positions, so at most the vocabulary
+        // width; a long caller list with repeats is legal (each is counted in
+        // `duplicates`) and must not size this vector (p7num-3, D-2666).
+        let mut first: Vec<Itemset> = reserved(live.len().min(vocab::table::COUNT))?;
+        // Every live position, in caller order, and then its singleton waiting
+        // for a count. The same bound as `first`: distinct live positions. The
+        // positions are kept beside the counts so an exclusion is named by the
+        // position the caller gave rather than recovered from its mask.
+        let mut positions: Vec<u32> = reserved(live.len().min(vocab::table::COUNT))?;
+        let mut measured: Vec<Itemset> = reserved(live.len().min(vocab::table::COUNT))?;
+        // Each refused-as-not-live position, with how many measured positions
+        // preceded it in the caller's list, so the second pass below names the
+        // exclusions in exactly the order one pass did.
+        let mut not_live: Vec<(usize, u32)> = reserved(live.len())?;
+        // Both counted inside the loops below, so every entry in `live` increments exactly
         // one bucket and `Frontier::reconciles` becomes an invariant of the loop rather
         // than an identity one residual makes true by construction.
         let mut duplicates = 0_u64;
@@ -1423,21 +1565,38 @@ impl Ladder {
             // position was pushed to `excluded` once per occurrence -- D-0080 requires an
             // excluded position be NAMED, and naming one three times reports three
             // exclusions where there is one position.
-            if !offered.insert(p) {
+            if !primitives::offer(&mut offered, p) {
                 duplicates = duplicates.saturating_add(1);
                 continue;
             }
             let live_position = u16::try_from(p).is_ok_and(vocab::table::is_live);
             if p >= ConditionMask::BITS || !live_position {
+                not_live.push((positions.len(), p));
+                continue;
+            }
+            positions.push(p);
+        }
+        measured.extend(positions.iter().map(|&p| Itemset {
+            mask: ConditionMask::default().with_bit(p),
+            hits: 0,
+        }));
+
+        // ONE BLOCKED PASS FOR EVERY POSITION (so1-1, D-4481). This loop called
+        // `Column::support` once per position, so k=1 streamed the column from
+        // memory up to 384 times; `support_each` counts every position against
+        // each cache-resident block, with the same one hit test per bar.
+        column.support_each(&mut measured);
+
+        let mut refused = not_live.into_iter().peekable();
+        for (at, (Itemset { mask: m, hits }, p)) in measured.into_iter().zip(positions).enumerate()
+        {
+            while let Some((_, dead)) = refused.next_if(|(before, _)| *before == at) {
                 excluded_positions.push(Excluded {
-                    position: p,
+                    position: dead,
                     support: None,
                     reason: Why::NotLive,
                 });
-                continue;
             }
-            let m = ConditionMask::default().with_bit(p);
-            let hits = column.support(&m);
             if hits == 0 {
                 excluded_positions.push(Excluded {
                     position: p,
@@ -1451,7 +1610,7 @@ impl Ladder {
                     reason: Why::AlwaysTrue,
                 });
             } else if hits >= self.min_hits {
-                first.push(Itemset { mask: m, hits });
+                primitives::append(&mut first, Itemset { mask: m, hits });
             } else {
                 // Counted here, not derived afterwards. `infrequent` used to be
                 // `generated - frequent - excluded`, which absorbed every silently
@@ -1461,7 +1620,14 @@ impl Ladder {
                 infrequent = infrequent.saturating_add(1);
             }
         }
-        sort_canonically(&mut first);
+        for (_, p) in refused {
+            excluded_positions.push(Excluded {
+                position: p,
+                support: None,
+                reason: Why::NotLive,
+            });
+        }
+        primitives::sort_level(&mut first);
         let generated = len_u64(live.len());
         // `duplicates` was hardcoded `0` here, under a comment claiming none were
         // possible because "`live` is deduplicated". `live` is deduplicated BY THIS LOOP,
@@ -1563,7 +1729,15 @@ impl Ladder {
             // stopped it, and that is the one the `break` below would skip.
             progress.halted = halt;
             sink.report(&current, progress.admitted, progress.pairs);
-            sink.checkpoint(&current, &progress)?;
+            // A HOST HALT IS NOT CHECKPOINTED (CE-9, D-2614). Candidate and
+            // pair budgets are part of the run's identity, so their halt is the
+            // run's answer and is saved. A Memory or Workers halt is a fact
+            // about THIS machine: saved, a rerun on a bigger host would resume
+            // the halt and never retry the level. The last durable boundary
+            // stays the complete level below, which a resume rebuilds from.
+            if is_durable(halt) {
+                sink.checkpoint(&current, &progress)?;
+            }
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
             // an incomplete frontier and label the result complete. Anti-monotonicity
             // only licenses the prune when the previous level is the WHOLE frequent
@@ -1588,9 +1762,9 @@ impl Ladder {
     /// # THE BOUND IS CUMULATIVE, AND A PER-LEVEL ONE HAS ALREADY FAILED
     ///
     /// `admitted` accumulates across every level of the walk, and it is tempting
-    /// to call that a mistake: `seen` is built fresh inside [`Self::next_level`]
-    /// and dropped when that level ends, so the bytes THIS SET holds are one
-    /// level's worth. An audit reached exactly that conclusion and changed the
+    /// to call that a mistake: the `seen` set, since deleted because the prefix
+    /// join is injective, was built fresh inside [`Self::next_level`] and dropped
+    /// when that level ended, so the bytes it held were one level's worth. An audit reached exactly that conclusion and changed the
     /// test to `seen.len() + grow_by > ceiling`.
     ///
     /// **It is wrong for the RETAINING entry point, and
@@ -1713,9 +1887,11 @@ impl Ladder {
         // A candidate therefore recovers its own block. Two pairs cannot collide
         // inside a block, and two blocks cannot collide with each other.
         //
-        // The repository already knew: `DEFAULT_PAIR_BUDGET`'s doc states
-        // "the prefix join makes `duplicates` a measured zero", and
-        // `one_k_set_is_evaluated_once_however_many_pairs_produce_it` asserts it.
+        // The repository already knew: `DEFAULT_PAIR_BUDGET`'s doc states the
+        // join is injective, and
+        // `one_k_set_is_evaluated_once_however_many_pairs_produce_it` pins it by
+        // `generated`. (`duplicates` is a literal zero at k>=2, not a
+        // measurement; D-1440.)
         // What nothing did was draw the conclusion that the set is therefore
         // dead weight.
         //
@@ -1743,11 +1919,6 @@ impl Ladder {
         // level is allowed to hold anyway.
         let mut out: Vec<Itemset> = reserved(frequent_prev.len().min(self.ceiling))?;
         let mut generated: u64 = 0;
-        // NOT `mut`, AND THAT IS THE PROOF. Nothing increments it any more:
-        // the prefix join cannot produce a repeat and `keyed.dedup()` removes
-        // the malformed-input case before the join. The field is still
-        // REPORTED, so a level that somehow found one would have to make this
-        // mutable again -- a compiler error is a better guard than a counter.
         let mut pruned: u64 = 0;
         let mut infrequent: u64 = 0;
         let mut halted: Option<Halt> = None;
@@ -1784,8 +1955,9 @@ impl Ladder {
         // and their union is S. So S is enumerated. Uniqueness: any pair
         // producing S must contribute S's two largest positions as its two
         // highest bits, which is that same pair and no other — so `duplicates`
-        // becomes a MEASURED zero rather than an assumed one, and `seen` is
-        // kept precisely to keep measuring it.
+        // is a PROVED zero. It is written as a literal in `joined_frontier`,
+        // not counted, and the tests witness the property by what was
+        // generated rather than by reading that literal back (D-1440).
         //
         // # The grouping is built, not assumed
         //
@@ -1816,49 +1988,48 @@ impl Ladder {
         let mut pairs: u64 = 0;
         'join: for block in keyed.chunk_by(|a, b| a.0 == b.0) {
             for (offset, (_, a)) in block.iter().enumerate() {
-                // THE PAIR BUDGET, CHECKED ONCE PER OUTER ROW so it costs nothing
-                // per pair. The count is exact rather than estimated because the
-                // inner loop below increments it.
-                //
-                // This is the budget that bounds TIME. The candidate ceiling
-                // bounds bytes, and the two are five orders of magnitude apart on
-                // a wide frontier -- see `Halt::pairs`. Without this, the only
-                // symptom of a `min_hits` set too low is a process that never
-                // returns, which is the opposite of the loud refusal
-                // `CLAUDE.md` §4 requires.
-                if pairs_walked.saturating_add(pairs) >= self.pair_budget {
-                    halted = Some(self.halt(
-                        k,
-                        admitted.saturating_add(emitted),
-                        pairs_walked.saturating_add(pairs),
-                        Breach::Pairs,
-                    ));
-                    break 'join;
-                }
                 for (_, b) in block.iter().skip(offset.saturating_add(1)) {
+                    // THE PAIR BUDGET, CHECKED BEFORE EVERY PAIR. One integer
+                    // compare, so per-pair checking costs nothing a reader could
+                    // measure against the hash probes below.
+                    //
+                    // This is the budget that bounds TIME. The candidate ceiling
+                    // bounds bytes, and the two are five orders of magnitude
+                    // apart on a wide frontier -- see `Halt::pairs`. Without
+                    // this, the only symptom of a `min_hits` set too low is a
+                    // process that never returns, which is the opposite of the
+                    // loud refusal `CLAUDE.md` §4 requires.
+                    //
+                    // # It was checked once per OUTER ROW, and that was two defects
+                    //
+                    // The row check let the inner loop finish its row, so a halt
+                    // reported up to `block.len() - 1` pairs past the budget: a
+                    // soft bound that `Halt::pairs` never admitted. And it ran on
+                    // the LAST row of a block too, which has no pair to walk, so a
+                    // level whose pair need EQUALLED the budget was reported as
+                    // `Breach::Pairs` with a partial frontier although every pair
+                    // had been walked. Checked here, a halt means a pair really
+                    // was refused, and `Halt::pairs == pair_budget` exactly.
+                    // D-1438.
+                    if pairs_walked.saturating_add(pairs) >= self.pair_budget {
+                        halted = Some(self.halt(
+                            k,
+                            admitted.saturating_add(emitted),
+                            pairs_walked.saturating_add(pairs),
+                            Breach::Pairs,
+                        ));
+                        break 'join;
+                    }
                     pairs = pairs.saturating_add(1);
-                    // No popcount filter, because the grouping already IS that
-                    // filter: `a` and `b` share a prefix of k−2 positions and
-                    // differ in their highest, so the union has exactly k. A
-                    // branch here could never be taken, and an unreachable
-                    // branch is a coverage hole -- the property is proved by
-                    // `every_generated_candidate_has_exactly_k_bits` instead.
-                    let cand = a.union(b);
                     // THE CEILING, AND IT IS CHECKED BEFORE ANY COUNTER MOVES.
                     //
-                    // Placement is the whole correctness argument. Guarding `out.len()`
-                    // would guard the wrong number: `seen` is filled BEFORE the support
-                    // test, so a level whose survivors all fall under `min_hits` still
-                    // allocates every distinct candidate it enumerated -- the level that
-                    // goes extinct is the level that allocates most. `seen` is the
-                    // allocation, so `seen` is what is bounded.
-                    //
-                    // Checking here, rather than after `seen.insert`, keeps
-                    // `Frontier::reconciles` an invariant: nothing half-processed is
-                    // ever counted. The cost is that a level which has admitted exactly
-                    // `ceiling` distinct candidates halts even if every remaining pair
-                    // would have been a duplicate. That is conservative in the safe
-                    // direction and it is stated rather than hidden.
+                    // Placement is the whole correctness argument. `admitted +
+                    // emitted` counts every candidate this walk has accepted for
+                    // evaluation, and the batch and `out` are where those bytes
+                    // live -- so a level whose survivors all fall under `min_hits`
+                    // still reserves room for every candidate it enumerated.
+                    // Checking before `emitted` moves keeps `Frontier::reconciles`
+                    // an invariant: nothing half-processed is ever counted.
                     //
                     // THE TWO MEMORY BOUNDS ARE ASKED AS ONE QUESTION, and that is
                     // what makes the halt reachable from a test. Written as two
@@ -1884,64 +2055,21 @@ impl Ladder {
                     generated = generated.saturating_add(1);
                     // NO DUPLICATE REJECTION, BECAUSE THERE ARE NO DUPLICATES.
                     //
-                    // This comment used to read "the same k-set arises from
-                    // several pairs and must be evaluated once", and that is
-                    // true of a NAIVE join. It is not true of a PREFIX join,
-                    // which is what this is: a candidate's two highest bits are
-                    // exactly the pair that made it, so the pair is recoverable
-                    // from the candidate and no second pair can produce it. See
-                    // the block comment where `emitted` is declared.
-                    //
-                    // `duplicates` therefore stays at zero and is still reported
-                    // — a reader comparing levels should see the field, and a
-                    // future join that broke the property would have to change
-                    // this line to make it non-zero again.
+                    // A candidate's two highest bits are exactly the pair that
+                    // made it, so the pair is recoverable from the candidate and
+                    // no second pair can produce it. See the block comment where
+                    // `emitted` is declared. `duplicates` is therefore a
+                    // structural zero at k>=2 -- written as a literal in
+                    // `joined_frontier`, never counted -- and the tests that pin
+                    // the property witness it by DISTINCTNESS of what was
+                    // generated, not by reading that literal back.
                     emitted = emitted.saturating_add(1);
-                    // Subset prune, justified by anti-monotonicity: a bar matches a
-                    // mask iff every bit is set, so adding a bit can only remove
-                    // hits. If any (k-1)-subset is infrequent the k-set cannot be
-                    // frequent, and it is never evaluated against a single bar.
-                    if !every_subset_is_frequent(&cand, &frequent_prev) {
+                    // Both prunes, as one call the bench times directly -- see
+                    // [`join_screen`] for what each refuses and why.
+                    let Some(cand) = join_screen(&frequent_prev, a, b) else {
                         pruned = pruned.saturating_add(1);
                         continue;
-                    }
-                    // MEANING PRUNE, AND IT IS A DIFFERENT AXIS FROM THE ONE
-                    // ABOVE.
-                    //
-                    // Anti-monotonicity kills a candidate whose subset is
-                    // INFREQUENT. It has nothing to say about a candidate whose
-                    // bits restate each other: `close_above_pivot_s2_band` and
-                    // `close_above_pivot_s3_band` are both spectacularly
-                    // frequent and so is their union, so the prune above is
-                    // right not to fire — and the result was a ranked table
-                    // headed by seven conditions carrying four facts.
-                    //
-                    // MEASURED, the live sweep's leading row:
-                    // `{15, 65, 82, 84, 182, 186, 185}`, where 84, 182 and 186
-                    // are each exactly implied by 82. It fired on 200,813 bars
-                    // of 609,722 and won 52%.
-                    //
-                    // ONE PAIR IS ENOUGH, WHICH IS WHY THIS STAYS O(1). `keyed`
-                    // groups by `without_highest`, so `a` and `b` share k−2
-                    // positions and differ ONLY in their highest bit. `a ∪ b`
-                    // therefore introduces exactly one pair that neither parent
-                    // already held. By induction from k=2 — where the parents
-                    // are single bits and the pair is checked directly — if
-                    // every level refuses a candidate whose one new pair is
-                    // dead, no surviving itemset can contain a dead pair. So
-                    // this is two six-word scans and a `match`, not a walk over
-                    // the candidate's bits.
-                    //
-                    // COUNTED AS `pruned`, deliberately: `Frontier::reconciles`
-                    // balances `generated` against the reasons a candidate left,
-                    // and a separate counter would need a column everywhere that
-                    // identity is checked. The cost is that the ladder table
-                    // cannot say WHICH prune fired. Named here because the table
-                    // cannot name it.
-                    if !parents_informative(a, b) {
-                        pruned = pruned.saturating_add(1);
-                        continue;
-                    }
+                    };
                     // COUNTED IN A BATCH, ACROSS EVERY CORE. `column.support`
                     // is Theta(bars) with fixed-six-word work per bar and dominates the
                     // whole walk; everything above it here is a hash probe or a
@@ -1994,7 +2122,7 @@ impl Ladder {
                 breach,
             ));
         }
-        sort_canonically(&mut out);
+        primitives::sort_level(&mut out);
         Ok((
             joined_frontier(k, out, generated, pruned, infrequent),
             halted,
@@ -2027,6 +2155,59 @@ impl JoinIndex {
     }
 }
 
+/// The per-pair work of the join that is not a counter: the union, the subset
+/// prune and the meaning prune. `Some(candidate)` when the pair survives both.
+///
+/// One function so that `benches/ratio.rs` C-E-08 and C-E-12 time THIS code
+/// through [`primitives::JoinProbe`] rather than a stand-in. C-E-08 used to
+/// time `a.union(b).popcount()` -- a popcount production no longer performs --
+/// while the subset prune, the one per-pair cost that grows, had no row at
+/// all. Everything else a pair costs in `try_next_level_observing` is an
+/// integer compare, a `try_reserve` that is a capacity test while the batch
+/// fits, two counter adds and a `Vec::push` into a pre-sized batch. D-0924.
+///
+/// # The subset prune
+///
+/// Justified by anti-monotonicity: a bar matches a mask iff every bit is set,
+/// so adding a bit can only remove hits. If any (k-1)-subset is infrequent the
+/// k-set cannot be frequent, and it is never evaluated against a single bar.
+///
+/// # The meaning prune, and it is a different axis
+///
+/// Anti-monotonicity kills a candidate whose subset is INFREQUENT. It has
+/// nothing to say about a candidate whose bits restate each other:
+/// `close_above_pivot_s2_band` and `close_above_pivot_s3_band` are both
+/// spectacularly frequent and so is their union, so the subset prune is right
+/// not to fire -- and the result was a ranked table headed by seven conditions
+/// carrying four facts.
+///
+/// MEASURED, the live sweep's leading row: `{15, 65, 82, 84, 182, 186, 185}`,
+/// where 84, 182 and 186 are each exactly implied by 82. It fired on 200,813
+/// bars of 609,722 and won 52%.
+///
+/// ONE PAIR IS ENOUGH, WHICH IS WHY THIS PART STAYS O(1). `keyed` groups by
+/// `without_highest`, so `a` and `b` share k-2 positions and differ ONLY in
+/// their highest bit. `a | b` therefore introduces exactly one pair that
+/// neither parent already held. By induction from k=2 -- where the parents are
+/// single bits and the pair is checked directly -- if every level refuses a
+/// candidate whose one new pair is dead, no surviving itemset can contain a
+/// dead pair.
+///
+/// Both refusals are counted as `pruned`, deliberately: `Frontier::reconciles`
+/// balances `generated` against the reasons a candidate left, and a separate
+/// counter would need a column everywhere that identity is checked. The cost
+/// is that the ladder table cannot say WHICH prune fired.
+///
+/// No popcount filter, because the grouping already IS that filter: `a` and
+/// `b` share a prefix of k-2 positions and differ in their highest, so the
+/// union has exactly k. The property is proved by
+/// `every_generated_candidate_has_exactly_k_bits`.
+fn join_screen(frequent: &MaskSet, a: &ConditionMask, b: &ConditionMask) -> Option<ConditionMask> {
+    let cand = a.union(b);
+    (every_non_parent_subset_is_frequent(&cand, frequent) && parents_informative(a, b))
+        .then_some(cand)
+}
+
 /// The only newly introduced pair is formed by the two parents' highest bits.
 fn parents_informative(a: &ConditionMask, b: &ConditionMask) -> bool {
     highest_position(a)
@@ -2051,6 +2232,11 @@ fn joined_frontier(
         k,
         frequent,
         generated,
+        // A LITERAL ZERO, because the prefix join is injective and
+        // `keyed.dedup()` removes the malformed-input case before it (D-1440):
+        // there is no duplicate to count at k>=2. Nothing would fail to compile
+        // if one appeared; the join tests witness it by distinctness
+        // (p7num-1, D-2666).
         duplicates: 0,
         excluded: 0,
         pruned,
@@ -2061,13 +2247,14 @@ fn joined_frontier(
 /// How many bars the mask matches.
 ///
 /// One [`ConditionMask::hits`] per bar and nothing else — no allocation, no
-/// early exit, no branch on the answer.
+/// early exit, no branch on the answer. The hit is added as `u64::from(bool)`;
+/// the body used to read `if b.hits(mask) { n + 1 } else { n }`, a source-level
+/// branch on the answer under a doc that denied one. D-0925.
 #[must_use]
 pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
-    bar_bits.iter().fold(
-        0_u64,
-        |n, b| if b.hits(mask) { n.saturating_add(1) } else { n },
-    )
+    bar_bits
+        .iter()
+        .fold(0_u64, |n, b| n.saturating_add(u64::from(b.hits(mask))))
 }
 
 /// Would growing the candidate set by `by` be refused by the allocator?
@@ -2152,45 +2339,14 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
     *m
 }
 
-/// True when every (k−1)-subset of `cand` is in the previous frequent frontier.
-///
-/// Walks the SET bits, k of them, not the whole 384-bit width.
-///
-/// # What this actually bought, which is less than it looks
-///
-/// The previous form scanned all 384 positions as
-/// `if cand.get(b) && !frequent.contains(..)`. Its doc called that "384 probes
-/// where k would do" and a bench comparison was written expecting a large win.
-/// **It was 8%.** `&&` short-circuits, so the number of `HashSet` lookups was
-/// already k — the 384 were cheap bit tests, not probes, and the doc's own
-/// wording had oversold the cost of the thing it was complaining about.
-///
-/// Kept because 8% of the sweep is real and the code is strictly less work, not
-/// because the estimate was right. `crates/vocab` still exposes no bit
-/// iterator; `column::set_positions` is `crates/engine`'s own, which is why this
-/// needed no change outside the crate.
-///
-/// # The measurement this used to cite was of a different function
-///
-/// This block named `C-E-02` as its proof. That row now benches the live
-/// `Column::support` path and still never calls this function — so the citation
-/// was for the wrong subject, and this per-candidate subset loop has no isolated
-/// bench row. Found by an adversarial audit.
-///
-/// **UNVERIFIED as a measured figure.** The O(1) bound above is read off the
-/// loop's constant limit, which is sound as an argument and is not a
-/// measurement. No row in `crates/engine/benches/ratio.rs` covers this function
-/// yet, and naming one that does not would be worse than admitting none does.
-///
-/// It also matters more since the prefix join landed: with the join no longer
-/// walking a million pairs, this 384-probe loop is now a materially larger
-/// share of what a level costs than it was when the citation was written.
 /// Candidates one lane counts before a batch is drained.
 ///
 /// # Sized so the spawn disappears, and no larger
 ///
-/// A lane's share of one batch is this many `Column::support` calls. At the
-/// benched cost — 1.2 to 5.0 microseconds per candidate on 100,000 bars — that
+/// A lane's share of one batch is this many candidates, counted in one
+/// `Column::support_each` pass (D-4481). At the benched cost — 1.2 to 5.0
+/// microseconds per candidate on 100,000 bars, measured one candidate per pass
+/// before D-4481 — that
 /// is 10 to 40 milliseconds of work against a thread spawn of roughly 50
 /// microseconds, so the spawn is under half a per cent.
 ///
@@ -2247,18 +2403,25 @@ fn lanes() -> usize {
 ///
 /// # Why the dedup and the budget stay sequential
 ///
-/// Everything upstream of this call mutates shared state — `seen` admits or
-/// rejects a duplicate, the pair counter decides a halt — and those are hash
-/// probes and integer adds. Moving them would need locks and would change when
-/// a budget fires, which changes the ANSWER. `Column::support` is the opposite:
-/// it takes `&Column`, touches no shared state, and costs `Theta(bars)`. Only
-/// the expensive, shared-nothing half is spread.
+/// Everything upstream of this call mutates shared state — the pair counter
+/// decides a halt, the ceiling counter decides a refusal, and the subset prune
+/// reads the previous frontier — and those are hash probes and integer adds.
+/// (This named a `seen` set admitting or rejecting duplicates; that set is
+/// deleted, D-1440.) Moving them would need locks and would change when
+/// a budget fires, which changes the ANSWER. Support counting is the opposite:
+/// it takes `&Column`, touches no shared state, and costs `Theta(bars)` per
+/// candidate. Only the expensive, shared-nothing half is spread, and each lane
+/// counts its whole slice in one blocked pass, [`Column::support_each`], so a
+/// lane streams the column once rather than once per candidate (D-4481).
 ///
 /// # Determinism
 ///
-/// `scope` joins its handles in the order they were spawned, so `parts` is in
-/// chunk order and `out` receives the same sequence a single lane would have
-/// produced. `sort_canonically` then runs over the level regardless, so §3 rule
+/// Workers write support counts into disjoint, positionally fixed slices of one
+/// `counted` vector, and after every worker has finished one serial loop appends
+/// the survivors to `out` in candidate order through
+/// [`primitives::append`] — so `out` receives the same sequence a single lane
+/// would have produced. (This described per-chunk `parts` vectors that no
+/// longer exist; D-1440.) `sort_canonically` then runs over the level regardless, so §3 rule
 /// 5 holds twice over. `a_batched_level_is_identical_to_a_single_lane_one`
 /// measures it rather than trusting either argument.
 ///
@@ -2282,25 +2445,21 @@ fn drain(
     }
     let width = batch.len().div_ceil(lane_count.max(1)).max(1);
     out.try_reserve(batch.len()).map_err(|_| Breach::Memory)?;
-    let mut counts = reserved(batch.len()).map_err(|_| Breach::Memory)?;
-    counts.resize(batch.len(), 0_u64);
+    let mut counted: Vec<Itemset> = reserved(batch.len()).map_err(|_| Breach::Memory)?;
+    counted.extend(batch.iter().map(|&mask| Itemset { mask, hits: 0 }));
     std::thread::scope(|scope| {
-        for (masks, hits) in batch.chunks(width).zip(counts.chunks_mut(width)) {
+        for lane in counted.chunks_mut(width) {
             std::thread::Builder::new()
-                .spawn_scoped(scope, move || {
-                    for (mask, count) in masks.iter().zip(hits) {
-                        *count = column.support(mask);
-                    }
-                })
+                .spawn_scoped(scope, move || column.support_each(lane))
                 .map_err(|_| Breach::Workers)?;
         }
         Ok(())
     })?;
     // All worker results commit together in original candidate order. No
     // worker owns a growing result vector and this loop cannot allocate.
-    for (mask, hits) in batch.iter().zip(counts) {
-        if hits >= min_hits {
-            out.push(Itemset { mask: *mask, hits });
+    for item in counted {
+        if item.hits >= min_hits {
+            primitives::append(out, item);
         } else {
             *infrequent = infrequent.saturating_add(1);
         }
@@ -2309,8 +2468,52 @@ fn drain(
     Ok(())
 }
 
-fn every_subset_is_frequent(cand: &ConditionMask, frequent: &MaskSet) -> bool {
-    set_positions(cand).all(|b| frequent.contains(&cand.without_bit(b)))
+/// Whether a level boundary with this halt may be saved as a checkpoint
+/// (CE-9, D-2614): an unhalted level or a budget halt, which belongs to the
+/// run's identity, yes; a Memory or Workers halt, which belongs to the host,
+/// no.
+const fn is_durable(halt: Option<Halt>) -> bool {
+    match halt {
+        Some(Halt {
+            breach: Breach::Memory | Breach::Workers,
+            ..
+        }) => false,
+        Some(_) | None => true,
+    }
+}
+
+/// True when every (k-1)-subset of a join candidate, other than its two
+/// parents, is in the previous frequent frontier.
+///
+/// # Theta(k), not O(1), and that is the honest bound
+///
+/// One expected-O(1) `MaskSet` probe per set bit below the candidate's two
+/// highest, so `k - 2` probes for a candidate that survives (fewer for one
+/// that is refused early), each hashing seven words and comparing 48 bytes.
+/// `k` is bounded by [`ConditionMask::BITS`] = 384, which makes the walk
+/// bounded but not constant: the per-candidate cost GROWS with depth. This
+/// used to be described as "O(1)" and as "a 384-probe loop" in the same doc
+/// while the code walked `k` set bits and had no bench row. `C-E-12` now
+/// measures the per-PROBE cost flat from k=4 to k=320, which is the constant
+/// part, and `docs/06-limits.md` names the Theta(k) per candidate. D-0924.
+///
+/// # Why the two parents are skipped
+///
+/// A prefix-join candidate is `a | b` with `a = P + {x}` and `b = P + {y}`,
+/// `x < y` its two highest positions. Removing `y` gives `a` and removing `x`
+/// gives `b`, and both came out of the very frontier `frequent` was built
+/// from, so their probes could only ever answer "yes". At k=2 that leaves no
+/// probe at all. This makes the function correct ONLY for a candidate the
+/// prefix join built; [`join_screen`] is its one caller.
+///
+/// `crates/vocab` exposes no bit iterator; `column::set_positions` is
+/// `crates/engine`'s own, and yields positions in ascending order, which is
+/// what lets `take(k - 2)` stop short of the two parents.
+fn every_non_parent_subset_is_frequent(cand: &ConditionMask, frequent: &MaskSet) -> bool {
+    let below_parents = usize::try_from(cand.popcount().saturating_sub(2)).unwrap_or(usize::MAX);
+    set_positions(cand)
+        .take(below_parents)
+        .all(|b| frequent.contains(&cand.without_bit(b)))
 }
 
 /// Order by the mask's words, then by hits.
@@ -2372,9 +2575,39 @@ const WORST_K3: usize = LIVE_POSITIONS * (LIVE_POSITIONS - 1) * (LIVE_POSITIONS 
 #[cfg(test)]
 const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
 
+/// The manifest reader behind V-06b. Declared here, past the shipping region, because
+/// several tests below read this file only up to its first `#[cfg(test)]`.
+#[cfg(test)]
+mod manifest;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CLAUDE.md` §3 rule 4: result append goes through
+    /// `primitives::append` AT EVERY k. The k=1 loop pushed into `first`
+    /// directly, so the primitive `C-E-11` times was not the one k=1 ran
+    /// (P1-15-04, D-1764). The shipping region names no other `push(Itemset`.
+    #[test]
+    fn every_level_appends_its_survivors_through_the_one_primitive() {
+        let source = include_str!("lib.rs");
+        let shipping = source
+            .split_once("\n#[cfg(test)]\n")
+            .map_or("", |(code, _)| code);
+        assert!(
+            !shipping.is_empty(),
+            "the shipping region precedes the tests"
+        );
+        assert!(shipping.contains("primitives::append(&mut first, Itemset { mask: m, hits });"));
+        assert!(shipping.contains("primitives::append(out, item);"));
+        assert!(!shipping.contains(".push(Itemset"));
+        // AND EVERY LEVEL IS ORDERED THROUGH THE ONE SORT FXD-08 TIMES
+        // (W3-engine1-1, D-4483): k=1 and every joined level, and no other
+        // call of the sort it fronts.
+        assert!(shipping.contains("primitives::sort_level(&mut first);"));
+        assert!(shipping.contains("primitives::sort_level(&mut out);"));
+        assert_eq!(shipping.matches("sort_canonically(&mut").count(), 0);
+    }
 
     /// Eight positions over sixty-four bars -- a column the ladder climbs.
     ///
@@ -2493,47 +2726,54 @@ mod tests {
 
     /// **`CLAUDE.md` §3 rule 5, measured on bytes.**
     ///
-    /// Three independent walks of one column, each feeding a bounded retention,
-    /// each serialised. A retention whose ties broke on ARRIVAL would not
-    /// survive this: `drain` spreads support counting across every core, so the
-    /// order candidates reach the sink is the schedule's, and the schedule is
-    /// not the same twice.
+    /// Three independent walks of one column, each handing every level to a
+    /// sink that serialises it at the boundary. `drain` spreads support
+    /// counting across every core, so the order candidates are COUNTED in is
+    /// the schedule's, and the schedule is not the same twice; the order a
+    /// level is HANDED OVER in must not be. A level filed on arrival would not
+    /// survive this.
     ///
-    /// The fourth comparison is the one that would catch a cut made on a partial
-    /// order -- the retaining walk's own survivors, pushed through the same
-    /// retention, must land on the same bytes.
+    /// The fourth comparison is the retaining walk's own survivors, serialised
+    /// the same way, which must land on the same bytes. This used to be made
+    /// through `keep::Best`, a bounded retention with no production caller;
+    /// D-4480 removed it and the property it was standing in for -- the
+    /// boundary's order is a function of the candidates alone -- is asked of
+    /// the boundary directly.
     #[test]
     fn two_streamed_runs_of_one_sweep_serialise_to_the_same_bytes() {
         let (live, column) = a_climbing_column();
         let ladder = Ladder::with_min_hits(1);
 
         let run = || {
-            let mut best = keep::Best::with_capacity(11);
-            let out =
-                ladder.walk_column_streamed(&column, &live, &mut |f, _, _| best.offer_level(f));
-            (
-                out.streamed,
-                best.discarded(),
-                bytes_of(&best.into_ordered()),
-            )
+            let mut bytes: Vec<u8> = Vec::new();
+            let out = ladder.walk_column_streamed(&column, &live, &mut |f, _, _| {
+                bytes.extend_from_slice(&bytes_of(&f.frequent));
+            });
+            (out.streamed, out.levels, bytes)
         };
 
         let first = run();
-        assert!(!first.2.is_empty(), "the fixture must keep something");
-        assert_eq!(first.2.len(), 11 * 56, "and the cap must actually bind");
-        assert!(first.1 > 0, "and the cap must actually refuse something");
+        assert!(!first.2.is_empty(), "the fixture must hand something over");
+        assert_eq!(
+            first.2.len(),
+            usize::try_from(first.0)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(56),
+            "and every survivor the count names is in the bytes"
+        );
+        assert!(
+            first.1.len() > 2,
+            "the fixture must climb, or the boundary order is untested"
+        );
         assert_eq!(first, run(), "a second run must be byte-identical");
         assert_eq!(first, run(), "and a third");
 
         let retained = ladder.walk_column(&column, &live, &|_, _, _| {});
-        let mut from_retained = keep::Best::with_capacity(11);
-        for itemset in retained.all_frequent() {
-            from_retained.offer(*itemset);
-        }
+        let kept: Vec<Itemset> = retained.all_frequent().copied().collect();
         assert_eq!(
             first.2,
-            bytes_of(&from_retained.into_ordered()),
-            "and the streamed path keeps exactly what the retained path would"
+            bytes_of(&kept),
+            "and the streamed path hands over exactly what the retained path keeps"
         );
     }
 
@@ -2545,6 +2785,7 @@ mod tests {
     /// the exact level a reader needs. See [`Halt`] for why a halt is not a
     /// depth parameter.
     #[test]
+    #[allow(clippy::expect_used, reason = "test-only: a small cap always reserves")]
     fn a_streamed_walk_that_halts_reports_the_breach_and_the_partial_level() {
         let (live, column) = a_climbing_column();
         let ladder = Ladder::with_min_hits(1).with_ceiling(1);
@@ -2587,20 +2828,26 @@ mod tests {
         let masks = bars(&rows);
         let ladder = Ladder::with_min_hits(1);
 
-        let mut from_masks = keep::Best::with_capacity(5);
-        let a = ladder.walk_streamed(&masks, &live, &mut |f, _, _| from_masks.offer_level(f));
+        let mut from_masks: Vec<Itemset> = Vec::new();
+        let a = ladder.walk_streamed(&masks, &live, &mut |f, _, _| {
+            from_masks.extend_from_slice(&f.frequent);
+        });
 
-        let mut from_column = keep::Best::with_capacity(5);
+        let mut from_column: Vec<Itemset> = Vec::new();
         let b = ladder.walk_column_streamed(&Column::from_rows(&masks), &live, &mut |f, _, _| {
-            from_column.offer_level(f);
+            from_column.extend_from_slice(&f.frequent);
         });
 
         assert_eq!(a.levels, b.levels, "the same ladder, either way in");
         assert_eq!(a.streamed, b.streamed);
         assert_eq!(a.bars, b.bars);
+        assert!(
+            !from_masks.is_empty(),
+            "the fixture must hand something over"
+        );
         assert_eq!(
-            bytes_of(&from_masks.into_ordered()),
-            bytes_of(&from_column.into_ordered()),
+            bytes_of(&from_masks),
+            bytes_of(&from_column),
             "and the same rows out"
         );
     }
@@ -2831,8 +3078,14 @@ mod tests {
              ONE quantity under a prefix join, which is the property the deleted \
              set used to be needed to confirm"
         );
-        assert_eq!(
-            level.duplicates, 0,
+        // No pair repeats a candidate another pair already made, witnessed by
+        // DISTINCTNESS of what survived rather than by `duplicates`, which is a
+        // literal zero at k>=2 and cannot fail (D-1440).
+        assert!(
+            level
+                .frequent
+                .windows(2)
+                .all(|w| matches!(w, [x, y] if x.mask != y.mask)),
             "no pair repeats a candidate another pair already made"
         );
         assert!(
@@ -3076,6 +3329,55 @@ mod tests {
             retired.levels.capacity(),
         ] {
             assert!(capacity > LIVE_POSITIONS, "metadata capacity {capacity}");
+        }
+    }
+
+    /// p7num-3, D-2666: k=1's survivor vector is sized by the vocabulary, not
+    /// by the caller's list. A million copies of one position used to reserve a
+    /// million 56-byte itemsets for at most one survivor.
+    #[test]
+    fn a_repeated_live_list_does_not_size_the_first_level() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (live, column) = a_climbing_column();
+        let one = *live.first().ok_or("the fixture has a live position")?;
+        let repeated = vec![one; 1_000_000];
+        let ladder = Ladder::with_min_hits(1)
+            .with_ceiling(10_000)
+            .with_pair_budget(1_000_000)
+            .with_support_lanes(1);
+        let (first, _) = ladder.first_level(&column, &repeated)?;
+        assert!(
+            first.frequent.len() <= 1,
+            "one distinct position survives at most once"
+        );
+        assert!(
+            first.frequent.capacity() <= vocab::table::COUNT,
+            "capacity {} for {} offered entries",
+            first.frequent.capacity(),
+            repeated.len()
+        );
+        assert_eq!(first.duplicates, 999_999);
+        Ok(())
+    }
+
+    /// CE-9, D-2614: a budget halt is the run's answer and is checkpointed; a
+    /// Memory or Workers halt belongs to the host and is not, so a rerun on a
+    /// larger machine resumes from the complete level below and retries.
+    #[test]
+    fn only_a_host_independent_halt_is_checkpointed() {
+        let ladder = Ladder::with_min_hits(1);
+        assert!(is_durable(None));
+        for (breach, durable) in [
+            (Breach::Candidates, true),
+            (Breach::Pairs, true),
+            (Breach::Memory, false),
+            (Breach::Workers, false),
+        ] {
+            assert_eq!(
+                is_durable(Some(ladder.halt(3, 1, 1, breach))),
+                durable,
+                "{breach:?}"
+            );
         }
     }
 
@@ -3437,92 +3739,21 @@ mod tests {
     ///
     /// Checked against the manifest rather than asserted in prose, so adding the
     /// arrow fails this test rather than passing review.
-    /// Every crate this manifest declares a dependency on, however it is spelled.
+    /// Every package this manifest links, however it is spelled.
     ///
-    /// # Why this is a parser and not a substring scan
-    ///
-    /// It WAS a substring scan over the raw text between `[dependencies]` and the
-    /// next `\n[`, and that scan was wrong in both directions at once.
-    ///
-    /// False positive: comments are inside the table. A commit adding the sentence
-    /// "`crates/indicators` had always written it the other way" to a comment in
-    /// that table turned this test red while the dependency list had not moved.
-    /// That is the same defect `vocab::mask::hits_does_the_same_work_for_every_input`
-    /// was fixed for one commit earlier -- text in a comment is text.
-    ///
-    /// False negative, and far worse: cargo accepts four spellings of one
-    /// dependency and the scan could see exactly one.
-    ///
-    /// ```text
-    /// [dependencies]
-    /// store = { path = "../store" }        the only form the scan saw
-    /// store.path = "../store"              a dotted key, same meaning
-    ///
-    /// [dependencies.store]                 a table header, same meaning
-    /// path = "../store"
-    ///
-    /// [dev-dependencies]                   links into every test and bench
-    /// [target.'cfg(unix)'.dependencies]    links on that target
-    /// ```
-    ///
-    /// An audit confirmed by running it that one `[dependencies.store]` stanza
-    /// defeats this test, gate 22 clause A, gate 9, gate 9b, gate 21 clause A and
-    /// the four graph tests in `crates/core/tests/graph.rs` -- nine dependency
-    /// guarantees sharing one parser shape, and one bypass for all of them.
-    ///
-    /// The one limit, stated: a `#` inside a quoted value would be read as a
-    /// comment. No manifest in this workspace has one, and a dependency name
-    /// cannot contain one.
-    fn declared_dependencies(manifest: &str) -> Vec<String> {
-        /// Are this table's KEYS dependency names?
-        fn keys_are_dependencies(table: &str) -> bool {
-            matches!(
-                table.rsplit('.').next().unwrap_or(""),
-                "dependencies" | "dev-dependencies" | "build-dependencies"
-            )
-        }
-        /// Does this table's HEADER name a dependency, as `[dependencies.store]` does?
-        fn named_by_header(table: &str) -> Option<&str> {
-            let mut segments = table.rsplit('.');
-            let leaf = segments.next()?;
-            let parent = segments.next()?;
-            matches!(
-                parent,
-                "dependencies" | "dev-dependencies" | "build-dependencies"
-            )
-            .then_some(leaf)
-        }
-
-        let mut found: Vec<String> = Vec::new();
-        let mut table = String::new();
-        for raw in manifest.lines() {
-            let line = raw.split_once('#').map_or(raw, |(code, _)| code).trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(inner) = line.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-                table = inner
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .trim()
-                    .to_owned();
-                if let Some(name) = named_by_header(&table) {
-                    found.push(name.to_owned());
-                }
-                continue;
-            }
-            if !keys_are_dependencies(&table) {
-                continue;
-            }
-            let key = line.split('=').next().unwrap_or("").trim();
-            let name = key.split('.').next().unwrap_or("").trim();
-            if !name.is_empty() {
-                found.push(name.to_owned());
-            }
-        }
-        found.sort();
-        found.dedup();
-        found
+    /// This was a line scanner twice over. The first version was a substring scan
+    /// between `[dependencies]` and the next `\n[`; it read comments as code and
+    /// saw one of cargo's four spellings of a dependency, and one
+    /// `[dependencies.store]` stanza defeated nine dependency guarantees at once.
+    /// The second split lines at `#` and `=` and still reported the KEY, so
+    /// `vocab = { package = "store", .. }` passed this test as `vocab`, and
+    /// `[ dependencies . store ]`, `[dev_dependencies]` and a root-level
+    /// `dependencies.store = { .. }` were not seen at all. D-1107 closed those
+    /// holes in the CI gates and deferred this one; [`crate::manifest`] closes it
+    /// here by reading the manifest as TOML (D-1120). A manifest it cannot read is
+    /// a failure of this test, never an empty list.
+    fn declared_dependencies(manifest: &str) -> Result<Vec<String>, String> {
+        crate::manifest::linked_packages(manifest, include_str!("../../../Cargo.toml"))
     }
 
     #[test]
@@ -3532,53 +3763,54 @@ mod tests {
         // dependency nobody thought to forbid fails it too.
         assert_eq!(
             declared_dependencies(include_str!("../Cargo.toml")),
-            ["vocab"],
-            "`crates/engine` must declare `vocab` and nothing else. V-06's whole \
+            Ok(names(&["vocab"])),
+            "`crates/engine` must link `vocab` and nothing else. V-06's whole \
              argument is that the sweep cannot recompute a condition bit because it \
              cannot reach the code that computes one -- `crates/indicators` is the \
              only crate that turns a bar into a bit. A new arrow here needs a \
              decisions entry AND a different proof of V-06."
         );
 
-        // The parser is checked against the four spellings it exists for, because a
-        // parser nothing tests is the previous version of this test.
-        assert_eq!(
-            declared_dependencies("[dependencies]\nstore = { path = \"../store\" }"),
-            ["store"],
-            "the inline-table spelling"
-        );
-        assert_eq!(
-            declared_dependencies("[dependencies]\nstore.path = \"../store\""),
-            ["store"],
-            "the dotted-key spelling"
-        );
-        assert_eq!(
-            declared_dependencies("[dependencies.store]\npath = \"../store\""),
-            ["store"],
-            "the table-header spelling — the bypass that defeated nine guarantees"
-        );
-        assert_eq!(
-            declared_dependencies("[target.'cfg(unix)'.dev-dependencies]\nstore = \"1\""),
-            ["store"],
-            "a dev-dependency behind a target predicate still links into every test"
-        );
+        // The reader is checked against the four spellings the first repair existed
+        // for, because a parser nothing tests is the previous version of this test.
+        // The spellings the SECOND line scan missed are in
+        // `the_manifest_reader_sees_every_spelling_the_line_scan_missed`.
+        for (manifest, why) in [
+            (
+                "[dependencies]\nstore = { path = \"../store\" }",
+                "the inline-table spelling",
+            ),
+            (
+                "[dependencies]\nstore.path = \"../store\"",
+                "the dotted-key spelling",
+            ),
+            (
+                "[dependencies.store]\npath = \"../store\"",
+                "the table-header spelling — the bypass that defeated nine guarantees",
+            ),
+            (
+                "[target.'cfg(unix)'.dev-dependencies]\nstore = \"1\"",
+                "a dev-dependency behind a target predicate still links into every test",
+            ),
+        ] {
+            assert_eq!(
+                declared_dependencies(manifest),
+                Ok(names(&["store"])),
+                "{why}"
+            );
+        }
         assert_eq!(
             declared_dependencies("[dependencies]\n# store = { path = \"../store\" }"),
-            [] as [&str; 0],
+            Ok(names(&[])),
             "a commented-out dependency is not a dependency"
         );
-        // A KEY WITH NO NAME IS NOT A DEPENDENCY EITHER, and this is the only guard
-        // between a malformed line and a phantom entry. The scanner takes everything
-        // left of the first `=` as the name, so a line that opens with one -- junk, a
-        // half-finished edit, a continuation nobody closed -- yields the empty
-        // string. Without the `!name.is_empty()` filter that empty string joins
-        // `found`, and the exact-equality assertion at the top of this test then
-        // reads `["", "vocab"]`: a dependency with no name, failing a check whose
-        // whole value is that it says what IS there.
-        assert_eq!(
-            declared_dependencies("[dependencies]\n= \"1\"\nvocab = \"0.1.0\""),
-            ["vocab"],
-            "a nameless key must be dropped, not admitted as a dependency called \"\""
+        // A KEY WITH NO NAME IS REFUSED, not dropped and not admitted. The line scan
+        // took everything left of the first `=` as the name and filtered out the
+        // empty string; the reader refuses the line, because a manifest it cannot
+        // read is a manifest whose dependency set it cannot state.
+        assert!(
+            declared_dependencies("[dependencies]\n= \"1\"\nvocab = \"0.1.0\"").is_err(),
+            "a nameless key must refuse the manifest, not pass or vanish"
         );
 
         // And the entry point takes bits, not bars. A signature change to accept
@@ -3590,6 +3822,175 @@ mod tests {
              sweep that accepted bars could compute a bit per candidate, which is \
              exactly what V-06 forbids."
         );
+    }
+
+    /// Owned names, so a `Result<Vec<String>, _>` can be compared in one line.
+    fn names(of: &[&str]) -> Vec<String> {
+        of.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    /// **The manifest is read as TOML, and the package is what is reported (D-1120).**
+    ///
+    /// Every positive case below is a manifest shape that linked a crate and that
+    /// the line scanner `declared_dependencies` used to be reported as something
+    /// else: the comment on each says what it returned. The first one is the shape
+    /// that mattered most -- it passed `the_sweep_cannot_compute_a_condition_bit`'s
+    /// exact pin of `["vocab"]` while linking `store`.
+    #[test]
+    fn the_manifest_reader_sees_every_spelling_the_line_scan_missed() {
+        let root = include_str!("../../../Cargo.toml");
+        for (manifest, linked, why) in [
+            (
+                "[dependencies]\nvocab = { package = \"store\", path = \"../store\", version = \"0.1.0\" }",
+                &["store"][..],
+                "a renamed package links the package, not the key (line scan: [\"vocab\"])",
+            ),
+            (
+                "[dependencies.vocab]\npath = \"../store\"\npackage = \"store\"",
+                &["store"],
+                "a rename inside a header table (line scan: [\"vocab\"])",
+            ),
+            (
+                "[dependencies]\nvocab.package = \"store\"\nvocab.path = \"../store\"",
+                &["store"],
+                "a rename as a dotted key (line scan: [\"vocab\"])",
+            ),
+            (
+                "[ dependencies . store ]\npath = \"../store\"",
+                &["store"],
+                "spaces around the dot of a header (line scan: [])",
+            ),
+            (
+                "[\"dependencies\"]\nstore = \"1\"",
+                &["store"],
+                "a quoted header segment (line scan: [])",
+            ),
+            (
+                "[dev_dependencies]\nstore = \"1\"\n[build_dependencies]\nlake = \"1\"",
+                &["lake", "store"],
+                "cargo's underscore spellings (line scan: [])",
+            ),
+            (
+                "dependencies.store = { path = \"../store\" }\n[package]\nname = \"x\"",
+                &["store"],
+                "a dotted key at the root, before any header (line scan: [])",
+            ),
+            (
+                "[dependencies]\n\"\\u0073tore\" = \"1\"",
+                &["store"],
+                "an escaped key is its decoded name (line scan: a name with a backslash)",
+            ),
+            (
+                "[dependencies]\nvocab = { path = \"../vocab\", features = [\n  \"x\",\n  \"y\" ] }",
+                &["vocab"],
+                "an array across lines is a value, not keys (line scan: phantom names)",
+            ),
+            (
+                "[package]\ndescription = '''\n[dependencies]\nphantom = 1\n'''\n[dependencies]\nvocab = \"1\"",
+                &["vocab"],
+                "a header inside a multi-line string is text (line scan: a phantom)",
+            ),
+            (
+                "[dependencies]\nvocab = { path = \"../vocab#\" } # store = \"1\"",
+                &["vocab"],
+                "a `#` inside a quoted value is text and after it a comment",
+            ),
+            (
+                "[[bench]]\nname = \"ratio\"\n[workspace.dependencies]\nstore = \"1\"\n[lints]\nworkspace = true",
+                &[],
+                "an array-of-tables element, a workspace table and lints link nothing",
+            ),
+        ] {
+            assert_eq!(
+                crate::manifest::linked_packages(manifest, root),
+                Ok(names(linked)),
+                "{why}"
+            );
+        }
+
+        // `NAME.workspace = true` resolves through the ROOT manifest, which is where
+        // its rename lives. The line scan could not see that file at all.
+        let renaming_root = "[workspace.dependencies]\nvocab = { package = \"store\", path = \"crates/store\" }\nlake.path = \"crates/lake\"";
+        assert_eq!(
+            crate::manifest::linked_packages(
+                "[dependencies]\nvocab.workspace = true\nlake = { workspace = true }\ncore = { workspace = false }",
+                renaming_root,
+            ),
+            Ok(names(&["core", "lake", "store"])),
+            "an inherited dependency links the package its workspace entry names"
+        );
+        assert_eq!(
+            crate::manifest::linked_packages(include_str!("../Cargo.toml"), root),
+            Ok(names(&["vocab"])),
+            "the real root manifest parses, and leaves this crate's set alone"
+        );
+    }
+
+    /// The reader decodes TOML strings and refuses text it cannot parse (D-1120).
+    #[test]
+    fn the_manifest_reader_decodes_strings_and_refuses_what_it_cannot_read() {
+        let root = include_str!("../../../Cargo.toml");
+        // The string grammar, decoded rather than skipped: every escape, both
+        // multi-line forms, a line-ending backslash, quotes just inside a closer,
+        // CRLF line ends, an empty inline table and a trailing comma.
+        assert_eq!(
+            crate::manifest::linked_packages(
+                "[dependencies]\r\n\
+                 a = { package = \"\\b\\t\\n\\f\\r\\\"\\\\\\U00000041\" }\r\n\
+                 b = { package = \"\"\"\n x\\\n   y\"\"\"\"\" }\n\
+                 c = { package = '''z''' }\n\
+                 d = {}\n\
+                 e = { version = \"1\", }\n\
+                 f = { features = [] }\n\
+                 g = { package = \"\" }\n",
+                root,
+            ),
+            Ok(names(&[
+                "",
+                "\u{8}\t\n\u{c}\r\"\\A",
+                " xy\"\"",
+                "d",
+                "e",
+                "f",
+                "z",
+            ])),
+            "the decoded package names"
+        );
+
+        // Text the reader cannot parse refuses, naming why. Never a partial list.
+        for (manifest, reason) in [
+            ("a = \"x", "unterminated string"),
+            ("a = \"x\ny\"", "newline inside a one-line string"),
+            ("a = \"x\\", "unterminated escape"),
+            ("a = \"\\u12\"", "malformed unicode escape"),
+            ("a = \"\\uD800\"", "escape is not a character"),
+            ("a = \"\\q\"", "unknown escape"),
+            ("= 1", "expected a key"),
+            ("a = { b }", "expected `=` in an inline table"),
+            (
+                "a = { b = \"1\" c = \"2\" }",
+                "expected `,` or `}` in an inline table",
+            ),
+            ("a = [\"1\" \"2\"]", "expected `,` or `]` in an array"),
+            ("a = ,", "malformed value"),
+            ("a = b = c", "malformed value"),
+            ("a =", "expected a value"),
+            ("[a", "malformed table header"),
+            ("[[a]", "malformed table header"),
+            ("a b", "expected `=` after a key"),
+            ("a = \"x\" y", "trailing text after a value"),
+        ] {
+            let got = crate::manifest::linked_packages(manifest, root);
+            assert!(
+                got.as_ref().is_err_and(|e| e.contains(reason)),
+                "{manifest:?} must refuse with {reason:?}, got {got:?}"
+            );
+            // A root the reader cannot parse refuses too.
+            assert!(
+                crate::manifest::linked_packages("", manifest).is_err(),
+                "an unreadable root manifest must refuse: {manifest:?}"
+            );
+        }
     }
 
     #[test]
@@ -3683,6 +4084,181 @@ mod tests {
         for level in &s.levels {
             assert!(level.reconciles(), "level {} lost a candidate", level.k);
         }
+    }
+
+    /// THE PAIR BUDGET IS EXACT AT BOTH EDGES. D-1438.
+    ///
+    /// It was checked once per outer row of a prefix block. Two defects
+    /// followed. A row ran to its end before the next check, so a halt
+    /// reported up to `block.len() - 1` pairs PAST the budget. And the check
+    /// also ran on a block's last row, which has no pair, so a level whose
+    /// need EQUALLED the budget halted with a partial frontier although every
+    /// pair had been walked. Bars `{0,1,2},{0,1,2},{}` need exactly four
+    /// pairs (three at k=2 in one block, one at k=3); the old join refused a
+    /// budget of four.
+    #[test]
+    fn the_pair_budget_is_exact_at_both_edges() {
+        let small = bars(&[&[0, 1, 2], &[0, 1, 2], &[]]);
+        let live = [0, 1, 2];
+        let unbounded = Ladder::with_min_hits(1).walk(&small, &live);
+        assert!(unbounded.completed());
+        let exact = Ladder::with_min_hits(1)
+            .with_pair_budget(4)
+            .walk(&small, &live);
+        assert!(
+            exact.completed(),
+            "a budget equal to the need must complete, halted: {:?}",
+            exact.halted
+        );
+        assert_eq!(exact.levels, unbounded.levels);
+        let short = Ladder::with_min_hits(1)
+            .with_pair_budget(3)
+            .walk(&small, &live);
+        let halt = short.halted.unwrap_or_default();
+        assert_eq!((halt.breach, halt.pairs), (Breach::Pairs, 3));
+
+        // ONE BLOCK OF NINE IS 36 PAIRS IN EIGHT ROWS. The first row alone is
+        // eight, so a row-granular check let a budget of five walk eight.
+        let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let b = bars(&[wide, wide, &[]]);
+        for budget in [1, 5, 8, 9, 35] {
+            let s = Ladder::with_min_hits(1)
+                .with_pair_budget(budget)
+                .walk(&b, wide);
+            let halt = s.halted.unwrap_or_default();
+            assert_eq!(
+                (halt.breach, halt.pairs),
+                (Breach::Pairs, budget),
+                "budget {budget}: a halt must stop AT the budget, never past it"
+            );
+            for level in &s.levels {
+                assert!(level.reconciles(), "level {} lost a candidate", level.k);
+            }
+        }
+    }
+
+    /// Skipping the two parents' subsets never changes the prune's answer
+    /// for a candidate the prefix join builds. Every pair of every block of
+    /// every 2- and 3-subset frontier over eight positions is checked
+    /// against the full k-probe walk, with frontiers that hold all, some and
+    /// none of the non-parent subsets. D-0924.
+    #[test]
+    fn skipping_the_parents_never_changes_the_subset_prune() {
+        let positions: Vec<u32> = vec![0, 1, 63, 64, 127, 128, 300, 383];
+        let all_of = |k: usize| -> Vec<ConditionMask> {
+            let n = positions.len();
+            (0_u32..(1 << n))
+                .filter(|m| usize::try_from(m.count_ones()).is_ok_and(|c| c == k))
+                .map(|m| {
+                    positions
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| m & (1 << i) != 0)
+                        .fold(ConditionMask::default(), |acc, (_, &p)| acc.with_bit(p))
+                })
+                .collect()
+        };
+        let mut checked = 0_u32;
+        for k in [2_usize, 3] {
+            let every = all_of(k);
+            for keep in [1_usize, 2, 3] {
+                let frontier: Vec<ConditionMask> = every
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % keep == 0)
+                    .map(|(_, m)| *m)
+                    .collect();
+                let frequent: MaskSet = frontier.iter().copied().collect();
+                for a in &frontier {
+                    for b in &frontier {
+                        if without_highest(a) != without_highest(b)
+                            || highest_position(a) >= highest_position(b)
+                        {
+                            continue;
+                        }
+                        let cand = a.union(b);
+                        let full =
+                            set_positions(&cand).all(|x| frequent.contains(&cand.without_bit(x)));
+                        assert_eq!(
+                            every_non_parent_subset_is_frequent(&cand, &frequent),
+                            full,
+                            "parents {a:?} {b:?}"
+                        );
+                        checked = checked.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 100,
+            "the sweep must reach real pairs, reached {checked}"
+        );
+    }
+
+    /// The bench primitives are the production primitives: the probe walks
+    /// exactly the pairs a level walks and keeps exactly the candidates that
+    /// survive both prunes, and `offer` / `append` behave as the set and
+    /// vector they front. D-0924.
+    #[test]
+    fn the_bench_primitives_agree_with_the_level_they_stand_for() {
+        let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let b = bars(&[wide, wide, &[0, 1, 2], &[]]);
+        let s = Ladder::with_min_hits(1).walk(&b, wide);
+        for pair in s.levels.windows(2) {
+            let [prev, next] = pair else { continue };
+            let built = primitives::JoinProbe::try_new(&prev.frequent);
+            assert!(built.is_ok(), "fixture-sized reservation");
+            let Ok(probe) = built else { continue };
+            let (pairs, survivors) = probe.screen_every_pair();
+            assert_eq!(pairs, next.generated, "k={} pairs", next.k);
+            assert_eq!(
+                survivors,
+                next.generated.saturating_sub(next.pruned),
+                "k={} survivors",
+                next.k
+            );
+            assert_eq!(probe.width(), prev.frequent.len());
+        }
+        let mut offered = HashSet::new();
+        assert!(primitives::offer(&mut offered, 7));
+        assert!(!primitives::offer(&mut offered, 7), "a repeat is rejected");
+        let mut out = Vec::new();
+        let item = Itemset {
+            mask: ConditionMask::default().with_bit(3),
+            hits: 2,
+        };
+        primitives::append(&mut out, item);
+        assert_eq!(out, vec![item]);
+        // `sort_level` puts any order of a level back in the order the walk
+        // published it (W3-engine1-1, D-4483).
+        for level in &s.levels {
+            let mut reversed = level.frequent.clone();
+            reversed.reverse();
+            primitives::sort_level(&mut reversed);
+            assert_eq!(reversed, level.frequent, "k={}", level.k);
+        }
+        assert!(
+            s.levels.iter().any(|l| l.frequent.len() > 1),
+            "a level of two or more, or the reversal proves nothing"
+        );
+        // Mask first, hits second: the same mask at two counts orders by the
+        // count, and two masks order by their words whatever their counts.
+        let one = ConditionMask::default().with_bit(1);
+        let two = ConditionMask::default().with_bit(2);
+        let mut keyed = vec![
+            Itemset { mask: two, hits: 1 },
+            Itemset { mask: one, hits: 9 },
+            Itemset { mask: one, hits: 3 },
+        ];
+        primitives::sort_level(&mut keyed);
+        assert_eq!(
+            keyed,
+            vec![
+                Itemset { mask: one, hits: 3 },
+                Itemset { mask: one, hits: 9 },
+                Itemset { mask: two, hits: 1 },
+            ]
+        );
     }
 
     /// The default ceiling, named once so the test above reads clearly.
@@ -3927,27 +4503,31 @@ mod tests {
         let exits = count_exits(shipping);
         // The owned column is on the sweep's hot path. `support` now has no
         // early exit at all: even the empty mask takes the same fixed-width hit
-        // test on every bar. `support_fingerprinted` keeps one empty-mask return
-        // because its reserved identity cannot be produced by the ordinary fold.
+        // test on every bar, and `support_fingerprinted` folds the empty mask like
+        // any other candidate (D-0761).
         let column_src = include_str!("column.rs");
         let column_exits = count_exits(column_src.split("#[cfg(test)]").next().unwrap_or(""));
         assert_eq!(
-            column_exits, 2,
-            "crates/engine/src/column.rs may leave early in exactly two places: \
+            column_exits, 1,
+            "crates/engine/src/column.rs may leave early in exactly one place: \
              `set_positions`' iterator returning `None` when one word is exhausted, \
-             which is how an iterator ends, and `support_fingerprinted` returning \
-             the reserved EVERY_BAR identity for the empty mask. `support` itself \
+             which is how an iterator ends. `support_fingerprinted` has no early \
+             exit: the empty mask folds like any other candidate. `support` itself \
              has no early exit: every candidate, including empty, performs one \
-             fixed-six-word hit test per bar. A THIRD exit could truncate a support \
-             count or make its cost depend on the answer. The fingerprint return \
-             cannot truncate a count: it returns `self.bars()`, the maximum score, \
-             and `the_fingerprinted_count_is_the_plain_count` holds both functions \
+             fixed-six-word hit test per bar. A SECOND exit could truncate a support \
+             count or make its cost depend on the answer, and \
+             `the_fingerprinted_count_is_the_plain_count` holds both functions \
              to the same answer on over a thousand candidates."
         );
         assert_eq!(
-            exits, 17,
+            exits, 16,
             "the shipping region of this file may leave a loop early in exactly \
-             seventeen places, and every one is accounted for.\n\
+             sixteen places, and every one is accounted for.\n\
+             \x20 IT WAS SEVENTEEN UNTIL D-0924 folded the subset prune and the \
+             meaning prune into one `join_screen` call, so both refusals now \
+             leave by ONE `let .. else {{ continue }}` skip; and D-1438 moved \
+             the pair-budget exit from the outer row into the inner pair, \
+             which moved it without adding or removing one.\n\
              Five resource-safety exits were added: four setup returns refuse \
              support-column or level-record storage before computation; one \
              batch exit reports MEMORY or WORKERS and rolls back uncommitted \
@@ -3959,20 +4539,22 @@ mod tests {
              six-word bound as `without_highest` beside it, and deliberately \
              beside it: the prefix join's correctness rests on both agreeing \
              about which bit is highest, so they are read together.\n\
-             \x20 1 FILTER SKIP -- a candidate whose ONE new pair restates \
+             \x20 THE MEANING PRUNE -- a candidate whose ONE new pair restates \
              itself or cannot hold. `vocab::implication` proves the pivot chain \
-             exact from `daily.rs:206-215` and the single shared band half at \
-             `daily.rs:579`; anti-monotonicity cannot reach it, because both \
-             bits are frequent and so is their union. It advances rather than \
-             truncating -- the level still enumerates every other pair.\n\
+             exact from `DailyLevels::from_previous_session` and the single \
+             shared band half `bits_with` binds before its loop; \
+             anti-monotonicity cannot reach it, because both bits are \
+             frequent and so is their union. It advances rather than \
+             truncating -- the level still enumerates every other pair. It \
+             shares the subset prune's skip since D-0924.\n\
              \x20 AND THE TEN THAT WERE ALREADY HERE:\n\
              \x20 1 EMPTY-BATCH RETURN -- `drain` handing back an untouched \
              tally when there is nothing to count. It is not optional: \
              `len.div_ceil(lanes())` on an empty batch is a chunk width of \
              zero, and `chunks(0)` panics.\n\
              \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
-             breach, the join's outer row on the pair budget, the join's inner \
-             pair on whichever memory bound `exhausted` names;\n\
+             breach, the join's pair on the pair budget before it is walked, \
+             the join's pair on whichever memory bound `exhausted` names;\n\
              \x20 2 EXHAUSTION RETURNS inside `exhausted` -- the ceiling, which \
              a caller set, and the allocator, which nobody set;\n\
              \x20 3 FILTER SKIPS, which advance rather than truncate -- a \
@@ -3983,7 +4565,7 @@ mod tests {
              the join rather than rejected inside it;\n\
              \x20 1 KEY RETURN -- `without_highest` handing back the join's \
              grouping key once it has found the top word.\n\
-             It was NINE until `every_subset_is_frequent` became a one-line \
+             It was NINE until the subset check became a one-line \
              `set_positions(cand).all(..)`, which deleted its `return false`. \
              Before that it was nine for a changed reason: the prefix join \
              removed the `popcount != k` skip and added the `without_highest` \
@@ -4066,7 +4648,7 @@ mod tests {
     /// The hole this closes: a frontier that never empties.
     ///
     /// Four positions that co-occur on most bars. Every subset of a frequent set
-    /// is frequent, so `every_subset_is_frequent` never prunes and extinction —
+    /// is frequent, so `every_non_parent_subset_is_frequent` never prunes and extinction —
     /// §6's entire replacement for a depth parameter — never happens. Before the
     /// ceiling the only thing under this was the allocator.
     #[test]
@@ -4211,11 +4793,20 @@ mod tests {
         // `column.rs` check below already uses, and it separates the two by what
         // they ARE rather than by how they happen to be written.
         let shipped = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // BOTH SITES COUNT A WHOLE SLICE IN ONE BLOCKED PASS (so1-1, D-4481).
+        // They called `column.support` once per candidate, which streamed the
+        // column from memory once per candidate; a site that went back to that
+        // would pass every result test, so the spelling is pinned here.
         assert_eq!(
-            shipped.matches(concat!("column.", "support(")).count(),
+            shipped.matches(concat!("column.", "support_each(")).count(),
             2,
             "both support sites in the sweep -- k=1 and the batch `drain` the \
-             level join feeds -- must read the owned fixed-width column."
+             level join feeds -- must count through the blocked column pass."
+        );
+        assert_eq!(
+            shipped.matches(concat!("column.", "support(")).count(),
+            0,
+            "and neither may fall back to one column walk per candidate"
         );
         assert!(
             shipped.contains(concat!("Column::", "try_from_rows(bar_bits)")),
@@ -4334,6 +4925,34 @@ mod tests {
         assert_eq!(s.depth(), 2, "the ladder should die at k=3");
         assert_eq!(s.levels.len(), 3, "the empty level is recorded, not hidden");
         assert!(s.levels.last().is_some_and(|l| l.frequent.is_empty()));
+    }
+
+    /// **`depth` is O(1) and agrees with counting the non-empty levels.** Rust
+    /// and O(1) sweep OE-5, D-2304, AFG-04.
+    ///
+    /// Only the level that ended the walk can be empty, so the depth is the
+    /// level count less that one. The count over every level is kept here as
+    /// the oracle: on an extinct walk, on a walk with nothing frequent at k=1,
+    /// and on walks of depth 1 to 6, both readings and the streamed sink agree.
+    #[test]
+    fn depth_is_the_level_count_less_the_empty_last_level() {
+        let oracle = |s: &Sweep| s.levels.iter().filter(|l| !l.frequent.is_empty()).count();
+        let none = Ladder::with_min_hits(9).walk(&bars(&[&[0], &[1]]), &[0, 1]);
+        assert_eq!((none.depth(), oracle(&none)), (0, 0));
+        for width in 1_u32..=6 {
+            let deep: Vec<u32> = (0..width).collect();
+            let s = Ladder::with_min_hits(2).walk(&bars(&[&deep, &deep, &[]]), &deep);
+            assert_eq!(s.depth(), oracle(&s), "width {width}");
+            assert_eq!(s.depth(), usize::try_from(width).unwrap_or(0));
+            assert!(
+                s.levels
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .all(|l| !l.frequent.is_empty()),
+                "only the last level can be empty"
+            );
+        }
     }
 
     /// The emitted order is canonical MASK order, and it is not support order.
@@ -4590,12 +5209,11 @@ mod tests {
             "the prefix join must REACH it once, not reach it three times and \
              discard two"
         );
-        assert!(
-            k3.is_some_and(|l| l.duplicates == 0),
-            "and the duplicate counter is the witness: a prefix join that emitted \
-             the same k-set twice would be enumerating pairs it has no business \
-             walking"
-        );
+        // `duplicates == 0` USED TO BE ASSERTED HERE AS "THE WITNESS", AND IT
+        // COULD NOT FAIL: every k>=2 level is built by `joined_frontier`, which
+        // writes `duplicates: 0` as a literal and counts nothing. The live
+        // witness is `generated == 1` above -- a join that reached {0,1,2}
+        // twice would report two. D-1440.
     }
 
     /// The prefix join returns exactly what an exhaustive pairwise join returns.
@@ -4635,7 +5253,7 @@ mod tests {
                 for c in oracle.iter().skip(i.saturating_add(1)) {
                     let cand = a.union(c);
                     if cand.popcount() == level.k
-                        && every_subset_is_frequent(&cand, &prev)
+                        && set_positions(&cand).all(|x| prev.contains(&cand.without_bit(x)))
                         && support(&b, &cand) >= min_hits
                     {
                         next.insert(cand);
@@ -4668,7 +5286,7 @@ mod tests {
     /// | Truncation | Why the count did not move |
     /// |---|---|
     /// | `if halt.is_some() \|\| (bars > 100 && k >= 3)` | folded into the existing `break`'s condition |
-    /// | `frequent.len() > 4096 \|\|` in `every_subset_is_frequent` | folded into the existing `return false`'s condition |
+    /// | `frequent.len() > 4096 \|\|` in the subset check (now `every_non_parent_subset_is_frequent`) | folded into the existing `return false`'s condition |
     /// | `.take(1024)` on the join's outer row loop | that header was not pinned at all |
     /// | `.step_by(stride)` on the inner loop | the pin is `contains`, so any suffix passes |
     /// | the `'join` loop wrapped in `if column.bars() <= 1000` | an `if` carries no exit token |
@@ -4921,10 +5539,9 @@ mod tests {
             "the repeated mask must yield ONE candidate, not two -- {{0,1,2}} \
              is produced once because the repeat never reaches the join"
         );
-        assert_eq!(
-            level.duplicates, 0,
-            "and nothing is rejected AFTER the fact, because nothing repeats"
-        );
+        // `duplicates == 0` was asserted here too, against the literal zero
+        // `joined_frontier` writes; it could not fail. `generated == 1` above is
+        // the property. D-1440.
         // AND IT LEAVES BY THE PRUNE, NOT BY THE BARS. `{0,1,2}` needs all three
         // of its 2-subsets frequent and the fixture supplies only `{0,1}` and
         // `{0,2}` — `{1,2}` is absent — so anti-monotonicity refuses it before a
@@ -5303,6 +5920,65 @@ mod caller_input {
         assert!(
             s.all_frequent()
                 .all(|i| vocab::table::only_live(i.mask) == i.mask)
+        );
+    }
+
+    /// k=1 counts every position in one blocked pass and still names its
+    /// exclusions in the caller's order (so1-1, D-4481).
+    ///
+    /// The pass that used to measure each position as it met it is now two: one
+    /// that dedups and refuses, one blocked count, then a merge. The merge is the
+    /// part that can reorder, so the fixture puts a not-live position before the
+    /// first measured one, between measured ones, and after the last, beside a
+    /// measured always-false and always-true position and a repeat.
+    #[test]
+    fn exclusions_are_named_in_caller_order_around_the_blocked_count() {
+        let b = bars(&[&[0, 9], &[1, 9], &[0, 1, 9]]);
+        let live = [240_u32, 3, 0, 9_999, 9, 6, 1, 3, 19];
+        let s = Ladder::with_min_hits(1).walk(&b, &live);
+        let named: Vec<(u32, Option<u64>, Why)> = s
+            .excluded
+            .iter()
+            .map(|e| (e.position, e.support, e.reason))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                (240, None, Why::NotLive),
+                (3, Some(0), Why::AlwaysFalse),
+                (9_999, None, Why::NotLive),
+                (9, Some(3), Why::AlwaysTrue),
+                (6, None, Why::NotLive),
+                (19, None, Why::NotLive),
+            ],
+            "every exclusion, in the order the caller listed its position"
+        );
+        let first = s.levels.first().cloned().unwrap_or_default();
+        assert_eq!(
+            first
+                .frequent
+                .iter()
+                .map(|i| (i.mask, i.hits))
+                .collect::<Vec<_>>(),
+            vec![
+                (ConditionMask::default().with_bit(0), 2),
+                (ConditionMask::default().with_bit(1), 2),
+            ],
+            "and the measured survivors keep their counts"
+        );
+        assert_eq!(first.duplicates, 1, "the repeated 3 is a duplicate");
+        assert_eq!(first.excluded, 6);
+        assert!(first.reconciles(), "1 + 6 + 0 + 2 == 9 offered");
+
+        let none_live = Ladder::with_min_hits(1).walk(&b, &[240, 6]);
+        assert_eq!(
+            none_live
+                .excluded
+                .iter()
+                .map(|e| e.position)
+                .collect::<Vec<_>>(),
+            vec![240, 6],
+            "with nothing to measure, every refusal is still named in order"
         );
     }
 

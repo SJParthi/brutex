@@ -202,15 +202,39 @@ fn the_join_no_longer_walks_a_pair_it_will_discard() {
             "level {} generated fewer candidates than it kept",
             level.k
         );
-        assert_eq!(
-            level.duplicates, 0,
-            "level {} emitted the same k-set twice. The prefix join reaches each \
-             k-set from exactly one pair -- its two largest positions -- so a \
-             non-zero duplicate count means the grouping is wrong, not that \
-             deduplication is working",
-            level.k
-        );
+        // `level.duplicates == 0` WAS ASSERTED HERE, AND IT COULD NOT FAIL:
+        // every k>=2 level is built by `joined_frontier`, which writes
+        // `duplicates: 0` as a literal and counts nothing (D-1440 removed the
+        // same assertion from engine and missed this one; D-1505). What the
+        // message claimed is checked on the answer instead: every kept k-set
+        // has exactly k bits, and no k-set is kept twice.
+        let mut seen = std::collections::HashSet::with_capacity(level.frequent.len());
+        for set in &level.frequent {
+            assert_eq!(
+                set.mask.popcount(),
+                level.k,
+                "level {} kept a set of the wrong width",
+                level.k
+            );
+            assert!(
+                seen.insert(set.mask),
+                "level {} emitted the same k-set twice. The prefix join reaches \
+                 each k-set from exactly one pair -- its two largest positions -- \
+                 so a repeat means the grouping is wrong",
+                level.k
+            );
+        }
     }
+    // Distinctness over a level of one set is vacuous; the fixture must give
+    // the check something to catch.
+    assert!(
+        out.sweep
+            .levels
+            .iter()
+            .skip(1)
+            .any(|l| l.frequent.len() >= 2),
+        "no k>=2 level kept two sets, so the distinctness check above proved nothing"
+    );
 
     // And the total pairwise cost the old join paid, recomputed here so the size
     // of what was removed is visible rather than asserted in a comment.

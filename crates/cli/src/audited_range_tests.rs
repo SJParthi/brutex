@@ -605,7 +605,7 @@ fn strict_invalid_runtime_settings_refuse_before_real_source_admission_or_prepar
         ("BRUTEX_PROTECTED_EXITS", "bad"),
         ("BRUTEX_MIN_FILL_HEADROOM_BP", "bad"),
         ("BRUTEX_MIN_AVG_RR_BP", "bad"),
-        ("BRUTEX_VALIDATE", "false"),
+        ("BRUTEX_VALIDATE", "maybe"),
     ];
     if let Ok(name) = std::env::var(CHILD) {
         let fixture = Fixture::new();
@@ -618,14 +618,29 @@ fn strict_invalid_runtime_settings_refuse_before_real_source_admission_or_prepar
         assert!(!fixture.root.join("checksum-receipts-v1").exists());
         return;
     }
+    // THE CHILD MUST PROVE IT RAN (P1-10-02). `--exact` on a name that matches
+    // nothing prints `0 passed` and exits zero, so a status check alone passes
+    // on a child that tested nothing. The path is built from `module_path!()`,
+    // so moving the `#[path]` mount cannot strand the literal, and the child's
+    // own `1 passed` line is required.
+    let test = concat!(
+        module_path!(),
+        "::strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation"
+    );
+    let test = test.split_once("::").map_or(test, |(_, path)| path);
     for (name, raw) in cases {
-        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args(["--exact", "audited_stored::range::tests::strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation", "--test-threads=1"])
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", test, "--test-threads=1"])
             .env(CHILD, name)
             .env(name, raw)
-            .status()
+            .output()
             .expect("isolated malformed environment child");
-        assert!(status.success(), "{name}");
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success(), "{name}: {stdout}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "{name}: the child must run exactly this one test:\n{stdout}"
+        );
     }
 }
 
@@ -682,6 +697,13 @@ fn the_strict_range_kernel_heads_a_share_gross_and_an_index_as_before() {
     crate::knobs::clear_all();
     // Bounded to what the header needs; both are settings a strict run admits.
     crate::knobs::set("BRUTEX_VALIDATE", "0");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
+    // test is fast only because validation is OFF. Were the knob not read
+    // as off, the run below would price the full stack for an hour.
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
     let index = "\nAUDIT\n  INDEX SPOT run. There is no brokerage";
     let equity = "\nAUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n";
@@ -795,4 +817,102 @@ fn a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded(
         .expect("the seam is gone with its guard");
     assert!(!crate::carries_refusal(&whole), "{whole}");
     assert!(!whole.contains(&named), "{whole}");
+}
+
+/// One generated month of `bars` one-minute candles starting at `first`.
+fn generated_month(first: i64, bars: i64) -> Loaded {
+    Loaded {
+        bars: (0..bars)
+            .map(|at| indicators::Candle {
+                ts_micros: first + at * 60_000_000,
+                open: 100,
+                high: 101,
+                low: 99,
+                close: 100,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect(),
+        vendor: Vendor::Zerodha,
+        key: stored::swept_index("NIFTY").expect("NIFTY is swept"),
+        timeframe: "1min",
+        excluded: stored::CalendarExclusion::none(),
+    }
+}
+
+/// Appending a month must not copy the bars already held: an exact
+/// per-month reservation on the growing span relocated every bar held on
+/// each append, so M appends copied Theta(M^2 x bars-per-month) bars. Months
+/// are now held apart and joined once, by one exact reservation, in
+/// `finish`. The first month's buffer is never reallocated while months are
+/// appended, and the finished span holds exactly its bars, in order.
+/// W2-cli1-1, D-0923.
+#[test]
+fn appending_a_month_never_relocates_the_bars_already_held() {
+    const MONTHS: i64 = 256;
+    const PER_MONTH: i64 = 7;
+    let mut builder = Builder::default();
+    builder
+        .append(generated_month(0, PER_MONTH))
+        .expect("the first month starts the span");
+    let head = builder.0.as_ref().expect("span exists after an append");
+    let (pointer, capacity) = (head.bars.as_ptr(), head.bars.capacity());
+    for month in 1..MONTHS {
+        builder
+            .append(generated_month(month * PER_MONTH * 60_000_000, PER_MONTH))
+            .expect("strictly later month joins");
+        let head = builder.0.as_ref().expect("span exists after an append");
+        assert_eq!(
+            (head.bars.as_ptr(), head.bars.capacity()),
+            (pointer, capacity),
+            "month {month}: the bars already held were relocated"
+        );
+    }
+    let span = builder.finish().expect("span");
+    assert_eq!(
+        span.bars.len(),
+        usize::try_from(MONTHS * PER_MONTH).expect("a test-sized bar count fits usize")
+    );
+    assert_eq!(span.bars.capacity(), span.bars.len(), "one exact join");
+    assert_eq!(i64::from(span.asked), MONTHS);
+    assert_eq!(span.found, span.asked);
+    for (at, bar) in span.bars.iter().enumerate() {
+        assert_eq!(
+            bar.ts_micros,
+            i64::try_from(at).expect("a test-sized index fits i64") * 60_000_000,
+            "bar {at} out of order"
+        );
+    }
+}
+
+/// The month boundary is checked against the last bar held, wherever it is
+/// held: a month stepping back onto the newest appended month is refused,
+/// and an empty month neither moves that boundary nor adds a bar.
+#[test]
+fn a_month_stepping_back_onto_an_appended_month_is_refused() {
+    let mut builder = Builder::default();
+    builder.append(generated_month(0, 2)).expect("first month");
+    builder
+        .append(generated_month(10 * 60_000_000, 2))
+        .expect("later month");
+    builder
+        .append(generated_month(0, 0))
+        .expect("an empty month joins without bars");
+    assert_eq!(
+        builder
+            .append(generated_month(11 * 60_000_000, 1))
+            .expect_err("steps back onto the appended month"),
+        "audited range steps backward at its month boundary"
+    );
+    builder
+        .append(generated_month(12 * 60_000_000, 1))
+        .expect("strictly later than the appended month");
+    let span = builder.finish().expect("span");
+    let at: Vec<i64> = span
+        .bars
+        .iter()
+        .map(|bar| bar.ts_micros / 60_000_000)
+        .collect();
+    assert_eq!(at, [0, 1, 10, 11, 12]);
+    assert_eq!(span.asked, 4);
 }

@@ -1,5 +1,8 @@
 //! Repeatable local sweep checks. No stored-data sweep or vendor pull is started.
 //! Build from the repository root with the command in README.md.
+//! CI gate 6d also builds it with `--test` and runs the tests below; every
+//! audit function is then unreachable, which is expected, not dead.
+#![cfg_attr(test, allow(dead_code))]
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -410,18 +413,29 @@ fn verify(focused: bool) -> io::Result<bool> {
     Ok(all_passed && stable)
 }
 
-fn main() -> std::process::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--purity") {
-        return match language_paths() {
-            Ok(true) => std::process::ExitCode::SUCCESS,
-            Ok(false) => std::process::ExitCode::FAILURE,
-            Err(error) => {
-                eprintln!("Language-path audit refused: {error}");
-                std::process::ExitCode::FAILURE
-            }
-        };
+/// The run the first argument asks for: the full audit, or `--focused`.
+/// `--purity`, a second and weaker extension checker, was removed (P13-05,
+/// D-2325): the boundary has one checker, CI gate 1. Any other argument is
+/// refused rather than read as a request for the full run.
+fn focused(arg: Option<&str>) -> Result<bool, String> {
+    match arg {
+        None => Ok(false),
+        Some("--focused") => Ok(true),
+        Some(other) => Err(format!(
+            "Unknown argument {other}. The extension boundary is CI gate 1 (`.github/gates_tree.rs gate-1`), not this verifier."
+        )),
     }
-    match verify(std::env::args().nth(1).as_deref() == Some("--focused")) {
+}
+
+fn main() -> std::process::ExitCode {
+    let focused = match focused(std::env::args().nth(1).as_deref()) {
+        Ok(f) => f,
+        Err(why) => {
+            eprintln!("{why}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    match verify(focused) {
         Ok(true) => std::process::ExitCode::SUCCESS,
         Ok(false) => std::process::ExitCode::FAILURE,
         Err(error) => {
@@ -431,49 +445,19 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn language_paths() -> io::Result<bool> {
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other("git file enumeration failed"));
-    }
-    let mut checked = 0_usize;
-    let mut valid = true;
-    for bytes in output.stdout.split(|byte| *byte == 0) {
-        if bytes.is_empty() {
-            continue;
-        }
-        let path = std::str::from_utf8(bytes).map_err(io::Error::other)?;
-        if path.starts_with("web/") {
-            continue;
-        }
-        checked += 1;
-        let file = Path::new(path);
-        let named = matches!(
-            file.file_name().and_then(|n| n.to_str()),
-            Some("LICENSE" | "CODEOWNERS" | ".gitignore" | ".gitattributes")
-        );
-        let allowed = match file.extension().and_then(|ext| ext.to_str()) {
-            Some("rs" | "toml" | "md" | "lock" | "html" | "css") => true,
-            Some("yml") => path.starts_with(".github/"),
-            Some("json") => path.starts_with(".claude/"),
-            _ => false,
-        };
-        if !named && !allowed {
-            eprintln!("Forbidden path outside web/: {path}");
-            valid = false;
+#[cfg(test)]
+mod tests {
+    use super::focused;
+
+    #[test]
+    fn purity_is_not_a_second_extension_checker() {
+        // P13-05, D-2325. `--purity` printed "Extension boundary: passed" on
+        // trees gate 1 refuses; it is now an unknown argument, refused.
+        assert_eq!(focused(None), Ok(false));
+        assert_eq!(focused(Some("--focused")), Ok(true));
+        for arg in ["--purity", "--full", ""] {
+            let why = focused(Some(arg)).unwrap_err();
+            assert!(why.contains("CI gate 1"), "{why}");
         }
     }
-    println!(
-        "Checked {checked} tracked and nonignored untracked paths outside web/. Extension boundary: {}. This does not inspect dependency implementations or prove front-end-toolchain independence.",
-        if valid { "passed" } else { "failed" }
-    );
-    Ok(valid && checked > 0)
 }

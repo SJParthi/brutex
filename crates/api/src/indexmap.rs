@@ -16,6 +16,15 @@ use pull::nseindex::{Basis, Catalogue, Unresolved, collapse};
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// The largest catalogue file [`Published::read`] reads, in bytes.
+///
+/// NSE's index list is about 150 `index_name,category` rows, a few KiB. One
+/// MiB is two orders of magnitude past that and still a bound: the file is read
+/// on every `/indexmap.json` request, and it had none (UC-19, D-1502). A file
+/// past it is refused naming the size, the way `master::MAX_MASTER_BYTES` is,
+/// instead of being read whole into memory.
+pub const MAX_CATALOGUE_BYTES: u64 = 1024 * 1024;
+
 /// NSE's published index list — matchable, and still readable.
 ///
 /// [`Catalogue`] collapses every name so a match can ignore the separators
@@ -38,9 +47,32 @@ impl Published {
     /// no empty fallback: a join against nothing resolves nothing and would
     /// report 136 refusals as though the exchange had disowned them, which is
     /// the failure wearing a success's clothes `CLAUDE.md` §4 bans.
+    /// A file larger than [`MAX_CATALOGUE_BYTES`] is refused naming the bound.
+    /// The read itself is capped one byte past it, so a file that grows between
+    /// a size check and the read cannot slip past (UC-19, D-1502).
+    ///
+    /// THE SIZE IS JUDGED BEFORE THE TEXT (r64-6, D-4431). The capped read used
+    /// to decode as it went, so an oversized file whose cut fell inside a
+    /// multi-byte character was refused as "not valid UTF-8" instead of by its
+    /// size. The bytes are read first, the size is checked on them, and only a
+    /// file within the bound is decoded; a file that is not UTF-8 is still
+    /// refused, naming that.
     pub fn read(path: &Path) -> Result<Self, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))?;
+        use std::io::Read as _;
+        let file = std::fs::File::open(path).map_err(|why| format!("{}: {why}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_CATALOGUE_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|why| format!("{}: {why}", path.display()))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CATALOGUE_BYTES {
+            return Err(format!(
+                "{}: larger than {MAX_CATALOGUE_BYTES} bytes, which this reader \
+                 holds at most; NSE's index list is a few KiB, so this is not it",
+                path.display()
+            ));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|why| format!("{}: not UTF-8 text: {why}", path.display()))?;
         let parsed = Self::from_text(&text);
         if parsed.is_empty() {
             return Err(format!("{}: no index names", path.display()));
@@ -349,6 +381,55 @@ mod tests {
                 .expect_err("empty")
                 .contains("no index names")
         );
+    }
+
+    /// **A CATALOGUE PAST ITS BOUND IS REFUSED BY SIZE (UC-19, D-1502).**
+    ///
+    /// Exactly `MAX_CATALOGUE_BYTES` reads; one byte more is refused naming
+    /// the bound, never parsed.
+    #[test]
+    fn a_catalogue_past_its_bound_is_refused_by_size() {
+        let dir = crate::scratch::path("indexmap-bound");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("nse_indices.csv");
+        let row = "NIFTY PRIVATE BANK,sectoral\n";
+        let at = usize::try_from(super::MAX_CATALOGUE_BYTES).expect("fits");
+        let mut text = row.repeat(at / row.len());
+        text.push_str(&"\n".repeat(at - text.len()));
+        assert_eq!(text.len(), at);
+        std::fs::write(&path, &text).expect("write");
+        assert_eq!(Published::read(&path).expect("at the bound reads").len(), 1);
+        text.push('\n');
+        std::fs::write(&path, &text).expect("write");
+        let why = Published::read(&path).expect_err("one byte past is refused");
+        assert!(why.contains("larger than 1048576 bytes"), "{why}");
+    }
+
+    /// **AN OVERSIZED FILE CUT INSIDE A CHARACTER IS REFUSED BY SIZE (r64-6,
+    /// D-4431).** The capped read ends one byte past the bound; a file whose
+    /// byte there begins a multi-byte character was refused as "not valid
+    /// UTF-8". It names its size now, and a file within the bound that is not
+    /// UTF-8 is still refused, naming that instead.
+    #[test]
+    fn an_oversized_catalogue_cut_inside_a_character_is_refused_by_size() {
+        let dir = crate::scratch::path("indexmap-cut");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("nse_indices.csv");
+        let at = usize::try_from(super::MAX_CATALOGUE_BYTES).expect("fits");
+        // `é` is two bytes. Its first lands on the last byte the reader takes
+        // (index `at`), so the capped bytes end mid-character.
+        let mut text = "a".repeat(at);
+        text.push_str("é,sectoral\n");
+        std::fs::write(&path, &text).expect("write");
+        let why = Published::read(&path).expect_err("past the bound");
+        assert!(why.contains("larger than 1048576 bytes"), "{why}");
+        assert!(!why.contains("UTF-8"), "{why}");
+
+        // Within the bound, bytes that are not UTF-8 name the text.
+        std::fs::write(&path, b"index_name,category\n\xff\xfe,sectoral\n").expect("write");
+        let why = Published::read(&path).expect_err("not text");
+        assert!(why.contains("not UTF-8 text"), "{why}");
+        assert!(why.contains("nse_indices.csv"), "{why}");
     }
 
     #[test]

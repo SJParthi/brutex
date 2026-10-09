@@ -155,6 +155,45 @@ fn stored_self_check_reports_partial_history_and_missing_feed_as_failures()
     })
 }
 
+/// P3-02-07, D-1970. The one tracked run configuration told the operator the
+/// build needed `BRUTEX_COMMIT` or would refuse every sweep. `build.rs` stamps
+/// the commit itself, and only a dirty tree is left unstamped, so the old
+/// sentence sent an operator hunting a missing variable instead of the
+/// uncommitted source that actually caused the refusal.
+///
+/// D-4492 (srust-3): the configuration starts `cargo` itself, not a shell
+/// handed `exec cargo run ...`; gate 1b's `gh_json launch` pins the whole
+/// argument list, and this test keeps only the program's name.
+#[test]
+fn the_launch_configuration_states_what_build_rs_actually_stamps() -> std::io::Result<()> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.claude/launch.json");
+    let text = std::fs::read_to_string(&path)?;
+    assert!(!text.contains("BRUTEX_COMMIT="), "{text}");
+    assert!(
+        !text.contains("a server built without it refuses every sweep"),
+        "{text}"
+    );
+    assert!(
+        text.contains("crates/cli/build.rs stamps the commit itself"),
+        "{text}"
+    );
+    assert!(
+        text.contains("a build from a CLEAN tree records sweeps"),
+        "{text}"
+    );
+    // P13-03, D-2511: cargo is the program, not an argument to a shell.
+    assert!(text.contains("\"runtimeExecutable\": \"cargo\""), "{text}");
+    assert!(!text.contains("\"runtimeExecutable\": \"sh\""), "{text}");
+    assert!(!text.contains("\"-c\""), "{text}");
+    assert!(
+        text.contains(
+            "\"runtimeArgs\": [\n        \"run\",\n        \"--release\",\n        \"-p\",\n        \"api\",\n        \"--\",\n        \"serve\"\n      ]"
+        ),
+        "{text}"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_failed_range_never_claims_that_no_source_was_read() -> Result<(), Box<dyn std::error::Error>> {
     const CHILD: &str = "BRUTEX_TEST_FAILED_RANGE_DISCLOSURE";
@@ -251,7 +290,24 @@ fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrent
     }
     assert_eq!(fs::read(marker)?, b"keep these bytes");
 
-    let first = crate::verification_scratch()?;
+    // A LOCAL COUNTER AND TAG (P16-03, D-2646). This test predicts which
+    // serials the next claims take, and it predicted the process-wide
+    // counter every other test in this binary also draws on: a concurrent
+    // caller could take a pre-claimed serial or push the counter past the
+    // window. The prediction is now about a counter only this test holds,
+    // while other threads keep drawing on the shared one below.
+    let next = std::sync::atomic::AtomicU64::new(0);
+    let claim = || crate::verification_scratch_from(&next, "p16-03-");
+    let noise: Vec<std::thread::JoinHandle<Vec<std::path::PathBuf>>> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..8)
+                    .filter_map(|_| crate::verification_scratch().ok())
+                    .collect()
+            })
+        })
+        .collect();
+    let first = claim()?;
     let _first = ScratchCleanup(first.clone());
     let name = first
         .file_name()
@@ -269,14 +325,25 @@ fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrent
         collisions.push(ScratchCleanup(path.clone()));
         fs::write(path.join("owner"), b"already held")?;
     }
-    let refused = crate::ledger_round_trip();
+    let refused = crate::ledger_round_trip_in(claim());
     assert!(!refused.held);
     assert!(refused.evidence.contains("16 collisions"));
     for held in &collisions {
         assert_eq!(fs::read(held.0.join("owner"))?, b"already held");
     }
-    let recovered = crate::ledger_round_trip();
+    let recovered = crate::ledger_round_trip_in(claim());
     assert!(recovered.held, "{}", recovered.evidence);
+    // The shared door still works beside it, and never took a tagged name.
+    for handle in noise {
+        let claimed = handle.join().map_err(|_| "noise thread panicked")?;
+        for path in claimed {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(!name.contains("p16-03-"), "{name}");
+            let _cleanup = ScratchCleanup(path);
+        }
+    }
+    let shared = crate::ledger_round_trip();
+    assert!(shared.held, "{}", shared.evidence);
     Ok(())
 }
 
@@ -328,6 +395,89 @@ fn support_is_scaled_in_ppm_and_cannot_disable_extinction() {
     ] {
         assert_eq!(min_hits_for(bars, support), expected);
     }
+}
+
+/// The swept-row form floors at one and saturates rather than wrapping at the
+/// top of `u64`; `min_hits_for` is the same rule over a `usize`. D-2101.
+/// D-2102: a share's dated cash closes are an identity term; an index has
+/// none, so its stored identity is exactly what it was before the term.
+#[test]
+fn the_cash_close_term_moves_a_shares_identity_and_leaves_an_index_alone() {
+    let anchored = [7_u8; 32];
+    assert_eq!(crate::bind_cash_closes(anchored, None), anchored);
+    let eligible = crate::bind_cash_closes(anchored, Some([1; 32]));
+    let ineligible = crate::bind_cash_closes(anchored, Some([2; 32]));
+    assert_ne!(eligible, anchored);
+    assert_ne!(eligible, ineligible);
+    assert_ne!(eligible, crate::bind_cash_closes([8; 32], Some([1; 32])));
+    assert_eq!(eligible, crate::bind_cash_closes(anchored, Some([1; 32])));
+}
+
+#[test]
+fn swept_support_floors_at_one_and_saturates_at_the_top() {
+    for (swept, support, expected) in [
+        (0, 999_999, 1),
+        (1_500, 200_000, 300),
+        (1_499, 200_000, 299),
+        (1_500, 999_999, 1_499),
+        (u64::MAX, 999_999, u64::MAX / 1_000_000),
+        (u64::MAX, 1, u64::MAX / 1_000_000),
+    ] {
+        assert_eq!(
+            crate::min_hits_for_swept(swept, support),
+            expected,
+            "{swept} {support}"
+        );
+    }
+    assert_eq!(
+        min_hits_for(1_500, 200_000),
+        crate::min_hits_for_swept(1_500, 200_000)
+    );
+}
+
+/// A descent over a column that swept nothing is refused by name, and any
+/// other floor is the statistical floor over the rows that can hit. D-2101.
+#[test]
+fn a_descent_over_a_column_that_swept_nothing_refuses() {
+    let rules = crate::Rules::BASELINE;
+    let refused = crate::descent_floor(&rules, 0, 600);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.starts_with("refused: ")
+                && why.contains("none of this span's 600 bar(s)")),
+        "{refused:?}"
+    );
+    for can_hit in [1, 300, 1_500] {
+        assert_eq!(
+            crate::descent_floor(&rules, can_hit, 3_000),
+            Ok(crate::statistical_floor_ppm(&rules, can_hit))
+        );
+    }
+    assert_ne!(
+        crate::statistical_floor_ppm(&rules, 300),
+        crate::statistical_floor_ppm(&rules, 600),
+        "premise: the floor moves with the row count it divides"
+    );
+}
+
+/// The descent banner names the rows it sized on as swept bars, and its
+/// round-trip estimate is the floor over those rows. D-2101.
+#[test]
+fn the_descent_banner_counts_swept_bars() {
+    let banner = crate::descent_banner(
+        "zerodha",
+        "NIFTY",
+        "5min",
+        ((2025, 5), (2025, 5)),
+        300,
+        20_000,
+        4,
+    );
+    assert!(
+        banner.contains("300 swept bars · floor 20000 ppm is about 6 round trip(s)"),
+        "{banner}"
+    );
 }
 
 #[test]
@@ -397,7 +547,7 @@ fn command_reports_preserve_the_failure_and_the_requested_result() {
     );
     assert_eq!(out, "prior\nmeasured\n");
     assert_eq!(
-        command_report(&mut out, Err("missing receipt".to_owned()), "AUDIT"),
+        command_report(&mut out, Err("missing receipt".to_owned().into()), "AUDIT"),
         FAILED
     );
     assert_eq!(out, "prior\nmeasured\nAUDIT REFUSED: missing receipt\n");
@@ -476,4 +626,185 @@ fn malformed_stored_command_numbers_refuse_before_any_store_access() {
             assert!(!report.contains("REAL MARKET DATA"));
         }
     }
+}
+
+/// A writer that refuses every byte with one chosen error, as a closed pipe or
+/// a full disk does.
+struct Refusing(std::io::ErrorKind);
+impl std::io::Write for Refusing {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::from(self.0))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::from(self.0))
+    }
+}
+
+/// A writer that takes every byte and refuses only the flush.
+struct FlushRefused(Vec<u8>);
+impl std::io::Write for FlushRefused {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    }
+}
+
+/// **The binary's output is written, never printed, and a failed write is
+/// said and decides the code.** v53-2, D-1484. `println!` panicked on a
+/// closed stdout and `cli sweep 6 100 | true` exited 101.
+#[test]
+fn a_report_that_cannot_be_written_is_said_and_never_panics() {
+    use crate::deliver;
+    // Written whole: the code is the run's, and stderr hears nothing.
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(deliver(OK, "report\n", &mut out, &mut err), OK);
+    assert_eq!(out, b"report\n");
+    assert!(err.is_empty());
+
+    // A closed pipe: every code stands, and the drop is said.
+    for code in [OK, FAILED, MISUSED] {
+        let mut err = Vec::new();
+        let earned = deliver(
+            code,
+            "report\n",
+            &mut Refusing(std::io::ErrorKind::BrokenPipe),
+            &mut err,
+        );
+        assert_eq!(
+            earned, code,
+            "a reader that stopped reading changes no code"
+        );
+        let said = String::from_utf8_lossy(&err).into_owned();
+        assert!(said.contains("stdout is not writable"), "{said}");
+        assert!(said.contains("7 bytes"), "{said}");
+        assert!(said.contains("closed the pipe"), "{said}");
+    }
+
+    // Any other failure: a clean run is no longer clean; a refusal stays one.
+    for (code, wanted) in [(OK, FAILED), (FAILED, FAILED), (MISUSED, MISUSED)] {
+        let mut err = Vec::new();
+        let earned = deliver(
+            code,
+            "report\n",
+            &mut Refusing(std::io::ErrorKind::StorageFull),
+            &mut err,
+        );
+        assert_eq!(earned, wanted, "from {code}");
+        let said = String::from_utf8_lossy(&err).into_owned();
+        assert!(said.contains("not a clean exit"), "{said}");
+    }
+
+    // A flush that fails after every byte was taken is still a failure.
+    let mut flushed = FlushRefused(Vec::new());
+    let mut err = Vec::new();
+    assert_eq!(deliver(OK, "report\n", &mut flushed, &mut err), FAILED);
+    assert_eq!(flushed.0, b"report\n");
+    assert!(!err.is_empty());
+
+    // And a stderr that is gone too is not a panic either.
+    assert_eq!(
+        deliver(
+            OK,
+            "report\n",
+            &mut Refusing(std::io::ErrorKind::BrokenPipe),
+            &mut Refusing(std::io::ErrorKind::BrokenPipe),
+        ),
+        OK
+    );
+}
+
+/// audit-20261003 hunt-api-2, D-1551: A STOP IS HONOURED AT THE NEXT
+/// INSTRUMENT-MONTH AND NAMED. In a child process (the stop is process-wide and
+/// never withdrawn, so it must not reach this binary's other tests): the warmed
+/// month loads before the stop; after it, the month loader, the fold-audit
+/// reader and a whole range sweep each refuse with [`crate::cancel::CANCELLED`]
+/// and name where they stopped, and none of them returns a report.
+#[test]
+fn a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_CANCEL_AT_BOUNDARY";
+    if std::env::var_os(CHILD).is_some() {
+        let root = crate::store_root()?;
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        assert!(!crate::cancel::requested());
+        assert_eq!(crate::cancel::check(|| "unused".to_owned()), Ok(()));
+        let before = crate::stored::load(&root, vendor, "NIFTY", "1min", 2025, 5)?;
+        assert!(!before.bars.is_empty(), "the warmed month holds bars");
+
+        crate::cancel::request();
+        assert!(crate::cancel::requested());
+        let loaded = crate::stored::load(&root, vendor, "NIFTY", "1min", 2025, 5);
+        let why = loaded.err().ok_or("a load after the stop was answered")?;
+        assert!(why.starts_with(crate::cancel::CANCELLED), "{why}");
+        assert!(
+            why.contains("NIFTY 1min 2025-05, before it was read"),
+            "{why}"
+        );
+
+        let read = crate::fold_audit::read_month(
+            &root,
+            vendor,
+            &crate::stored::swept_index("NIFTY")?,
+            store::path::Timeframe::MINUTE_1,
+            store::path::YearMonth::new(2025, 5)?,
+        );
+        let why = read
+            .err()
+            .ok_or("a fold-audit read after the stop was answered")?;
+        assert!(why.starts_with(crate::cancel::CANCELLED), "{why}");
+
+        let report = crate::range_over("zerodha", "NIFTY", &["1min"], (2025, 5), (2025, 5), None);
+        assert!(report.starts_with("refused: "), "{report}");
+        assert!(report.contains(crate::cancel::CANCELLED), "{report}");
+        assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
+        // THE WHOLE TABLE IS REFUSED AT ITS OWN BOUNDARY, by the stop and
+        // naming it, before the every-rung-refused summary could stand in for
+        // it (R1286-cli-03, D-4100). Each rung's month refused with the stop,
+        // so without this check the page would be that summary, which names
+        // no boundary and reads like a refusal of the arguments.
+        for (rungs, count) in [(&["1min"][..], 1), (&["1min", "5min"][..], 2)] {
+            let report = crate::range_over("zerodha", "NIFTY", rungs, (2025, 5), (2025, 5), None);
+            assert_eq!(
+                report,
+                format!(
+                    "refused: {} Stopped at: the {count} rung(s) of NIFTY on zerodha, before \
+                     their table was rendered.\n",
+                    crate::cancel::CANCELLED
+                )
+            );
+        }
+        assert!(
+            crate::cancel::observed() >= 3,
+            "{}",
+            crate::cancel::observed()
+        );
+        return Ok(());
+    }
+    assert!(
+        !crate::cancel::requested(),
+        "the stop leaked into the parent"
+    );
+    crate::audited_stored::with_warmed_store(|root| {
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "operator_boundary_tests::a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "generated")
+            .env("BRUTEX_STORE", root)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        Ok(())
+    })
 }

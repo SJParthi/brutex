@@ -4,7 +4,7 @@ use super::*;
 use crate::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
     RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-    printed_ohlcv_cost_model_id_v1,
+    printed_ohlcv_cost_model_id_v3,
 };
 use crate::identity::{Direction, Params};
 use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -35,7 +35,7 @@ fn policy(side: crate::excursion::Side) -> Result<ExitGridPolicyV1, String> {
         RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
         32,
         ExitGridSelectorV1::PessimisticTotal,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,
@@ -122,6 +122,53 @@ fn conjunction_uses_identical_exact_grid_and_every_coordinate_replays() -> Resul
         assert!(admitted > 0);
         assert_eq!(evaluated.grid().cells.len() as u64, resolved.cell_count());
     }
+    Ok(())
+}
+
+/// W3-runner2-0 (D-0741): programs priced and coordinates materialized over
+/// one attestation derive the slice facts only in that attestation.
+#[test]
+fn programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once() -> Result<(), String>
+{
+    let (bars, column) = fixture()?;
+    let key = key()?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let before = crate::trade::slice_facts_derived_on_this_thread();
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let attested_at = crate::trade::slice_facts_derived_on_this_thread();
+    let mut coordinates = 0_u64;
+    for text in ["30 & 44", "30 | 44", "30 & !44"] {
+        let program = expression(text)?;
+        let run = ExpressionExecutionRunV1::new(
+            &run(&key, &bars, &program, Direction::Long),
+            &program,
+            &bars,
+            None,
+        )?;
+        let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+        let validated = resolved.validate_expression_evaluation(&evaluated)?;
+        for (ordinal, cell) in evaluated.grid().cells.iter().enumerate() {
+            let rows =
+                resolved.materialize_expression_coordinate(&attested, &validated, ordinal)?;
+            assert_eq!(u64::try_from(rows.len()).map_err(display)?, cell.trades);
+            coordinates += 1;
+        }
+    }
+    assert_eq!(coordinates, 30);
+    assert_eq!(
+        crate::trade::slice_facts_derived_on_this_thread() - attested_at,
+        0,
+        "{coordinates} coordinates over three programs must not re-derive the slice facts"
+    );
+    assert_eq!(attested_at - before, 1, "attestation derives once");
     Ok(())
 }
 
@@ -273,5 +320,158 @@ fn source_terms_foreign_resolutions_and_incomplete_populations_refuse() -> Resul
     let (first, rest) = reordered.grid.cells.split_first_mut().ok_or("first cell")?;
     std::mem::swap(first, rest.first_mut().ok_or("second cell")?);
     assert!(long.validate_expression_evaluation(&reordered).is_err());
+    Ok(())
+}
+
+/// **Every coordinate of a program replays over one program walk
+/// (W3-runner2-1, D-1833).** The per-ordinal door walks the program and
+/// measures every crossing for each coordinate; the replay walks once per
+/// program. Counted: 30 coordinates over three programs cost 30 walks through
+/// the per-ordinal door and 3 through the replay, and every coordinate's rows
+/// are byte-identical. `30 & !30` is never true, so its walk is empty and the
+/// empty-fold rule is exercised; an absent ordinal and a foreign attestation
+/// refuse exactly as the per-ordinal door does.
+#[test]
+fn every_coordinate_of_a_program_replays_over_one_walk() -> Result<(), String> {
+    let (bars, column) = fixture()?;
+    let key = key()?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let other = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(4).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let (mut per_ordinal, mut replayed, mut coordinates, mut traded) = (0, 0, 0, 0);
+    for text in ["30 & 44", "30 | 44", "30 & !30"] {
+        let program = expression(text)?;
+        let run = ExpressionExecutionRunV1::new(
+            &run(&key, &bars, &program, Direction::Long),
+            &program,
+            &bars,
+            None,
+        )?;
+        let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+        let validated = resolved.validate_expression_evaluation(&evaluated)?;
+        let cells = evaluated.grid().cells.len();
+        let before = crate::grid::expression_walks_on_this_thread();
+        let one_off = (0..cells)
+            .map(|ordinal| {
+                resolved.materialize_expression_coordinate(&attested, &validated, ordinal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let middle = crate::grid::expression_walks_on_this_thread();
+        let replay = resolved.expression_coordinate_replay(&attested, &validated);
+        let shared = (0..cells)
+            .map(|ordinal| replay.materialize(ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        let after = crate::grid::expression_walks_on_this_thread();
+        assert_eq!(shared, one_off, "{text}: rows differ");
+        assert_eq!(
+            replay.materialize(cells),
+            resolved.materialize_expression_coordinate(&attested, &validated, cells)
+        );
+        assert_eq!(
+            replay.materialize(cells).err().as_deref(),
+            Some("expression replay ordinal is absent")
+        );
+        let foreign = resolved.expression_coordinate_replay(&other, &validated);
+        assert_eq!(
+            foreign.materialize(0).err().as_deref(),
+            Some("expression replay does not match authenticated training inputs")
+        );
+        assert_eq!(
+            foreign.materialize(0),
+            resolved.materialize_expression_coordinate(&other, &validated, 0)
+        );
+        assert_eq!(
+            crate::grid::expression_walks_on_this_thread(),
+            after,
+            "a refusal before the walk walks nothing"
+        );
+        per_ordinal += middle - before;
+        replayed += after - middle;
+        coordinates += cells;
+        traded += shared.iter().filter(|rows| !rows.is_empty()).count();
+    }
+    assert_eq!(coordinates, 30);
+    assert!(traded > 0, "at least one coordinate must trade");
+    assert_eq!((per_ordinal, replayed), (30, 3));
+    Ok(())
+}
+
+/// The replay refuses a selected cell its walk does not reproduce, on both
+/// the traded and the empty-walk path (D-1833).
+#[test]
+fn an_expression_replay_refuses_a_forged_cell() -> Result<(), String> {
+    let (bars, column) = fixture()?;
+    let facts = crate::trade::SliceFacts::of(&bars, &column);
+    let key = key()?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    for (text, refusal) in [
+        (
+            "30 | 44",
+            "selected expression cell differs from exact replay",
+        ),
+        (
+            "30 & !30",
+            "selected expression empty cell differs from exact replay",
+        ),
+    ] {
+        let program = expression(text)?;
+        let run = ExpressionExecutionRunV1::new(
+            &run(&key, &bars, &program, Direction::Long),
+            &program,
+            &bars,
+            None,
+        )?;
+        let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+        let grid = evaluated.grid();
+        let replay = crate::grid::ExpressionCellReplay::prepare(
+            &bars,
+            &column,
+            &program,
+            Horizon::bars(5).ok_or("horizon")?,
+            crate::excursion::Side::Long,
+            grid,
+            &facts,
+        )?;
+        for cell in &grid.cells {
+            assert_eq!(
+                replay.materialize(cell)?,
+                crate::grid::materialize_expression_cell(
+                    &bars,
+                    &column,
+                    &program,
+                    Horizon::bars(5).ok_or("horizon")?,
+                    crate::excursion::Side::Long,
+                    grid,
+                    cell,
+                )?
+            );
+            let mut forged = *cell;
+            forged.trades = forged.trades.wrapping_add(1);
+            assert_eq!(replay.materialize(&forged).err().as_deref(), Some(refusal));
+        }
+    }
     Ok(())
 }

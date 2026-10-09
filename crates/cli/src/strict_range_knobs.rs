@@ -47,12 +47,6 @@ impl std::error::Error for KnobRefusal {}
 /// by the HTTP adapter; direct runtime values must already have the right meaning.
 #[must_use]
 pub fn request_value(name: &str, raw: &str) -> bool {
-    if name == "BRUTEX_VALIDATE" {
-        return matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "0" | "1" | "false" | "true" | "off" | "on" | "no" | "yes"
-        );
-    }
     value(name, raw)
 }
 
@@ -61,10 +55,13 @@ fn value(name: &str, raw: &str) -> bool {
     match name {
         "BRUTEX_CEILING" => machine_count(raw, crate::ceiling_limit()).is_some(),
         "BRUTEX_SCREEN_CAP" => machine_count(raw, crate::SCREEN_CAP_CEILING).is_some(),
-        "BRUTEX_TOP" => nonnegative_floor(raw)
-            .and_then(|count| usize::try_from(count).ok())
-            .is_some_and(|count| count > 0),
-        "BRUTEX_VALIDATE" => matches!(raw.trim(), "0" | "1"),
+        // `1..=TOP_CEILING`: the band `measure_top` prices is eight rows per
+        // printed row, so an unbounded TOP was an unbounded request (D-1727).
+        "BRUTEX_TOP" => machine_count(raw, crate::TOP_CEILING).is_some(),
+        // THE SAME EIGHT WORDS EVERY OTHER READER TAKES. This accepted only `0`
+        // and `1`, so `BRUTEX_VALIDATE=false` ran `cli screen` unvalidated and
+        // refused `cli audit-audited-range` in the same process (CE-44, D-2651).
+        "BRUTEX_VALIDATE" => brutex_core::knob::switch(name, Some(raw), true).is_ok(),
         "BRUTEX_HORIZON_BARS" => {
             raw.trim().eq_ignore_ascii_case("rung") || crate::knobs::horizon_count(raw).is_some()
         }
@@ -82,7 +79,7 @@ fn value(name: &str, raw: &str) -> bool {
         | "BRUTEX_MAX_STOP_POINTS"
         | "BRUTEX_PROTECTED_EXITS"
         | "BRUTEX_MIN_FILL_HEADROOM_BP"
-        | "BRUTEX_MIN_AVG_RR_BP" => nonnegative_floor(raw).is_some(),
+        | "BRUTEX_MIN_AVG_RR_BP" => crate::knobs::policy_floor(name, raw).is_some(),
         // `BRUTEX_SCREEN_BUDGET_MS` IS IN `NAMES` AND REACHES THIS ARM ON
         // PURPOSE: it is never usable, whatever it says. The strict range audit
         // records, and a budget derives the priced cap from a wall-clock
@@ -189,10 +186,12 @@ mod tests {
                 "4294967295".to_owned(),
                 "4294967296".to_owned(),
             ),
+            // The shared reader's ceiling is `TOP_CEILING` since D-1727; the
+            // exact limit moved from `i64::MAX` to it.
             (
                 "BRUTEX_TOP",
-                usize::try_from(i64::MAX).unwrap_or(usize::MAX).to_string(),
-                "9223372036854775808".to_owned(),
+                crate::TOP_CEILING.to_string(),
+                (crate::TOP_CEILING + 1).to_string(),
             ),
             (
                 "BRUTEX_SCREEN_CAP",
@@ -227,10 +226,29 @@ mod tests {
         assert!(!value("BRUTEX_MIN_TRADES", "9223372036854775808"));
     }
 
+    /// CE-44, D-2651: the strict check takes exactly the words `knob::switch`
+    /// takes, so one process cannot read `BRUTEX_VALIDATE` two ways.
+    #[test]
+    fn the_strict_validate_check_takes_the_switch_words_and_nothing_else() {
+        for word in ["0", "1", "false", "TRUE", " off ", "On", "no", "yes"] {
+            assert_eq!(
+                value("BRUTEX_VALIDATE", word),
+                brutex_core::knob::switch("BRUTEX_VALIDATE", Some(word), true).is_ok(),
+                "{word:?}"
+            );
+            assert!(value("BRUTEX_VALIDATE", word), "{word:?}");
+            assert!(request_value("BRUTEX_VALIDATE", word), "{word:?}");
+        }
+        for word in ["", "2", "maybe", "0x0", "enabled"] {
+            assert!(!value("BRUTEX_VALIDATE", word), "{word:?}");
+            assert!(!request_value("BRUTEX_VALIDATE", word), "{word:?}");
+        }
+    }
+
     #[test]
     fn strict_environment_validation_refuses_without_defaulting_or_exposing_values() {
         let refusal = validate_with(&[], |name| match name {
-            "BRUTEX_VALIDATE" => Some("false".to_owned()),
+            "BRUTEX_VALIDATE" => Some("maybe".to_owned()),
             "BRUTEX_MAX_STOP_POINTS" => Some("not-an-integer".to_owned()),
             "BRUTEX_SIZING_RATE_BP" => Some("5000".to_owned()),
             _ => None,

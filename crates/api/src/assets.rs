@@ -93,8 +93,12 @@ const MASTERS: &str = "masters.js";
 const SOURCES: &str = "src";
 
 /// The front-end directory: [`WEB_ENV`], or `web/` beside this workspace.
-#[must_use]
-pub fn web_dir() -> PathBuf {
+///
+/// # Errors
+///
+/// [`WEB_ENV`] is set but empty, which would serve `./build` of the working
+/// directory as the front end (CE-37, D-1769).
+pub fn web_dir() -> Result<PathBuf, String> {
     web_dir_from(std::env::var_os(WEB_ENV))
 }
 
@@ -105,9 +109,8 @@ pub fn web_dir() -> PathBuf {
 /// cannot set an environment variable — `set_var` is `unsafe` under edition
 /// 2024, this crate forbids `unsafe`, and mutating process-wide state would
 /// race every other test in the binary.
-#[must_use]
-fn web_dir_from(value: Option<std::ffi::OsString>) -> PathBuf {
-    value.map_or_else(default_web_dir, PathBuf::from)
+fn web_dir_from(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    Ok(brutex_core::knob::folder(WEB_ENV, value)?.unwrap_or_else(default_web_dir))
 }
 
 /// `web/` beside the workspace this binary was built from.
@@ -272,6 +275,22 @@ fn segments(raw: &str) -> Result<Vec<String>, Refusal> {
 fn looks_like_asset(segments: &[String]) -> bool {
     segments.first().is_some_and(|s| s == IMMUTABLE_DIR)
         || segments.last().is_some_and(|s| s.contains('.'))
+}
+
+/// How long a browser may keep a content-addressed bundle file.
+///
+/// audit-20261003 webcontract-5, D-1591. Nothing was cacheable, so every
+/// navigation re-downloaded every chunk (the backtest node alone is 716 KB)
+/// with a whole-file read on the server. A file under `_app/immutable/` carries
+/// a hash of its own content in its name — a changed file is a new URL — so it
+/// can be kept for a year with no revalidation. Everything else (the shell,
+/// `version.json`, the hand-written scripts) keeps no cache header and is
+/// fetched afresh, so a rebuild is seen on the next navigation.
+const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// Whether `segments` name a content-hashed bundle file.
+fn content_addressed(segments: &[String]) -> bool {
+    matches!(segments, [app, immutable, _, ..] if app == IMMUTABLE_DIR && immutable == "immutable")
 }
 
 /// The `Content-Type` for a file, decided by its extension and nothing else.
@@ -527,6 +546,13 @@ pub enum Build {
     },
     /// A shell is there, and no source is newer than it.
     Serving,
+    /// A shell is there and answers pages, and whether a source is newer was
+    /// NOT decided: the walk of the sources was cut short or could not read a
+    /// directory. D-3686.
+    Unchecked {
+        /// Why the walk did not see every source.
+        why: String,
+    },
 }
 
 impl Build {
@@ -538,6 +564,11 @@ impl Build {
 
     /// Reads the state of the build beside its sources.
     fn read(web: &Path, root: Option<&Path>) -> Self {
+        Self::read_bounded(web, root, Self::MAX_SOURCES)
+    }
+
+    /// [`Self::read`] with the source walk's bound given, so a test can cut it.
+    fn read_bounded(web: &Path, root: Option<&Path>, limit: u64) -> Self {
         let Some(root) = root else {
             return Self::Missing;
         };
@@ -555,25 +586,31 @@ impl Build {
         // absent comparison may not be reported as a fresh one OR as a stale
         // one. `CLAUDE.md` §3 rule 6.
         let src = web.join(SOURCES);
-        let Some((newest, at)) = newest_under(&src, Self::MAX_SOURCES) else {
-            return Self::Serving;
-        };
-        match at.duration_since(built_at) {
-            Ok(gap) if gap.as_secs() > 0 => Self::Stale {
+        let (newest, incomplete) = newest_under(&src, limit);
+        if let Some((newest, at)) = newest
+            && let Ok(gap) = at.duration_since(built_at)
+            && gap.as_secs() > 0
+        {
+            // A NEWER SOURCE FOUND IS A FACT, whether or not the walk finished.
+            return Self::Stale {
                 newer: newest.display().to_string(),
                 by_secs: gap.as_secs(),
-            },
-            // `Err` is the ordinary case: the shell is NEWER than every source,
-            // so the subtraction runs backwards. Sub-second is not staleness —
-            // a build writes its own output while the walk is running.
-            _ => Self::Serving,
+            };
         }
+        // `Err` from the subtraction is the ordinary case: the shell is NEWER
+        // than every source seen. Sub-second is not staleness, because a build
+        // writes its own output while the walk is running. But "no source
+        // newer" is only true of a walk that saw every source.
+        incomplete.map_or(Self::Serving, |why| Self::Unchecked { why })
     }
 
     /// Whether this build can answer a page.
     #[must_use]
     pub const fn serving(&self) -> bool {
-        matches!(self, Self::Serving | Self::Stale { .. })
+        matches!(
+            self,
+            Self::Serving | Self::Stale { .. } | Self::Unchecked { .. }
+        )
     }
 
     /// The word for a log field. One token, never a sentence.
@@ -584,6 +621,7 @@ impl Build {
             Self::NoShell { .. } => "no-shell",
             Self::Stale { .. } => "STALE",
             Self::Serving => "serving",
+            Self::Unchecked { .. } => "unchecked",
         }
     }
 
@@ -602,29 +640,52 @@ impl Build {
                  Run `npm run build` in web/"
             ),
             Self::Serving => "serving".to_owned(),
+            Self::Unchecked { ref why } => format!(
+                "serving, FRESHNESS UNCHECKED — {why}, so whether a source is newer than \
+                 {INDEX} was not decided"
+            ),
         }
     }
 }
 
-/// The newest file under `dir`, and when it was written.
+/// The newest file under `dir`, and when it was written, and whether the walk
+/// was incomplete.
 ///
-/// `None` when the directory is not there, holds no file, or holds none whose
-/// modification time can be read — three absences, and not one of them is a
-/// timestamp this may invent.
+/// The first half is `None` when the directory is not there, holds no file, or
+/// holds none whose modification time can be read: three absences, and not
+/// one of them is a timestamp this may invent. The second half names why the
+/// walk did NOT see everything (it stopped at `limit`, or a directory under
+/// `dir` could not be read), so a caller never reports "nothing newer" over a
+/// tree it did not finish reading (gap-audit #14, D-3686). A `dir` that does
+/// not exist is not incomplete: there is nothing to read.
 ///
 /// Iterative, bounded, and keyed on [`std::fs::DirEntry::file_type`] so a
 /// symlink is one entry rather than a descent — the same rule, and the same
 /// reason, as [`walk_within`].
-fn newest_under(dir: &Path, limit: u64) -> Option<(PathBuf, std::time::SystemTime)> {
+fn newest_under(
+    dir: &Path,
+    limit: u64,
+) -> (Option<(PathBuf, std::time::SystemTime)>, Option<String>) {
     let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut incomplete: Option<String> = None;
     let mut seen: u64 = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
         if seen >= limit {
+            incomplete = Some(format!(
+                "the walk of {} stopped at its bound of {limit} entries",
+                dir.display()
+            ));
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(why) if next == dir && why.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(why) => {
+                incomplete
+                    .get_or_insert_with(|| format!("{} could not be read — {why}", next.display()));
+                continue;
+            }
         };
         for entry in entries.flatten() {
             seen = seen.saturating_add(1);
@@ -643,7 +704,7 @@ fn newest_under(dir: &Path, limit: u64) -> Option<(PathBuf, std::time::SystemTim
             }
         }
     }
-    best
+    (best, incomplete)
 }
 
 /// The front end on disk, and everything that decides what a path answers.
@@ -788,15 +849,44 @@ impl Assets {
     /// a 404 only for a path that does not look like an asset.
     #[must_use]
     pub fn respond(&self, method: &axum::http::Method, raw_path: &str) -> Response {
+        // NO ROUTE, NOT A WRONG METHOD. Every unrouted path lands here, so a
+        // POST to `/pull/spot/` or `/backtest/runn` is a wrong PATH, and a
+        // `405` told the caller to change a method that can never succeed --
+        // with no `Allow` header, which RFC 9110 §15.5.6 requires of a 405.
+        // `404` names the path as `not_found` does for a GET. D-2752 (CE-99).
         if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
             return answer(
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::NOT_FOUND,
                 "text/plain; charset=utf-8",
-                format!("{method} is not a method the front end answers\n").into_bytes(),
+                format!(
+                    "no route answers {method} {raw_path}. The front end \
+                     answers only GET and HEAD; every other method needs a \
+                     server route, spelled exactly.\n"
+                )
+                .into_bytes(),
             );
         }
-        let Some(root) = self.root.as_deref() else {
-            return self.not_built();
+        // NOT BUILT AT STARTUP IS ASKED AGAIN, NOT CACHED. The 503 below tells
+        // the operator to run the build; with the startup answer cached, the
+        // page stayed 503 after that command succeeded, until a restart the
+        // page never mentioned. So the not-built branch resolves the directory
+        // once per request (one `canonicalize`), and the served branch, the
+        // one that found it at startup, costs nothing extra. The banner and
+        // [`Build`] remain the startup observation they say they are.
+        // conc:server2-1, D-2772.
+        let built_since;
+        let root = match self.root.as_deref() {
+            Some(root) => root,
+            None => match std::fs::canonicalize(&self.named)
+                .ok()
+                .filter(|resolved| resolved.is_dir())
+            {
+                Some(resolved) => {
+                    built_since = resolved;
+                    built_since.as_path()
+                }
+                None => return self.not_built(),
+            },
         };
         let segments = match segments(raw_path) {
             Ok(segments) => segments,
@@ -816,7 +906,14 @@ impl Assets {
         if let Some(real) = target
             && let Ok(bytes) = std::fs::read(&real)
         {
-            return answer(StatusCode::OK, content_type(&real), bytes);
+            let mut served = answer(StatusCode::OK, content_type(&real), bytes);
+            if content_addressed(&segments) {
+                served.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static(IMMUTABLE_CACHE),
+                );
+            }
+            return served;
         }
         if looks_like_asset(&segments) {
             return self.not_found(raw_path);
@@ -903,7 +1000,7 @@ impl Assets {
                      <a href=\"/instruments\">/instruments</a>, \
                      <a href=\"/pull\">/pull</a>, \
                      <a href=\"/store\">/store</a>, \
-                     <a href=\"/audit\">/audit</a>.</p>",
+                     <a href=\"/audit/page\">/audit/page</a>.</p>",
                     crate::render::escape(INDEX),
                     crate::render::escape(&index.display().to_string()),
                     crate::render::escape(&e.to_string()),
@@ -1003,7 +1100,7 @@ impl Assets {
                  <a href=\"/instruments\">/instruments</a>, \
                  <a href=\"/pull\">/pull</a>, \
                  <a href=\"/store\">/store</a>, \
-                 <a href=\"/audit\">/audit</a>, \
+                 <a href=\"/audit/page\">/audit/page</a>, \
                  <a href=\"/autopilot.json\">/autopilot.json</a>.</p>",
                 crate::render::escape(&self.named.display().to_string()),
                 crate::render::escape(WEB_ENV),
@@ -1062,6 +1159,89 @@ mod tests {
     }
 
     /// A directory with a shell and one real asset.
+    /// **A source walk that did not finish never says "serving".**
+    /// Gap-audit #14, D-3686. A walk cut at its bound is incomplete; a walk
+    /// over a tree with no `web/src` is not; a newer source found before the
+    /// cut is still STALE.
+    #[test]
+    fn a_source_walk_that_did_not_finish_is_unchecked_not_serving() {
+        let root = web("walk-bound");
+        for name in ["a.svelte", "b.svelte", "c.svelte"] {
+            put(&root, name, "x");
+        }
+        let (_, incomplete) = newest_under(&root, 1);
+        assert!(
+            incomplete
+                .as_deref()
+                .is_some_and(|why| why.contains("stopped at its bound of 1")),
+            "{incomplete:?}"
+        );
+        let (_, whole) = newest_under(&root, 100);
+        assert_eq!(whole, None, "a walk that saw everything is complete");
+        let (none, absent) = newest_under(&root.join("no-such-dir"), 100);
+        assert_eq!(
+            (none, absent),
+            (None, None),
+            "no sources is not an incomplete walk"
+        );
+
+        let shell = furnished("walk-unchecked");
+        let src = shell.join(SOURCES);
+        std::fs::create_dir_all(&src).expect("mkdir");
+        std::fs::write(src.join("old.svelte"), "x").expect("a source");
+        let long_ago =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(src.join("old.svelte"))
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("an old source");
+        let bundle = shell.join(BUILD_DIR);
+        let build = Build::read_bounded(&shell, Some(bundle.as_path()), 0);
+        let Build::Unchecked { ref why } = build else {
+            panic!("a walk stopped at once decided nothing: {build:?}");
+        };
+        assert!(why.contains("bound of 0"), "{why}");
+        assert!(build.serving(), "it still answers pages");
+        assert_eq!(build.word(), "unchecked");
+        assert!(
+            build.note().contains("FRESHNESS UNCHECKED"),
+            "{}",
+            build.note()
+        );
+        assert_eq!(
+            Build::read_bounded(&shell, Some(bundle.as_path()), 100),
+            Build::Serving,
+            "the same tree walked whole is fresh"
+        );
+    }
+
+    /// **An unreadable directory under the sources is named, not skipped.**
+    /// D-3686, run where the mode bits bind (D-0995).
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_source_directory_leaves_freshness_unchecked() {
+        crate::isolated::where_permission_binds(
+            "assets::tests::an_unreadable_source_directory_leaves_freshness_unchecked",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let shell = furnished("walk-unreadable");
+                let locked = shell.join(SOURCES).join("routes");
+                std::fs::create_dir_all(&locked).expect("mkdir");
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                    .expect("chmod");
+                let bundle = shell.join(BUILD_DIR);
+                let build = Build::read_bounded(&shell, Some(bundle.as_path()), 100);
+                let _restored =
+                    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+                let Build::Unchecked { ref why } = build else {
+                    panic!("an unreadable source directory decided nothing: {build:?}");
+                };
+                assert!(why.contains("could not be read"), "{why}");
+            },
+        );
+    }
+
     fn furnished(name: &str) -> PathBuf {
         let dir = web(name);
         put(&dir, INDEX, "<!doctype html><title>shell</title>");
@@ -1093,13 +1273,18 @@ mod tests {
     fn the_directory_is_the_environment_or_web_beside_the_workspace() {
         assert_eq!(
             web_dir_from(Some("/somewhere/else".into())),
-            PathBuf::from("/somewhere/else"),
+            Ok(PathBuf::from("/somewhere/else")),
             "the environment wins when it is set"
+        );
+        // CE-37, D-1769: set but empty is refused by name, never `./build`.
+        assert!(
+            web_dir_from(Some("".into()))
+                .is_err_and(|why| why.starts_with("BRUTEX_WEB is set but empty")),
         );
         // Compared against `default_web_dir` rather than only against
         // `web_dir_from(None)`, which calls it: a function compared only
         // against itself cannot be falsified.
-        assert_eq!(web_dir_from(None), default_web_dir());
+        assert_eq!(web_dir_from(None), Ok(default_web_dir()));
         assert!(
             default_web_dir().ends_with("web"),
             "the default names the front-end directory: {}",
@@ -1288,6 +1473,30 @@ mod tests {
     //    shell, then an honest 404.
     // ---------------------------------------------------------------------
 
+    /// audit-20261003 webcontract-5, D-1591: a content-hashed bundle file is
+    /// served cacheable as immutable; the shell and any other file are not.
+    #[tokio::test]
+    async fn only_content_hashed_files_are_served_immutable() {
+        let dir = furnished("cache");
+        put(&dir, "_app/version.json", "{}");
+        let assets = Assets::new(&dir);
+        let cache = |path: &str| {
+            assets
+                .respond(&axum::http::Method::GET, path)
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        assert_eq!(
+            cache("/_app/immutable/entry/app.js").as_deref(),
+            Some(IMMUTABLE_CACHE)
+        );
+        assert_eq!(cache("/"), None, "the shell must see a rebuild");
+        assert_eq!(cache("/backtest"), None);
+        assert_eq!(cache("/_app/version.json"), None);
+        assert_eq!(cache("/_app/immutable/nope"), None, "a 404 is not cached");
+    }
+
     #[tokio::test]
     async fn a_real_asset_is_served_and_a_missing_one_is_a_404_not_the_shell() {
         let dir = furnished("order");
@@ -1345,8 +1554,17 @@ mod tests {
         let dir = furnished("method");
         let assets = Assets::new(&dir);
         let (status, _, body) = read(assets.respond(&axum::http::Method::POST, "/db")).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert!(body.contains("POST"), "it names the method: {body}");
+        // CE-99 / D-2752: an unrouted POST is a wrong PATH, named as one --
+        // never a 405 without the `Allow` header RFC 9110 requires.
+        let (status, _, body) =
+            read(assets.respond(&axum::http::Method::POST, "/pull/spot/")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(
+            body.contains("no route answers POST /pull/spot/"),
+            "it names the method and the path: {body}"
+        );
         let (status, _, _) = read(assets.respond(&axum::http::Method::HEAD, "/")).await;
         assert_eq!(status, StatusCode::OK, "HEAD is a GET without a body");
     }
@@ -1436,6 +1654,42 @@ mod tests {
         assert!(!assets.built(), "a file named `build` is not a build");
         let (status, _, _) = get(&assets, "/").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// **A build made after startup is served without a restart.**
+    /// conc:server2-1, D-2772.
+    ///
+    /// The 503 names the command that produces the build. The not-built
+    /// answer was cached at startup, so after that command succeeded every
+    /// page still answered the same 503 until the process restarted.
+    #[tokio::test]
+    async fn a_build_made_after_startup_is_served_without_a_restart() {
+        let dir = crate::scratch::path("assets-built-after-startup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let assets = Assets::new(&dir);
+        assert!(!assets.built(), "the premise: nothing at startup");
+        let (status, _, body) = get(&assets, "/").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        put(&dir, INDEX, "<!doctype html><title>built later</title>");
+        put(
+            &dir,
+            "_app/immutable/entry/app.js",
+            "export const later = 1;",
+        );
+        let (status, _, body) = get(&assets, "/").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("built later"), "{body}");
+        let (status, _, body) = get(&assets, "/_app/immutable/entry/app.js").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, _) = get(&assets, "/../secret.txt").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a root resolved late keeps every refusal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`built()` was true for any directory that exists, and the banner said

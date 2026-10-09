@@ -18,8 +18,12 @@
 //!
 //! Coordinate reconstruction and OOS replay are linear in the supplied bars,
 //! resolved grid and candidate paths.  The chronological merge examines at
-//! most 200 stream heads per emitted minute.  Persistence, hashing and reopen
-//! are linear in their records.  Only an already-indexed execution-capability
+//! most 200 stream heads per emitted minute, indexes the minute's offered
+//! constituents once, and resolves each scheduled decision with one
+//! expected-O(1) probe of that index rather than a rescan of every offered
+//! stream (rep-1, D-2640; UNVERIFIED as a measured bound, proven only in
+//! shape by `cli::global_replay::tests::a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan`).
+//! Persistence, hashing and reopen are linear in their records.  Only an already-indexed execution-capability
 //! lookup is average O(1); this module makes no end-to-end O(1) claim.
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
@@ -48,7 +52,8 @@ use runner::portfolio::{
 use store::path::YearMonth;
 
 use crate::execution_capability::{
-    ExecutionCapabilityCompletionV1, ExecutionCapabilityLedger, exact_execution_law_digest_v1,
+    ExecutionCapabilityCompletionV1, ExecutionCapabilityLedger, TrainingAttestationsV1,
+    exact_execution_law_digest_v1,
 };
 use crate::population::{InstrumentFamilyV1, PopulationRowV1, TradeDirectionV1};
 use crate::selection::SelectedEntryV1;
@@ -282,6 +287,8 @@ pub fn prepare_global_replay_v1(
     runtime
         .try_reserve_exact(expected_streams)
         .map_err(|why| format!("global replay stream allocation refused: {why}"))?;
+    // One TRAINING attestation per shared slice, not per stream (D-1838).
+    let mut attestations = TrainingAttestationsV1::new();
 
     for (selection_index, selection) in selections.iter().enumerate() {
         for (rank_zero, entry) in selection.top_twenty_five().iter().copied().enumerate() {
@@ -313,6 +320,7 @@ pub fn prepare_global_replay_v1(
                 witness,
                 execution,
                 &manifest,
+                &mut attestations,
             )?;
             runtime.push(built);
         }
@@ -366,15 +374,16 @@ fn require_exact_witness_row(
     clippy::too_many_arguments,
     reason = "each argument is a separately checked selection or execution authority term"
 )]
-fn reconstruct_stream(
+fn reconstruct_stream<'w>(
     selection_index: usize,
     selection: &SelectionReceiptV3,
     rank: u16,
     entry: SelectedEntryV1,
     stream_ordinal: u16,
-    witness: &SelectedReplayWitnessV1<'_>,
+    witness: &SelectedReplayWitnessV1<'w>,
     execution: &mut ExecutionCapabilityLedger,
     manifest: &ReplayManifestV1,
+    attestations: &mut TrainingAttestationsV1<'w>,
 ) -> Result<RuntimeStream, GlobalReplayRefusal> {
     let row = require_exact_witness_row(selection, rank, entry, witness)?;
     let capability = execution
@@ -411,6 +420,7 @@ fn reconstruct_stream(
         witness.training_series,
         witness.training_column,
         witness.training_run,
+        attestations,
     )?;
     let universe = resolved
         .replay_selected_universe(
@@ -508,8 +518,9 @@ impl ScheduleStateV1 {
             .scheduler
             .schedule_minute(entry_micros, &offered)
             .map_err(|refusal| format!("global minute {entry_micros} refused: {refusal:?}"))?;
+        let offered_index = OfferedIndex::new(&offered, &offered_streams)?;
         for decision in schedule.decisions() {
-            self.record_decision(decision, runtime, &offered_streams, vix)?;
+            self.record_decision(decision, runtime, &offered_index, vix)?;
         }
         Ok(())
     }
@@ -518,10 +529,10 @@ impl ScheduleStateV1 {
         &mut self,
         decision: &PortfolioDecision,
         runtime: &mut [RuntimeStream],
-        offered_streams: &[usize],
+        offered: &OfferedIndex,
         vix: &VixCatalogV1<'_>,
     ) -> Result<(), GlobalReplayRefusal> {
-        let stream_index = find_offered_stream(runtime, offered_streams, decision.constituent)?;
+        let stream_index = find_offered_stream(offered, decision.constituent)?;
         let stream = runtime
             .get_mut(stream_index)
             .ok_or_else(|| "scheduled stream index disappeared".to_owned())?;
@@ -747,24 +758,77 @@ fn constituent_of(stream: &RuntimeStream) -> Result<Constituent, GlobalReplayRef
     })
 }
 
+/// Which offered stream a scheduled constituent names (rep-1, D-2640).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OfferedStream {
+    /// Exactly one offered stream carries the constituent.
+    Found(usize),
+    /// Two or more offered streams carry it.
+    Aliased,
+    /// No offered stream carries it.
+    Unoffered,
+}
+
+/// One minute's offered constituents, indexed ONCE per minute (rep-1,
+/// D-2640).
+///
+/// Every scheduled decision used to rescan every offered stream and rebuild
+/// each one's `Constituent` from its record, so a minute with 200 offered
+/// streams cost up to 200² rebuilds where the module header promised "at most
+/// 200 stream heads per emitted minute". The minute's intents already carry
+/// each constituent, built once in `offered_for_minute`; they are indexed
+/// here once, and each decision is one expected-O(1) probe. The answers are
+/// the scan's: a unique match, an alias, or nothing offered. UNVERIFIED as a
+/// measured bound; proven in shape by
+/// `cli::global_replay::tests::a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan`.
+pub(crate) struct OfferedIndex(HashMap<Constituent, OfferedStream>);
+
+impl OfferedIndex {
+    /// Indexes `intents[k]` as stream `streams[k]`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses intents and stream indexes of different lengths, or an
+    /// allocation the host denies.
+    pub(crate) fn new(intents: &[Intent], streams: &[usize]) -> Result<Self, String> {
+        if intents.len() != streams.len() {
+            return Err("offered intents and stream indexes differ in length".to_owned());
+        }
+        let mut index = HashMap::new();
+        index
+            .try_reserve(intents.len())
+            .map_err(|why| format!("offered-constituent index allocation refused: {why}"))?;
+        for (intent, stream) in intents.iter().zip(streams.iter().copied()) {
+            index
+                .entry(intent.constituent)
+                .and_modify(|seen| *seen = OfferedStream::Aliased)
+                .or_insert(OfferedStream::Found(stream));
+        }
+        Ok(Self(index))
+    }
+
+    /// The offered stream `constituent` names.
+    pub(crate) fn find(&self, constituent: Constituent) -> OfferedStream {
+        self.0
+            .get(&constituent)
+            .copied()
+            .unwrap_or(OfferedStream::Unoffered)
+    }
+}
+
 fn find_offered_stream(
-    runtime: &[RuntimeStream],
-    offered: &[usize],
+    offered: &OfferedIndex,
     constituent: Constituent,
 ) -> Result<usize, GlobalReplayRefusal> {
-    let mut found = None;
-    for index in offered.iter().copied() {
-        let Some(stream) = runtime.get(index) else {
-            return Err("offered stream index is outside the runtime".to_owned());
-        };
-        if constituent_of(stream)? == constituent {
-            if found.is_some() {
-                return Err("scheduler constituent aliases more than one runtime stream".to_owned());
-            }
-            found = Some(index);
+    match offered.find(constituent) {
+        OfferedStream::Found(index) => Ok(index),
+        OfferedStream::Aliased => {
+            Err("scheduler constituent aliases more than one runtime stream".to_owned())
+        }
+        OfferedStream::Unoffered => {
+            Err("scheduler returned a constituent not offered for this minute".to_owned())
         }
     }
-    found.ok_or_else(|| "scheduler returned a constituent not offered for this minute".to_owned())
 }
 
 fn absorb_quality(
@@ -3308,19 +3372,66 @@ fn scan_records<const STRIDE: usize, T>(
     Ok(records)
 }
 
+/// A file a global replay append writes to and, on failure, cuts back.
+///
+/// A trait rather than `File` alone so a test can make a write fail after part
+/// of a record reached the file, which a real disk only does when it fills.
+pub(crate) trait AppendTarget: Write + Seek {
+    /// Truncate to `len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// The operating system's refusal to truncate.
+    fn cut_to(&mut self, len: u64) -> std::io::Result<()>;
+}
+
+impl AppendTarget for File {
+    fn cut_to(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+}
+
+/// Append fixed-stride records, or leave the file exactly as long as it was.
+///
+/// `write_all` may extend a file and then fail, and a record that refuses to
+/// encode can follow records already written. Either would leave bytes no
+/// completion names, and a partial record makes `check_record_file` refuse the
+/// whole file for its ragged body on every later open. The starting length is
+/// measured by the seek to the end, under the caller's writer lock, so cutting
+/// back to it removes only this call's bytes. A process killed between two
+/// writes runs no rollback; that tail is still refused on open.
+///
+/// # Errors
+///
+/// The seek, an encode or a write refusal, naming whether the rollback held.
+pub(crate) fn append_encoded_with<T: AppendTarget, const STRIDE: usize>(
+    file: &mut T,
+    path: &Path,
+    records: impl IntoIterator<Item = Result<[u8; STRIDE], String>>,
+) -> Result<(), String> {
+    let start = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("{} could not be seeked for append: {why}", path.display()))?;
+    let attempt = records.into_iter().try_for_each(|record| {
+        file.write_all(&record?)
+            .map_err(|why| format!("{} append failed: {why}", path.display()))
+    });
+    attempt.map_err(|why| match file.cut_to(start) {
+        Ok(()) => format!(
+            "{why}. The append was rolled back to byte {start}, so every earlier whole record remains readable"
+        ),
+        Err(and) => format!(
+            "{why}. Rolling the append back to byte {start} ALSO failed: {and}. The file may now end mid-record and is refused on open until its tail is repaired"
+        ),
+    })
+}
+
 fn append_encoded<const STRIDE: usize>(
     file: &mut File,
     path: &Path,
     records: impl IntoIterator<Item = Result<[u8; STRIDE], GlobalReplayRefusal>>,
 ) -> Result<(), GlobalReplayRefusal> {
-    file.seek(SeekFrom::End(0))
-        .map_err(|why| format!("{} could not be seeked for append: {why}", path.display()))?;
-    for record in records {
-        let raw = record?;
-        file.write_all(&raw)
-            .map_err(|why| format!("{} append failed: {why}", path.display()))?;
-    }
-    Ok(())
+    append_encoded_with(file, path, records)
 }
 
 fn digest_file(file: &mut File, path: &Path) -> Result<[u8; 32], GlobalReplayRefusal> {
@@ -3732,7 +3843,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, ResolvedExitGridV1, RungPlanV1,
-        SelectedExitV1, printed_ohlcv_cost_model_id_v1,
+        SelectedExitV1, printed_ohlcv_cost_model_id_v3,
     };
     use runner::grid::Chosen;
     use runner::identity::{Direction as RunDirection, Params, Run, data_digest};
@@ -3827,7 +3938,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 4).expect("broad exact ratio interval"),
             16,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -4996,5 +5107,220 @@ mod tests {
         );
         drop(ledger);
         cleanup(&root);
+    }
+
+    /// A file a write lands in only up to `accept` bytes, whose later writes
+    /// fail as a full disk's do, and whose truncation can be made to fail.
+    struct FillingDisk {
+        bytes: Vec<u8>,
+        accept: usize,
+        cut_refused: bool,
+    }
+
+    impl Write for FillingDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let room = self.accept.saturating_sub(self.bytes.len()).min(buf.len());
+            if room == 0 {
+                return Err(std::io::Error::other("injected full disk"));
+            }
+            self.bytes.extend_from_slice(&buf[..room]);
+            Ok(room)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for FillingDisk {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Ok(u64::try_from(self.bytes.len()).expect("test length fits"))
+        }
+    }
+
+    impl AppendTarget for FillingDisk {
+        fn cut_to(&mut self, len: u64) -> std::io::Result<()> {
+            if self.cut_refused {
+                return Err(std::io::Error::other("injected truncate refusal"));
+            }
+            self.bytes
+                .truncate(usize::try_from(len).expect("test length fits"));
+            Ok(())
+        }
+    }
+
+    /// A write that fails after one whole record and three bytes of the next
+    /// leaves the file exactly as long as it was before the call, and says so.
+    /// Without the rollback those eleven bytes stayed, and `check_record_file`
+    /// refused the file for its ragged body on every later open.
+    #[test]
+    fn a_partial_append_write_rolls_back_to_its_starting_length() {
+        let mut disk = FillingDisk {
+            bytes: vec![7; HEADER_BYTES_USIZE],
+            accept: HEADER_BYTES_USIZE + 8 + 3,
+            cut_refused: false,
+        };
+        let path = Path::new("filling-disk");
+        let why = append_encoded_with::<_, 8>(&mut disk, path, [Ok([1; 8]), Ok([2; 8])])
+            .expect_err("the second record does not fit");
+        assert_eq!(disk.bytes, vec![7; HEADER_BYTES_USIZE], "{why}");
+        assert!(why.contains("filling-disk append failed"), "{why}");
+        assert!(why.contains("injected full disk"), "{why}");
+        assert!(why.contains("rolled back to byte 24"), "{why}");
+
+        // A rollback that itself fails is named as that, and leaves the
+        // partial bytes where a later open will refuse them.
+        let mut stuck = FillingDisk {
+            bytes: vec![7; HEADER_BYTES_USIZE],
+            accept: HEADER_BYTES_USIZE + 8 + 3,
+            cut_refused: true,
+        };
+        let why = append_encoded_with::<_, 8>(&mut stuck, path, [Ok([1; 8]), Ok([2; 8])])
+            .expect_err("the second record does not fit");
+        assert_eq!(stuck.bytes.len(), HEADER_BYTES_USIZE + 8 + 3, "{why}");
+        assert!(why.contains("back to byte 24 ALSO failed"), "{why}");
+        assert!(why.contains("injected truncate refusal"), "{why}");
+
+        // Room for both records: nothing is cut and nothing is refused.
+        let mut roomy = FillingDisk {
+            bytes: vec![7; HEADER_BYTES_USIZE],
+            accept: usize::MAX,
+            cut_refused: true,
+        };
+        append_encoded_with::<_, 8>(&mut roomy, path, [Ok([1; 8]), Ok([2; 8])])
+            .expect("both records fit");
+        assert_eq!(roomy.bytes.len(), HEADER_BYTES_USIZE + 16);
+    }
+
+    /// A record that refuses to encode after an earlier record was written
+    /// leaves the real file exactly as long as it was before the call.
+    #[test]
+    fn a_refused_append_leaves_the_file_exactly_as_long_as_it_was() {
+        let dir = root("append-encode-rollback");
+        fs::create_dir_all(&dir).expect("create append-rollback root");
+        let path = dir.join("records");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .expect("open append-rollback file");
+        file.write_all(&[7_u8; HEADER_BYTES_USIZE])
+            .expect("write stand-in header");
+        let why = append_encoded::<8>(
+            &mut file,
+            &path,
+            [Ok([1_u8; 8]), Err("injected encode refusal".to_owned())],
+        )
+        .expect_err("the second record refuses");
+        assert_eq!(
+            file.metadata().expect("rolled-back metadata").len(),
+            HEADER_BYTES,
+            "the first record of the refused append was removed: {why}"
+        );
+        assert!(why.contains("injected encode refusal"), "{why}");
+        assert!(why.contains("rolled back to byte 24"), "{why}");
+        fs::remove_dir_all(&dir).expect("remove append-rollback root");
+    }
+
+    fn offered_constituent(priority: u16, direction: Direction) -> Constituent {
+        Constituent {
+            priority,
+            strategy_digest: StrategyDigest::new([u8::try_from(priority % 251).unwrap(); 32]),
+            instrument: InstrumentKey::index(Exchange::Nse, "NIFTY").unwrap(),
+            direction,
+            rung_minutes: 5,
+        }
+    }
+
+    fn offered_intent(constituent: Constituent) -> Intent {
+        Intent {
+            constituent,
+            evidence: Evidence::Reachable {
+                occupied_through_micros: 0,
+            },
+        }
+    }
+
+    /// The scan `find_offered_stream` ran per decision before rep-1, as the
+    /// oracle the per-minute index is proven against.
+    fn scanned(intents: &[Intent], streams: &[usize], constituent: Constituent) -> OfferedStream {
+        let mut found = OfferedStream::Unoffered;
+        for (intent, stream) in intents.iter().zip(streams) {
+            if intent.constituent == constituent {
+                found = match found {
+                    OfferedStream::Unoffered => OfferedStream::Found(*stream),
+                    _ => OfferedStream::Aliased,
+                };
+            }
+        }
+        found
+    }
+
+    /// rep-1 (D-2640): a minute's offered constituents are indexed once and
+    /// every scheduled decision is answered as the per-decision scan answered
+    /// it: the unique stream, an alias refusal, or an unoffered refusal. The
+    /// scan rebuilt every offered stream's constituent for every decision,
+    /// up to 200² per minute; `find_offered_stream` no longer takes the
+    /// runtime at all, which the source check below pins.
+    #[test]
+    fn a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan() {
+        // 200 distinct constituents, streams in reverse order.
+        let intents: Vec<Intent> = (1..=200_u16)
+            .map(|p| offered_intent(offered_constituent(p, Direction::Long)))
+            .collect();
+        let streams: Vec<usize> = (0..200).rev().collect();
+        let index = OfferedIndex::new(&intents, &streams).expect("index");
+        for (intent, stream) in intents.iter().zip(&streams) {
+            assert_eq!(
+                index.find(intent.constituent),
+                OfferedStream::Found(*stream)
+            );
+            assert_eq!(find_offered_stream(&index, intent.constituent), Ok(*stream));
+        }
+        // Same priority, other side: a different constituent, not offered.
+        let short = offered_constituent(1, Direction::Short);
+        assert_eq!(index.find(short), OfferedStream::Unoffered);
+        assert!(
+            find_offered_stream(&index, short)
+                .unwrap_err()
+                .contains("not offered for this minute")
+        );
+        // An alias is refused for that constituent only, as the scan did.
+        let mut aliased = intents.clone();
+        aliased.push(offered_intent(offered_constituent(7, Direction::Long)));
+        let mut alias_streams = streams.clone();
+        alias_streams.push(200);
+        let index = OfferedIndex::new(&aliased, &alias_streams).expect("index");
+        for probe in (1..=201_u16)
+            .map(|p| offered_constituent(p, Direction::Long))
+            .chain([short])
+        {
+            assert_eq!(
+                index.find(probe),
+                scanned(&aliased, &alias_streams, probe),
+                "{probe:?}"
+            );
+        }
+        assert!(
+            find_offered_stream(&index, offered_constituent(7, Direction::Long))
+                .unwrap_err()
+                .contains("aliases more than one runtime stream")
+        );
+        // Empty minute; mismatched lengths.
+        let empty = OfferedIndex::new(&[], &[]).expect("empty minute");
+        assert_eq!(empty.find(short), OfferedStream::Unoffered);
+        assert!(OfferedIndex::new(&intents, &streams[..199]).is_err());
+        // The decision path no longer rebuilds constituents per decision.
+        let source = include_str!("global_replay.rs");
+        let body = source
+            .split_once("fn find_offered_stream(")
+            .expect("find_offered_stream exists")
+            .1
+            .split_once("\n}\n")
+            .expect("its body ends")
+            .0;
+        assert!(!body.contains("constituent_of("), "{body}");
     }
 }

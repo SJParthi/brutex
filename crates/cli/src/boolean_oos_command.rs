@@ -4,14 +4,18 @@ use crate::boolean_catalog_command::{
     prepared::{Input, Prepared},
 };
 use crate::candidate_universe::boolean_candidate_v1::{self as candidate, oos};
-use rayon::prelude::*;
 use std::fmt::Write as _;
 use std::path::Path;
 
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    match parse(args).and_then(|request| execute(request, out)) {
+    // Arguments, then work, each with its own code (P8-03, D-2722).
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(request, out) {
         Ok(()) => crate::OK,
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 #[derive(Clone, Copy)]
@@ -49,6 +53,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
     else {
         return Err("boolean-oos-stored requires 15 explicit arguments: VENDOR SYMBOLS RUNG FY FM TY TM CATALOG HORIZON MAX_POINTS OUTPUT LATER_FY LATER_FM LATER_TY LATER_TM".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let from = month(fy, fm)?;
     let to = month(ty, tm)?;
     let later_from = month(lfy, lfm)?;
@@ -89,49 +94,48 @@ fn execute(request: Request<'_>, out: &mut String) -> Result<(), String> {
     let prepared = Prepared::new(request.input, out)?;
     let programs = catalog(request.catalog, prepared.strict.max_bytes())?;
     out.push_str("\nLATER-PERIOD COMPARISON: every original program × both directions × every frozen TRAINING exit coordinate. Later prices never choose exits. Cost-excluded, unvalidated research; printed-fill amounts are not net trading profits. Intraday only; forced exit no later than15:10IST. This receipt is not admission or portfolio selection.\n");
-    let lanes = std::thread::available_parallelism()
-        .map_err(|why| why.to_string())?
-        .get()
-        .min(prepared.scope.families().len());
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(lanes)
-        .build()
-        .map_err(|why| why.to_string())?;
-    let results:Vec<Result<String,String>> = pool.install(|| prepared.scope.families().par_iter().map(|family| {
-        let key = family.instrument();
-        let training_request = prepared.request(request.rung, &programs, key.underlying.as_str());
-        let training = candidate::produce(training_request)?;
-        let observed = oos::produce(
-            &training,
-            oos::LaterRequest {
-                output: &prepared.output,
-                inputs: training_request.inputs,
-                from: request.later_from,
-                to: request.later_to,
-                bounds: training_request.bounds,
-            },
-        )?;
-        observed.require_current()?;
-        let trades = observed.rows().iter().try_fold(0_u64, |sum, row| {
-            sum.checked_add(row.cell().trades)
-                .ok_or("Boolean later trade total overflow")
-        })?;
-        Ok(format!(
-            "{}: original catalog={} completion={}; later comparison={} completion={}; {} frozen coordinates, {} accepted later sessions, {} complete-coordinate trade observations. Later dates {:04}-{:02} through {:04}-{:02}.",
-            family.instrument().underlying.as_str(),
-            hex(training.identity()),
-            hex(training.completion_digest()),
-            hex(observed.identity()),
-            hex(observed.completion_digest()),
-            observed.rows().len(),
-            observed.sessions().len(),
-            trades,
-            request.later_from.0,
-            request.later_from.1,
-            request.later_to.0,
-            request.later_to.1
-        ))
-    }).collect());
+    // Ordered lanes: each family's training and later-comparison attempts land
+    // in an order fixed by the scope, not the thread schedule. D-1556
+    // (audit-20261003 hunt-conc-2).
+    let results: Vec<Result<String, String>> = crate::ordered::map(
+        prepared.scope.families(),
+        |family| {
+            let key = family.instrument();
+            let training_request =
+                prepared.request(request.rung, &programs, key.underlying.as_str());
+            let training = candidate::produce(training_request)?;
+            let observed = oos::produce(
+                &training,
+                oos::LaterRequest {
+                    output: &prepared.output,
+                    inputs: training_request.inputs,
+                    from: request.later_from,
+                    to: request.later_to,
+                    bounds: training_request.bounds,
+                },
+            )?;
+            observed.require_current()?;
+            let trades = observed.rows().iter().try_fold(0_u64, |sum, row| {
+                sum.checked_add(row.cell().trades)
+                    .ok_or("Boolean later trade total overflow")
+            })?;
+            Ok(format!(
+                "{}: original catalog={} completion={}; later comparison={} completion={}; {} frozen coordinates, {} accepted later sessions, {} complete-coordinate trade observations. Later dates {:04}-{:02} through {:04}-{:02}.",
+                family.instrument().underlying.as_str(),
+                hex(training.identity()),
+                hex(training.completion_digest()),
+                hex(observed.identity()),
+                hex(observed.completion_digest()),
+                observed.rows().len(),
+                observed.sessions().len(),
+                trades,
+                request.later_from.0,
+                request.later_from.1,
+                request.later_to.0,
+                request.later_to.1
+            ))
+        },
+    )?;
     let mut refused = Vec::new();
     for (family, result) in prepared.scope.families().iter().zip(results) {
         match result {
@@ -196,5 +200,18 @@ mod tests {
         }
         assert!(parse(args.get(..14).ok_or("test prefix")?).is_err());
         Ok(())
+    }
+
+    /// G18-cli-a-03, D-2002: an argument list this build does not understand
+    /// exits `MISUSED` with the usage -- never `OK`, never `FAILED`.
+    #[test]
+    fn a_short_argument_list_exits_misused_with_the_usage() {
+        let mut out = String::new();
+        assert_eq!(command(&[], &mut out), crate::MISUSED);
+        assert!(
+            out.contains("boolean-oos-stored requires 15 explicit arguments"),
+            "{out}"
+        );
+        assert!(out.contains(crate::USAGE), "{out}");
     }
 }

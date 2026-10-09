@@ -668,6 +668,7 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
         path: PathBuf::from("fixture.csv"),
         instrument: "NIFTY".to_owned(),
         rows: raw.rows.clone(),
+        skipped: pull::fetch::DecodeSkips::default(),
     };
     let mut archive_done =
         ingest::from_members(&[member], &archive_scratch.store(), plan(&request));

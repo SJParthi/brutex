@@ -248,6 +248,12 @@ fn real_stored_witness_observer_refuses_before_each_computation_and_binds_actual
     }
 }
 
+/// Ceilings no fixture reaches, for tests about something else. Indexed by the
+/// fixture's stream id, so every `attempt(id, ..)` up to 255 has a slot.
+fn open_quality() -> Vec<StreamQuality> {
+    vec![StreamQuality::frozen(u64::MAX, u64::MAX); 256]
+}
+
 // Private scheduling facts only; the production constructor never accepts these.
 fn attempt(
     id: u8,
@@ -325,7 +331,14 @@ fn global_occupancy_crosses_family_direction_and_rung_and_retains_unpriced_hold(
         calls: Vec::new(),
         exact: false,
     };
-    let audit = schedule(&attempts, &mut rows, bounds(), &mut vix).expect("chronological schedule");
+    let audit = schedule(
+        &attempts,
+        &mut open_quality(),
+        &mut rows,
+        bounds(),
+        &mut vix,
+    )
+    .expect("chronological schedule");
     assert_eq!(audit.counters.offered, 4);
     assert_eq!(audit.counters.admitted, 2);
     assert_eq!(audit.counters.blocked_simultaneous, 1);
@@ -349,7 +362,7 @@ fn scheduler_ties_are_order_invariant_duplicate_keys_and_overwide_minutes_refuse
             calls: Vec::new(),
             exact: false,
         };
-        let audit = schedule(rows, &mut out, bounds(), &mut vix)?;
+        let audit = schedule(rows, &mut open_quality(), &mut out, bounds(), &mut vix)?;
         Ok::<_, String>((audit, out))
     };
     assert_eq!(
@@ -371,6 +384,7 @@ fn reference_changes_publication_bytes_but_never_economic_decisions() {
     let mut exact = Vec::new();
     let a = schedule(
         &input,
+        &mut open_quality(),
         &mut absent,
         bounds(),
         &mut Stamps {
@@ -381,6 +395,7 @@ fn reference_changes_publication_bytes_but_never_economic_decisions() {
     .expect("absent reference");
     let b = schedule(
         &input,
+        &mut open_quality(),
         &mut exact,
         bounds(),
         &mut Stamps {
@@ -407,6 +422,7 @@ fn empty_records() -> Vec<Record> {
     }
     let audit = schedule(
         &[],
+        &mut open_quality(),
         &mut rows,
         bounds(),
         &mut Stamps {
@@ -515,8 +531,14 @@ fn genuine_stored_oos_witness_reaches_private_projection_and_chronological_sched
         }
         let mut rows = Vec::new();
         let capacity = GlobalReplayV4Bounds::new(1_000_000, 1_000_000 * codec::STRIDE as u64)?;
+        // The real frozen ceilings this witness was sealed with (D-1643).
+        let mut quality = [StreamQuality::frozen(
+            replay.max_ambiguous_bars(),
+            replay.max_gap_fills(),
+        )];
         let audit = schedule(
             &attempts,
+            &mut quality,
             &mut rows,
             capacity,
             &mut Stamps {
@@ -537,4 +559,272 @@ fn genuine_stored_oos_witness_reaches_private_projection_and_chronological_sched
         Ok(())
     })
     .expect("real stored-origin OOS capability");
+}
+
+/// GAP15-18, D-1637: the candidate budget leaves room for the VIX row every
+/// admitted priceable decision writes, so the pre-replay check is sufficient.
+#[test]
+fn the_candidate_budget_reserves_three_records_per_candidate() {
+    for (records, selected) in [
+        (10_u64, 0_u64),
+        (13, 0),
+        (1_024, 0),
+        (1_024, 200),
+        (u64::MAX, 200),
+        (u64::MAX, u64::MAX - 10),
+    ] {
+        let budget = candidate_budget(records, selected).expect("room for the roster");
+        let worst = budget
+            .checked_mul(RECORDS_PER_CANDIDATE)
+            .and_then(|rows| rows.checked_add(selected + 10))
+            .expect("worst case fits u64");
+        assert!(worst <= records, "{records} records, {selected} selected");
+        assert!(
+            worst
+                .checked_add(RECORDS_PER_CANDIDATE)
+                .is_none_or(|next| next > records),
+            "the budget is the largest that fits"
+        );
+    }
+    assert_eq!(candidate_budget(1_024, 0), Ok(338));
+    assert!(candidate_budget(9, 0).is_err());
+    assert!(candidate_budget(209, 200).is_err());
+    assert!(candidate_budget(u64::MAX, u64::MAX).is_err());
+}
+
+/// CE-8, D-1769: the VIX month catalogue is bounded. Opening one month past
+/// the cap drops the earliest held one, so a replay over any span holds at
+/// most `VIX_MONTHS_HELD` months, and the months still held are the newest.
+#[test]
+fn the_vix_month_catalogue_drops_the_oldest_month_at_its_cap() {
+    use brutex_core::vendor::Vendor;
+    use std::collections::HashMap;
+    let month = |year, m| store::path::YearMonth::new(year, m).expect("a month");
+    let mut held: HashMap<(Vendor, store::path::YearMonth), u32> = HashMap::new();
+    for (n, m) in (1..=12).enumerate() {
+        super::make_room(&mut held, super::VIX_MONTHS_HELD);
+        held.insert(
+            (Vendor::Dhan, month(2025, m)),
+            u32::try_from(n).expect("small"),
+        );
+        assert!(held.len() <= super::VIX_MONTHS_HELD, "{n}: {}", held.len());
+    }
+    let mut kept: Vec<_> = held.keys().map(|(_, m)| *m).collect();
+    kept.sort_unstable();
+    assert_eq!(
+        kept,
+        (13 - super::VIX_MONTHS_HELD..=12)
+            .map(|m| month(2025, u8::try_from(m).expect("a month number")))
+            .collect::<Vec<_>>()
+    );
+    // A cap of zero still leaves room for the one month being stamped.
+    super::make_room(&mut held, 0);
+    assert!(held.is_empty());
+}
+
+fn with_quality(mut attempt: Attempt, ambiguous_bars: u64, gap_fills: u64) -> Attempt {
+    if let PathProjection::Priceable(price) = &mut attempt.candidate.path {
+        price.ambiguous_bars = ambiguous_bars;
+        price.gap_fills = gap_fills;
+    }
+    attempt
+}
+
+fn schedule_with(
+    attempts: &[Attempt],
+    quality: &mut [StreamQuality],
+) -> Result<GlobalReplayV4Audit, String> {
+    schedule(
+        attempts,
+        quality,
+        &mut Vec::new(),
+        bounds(),
+        &mut Stamps {
+            calls: Vec::new(),
+            exact: false,
+        },
+    )
+}
+
+/// GAP15-19, D-1643: a stream's globally admitted ambiguous bars and gap fills
+/// are summed and refused past the frozen exit policy's ceilings, as Global
+/// Replay V1 did. Equality admits; one more refuses; blocked, unpriced and
+/// other streams' trades never count; a stream with no ceilings refuses.
+#[test]
+fn admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings() {
+    // Stream 1 has three sequential priced trades, each one ambiguous bar.
+    let three = [
+        with_quality(attempt(1, 1, 1, 1, "NIFTY", 1, true), 1, 0),
+        with_quality(attempt(1, 2, 2, 1, "NIFTY", 1, true), 1, 0),
+        with_quality(attempt(1, 3, 3, 1, "NIFTY", 1, true), 1, 0),
+    ];
+    let mut quality = open_quality();
+    quality[1] = StreamQuality::frozen(3, 0);
+    let audit = schedule_with(&three, &mut quality).expect("three bars at a ceiling of three");
+    assert_eq!(audit.money_rows, 3);
+    assert_eq!(quality[1].admitted_ambiguous_bars, 3);
+    assert_eq!(quality[1].admitted_gap_fills, 0);
+    quality[1] = StreamQuality::frozen(2, 0);
+    let refused =
+        schedule_with(&three, &mut quality).expect_err("three bars past a ceiling of two");
+    assert!(
+        refused.contains("stream 1 globally admitted quality 3/0 exceeds its frozen ceilings 2/0"),
+        "{refused}"
+    );
+
+    // Gap fills are summed the same way, independently of ambiguity.
+    let gaps = [
+        with_quality(attempt(1, 1, 1, 1, "NIFTY", 1, true), 0, 1),
+        with_quality(attempt(1, 2, 2, 1, "NIFTY", 1, true), 0, 1),
+    ];
+    quality[1] = StreamQuality::frozen(0, 2);
+    schedule_with(&gaps, &mut quality).expect("two gap fills at a ceiling of two");
+    quality[1] = StreamQuality::frozen(0, 1);
+    let refused = schedule_with(&gaps, &mut quality).expect_err("two gap fills past one");
+    assert!(
+        refused.contains("2/2") || refused.contains("0/2 exceeds its frozen ceilings 0/1"),
+        "{refused}"
+    );
+
+    // The ceiling is per stream: stream 3 at zero is not charged stream 1's trades.
+    let mixed = [
+        with_quality(attempt(1, 1, 1, 1, "NIFTY", 1, true), 1, 1),
+        with_quality(attempt(3, 2, 2, 2, "BANKNIFTY", 5, true), 0, 0),
+    ];
+    quality[1] = StreamQuality::frozen(1, 1);
+    quality[3] = StreamQuality::frozen(0, 0);
+    schedule_with(&mixed, &mut quality).expect("each stream within its own ceilings");
+    assert_eq!(quality[3].admitted_ambiguous_bars, 0);
+
+    // A trade the scheduler blocks, or an admitted unpriced hold, adds nothing.
+    let blocked = [
+        attempt(1, 1, 3, 1, "NIFTY", 1, false),
+        with_quality(attempt(2, 2, 2, 2, "BANKNIFTY", 5, true), 1, 1),
+    ];
+    quality[1] = StreamQuality::frozen(0, 0);
+    quality[2] = StreamQuality::frozen(0, 0);
+    let audit = schedule_with(&blocked, &mut quality).expect("blocked trade is not charged");
+    assert_eq!(audit.counters.blocked_occupied, 1);
+    assert_eq!(audit.admitted_pricing_refused, 1);
+    assert_eq!(quality[2].admitted_ambiguous_bars, 0);
+
+    // An admitted priced trade whose stream has no ceilings refuses loudly.
+    let missing = [with_quality(attempt(9, 1, 1, 1, "NIFTY", 1, true), 0, 0)];
+    let mut short = vec![StreamQuality::frozen(u64::MAX, u64::MAX); 9];
+    assert_eq!(
+        schedule_with(&missing, &mut short),
+        Err("Global Replay V4 admitted a trade of a stream with no frozen ceilings".to_owned())
+    );
+    short.push(StreamQuality::frozen(0, 0));
+    schedule_with(&missing, &mut short).expect("stream 9 now has a slot");
+}
+
+#[test]
+fn admitted_quality_counts_refuse_on_overflow_instead_of_wrapping() {
+    let price = |ambiguous_bars, gap_fills| PriceProjection {
+        row: runner::grid::TradeRow {
+            signal_bar: 0,
+            entry_bar: 1,
+            exit_bar: 1,
+            best: 0,
+            worst: 0,
+            entry_micros: MINUTE,
+            exit_micros: MINUTE,
+            adverse: 0,
+            adverse_paisa: 0,
+            favourable: 0,
+            favourable_paisa: 0,
+        },
+        ambiguous_bars,
+        gap_fills,
+    };
+    let mut full = StreamQuality::frozen(u64::MAX, u64::MAX);
+    full.admitted_ambiguous_bars = u64::MAX;
+    assert_eq!(
+        full.absorb(0, price(1, 0)),
+        Err("Global Replay V4 admitted ambiguous-bar count overflow".to_owned())
+    );
+    let mut full = StreamQuality::frozen(u64::MAX, u64::MAX);
+    full.admitted_gap_fills = u64::MAX;
+    assert_eq!(
+        full.absorb(0, price(0, 1)),
+        Err("Global Replay V4 admitted gap-fill count overflow".to_owned())
+    );
+    let mut edge = StreamQuality::frozen(u64::MAX, u64::MAX);
+    edge.admitted_ambiguous_bars = u64::MAX - 1;
+    edge.admitted_gap_fills = u64::MAX - 1;
+    assert_eq!(edge.absorb(0, price(1, 1)), Ok(()));
+    assert_eq!(edge.admitted_ambiguous_bars, u64::MAX);
+    assert_eq!(edge.admitted_gap_fills, u64::MAX);
+}
+
+/// replay-5 (D-2636): a VIX month a writer holds when the replay first needs
+/// it is waited for a bounded second, never refused at once and never turned
+/// into absence. On the old code `VixCatalog::stamp` opened through the plain
+/// door, so the held month refused at once with "another writer holds" and
+/// this test's first stamp was `Err`.
+#[test]
+fn a_vix_month_held_briefly_by_a_writer_is_waited_for_not_refused() {
+    use store::file::BarFile;
+    use store::path::{FileKind, StorePath, Timeframe, YearMonth};
+    let scratch = Scratch::new();
+    let month = YearMonth::new(2025, 5).expect("month");
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        crate::vix_reference::VIX_REFERENCE_SYMBOL,
+    )
+    .expect("VIX key");
+    let path = StorePath::for_key(
+        Vendor::Dhan,
+        &key,
+        Timeframe::MINUTE_1,
+        month,
+        FileKind::Bars,
+    )
+    .expect("VIX path");
+    let hash =
+        brutex_core::universe::fnv1a(crate::vix_reference::VIX_REFERENCE_SYMBOL).to_le_bytes();
+    let symbol_id = u32::from_le_bytes(hash[..4].try_into().expect("low 32 bits"));
+    let ts = month.ist_bounds_micros().0 + 600 * MINUTE;
+    let mut writer = BarFile::open_or_create(&scratch.0, path, symbol_id).expect("VIX writer");
+    writer
+        .append(&[store::format::Bar {
+            ts_micros: ts,
+            open: 1_500,
+            high: 1_510,
+            low: 1_490,
+            close: 1_505,
+            volume: 0,
+            open_interest: i64::MIN,
+        }])
+        .expect("one VIX bar");
+    // The writer still holds the month when the stamp is asked for, and
+    // closes inside the bound.
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(writer);
+    });
+    let mut catalog = VixCatalog {
+        root: &scratch.0,
+        months: HashMap::new(),
+    };
+    let stamped = catalog.stamp(Vendor::Dhan, ts);
+    release.join().expect("release thread");
+    assert!(
+        matches!(stamped, Ok(VixStamp::Exact(candle)) if candle.close == 1_505),
+        "a briefly held month is waited for, not {stamped:?}"
+    );
+    // The minute after is a hole in the same held month: absent.
+    assert_eq!(
+        catalog.stamp(Vendor::Dhan, ts + MINUTE),
+        Ok(VixStamp::Absent)
+    );
+    // A month that does not exist is a refusal, never an absent stamp.
+    let missing = catalog.stamp(Vendor::Groww, ts);
+    assert!(
+        missing
+            .as_ref()
+            .is_err_and(|why| why.contains("does not exist")),
+        "{missing:?}"
+    );
 }

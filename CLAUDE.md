@@ -135,9 +135,11 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    honest limits; describing either historical defect as current would now be a
    second documentation defect.
 
-   *Mask evaluation* is O(1) per bar in the production
-   `engine::column::Column::support` path. The owned column is row-major and
-   folds exactly one fixed-six-word `vocab::ConditionMask::hits` call per bar,
+   *Mask evaluation* is O(1) per bar per candidate in the production
+   `engine::column::Column::support_each` path, which counts a whole batch of
+   candidates against each 512-row block of the column before the next
+   (D-4481, D-4487). The owned column is row-major and every (bar, candidate)
+   pair folds exactly one fixed-six-word `vocab::ConditionMask::hits` call,
    independent of candidate width and of whether the row matches. The former
    vertical implementation did one bitmap intersection per named condition and
    was Θ(k); `C-E-02b` retains that failed measurement, while `C-E-02`,
@@ -149,16 +151,17 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    former candidate `seen` set was removed: there is no dedup operation on that
    path to call O(1).
 
-   *Result append* is `Vec::push` **at k=1 and `Vec::extend` at k≥2, and the
-   difference is the live path rather than a detail.** `engine::drain` hands each
-   support lane its own pre-sized `kept`, pushes into that, and then folds the
-   lanes into `out` with one `extend` per chunk — so the per-candidate `push`
-   happens into a lane-local vector and the result vector is appended in batches.
-   Same amortised class, different operation from the one this rule named for as
-   long as it has existed. k=1 reserves the offered width and later levels
-   reserve a capped previous-frontier heuristic. Appends within that reservation
-   allocate nothing; an expanding level can outgrow it, so the unconditional
-   bound is amortised O(1), not worst-case O(1) for every append.
+   *Result append* is one `Vec::push` per surviving candidate, through
+   `engine::primitives::append`, at every k. At k≥2 `engine::drain` reserves room
+   in `out` for the whole batch before any worker runs, the support lanes write
+   counts into disjoint slices of one `counts` vector, and one serial loop then
+   pushes each survivor in candidate order — so no push on that path allocates.
+   (This paragraph described lane-local `kept` vectors folded with one `extend`
+   per chunk; that design was replaced and the paragraph was not. D-1440.) k=1
+   reserves the offered width; the join's `exhausted` check reserves for every
+   pending batch candidate before admitting one. Where a reservation is not
+   already held, `Vec`'s guarantee is amortised O(1), not worst-case O(1).
+   `C-E-11` times `engine::primitives::append` itself.
 
    These qualifications do not widen the rule: they identify where its named
    primitive exists, where injectivity removes the need for one, and where
@@ -185,8 +188,12 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    the right tool there. Two rules follow from the distinction, and the second
    is the one that bites: **a new consumer that takes `&[Candle]` and indexes
    into it inherits no protection at all** — `vwap::availability_of` reads the
-   whole slice, which is exactly why `cli` and `runner` pass
-   `Availability::Absent` rather than deriving it. Wiring `PastPrefix` into the
+   whole slice, which is exactly why stored callers select availability from
+   instrument kind before reading bars: spot indices use `Availability::Absent`,
+   eligible cash equities use `Availability::Present` (D-0507). Futures remain
+   outside the sweep scope. No caller may infer eligibility from later volume.
+   (This said `cli` and `runner` pass `Absent` everywhere; `AGENTS.md` carried
+   the correction and this file did not — P1-15-01, D-1764.) Wiring `PastPrefix` into the
    fold, or writing a gate that refuses slice indexing on that path, would make
    the original sentence true; until one of those lands this is the honest
    statement. D-0212.
@@ -244,9 +251,12 @@ only after their manifests took them. `cli`'s `pull` and `vocab` arrows, both
 declared on 2026-09-01, were missing here until D-0683: D-0453 drew `pull` in
 `AGENTS.md` and `docs/01-architecture.md` but not in this file, and its own list
 left out `vocab`. Gates 9 and 9b pin one arrow each, and `core/tests/graph.rs`
-checks the table in `docs/01-architecture.md` against all thirteen manifests;
-**nothing parses this block as a whole**, so check it against that gate and the
-manifests rather than trusting it.
+checks the table in `docs/01-architecture.md` against all thirteen manifests.
+**Since D-3502 the same file parses this block, and `AGENTS.md`'s copy, as a
+whole** (`the_law_pictures_of_the_graph_are_the_manifests`): every member and
+every arrow, both ways. Redraw the block when a manifest changes, or the build
+is red; the diagram above `docs/01-architecture.md`'s table is still checked by
+nothing.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
 of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot
@@ -314,9 +324,14 @@ any kind — not the file it opened, not the bars it read, not a refusal — so 
 `/logs` page covered the pull half of the data path and nothing of the read half.
 Gate 17 silences `vocab engine indicators runner`, because those hold the loops
 and its rule is not "each call is cheap" but "the innermost loop calls nothing at
-all". `cli` holds no loop over bars and none over candidates: it is the
-structural boundary, one event per run and one per instrument-month, which is the
-granularity gate 17's own comment prescribes as the affordable one. D-0226.
+all". `cli` is not on that list, and it is NOT loop-free: it walks bars (for
+example `window_range_percentile`) and `screen` walks every candidate in
+`by_evidence.par_iter()`, calling `GridProgress::tick` per candidate — one
+relaxed `fetch_add`, with an event only on every `stride`-th candidate. Its
+events are emitted at structural boundaries — per run, per instrument-month, and
+that `stride` — which is the granularity gate 17's own comment prescribes as the
+affordable one. This said `cli` held no loop over bars or candidates until
+D-1448 corrected it. D-0226.
 
 `cli` once deliberately had no `store` arrow, on the reasoning that the
 operator's standing rule forbade both a vendor pull and the bars already on
@@ -332,7 +347,7 @@ What survives from that reasoning is the half about gate 22, and it is the half
 that carries the rule: `cli` declines to be a *swept* crate, not to be a caller.
 
 It is **not** on gate 22's list and must never be added to one: clause A pins
-`vocab`, `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
+`vocab` to no dependency at all and `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
 as `runner` is.
 
 Every report it renders is led by a **provenance banner, and there are two of
@@ -443,9 +458,19 @@ Report failures plainly. Do not paper over a red gate.
 
 **The table was eight rows while fourteen documents existed**, so six carried no
 stated authority at all and a reader had no way to know whether they bound
-anything. All fourteen are listed now. Two numbers are used twice — `07-` and
-`09-` — which is a naming defect, not two documents pretending to be one; both
-of each pair are named above and neither is authoritative over the other.
+anything. The fourteen above are the documents with authority. Two numbers are
+used twice among them — `07-` and `09-` — which is a naming defect, not two
+documents pretending to be one; both of each pair are named above and neither
+is authoritative over the other.
+
+**`docs/12-` to `docs/35-` and `docs/research-policy/` hold no authority.** They
+are audit, readiness, research and integration reports: evidence of what was
+measured or decided at the time, cited by the decisions that act on them. Where
+one disagrees with a document in the table, the table's document wins and the
+report is the stale copy. `22-` is used twice (`22-expression-search.md`,
+`22-research-policy.md`), the same naming defect as `07-` and `09-`. This
+paragraph said "all fourteen are listed now" while 25 more documents existed
+(P1-15-02, D-1764).
 
 If this file and a document disagree, **this file wins** and the document is
 the stale copy to fix — **with one caveat that has already bitten.** That rule

@@ -38,8 +38,13 @@
 //! instruments. The drawdown does not add and cannot be pooled from cell
 //! aggregates: a pooled drawdown is a property of the merged, time-ordered
 //! trade sequence, and the exit grid keeps per-cell totals, not per-trade
-//! P&L. The `dd≥` column is therefore the LARGEST single-instrument drawdown
-//! among those pooled — a lower bound on the pooled figure, labelled as one.
+//! P&L. The `dd1max` column is therefore the LARGEST single-instrument
+//! drawdown among those pooled, and it bounds the pooled figure in NEITHER
+//! direction: A losing 100, then B winning 150, then A losing 100 again shows
+//! 200 here while the merged sequence's drawdown is 100, and two instruments
+//! losing at once can make the pooled drawdown larger than either's. It was
+//! called a lower bound and labelled `dd>=`, which was false (p2misc-1,
+//! D-2648).
 //! Exposing per-trade P&L from the grid is the change that would make it
 //! exact, and `docs/06-limits.md` records it as not done.
 //!
@@ -47,7 +52,8 @@
 //!
 //! No cost of any kind. On the indices that is correct by charter — an index
 //! is not tradeable. On a cash equity it is NOT correct: brokerage, STT, stamp
-//! duty, exchange charges, the SEBI fee and GST are real, and no rate for any of
+//! duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST are real
+//! (an UNVERIFIED list, D-1779), and no rate for any of
 //! them is quoted here because `docs/00-charter.md` records no source for an
 //! equity charge (`CLAUDE.md` §3 rule 1; D-0681). The operator
 //! asked for this pass without costs so that the rare tail is visible before
@@ -77,23 +83,42 @@
 //!
 //! # Cost
 //!
-//! Pass 1 is `instruments` screens in parallel, each what `range-rung` costs.
-//! Pass 2 is `instruments × |union|` grid evaluations, each the cost of one
-//! exit grid over that instrument's trades for that mask. Neither is a rule-4
+//! Pass 1 is `instruments` screens, one at a time, each what `range-rung`
+//! costs; each screen's sweep and pricing are parallel inside it.
+//!
+//! The union is built from ONE admission of the parent ledger and receipt
+//! sidecar, O(L + R) for L ledger rows and R receipts, then one frontier-block
+//! read per screened instrument, O(its rows), and one `HashSet` insert per
+//! frontier row -- O(1) expected (W2-cli9-0, D-1703). It used to re-admit both
+//! parent files once per instrument, O(I × (L + R)), while this header said
+//! nothing here scanned the store.
+//!
+//! Pass 2 is, per instrument, the loads, the column, the projection onto the
+//! one-minute execution series and one `SliceFacts`, `O(B_sig + B_exec)`;
+//! then per union candidate one `grid::evaluate_over`, which walks EVERY row
+//! of the projected column before it prices: `Θ(B_exec + cells × T)`. So
+//! pass 2 is `Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T))`, and
+//! because the union U is the union of every instrument's kept frontier, U
+//! grows with I (up to I × `top`): up to `Θ(I² × top × B_exec)` for the rare
+//! setups this pool exists to find, where T is small and `B_exec` is large.
+//! Until D-1702 this said "each the cost of one exit grid over that
+//! instrument's trades",
+//! which left out the `B_exec` walk (R9-cli-o1-1). None of these is a rule-4
 //! operation: those bound the per-bar and per-candidate primitives INSIDE the
-//! screen, which are unchanged. The union itself is one `HashSet` insert per
-//! frontier row — O(1) expected — and the pooled fold is one pass over
-//! `instruments × |union|` cells with O(1) work each. Nothing here scans the
-//! store per candidate, and the catalog walk that lists the surface is paid
-//! once.
+//! screen, which are unchanged. The pooled fold is one pass over
+//! `instruments × |union|` cells with O(1) work each, and the catalog walk
+//! that lists the surface is paid once. `docs/06-limits.md` states all of it.
 //!
 //! # Parallelism and reproducibility
 //!
-//! Both passes are `par_iter` over INSTRUMENTS with indexed `collect`, so the
-//! order of every table is the sorted symbol order and never the scheduler's.
-//! Pass 1's per-instrument runs are the same runs `range-rung` makes, so their
-//! identities and rows are byte-identical to running each by hand. The pooled
-//! fold runs sequentially over the collected cells. §3 rule 5.
+//! Pass 1 runs its instruments one at a time in sorted symbol order, so its
+//! ledger rows and attempt tokens are written in that order (D-1701). Pass 2 is
+//! `par_iter` over INSTRUMENTS with indexed `collect` and writes nothing, so
+//! the order of every table is the sorted symbol order and never the
+//! scheduler's. Pass 1's per-instrument runs are the same runs `range-rung`
+//! makes, so their identities and rows are byte-identical to running each by
+//! hand. The pooled fold runs sequentially over the collected cells. §3 rule
+//! 5.
 
 use core::fmt::Write as _;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -111,23 +136,25 @@ use crate::stored;
 /// Read from the operator's `Rules` rather than written here: `min_rr_bp` is
 /// the reward-to-risk floor every single-instrument cell is admitted against,
 /// and a pooled row is held to the same number so the two tables agree on what
-/// "the rule" is. Zero — the floor OFF — marks every fired row as meeting it,
-/// which is what OFF means.
+/// "the rule" is. Zero — the floor OFF — marks every fired row that WON
+/// somewhere as meeting it, which is what OFF means; a row that never won meets
+/// no rule, exactly as `grid::Cell::clears` refuses a cell with no winner
+/// (p5num-3, D-2713).
 fn tail_rule_bp(rules: crate::Rules) -> i64 {
     rules.min_rr_bp
 }
 
 /// One instrument's pass-1 outcome: the run `range-rung` would have made.
-struct Screened {
-    symbol: String,
-    outcome: Result<crate::results::Record, String>,
+pub(crate) struct Screened {
+    pub(crate) symbol: String,
+    pub(crate) outcome: Result<crate::results::Record, String>,
 }
 
 /// One `(combination, side)` the union holds, in first-seen order.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Candidate {
-    words: [u64; 6],
-    direction: Direction,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Candidate {
+    pub(crate) words: [u64; 6],
+    pub(crate) direction: Direction,
 }
 
 /// What one candidate did on one instrument: the cell the screen would have
@@ -141,25 +168,36 @@ struct Pooled {
     fired: u64,
     trades: u64,
     wins: u64,
-    net: i64,
+    /// The three money totals are `i128`, summed exactly. They were `i64`
+    /// `saturating_add`s, so a pooled sum past either end was printed and
+    /// ranked as `i64::MAX` or `i64::MIN` as if it were the real total
+    /// (h-cli-3). Each addend is one instrument's `i64` cell, and at most
+    /// `usize::MAX` of them cannot leave `i128`'s range (D-1852).
+    net: i128,
     worst: i64,
     min_win: i64,
-    gross_win: i64,
-    gross_loss: i64,
-    /// The largest single-instrument drawdown among those pooled. A LOWER
-    /// BOUND on the pooled drawdown — see the module documentation.
+    gross_win: i128,
+    gross_loss: i128,
+    /// The largest single-instrument drawdown among those pooled. NOT a
+    /// bound on the pooled drawdown in either direction — see the module
+    /// documentation (p2misc-1, D-2648).
     dd_bound: i64,
     /// Up to the first few symbols it fired on, for the row.
     names: Vec<String>,
 }
 
 impl Pooled {
-    /// Gross wins over gross losses, in hundredths. [`i64::MAX`] when nothing
-    /// was lost, which is a fact and is demoted by [`crate::ranked`] exactly as
-    /// a cell's is.
-    const fn profit_factor_bp(&self) -> i64 {
+    /// Gross wins over gross losses, in hundredths. [`NEVER_LOST`] when
+    /// nothing was lost, which is a fact and is demoted by [`ranked`] exactly
+    /// as a cell's is by [`crate::ranked`].
+    ///
+    /// In `i128` from the exact `i128` totals (D-1852). The `saturating_mul`
+    /// is unreachable short of pooling some 10^17 instruments: `gross_win` is
+    /// at most that many `i64::MAX` cells, and `i128::MAX / 100` is about
+    /// 1.8 x 10^17 of them.
+    const fn profit_factor_bp(&self) -> i128 {
         if self.gross_loss == 0 {
-            return i64::MAX;
+            return NEVER_LOST;
         }
         // `gross_loss` is negative or zero; the magnitude is what divides.
         // HUNDREDTHS, as `grid::Cell::profit_factor_bp` is: 125 is 1.25x.
@@ -167,33 +205,70 @@ impl Pooled {
     }
 
     /// The smallest win over the largest loss, in hundredths — the operator's
-    /// own rule, `min(win) >= k × max(loss)`, as a ratio. [`i64::MAX`] when
+    /// own rule, `min(win) >= k × max(loss)`, as a ratio. [`NEVER_LOST`] when
     /// nothing was lost.
-    const fn tail_bp(&self) -> i64 {
+    ///
+    /// In `i128` so `min_win × 100` is exact for every `i64` win: it was an
+    /// `i64` `saturating_mul`, which clamped a win above `i64::MAX / 100`
+    /// (D-1852). `i64::MAX × 100` is far inside `i128`, so this is exact.
+    fn tail_bp(&self) -> i128 {
         if self.worst == 0 {
-            return i64::MAX;
+            return NEVER_LOST;
         }
         // HUNDREDTHS, as `grid::Cell::reward_to_risk_bp` is, so it compares
         // directly with `Rules::min_rr_bp`.
-        self.min_win.saturating_mul(100) / self.worst.saturating_abs()
+        i128::from(self.min_win) * 100 / i128::from(self.worst).abs()
     }
 
     /// Whether the tail rule holds at the operator's multiple.
-    const fn meets(&self, rule_bp: i64) -> bool {
-        self.fired > 0 && self.tail_bp() >= rule_bp
+    ///
+    /// `wins > 0` is its own clause for the reason `grid::Cell::clears` gives:
+    /// a candidate whose every pooled trade was flat has `worst == 0`, so
+    /// [`Self::tail_bp`] is [`NEVER_LOST`] and cleared every multiple, and the
+    /// row sorted first reading "wins 0, tail never lost". No winners is never
+    /// what an operator means by a met rule (p5num-3, D-2713).
+    fn meets(&self, rule_bp: i64) -> bool {
+        self.fired > 0 && self.wins > 0 && self.tail_bp() >= i128::from(rule_bp)
     }
 
-    /// The sort key, largest first: the rule met, then the SMALLEST drawdown
-    /// bound, then the profit factor with its never-lost sentinel demoted, then
+    /// The tail as the table prints it: `-` when nothing won, because a
+    /// smallest win over a largest loss with no win has no numerator, and
+    /// "never lost" on a row with no winner reads as the best tail there is
+    /// (p5num-3, D-2713).
+    fn tail_cell(&self) -> String {
+        if self.wins == 0 {
+            "-".to_owned()
+        } else {
+            ratio_cell(self.tail_bp())
+        }
+    }
+
+    /// The sort key, largest first: the rule met, then the SMALLEST largest
+    /// single-instrument drawdown (a ranking key, not a bound on the pooled
+    /// drawdown; p2misc-1, D-2648), then the profit factor with its never-lost sentinel demoted, then
     /// the net. The drawdown leads because the objective is "very very less max
     /// drawdown" before it is anything else.
-    fn key(&self, rule_bp: i64) -> (bool, i64, i64, i64) {
+    fn key(&self, rule_bp: i64) -> (bool, i64, i128, i128) {
         (
             self.meets(rule_bp),
             self.dd_bound.saturating_neg(),
-            crate::ranked(self.profit_factor_bp()),
+            ranked(self.profit_factor_bp()),
             self.net,
         )
+    }
+}
+
+/// The never-lost sentinel of a pooled ratio. No finite ratio reaches it: the
+/// largest is `i64::MAX × 100` for the tail and, for the profit factor, the
+/// unreachable saturation [`Pooled::profit_factor_bp`] names.
+const NEVER_LOST: i128 = i128::MAX;
+
+/// [`crate::ranked`] for a pooled ratio: the never-lost sentinel sorts last.
+const fn ranked(ratio: i128) -> i128 {
+    if ratio == NEVER_LOST {
+        i128::MIN
+    } else {
+        ratio
     }
 }
 
@@ -290,14 +365,19 @@ fn run_under(
     );
 
     // ── PASS 1: every instrument, exactly as `range-rung` screens one ──
-    let screened: Vec<Screened> = surface
-        .par_iter()
-        .map(|symbol| Screened {
-            symbol: symbol.clone(),
-            outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None)
-                .outcome,
-        })
-        .collect();
+    //
+    // ONE AT A TIME, IN SURFACE ORDER, as `sweep_rungs` runs rungs. This was a
+    // rayon parallel map over the surface, which wrote every instrument's ledger row and
+    // attempts in thread-completion order (GAP13-13) and ran up to the rayon
+    // pool's width of sweeps at once while nothing raised
+    // `SWEEPS_SHARING_THIS_MACHINE`, so each concurrent sweep took the whole
+    // machine's ceiling and every core (R9-cli-o1-0). With one sweep in flight
+    // the counter's 1 is the truth, and each sweep's own support lanes and
+    // pricing still use every core. D-1701.
+    let screened: Vec<Screened> = crate::in_input_order(&surface, |symbol| Screened {
+        symbol: symbol.clone(),
+        outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None).outcome,
+    });
     let screened_ok = screened.iter().filter(|s| s.outcome.is_ok()).count();
     crate::note(
         &telemetry::Event::info("cli.pool", "pass 1 finished")
@@ -379,7 +459,7 @@ fn run_under(
 /// banner (D-0696).
 /// A surface with only misfiled holdings refuses with these blocks before
 /// the opening is built. A store with no such holdings remains a page.
-fn head_under(
+pub(crate) fn head_under(
     root: &std::path::Path,
     vendor_word: &str,
     rung: &str,
@@ -392,10 +472,12 @@ fn head_under(
         symbols: surface,
         elsewhere,
         unrecognised,
+        unoffered,
     } = surface_under(root, vendor, rung)?;
     let mut unread = String::new();
     not_on_the_surface(&mut unread, &elsewhere);
     not_catalogued(&mut unread, unrecognised);
+    not_walked(&mut unread, &unoffered);
     if surface.is_empty() && !elsewhere.is_empty() {
         return Err(format!(
             "no instrument is on the surface for {vendor_word} at {rung}; the catalog \
@@ -445,9 +527,22 @@ fn not_catalogued(out: &mut String, (feeds, rungs): (u64, u64)) {
     );
 }
 
+/// The catalog's `unoffered_report`, indented like the other blocks the pool
+/// names without reading, under a blank line. Nothing when it is empty.
+/// D-0769.
+fn not_walked(out: &mut String, unoffered: &str) {
+    if unoffered.is_empty() {
+        return;
+    }
+    out.push('\n');
+    for line in unoffered.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
 /// wrapping on a platform where that could differ.
-fn count(n: usize) -> u64 {
+pub(crate) fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
@@ -474,7 +569,7 @@ fn count(n: usize) -> u64 {
 /// mark of how far the instrument ran, so this names every instrument with
 /// its own reason, claims nothing about what ran, and ends with `unread`,
 /// the head's two blocks.
-fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
+pub(crate) fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
     if screened.is_empty() || screened.iter().any(|s| s.outcome.is_ok()) {
         return Ok(());
     }
@@ -564,6 +659,7 @@ fn surface_under(
         symbols: symbols.into_iter().collect(),
         elsewhere: elsewhere.into_values().collect(),
         unrecognised: (holdings.census.unknown_vendor, holdings.census.unknown_rung),
+        unoffered: holdings.census.unoffered_report(),
     })
 }
 
@@ -581,6 +677,9 @@ struct Surface {
     /// directory, that is spelt as no feed or rung this engine knows: the
     /// catalog census's `unknown_vendor` and `unknown_rung`, store-wide.
     unrecognised: (u64, u64),
+    /// The catalog's own `unoffered_report`, store-wide: the entries it saw
+    /// below `bars/` and offered to nobody, or empty. D-0769.
+    unoffered: String,
 }
 
 /// The holdings the surface names and does not read, under the opening they
@@ -611,8 +710,8 @@ fn not_on_the_surface(out: &mut String, elsewhere: &[String]) {
 /// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
 /// holds it to the header `runner::audit::render` prints.
 pub(crate) const EQUITY_TOTALS_GROSS: &str = "NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct on a\n\
-     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee and\n\
-     GST all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
+     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee, the\n\
+     IPFT, DP charges and GST (an UNVERIFIED list) all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
      COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result\n\
      carries Selection V6 or execution authority until a charter-sourced equity charge\n\
      stack exists.";
@@ -625,7 +724,7 @@ fn opening(
     support_ppm: Option<u64>,
     surface: &[String],
 ) -> String {
-    let mut out = String::from(crate::STORED_PROVENANCE);
+    let mut out = String::from(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "feed {vendor_word} · POOL over {} instrument(s) · {rung} · {}-{:02}..{}-{:02} · support {}",
@@ -653,46 +752,84 @@ fn opening(
     out
 }
 
-fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+pub(crate) fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+    use crate::columns::{left, right};
     let _ = writeln!(out, "\n  PASS 1 -- PER SYMBOL, each on its own bars");
-    let _ = writeln!(
-        out,
-        "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD"
-    );
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
     // worst trade closest to zero, then the net. Refusals sort last and are
     // named, never dropped.
-    let mut rows: Vec<&Screened> = screened.iter().collect();
-    rows.sort_by_key(|s| match &s.outcome {
-        Ok(r) => (
-            false,
+    //
+    // TWO PARTS, EXPLICITLY. This was one ascending sort over a mixed key with
+    // refusals keyed `(true, ..)`, then `reverse()` -- which put every refusal
+    // FIRST, the opposite of the sentence above (W2-cli9-7, D-1704). The Ok
+    // rows are now sorted descending on the money key and the refusals are
+    // appended after them in their input (symbol) order. Ties among Ok rows keep
+    // input order too: `sort_by_key` is stable and `Reverse` does not reorder
+    // equal keys.
+    let mut ranked: Vec<(&Screened, &crate::results::Record)> = screened
+        .iter()
+        .filter_map(|s| s.outcome.as_ref().ok().map(|r| (s, r)))
+        .collect();
+    ranked.sort_by_key(|(_, r)| {
+        core::cmp::Reverse((
             r.max_drawdown.saturating_neg(),
             r.worst_trade,
             r.pessimistic,
-        ),
-        Err(_) => (true, i64::MIN, i64::MIN, i64::MIN),
+        ))
     });
-    rows.reverse();
-    for s in rows {
+    let mut rows: Vec<&Screened> = ranked.into_iter().map(|(s, _)| s).collect();
+    rows.extend(screened.iter().filter(|s| s.outcome.is_err()));
+    // LAID OUT TOGETHER (D-1420). Raw paisa at `i64::MIN` is 20 characters
+    // in a 12-character column, and a 14-character symbol filled its column,
+    // so `worst`, `net` and `max_dd` could read as one number.
+    let columns = [
+        left(14),
+        right(9),
+        right(9),
+        right(6),
+        right(8),
+        right(12),
+        right(12),
+        right(12),
+        right(10),
+        left(64).after(2),
+    ];
+    // THE IDENTITY EACH ROW WAS RECORDED UNDER, as its last column, so a
+    // pass-1 figure can be traced to its run without leaving the page (§3 rule
+    // 3). The page opens with `STORED_POOLED_PROVENANCE`, which promises
+    // exactly this: identities printed beside the rows they produced.
+    // R9-cli-law-3, D-1705.
+    let header = [
+        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD",
+        "identity",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for s in &rows {
+        cells.push(match &s.outcome {
+            Err(_) => vec![s.symbol.clone()],
+            Ok(r) => vec![
+                s.symbol.clone(),
+                r.bars.to_string(),
+                r.min_hits.to_string(),
+                r.depth.to_string(),
+                r.trades.to_string(),
+                r.worst_trade.to_string(),
+                r.pessimistic.to_string(),
+                r.max_drawdown.to_string(),
+                crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
+                r.identity_hex(),
+            ],
+        });
+    }
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header.trim_end());
+    for (s, line) in rows.iter().zip(&laid.rows) {
         match &s.outcome {
             Err(why) => {
-                let _ = writeln!(out, "  {:<14}REFUSED: {why}", s.symbol);
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
             }
-            Ok(r) => {
-                let _ = writeln!(
-                    out,
-                    "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-                    s.symbol,
-                    r.bars,
-                    r.min_hits,
-                    r.depth,
-                    r.trades,
-                    r.worst_trade,
-                    r.pessimistic,
-                    r.max_drawdown,
-                    crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
-                );
+            Ok(_) => {
+                let _ = writeln!(out, "  {}", line.trim_end());
             }
         }
     }
@@ -703,7 +840,27 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
 /// One `HashSet` insert per row decides membership; the `Vec` keeps first-seen
 /// order so the table is stable across runs. Instruments whose rows cannot be
 /// read are returned by name with the reason rather than skipped.
-fn union_of(
+///
+/// # One parent snapshot, not one per instrument
+///
+/// Each `Frontier::of_run` on a read-only handle proves its parent through
+/// `result_set::committed_receipt`, which opens the results ledger and the
+/// receipt sidecar afresh and indexes both in full: O(L + R) per call, so this
+/// loop was O(I × (L + R)) while the module header said nothing here scanned
+/// the store (W2-cli9-0, D-1703; the base fixed it too, sweep audit OS-4,
+/// D-2301, and the base's code is the one kept, D-2105). The parents are now
+/// admitted ONCE, through
+/// [`crate::result_set::CommittedParents`], and each instrument's receipt is
+/// one expected-O(1) probe of that snapshot followed by
+/// `Frontier::of_run_against_receipt`, which applies the same commit and
+/// count checks `of_run` applies. The snapshot is taken after pass 1 has
+/// committed every row this union reads, so it holds them.
+///
+/// Cost: O(L + R) once, plus one frontier-block read, O(rows), per screened
+/// instrument, plus one `HashSet` insert per row. The single admission is
+/// proved by `crate::pool::tests::the_union_admits_the_parent_ledger_once_not_once_per_instrument`
+/// (invariant L1A-05); the per-row terms are UNVERIFIED by any bench.
+pub(crate) fn union_of(
     root: &std::path::Path,
     screened: &[Screened],
 ) -> (Vec<Candidate>, Vec<(String, String)>) {
@@ -721,11 +878,35 @@ fn union_of(
             return (union, unread);
         }
     };
+    // THE PARENTS ARE OPENED ONCE. `Frontier::of_run` on a read-only handle
+    // cold-opens the results ledger and the receipt sidecar on every call --
+    // O(history) each -- so a pool over 210 instruments paid that 210 times.
+    // One snapshot here makes each instrument one hash probe in each parent
+    // plus its own rows (sweep audit OS-4, D-2301). The proof is the same
+    // committed-receipt gate the API's detail readers use.
+    let mut parents = match crate::result_set::CommittedParents::open_read_bounded(root, u64::MAX) {
+        Ok(parents) => parents,
+        Err(why) => {
+            for s in screened {
+                if s.outcome.is_ok() {
+                    unread.push((s.symbol.clone(), format!("parent ledger not opened: {why}")));
+                }
+            }
+            return (union, unread);
+        }
+    };
     for s in screened {
         let Ok(record) = &s.outcome else {
             continue;
         };
-        match frontier.of_run(&record.identity) {
+        let receipt = match parents.committed(&record.identity) {
+            Ok(committed) => committed.map(|committed| committed.receipt),
+            Err(why) => {
+                unread.push((s.symbol.clone(), why));
+                continue;
+            }
+        };
+        match frontier.of_run_against_receipt(&record.identity, receipt) {
             Ok((rows, damage)) => {
                 if let Some(why) = damage {
                     unread.push((s.symbol.clone(), why));
@@ -759,11 +940,41 @@ fn union_of(
 
 /// Every candidate priced on one instrument, in union order.
 ///
-/// The span is prepared exactly as the screen prepares one — the same loaders,
-/// the same execution-series check, the same withheld days, the same anchored
-/// column, the same VWAP verdict — so a cell here is the cell `range-rung`
-/// would show for that mask on that instrument. `the_pool_prepares_a_span_exactly_as_the_screen_does`
-/// pins the sequence.
+/// The span is prepared as pass 1's `audit-range` prepares one -- the same
+/// loaders, the same execution-series check, the same withheld days, the same
+/// anchored column, the same VWAP verdict -- AND THEN PRICED WHERE PASS 1
+/// PRICES: on the one-minute execution series.
+///
+/// # What was wrong (GAP13-15, D-1702)
+///
+/// This evaluated the exit grid on the coarse SIGNAL bars with the horizon
+/// counted in signal bars, while pass 1 projects its column onto the 1-minute
+/// execution series ([`crate::project_onto_execution`], `Sourced::Fill`) and
+/// prices there with the horizon in MINUTES, its stop ladder, rung count, step
+/// and floors all measured on those minutes. So a coarse rung's pass-2 cell was
+/// a different model's cell under the same mask: at 60min the pool printed "no
+/// candidate fired" over instruments whose pass-1 rows showed 83-94 trades.
+///
+/// Now the projection is the one `audit_bars_work` calls, with the same
+/// arguments: an explicit execution series for a coarse rung, and the native
+/// self-alignment for `1min`. The grid is built exactly as `screen` builds it,
+/// from the projected bars, and the rules are `Rules::derived` over the series
+/// the floors are measured on (`floors_measured_on`): the execution one.
+///
+/// The column is pass 1's own build, `column_withholding_at_build`, run
+/// read-only: a day whose exact closing minute cannot be sourced is withheld
+/// and the column rebuilt, as pass 1 does, and no preparation attempt is
+/// written. Until D-1707 this pass refused such an instrument instead.
+/// `the_pool_prices_a_span_exactly_where_the_audit_path_does` and
+/// `pass_two_withholds_an_unsourceable_close_day_as_pass_one_does` pin the
+/// behaviour.
+///
+/// # Cost
+///
+/// Per instrument: the loads, `O(B_sig + B_exec)` for the column, the projection
+/// and one hoisted `SliceFacts`; then per candidate one `grid::evaluate_over`,
+/// which walks every row of the projected column -- `Θ(B_exec)` -- before it
+/// prices `cells × T`. `docs/06-limits.md` states the whole pass (R9-cli-o1-1).
 fn price_all(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -773,9 +984,96 @@ fn price_all(
     to: (u16, u8),
     union: &[Candidate],
 ) -> Result<Vec<Priced>, String> {
+    let PreparedSpan {
+        bars,
+        column,
+        horizon,
+        rules,
+    } = prepare_span(root, vendor, underlying, rung, from, to)?;
+    let bars = bars.as_slice();
+    let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
+    let stop_rungs = crate::stop_ladder_ppm(bars, hold);
+    let levels = grid::Levels {
+        rungs: crate::grid_rungs(bars),
+        step_ppm: Some(crate::grid_step_ppm(bars, hold)),
+        // PASSED AS IT IS: the grid's own merge drops a forced level of zero
+        // (`forced.filter(|&l| l > 0)` in `runner::grid::merged`), so a
+        // `> 0` guard here was a second copy of that rule that no test could
+        // tell from `>= 0` (G18-cli-b-03, D-2022).
+        forced: Some(rules.max_mae_ppm),
+        ratios: true,
+        stops_ppm: &stop_rungs,
+    };
+    let facts = runner::trade::SliceFacts::of(bars, &column);
+    Ok(union
+        .iter()
+        .map(|candidate| {
+            let mask = vocab::ConditionMask::from_words(candidate.words);
+            let side = match candidate.direction {
+                Direction::Long => runner::excursion::Side::Long,
+                Direction::Short => runner::excursion::Side::Short,
+            };
+            let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
+            priced_cell(&g, rules)
+        })
+        .collect())
+}
+
+/// The cell pass 2 prices from one candidate's grid: the cell the screen
+/// shows, or `None` when that cell never traded.
+///
+/// `shown_cell` falls back to `Grid::best`, which does not ask whether a cell
+/// traded, and a grid can hold one that did not: a refused path blocks every
+/// clean entry behind it (`runner::grid`'s replay names that case). Such a
+/// cell is "no candidate fired", never a priced zero.
+///
+/// A function of its own so the boundary is asserted over plain cells
+/// (R1286-cli-02, D-4101), as D-2008 lifted `best_shown`: a candidate that
+/// never fires has no cell at all, so no generated pricing fixture shows a
+/// zero-trade cell reaching this filter.
+fn priced_cell(g: &grid::Grid, rules: crate::Rules) -> Priced {
+    crate::shown_cell(g, rules)
+        .map(|(cell, _admitted)| cell)
+        .filter(|cell| cell.trades > 0)
+}
+
+/// One instrument's span over one month range, prepared exactly as the screen
+/// prepares one and projected onto the series its trades fill on: the 1-minute
+/// execution bars at a coarser rung, the signal bars themselves at 1min.
+///
+/// Lifted out of [`price_all`] so `pool-oos` prepares its training and later
+/// spans through the same sequence, rather than a second copy of it that could
+/// drift (D-1576). Pass 2 already priced on the execution series and `pool-oos`
+/// walked the signal bars, which is the drift D-1576 was written against; the
+/// projection lives here so both read it (D-2105).
+/// `the_pool_prepares_projects_and_prices_in_order_inside_price_all` pins the
+/// sequence.
+pub(crate) struct PreparedSpan {
+    /// The bars trades fill on, after interior-gap days are withheld.
+    pub(crate) bars: Vec<indicators::Candle>,
+    /// One condition row per bar of [`Self::bars`], projected from the signal
+    /// column.
+    pub(crate) column: indicators::column::Column,
+    /// The holding period, in execution bars, these bars imply.
+    pub(crate) horizon: runner::outcome::Horizon,
+    /// The floors, measured on the series positions fill on.
+    pub(crate) rules: crate::Rules,
+}
+
+/// [`PreparedSpan`] for one instrument, rung and month range, or the reason it
+/// could not be prepared. Nothing is substituted for a refused step.
+pub(crate) fn prepare_span(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    underlying: &str,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+) -> Result<PreparedSpan, String> {
+    let native = rung == crate::EXECUTION_RUNG;
     let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
-    let execution_bars = if rung == crate::EXECUTION_RUNG {
+    let execution_bars = if native {
         None
     } else {
         Some(stored::load_span(
@@ -796,49 +1094,57 @@ fn price_all(
             crate::EXECUTION_RUNG
         )
     })?;
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let cash = stored::span_cash_closes(root, &span.key, None, &span.bars)?;
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &span.bars,
+        execution_slice,
+        signal_length,
+        |day| stored::session_close_for(cash.as_ref(), day),
+    );
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS, as the screen does. D-1781.
+    let folded = span.bars.clone();
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
-    let exact_minute =
-        stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
-    let availability = stored::vwap_availability(&span.key);
-    let column = crate::stored_anchored_column(
-        &span.bars,
-        &daily,
-        &exact_minute,
+    let mut withheld_days = holed_days;
+    // PASS 1'S OWN BUILD, READ-ONLY: a day whose exact closing minute cannot
+    // be sourced is withheld and the column rebuilt from what survives, exactly
+    // as `one_rung` and `audit_range_kernel` do; `commit: None` records no
+    // preparation attempt, because this pass prepares nothing new. D-1707.
+    let crate::PreparedColumn { column, .. } = crate::column_withholding_at_build(
+        root,
+        vendor,
+        underlying,
+        (from, to),
+        crate::FoldedSeries {
+            folded: &folded,
+            days: &mut withheld_days,
+            bars: &mut span.bars,
+        },
         signal_length,
-        availability,
+        crate::StoredPreparationBuild { rung, commit: None },
+        &crate::SpanShare::default(),
     )?;
-    let bars = span.bars.as_slice();
-    let horizon = crate::horizon_for(bars, rung != crate::EXECUTION_RUNG);
-    let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
-    let rules = crate::Rules::derived(bars, horizon);
-    let stop_rungs = crate::stop_ladder_ppm(bars, hold);
-    let levels = grid::Levels {
-        rungs: crate::grid_rungs(bars),
-        step_ppm: Some(crate::grid_step_ppm(bars, hold)),
-        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-        ratios: true,
-        stops_ppm: &stop_rungs,
-    };
-    let facts = runner::trade::SliceFacts::of(bars, &column);
-    Ok(union
-        .iter()
-        .map(|candidate| {
-            let mask = vocab::ConditionMask::from_words(candidate.words);
-            let side = match candidate.direction {
-                Direction::Long => runner::excursion::Side::Long,
-                Direction::Short => runner::excursion::Side::Short,
-            };
-            let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
-            crate::shown_cell(&g, rules)
-                .map(|(cell, _admitted)| cell)
-                .filter(|cell| cell.trades > 0)
-        })
-        .collect())
+    let execution = execution_bars.as_ref().map(|exec| crate::Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
+    // THE HORIZON, THE FLOORS AND THE PROJECTION, AS `audit_range_kernel`
+    // RESOLVES THEM: the horizon from the signal bars on the execution-series
+    // reading, the floors from the series positions fill on.
+    let horizon = crate::horizon_for(&span.bars, execution.is_some());
+    let rules = crate::Rules::derived(crate::floors_measured_on(&span.bars, execution), horizon);
+    let (bars, column, _note) = crate::project_onto_execution(
+        &span.bars, &column, execution, native, horizon,
+    )
+    .map_err(|why| format!("the span could not be projected onto the execution series: {why}"))?;
+    Ok(PreparedSpan {
+        bars,
+        column,
+        horizon,
+        rules,
+    })
 }
 
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
@@ -881,13 +1187,14 @@ fn fold(
             p.fired = p.fired.saturating_add(1);
             p.trades = p.trades.saturating_add(cell.trades);
             p.wins = p.wins.saturating_add(cell.wins);
-            p.net = p.net.saturating_add(cell.pessimistic);
+            // Unreachable saturation: see `Pooled::net`.
+            p.net = p.net.saturating_add(i128::from(cell.pessimistic));
             p.worst = p.worst.min(cell.worst_trade);
             if cell.wins > 0 {
                 p.min_win = p.min_win.min(cell.min_win);
             }
-            p.gross_win = p.gross_win.saturating_add(cell.gross_win);
-            p.gross_loss = p.gross_loss.saturating_add(cell.gross_loss);
+            p.gross_win = p.gross_win.saturating_add(i128::from(cell.gross_win));
+            p.gross_loss = p.gross_loss.saturating_add(i128::from(cell.gross_loss));
             p.dd_bound = p.dd_bound.max(cell.max_drawdown);
             if p.names.len() < NAMED {
                 p.names.push(symbol.clone());
@@ -929,56 +1236,30 @@ fn render_pooled(
     let _ = writeln!(
         out,
         "  tail = smallest win / largest loss; rule = tail >= {}.{:02}x (the operator's \
-         reward-to-risk floor, 0 = OFF)\n  dd>= is the LARGEST single-instrument drawdown \
-         among those pooled: a lower bound on the pooled drawdown, not the figure itself",
+         reward-to-risk floor, 0 = OFF)\n  {POOLED_DRAWDOWN_LEGEND}",
         rule_bp / 100,
         rule_bp % 100
     );
-    let _ = writeln!(
-        out,
-        "  {:>4} {:<5}{:>6}{:>8}{:>6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>5}  fired on",
-        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>="
-    );
-    for (rank, p) in pooled.iter().take(rules.top.max(1)).enumerate() {
-        let Some(candidate) = union.get(p.candidate) else {
-            let _ = writeln!(
-                out,
-                "refused: pooled rank {} names missing candidate {}; no row was fabricated",
-                rank + 1,
-                p.candidate
-            );
-            continue;
-        };
-        let _ = writeln!(
-            out,
-            "  {:>4} {:<5}{:>6}{:>8}{:>6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>5}  {}{}",
-            rank + 1,
-            match candidate.direction {
-                Direction::Long => "long",
-                Direction::Short => "short",
-            },
-            p.fired,
-            p.trades,
-            p.wins,
-            p.worst,
-            p.min_win,
-            ratio_cell(p.tail_bp()),
-            ratio_cell(p.profit_factor_bp()),
-            p.net,
-            p.dd_bound,
-            p.names.join(" "),
-            if p.fired > count(p.names.len()) {
-                format!(" +{} more", p.fired.saturating_sub(count(p.names.len())))
-            } else {
-                String::new()
+    let (columns, header) = pooled_columns();
+    let entries = pooled_entries(union, pooled, rules);
+    let body: Vec<Vec<String>> = entries
+        .iter()
+        .filter_map(|entry| entry.as_ref().ok().map(|(cells, _)| cells.clone()))
+        .collect();
+    let laid = crate::columns::with_header(&columns, &header, body);
+    let _ = writeln!(out, "{}", laid.header.trim_end());
+    let mut lines = laid.rows.iter();
+    for entry in &entries {
+        match entry {
+            Err(why) => {
+                let _ = writeln!(out, "{why}");
             }
-        );
-        let _ = writeln!(
-            out,
-            "       mask {}{}",
-            mask_hex(candidate.words),
-            if p.meets(rule_bp) { "  RULE MET" } else { "" }
-        );
+            Ok((_, mask)) => {
+                let line = lines.next().map_or("", String::as_str);
+                let _ = writeln!(out, "{}", line.trim_end());
+                let _ = writeln!(out, "{mask}");
+            }
+        }
     }
     if pooled.is_empty() {
         let _ = writeln!(
@@ -1000,9 +1281,99 @@ fn render_pooled(
     out.push_str(crate::IN_SAMPLE_WARNING);
 }
 
+/// What the pooled table's `dd1max` column is, printed under the pass-2
+/// heading (p2misc-1, D-2648). It called the column the pooled drawdown's lower bound,
+/// which the largest single-instrument drawdown is not.
+const POOLED_DRAWDOWN_LEGEND: &str = "dd1max is the LARGEST single-instrument drawdown among those \
+     pooled; it bounds the pooled drawdown in neither direction and is not that figure";
+
+/// The pooled table's columns and header.
+///
+/// LAID OUT TOGETHER, as pass 1 is (D-1420). This was one `format!` of
+/// adjacent specifiers, `{:>12}{:>5}` for `net` and `dd>=`, so a drawdown of
+/// five digits or more ran into the net: -16462 beside 123456 printed as
+/// "-16462123456", one number that is neither (GAP13-16, D-1704). Every
+/// column is now separated whatever its figures, and keeps its old width as
+/// a minimum.
+fn pooled_columns() -> ([crate::columns::Col; 12], [&'static str; 12]) {
+    use crate::columns::{left, right};
+    (
+        [
+            right(6),
+            left(5).after(1),
+            right(6),
+            right(8),
+            right(6),
+            right(12),
+            right(12),
+            right(10),
+            right(10),
+            right(12),
+            right(9),
+            left(0).after(2),
+        ],
+        [
+            "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net",
+            "dd1max", "fired on",
+        ],
+    )
+}
+
+/// One entry per ranked pooled row: its cells and its mask line, or the
+/// refusal a missing candidate gets, in rank order.
+fn pooled_entries(
+    union: &[Candidate],
+    pooled: &[Pooled],
+    rules: crate::Rules,
+) -> Vec<Result<(Vec<String>, String), String>> {
+    let rule_bp = tail_rule_bp(rules);
+    let mut entries: Vec<Result<(Vec<String>, String), String>> = Vec::new();
+    for (rank, p) in pooled.iter().take(rules.top.max(1)).enumerate() {
+        let Some(candidate) = union.get(p.candidate) else {
+            entries.push(Err(format!(
+                "refused: pooled rank {} names missing candidate {}; no row was fabricated",
+                rank + 1,
+                p.candidate
+            )));
+            continue;
+        };
+        let more = if p.fired > count(p.names.len()) {
+            format!(" +{} more", p.fired.saturating_sub(count(p.names.len())))
+        } else {
+            String::new()
+        };
+        entries.push(Ok((
+            vec![
+                (rank + 1).to_string(),
+                match candidate.direction {
+                    Direction::Long => "long",
+                    Direction::Short => "short",
+                }
+                .to_owned(),
+                p.fired.to_string(),
+                p.trades.to_string(),
+                p.wins.to_string(),
+                p.worst.to_string(),
+                p.min_win.to_string(),
+                p.tail_cell(),
+                ratio_cell(p.profit_factor_bp()),
+                p.net.to_string(),
+                p.dd_bound.to_string(),
+                format!("{}{more}", p.names.join(" ")),
+            ],
+            format!(
+                "       mask {}{}",
+                mask_hex(candidate.words),
+                if p.meets(rule_bp) { "  RULE MET" } else { "" }
+            ),
+        )));
+    }
+    entries
+}
+
 /// A ratio in hundredths as `12.34x`, or `never lost` for the sentinel.
-fn ratio_cell(bp: i64) -> String {
-    if bp == i64::MAX {
+fn ratio_cell(bp: i128) -> String {
+    if bp == NEVER_LOST {
         "never lost".to_owned()
     } else {
         format!("{}.{:02}x", bp / 100, bp % 100)
@@ -1010,7 +1381,7 @@ fn ratio_cell(bp: i64) -> String {
 }
 
 /// The six mask words as hex, so a row can be matched to a frontier row.
-fn mask_hex(words: [u64; 6]) -> String {
+pub(crate) fn mask_hex(words: [u64; 6]) -> String {
     let mut out = String::with_capacity(6 * 17);
     for (i, w) in words.iter().enumerate() {
         if i > 0 {
@@ -1048,7 +1419,7 @@ mod tests {
             worst_trade: worst,
             min_win,
             gross_win: if wins > 0 {
-                net.max(0).saturating_add(worst.abs())
+                net.max(0).saturating_add(worst.saturating_abs())
             } else {
                 0
             },
@@ -1056,6 +1427,42 @@ mod tests {
             max_drawdown: dd,
             ..grid::Cell::default()
         }
+    }
+
+    /// **A grid whose shown cell never traded prices as no cell, even where
+    /// that cell beats every trading one; a shown cell with one trade is
+    /// priced as itself.** R1286-cli-02, D-4101.
+    ///
+    /// The losing cell traded once and lost 500; the zero-trade cell is the
+    /// one a refused path leaves behind. Neither is admitted, so `shown_cell`
+    /// falls back to `Grid::best`, whose larger pessimistic total is the zero
+    /// cell's 0 (the premise). Pass 2 must still call it unpriced. One trade
+    /// is the smallest count that is priced, and an empty grid is unpriced.
+    #[test]
+    fn a_shown_cell_that_never_traded_prices_as_no_cell() {
+        let rules = crate::Rules::BASELINE;
+        let never = grid::Cell::default();
+        let losing = cell(1, 0, -500, -500, 0, 500);
+        let lost_to_nothing = grid::Grid {
+            cells: vec![losing, never],
+            ..grid::Grid::default()
+        };
+        assert_eq!(
+            crate::shown_cell(&lost_to_nothing, rules),
+            Some((never, false)),
+            "premise: the fallback shows the cell that never traded"
+        );
+        assert_eq!(super::priced_cell(&lost_to_nothing, rules), None);
+        let only_losing = grid::Grid {
+            cells: vec![losing],
+            ..grid::Grid::default()
+        };
+        assert_eq!(
+            super::priced_cell(&only_losing, rules),
+            Some(losing),
+            "one trade is priced"
+        );
+        assert_eq!(super::priced_cell(&grid::Grid::default(), rules), None);
     }
 
     fn candidates(n: usize) -> Vec<Candidate> {
@@ -1136,6 +1543,46 @@ mod tests {
         assert_eq!(p.names, vec!["AAA"]);
     }
 
+    /// **A candidate that never won meets no tail rule** (p5num-3, D-2713).
+    ///
+    /// Every pooled trade flat: `worst == 0`, `wins == 0`, so the tail was
+    /// the never-lost sentinel and `meets` held at every multiple, sorting the
+    /// row first. `grid::Cell::clears` refuses the same cell by its own
+    /// `wins > 0` clause.
+    #[test]
+    fn a_candidate_that_never_won_meets_no_tail_rule() {
+        let union = candidates(2);
+        let surface = vec!["AAA".to_owned(), "BBB".to_owned()];
+        let flat = cell(2, 0, 0, 0, 0, 0);
+        assert!(!flat.clears(0, 0), "the single-instrument rule refuses it");
+        let priced = vec![
+            Ok(vec![Some(flat), Some(cell(1, 1, 500, -10, 500, 10))]),
+            Ok(vec![Some(flat), None]),
+        ];
+        let pooled = fold(&union, &surface, &priced, rules_at(300));
+        assert_eq!(pooled.len(), 2);
+        let never_won = pooled
+            .iter()
+            .find(|p| p.candidate == 0)
+            .expect("the flat candidate is pooled");
+        assert_eq!((never_won.wins, never_won.worst), (0, 0));
+        for rule_bp in [0, 1, 300, i64::MAX] {
+            assert!(!never_won.meets(rule_bp), "rule {rule_bp}");
+        }
+        assert_eq!(never_won.tail_cell(), "-");
+        assert_eq!(
+            pooled.first().map(|p| p.candidate),
+            Some(1),
+            "the candidate that won and met the rule sorts first"
+        );
+        let won = pooled
+            .iter()
+            .find(|p| p.candidate == 1)
+            .expect("the winning candidate is pooled");
+        assert!(won.meets(300));
+        assert_eq!(won.tail_cell(), "50.00x");
+    }
+
     /// **The ranking is the rule, then the drawdown bound, then the profit
     /// factor with its never-lost sentinel demoted, then the net.**
     #[test]
@@ -1174,10 +1621,10 @@ mod tests {
         assert!(meets.meets(rule_bp));
         assert_eq!(smaller_dd_but_fails.tail_bp(), 10, "10 over 100 is 0.10x");
         assert!(!smaller_dd_but_fails.meets(rule_bp));
-        assert_eq!(never_lost.profit_factor_bp(), i64::MAX);
+        assert_eq!(never_lost.profit_factor_bp(), super::NEVER_LOST);
         assert_eq!(
-            crate::ranked(never_lost.profit_factor_bp()),
-            i64::MIN,
+            super::ranked(never_lost.profit_factor_bp()),
+            i128::MIN,
             "never lost is demoted, as a cell's is"
         );
         assert!(
@@ -1195,6 +1642,79 @@ mod tests {
         );
     }
 
+    /// h-cli-3, D-1852: pooled money totals past either end of `i64` are the
+    /// exact sums, printed and ranked as such, and both ratios are exact where
+    /// an `i64` multiply clamped them. Before, three `i64::MAX` nets pooled to
+    /// `i64::MAX`, and a tail of `i64::MAX × 100` hundredths clamped to
+    /// `i64::MAX` -- the never-lost sentinel -- so a measured ratio rendered as
+    /// "never lost" and was demoted.
+    #[test]
+    fn pooled_money_totals_past_i64_are_exact_not_clamped() {
+        let union = candidates(2);
+        let surface = vec!["AAA".to_owned(), "BBB".to_owned(), "CCC".to_owned()];
+        let rich = grid::Cell {
+            trades: 1,
+            wins: 1,
+            pessimistic: i64::MAX,
+            worst_trade: -1,
+            min_win: i64::MAX,
+            gross_win: i64::MAX,
+            gross_loss: i64::MIN,
+            max_drawdown: 1,
+            ..grid::Cell::default()
+        };
+        let poor = grid::Cell {
+            trades: 1,
+            wins: 0,
+            pessimistic: i64::MIN,
+            worst_trade: i64::MIN,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: i64::MIN,
+            max_drawdown: 2,
+            ..grid::Cell::default()
+        };
+        let priced = vec![Ok(vec![Some(rich), Some(poor)]); 3];
+        let pooled = fold(&union, &surface, &priced, rules_at(300));
+        let by = |candidate: usize| {
+            pooled
+                .iter()
+                .find(|p| p.candidate == candidate)
+                .expect("pooled candidate")
+        };
+        let up = by(0);
+        assert_eq!(up.net, 3 * i128::from(i64::MAX));
+        assert_eq!(up.gross_win, 3 * i128::from(i64::MAX));
+        assert_eq!(up.gross_loss, 3 * i128::from(i64::MIN));
+        // 300 x (2^63 - 1) over 3 x 2^63 is 99.99..., floored.
+        assert_eq!(up.profit_factor_bp(), 99);
+        assert_eq!(up.tail_bp(), i128::from(i64::MAX) * 100);
+        assert_ne!(up.tail_bp(), super::NEVER_LOST);
+        assert!(up.meets(i64::MAX), "the exact tail clears the largest rule");
+        let unfired = Pooled {
+            fired: 0,
+            ..up.clone()
+        };
+        assert!(
+            !unfired.meets(0),
+            "a candidate that fired nowhere meets no rule, whatever its tail"
+        );
+        let down = by(1);
+        assert_eq!(down.net, 3 * i128::from(i64::MIN));
+        assert_eq!(down.gross_loss, 3 * i128::from(i64::MIN));
+        assert_eq!(down.profit_factor_bp(), 0);
+        assert!(up.key(300) > down.key(300));
+
+        let mut rules = rules_at(300);
+        rules.top = 2;
+        let mut out = String::new();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        for total in [3 * i128::from(i64::MAX), 3 * i128::from(i64::MIN)] {
+            assert!(out.contains(&total.to_string()), "{total} missing:\n{out}");
+        }
+        assert!(out.contains("9223372036854775807.00x"), "{out}");
+    }
+
     /// **The tail and profit-factor cells render as multiples, and the
     /// sentinel as words.**
     #[test]
@@ -1206,7 +1726,10 @@ mod tests {
             "the default `min_rr_bp` renders as itself"
         );
         assert_eq!(ratio_cell(0), "0.00x");
-        assert_eq!(ratio_cell(i64::MAX), "never lost");
+        assert_eq!(ratio_cell(super::NEVER_LOST), "never lost");
+        // `i64::MAX` was the sentinel while the ratio was an `i64`; it is now a
+        // finite ratio and renders as one (D-1852).
+        assert_eq!(ratio_cell(i128::from(i64::MAX)), "92233720368547758.07x");
         let p = Pooled {
             candidate: 0,
             fired: 1,
@@ -1570,7 +2093,7 @@ mod tests {
             why.ends_with(block("NSE/INDEX/RELIANCE", "RELIANCE").trim_end()),
             "{why}"
         );
-        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
+        assert!(!why.contains(crate::STORED_POOLED_PROVENANCE), "{why}");
 
         // Every holding at its own path: the opening alone, as before D-0696.
         let (page, _, unread) = head("page-clean", &["NSE/CASH/RELIANCE", "NSE/INDEX/NIFTY"]);
@@ -1679,6 +2202,47 @@ mod tests {
         }
     }
 
+    /// **The pool page names what the catalog saw and offered to nobody.**
+    /// D-0769.
+    ///
+    /// The surface read only `unknown_vendor` and `unknown_rung` from the
+    /// census, so a linked symbol directory, which the catalog stops
+    /// offering at D-0766, was absent from the page without a line (found by a
+    /// review). A store with none of those entries gets no block.
+    #[test]
+    fn the_pool_page_names_the_entries_the_catalog_did_not_offer() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-pool-unoffered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cash = root.join("bars/zerodha/NSE/CASH");
+        std::fs::create_dir_all(cash.join("RELIANCE/60min")).expect("dirs");
+        std::fs::write(cash.join("RELIANCE/60min/2026-07.bin"), b"").expect("a month");
+        std::os::unix::fs::symlink(cash.join("RELIANCE"), cash.join("TCS")).expect("a link");
+        let head = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None);
+        let _ = std::fs::remove_dir_all(&root);
+        let (page, _, unread) = head.expect("the head renders");
+        let census = store::catalog::Census {
+            seen: 2,
+            spot: 1,
+            linked: 1,
+            ..store::catalog::Census::default()
+        };
+        let mut block = String::new();
+        super::not_walked(&mut block, &census.unoffered_report());
+        assert_eq!(unread, block, "`unread` is the block alone");
+        assert!(
+            block.starts_with(
+                "\n  NOT OFFERED: below bars/ the catalog could not read 0 director(ies) or \
+                 entr(ies), did not follow 1 symbolic link(s)"
+            ) && block.ends_with(".\n"),
+            "{block}"
+        );
+        assert!(page.contains(&block), "{page}");
+        let mut quiet = String::new();
+        super::not_walked(&mut quiet, "");
+        assert!(quiet.is_empty(), "no block when nothing went unoffered");
+    }
+
     #[test]
     fn a_pool_with_only_misfiled_holdings_refuses_and_keeps_their_reasons() {
         let root = store_holding(
@@ -1704,7 +2268,7 @@ mod tests {
         for dir in ["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"] {
             assert!(why.contains(&named(dir, "RELIANCE")), "{why}");
         }
-        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
+        assert!(!why.contains(crate::STORED_POOLED_PROVENANCE), "{why}");
     }
 
     /// **The page `pool` prints IS its head, and every later line is
@@ -1945,7 +2509,7 @@ mod tests {
                 page.starts_with(&format!("refused: {why}\n")),
                 "{from:?}..{to:?}: {page}"
             );
-            assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
+            assert!(!page.contains(crate::STORED_POOLED_PROVENANCE), "{page}");
         }
     }
 
@@ -1978,6 +2542,51 @@ mod tests {
             returns += usize::from(returned);
         }
         (writes, renders, returns)
+    }
+
+    /// Pass 1 lists priced rows by the money, smallest drawdown first, ties in
+    /// the order they were screened, and every refusal LAST (CE-4, D-1769).
+    #[test]
+    fn pass_one_puts_refusals_last_and_keeps_ties_in_screened_order() {
+        let record = |dd: i64, worst: i64, net: i64| crate::results::Record {
+            max_drawdown: dd,
+            worst_trade: worst,
+            pessimistic: net,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let row = |symbol: &str, outcome| super::Screened {
+            symbol: symbol.to_owned(),
+            outcome,
+        };
+        let screened = [
+            row("REFUSED_A", Err("a".to_owned())),
+            row("DEEP", Ok(record(900, -50, 10))),
+            row("TIE_FIRST", Ok(record(100, -20, 5))),
+            row("TIE_SECOND", Ok(record(100, -20, 5))),
+            row("SHALLOW_WORSE", Ok(record(100, -80, 5))),
+            row("REFUSED_B", Err("b".to_owned())),
+            row("SHALLOWEST", Ok(record(10, -90, 1))),
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let order: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|word| screened.iter().any(|s| s.symbol == *word))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "SHALLOWEST",
+                "TIE_FIRST",
+                "TIE_SECOND",
+                "SHALLOW_WORSE",
+                "DEEP",
+                "REFUSED_A",
+                "REFUSED_B"
+            ],
+            "{out}"
+        );
     }
 
     /// **Each renderer `run_under` hands the page to only appends to it.**
@@ -2124,10 +2733,13 @@ mod tests {
         assert!(
             arm.contains(concat!(
                 "        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {\n",
+                "            if let Err(why) = stored_words(vendor, None, Some(known), Some(((fy, fm), (ty, tm)))) {\n",
+                "                return refuse(out, &why);\n",
+                "            }\n",
                 "            let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);\n",
-                "            let refused = carries_refusal(&text);\n",
+                "            let code = work_exit(&text);\n",
                 "            out.push_str(&text);\n",
-                "            if refused { MISUSED } else { OK }\n",
+                "            code\n",
                 "        }\n",
             )),
             "`pool_arm` appends `pool`'s page whole, and exits on what it says:\n{arm}"
@@ -2193,7 +2805,7 @@ mod tests {
     ///   pass 1's refused row and the nothing-to-pool line, and exited OK
     ///   (D-0696).
     ///
-    /// The first exits OK and is not a refusal; the second exits MISUSED. An
+    /// The first exits OK and is not a refusal; the second exits FAILED. An
     /// unstamped build refuses both before a bar is read, and there the child
     /// requires the stamp refusal and that nothing was recorded.
     #[test]
@@ -2261,12 +2873,12 @@ mod tests {
         let emptied = dispatch(&["pool", "zerodha", "60min", "2026", "7", "2026", "7", "auto"]);
         if crate::commit_stamp().is_none() {
             for (status, page) in [&priced, &emptied] {
-                assert_eq!(*status, crate::MISUSED, "{page}");
+                assert_eq!(*status, crate::FAILED, "{page}");
                 assert!(
                     page.starts_with("refused: this build carries no verified commit stamp"),
                     "{page}"
                 );
-                assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
+                assert!(!page.contains(crate::STORED_POOLED_PROVENANCE), "{page}");
             }
             assert!(
                 !crate::results::Results::path(root).exists(),
@@ -2301,8 +2913,8 @@ mod tests {
         assert!(
             pass_1
                 .lines()
-                .any(|line| line.starts_with(&format!("  {:<14}{:>9}", "NIFTY", 600))),
-            "pass 1 screened NIFTY's 600 generated five-minute bars:\n{pass_1}"
+                .any(|line| line.starts_with(&format!("  {:<14}{:>9}", "NIFTY", 300))),
+            "pass 1 records the 300 bars it swept of NIFTY's 600 generated five-minute bars, warm-up excluded (D-1661):\n{pass_1}"
         );
         assert!(
             !pass_1.contains("REFUSED") && !pass_1.contains("NOT READ"),
@@ -2359,13 +2971,13 @@ mod tests {
             "premise: {unread}"
         );
         assert!(
-            !page.contains(crate::STORED_PROVENANCE),
+            !page.contains(crate::STORED_POOLED_PROVENANCE),
             "no banner over nothing:\n{page}"
         );
         assert!(crate::carries_refusal(page), "{page}");
         assert_eq!(
             status,
-            crate::MISUSED,
+            crate::FAILED,
             "a pool whose every instrument refused is a refusal of the pool"
         );
         Ok(())
@@ -2388,7 +3000,7 @@ mod tests {
         assert!(!charges.contains("0.025"), "{charges}");
         for claim in [
             "NO COST OF ANY KIND IS CHARGED",
-            "brokerage, STT, stamp duty, exchange charges, the SEBI fee and\nGST",
+            "brokerage, STT, stamp duty, exchange charges, the SEBI fee, the\nIPFT, DP charges and GST (an UNVERIFIED list)",
             "every equity total is GROSS OF EVERY CHARGE",
             "COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681)",
             "No equity result\ncarries Selection V6",
@@ -2445,44 +3057,930 @@ mod tests {
         }
     }
 
-    /// **The pool prepares a span exactly as the screen does.**
+    /// **`prepare_span` prepares and projects in order, and `price_all` prices
+    /// only what it returns.** W2-cli9-4, D-1702, D-2105.
     ///
-    /// The sequence of loaders and checks in `price_all` is the sequence in
-    /// `screen_range_inner`, in the same order, so a cell the pool prices is
-    /// the cell `range-rung` would show. Pinned by name because the two are
-    /// separate functions and a loader added to one and not the other would
-    /// price a different column without any test noticing.
+    /// This was `the_pool_prepares_a_span_exactly_as_the_screen_does`, and it
+    /// proved less than its name: both searches were unbounded `find`s, so
+    /// `stored_anchored_column(` -- absent from `screen_range_inner` -- was
+    /// matched inside `audit_bars_work`, another function, and the test passed
+    /// on text outside what it pinned. The equivalence it claimed is now
+    /// proved by behaviour, in
+    /// `the_pool_prices_a_span_exactly_where_the_audit_path_does`. What stays
+    /// here is the order of the steps, each searched only within its own
+    /// function's body: preparation and projection in `prepare_span`, which
+    /// `pool-oos` shares since D-1576, and pricing over the projected column in
+    /// `price_all`.
     #[test]
-    fn the_pool_prepares_a_span_exactly_as_the_screen_does() {
-        const SEQUENCE: [&str; 10] = [
+    fn the_pool_prepares_projects_and_prices_in_order_inside_price_all() {
+        const PREPARE: [&str; 11] = [
             "stored::load_span(",
             "stored::rung_length_micros(",
             "validate_one_minute_execution(",
-            "minute_gaps::days_with_interior_gaps(",
+            "minute_gaps::days_with_minute_holes(",
             "minute_gaps::withhold(",
-            "stored::load_daily_context(",
-            "stored::load_exact_minute_context(",
-            "stored::vwap_availability(",
-            "stored_anchored_column(",
+            "crate::column_withholding_at_build(",
+            "crate::StoredPreparationBuild { rung, commit: None }",
             "horizon_for(",
+            "floors_measured_on(",
+            "crate::project_onto_execution(",
+            "&span.bars, &column, execution, native, horizon,",
+        ];
+        const PRICE: [&str; 3] = [
+            "prepare_span(root, vendor, underlying, rung, from, to)?",
+            "SliceFacts::of(bars, &column)",
+            "evaluate_over(bars, &column,",
         ];
         let pool = include_str!("pool.rs");
-        let lib = include_str!("lib.rs");
-        let screen_at = lib
-            .find("fn screen_range_inner(")
-            .expect("the screen exists");
-        let price_at = pool.find("fn price_all(").expect("the pool prices");
-        let mut last_pool = price_at;
-        let mut last_screen = screen_at;
-        for step in SEQUENCE {
-            let in_pool = pool[last_pool..].find(step).map(|i| i + last_pool);
-            let in_screen = lib[last_screen..].find(step).map(|i| i + last_screen);
-            assert!(
-                in_pool.is_some() && in_screen.is_some(),
-                "`{step}` must appear in both, after the previous step: pool={in_pool:?} screen={in_screen:?}"
-            );
-            last_pool = in_pool.expect("asserted above");
-            last_screen = in_screen.expect("asserted above");
+        let body_of = |head: &str| {
+            let from = pool.find(head).expect("the function exists");
+            pool.get(from..)
+                .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
+                .expect("its body")
+        };
+        for (head, sequence) in [
+            ("\npub(crate) fn prepare_span(", &PREPARE[..]),
+            ("\nfn price_all(", &PRICE[..]),
+        ] {
+            let body = body_of(head);
+            let mut last = 0;
+            for step in sequence {
+                let at = body
+                    .get(last..)
+                    .and_then(|rest| rest.find(step))
+                    .map(|i| i + last);
+                assert!(
+                    at.is_some(),
+                    "`{step}` must appear in `{head}`'s body after the previous step"
+                );
+                last = at.expect("asserted above");
+            }
         }
+        let prepare = body_of("\npub(crate) fn prepare_span(");
+        let projected = prepare
+            .find("let (bars, column, _note) =")
+            .expect("the projection rebinds the bars and the column");
+        let returned = prepare
+            .find("Ok(PreparedSpan {")
+            .expect("the span is returned");
+        assert!(
+            projected < returned,
+            "a prepared span must carry the projected series, never the signal column"
+        );
+    }
+
+    /// D-1420: the pass-1 table at the extremes a row can carry. Raw paisa at
+    /// `i64::MIN` is 20 characters in a 12-character column, so before the
+    /// columns were laid out together `worst`, `net` and `max_dd` ran into one
+    /// another and every column after them left its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_per_symbol_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let record = |extreme: i64, count: u64| crate::results::Record {
+            bars: count,
+            min_hits: count,
+            depth: u32::MAX,
+            trades: count,
+            pessimistic: extreme,
+            worst_trade: extreme,
+            max_drawdown: extreme,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let screened = [
+            super::Screened {
+                symbol: "WAAREEENERGY_X".to_owned(),
+                outcome: Ok(record(i64::MIN, u64::MAX)),
+            },
+            super::Screened {
+                symbol: "NIFTY".to_owned(),
+                outcome: Ok(record(i64::MAX, 0)),
+            },
+            super::Screened {
+                symbol: "TORNTPHARM".to_owned(),
+                outcome: Ok(record(-1, 1)),
+            },
+            super::Screened {
+                symbol: "SIXTEEN_CHARS_XY".to_owned(),
+                outcome: Err("its month could not be read".to_owned()),
+            },
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("symbol"))
+            .expect("a header");
+        for row in &lines[at + 1..] {
+            if let Some(refused) = row.find("REFUSED:") {
+                assert!(
+                    row[..refused].ends_with(' '),
+                    "a refusal touches its symbol: {row}"
+                );
+                continue;
+            }
+            crate::columns::assert_under(lines[at], row, &[L, R, R, R, R, R, R, R, R, L])
+                .expect("separated and aligned");
+        }
+        assert_eq!(lines.len() - at - 1, screened.len(), "{out}");
+    }
+
+    /// A pass-1 row whose money columns are `(max_drawdown, worst, net)`.
+    fn screened_row(symbol: &str, dd: i64, worst: i64, net: i64) -> super::Screened {
+        super::Screened {
+            symbol: symbol.to_owned(),
+            outcome: Ok(crate::results::Record {
+                trades: 1,
+                pessimistic: net,
+                worst_trade: worst,
+                max_drawdown: dd,
+                ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+            }),
+        }
+    }
+
+    fn refused_row(symbol: &str) -> super::Screened {
+        super::Screened {
+            symbol: symbol.to_owned(),
+            outcome: Err(format!("{symbol} refused for this test")),
+        }
+    }
+
+    /// The symbols of pass 1's body rows, in the order they printed.
+    fn printed_order(out: &str) -> Vec<String> {
+        let mut lines = out
+            .lines()
+            .skip_while(|l| !l.trim_start().starts_with("symbol"));
+        let _header = lines.next();
+        lines
+            .map(|l| l.split_whitespace().next().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// **Refusals print LAST, as the comment and D-0509's table say.**
+    /// W2-cli9-7, D-1704.
+    ///
+    /// The order was one ascending sort with refusals keyed `(true, ..)` and
+    /// then `reverse()`, so the refusal printed FIRST. Mixed input, refusal
+    /// placed first and in the middle so input order cannot hide it.
+    #[test]
+    fn pass_one_prints_its_refusals_after_every_screened_row() {
+        let screened = [
+            refused_row("RFIRST"),
+            screened_row("BIGDD", 900, -50, 10),
+            refused_row("RMIDDLE"),
+            screened_row("SMALLDD", 100, -500, -20),
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        assert_eq!(
+            printed_order(&out),
+            ["SMALLDD", "BIGDD", "RFIRST", "RMIDDLE"],
+            "smallest drawdown first, refusals last in input order:\n{out}"
+        );
+        // The refusal lines carry their reasons, so none was dropped.
+        assert!(
+            out.contains("REFUSED: RFIRST refused") && out.contains("REFUSED: RMIDDLE refused")
+        );
+    }
+
+    /// The money key's three terms each decide, and a full tie keeps input
+    /// order (a stable sort under `Reverse`). D-1704.
+    #[test]
+    fn pass_one_orders_by_drawdown_then_worst_then_net_and_keeps_ties_stable() {
+        let screened = [
+            screened_row("TIEA", 100, -10, 5),
+            screened_row("NETLOW", 100, -10, 1),
+            screened_row("WORSTLOW", 100, -99, 50),
+            screened_row("TIEB", 100, -10, 5),
+            screened_row("DDHIGH", 101, 0, 1_000),
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        assert_eq!(
+            printed_order(&out),
+            ["TIEA", "TIEB", "NETLOW", "WORSTLOW", "DDHIGH"],
+            "{out}"
+        );
+    }
+
+    /// All refused and all screened: neither part is lost or reordered.
+    #[test]
+    fn pass_one_keeps_an_all_refused_or_all_screened_table_whole() {
+        let refused = [refused_row("B"), refused_row("A")];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &refused);
+        assert_eq!(printed_order(&out), ["B", "A"], "{out}");
+        let screened = [screened_row("B", 5, 0, 0), screened_row("A", 1, 0, 0)];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        assert_eq!(printed_order(&out), ["A", "B"], "{out}");
+    }
+
+    /// **`net` and `dd>=` are two figures, not one.** GAP13-16, D-1704.
+    ///
+    /// The pooled row was `{:>12}{:>5}` for them, so a net of -16462 beside a
+    /// drawdown bound of 123456 printed as `-16462123456`. Every pooled row is
+    /// now laid out with its header and every column is separated.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_pooled_net_and_drawdown_bound_print_as_separate_figures() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let union = candidates(2);
+        let surface = vec!["AAA".to_owned()];
+        let mut wide = cell(3, 1, -16_462, -20_000, 3_538, 123_456);
+        wide.gross_win = 3_538;
+        let extreme = cell(u64::MAX, u64::MAX, i64::MIN, i64::MIN, i64::MAX, i64::MAX);
+        let priced = vec![Ok(vec![Some(wide), Some(extreme)])];
+        let rules = rules_at(0);
+        let pooled = fold(&union, &surface, &priced, rules);
+        let mut out = String::new();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        assert!(!out.contains("-16462123456"), "{out}");
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("rank"))
+            .expect("a header");
+        let rows: Vec<&str> = lines[at + 1..]
+            .iter()
+            .copied()
+            .filter(|l| !l.trim_start().starts_with("mask") && !l.trim().is_empty())
+            .take(2)
+            .collect();
+        assert_eq!(rows.len(), 2, "{out}");
+        let wide_row = rows
+            .iter()
+            .find(|r| r.contains("-16462"))
+            .expect("the -16462 row");
+        let tokens: Vec<&str> = wide_row.split_whitespace().collect();
+        let net = tokens
+            .iter()
+            .position(|t| *t == "-16462")
+            .expect("net alone");
+        assert_eq!(tokens.get(net + 1), Some(&"123456"), "{wide_row}");
+        // Every column under its header, at ordinary and at extreme figures.
+        // The trailing `fired on` text column is one word here ("AAA").
+        let header = lines[at].replace("fired on", "fired_on");
+        for row in rows {
+            crate::columns::assert_under(&header, row, &[R, L, R, R, R, R, R, R, R, R, R, L])
+                .expect("separated and aligned");
+        }
+    }
+
+    /// v4-2, GAP13-16, D-1487 (kept by D-1708 against D-1704's layout): the
+    /// pooled pass-2 table at the extremes a row
+    /// can carry. Raw paisa at `i64::MIN` is 20 characters in a 12-character
+    /// column; before the table was laid out together `worst`, `min_win`,
+    /// `net` and `dd>=` ran into one another and slid off their headers.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_pooled_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let union = candidates(3);
+        let pooled_at = |candidate: usize, extreme: i64, count: u64| Pooled {
+            candidate,
+            fired: count,
+            trades: count,
+            wins: count,
+            net: i128::from(extreme),
+            // `worst` and `gross_loss` at `i64::MIN` keep both ratios finite,
+            // so every cell is one word; `min_win` and `gross_win` are never
+            // negative in a real fold.
+            worst: i64::MIN,
+            min_win: extreme.max(0),
+            gross_win: i128::from(extreme.max(0)),
+            gross_loss: i128::from(i64::MIN),
+            dd_bound: extreme,
+            names: vec!["AAA".to_owned()],
+        };
+        let pooled = vec![
+            pooled_at(0, i64::MIN, u64::MAX),
+            pooled_at(1, i64::MAX, u64::MAX),
+            pooled_at(2, -1, 1),
+            pooled_at(7, 0, 1),
+        ];
+        let mut rules = rules_at(300);
+        rules.top = pooled.len();
+        let surface = vec!["AAA".to_owned()];
+        let priced: Vec<Result<Vec<super::Priced>, String>> = vec![Ok(Vec::new())];
+        let mut out = String::new();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("rank"))
+            .expect("a header");
+        let header = lines[at]
+            .strip_suffix("  fired on")
+            .expect("the trailing label");
+        let mut rows = 0;
+        let mut more = Vec::new();
+        for row in &lines[at + 1..] {
+            if row.trim_start().starts_with("mask ") || row.is_empty() {
+                continue;
+            }
+            if row.starts_with("refused: pooled rank 4 names missing candidate 7") {
+                rows += 1;
+                continue;
+            }
+            let (row, named_more) = match row.strip_suffix("  AAA +18446744073709551614 more") {
+                Some(row) => (row, true),
+                None => match row.strip_suffix("  AAA") {
+                    Some(row) => (row, false),
+                    None => break,
+                },
+            };
+            more.push(named_more);
+            crate::columns::assert_under(header, row, &[R, L, R, R, R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+            rows += 1;
+        }
+        assert_eq!(rows, pooled.len(), "{out}");
+        // FIRED ON MORE INSTRUMENTS THAN NAMED, AND ONLY THEN, says how many
+        // more: one name against `u64::MAX` fired, and none against one.
+        // G18-cli-b-04, D-2020.
+        assert_eq!(more, [true, true, false], "{out}");
+        assert!(out.contains(&i64::MIN.to_string()), "{out}");
+    }
+
+    /// A scratch store for the union tests, unique per thread.
+    fn union_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-pool-union-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch store");
+        root
+    }
+
+    /// One run committed in the order production commits it: frontier block,
+    /// trades, receipt (when `receipt`), then the ledger row. Its one frontier
+    /// row carries `mask_word` as its combination.
+    fn commit_run(
+        root: &std::path::Path,
+        n: u8,
+        symbol: &str,
+        mask_word: u64,
+        receipt: bool,
+    ) -> crate::results::Record {
+        let identity = [n; 32];
+        let mut row = crate::tests::result_commit_frontier(identity, 11);
+        row.mask_words = [mask_word, 0, 0, 0, 0, 0];
+        crate::ensure_frontier_rows(root, &identity, &[row]).expect("frontier block");
+        crate::ensure_trade_rows(
+            root,
+            &identity,
+            &[crate::tests::result_commit_trade(identity)],
+        )
+        .expect("trade block");
+        if receipt {
+            crate::ensure_detail_receipt(root, identity, 1, 1, Direction::Short)
+                .expect("detail receipt");
+        }
+        let mut record = crate::tests::record_for_naming();
+        record.identity = identity;
+        record.underlying = crate::results::field(symbol);
+        record.combinations = 11;
+        record.trades = 1;
+        crate::ensure_run_record(root, &record).expect("ledger row");
+        record
+    }
+
+    fn screened_ok(symbol: &str, record: crate::results::Record) -> super::Screened {
+        super::Screened {
+            symbol: symbol.to_owned(),
+            outcome: Ok(record),
+        }
+    }
+
+    /// **The union admits the parent ledger ONCE, not once per instrument.**
+    /// W2-cli9-0, D-1703.
+    ///
+    /// `Frontier::of_run` proved each instrument's parent by opening and
+    /// indexing the whole results ledger and receipt sidecar, so five
+    /// instruments were five O(L + R) index builds. The count is read from the
+    /// ledger's own open seam on this thread; `union_of` is sequential, so no
+    /// other thread's open can enter it. The union itself is unchanged: three
+    /// distinct masks over five instruments, in first-seen order, and the
+    /// refused instrument contributes nothing and is not named as unread.
+    #[test]
+    fn the_union_admits_the_parent_ledger_once_not_once_per_instrument() {
+        let root = union_root("once");
+        let mut screened: Vec<super::Screened> = (0_u8..5)
+            .map(|i| {
+                let symbol = format!("SYM{i}");
+                let record = commit_run(&root, 100 + i, &symbol, u64::from(i % 3) + 1, true);
+                screened_ok(&symbol, record)
+            })
+            .collect();
+        screened.insert(2, refused_row("REFUSEDSYM"));
+        crate::results::OPENS.with(|n| n.set(0));
+        let (union, unread) = super::union_of(&root, &screened);
+        let opens = crate::results::OPENS.with(std::cell::Cell::get);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(opens, 1, "one ledger index build for five instruments");
+        assert!(unread.is_empty(), "{unread:?}");
+        assert_eq!(
+            union.iter().map(|c| c.words[0]).collect::<Vec<_>>(),
+            [1, 2, 3],
+            "first-seen order, duplicates collapsed"
+        );
+    }
+
+    /// A committed row whose receipt is missing is NAMED, and the others still
+    /// enter the union; the receipt-less refusal is the one `of_run` made.
+    #[test]
+    fn a_missing_receipt_names_its_instrument_and_the_rest_still_pool() {
+        let root = union_root("receiptless");
+        let kept = commit_run(&root, 120, "KEPT", 7, true);
+        let bare = commit_run(&root, 121, "BARE", 8, false);
+        let screened = [screened_ok("KEPT", kept), screened_ok("BARE", bare)];
+        let (union, unread) = super::union_of(&root, &screened);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(union.iter().map(|c| c.words[0]).collect::<Vec<_>>(), [7]);
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        let (symbol, why) = unread.first().expect("one named instrument");
+        assert_eq!(symbol, "BARE");
+        assert!(why.contains("no validated detail receipt"), "{unread:?}");
+    }
+
+    /// No frontier file: every screened instrument is named, none silently
+    /// dropped, and nothing is created on the read path.
+    #[test]
+    fn an_absent_frontier_names_every_screened_instrument() {
+        let root = union_root("absent");
+        let mut record = crate::tests::record_for_naming();
+        record.identity = [122; 32];
+        let screened = [screened_ok("ONE", record), refused_row("TWO")];
+        let (union, unread) = super::union_of(&root, &screened);
+        let created = crate::results::Results::path(&root).exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(union.is_empty());
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        let (_, why) = unread.first().expect("one named instrument");
+        assert!(why.starts_with("frontier not opened:"), "{unread:?}");
+        assert!(!created, "a read created the ledger");
+    }
+
+    /// A frontier block whose run never reached the ledger stays hidden and
+    /// is named, exactly as `of_run` hid it.
+    #[test]
+    fn an_uncommitted_frontier_block_is_named_not_pooled() {
+        let root = union_root("uncommitted");
+        let identity = [123; 32];
+        crate::ensure_frontier_rows(
+            &root,
+            &identity,
+            &[crate::tests::result_commit_frontier(identity, 11)],
+        )
+        .expect("prepared block");
+        let mut record = crate::tests::record_for_naming();
+        record.identity = identity;
+        let (union, unread) = super::union_of(&root, &[screened_ok("HIDDEN", record)]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(union.is_empty());
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        let (_, why) = unread.first().expect("one named instrument");
+        assert!(why.contains("hidden"), "{unread:?}");
+    }
+
+    /// A ledger the parent snapshot cannot admit names every screened
+    /// instrument with that refusal; no instrument is read without its parent.
+    #[test]
+    fn an_unreadable_parent_ledger_names_every_screened_instrument() {
+        let root = union_root("badledger");
+        let record = commit_run(&root, 124, "ONE", 9, true);
+        std::fs::write(crate::results::Results::path(&root), b"NOTALEDGERFILE00")
+            .expect("damage the ledger");
+        let (union, unread) = super::union_of(&root, &[screened_ok("ONE", record)]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(union.is_empty());
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        let (_, why) = unread.first().expect("one named instrument");
+        assert!(why.starts_with("parent ledger not opened:"), "{unread:?}");
+    }
+
+    /// The cell the AUDIT PATH would price for `mask` and `side` on
+    /// `underlying` at `rung`: the anchored column projected by
+    /// `project_onto_execution` exactly as `audit_bars_work` calls it, the
+    /// horizon and floors as `audit_range_kernel` resolves them, and the grid
+    /// as `screen` builds it. Independent of `price_all`'s own body: it is
+    /// assembled here from the audit path's functions.
+    fn audit_path_cell(
+        root: &std::path::Path,
+        rung: &'static str,
+        words: [u64; 6],
+        side: runner::excursion::Side,
+        withheld: &[i64],
+    ) -> Option<grid::Cell> {
+        let span = |r: &str| {
+            crate::stored::load_span(
+                root,
+                brutex_core::vendor::Vendor::Zerodha,
+                "NIFTY",
+                r,
+                (2025, 5),
+                (2025, 5),
+            )
+            .expect("generated span")
+        };
+        let mut signal = span(rung);
+        // The days pass 1 withholds, named by the caller; none on a whole store.
+        signal.bars = crate::minute_gaps::withhold(&signal.bars, withheld).0;
+        let native = rung == crate::EXECUTION_RUNG;
+        let exec = (!native).then(|| span(crate::EXECUTION_RUNG));
+        let length = crate::stored::rung_length_micros(rung).expect("rung length");
+        let range = ((2025, 5), (2025, 5));
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        let daily = crate::stored::load_daily_context(root, vendor, "NIFTY", range, &signal.bars)
+            .expect("daily");
+        let exact =
+            crate::stored::load_exact_minute_context(root, vendor, "NIFTY", range, &signal.bars)
+                .expect("exact minute");
+        let column = crate::stored_anchored_column(
+            &signal.bars,
+            &daily,
+            &exact,
+            length,
+            crate::stored::vwap_availability(&signal.key),
+        )
+        .expect("anchored column");
+        let execution = exec.as_ref().map(|e| crate::Execution {
+            bars: &e.bars,
+            signal_length_micros: length,
+        });
+        let horizon = crate::horizon_for(&signal.bars, execution.is_some());
+        let rules = crate::Rules::derived(execution.map_or(&signal.bars[..], |e| e.bars), horizon);
+        let (bars, column, _) =
+            crate::project_onto_execution(&signal.bars, &column, execution, native, horizon)
+                .expect("projection");
+        let hold = usize::try_from(horizon.as_bars()).expect("hold");
+        let stops = crate::stop_ladder_ppm(&bars, hold);
+        let levels = grid::Levels {
+            rungs: crate::grid_rungs(&bars),
+            step_ppm: Some(crate::grid_step_ppm(&bars, hold)),
+            forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+            ratios: true,
+            stops_ppm: &stops,
+        };
+        let facts = runner::trade::SliceFacts::of(&bars, &column);
+        let mask = vocab::ConditionMask::from_words(words);
+        let g = grid::evaluate_over(&bars, &column, &mask, horizon, side, levels, &facts);
+        crate::shown_cell(&g, rules)
+            .map(|(cell, _)| cell)
+            .filter(|cell| cell.trades > 0)
+    }
+
+    /// **Pass 2 prices where pass 1 prices: on the one-minute execution
+    /// series, the horizon in minutes.** GAP13-15 and W2-cli9-4, D-1702.
+    ///
+    /// Replaces a source-order test whose unbounded `find` matched text in a
+    /// function it did not name. This one runs `price_all` on a generated
+    /// store, for a coarse rung (projected) and for `1min` (self-aligned),
+    /// both sides, and holds every cell to the audit path's own cell, which
+    /// fires. Before the fix the coarse rung was evaluated on its signal bars
+    /// with a horizon in signal bars and its cell differed.
+    #[test]
+    fn the_pool_prices_a_span_exactly_where_the_audit_path_does() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        crate::audited_stored::with_warmed_store(|root| {
+            let union = [
+                Candidate {
+                    words: [0; 6],
+                    direction: Direction::Long,
+                },
+                Candidate {
+                    words: [0; 6],
+                    direction: Direction::Short,
+                },
+            ];
+            for rung in ["5min", "1min"] {
+                let priced = super::price_all(
+                    root,
+                    brutex_core::vendor::Vendor::Zerodha,
+                    "NIFTY",
+                    rung,
+                    (2025, 5),
+                    (2025, 5),
+                    &union,
+                )
+                .expect("pass 2 prices the generated span");
+                assert_eq!(priced.len(), union.len());
+                for (candidate, cell) in union.iter().zip(&priced) {
+                    let side = match candidate.direction {
+                        Direction::Long => runner::excursion::Side::Long,
+                        Direction::Short => runner::excursion::Side::Short,
+                    };
+                    let reference = audit_path_cell(root, rung, candidate.words, side, &[]);
+                    assert!(
+                        reference.is_some_and(|c| c.trades > 0),
+                        "premise: the audit path fires at {rung}"
+                    );
+                    assert_eq!(*cell, reference, "{rung} {side:?}");
+                }
+            }
+        });
+    }
+
+    /// **Pass 2 withholds the day pass 1 withholds when that day's closing
+    /// minute cannot be sourced, and prices the rest exactly where the audit
+    /// path does.** D-1707, closing the difference D-1702 stated.
+    ///
+    /// The store's one-minute series stops five minutes early on one day: no
+    /// interior minute is missing, so the interior-gap withholding names
+    /// nothing, and the plain column build refuses on that day's closing
+    /// minute (both are premises). Pass 1 withholds the day and rebuilds;
+    /// before D-1707 pass 2 refused the whole instrument instead.
+    #[test]
+    fn pass_two_withholds_an_unsourceable_close_day_as_pass_one_does() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        crate::audited_stored::with_unsourceable_close(5, |root, day| {
+            let vendor = brutex_core::vendor::Vendor::Zerodha;
+            let range = ((2025, 5), (2025, 5));
+            let load = |rung: &str| {
+                crate::stored::load_span(root, vendor, "NIFTY", rung, range.0, range.1)
+                    .expect("generated span")
+            };
+            let (signal, minutes) = (load("5min"), load(crate::EXECUTION_RUNG));
+            assert!(
+                crate::minute_gaps::days_with_interior_gaps(&minutes.bars).is_empty(),
+                "premise: the cut is at the session's end, not interior"
+            );
+            let refused =
+                crate::stored::load_daily_context(root, vendor, "NIFTY", range, &signal.bars)
+                    .and_then(|daily| {
+                        let exact = crate::stored::load_exact_minute_context(
+                            root,
+                            vendor,
+                            "NIFTY",
+                            range,
+                            &signal.bars,
+                        )?;
+                        crate::stored_anchored_column(
+                            &signal.bars,
+                            &daily,
+                            &exact,
+                            crate::stored::rung_length_micros("5min")?,
+                            crate::stored::vwap_availability(&signal.key),
+                        )
+                    })
+                    .expect_err("premise: the whole span's column build refuses");
+            assert_eq!(
+                crate::unsourceable_minute(&refused).map(indicators::ist_day),
+                Some(day),
+                "premise: it refuses on the short day's closing minute: {refused}"
+            );
+            let union = [
+                Candidate {
+                    words: [0; 6],
+                    direction: Direction::Long,
+                },
+                Candidate {
+                    words: [0; 6],
+                    direction: Direction::Short,
+                },
+            ];
+            let priced = super::price_all(root, vendor, "NIFTY", "5min", range.0, range.1, &union)
+                .expect("pass 2 withholds the day and prices the rest");
+            assert_eq!(priced.len(), union.len());
+            for (candidate, cell) in union.iter().zip(&priced) {
+                let side = match candidate.direction {
+                    Direction::Long => runner::excursion::Side::Long,
+                    Direction::Short => runner::excursion::Side::Short,
+                };
+                let reference = audit_path_cell(root, "5min", candidate.words, side, &[day]);
+                assert!(
+                    reference.is_some_and(|c| c.trades > 0),
+                    "premise: the audit path fires on the withheld span"
+                );
+                assert_eq!(*cell, reference, "{side:?}");
+            }
+        });
+    }
+
+    /// A span pass 2 cannot load is refused for that instrument by name, not
+    /// priced as "never fired". The generated store holds no 5min April.
+    #[test]
+    fn a_span_pass_two_cannot_load_is_refused_not_priced_empty() {
+        crate::audited_stored::with_warmed_store(|root| {
+            let union = [Candidate {
+                words: [0; 6],
+                direction: Direction::Long,
+            }];
+            let refused = super::price_all(
+                root,
+                brutex_core::vendor::Vendor::Zerodha,
+                "NIFTY",
+                "5min",
+                (2025, 4),
+                (2025, 4),
+                &union,
+            );
+            assert!(refused.is_err(), "{refused:?}");
+        });
+    }
+
+    /// The single-run promises `STORED_PROVENANCE` makes, which no page over
+    /// many instruments or months may carry. R9-cli-law-3, GAP15-21, D-1705.
+    const SINGLE_RUN_PROMISES: [&str; 2] = [
+        "describes that instrument and that month",
+        "the run identity beneath names the exact",
+    ];
+
+    /// **The pool page promises no single instrument, month or identity, and
+    /// prints the identity of every row pass 1 recorded.** R9-cli-law-3,
+    /// D-1705.
+    ///
+    /// Its opening was `STORED_PROVENANCE`, which says the run identity
+    /// beneath names the exact column and that a figure describes "that
+    /// instrument and that month" -- over a page of many instruments and no
+    /// identity at all.
+    #[test]
+    fn the_pool_page_promises_no_single_run_and_prints_each_rows_identity() {
+        let head = super::opening(
+            "zerodha",
+            "5min",
+            (2025, 1),
+            (2025, 5),
+            None,
+            &["BANKNIFTY".to_owned(), "NIFTY".to_owned()],
+        );
+        assert!(head.starts_with(crate::STORED_POOLED_PROVENANCE), "{head}");
+        for promise in SINGLE_RUN_PROMISES {
+            assert!(!head.contains(promise), "{promise}: {head}");
+        }
+        let mut first = screened_row("NIFTY", 10, -1, 5);
+        let mut second = screened_row("BANKNIFTY", 20, -1, 5);
+        for (row, byte) in [(&mut first, 0xab_u8), (&mut second, 0x01)] {
+            if let Ok(record) = &mut row.outcome {
+                record.identity = [byte; 32];
+            }
+        }
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &[first, second, refused_row("TCS")]);
+        for (symbol, byte) in [("NIFTY", "ab"), ("BANKNIFTY", "01")] {
+            let line = out
+                .lines()
+                .find(|l| l.trim_start().starts_with(symbol))
+                .expect("its row");
+            assert!(
+                line.trim_end().ends_with(&byte.repeat(32)),
+                "{symbol}'s row ends with its identity: {line}"
+            );
+        }
+        let refused = out.lines().find(|l| l.contains("TCS")).expect("TCS row");
+        assert!(refused.contains("REFUSED: TCS refused"), "{refused}");
+    }
+
+    /// **`ledger-v6`, `ledger-v6-replay` and `ledger-all` open with the pooled
+    /// banner.** GAP15-21, D-1705.
+    ///
+    /// Each covers eight rungs over a span of months, and each printed the
+    /// single-run banner. A feed word no vendor has refuses before any store is
+    /// read, so the page is the banner, its own heading and the refusal.
+    #[test]
+    fn the_ledger_pages_promise_no_single_instrument_month_or_identity() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let root = std::env::temp_dir().join(format!(
+            "brutex-pooled-banner-ledgers-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let request = crate::ledger_all::LedgerAllRequest {
+            vendor: "nosuchfeed",
+            from: (2025, 1),
+            to: (2025, 5),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: &root,
+        };
+        let pages = [
+            ("ledger-v6", crate::ledger_v6::ledger_v6(&request)),
+            (
+                "ledger-v6-replay",
+                crate::ledger_v6::ledger_v6_replay(&request, (2025, 6), (2025, 7)),
+            ),
+            ("ledger-all", crate::ledger_all::ledger_all(&request)),
+        ];
+        for (verb, page) in pages {
+            assert!(
+                page.starts_with(crate::STORED_POOLED_PROVENANCE),
+                "{verb}:\n{page}"
+            );
+            for promise in SINGLE_RUN_PROMISES {
+                assert!(!page.contains(promise), "{verb} {promise}:\n{page}");
+            }
+            assert!(page.contains("refused:"), "premise, {verb}:\n{page}");
+        }
+        assert!(!root.exists(), "a refused feed creates no tree");
+    }
+
+    /// **`in_input_order` runs one call at a time, in input order, even when
+    /// the first is the slowest.** GAP13-13, R9-cli-o1-0, D-1701.
+    #[test]
+    fn in_input_order_calls_each_item_alone_and_in_order() {
+        let log = std::sync::Mutex::new(Vec::new());
+        let out = crate::in_input_order(&[3_u64, 0, 1, 2], |&n| {
+            log.lock().expect("log").push(format!("start {n}"));
+            std::thread::sleep(std::time::Duration::from_millis(n * 20));
+            log.lock().expect("log").push(format!("end {n}"));
+            n * 10
+        });
+        assert_eq!(out, [30, 0, 10, 20]);
+        assert_eq!(
+            log.into_inner().expect("log"),
+            [
+                "start 3", "end 3", "start 0", "end 0", "start 1", "end 1", "start 2", "end 2"
+            ]
+        );
+        assert!(crate::in_input_order(&[] as &[u8], |_| 0_u8).is_empty());
+    }
+
+    /// Both outer loops over `one_rung` -- `range-all`'s and pool pass 1's --
+    /// go through `in_input_order` and neither is a `par_iter`. Each
+    /// `one_rung` writes durable rows from inside the kernel, so a parallel
+    /// outer loop writes them in completion order (GAP13-13) and runs several
+    /// whole-machine sweeps at once (R9-cli-o1-0). D-1701.
+    #[test]
+    fn every_outer_loop_over_one_rung_runs_in_input_order() {
+        let body = |source: &'static str, head: &str| -> &'static str {
+            let from = source.find(head).expect("the function");
+            source
+                .get(from..)
+                .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
+                .expect("its body")
+        };
+        let rungs = body(include_str!("lib.rs"), "\nfn sweep_rungs(");
+        assert!(rungs.contains("in_input_order(rungs,") && !rungs.contains("par_iter"));
+        assert!(
+            !rungs.contains("SharedBy::these"),
+            "one sweep in flight shares nothing"
+        );
+        let pool = body(include_str!("pool.rs"), "\nfn run_under(");
+        let pass_1 = pool
+            .split_once("PASS 1:")
+            .and_then(|(_, rest)| rest.split_once("PASS 2:"))
+            .expect("pass 1")
+            .0;
+        assert!(
+            pass_1.contains("crate::in_input_order(&surface,"),
+            "{pass_1}"
+        );
+        assert!(pass_1.contains("crate::one_rung("));
+        assert!(!pass_1.contains("par_iter"), "{pass_1}");
+    }
+
+    /// The drawdown of a time-ordered P&L sequence: the largest fall from a
+    /// running peak, the figure a pooled drawdown would be.
+    fn sequence_drawdown(pnl: &[i64]) -> i64 {
+        let (mut equity, mut peak, mut worst) = (0_i64, 0_i64, 0_i64);
+        for step in pnl {
+            equity += step;
+            peak = peak.max(equity);
+            worst = worst.max(peak - equity);
+        }
+        worst
+    }
+
+    /// p2misc-1 (D-2648): the drawdown column is not called a bound, because
+    /// the largest single-instrument drawdown bounds the merged sequence's in
+    /// neither direction -- shown here both ways. On the old code the legend
+    /// said "a lower bound on the pooled drawdown" and the header was `dd>=`.
+    #[test]
+    fn the_drawdown_column_is_not_called_a_bound() {
+        let legend = super::POOLED_DRAWDOWN_LEGEND;
+        assert!(!legend.contains("lower bound"), "{legend}");
+        assert!(legend.contains("neither direction"), "{legend}");
+        let (_, header) = super::pooled_columns();
+        assert!(header.contains(&"dd1max"), "{header:?}");
+        assert!(!header.iter().any(|name| name.contains(">=")), "{header:?}");
+        let source = include_str!("pool.rs");
+        let shipping = source.split("\nmod tests {").next().unwrap_or(source);
+        assert!(
+            !shipping.contains("a lower bound on the pooled"),
+            "stale wording"
+        );
+
+        // Above the pooled figure: A -100, B +150, A -100.
+        let a = [-100, -100];
+        let merged = [-100, 150, -100];
+        assert_eq!(sequence_drawdown(&a), 200, "the column prints 200");
+        assert_eq!(sequence_drawdown(&[150]), 0);
+        assert_eq!(sequence_drawdown(&merged), 100, "the pooled figure is 100");
+        // Below the pooled figure: A and B each lose 100 at once.
+        assert_eq!(sequence_drawdown(&[-100]), 100, "the column prints 100");
+        assert_eq!(
+            sequence_drawdown(&[-100, -100]),
+            200,
+            "the pooled figure is 200"
+        );
+        assert_eq!(sequence_drawdown(&[]), 0);
     }
 }

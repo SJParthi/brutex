@@ -1,6 +1,10 @@
 //! Exact, pinned observation pages for the finite supplied Boolean catalog.
 //! Cold admission hashes and decodes the bounded body; warm reads retain its
 //! owner/receipt/body guards. No decoded page mints a successor authority.
+//! An unpinned first page reuses a held catalog that is still current
+//! (`detail::must_admit`); a new key or a changed generation is cold, and the
+//! one slot makes alternating keys cold every time. `docs/06-limits.md`,
+//! D-1444, states that cost, which is UNVERIFIED as a measurement.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_observation::{
     Cell, Coordinate, ExecutionRefusalBitsV1 as Refusal, ExitGridSelectorV1, ForcedStopV1,
@@ -153,6 +157,14 @@ pub async fn boolean_json(uri: Uri) -> Response {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Cold authentications run on this thread, so a test can tell a warm
+    /// page from a fresh hash and decode of the whole body. Per thread, so a
+    /// test running beside another cannot count the other's. Test builds only.
+    pub(crate) static COLD_ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct Cached {
     root: PathBuf,
     identity: [u8; 32],
@@ -174,31 +186,49 @@ fn render_with_budget(
     // One bounded catalog, including all decoded child observations. No scan of
     // other identities and no accumulation of a process-wide unbounded history.
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
-    let mut cache = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|_| "Boolean catalog cache poisoned")?;
-    if asked.completion.is_none()
-        || !cache.as_ref().is_some_and(|held| {
+    let slot = CACHE.get_or_init(|| Mutex::new(None));
+    let warm = {
+        let mut cache = slot.lock().map_err(|_| "Boolean catalog cache poisoned")?;
+        let held = cache.as_ref().filter(|held| {
             held.root == root && held.identity == asked.identity && held.budget == budget
-        })
-    {
-        *cache = None;
+        });
+        if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
+            held.is_some_and(|held| held.reader.require_current().is_ok())
+        }) {
+            *cache = None;
+            None
+        } else {
+            let held = cache
+                .as_ref()
+                .ok_or("catalog cache admission disappeared")?;
+            Some(project(&held.reader, asked)?)
+        }
+    };
+    let mut body = if let Some(body) = warm {
+        body
+    } else {
+        // THE COLD OPEN RUNS WITH THE LOCK RELEASED (expr-3, D-2576). It
+        // authenticates and decodes the whole catalog up to the budget, and
+        // the guard used to be held across it, so every other catalog
+        // request parked here inside `detail::run` holding a detail permit.
+        // The lock is retaken only to install the opened reader.
+        #[cfg(test)]
+        COLD_ADMISSIONS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        crate::detail::note_slot_free(slot);
         let reader = Reader::open(root, asked.identity, budget.bytes()).map_err(|why| budget.context(&format!(
             "Catalog {} unavailable under configured evidence root {}: {why}. The dashboard BRUTEX_STORE must match the catalog command OUTPUT_ROOT; no other folder was searched.",
             crate::server::hex32(asked.identity), root.display()
         )))?;
-        *cache = Some(Cached {
+        let projected = project(&reader, asked);
+        *slot.lock().map_err(|_| "Boolean catalog cache poisoned")? = Some(Cached {
             root: root.to_path_buf(),
             identity: asked.identity,
             budget,
             reader,
         });
-    }
-    let held = cache
-        .as_ref()
-        .ok_or("catalog cache admission disappeared")?;
-    let mut body = project(&held.reader, asked)?;
+        projected?
+    };
     body.as_object_mut()
         .ok_or("catalog projection object absent")?
         .insert(

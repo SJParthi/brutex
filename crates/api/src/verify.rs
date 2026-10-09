@@ -30,19 +30,24 @@
 //!
 //! # Cost
 //!
-//! O(1) per entry — one open, one header read, two record reads at computed
-//! offsets, none of which grows with the size of the file or the store. Walking
-//! every entry is inherent: you cannot verify a store you do not look at. The
-//! per-operation bound `CLAUDE.md` §3 rule 4 fixes is the one this holds.
-//!
-//! **UNVERIFIED as a measurement.** The bound is argued from the
-//! shape of the code and no bench in this workspace times it.
-//! `CLAUDE.md` §3 rule 6: a structural argument is not a
-//! measurement, however sound it is.
+//! Per checked entry, one open, one header read and two record reads at
+//! computed offsets, none of which grows with the size of the file. Since
+//! D-4435 one answer checks one PAGE of the held entries, at most
+//! [`MAX_VERIFY_PAGE`] of them from `offset=`, so a request opens at most
+//! that many files however large the store is (W1-api5-7, W1-api6-0). The
+//! newest-per-key list a page is cut from is `Manifest::newest`, a walk of the
+//! census's whole append log; it is built once per census snapshot and kept
+//! with it (`Site::verify_memo`), so only the first request after a pull
+//! rewrites a manifest pays O(log length). `verify_json` runs on the
+//! store-read pool (`detail::run_store_read`), so no runtime worker waits on
+//! the opens (D-2281). The measured page is in `docs/06-limits.md`'s D-4435
+//! section.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use brutex_core::vendor::Vendor;
+use pull::manifest::Entry;
 use pull::scrub::{self, Tally};
 
 use crate::census::{Census, VendorCensus};
@@ -58,6 +63,17 @@ use crate::census::{Census, VendorCensus};
 /// many were not, so a truncated list can never read as a complete one.
 pub const MAX_NAMED: usize = 50;
 
+/// How many held entries one answer opens, and the page size when `limit=` is
+/// not given.
+///
+/// One answer used to open every file the counter held: `E_v` opens for `E_v`
+/// entries, so the request grew with the store, without limit (W1-api5-7,
+/// W1-api6-0). A page of this many is about a fifth of one feed's indices and
+/// stocks for one month and one timeframe, and it is the bound the measured
+/// p99 in `docs/06-limits.md` is taken at. A larger `limit=` is refused by
+/// name rather than silently cut. D-4435.
+pub const MAX_VERIFY_PAGE: u64 = 1_024;
+
 /// What a scrub of one vendor found.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
@@ -65,10 +81,21 @@ pub struct Report {
     pub vendor: Option<Vendor>,
     /// Every finding, counted.
     pub tally: Tally,
-    /// The first [`MAX_NAMED`] disagreements, in the order the census holds them.
+    /// The first [`MAX_NAMED`] entries that did not agree, newest write first:
+    /// `Manifest::newest` walks the census's append log backward, so this is
+    /// the reverse of append order. It said "in the order the census holds
+    /// them" until D-1501 (c4a-9).
     pub named: Vec<String>,
     /// Disagreements past [`MAX_NAMED`] that this answer does not quote.
     pub undrawn: u64,
+    /// How many entries the counter holds, newest write per key: the extent
+    /// every page is cut from.
+    pub held: u64,
+    /// The position, in the counter's newest-first order, of the first entry
+    /// this answer checked.
+    pub offset: u64,
+    /// Where the next page starts, when this one stopped short of the end.
+    pub next_offset: Option<u64>,
     /// Why nothing could be checked, when nothing could be.
     ///
     /// A census that is absent, unreadable or degraded is NOT a clean store,
@@ -85,7 +112,35 @@ impl Report {
     /// unreadable census would be the §4 fallback that hides a failure.
     #[must_use]
     pub fn verified(&self) -> bool {
-        self.refused.is_none() && self.tally.clean() && self.tally.seen() > 0
+        self.refused.is_none() && self.tally.clean() && self.tally.seen() > 0 && self.whole()
+    }
+
+    /// Whether this answer checked every entry the counter holds.
+    ///
+    /// **A page is not the store.** A clean page beside unchecked ones has not
+    /// verified the counter, so a page that starts past the first entry or
+    /// stops short of the last is never `verified`, however clean.
+    #[must_use]
+    pub const fn whole(&self) -> bool {
+        self.offset == 0 && self.next_offset.is_none()
+    }
+
+    /// What a partial page leaves out, or nothing for a whole answer.
+    fn part(&self) -> String {
+        if self.whole() {
+            return String::new();
+        }
+        let end = self.offset.saturating_add(self.tally.seen());
+        let next = self.next_offset.map_or_else(
+            || "this is the last page".to_owned(),
+            |at| format!("the next page starts at offset={at}"),
+        );
+        format!(
+            " This page checked entries {} to {end} of the {} held; the counter is \
+             verified only by an answer that covers all of them, and {next}.",
+            self.offset.saturating_add(1),
+            self.held
+        )
     }
 
     /// One line, whatever happened.
@@ -100,9 +155,41 @@ impl Report {
                     — which is not the same as a store that checked out clean"
                 .to_owned();
         }
+        let part = self.part();
         if t.clean() {
+            let not = if self.whole() {
+                ""
+            } else {
+                "not verified — "
+            };
             return format!(
-                "{} entry(s) checked against their own files and every one agrees",
+                "{not}{} entry(s) checked against their own files and every one agrees{}",
+                t.seen(),
+                if part.is_empty() {
+                    String::new()
+                } else {
+                    format!(".{part}")
+                }
+            );
+        }
+        // A MONTH A WRITER HELD WAS NOT CHECKED, AND IS NOT A DISAGREEMENT
+        // (W1-api6-7, D-1501). It used to be counted as unreadable and fall into
+        // the sentence below, which tells the operator the disk disagrees.
+        let busy = if t.busy == 0 {
+            String::new()
+        } else {
+            // `busy` also counts a file grown past the counter over a matching
+            // prefix (conc14-1, D-2532): a live pull either way.
+            format!(
+                " {} more were held by a writer, or had grown past the counter, \
+                 and were not checked; scrub again once the pull finishes.",
+                t.busy
+            )
+        };
+        if t.disagreed() == 0 {
+            return format!(
+                "not verified — {} of {} entry(s) agree and none disagrees.{busy}{part}",
+                t.agreed,
                 t.seen()
             );
         }
@@ -110,8 +197,8 @@ impl Report {
             "{} of {} entry(s) disagree with the files they describe — {} missing, \
              {} with a different bar count, {} holding other bars, {} unreadable. \
              The counter is what every page and the ladder gate answer from, so \
-             these month(s) read as held while the disk says otherwise.",
-            t.seen() - t.agreed,
+             these month(s) read as held while the disk says otherwise.{busy}{part}",
+            t.disagreed(),
             t.seen(),
             t.missing,
             t.rows,
@@ -121,7 +208,25 @@ impl Report {
     }
 }
 
-/// Checks every entry one vendor's counter holds against the file it describes.
+/// The newest write of each key one vendor's counter holds, in the
+/// counter's own newest-first order, or `None` when it holds no readable
+/// census. Built once per census snapshot by `Site::verify_memo`: it is a
+/// pure function of a snapshot that is replaced, never mutated. D-4435.
+///
+/// # Cost
+///
+/// `Manifest::newest`: one hash probe and one push per log entry, O(log
+/// length), paid on the first request after a pull rewrites the manifest.
+#[must_use]
+pub fn newest(census: &VendorCensus) -> Option<Arc<Vec<Entry>>> {
+    match census.state {
+        Census::Held { ref manifest } => Some(Arc::new(manifest.newest())),
+        _ => None,
+    }
+}
+
+/// Checks one page of the entries one vendor's counter holds against the
+/// files they describe: `limit` entries of `newest` from `offset`.
 ///
 /// # The symbol id is recomputed, not remembered
 ///
@@ -133,27 +238,58 @@ impl Report {
 ///
 /// # Cost
 ///
-/// O(1) per entry. Nothing is sorted and nothing is read whole.
+/// One open, one header read and two record reads per entry of the page, at
+/// most [`MAX_VERIFY_PAGE`] of them, and nothing per entry outside it: the
+/// page is cut from `newest` by position, not found by a walk. The log walk
+/// that built `newest` is [`newest`]'s, once per census snapshot. D-4435,
+/// W1-api5-7, W1-api6-0; measured in `docs/06-limits.md`'s D-4435 section.
 ///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
-#[must_use]
-pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
+/// # Errors
+///
+/// A `limit` of zero or above [`MAX_VERIFY_PAGE`], or an `offset` past the
+/// held entries, refused by name: a page outside the extent is not answered
+/// as an empty clean one.
+pub fn vendor(
+    root: &Path,
+    census: &VendorCensus,
+    newest: Option<&[Entry]>,
+    offset: u64,
+    limit: u64,
+) -> Result<Report, String> {
+    if limit == 0 || limit > MAX_VERIFY_PAGE {
+        return Err(format!(
+            "limit={limit} is refused: one answer checks 1 to {MAX_VERIFY_PAGE} \
+             entries (MAX_VERIFY_PAGE); page with offset= for more"
+        ));
+    }
     let mut report = Report {
         vendor: Some(census.vendor),
+        offset,
         ..Report::default()
     };
 
-    let Census::Held { ref manifest } = census.state else {
+    let (Census::Held { manifest }, Some(newest)) = (&census.state, newest) else {
         report.refused = Some(format!(
             "{}'s counter could not be read, so none of its months could be \
              checked against the disk. An unread counter is not a verified one.",
             census.vendor.as_str()
         ));
-        return report;
+        return Ok(report);
     };
+    let held = newest.len() as u64;
+    report.held = held;
+    if offset > held || (offset == held && held > 0) {
+        return Err(format!(
+            "offset={offset} is past the {held} entry(s) this counter holds"
+        ));
+    }
+    let end = offset.saturating_add(limit).min(held);
+    report.next_offset = (end < held).then_some(end);
+    let page = usize::try_from(offset)
+        .ok()
+        .zip(usize::try_from(end).ok())
+        .and_then(|(from, to)| newest.get(from..to))
+        .ok_or("the verify page does not fit this host's address space")?;
 
     // A DEGRADED CENSUS IS STILL WORTH SCRUBBING, and saying so is the point:
     // it stepped back to an older generation, so the entries it holds are real
@@ -191,7 +327,7 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     // is append-only — so the order is the file's own and no comparison sort is
     // needed. One hash probe per entry: O(1) per operation, no `log keys`
     // factor. See its header.
-    for entry in manifest.newest() {
+    for entry in page {
         // THE SAME DERIVATION THE WRITER USED, so a mismatch is a real
         // disagreement rather than an artefact of asking wrongly.
         // `crates/pull/src/ingest.rs` computes it exactly this way.
@@ -200,7 +336,7 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
         // narrow identically or every file would look like another symbol's.
         #[allow(clippy::cast_possible_truncation)]
         let symbol_id = brutex_core::universe::fnv1a(entry.key.symbol.as_str()) as u32;
-        let finding = scrub::one(&entry, root, census.vendor, symbol_id);
+        let finding = scrub::one(entry, root, census.vendor, symbol_id);
         report.tally.count(&finding);
         if finding.agrees() {
             continue;
@@ -230,7 +366,7 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
             report.tally.seen()
         ));
     }
-    report
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -282,5 +418,34 @@ mod tests {
             "the sentence must name the consequence: {}",
             bad.say()
         );
+    }
+
+    /// **A MONTH A WRITER HELD IS NOT A DISAGREEMENT (W1-api6-7, D-1501).**
+    ///
+    /// Only busy months: not verified, and the sentence says none disagrees
+    /// rather than "the disk says otherwise". Busy beside a real disagreement:
+    /// the disagreement count excludes the busy one and both are named.
+    #[test]
+    fn a_busy_month_is_not_verified_and_is_not_called_a_disagreement() {
+        let busy = Finding::Busy {
+            path: "/x".to_owned(),
+        };
+        let mut only = Report::default();
+        only.tally.count(&Finding::Agrees);
+        only.tally.count(&busy);
+        assert!(!only.verified(), "a month not checked is not verified");
+        let said = only.say();
+        assert!(said.starts_with("not verified — 1 of 2"), "{said}");
+        assert!(said.contains("none disagrees"), "{said}");
+        assert!(said.contains("1 more were held by a writer"), "{said}");
+        assert!(!said.contains("disk says otherwise"), "{said}");
+
+        let mut both = only;
+        both.tally.count(&Finding::Missing {
+            path: "/y".to_owned(),
+        });
+        let said = both.say();
+        assert!(said.starts_with("1 of 3 entry(s) disagree"), "{said}");
+        assert!(said.contains("1 more were held by a writer"), "{said}");
     }
 }

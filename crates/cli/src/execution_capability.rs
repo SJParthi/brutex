@@ -43,7 +43,7 @@ use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
     ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, ResolvedExitGridV1,
-    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v1,
+    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v3,
 };
 use runner::grid::{Chosen, Ttp};
 use runner::identity::Params;
@@ -99,6 +99,33 @@ const ENTRY_DELAY_MINUTES: u16 = 1;
 const FORCED_EXIT_IST_MINUTE: u16 = 15 * 60 + 10;
 
 const _: () = assert!(EXECUTION_PARAMETER_STRIDE == 648);
+
+/// The scalar-parameter stride before the evaluation-spec fingerprint widened
+/// 155 -> 163 (the charter's ninth non-regular day).
+///
+/// **The record grew IN PLACE: magic and version stayed `BRUTXEP1` / 1**, which
+/// `CLAUDE.md` §3 rule 8 forbids and which cannot now be undone without
+/// stranding the 648-byte files this build has written under that header
+/// (P1-16-03, D-1763). What separates the two geometries is the header's own
+/// stride field, so a 640-byte file is refused BY NAME here rather than as an
+/// anonymous stride mismatch: its records carry the eight-day calendar's
+/// fingerprint, so they name runs no current build can reproduce, and there is
+/// nothing to read them for.
+pub(crate) const RETIRED_PARAMETER_STRIDE: u32 = 640;
+
+/// The sentence for a parameter file whose header names the retired stride,
+/// or `None` for any other mismatch.
+pub(crate) fn retired_parameter_stride(read: u32, expected: usize) -> Option<String> {
+    (read == RETIRED_PARAMETER_STRIDE && expected == EXECUTION_PARAMETER_STRIDE).then(|| {
+        format!(
+            "holds {RETIRED_PARAMETER_STRIDE}-byte execution-parameter records, written \
+             before the evaluation-spec fingerprint widened from 155 to \
+             {EVALUATION_SPEC_FINGERPRINT_V1_LEN} bytes; they name the eight-day calendar \
+             and are retired. Move the file aside and rerun to rebuild it at \
+             {EXECUTION_PARAMETER_STRIDE} bytes"
+        )
+    })
+}
 const _: () = assert!(EXECUTION_PERCENTILE_STRIDE == 128);
 const _: () = assert!(EXECUTION_CAPABILITY_STRIDE == 320);
 const _: () = assert!(EXECUTION_COMPLETION_STRIDE == 416);
@@ -123,7 +150,7 @@ pub fn exact_execution_law_digest_v1() -> [u8; 32] {
     hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
     hasher.update(&[FORCED_EXIT_POLICY_TAG]);
     hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
-    hasher.update(&printed_ohlcv_cost_model_id_v1());
+    hasher.update(&printed_ohlcv_cost_model_id_v3());
     hasher.finalize()
 }
 
@@ -189,11 +216,10 @@ impl ExecutionParametersV1 {
         if resolved.policy().execution_resolution() != ExecutionResolutionV1::OneMinuteOhlcv {
             return Err("execution capability requires exact one-minute OHLCV policy".to_owned());
         }
-        if resolved.policy().cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(
-                "execution capability requires the implemented printed-OHLCV model".to_owned(),
-            );
-        }
+        runner::exit_grid_policy::implemented_cost_model(resolved.policy().cost_model_id())
+            .map_err(|why| {
+                format!("execution capability requires the implemented printed-OHLCV model: {why}")
+            })?;
         let mut parameters = Self {
             parameter_id: [0; 32],
             population_id: population_v4.population_id(),
@@ -347,9 +373,8 @@ impl ExecutionParametersV1 {
         if self.policy.side() != side_of_direction(self.direction) {
             return Err("execution parameter direction and policy side differ".to_owned());
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err("execution parameter cost model is unsupported".to_owned());
-        }
+        runner::exit_grid_policy::implemented_cost_model(self.policy.cost_model_id())
+            .map_err(|why| format!("execution parameter cost model is unsupported: {why}"))?;
         if self.training_bars == 0 || self.training_first_ts_micros > self.training_last_ts_micros {
             return Err("execution parameter training geometry is invalid".to_owned());
         }
@@ -485,17 +510,22 @@ impl ExecutionStrategyCapabilityV1 {
 
     /// Reconstructs and re-authorizes the exact selected exit.
     ///
+    /// The TRAINING slice is attested through `attestations`, so a replay
+    /// whose streams share one resolution, series and column attests it once
+    /// rather than once per stream (W3-runner2-2, D-1838).
+    ///
     /// # Errors
     ///
     /// Refuses every changed parameter, row, column, run, training series,
     /// complete grid, coordinate or final opaque selection digest.
-    pub fn reconstruct_selected(
+    pub fn reconstruct_selected<'w>(
         &self,
         parameters: &ExecutionParametersV1,
         row: PopulationRowV1,
-        series: ExecutionSeriesV1<'_>,
-        column: &Column,
+        series: ExecutionSeriesV1<'w>,
+        column: &'w Column,
         run: ExecutionRunV1,
+        attestations: &mut TrainingAttestationsV1<'w>,
     ) -> Result<(ResolvedExitGridV1, SelectedExitV1), ExecutionCapabilityRefusal> {
         self.validate()?;
         self.require_binding(parameters, &row)?;
@@ -504,8 +534,8 @@ impl ExecutionStrategyCapabilityV1 {
             return Err("training execution run differs from row capability".to_owned());
         }
         let resolved = parameters.reconstruct_grid(series)?;
-        let evaluated = resolved
-            .evaluate_training_grid_attested(series, column, parameters.horizon, run)
+        let evaluated = attestations
+            .evaluate(&resolved, series, column, parameters.horizon, run)
             .map_err(|why| format!("complete training grid could not be evaluated: {why:?}"))?;
         let validated = resolved
             .validate_evaluation(&evaluated)
@@ -527,6 +557,20 @@ impl ExecutionStrategyCapabilityV1 {
         row: &PopulationRowV1,
     ) -> Result<(), ExecutionCapabilityRefusal> {
         parameters.validate()?;
+        self.require_binding_of_validated(parameters, row)
+    }
+
+    /// [`Self::require_binding`] for parameters the caller has already
+    /// validated and holds immutably. `ExecutionParametersV1::validate`
+    /// rehashes the side policy's percentile atoms (O(A)), so calling it per
+    /// population row made preparation O(R·A) against the documented O(R + A)
+    /// (W2-cli3-5, D-1641). `from_population_v4` validates both sides once in
+    /// `validate_population_parameter_pair` before the row loop.
+    fn require_binding_of_validated(
+        &self,
+        parameters: &ExecutionParametersV1,
+        row: &PopulationRowV1,
+    ) -> Result<(), ExecutionCapabilityRefusal> {
         require_row_matches(parameters, row)?;
         if self.parameter_id != parameters.parameter_id
             || self.population_id != row.population_id
@@ -1246,7 +1290,7 @@ fn validate_population_capabilities(
                     short_parameters
                 }
             };
-            capability.require_binding(parameters_for_row, &row)?;
+            capability.require_binding_of_validated(parameters_for_row, &row)?;
             if capability.row_sequence != row.sequence {
                 return Err("execution capability block is reordered".to_owned());
             }
@@ -1333,7 +1377,8 @@ pub struct ExecutionCapabilityLedger {
 }
 
 impl ExecutionCapabilityLedger {
-    /// Scalar parameter records (640-byte stride).
+    /// Scalar parameter records (648-byte stride; 640 before the fingerprint
+    /// widened, which [`retired_parameter_stride`] names).
     #[must_use]
     pub fn parameter_path(root: &Path) -> PathBuf {
         root.join("results").join("execution-parameters-v1.bin")
@@ -1359,7 +1404,7 @@ impl ExecutionCapabilityLedger {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        crate::population::population_write_lock(root)
     }
 
     /// Creates missing fixed-layout files, then scans and indexes all committed
@@ -2324,7 +2369,11 @@ fn check_record_file(
     if decoder.u32()? != u32::try_from(HEADER_BYTES_USIZE).unwrap_or(u32::MAX) {
         return Err(format!("{} has a different header width", path.display()));
     }
-    if decoder.u32()? != u32::try_from(stride).unwrap_or(u32::MAX) {
+    let read_stride = decoder.u32()?;
+    if read_stride != u32::try_from(stride).unwrap_or(u32::MAX) {
+        if let Some(why) = retired_parameter_stride(read_stride, stride) {
+            return Err(format!("{} {why}", path.display()));
+        }
         return Err(format!(
             "{} has a different fixed record stride",
             path.display()
@@ -3203,9 +3252,8 @@ impl ParameterScalarV1 {
         if self.execution_resolution != ExecutionResolutionV1::OneMinuteOhlcv {
             return Err("execution parameter resolution is not one-minute OHLCV".to_owned());
         }
-        if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
-            return Err("execution parameter fill/cost model is unsupported".to_owned());
-        }
+        runner::exit_grid_policy::implemented_cost_model(self.cost_model_id)
+            .map_err(|why| format!("execution parameter fill/cost model is unsupported: {why}"))?;
         if self.execution_law_digest != exact_execution_law_digest_v1() {
             return Err("execution parameter next-minute/15:10 law digest differs".to_owned());
         }
@@ -3488,6 +3536,103 @@ fn forced_stop_from_parts(tag: u8, ppm: i64) -> Result<ForcedStopV1, ExecutionCa
     }
 }
 
+/// The identity of one TRAINING attestation: the resolution that minted it
+/// and the exact borrowed series, column and horizon it read. Every
+/// reference term is keyed by address and length, so two keys are equal only
+/// when they name the very same borrowed bytes; equal CONTENT at another
+/// address attests again rather than being trusted by value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AttestationKeyV1 {
+    resolution: [u8; 32],
+    instrument: usize,
+    feed: (usize, usize),
+    commit: (usize, usize),
+    calendar: [u8; 32],
+    bars: (usize, usize),
+    column: usize,
+    horizon: u32,
+}
+
+impl AttestationKeyV1 {
+    fn of(
+        resolved: &ResolvedExitGridV1,
+        series: ExecutionSeriesV1<'_>,
+        column: &Column,
+        horizon: Horizon,
+    ) -> Self {
+        let bars = series.bars();
+        Self {
+            resolution: resolved.digest(),
+            instrument: std::ptr::from_ref(series.instrument()).addr(),
+            feed: (series.feed().as_ptr().addr(), series.feed().len()),
+            commit: (series.commit().as_ptr().addr(), series.commit().len()),
+            calendar: series.calendar_digest(),
+            bars: (bars.as_ptr().addr(), bars.len()),
+            column: std::ptr::from_ref(column).addr(),
+            horizon: horizon.as_bars(),
+        }
+    }
+}
+
+/// One TRAINING attestation per resolution, series, column and horizon a
+/// replay sees (W3-runner2-2, D-1838).
+///
+/// Global Replay V1 and V2 reconstruct up to 200 streams, and each stream
+/// re-attested its TRAINING slice through `evaluate_training_grid_attested`:
+/// a BLAKE3 pass over every bar, a column validation and a slice-facts build,
+/// O(E) per stream, even when several streams share one population side and
+/// so one resolution and one borrowed slice. This cache attests each distinct
+/// key once and prices every stream through `evaluate_with_attested`; a hit
+/// is one hash-map probe, expected O(1). The per-stream grid evaluation it
+/// leaves is that stream's own run and is not shared. Proof:
+/// `cli::execution_disposition_v2::a_replay_attests_each_shared_training_slice_once`.
+#[derive(Debug, Default)]
+pub struct TrainingAttestationsV1<'w> {
+    by_key: HashMap<AttestationKeyV1, runner::exit_grid_policy::AttestedTrainingV1<'w>>,
+}
+
+impl<'w> TrainingAttestationsV1<'w> {
+    /// An empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Distinct TRAINING slices attested so far.
+    #[must_use]
+    pub fn attested(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// Prices `run`'s complete TRAINING grid, attesting the slice only when
+    /// this exact key has not been attested before. The answer equals
+    /// `evaluate_training_grid_attested`'s, field for field.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal `attest_training` or `evaluate_with_attested` makes.
+    pub fn evaluate(
+        &mut self,
+        resolved: &ResolvedExitGridV1,
+        series: ExecutionSeriesV1<'w>,
+        column: &'w Column,
+        horizon: Horizon,
+        run: ExecutionRunV1,
+    ) -> Result<
+        runner::exit_grid_policy::EvaluatedExitGridV1,
+        runner::exit_grid_policy::ExitGridErrorV1,
+    > {
+        let key = AttestationKeyV1::of(resolved, series, column, horizon);
+        let attested = match self.by_key.entry(key) {
+            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(resolved.attest_training(series, column, horizon)?)
+            }
+        };
+        resolved.evaluate_with_attested(attested, run)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -3497,6 +3642,33 @@ fn forced_stop_from_parts(tag: u8, ppm: i64) -> Result<ForcedStopV1, ExecutionCa
     reason = "the same exception every test module in this workspace takes: a test that cannot panic cannot fail"
 )]
 mod tests {
+
+    /// W2-cli3-5, D-1641: the per-row binding check does not re-validate the
+    /// side parameters; they are validated once before the row loop.
+    #[test]
+    fn population_rows_bind_without_revalidating_parameters_per_row() {
+        let source = include_str!("execution_capability.rs");
+        let production = source.split("\nmod tests {").next().expect("production");
+        let start = production
+            .find("fn validate_population_capabilities(")
+            .expect("row loop");
+        let body = production.get(start..).expect("body");
+        let body = body.get(..body.find("\n}\n").expect("end")).expect("body");
+        assert!(body.contains("require_binding_of_validated(parameters_for_row, &row)"));
+        assert!(!body.contains(".require_binding("));
+        assert!(!body.contains(".validate()"));
+        let pair = production
+            .find("fn from_population_v4(")
+            .expect("preparation");
+        let preparation = production.get(pair..).expect("preparation body");
+        let check = preparation
+            .find("validate_population_parameter_pair(")
+            .expect("parameters validated");
+        let rows = preparation
+            .find("validate_population_capabilities(")
+            .expect("rows checked");
+        assert!(check < rows, "parameters are validated before the row loop");
+    }
     use super::*;
 
     /// **Every selector round-trips, and the numbers never move — D-0594.**
@@ -3563,7 +3735,7 @@ mod tests {
             RatioLimitsV1::new(100, 500, 10_000).expect("test ratio limits"),
             1_000_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             0,
             0,
@@ -3594,6 +3766,126 @@ mod tests {
         value.parameter_id = value.derived_id().expect("test parameter identity");
         value.validate().expect("valid test parameters");
         value
+    }
+
+    /// A parameter file whose header names the retired 640-byte stride is
+    /// refused BY NAME, by the writer and the reader alike, and is left as it
+    /// was (P1-16-03, D-1763). Any other stride keeps the generic refusal.
+    #[test]
+    fn a_retired_640_byte_parameter_file_is_refused_by_name_and_kept() {
+        let root = root("retired-640");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("results");
+        let path = ExecutionCapabilityLedger::parameter_path(&root);
+        let mut header = Vec::with_capacity(HEADER_BYTES_USIZE + 640);
+        header.extend_from_slice(&PARAMETER_MAGIC);
+        header.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        header.extend_from_slice(&24_u32.to_le_bytes());
+        header.extend_from_slice(&640_u32.to_le_bytes());
+        header.extend_from_slice(&[0; 4]);
+        header.extend_from_slice(&[7; 640]);
+        std::fs::write(&path, &header).expect("a v1 file at the old stride");
+        for opened in [
+            ExecutionCapabilityLedger::open(&root).err(),
+            ExecutionCapabilityLedger::open_read(&root).err(),
+        ] {
+            let why = opened.expect("a retired stride is refused");
+            assert!(
+                why.contains("holds 640-byte execution-parameter records"),
+                "{why}"
+            );
+            assert!(why.contains("rebuild it at 648 bytes"), "{why}");
+        }
+        assert_eq!(std::fs::read(&path).expect("kept"), header);
+        assert!(retired_parameter_stride(640, EXECUTION_PERCENTILE_STRIDE).is_none());
+        assert!(retired_parameter_stride(641, EXECUTION_PARAMETER_STRIDE).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The execution law digest exactly as `exact_execution_law_digest_v1`
+    /// composes it, under a NAMED cost model, so the test can say which model
+    /// the shipped digest binds.
+    fn law_digest_under(cost_model: [u8; 32]) -> [u8; 32] {
+        let mut hasher = Hasher::new();
+        hasher.update(EXECUTION_LAW_DOMAIN);
+        hasher.update(&[ENTRY_POLICY_TAG]);
+        hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
+        hasher.update(&[FORCED_EXIT_POLICY_TAG]);
+        hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
+        hasher.update(&cost_model);
+        hasher.finalize()
+    }
+
+    /// D-1514: each of the three cost-model checks here refuses the superseded
+    /// V1 model by name and an unknown one generically, and the execution law
+    /// digest binds V2 rather than V1. D-4500 and D-4471: V2 is superseded in
+    /// turn and refused by its own name by the same three checks, and the
+    /// law digest binds V3, so a record written under V2 is refused, naming
+    /// V2, before its law digest is compared.
+    #[test]
+    fn every_cost_model_check_refuses_the_superseded_v1_model_by_name() {
+        use runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1 as v1;
+        use runner::exit_grid_policy::printed_ohlcv_cost_model_id_v2 as v2;
+        let shipped = exact_execution_law_digest_v1();
+        assert_eq!(shipped, law_digest_under(printed_ohlcv_cost_model_id_v3()));
+        assert_ne!(shipped, law_digest_under(v1()));
+        assert_ne!(shipped, law_digest_under(v2()));
+
+        let valid = parameters(TradeDirectionV1::Long, 3);
+        let scalar = ParameterScalarV1::from_parameters(&valid).expect("V3 scalar");
+        assert_eq!(scalar.validate_shape(), Ok(()));
+        // A record exactly as the build before D-4500 wrote it: V2 model and
+        // the law digest under V2. Refused by the model's name, first.
+        let mut before_v3 = scalar.clone();
+        before_v3.cost_model_id = v2();
+        before_v3.execution_law_digest = law_digest_under(v2());
+        let refused = before_v3
+            .validate_shape()
+            .expect_err("a V2 record is refused");
+        assert!(refused.contains("SupersededCostModelIdV2"), "{refused}");
+        for (model, needle) in [
+            (v1(), "SupersededCostModelIdV1"),
+            (v2(), "SupersededCostModelIdV2"),
+            ([8; 32], "UnsupportedCostModelId"),
+        ] {
+            let mut old = valid.clone();
+            old.policy = ExitGridPolicyV1::new(
+                valid.policy.execution_resolution(),
+                valid.policy.range_resolution(),
+                valid.policy.side(),
+                valid.policy.rungs().clone(),
+                valid.policy.ratios(),
+                valid.policy.max_cells(),
+                valid.policy.selector(),
+                model,
+                valid.policy.forced_stop(),
+                valid.policy.max_ambiguous_bars(),
+                valid.policy.max_gap_fills(),
+            )
+            .expect("a policy may NAME any model; resolution decides");
+            let refused = old.validate().expect_err("parameters refuse the model");
+            assert!(
+                refused.starts_with("execution parameter cost model is unsupported")
+                    && refused.contains(needle),
+                "{refused}"
+            );
+            let mut stored = scalar.clone();
+            stored.cost_model_id = model;
+            let refused = stored
+                .validate_shape()
+                .expect_err("a stored record refuses it");
+            assert!(
+                refused.starts_with("execution parameter fill/cost model is unsupported")
+                    && refused.contains(needle),
+                "{refused}"
+            );
+        }
+        let mut old_law = scalar;
+        old_law.execution_law_digest = law_digest_under(v1());
+        assert_eq!(
+            old_law.validate_shape(),
+            Err("execution parameter next-minute/15:10 law digest differs".to_owned())
+        );
     }
 
     fn root(tag: &str) -> PathBuf {
@@ -4088,6 +4380,29 @@ mod tests {
             "unexpected refusal: {refusal}"
         );
         drop(population);
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// G18-cli-a-07, D-2002: `require_binding` accepts exactly its own row
+    /// under its own parameters and refuses the other side's row by name.
+    #[test]
+    fn require_binding_accepts_its_own_row_and_refuses_another() {
+        let (root, rows, _receipt, prepared) = population_v4_fixture("require-binding");
+        let [long, short] = prepared.parameters.clone();
+        let [long_capability, short_capability] =
+            [prepared.capabilities[0], prepared.capabilities[1]];
+        assert_eq!(long_capability.require_binding(&long, &rows[0]), Ok(()));
+        assert_eq!(short_capability.require_binding(&short, &rows[1]), Ok(()));
+        assert!(
+            long_capability.require_binding(&long, &rows[1]).is_err(),
+            "the short row is not the long capability's row"
+        );
+        let mut forged = rows[0];
+        forged.sequence = rows[1].sequence;
+        let refusal = long_capability
+            .require_binding(&long, &forged)
+            .expect_err("a moved row sequence is refused");
+        assert!(refusal.contains("differs"), "{refusal}");
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 

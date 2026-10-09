@@ -89,6 +89,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
+  import { generationOf, generationStep, mergePages, nextOrdinal, olderPageOf, pageFor } from '$lib/audit-pages.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -96,8 +97,12 @@
 
   /** `docs/07-plan.md` R-2: the backfill window opens here. */
   const TARGET_FROM = '2020-01';
-  /** `crates/api/src/audit.rs`: the note field is 68 bytes. */
+  /** `crates/api/src/audit.rs`: a version-1 record's note was 68 bytes and a
+   *  version-2 record's is 60 (D-2673). Each record now states its own as
+   *  `note_capacity`; this is only the fallback for a reply that predates it. */
   const NOTE_BYTES = 68;
+  /** @param {any} r @returns {number} */
+  const noteCap = (r) => (typeof r.note_capacity === 'number' ? r.note_capacity : NOTE_BYTES);
   /** `crates/api/src/audit.rs`: `MAX_PAGE_RECORDS`. */
   const PAGE_ROWS = 200;
   /**
@@ -298,6 +303,8 @@
   /** @type {any[]} */
   let older = $state([]);
   let pagesHeld = $state(1);
+  /** Why the last older page could not be read; empty when it could (OBSV-10). */
+  let olderError = $state('');
   let loadingOlder = $state(false);
 
   /** Round trips, newest last, for the probe sparkline. */
@@ -306,12 +313,12 @@
 
   /**
    * Growth samples. One per successful poll, bounded.
-   * @type {{at:number, bars:number, im:number, gen:number, months:Map<string,number>}[]}
+   * @type {{at:number, bars:number, im:number, gen:number|null, months:Map<string,number>}[]}
    */
   let samples = $state([]);
 
   /** The store as it was when this page opened — the "since you arrived" base. */
-  /** @type {{at:number, bars:number, im:number, gen:number} | null} */
+  /** @type {{at:number, bars:number, im:number, gen:number|null} | null} */
   let base = $state(null);
 
   let live = $state(true);
@@ -394,7 +401,8 @@
         at: body.at,
         bars: body.store.bars,
         im: body.store.instrument_months,
-        gen: body.store.generation ?? 0,
+        // null when no census is held, never 0 (F3, D-3219).
+        gen: generationOf(body.store),
         months
       };
       // The server's own clock decides the ordering. Two answers with the same
@@ -422,15 +430,27 @@
   async function readOlder(ticket) {
     if (loadingOlder || pagesHeld >= Math.min(MAX_PAGES, payload?.journal?.pages ?? 1)) return;
     const feed = feeds.active;
-    const page = pagesHeld;
-    if (!feed) return;
+    // BY ORDINAL, NOT BY COUNT (P1-06-03, D-2663). `page = pagesHeld` was an
+    // offset from an end that moves while a pull appends; the page to read is
+    // the one that holds the newest missing ordinal, or the one just below
+    // the oldest held, for the total the server last reported.
+    const want = nextOrdinal(merged);
+    const page = want === null ? null : pageFor(want, payload?.journal?.records ?? 0, PAGE_ROWS);
+    if (!feed || page === null) return;
     loadingOlder = true;
     try {
       const got = await read(ticket, page, feed);
       if (!ticket.current() || feeds.active !== feed) return;
       if (got) {
-        older = [...older, ...got.body.runs];
-        pagesHeld += 1;
+        const one = olderPageOf(got.body);
+        if (one.error !== null) {
+          // NAMED, AND NOT COUNTED HELD: the page was not read (OBSV-10).
+          olderError = one.error;
+        } else {
+          olderError = '';
+          older = [...older, ...one.runs];
+          pagesHeld += 1;
+        }
       }
     } catch (why) {
       if (!ticket.current() || feeds.active !== feed) return;
@@ -474,19 +494,20 @@
     const span = first && last ? last.at - first.at : 0;
     const dBars = first && last ? last.bars - first.bars : 0;
     const dIm = first && last ? last.im - first.im : 0;
-    const dGen = first && last ? last.gen - first.gen : 0;
+    // null across an unknown generation: no commit count was measured (F3).
+    const dGen = first && last ? generationStep(first.gen, last.gen) : 0;
     const barsPerMin = span > 0 ? (dBars / span) * 60 : null;
 
     // Did anything move between the last TWO answers? That is the strongest
     // evidence available and it is a comparison, not a guess.
     const prev = samples.at(-2);
-    const stepped = prev && last ? last.gen - prev.gen : 0;
+    const stepped = prev && last ? generationStep(prev.gen, last.gen) : 0;
     const steppedBars = prev && last ? last.bars - prev.bars : 0;
 
     /** @type {'moving'|'fresh'|'still'|'unknown'} */
     let state = 'unknown';
     if (!store || store.state !== 'held') state = 'unknown';
-    else if (stepped > 0 || steppedBars > 0 || dGen > 0 || dBars > 0) state = 'moving';
+    else if ((stepped ?? 0) > 0 || steppedBars > 0 || (dGen ?? 0) > 0 || dBars > 0) state = 'moving';
     else if (sinceCommit != null && sinceCommit <= FRESH_SECS) state = 'fresh';
     else state = 'still';
 
@@ -515,7 +536,7 @@
       barsPerMin,
       stepped,
       filling,
-      sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: last.gen - base.gen, secs: last.at - base.at } : null
+      sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: generationStep(base.gen, last.gen), secs: last.at - base.at } : null
     };
   });
 
@@ -546,6 +567,7 @@
       if (changed) {
         payload = null;
         older = [];
+        olderError = '';
         pagesHeld = 1;
         samples = [];
         base = null;
@@ -693,7 +715,12 @@
      PRIORITIES 2 AND 4 — RUNS, CAUSES, AND THE REASONS THAT ARE NOT ON DISK
      ══════════════════════════════════════════════════════════════════════ */
 
-  const runs = $derived([...(payload?.runs ?? []), ...older]);
+  /* MERGED BY ORDINAL (P1-06-03, D-2663). Page 0 refreshes against a moving
+     end and older pages do not, so a positional concatenation dropped the
+     records that slid between them and repeated the ones two reads shared.
+     `mergePages` de-duplicates by the absolute ordinal and names every hole. */
+  const merged = $derived(mergePages(payload?.runs ?? [], older));
+  const runs = $derived(merged.runs);
 
   /**
    * Fold a note into a CAUSE.
@@ -784,7 +811,7 @@
       g.members += weight;
       g.first = Math.min(g.first, r.at);
       g.last = Math.max(g.last, r.at);
-      if (r.note_bytes > NOTE_BYTES) g.cut = true;
+      if (r.note_bytes > noteCap(r)) g.cut = true;
       const dash = (r.note ?? '').indexOf(' — ');
       if (dash > 0 && dash <= 24) g.examples.add(r.note.slice(0, dash));
       /* A MEMBER ROW NAMES ITS INSTRUMENT IN `source`, NOT IN `note`, so the
@@ -1080,7 +1107,7 @@
             </span>
             <span class="sep">·</span>
             <span>
-              the manifest committed <b>{n0(pulse.dGen)}</b> time{pulse.dGen === 1 ? '' : 's'} and the
+              the manifest committed <b>{n0(pulse.dGen ?? Number.NaN)}</b> time{pulse.dGen === 1 ? '' : 's'} and the
               store gained <b>{n0(pulse.dBars)}</b> bars in the last <b>{dur(pulse.span)}</b> — measured,
               not timed
             </span>
@@ -1124,8 +1151,10 @@
             <span class="k">Commits (generation)</span>
             <span class="v">{n0(tGen.v)}</span>
             <span class="n">
-              {#if pulse.sinceOpen && pulse.sinceOpen.gen > 0}
-                +{n0(pulse.sinceOpen.gen)} since you opened this page
+              {#if pulse.sinceOpen && pulse.sinceOpen.gen === null}
+                not comparable: one of the two answers held no census generation
+              {:else if pulse.sinceOpen && (pulse.sinceOpen.gen ?? 0) > 0}
+                +{n0(pulse.sinceOpen.gen ?? Number.NaN)} since you opened this page
               {:else}
                 unchanged since you opened this page
               {/if}
@@ -1346,7 +1375,7 @@
             {n0(faults.reasonsLost)} reasons were never written. This is not a rendering gap and no
             page can recover them: <code>crates/api/src/audit.rs</code> stores the failure COUNT and
             keeps <code>failures.first()</code> — one name, the alphabetically first — in a
-            {NOTE_BYTES}-byte field. The rest reach the POST's HTML reply
+            60-byte field (68 before record version 2). The rest reach the POST's HTML reply
             (<code>take(5)</code>) and are dropped when the run returns.
           </p>
         {/if}
@@ -1377,7 +1406,7 @@
                     </span>
                   {/if}
                   {#if g.cut}
-                    <span class="tag warn" title="The server cut this note at {NOTE_BYTES} bytes. Two long reasons sharing a prefix are indistinguishable here.">
+                    <span class="tag warn" title="The server cut this note to the record's note field (60 bytes; 68 in version-1 records). Two long reasons sharing a prefix are indistinguishable here.">
                       truncated at source
                     </span>
                   {/if}
@@ -1573,6 +1602,16 @@
         {/if}
 
         <div class="logfoot">
+          {#if merged.gaps.length > 0}
+            <span class="fine" role="alert">
+              NOT HELD: ordinal(s) {merged.gaps.map((g) => (g.from === g.to ? `${g.from}` : `${g.from}–${g.to}`)).join(', ')}
+              — the journal grew between two reads, so these rows are missing from the list below. The next load
+              reads the newest of them first.
+            </span>
+          {/if}
+          {#if olderError}
+            <span class="fine" role="alert">The older page could not be read: {olderError}</span>
+          {/if}
           {#if pagesHeld < Math.min(MAX_PAGES, payload.journal.pages)}
             <button class="btn" type="button" onclick={loadOlder} disabled={loadingOlder}>
               {loadingOlder ? 'Reading…' : `Load the previous ${PAGE_ROWS}`}
@@ -1641,10 +1680,10 @@
           </div>
           <h3>What it says</h3>
           <p class="note">{picked.note || '(no note)'}</p>
-          {#if picked.note_bytes > NOTE_BYTES}
+          {#if picked.note_bytes > noteCap(picked)}
             <p class="why">
-              The server had {n0(picked.note_bytes)} bytes to say and the record holds {NOTE_BYTES}.
-              The remaining {n0(picked.note_bytes - NOTE_BYTES)} bytes were never written to disk and
+              The server had {n0(picked.note_bytes)} bytes to say and the record holds {noteCap(picked)}.
+              The remaining {n0(picked.note_bytes - noteCap(picked))} bytes were never written to disk and
               cannot be recovered from here.
             </p>
           {/if}
@@ -1654,9 +1693,25 @@
           {:else}
             <ul class="drops">
               {#each picked.drops as d}
-                <li class:zero={d.rows === 0}><b>{n0(d.rows)}</b> <span>{d.reason}</span></li>
+                {#if d.rows === null}
+                  <!-- A version-1 record predates this reason: unknown, never a claimed zero. -->
+                  <li class="zero"><b>not counted</b> <span>{d.reason} (record version 1)</span></li>
+                {:else}
+                  <li class:zero={d.rows === 0}><b>{n0(d.rows)}</b> <span>{d.reason}</span></li>
+                {/if}
               {/each}
             </ul>
+          {/if}
+          {#if picked.kept_unclassified_day === null}
+            <p class="fine">
+              Rows kept on a day the exchange calendar has not measured: not counted (record version 1).
+            </p>
+          {:else if typeof picked.kept_unclassified_day === 'number' && picked.kept_unclassified_day > 0}
+            <p class="fine">
+              <b>{n0(picked.kept_unclassified_day)}</b> row(s) were KEPT on a day the exchange calendar
+              has not measured, so whether the exchange traded that day is unknown. They are stored,
+              not dropped, and counted here so the keep is not silent.
+            </p>
           {/if}
           <p class="fine">
             Asked for <code>{picked.source}</code>{picked.source_bytes > picked.source.length
@@ -1682,7 +1737,7 @@
           </li>
           <li>
             Census: <code>{payload.store.manifest}</code> — {payload.store.state}, generation
-            {n0(payload.store.generation ?? 0)}, {n0(payload.store.commits ?? 0)} committed entries.
+            {n0(payload.store.generation ?? Number.NaN)}, {n0(payload.store.commits ?? Number.NaN)} committed entries.
             {#if payload.store.degraded}<b class="down"> {payload.store.degraded}</b>{/if}
           </li>
           <li>

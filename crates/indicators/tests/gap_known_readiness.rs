@@ -33,12 +33,16 @@ fn day_of(bar: &Candle) -> i64 {
     (bar.ts_micros + 330 * MINUTE).div_euclid(DAY)
 }
 
+/// The bar's span on the 3-minute grid anchored at IST midnight (D-1441): the
+/// source's candle is a clock span, so membership is read off the stamp.
+fn span_of(bar: &Candle) -> i64 {
+    (bar.ts_micros + 330 * MINUTE).div_euclid(3 * MINUTE)
+}
+
 fn evaluator(tolerance: Tolerance, calendar: Calendar) -> Evaluator {
     Evaluator::with_calendar(
-        Widths {
-            fib: tolerance,
-            pivot: vocab::tolerance::pinned_pivot().expect("pivot"),
-        },
+        Widths::new(tolerance, vocab::tolerance::pinned_pivot().expect("pivot"))
+            .expect("a Fibonacci width on the session range"),
         Availability::Absent,
         Thresholds::CLASSICAL,
         calendar,
@@ -54,12 +58,17 @@ fn expected(
     calendar: Calendar,
 ) -> [Truth; 11] {
     let today = day_of(current);
+    // Today's first candle: every prior bar of today stamped in the span of today's
+    // first bar. It is closed -- usable -- only once the current bar lies in a later
+    // span; a bar inside the opening span is still measured against nothing.
+    let Some(opening) = prior.iter().find(|bar| day_of(bar) == today).map(span_of) else {
+        return [Truth::Unknown; 11];
+    };
     let first: Vec<_> = prior
         .iter()
-        .filter(|bar| day_of(bar) == today)
-        .take(3)
+        .filter(|bar| day_of(bar) == today && span_of(bar) == opening)
         .collect();
-    if first.len() < 3 || tolerance.base() != Some(Base::SessionRange) {
+    if span_of(current) == opening || tolerance.base() != Some(Base::SessionRange) {
         return [Truth::Unknown; 11];
     }
     let Some(yesterday) = prior
@@ -70,22 +79,26 @@ fn expected(
     else {
         return [Truth::Unknown; 11];
     };
-    let last: Vec<_> = prior
+    let closing = prior
         .iter()
         .rev()
-        .filter(|bar| day_of(bar) == yesterday)
-        .take(3)
+        .find(|bar| day_of(bar) == yesterday)
+        .map(span_of)
+        .expect("previous observed session");
+    let last: Vec<_> = prior
+        .iter()
+        .filter(|bar| day_of(bar) == yesterday && span_of(bar) == closing)
         .collect();
     let high = first
         .iter()
         .map(|bar| bar.high)
         .max()
-        .expect("three opening bars");
+        .expect("an opening bar");
     let low = first
         .iter()
         .map(|bar| bar.low)
         .min()
-        .expect("three opening bars");
+        .expect("an opening bar");
     let y_high = last
         .iter()
         .map(|bar| bar.high)
@@ -209,6 +222,46 @@ fn all_eleven_gap_predicates_and_negations_match_independent_pre_fold_levels() {
     }
 }
 
+/// D-1441 through the whole evaluator: minutes missing on both sides of the night.
+/// Yesterday lacks 15:29 and spikes at 15:26; today lacks 09:16 and spikes at 09:18.
+/// The independent oracle reads clock spans, so a three-bar count would take 15:26
+/// into `X1` and 09:18 into `X2` and disagree with it on truth AND availability.
+#[test]
+fn missing_minutes_keep_each_candle_inside_its_clock_span() {
+    let tolerance = vocab::tolerance::pinned_fib().expect("fib");
+    let mut bars = vec![
+        bar(30_000, 370, 100_000, 100_000, 100_000),
+        bar(30_000, 371, 150_000, 100_000, 100_000),
+        bar(30_000, 372, 101_000, 99_000, 100_000),
+        bar(30_000, 373, 100_000, 100_000, 100_000),
+        bar(30_001, 0, 120_000, 119_000, 119_500),
+        bar(30_001, 2, 119_000, 118_000, 118_500),
+        bar(30_001, 3, 200_000, 118_000, 119_000),
+    ];
+    let (old, opening) = (101_000_i128, 120_000_i128);
+    for (offset, rung) in RUNGS.into_iter().enumerate() {
+        let price = i64::try_from(opening + (rung * (old - opening)).div_euclid(1000))
+            .expect("ordinary positive levels");
+        bars.push(bar(
+            30_001,
+            4 + i64::try_from(offset).expect("eleven"),
+            price,
+            price,
+            price,
+        ));
+    }
+    for [false_count, true_count, unknown_count] in
+        verify(&bars, tolerance, Calendar::all_regular())
+    {
+        assert!(false_count > 0 && true_count > 0);
+        assert_eq!(
+            unknown_count, 6,
+            "yesterday's four bars and today's 09:15 and 09:17 stay unavailable; \
+             09:18 opens the next span and is measured"
+        );
+    }
+}
+
 #[test]
 fn absent_ambiguous_and_unrepresentable_gap_references_never_satisfy_not() {
     let mut ordinary = Vec::new();
@@ -248,14 +301,8 @@ fn absent_ambiguous_and_unrepresentable_gap_references_never_satisfy_not() {
     );
     assert!(counts.iter().any(|[_, _, unknown]| *unknown == huge.len()));
     assert!(counts.iter().any(|[f, t, _]| f + t > 0));
-    for wrong in [
-        Tolerance::from_milli(10).expect("baseless"),
-        vocab::tolerance::pinned_pivot().expect("wrong base"),
-    ] {
-        for [f, t, u] in verify(&huge, wrong, Calendar::all_regular()) {
-            assert_eq!((f, t, u), (0, 0, huge.len()));
-        }
-    }
+    // A baseless or wrong-base width cannot reach an evaluator at all (D-1553).
+    refused_widths();
     for milli in [0, i64::MAX] {
         verify(
             &huge,
@@ -279,6 +326,27 @@ fn non_regular_session_cannot_replace_the_prior_regular_gap_anchor() {
         Calendar::charter(),
     );
     assert!(counts.iter().all(|[f, t, _]| f + t == 4));
+}
+
+/// The five-minute exact-minute `GapFib` overlay over regular 09:15-15:29 sessions; the
+/// caller's session close is 15:29 on every fixture day (D-0943).
+fn overlay_five_minute(
+    signal: &[Candle],
+    minutes: &[Candle],
+    widths: Widths,
+    calendar: Calendar,
+    column: &mut Column,
+) -> Result<indicators::anchored::ExactMinuteGapCensus, indicators::anchored::ExactMinuteGapRefusal>
+{
+    indicators::anchored::overlay_exact_minute_gapfib(
+        signal,
+        minutes,
+        5 * MINUTE,
+        widths,
+        calendar,
+        |_| Some(15 * 60 + 29),
+        column,
+    )
 }
 
 #[test]
@@ -308,18 +376,11 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
         }
         minutes.extend(today);
     }
-    let mut column = Column::build(&signal, &mut evaluator(widths.fib, calendar));
+    let mut column = Column::build(&signal, &mut evaluator(widths.fib(), calendar));
     assert!(!column.is_empty(), "fixture must warm the actual column");
     let before = column.clone();
-    indicators::anchored::overlay_exact_minute_gapfib(
-        &signal,
-        &minutes,
-        5 * MINUTE,
-        widths,
-        calendar,
-        &mut column,
-    )
-    .expect("exact close alignment");
+    overlay_five_minute(&signal, &minutes, widths, calendar, &mut column)
+        .expect("exact close alignment");
     let mut known_false = 0;
     for ((source, truth), known) in column
         .sources()
@@ -336,7 +397,7 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
         let answers = expected(
             minutes.get(..minute_index).expect("prior exact context"),
             exact,
-            widths.fib,
+            widths.fib(),
             calendar,
         );
         known_false += answers
@@ -368,19 +429,38 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
     let missing_ts = signal.get(first_source).expect("source").ts_micros + 4 * MINUTE;
     minutes.retain(|bar| bar.ts_micros != missing_ts);
     let intact = column.clone();
-    assert!(
-        indicators::anchored::overlay_exact_minute_gapfib(
-            &signal,
-            &minutes,
-            5 * MINUTE,
-            widths,
-            calendar,
-            &mut column
-        )
-        .is_err()
-    );
+    assert!(overlay_five_minute(&signal, &minutes, widths, calendar, &mut column).is_err());
     assert_eq!(
         column, intact,
         "no partial truth or availability overlay on failure"
     );
+}
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
+    }
 }

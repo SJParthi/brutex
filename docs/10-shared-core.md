@@ -76,6 +76,30 @@ and now nothing needs it drawn.
 The repository is public, so a git dependency pinned to a tag is the whole
 mechanism. No registry publish, no vendoring, no copy.
 
+**The snippet below is not yet possible. No tag exists.** The repository has no
+tags (`git tag --list` and `git ls-remote --tags origin` both print nothing on
+3 October 2026), so `vocab-v0.1.0` does not resolve; the audit that found this,
+P1-18-03, reproduced the failure with `cargo fetch`. It is kept as the intended shape, and it becomes usable the day a
+tag is cut and recorded in `docs/05-decisions.md`; it is not cut here, because
+choosing the commit a shared contract is frozen at is the operator's decision,
+not a documentation fix (P1-18-03, D-1943).
+
+**What a consumer can do today** is pin to a full commit hash with `rev`, which
+cargo resolves without any tag and which, like a tag, changes only by a visible
+edit to the consumer's `Cargo.toml` and lockfile:
+
+```toml
+[dependencies]
+vocab      = { git = "https://github.com/SJParthi/brutex", rev = "<full 40-character commit hash>" }
+indicators = { git = "https://github.com/SJParthi/brutex", rev = "<full 40-character commit hash>" }
+engine     = { git = "https://github.com/SJParthi/brutex", rev = "<full 40-character commit hash>" }
+```
+
+Use the same commit for all three. Pin to a commit that is on the repository's
+published history, not to a branch, for the reason the next paragraph gives.
+
+The intended form, once a tag exists:
+
 ```toml
 [dependencies]
 vocab      = { git = "https://github.com/SJParthi/brutex", tag = "vocab-v0.1.0" }
@@ -128,12 +152,19 @@ because nothing compiles until `WORDS` is widened in the same change.
 
 ### The set of positions is derived, never listed
 
-`indicators::evaluator::Evaluator::positions()` is the union of the ELEVEN position
-sources' own `positions()` — eight modules, the current-day Fibonacci rung range, the
-four the evaluator computes from its own session bookkeeping, and the crossing family it
-derives from `vocab::table::CROSSINGS` — **272 positions** in total. Adding a position to a module adds it to the evaluator with no
-second edit, so the two cannot drift. A hand-maintained list is exactly the kind of
-thing that goes stale silently.
+`indicators::evaluator::Evaluator::positions()` is the union of TWELVE position
+sources — eight modules' own `positions()`, the current-day Fibonacci rung range, the
+four (276–279) the evaluator computes from its own session bookkeeping, the five
+weekday rows (365–369) it claims itself, and the crossing family it derives from
+`vocab::table::CROSSINGS` — **328 positions** in total. Adding a position to a module
+adds it to the evaluator with no second edit, so the two cannot drift. A
+hand-maintained list is exactly the kind of thing that goes stale silently.
+
+This paragraph said ELEVEN sources and 272 positions after §1 and the code had moved
+to twelve and 328: it omitted the weekday rows, and nothing read it (P1-18-02,
+D-1942). `crates/indicators/tests/evaluator_position_count.rs` now checks both counts
+in this file against `positions().len()`, in
+`indicators` test `this_documents_position_counts_are_the_live_table`.
 
 ### What a consumer must do when brutex adds conditions
 
@@ -185,9 +216,15 @@ Duplicate rejection | O(1) **expected**, not adversarial worst-case | k=1 uses o
 
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
-`const _: () = assert!(size_of::<Evaluator>() <= 1824)` fails if any module starts
-accumulating. It measures 1792 bytes today, so the assertion has 32 bytes of slack and is
-a live guard rather than a rounded-up number that could never fire — it was 1664 until the
+`const _: () = assert!(size_of::<Evaluator>() <= 1808)` fails if any module starts
+accumulating. It measures 1792 bytes today, so the assertion has 16 bytes of slack and is
+a live guard rather than a rounded-up number that could never fire. D-3403 grew it from
+1776 by holding the SuperTrend stop exactly, as an `i128` numerator, so its
+`Option` went from 16 bytes to 32; the ceiling did not move. D-1542 grew it from
+1728 (ceiling 1760) by one `i128` seed sum in each of the two EMAs and the ATR, so the
+first warm value is the simple mean of the first period. D-1441 shrank it from
+1792 (ceiling 1824) when `GapFib`'s three-slot ring became one running 3-minute candle,
+160 bytes to 96, and the ceiling came down with it — it was 1664 until the
 non-regular-session `Calendar` was added, 1728 before the growth after that, 1744 before
 the crossing family added one `Option<ConditionMask>`, and 1776 before the charter's ninth
 non-regular day (2021-02-24, the NSE outage) widened `Calendar` by one `i64` and its

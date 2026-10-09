@@ -55,3 +55,17 @@ test('comparison labels receipt checks separately and opens exact pinned details
  assert.equal((component.match(/initialCompletion=\{detail.completion\}/g)??[]).length,2);
  assert.match(component,/Finishing a finite catalog does not exhaust every Boolean expression/);
 });
+
+// D-3519 (ONEAUTH-22). The display lookups `CAMPAIGN_RUNGS[Number(rung)]` in
+// `BooleanQualifiedSearch.svelte` and `ResearchTester.svelte` name a rung by
+// the server's index into THIS list, so a list that drifted from
+// `cli::EVERY_RUNG` would label a 5-minute result "3min" with nothing refusing
+// it. The list is held to the Rust source it copies.
+test('the campaign rung list is cli::EVERY_RUNG, in its order', () => {
+  const lib = readFileSync(new URL('../../crates/cli/src/lib.rs', import.meta.url), 'utf8');
+  const found = [...lib.matchAll(/^pub const EVERY_RUNG: \[&str; (\d+)\] = \[([^\]]*)\];$/gm)];
+  assert.equal(found.length, 1, 'exactly one EVERY_RUNG definition in the shape this reader reads');
+  const rungs = [...found[0][2].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(rungs.length, Number(found[0][1]));
+  assert.deepEqual(CAMPAIGN_RUNGS, rungs);
+});

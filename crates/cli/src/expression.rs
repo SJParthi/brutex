@@ -32,28 +32,40 @@ pub(crate) fn stored(
     let Ok(month @ 1..=12) = month.parse::<u8>() else {
         return crate::refuse(out, "MONTH must be 1..=12");
     };
-    match run(feed, underlying, rung, year, month, source) {
+    // Every argument is checked before the work, so a refusal after this is the
+    // work's and exits `FAILED` without the usage (P8-03, D-2722).
+    let expression = match parse_expression(source) {
+        Ok(expression) => expression,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    let span = Some(((year, month), (year, month)));
+    if let Err(why) = crate::stored_words(feed, Some(underlying), Some(rung), span) {
+        return crate::refuse(out, &why);
+    }
+    match run(feed, underlying, rung, (year, month), (source, &expression)) {
         Ok(report) => {
             out.push_str(&report);
             crate::OK
         }
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
+}
+
+fn parse_expression(source: &str) -> Result<Expression, String> {
+    Expression::parse(source).map_err(|why| {
+        format!(
+            "expression refused: {why:?}; use live names or bit numbers, !, &, | and parentheses"
+        )
+    })
 }
 
 fn run(
     feed: &str,
     underlying: &str,
     rung: &str,
-    year: u16,
-    month: u8,
-    source: &str,
+    (year, month): (u16, u8),
+    (source, expression): (&str, &Expression),
 ) -> Result<String, String> {
-    let expression = Expression::parse(source).map_err(|why| {
-        format!(
-            "expression refused: {why:?}; use live names or bit numbers, !, &, | and parentheses"
-        )
-    })?;
     crate::swept_rung(rung)?;
     let commit = crate::commit_stamp().ok_or_else(|| "this build has no verified clean commit stamp; the expression cannot run before its identity is recordable".to_owned())?;
     let vendor = crate::parse_vendor(feed)?;
@@ -74,7 +86,7 @@ fn run(
         commit,
         feed: loaded.vendor.as_str(),
     };
-    let identity = runner::expression::identity(&run, &expression);
+    let identity = runner::expression::identity(&run, expression);
     // Both lifecycle and descriptor sync before the indicator fold or expression
     // evaluation. A failure here prevents the computation, not just its report.
     let attempt = crate::sweep_evidence::begin(
@@ -85,7 +97,7 @@ fn run(
     let directory =
         attempt_directory(&root, identity, attempt.token()).map_err(|e| e.to_string())?;
     let mut writer =
-        EvidenceWriter::begin(&directory, identity, &expression).map_err(|e| e.to_string())?;
+        EvidenceWriter::begin(&directory, identity, expression).map_err(|e| e.to_string())?;
     let column = crate::stored_anchored_column(
         &loaded.bars,
         &daily,
@@ -93,7 +105,7 @@ fn run(
         crate::stored::rung_length_micros(rung)?,
         crate::stored::vwap_availability(&loaded.key),
     )?;
-    let summary = runner::expression::evaluate(&column, &expression, |index, verdict| {
+    let summary = runner::expression::evaluate(&column, expression, |index, verdict| {
         let bar = loaded.bars.get(index).ok_or_else(|| {
             std::io::Error::other("expression source is outside its historical slice")
         })?;
@@ -115,21 +127,63 @@ fn run(
         ));
     }
     attempt.finish(crate::sweep_evidence::Completion::Completed)?;
-    let mut report = String::from(crate::STORED_PROVENANCE);
-    let _ = writeln!(
-        report,
-        "EXPLICIT EXPRESSION V1\n  expression: {source}\n  feed: {} · {underlying} · {} · {year}-{month:02}\n  identity: {}\n  evaluated: {} · true: {} · false: {} · unknown: {}\n  warming bars: {}\n  evidence: {}\nSIGNAL RESEARCH ONLY: this evaluates the named expression; it does not enumerate all Boolean expressions, price trades, or grant institutional admission. Unknown is never admitted as a hit.",
-        loaded.vendor.as_str(),
-        loaded.timeframe,
-        hex(&identity),
-        summary.evaluated,
-        summary.hits,
-        summary.misses,
-        summary.unknown,
-        column.census().warming,
-        path.display()
-    );
-    Ok(report)
+    Ok(Report {
+        key: &loaded.key,
+        feed: loaded.vendor.as_str(),
+        underlying,
+        timeframe: loaded.timeframe,
+        month: (year, month),
+        source,
+        identity: &identity,
+        summary,
+        warming: column.census().warming,
+        evidence: &path,
+    }
+    .render())
+}
+
+/// What an explicit expression run prints once its evidence is published.
+struct Report<'a> {
+    key: &'a brutex_core::instrument::InstrumentKey,
+    feed: &'a str,
+    underlying: &'a str,
+    timeframe: &'a str,
+    month: (u16, u8),
+    source: &'a str,
+    identity: &'a [u8; 32],
+    summary: Summary,
+    warming: u64,
+    evidence: &'a Path,
+}
+
+impl Report<'_> {
+    /// The stored banner for the instrument, then the counts.
+    ///
+    /// The banner is [`crate::stored_provenance_of`], not the bare
+    /// `STORED_PROVENANCE`: a swept cash equity's true/false/unknown counts
+    /// come from bars no corporate action has been checked against, and the
+    /// report says so exactly as `expression-search-stored` does for the same
+    /// instrument (D-0694, h-cli-2, D-1851).
+    fn render(&self) -> String {
+        let (year, month) = self.month;
+        let mut report = crate::stored_provenance_of(self.key);
+        let _ = writeln!(
+            report,
+            "EXPLICIT EXPRESSION V1\n  expression: {}\n  feed: {} · {} · {} · {year}-{month:02}\n  identity: {}\n  evaluated: {} · true: {} · false: {} · unknown: {}\n  warming bars: {}\n  evidence: {}\nSIGNAL RESEARCH ONLY: this evaluates the named expression; it does not enumerate all Boolean expressions, price trades, or grant institutional admission. Unknown is never admitted as a hit.",
+            self.source,
+            self.feed,
+            self.underlying,
+            self.timeframe,
+            hex(self.identity),
+            self.summary.evaluated,
+            self.summary.hits,
+            self.summary.misses,
+            self.summary.unknown,
+            self.warming,
+            self.evidence.display()
+        );
+        report
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -893,6 +947,68 @@ mod tests {
         let other = Scratch::new()?;
         fs::write(other.0.join("expression-v1"), b"not a directory")?;
         assert!(attempt_directory(&other.0, [7; 32], 1).is_err());
+        Ok(())
+    }
+
+    /// h-cli-2, D-1851: the explicit expression report over a stock states
+    /// gross of every charge and corporate actions unchecked after the stored
+    /// banner, as `expression-search-stored` does; over an index it is the bare
+    /// banner and the counts, byte for byte what it always was.
+    #[test]
+    fn a_stock_report_states_corporate_actions_unchecked_and_an_index_report_does_not()
+    -> Result<(), String> {
+        for (symbol, stock) in [
+            ("RELIANCE", true),
+            ("TCS", true),
+            ("NIFTY", false),
+            ("BANKNIFTY", false),
+        ] {
+            let key = crate::stored::swept_index(symbol)?;
+            let text = Report {
+                key: &key,
+                feed: "zerodha",
+                underlying: symbol,
+                timeframe: "5min",
+                month: (2025, 5),
+                source: "1 & !2",
+                identity: &[7; 32],
+                summary: Summary {
+                    evaluated: 4,
+                    hits: 1,
+                    misses: 2,
+                    unknown: 1,
+                },
+                warming: 3,
+                evidence: Path::new("/evidence/expr"),
+            }
+            .render();
+            let body = format!(
+                "EXPLICIT EXPRESSION V1\n  expression: 1 & !2\n  feed: zerodha · {symbol} · 5min · 2025-05\n  identity: {}\n  evaluated: 4 · true: 1 · false: 2 · unknown: 1\n  warming bars: 3\n  evidence: /evidence/expr\nSIGNAL RESEARCH ONLY: this evaluates the named expression; it does not enumerate all Boolean expressions, price trades, or grant institutional admission. Unknown is never admitted as a hit.\n",
+                "07".repeat(32)
+            );
+            let Some(head) = text.strip_suffix(&body) else {
+                return Err(format!("{symbol}: the counts close the report:\n{text}"));
+            };
+            assert_eq!(
+                head,
+                crate::stored_provenance(symbol),
+                "{symbol}: the banner is the stored one for this instrument"
+            );
+            assert_eq!(
+                text.matches(runner::audit::CORPORATE_ACTIONS_UNCHECKED)
+                    .count(),
+                usize::from(stock),
+                "{symbol}:\n{text}"
+            );
+            assert_eq!(
+                text.contains("GROSS OF EVERY CHARGE"),
+                stock,
+                "{symbol}:\n{text}"
+            );
+            if !stock {
+                assert_eq!(head, crate::STORED_PROVENANCE, "{symbol}");
+            }
+        }
         Ok(())
     }
 

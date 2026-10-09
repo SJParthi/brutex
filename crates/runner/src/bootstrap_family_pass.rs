@@ -24,7 +24,8 @@
 //!   indices draw `m` of each separate procedure holds. Chunking changes WHEN an
 //!   index vector is generated, never which one.
 //! * **Every float.** Each value comes from the same operation on the same
-//!   operands as in the separate procedures: the same `summarise`, `mean_at` and
+//!   operands as in the separate procedures: the same `summarise`,
+//!   `resampled_mean` (the former `mean_at`'s fold bit for bit, D-2316) and
 //!   `studentized`, the same centring `resampled - mean`, the same `root_n *`,
 //!   Hansen's same gate, and every running maximum folded in the same order --
 //!   strategy order for White and SPA, stepdown order from the last rank for
@@ -40,26 +41,34 @@
 //!
 //! # Memory
 //!
-//! The separate Romano--Wolf procedure holds all `draws x periods` indices at
-//! once (about 360 MB at 200,000 x 225). This walk generates at most
+//! The separate Romano--Wolf procedure holds every draw's runs at once, at most
+//! two words per period and about `2·periods/block` at the expected block
+//! length (D-2316). This walk generates at most
 //! `INDEX_CHUNK_BYTES` of indices per serial step -- or one draw's, when a
 //! single draw is larger than that. Each running task holds one
-//! strategy-length scratch row, and every task of the step keeps one
-//! rank-length count row until the step is reduced: at most
+//! strategy-length scratch row and one draw's runs, and every task of the step
+//! keeps one rank-length count row until the step is reduced: at most
 //! `MAX_CHUNK_DRAWS / TASK_DRAWS` = 512 count rows, about 16 MB at 4,000 ranks.
+//! Each lane holds one `periods + 1` prefix row when its fold is exact: O(S·N),
+//! the size of the input family.
 //!
 //! # Cost
 //!
-//! O(B·S·N) additions for B draws, S strategies and N periods -- one resampled
-//! mean per strategy per draw where the separate procedures computed three --
-//! plus O(B·N) serial index generation. **UNVERIFIED as a measured bound**: no
-//! bench row in this workspace re-measures it. `CLAUDE.md` §3 rule 6.
+//! O(S·N) prefix construction, O(B·N) serial index generation and per-task run
+//! derivation, and O(B·S·R) reads for R runs per draw (R ≈ N/`block`
+//! expected) -- one resampled mean per strategy per draw where the separate
+//! procedures computed three. The O(B·S·R) term needs the lane's fold to be
+//! provably exact (`N x max|v| <= 2^53`); a lane outside it keeps the O(N)
+//! fold, so the worst case is still O(B·S·N) (D-2316). **UNVERIFIED as a
+//! measured bound**: no bench row in this workspace re-measures it.
+//! `CLAUDE.md` §3 rule 6.
 
 use super::{
-    ExactResamplingPValueV1, Performance, Rng, RomanoWolfAdjustedCandidateV1,
-    RomanoWolfAdjustedReceiptV1, SpaReceiptV1, WhiteRealityCheckReceiptV1,
-    exact_family_test_fields_v1, exact_family_test_inputs_v1, mean_at,
-    romano_wolf_family_digest_v1, stationary_indices, studentized, summarise,
+    ExactPrefix, ExactResamplingPValueV1, Performance, Resample, Rng,
+    RomanoWolfAdjustedCandidateV1, RomanoWolfAdjustedReceiptV1, SpaReceiptV1,
+    WhiteRealityCheckReceiptV1, exact_family_test_fields_v1, exact_family_test_inputs_v1,
+    resampled_mean, romano_wolf_family_digest_v1, stationary_indices, studentized, summarise,
+    white_point_mass_would_mint_evidence,
 };
 use rayon::prelude::*;
 
@@ -170,6 +179,11 @@ pub fn family_tests_v1(
     let (periods, stats) =
         exact_family_test_inputs_v1(returns, draws, block).ok_or(FamilyTestsRefusalV1::White)?;
     let family = Family::new(returns, &stats, periods, stepdown.as_ref());
+    // The separate White receipt's point-mass refusal (D-0972), at the same
+    // place in the refusal order: after Romano--Wolf's, before any draw.
+    if white_point_mass_would_mint_evidence(returns, family.white_observed) {
+        return Err(FamilyTestsRefusalV1::White);
+    }
     let tally = count(&family, periods, draws, seed, block, chunk_draws(periods))
         .ok_or(FamilyTestsRefusalV1::Pass)?;
     let romano_wolf = stepdown
@@ -217,6 +231,9 @@ fn chunk_draws(periods: usize) -> usize {
 /// One strategy as every draw reads it.
 struct Lane<'a> {
     series: &'a [i64],
+    /// Exact prefix sums when the fold over this series is provably exact,
+    /// built once per call (D-2316).
+    prefix: Option<ExactPrefix>,
     mean: f64,
     standard_error: f64,
     /// Hansen's gate: recentred when the strategy's own statistic clears
@@ -275,6 +292,7 @@ impl<'a> Family<'a> {
             .zip(stats)
             .map(|(series, summary)| Lane {
                 series,
+                prefix: ExactPrefix::new(series, periods),
                 mean: summary.mean,
                 standard_error: summary.standard_error,
                 recentred: studentized(summary.mean, summary.standard_error) >= gate,
@@ -291,12 +309,12 @@ impl<'a> Family<'a> {
 
     /// Adds one draw's hits to `tally`. `resampled` is scratch, one slot per
     /// lane. `None` only if a rank names no lane or a count cannot grow.
-    fn accumulate(&self, index: &[usize], resampled: &mut [f64], tally: &mut Tally) -> Option<()> {
+    fn accumulate(&self, draw: &Resample, resampled: &mut [f64], tally: &mut Tally) -> Option<()> {
         let mut white = f64::NEG_INFINITY;
         let mut spa = f64::NEG_INFINITY;
         for (lane, slot) in self.lanes.iter().zip(resampled.iter_mut()) {
             // The ONE resampled mean all three procedures read for this lane.
-            let mean = mean_at(lane.series, index);
+            let mean = resampled_mean(lane.series, lane.prefix.as_ref(), draw);
             *slot = mean;
             white = white.max(self.root_n * (mean - lane.mean));
             let hansen = if lane.recentred {
@@ -330,8 +348,12 @@ impl<'a> Family<'a> {
     fn count_draws(&self, draws: &[Vec<usize>]) -> Option<Tally> {
         let mut resampled = vec![0.0; self.lanes.len()];
         let mut tally = Tally::new(self.walk.len());
+        // One run scratch per task: each draw's runs are derived once, O(N),
+        // and shared by every lane, which then reads O(runs) (D-2316).
+        let mut draw = Resample::default();
         for index in draws {
-            self.accumulate(index, &mut resampled, &mut tally)?;
+            draw.fill(index);
+            self.accumulate(&draw, &mut resampled, &mut tally)?;
         }
         Some(tally)
     }
@@ -417,7 +439,7 @@ impl Stepdown {
         seed: u64,
         block: usize,
     ) -> Option<Self> {
-        if draws == 0 || block == 0 {
+        if draws == 0 || block == 0 || block > super::MAX_BLOCK {
             return None;
         }
         let denominator = draws.checked_add(1)?;
@@ -426,7 +448,9 @@ impl Stepdown {
             .map(|&row| returns.get(row).map(Vec::as_slice))
             .collect::<Option<_>>()?;
         let periods = named.first()?.len();
-        if periods < 2 || named.iter().any(|series| series.len() != periods) {
+        // A block longer than the series is refused, as every bootstrap.rs
+        // entry point refuses it (D-1990).
+        if periods < 2 || block > periods || named.iter().any(|series| series.len() != periods) {
             return None;
         }
         let stats: Vec<Performance> = named.iter().map(|series| summarise(series)).collect();

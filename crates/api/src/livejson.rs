@@ -18,9 +18,11 @@
 //!
 //! `/frontier.json` calls `Row::derived()` and `Row::verdict()` and serves a
 //! `meets` block. This must not, and the reason is not style: a live row is
-//! written by `publish_ranked` BEFORE the exit grid runs, so `trades`, `wins`,
-//! `pessimistic`, `worst_trade`, `max_drawdown`, `min_win`, `gross_win` and
-//! `gross_loss` are all structural zeros. A win rate computed from them is 0%, a
+//! written by `publish_ranked` BEFORE the exit grid runs, so `trades`,
+//! `cell_wins`, `pessimistic`, `worst_trade`, `max_drawdown`, `min_win`,
+//! `gross_win` and `gross_loss` are all structural zeros. (`wins` is NOT one of
+//! them: it is the sweep's own count, `scored.edge.wins`, real at publish time
+//! and served as `edge_wins`.) A win rate computed from them is 0%, a
 //! reward-to-risk is 0.00x, and a verdict is FAIL — three figures nobody
 //! measured, wearing the shape of three that somebody did. `CLAUDE.md` §4 bans
 //! exactly that.
@@ -191,13 +193,13 @@ fn write_run(out: &mut String, run: &cli::live::Run) {
         if nth > 0 {
             out.push(',');
         }
-        write_row(out, row, run.summary.bar_milli);
+        write_row(out, row, &run.summary);
     }
     let _ = std::fmt::Write::write_fmt(out, format_args!(r#"],"kept":{}}}"#, run.rows.len()));
 }
 
 /// One ranked row, in the eight fields that are REAL before the grid runs.
-fn write_row(out: &mut String, row: &cli::frontier::Row, bar_milli: i64) {
+fn write_row(out: &mut String, row: &cli::frontier::Row, summary: &cli::live::Summary) {
     let _ = std::fmt::Write::write_fmt(
         out,
         format_args!(
@@ -219,14 +221,33 @@ fn write_row(out: &mut String, row: &cli::frontier::Row, bar_milli: i64) {
             row.n,
             row.mean_milli_paisa,
             row.t_milli,
-            row.payoff_bp,
+            // NULL FOR AN UNBOUNDED OR REFUSED PAYOFF, the one rule
+            // `/frontier.json` follows (p5num-5, D-2568): a bare `i64::MAX`
+            // is the same 64-bit-unsafe number the comment above refuses.
+            crate::frontierjson::payoff_on_wire(row.n, row.payoff_bp),
             row.wins,
             // THE COMPARISON, MADE HERE RATHER THAN LEFT TO THE READER. Both
             // figures are on the wire beside it, so this adds no fact -- it
             // removes the chance of two integers on different scales being
             // eyeballed against each other. `t_milli` can be negative for a
             // short's evidence; the bar is on |t|.
-            row.t_milli.saturating_abs() >= bar_milli,
+            //
+            // STRICTLY ABOVE. `t_milli` is rounded and `bar_milli` is the
+            // ceiling of the bar, so `t_milli > bar_milli` is the comparison
+            // that cannot call a |t| below the bar a clearance: |t| is at least
+            // `t_milli - 0.5` thousandths, which is at least `bar_milli + 0.5`
+            // and above the bar. `>=` read a |t| up to 1.5 milli short as
+            // clearing it (CE-7, D-1769).
+            //
+            // AND ONLY A JUDGEABLE ROW. The end-of-run report refuses a verdict
+            // below thirty observations; this served `true` for a
+            // five-observation row the report calls TOO FEW (xcut-1, D-1991).
+            // AND AGAINST THE ROW'S OWN STUDENT-T TAIL, which the report now
+            // also requires (p8num-1, D-2725). One function holds all three
+            // conditions so the page and the report cannot drift apart again.
+            // A mispaired row never reaches here: `publish_ranked` refuses to
+            // write one.
+            cli::live::clears_bar(row, summary),
         ),
     );
 }
@@ -292,6 +313,180 @@ mod tests {
             !body.contains(r#""stale""#) && !body.contains(r#""strays""#),
             "and no count is served for a directory that was never opened: {body}"
         );
+    }
+
+    /// A |t| whose rounded thousandths EQUAL the ceilinged bar is not called a
+    /// clearance, and one a milli above it is; the sign of `t` does not matter
+    /// (CE-7, D-1769).
+    #[test]
+    fn a_t_at_the_rounded_bar_does_not_clear_it_and_one_above_does() {
+        let row = |t_milli: i64| cli::frontier::Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: 30,
+            n: 30,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: cli::frontier::Direction::Long,
+            rules: cli::Rules::elite(400, 25),
+        };
+        // bar 5.6735 at 3,572,851 trials is carried as 5674; t 5.6735 rounds
+        // to 5674 and is not above it. A row of a billion observations, so the
+        // Student-t tail (p8num-1, D-2725) is the normal one to well inside a
+        // milli and this pins the rounding rule alone.
+        let wide = cli::live::Summary {
+            trials: 3_572_851,
+            bar_milli: 5_674,
+            priced: 0,
+        };
+        for (t_milli, clears) in [
+            (5_674, false),
+            (-5_674, false),
+            (5_675, true),
+            (-5_675, true),
+        ] {
+            let mut out = String::new();
+            let many = cli::frontier::Row {
+                n: 1_000_000_000,
+                ..row(t_milli)
+            };
+            super::write_row(&mut out, &many, &wide);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "{t_milli}: {out}"
+            );
+        }
+        // xcut-1, D-1991: below the report's thirty observations no |t| clears,
+        // however far past the bar; at thirty the same |t| does.
+        let thousand = cli::live::Summary {
+            trials: 1_000,
+            bar_milli: 4_055,
+            priced: 0,
+        };
+        for (n, clears) in [(5, false), (29, false), (30, true)] {
+            let mut out = String::new();
+            let few = cli::frontier::Row { n, ..row(9_000) };
+            super::write_row(&mut out, &few, &thousand);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "n {n}: {out}"
+            );
+        }
+    }
+
+    /// A ROW AT THIRTY OBSERVATIONS IS HELD TO ITS STUDENT-T TAIL. p8num-1, D-2725.
+    ///
+    /// At 3,689 trials the normal Bonferroni bar is 4.351 and the Student-t
+    /// bar at 29 degrees of freedom is 5.225. `clears_bar` served `true` for
+    /// a thirty-observation row at t = 5.000, which spends about eleven times
+    /// its share of the family-wise budget; it now serves `false`, and the
+    /// same t clears at a thousand observations, where the two bars meet.
+    #[test]
+    fn a_thirty_observation_row_is_judged_against_its_student_t_tail() {
+        let summary = cli::live::Summary {
+            trials: 3_689,
+            bar_milli: 4_352,
+            priced: 0,
+        };
+        let row = |n: u64, t_milli: i64| cli::frontier::Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: n,
+            n,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: cli::frontier::Direction::Long,
+            rules: cli::Rules::elite(400, 25),
+        };
+        for (n, t_milli, clears) in [
+            (30, 5_000, false),
+            (30, -5_000, false),
+            (30, 5_300, true),
+            (1_000, 5_000, true),
+        ] {
+            let mut out = String::new();
+            super::write_row(&mut out, &row(n, t_milli), &summary);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "n {n} t {t_milli}: {out}"
+            );
+            assert_eq!(
+                cli::live::clears_bar(&row(n, t_milli), &summary),
+                clears,
+                "n {n} t {t_milli}"
+            );
+        }
+    }
+
+    /// p5num-5 (D-2568): the in-flight row follows `/frontier.json`'s payoff
+    /// rule. Before the fix an unbounded row carried a bare
+    /// `9223372036854775807` here, the 64-bit-unsafe number this module's own
+    /// row comment refuses for the mask words.
+    #[test]
+    fn an_in_flight_row_carries_a_null_payoff_where_the_method_has_none() {
+        let summary = cli::live::Summary {
+            trials: 3_689,
+            bar_milli: 4_352,
+            priced: 0,
+        };
+        for (n, payoff, expected) in [
+            (4_070_u64, 140_i64, r#""payoff_bp":140,"#),
+            (4_070, i64::MAX, r#""payoff_bp":null,"#),
+            (2, 0, r#""payoff_bp":0,"#),
+            (1, 0, r#""payoff_bp":null,"#),
+            (0, 0, r#""payoff_bp":null,"#),
+        ] {
+            let row = cli::frontier::Row {
+                identity: [0x7d_u8; 32],
+                rank: 1,
+                mask_words: [9, 0, 0, 0, 0, 0],
+                hits: 4_395,
+                n,
+                mean_milli_paisa: 12_300,
+                t_milli: 1_802,
+                payoff_bp: payoff,
+                wins: 0,
+                trades: 0,
+                cell_wins: 0,
+                pessimistic: 0,
+                worst_trade: 0,
+                max_drawdown: 0,
+                min_win: 0,
+                gross_win: 0,
+                gross_loss: 0,
+                direction: cli::frontier::Direction::Short,
+                rules: cli::Rules::elite(400, 25),
+            };
+            let mut out = String::new();
+            super::write_row(&mut out, &row, &summary);
+            assert!(out.contains(expected), "n {n} payoff {payoff}: {out}");
+            assert!(
+                !out.contains("9223372036854775807"),
+                "no bare i64::MAX reaches the wire: {out}"
+            );
+        }
     }
 
     /// A published run is served with its bar, and the rows are NOT judged.
@@ -445,6 +640,120 @@ mod tests {
             "it is counted, and counted apart — an uncounted stray would be the \
              silent skip the census exists to refuse: {body}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **At its three named ceilings the route still answers, and a run past
+    /// either the run or the row ceiling refuses by name.** so1-4, D-4437.
+    #[test]
+    fn the_live_route_answers_at_its_ceilings_and_refuses_past_them() {
+        let root = crate::scratch::path("livejson-ceilings");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+        let at_ceiling = full_live_store(&root, 3, cli::live::LIVE_ROW_LIMIT);
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body.contains(r#""count":3"#), "{body}");
+        assert!(body.contains(r#""kept":256"#), "{body}");
+
+        // One row past the per-run ceiling is refused, never cut.
+        let past_rows = full_live_store(&root, 1, cli::live::LIVE_ROW_LIMIT + 1);
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("live snapshot limit of 256 rows"), "{body}");
+        drop((at_ceiling, past_rows));
+        let _ = std::fs::remove_dir_all(&root);
+
+        std::fs::create_dir_all(&root).expect("a temp root");
+        let past_runs = full_live_store(&root, cli::live::LIVE_RUN_LIMIT + 1, 1);
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("exceeds 128 runs"), "{body}");
+        drop(past_runs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `runs` live files under `root`, each with `rows` ranked rows, and the
+    /// open views that write them. HELD by the caller, because a dropped
+    /// `Live` removes its own file (conc17-1, D-2641): this built the files and
+    /// dropped every view, so the route saw an empty store (D-4662).
+    #[must_use]
+    fn full_live_store(root: &std::path::Path, runs: usize, rows: usize) -> Vec<cli::live::Live> {
+        let mut held = Vec::with_capacity(runs);
+        for nth in 0..runs {
+            let mut identity = [0_u8; 32];
+            identity[..8].copy_from_slice(&(nth as u64 + 1).to_le_bytes());
+            let mut live = cli::live::Live::open(root, &identity).expect("a live file opens");
+            let ranked: Vec<_> = (0..rows)
+                .map(|rank| cli::frontier::Row {
+                    identity,
+                    rank: u16::try_from(rank + 1).expect("a rank within u16"),
+                    mask_words: [9, 0, 0, 0, 0, 0],
+                    hits: 4_395,
+                    n: 4_070,
+                    mean_milli_paisa: 12_300,
+                    t_milli: 1_802,
+                    payoff_bp: 140,
+                    wins: 2_100,
+                    trades: 0,
+                    cell_wins: 0,
+                    pessimistic: 0,
+                    worst_trade: 0,
+                    max_drawdown: 0,
+                    min_win: 0,
+                    gross_win: 0,
+                    gross_loss: 0,
+                    direction: cli::frontier::Direction::Short,
+                    rules: cli::Rules::elite(400, 25),
+                })
+                .collect();
+            live.publish(
+                &ranked,
+                cli::live::Summary {
+                    trials: 3_572_851,
+                    bar_milli: 5_673,
+                    priced: 0,
+                },
+            )
+            .expect("the rows publish");
+            held.push(live);
+        }
+        held
+    }
+
+    /// What `/live.json` costs at its ceilings: `LIVE_RUN_LIMIT` runs of
+    /// `LIVE_ROW_LIMIT` rows, warm (every file unchanged, rows reused) and
+    /// cold (a fresh index decoding every file). A measurement, run on
+    /// purpose; the numbers are in `docs/06-limits.md`'s D-4437 row. so1-4.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_live_json_at_its_ceilings() {
+        let root = crate::scratch::path("livejson-latency");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+        let held = full_live_store(&root, cli::live::LIVE_RUN_LIMIT, cli::live::LIVE_ROW_LIMIT);
+        let mut bytes = 0;
+        let warm = crate::latency::Timed::run(100, || {
+            let (status, _, body) = respond(Ok(root.clone()));
+            bytes = body.len();
+            (status == axum::http::StatusCode::OK)
+                .then_some(())
+                .ok_or(body)
+        })
+        .expect("warm");
+        let cold = crate::latency::Timed::run(30, || {
+            cli::live::CensusCache::default()
+                .refresh(&root)
+                .map(|census| assert_eq!(census.runs.len(), cli::live::LIVE_RUN_LIMIT))
+        })
+        .expect("cold");
+        println!("/live.json body at the ceilings: {bytes} bytes");
+        println!("{}", warm.line("/live.json, 128 runs x 256 rows, warm"));
+        println!(
+            "{}",
+            cold.line("CensusCache::refresh, 128 runs x 256 rows, cold")
+        );
+        drop(held);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

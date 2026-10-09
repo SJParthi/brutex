@@ -107,13 +107,13 @@ fn the_binary_reports_what_it_read_and_exits_zero() {
             "{GROWW_HEAD}\
              NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n\
              NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
-             NSE,CASH,,SOMEBOND,EQ,N2,INE121A08PJ0,,\n"
+             NSE,CASH,,SOMEBOND,EQ,N2,INE121A08PJ0,,,NSE-SOMEBOND\n"
         )),
         Some(&format!(
             "{DHAN_HEAD}\
              NSE,I,NA,INDEX,NIFTY,NIFTY,NA,0001-01-01,,,1333\n\
              NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES LTD,EQ,,,,1333\n\
-             NSE,E,INE121A08PJ0,EQUITY,SOMEBOND,SOME BOND,N2,,,\n"
+             NSE,E,INE121A08PJ0,EQUITY,SOMEBOND,SOME BOND,N2,,,,9998\n"
         )),
     );
     let (code, text, _) = run(&dir, "report");
@@ -186,4 +186,27 @@ fn the_binary_refuses_an_argument_it_does_not_understand() {
 /// than spelled again here so a rename cannot leave this test opening windows.
 fn brutex_api_no_open() -> &'static str {
     api::server::NO_OPEN_ENV
+}
+
+/// probeapi-3, D-1200: an argument that is not valid UTF-8 is a misuse, exit
+/// 2 with a sentence — not a `std::env::args` panic and exit 101.
+#[cfg(unix)]
+#[test]
+fn the_binary_refuses_a_non_utf8_argument_as_a_misuse_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt as _;
+    for bytes in [&b"\xff"[..], &b"serve\xc0\x80"[..], &b"\xed\xa0\x80"[..]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_api"))
+            .arg(std::ffi::OsStr::from_bytes(bytes))
+            .env(brutex_api_no_open(), "1")
+            .output()
+            .expect("the binary must run");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{bytes:?}: {err}");
+        assert!(!err.contains("panicked"), "{bytes:?}: {err}");
+        assert!(
+            err.contains("argument 1 is not valid UTF-8"),
+            "{bytes:?}: {err}"
+        );
+        assert!(err.contains("usage:"), "{err}");
+    }
 }

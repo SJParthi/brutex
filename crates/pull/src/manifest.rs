@@ -43,8 +43,9 @@
 //! nothing straddles a cache line, and every byte of an entry is covered by
 //! exactly one checksum.
 //!
-//! Version 1 is read and never written. Version 2 is what this build writes,
-//! and D-0067 says why the closes are in the census at all: `/store.json` must
+//! Version 1 is read and never written. Version 3 is what this build writes:
+//! version 2's geometry with the derivative contract in the closes half's
+//! reserved bytes. D-0067 says why the closes are in the census at all: `/store.json` must
 //! serve a month's percentage change, and deriving it from the bars costs
 //! ~17.5 GB to extract 492 KB.
 //!
@@ -184,7 +185,9 @@ pub const MANIFEST_EXTENSION: &str = ".man";
 /// argument `store::layout::FORMAT_VERSION_2` makes one crate away.
 pub const MAGIC: [u8; 8] = *b"BRUTEXM1";
 
-/// Identifies a version-2 manifest — the one this build writes.
+/// Identifies the version-2 GEOMETRY, which versions 2 and 3 share. Version 3
+/// is the one this build writes; the version field, not the magic, separates
+/// them.
 pub const MAGIC_V2: [u8; 8] = *b"BRUTEXM2";
 
 /// The seven bytes shared by every manifest version.
@@ -192,7 +195,7 @@ pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXM";
 
 /// The format version this build **writes**. Version 1 is read, never written.
 ///
-/// `Layout::KNOWN` is what this build **reads**, and it holds both.
+/// `Layout::KNOWN` is what this build **reads**, and it holds all three.
 pub const FORMAT_VERSION: u16 = 3;
 
 /// Bytes per header slot, and per checksummed image unit.
@@ -508,9 +511,9 @@ const C_CONTRACT_N: usize = C_CONTRACT + C_CONTRACT_LEN;
 
 const _: () = assert!(C_LAST_CLOSE + 8 <= C_CONTRACT);
 const _: () = assert!(C_CONTRACT_N < OFF_CRC);
-// 16..60 is reserved and stays zero. `docs/02-store-format.md` §2: a future
-// field takes reserved space in a NEW VERSION, never by reinterpreting this
-// one.
+// 41..60 is reserved and stays zero at version 3 (16..60 was, at version 2).
+// `docs/02-store-format.md` §2 and §11.5a: a future field takes reserved space
+// in a NEW VERSION, never by reinterpreting this one.
 const _: () = assert!(C_LAST_CLOSE + 8 < OFF_CRC);
 
 /// The path of one vendor's manifest under `root`.
@@ -940,6 +943,19 @@ pub enum EntryFault {
         /// The value that is neither a price nor the sentinel.
         paisa: i64,
     },
+    /// The version-3 contract field states a length past the field, or text
+    /// that is not a contract. Reading it as no contract would file a
+    /// derivative row under its underlying's spot key. D-3680.
+    ContractUnreadable {
+        /// The length byte as stored.
+        len: u8,
+    },
+    /// A byte the format reserves, or a text byte past the contract's stated
+    /// length, is not zero. D-3680.
+    ReservedNotZero {
+        /// Its offset within the closes half.
+        offset: usize,
+    },
 }
 
 impl fmt::Display for EntryFault {
@@ -970,6 +986,14 @@ impl fmt::Display for EntryFault {
                 "close {paisa} paisa is neither a price nor the not-recorded \
                  sentinel {CLOSE_NULL}"
             ),
+            Self::ContractUnreadable { len } => write!(
+                f,
+                "the contract field (length {len}) is not a contract; refused \
+                 rather than read as the spot key"
+            ),
+            Self::ReservedNotZero { offset } => {
+                write!(f, "reserved byte {offset} of the closes half is not zero")
+            }
         }
     }
 }
@@ -1655,6 +1679,23 @@ impl Held {
     /// a second half that fails its own, or [`EntryFault::CloseHalfRecorded`] /
     /// [`EntryFault::CloseNotAPrice`] for a pair that is not a pair.
     pub fn decode(bytes: &[u8]) -> Result<Self, EntryFault> {
+        Self::decode_versioned(bytes, true)
+    }
+
+    /// Decodes a version-2 entry, whose bytes `16..60` of the closes half were
+    /// reserved and carry no meaning: no contract is read from them, exactly
+    /// as the version-2 decoder read them. Reading version-3 meaning into a
+    /// version-2 row would reinterpret its reserved space, which
+    /// `docs/02-store-format.md` §2 forbids. D-3680.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode`], less the contract and reserved-tail refusals.
+    pub fn decode_v2(bytes: &[u8]) -> Result<Self, EntryFault> {
+        Self::decode_versioned(bytes, false)
+    }
+
+    fn decode_versioned(bytes: &[u8], with_contract: bool) -> Result<Self, EntryFault> {
         let entry = Entry::decode(bytes)?;
         let half = image_of_at(bytes, IMAGE_LEN).map_err(|len| EntryFault::TooShort { len })?;
         verify(&half).map_err(|(stored, computed)| EntryFault::Checksum { stored, computed })?;
@@ -1671,7 +1712,9 @@ impl Held {
         // answering `None` is the right answer for it, and this is the only
         // place that has both halves in hand.
         let mut entry = entry;
-        entry.key.contract = read_contract(&half);
+        if with_contract {
+            entry.key.contract = read_contract(&half)?;
+        }
         Ok(Self { entry, closes })
     }
 }
@@ -1688,7 +1731,12 @@ impl Layout {
     ///
     /// Whatever [`Entry::decode`] or [`Held::decode`] refuses.
     pub fn decode_entry(self, bytes: &[u8]) -> Result<Held, EntryFault> {
-        if self.carries_closes {
+        // THE VERSION SAYS WHAT THE RESERVED BYTES MEAN (D-3680). Versions 2
+        // and 3 share a geometry, and this chose the decoder by geometry alone,
+        // so a version-2 entry was read with version-3 contract meaning.
+        if self.carries_closes && self.version == 2 {
+            Held::decode_v2(bytes)
+        } else if self.carries_closes {
             Held::decode(bytes)
         } else {
             Entry::decode(bytes).map(Held::unknown)
@@ -2216,17 +2264,21 @@ impl HeaderRead {
 ///
 /// # Two paths, two different bounds, said separately
 ///
-/// **Lookup — O(1) worst case.** [`Manifest::entry`] is one probe into a table
-/// that the load walk built once and never grew, whatever the census holds.
+/// **Lookup — expected O(1).** [`Manifest::entry`] is one hash probe into a
+/// table that the load walk built once and never grew, whatever the census
+/// holds. A `HashMap` probe is expected O(1), not an adversarial worst-case
+/// guarantee (`CLAUDE.md` §3 rule 4); this called it a worst-case bound until
+/// D-1488 (v4-1).
 /// `docs/07-o1-architecture.md` layer 3. C-12 in `crates/pull/benches/ratio.rs`
 /// measures it at 1×, 10× and 100× the census.
 ///
-/// **Append — O(1) worst case for the first `n_valid` new keys, amortised O(1)
-/// after that.** The reservation carries [`APPEND_HEADROOM_FACTOR`]× the
-/// census, so [`Manifest::record`] has at least `n_valid` free slots waiting
-/// and cannot rehash until they are gone; past them one append in a doubling
-/// rebuilds the table at `O(n_keys)`. Until D-0040 this sentence read "it never
-/// rehashes … O(1) worst case", the reservation was exactly `n_valid`, and a
+/// **Append — no rehash for the first `n_valid` new keys (each one expected-O(1)
+/// hash insert), amortised O(1) after that.** The reservation carries
+/// [`APPEND_HEADROOM_FACTOR`]× the census, so [`Manifest::record`] has at least
+/// `n_valid` free slots waiting and cannot rehash until they are gone; past
+/// them one append in a doubling rebuilds the table at `O(n_keys)`. Until
+/// D-0040 this sentence said it never rehashed and called the append a
+/// worst-case constant, the reservation was exactly `n_valid`, and a
 /// census sitting on a `7·2^k` boundary rehashed on the **first** append —
 /// measured at 22× the cost between a 1,792-entry census and a 57,344-entry
 /// one. `docs/06-limits.md` §23 states what is still not unconditional and what
@@ -2764,8 +2816,8 @@ impl Manifest {
     ///
     /// # Cost, and what crossing a month costs
     ///
-    /// **O(1) worst case**, the same bound [`Manifest::entry`] carries: one
-    /// probe into a table the load walk built once and never grew. A caller
+    /// **Expected O(1)**, the same bound [`Manifest::entry`] carries: one
+    /// hash probe into a table the load walk built once and never grew. A caller
     /// computing a month-over-month change probes twice — this month and
     /// `YearMonth::previous` — which crosses a manifest **entry**, not a file:
     /// no `open`, no `stat`, no `pread`, because the whole census is already
@@ -2776,8 +2828,9 @@ impl Manifest {
     /// probe at 1×, 10× and 100× the census, on a hit and on a miss. The bench
     /// calls [`Manifest::entry`] rather than this method because the two are
     /// one `HashMap::get` on the same key type and differ only in which field
-    /// of the `Copy` value they hand back, so a cost that had started to grow
-    /// with the census would show on either one.
+    /// of the `Copy` value they hand back. C-12 probes one cached key, so it
+    /// cannot see the cache-miss growth O1P-05 measures for random keys past
+    /// 10^4 months (D-3307).
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.
@@ -2851,7 +2904,8 @@ impl Manifest {
     /// `index.insert` that keeps the census current, and that one has a
     /// condition on it:
     ///
-    /// * **O(1) worst case for the first `n_valid` calls after a load.**
+    /// * **No rehash, so one expected-O(1) insert, for the first `n_valid`
+    ///   calls after a load.**
     ///   `Manifest::walk` reserved [`APPEND_HEADROOM_FACTOR`]× the census and
     ///   the walk can leave at most `n_valid` elements in it, so at least
     ///   `n_valid` slots are free and no call in that run can rebuild the
@@ -3405,20 +3459,40 @@ fn covered(image: &[u8; IMAGE_LEN]) -> [u8; OFF_CRC] {
 }
 
 /// Writes `src` at `offset`.
-/// The contract this half names, or [`None`] where it names none.
+/// The contract a version-3 half names, or [`None`] where it names none.
 ///
-/// A zero length is the spot case and is not an error: every version-2 row and
-/// every spot row leaves these bytes zero, and a census full of them reads back
-/// exactly as it always did. Text that is not valid ASCII, or a length past the
-/// field, answers `None` rather than a partial name — a truncated contract is a
-/// DIFFERENT contract, and reading one would merge two series under one key.
-fn read_contract(half: &[u8; IMAGE_LEN]) -> Option<Contract> {
-    let n = usize::from(*half.get(C_CONTRACT_N)?);
-    if n == 0 || n > C_CONTRACT_LEN {
-        return None;
+/// A zero length is the spot case and is not an error, provided the text field
+/// is zero too: every spot row leaves these bytes zero. A length past the
+/// field, text that is not a contract, a byte past the stated length, or a
+/// nonzero reserved tail (`41..60`) is REFUSED, not read as the spot key. This
+/// answered `None` for all of them, and `None` is the spot key, so a corrupt
+/// derivative row loaded silently as its underlying's spot month and, the
+/// index being newest-wins, replaced that month's count (D-3680;
+/// `docs/02-store-format.md` §11.5a).
+fn read_contract(half: &[u8; IMAGE_LEN]) -> Result<Option<Contract>, EntryFault> {
+    let reserved_from = C_CONTRACT_N + 1;
+    if let Some(offset) = (reserved_from..OFF_CRC).find(|&at| half.get(at).copied() != Some(0)) {
+        return Err(EntryFault::ReservedNotZero { offset });
     }
-    let text = core::str::from_utf8(half.get(C_CONTRACT..C_CONTRACT + n)?).ok()?;
-    Contract::parse(text)
+    let n = half.get(C_CONTRACT_N).copied().unwrap_or(0);
+    let len = usize::from(n);
+    let text_field = half.get(C_CONTRACT..C_CONTRACT_N).unwrap_or_default();
+    if text_field.iter().skip(len).any(|&b| b != 0) {
+        return Err(EntryFault::ReservedNotZero {
+            offset: C_CONTRACT + len,
+        });
+    }
+    if len == 0 {
+        return Ok(None);
+    }
+    let parsed = text_field
+        .get(..len)
+        .and_then(|text| core::str::from_utf8(text).ok())
+        .and_then(Contract::parse);
+    match parsed {
+        Some(contract) => Ok(Some(contract)),
+        None => Err(EntryFault::ContractUnreadable { len: n }),
+    }
 }
 
 fn write_at<const N: usize>(out: &mut [u8; IMAGE_LEN], offset: usize, src: [u8; N]) {

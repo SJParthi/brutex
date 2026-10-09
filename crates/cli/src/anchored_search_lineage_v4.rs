@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -65,10 +65,8 @@ const LOCK_FILE: &str = "anchored-search-lineage-v4.lock";
 const LOCK_FILE_MAX_BYTES: u64 = 0;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(MEMBER_PAYLOAD_BYTES + SEAL_BYTES == ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES);
 const _: () =
@@ -677,6 +675,8 @@ pub(crate) struct AnchoredSearchLineageV4Ledger {
     writable: bool,
     receipts: HashMap<[u8; 32], AnchoredSearchLineageV4StructuralReceipt>,
     trailing: Option<TrailingPairV4>,
+    /// A single whole NIFTY member past the last Completion, sequence zeroed.
+    orphan_nifty: Option<MemberRecordV4>,
     member_records: u64,
     completion_records: u64,
 }
@@ -725,6 +725,33 @@ impl AnchoredSearchLineageV4Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("anchored search-lineage V4 root changed while opening".to_owned());
             }
+            if writable {
+                // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+                // lock; the bytes past the last whole record were never acknowledged.
+                // A whole NIFTY member left by a torn pair is kept: the scan
+                // already treats it as the exact retry's orphan.
+                // Each file is cut only when it begins with its own records'
+                // magic, so a renamed or foreign file reaches the scan's
+                // refusal uncut (CE-89, D-2795).
+                for (file, path, width, magic) in [
+                    (
+                        &member_file,
+                        &member_path,
+                        ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES,
+                        &MEMBER_MAGIC,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES,
+                        &COMPLETION_MAGIC,
+                    ),
+                ] {
+                    let width = u64::try_from(width)
+                        .map_err(|_| "search-lineage V4 width does not fit u64".to_owned())?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, width, magic)?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_FILE_MAX_BYTES)?;
             let member_generation =
                 file_generation(&member_file, &member_path, bounds.member_bytes)?;
@@ -749,6 +776,7 @@ impl AnchoredSearchLineageV4Ledger {
                 writable,
                 receipts: HashMap::new(),
                 trailing: None,
+                orphan_nifty: None,
                 member_records: 0,
                 completion_records: 0,
             };
@@ -806,14 +834,34 @@ impl AnchoredSearchLineageV4Ledger {
             .checked_sub(covered_members)
             .ok_or_else(|| "anchored search-lineage V4 trailing-member underflow".to_owned())?;
         self.trailing = match trailing_members {
-            0 => None,
+            0 => {
+                self.orphan_nifty = None;
+                None
+            }
             1 => {
-                return Err(
-                    "anchored search-lineage V4 has a partial trailing pair; history is not rewritten"
-                        .to_owned(),
-                );
+                // One whole NIFTY member past the last Completion is the
+                // prefix a crash inside the pair's member write leaves. It is
+                // retained, never rewritten, and only the exact retry whose
+                // NIFTY member equals it may complete the pair (D-1620).
+                // Anything else in that slot still refuses.
+                let orphan = decode_member(&read_fixed_at::<
+                    ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES,
+                >(
+                    &mut self.member_file, covered_members
+                )?)?;
+                if orphan.block_sequence != completion_records
+                    || orphan.family != SearchFamilyV4::Nifty
+                {
+                    return Err(
+                        "anchored search-lineage V4 has a partial trailing pair whose member is not the next NIFTY member; history is not rewritten"
+                            .to_owned(),
+                    );
+                }
+                self.orphan_nifty = Some(orphan.with_sequence(0));
+                None
             }
             2 => {
+                self.orphan_nifty = None;
                 let members = read_member_pair(&mut self.member_file, completion_records)?;
                 let pair = validate_member_pair(completion_records, &members)?;
                 if self.receipts.contains_key(&pair.pair_id) {
@@ -927,15 +975,36 @@ impl AnchoredSearchLineageV4Ledger {
             return Ok((true, receipt));
         }
         self.require_append_capacity()?;
-        for raw in encode_member_records(&prepared.members(self.completion_records))? {
-            append_raw(&mut self.member_file, &raw)?;
-        }
+        let members = prepared.members(self.completion_records);
+        // Both members go down in one write, so the only whole-record prefix a
+        // crash can leave is the NIFTY member that `scan` retains as an
+        // orphan. A write error truncates back (D-1620).
+        let (bytes, written) = match self.orphan_nifty {
+            Some(orphan) if orphan == prepared.nifty => (
+                encode_member(
+                    members
+                        .get(1)
+                        .ok_or_else(|| "cannot encode absent V4 BANKNIFTY member".to_owned())?,
+                )?
+                .to_vec(),
+                1,
+            ),
+            Some(orphan) => {
+                return Err(format!(
+                    "anchored search-lineage V4 trailing NIFTY member {} is not exact retry {}",
+                    hex32(orphan.member_id),
+                    hex32(prepared.pair_id)
+                ));
+            }
+            None => (encode_members(&members)?, 2),
+        };
+        append_raw(&mut self.member_file, &bytes)?;
         self.member_file
             .sync_data()
             .map_err(|why| format!("cannot sync search-lineage V4 members: {why}"))?;
         self.member_records = self
             .member_records
-            .checked_add(2)
+            .checked_add(written)
             .ok_or_else(|| "search-lineage V4 member count overflowed".to_owned())?;
         self.member_generation = file_generation(
             &self.member_file,
@@ -1007,9 +1076,10 @@ impl AnchoredSearchLineageV4Ledger {
                 self.bounds.pair_records
             ));
         }
-        let next_members = self
-            .member_records
-            .checked_add(2)
+        // Counted from the Completions, so a retained orphan NIFTY member is
+        // not charged twice against the bound.
+        let next_members = next_pairs
+            .checked_mul(2)
             .ok_or_else(|| "search-lineage V4 member count overflowed".to_owned())?;
         let next_member_bytes = next_members
             .checked_mul(ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64)
@@ -1592,10 +1662,32 @@ fn record_count(
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), AnchoredSearchLineageV4Refusal> {
-    file.seek(SeekFrom::End(0))
+    append_with_rollback(file, raw, Write::write_all)
+}
+
+/// Appends `raw`, and on a write error (ENOSPC, EIO, a short write) truncates
+/// the file back to the length it had before, as Admission V3/V4 do (D-0916).
+/// Without it a partial write left a ragged tail that every later open,
+/// read-only included, refused for good (D-1620).
+fn append_with_rollback(
+    file: &mut File,
+    raw: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), AnchoredSearchLineageV4Refusal> {
+    let end = file
+        .seek(SeekFrom::End(0))
         .map_err(|why| format!("cannot seek search-lineage V4 append: {why}"))?;
-    file.write_all(raw)
-        .map_err(|why| format!("cannot append search-lineage V4 bytes: {why}"))
+    let Err(why) = write(file, raw) else {
+        return Ok(());
+    };
+    match file.set_len(end) {
+        Ok(()) => Err(format!(
+            "cannot append search-lineage V4 bytes: {why}; truncated back to {end} bytes"
+        )),
+        Err(rollback) => Err(format!(
+            "cannot append search-lineage V4 bytes: {why}; truncation back to {end} bytes also failed: {rollback}"
+        )),
+    }
 }
 
 fn open_root(
@@ -1872,7 +1964,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
         ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v1,
+        printed_ohlcv_cost_model_id_v3,
     };
     use runner::outcome::Horizon;
     use std::sync::OnceLock;
@@ -1937,7 +2029,7 @@ mod tests {
             ratios,
             32,
             ExitGridSelectorV1::PessimisticTotal,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -2351,6 +2443,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walks the complete, orphan-NIFTY, bad-orphan and foreign tails so each case shares the same prepared pair"
+    )]
     fn full_synced_tail_is_retryable_but_partial_or_foreign_tail_refuses() {
         let (nifty, banknifty) = projections();
         let prepared = PreparedPairV4::from_opaque(&nifty, &banknifty).expect("prepare V4 pair");
@@ -2392,10 +2488,82 @@ mod tests {
         .expect("append one V4 member");
         member.sync_all().expect("sync partial V4 tail");
         drop(member);
-        assert_refuses(
-            AnchoredSearchLineageV4Ledger::open_read(partial.path(), bounds()),
-            "partial trailing pair",
+        // D-1620: one whole NIFTY member is a crash prefix. A reader keeps it
+        // byte-identical, a foreign retry is refused without touching it, and
+        // the exact retry completes the pair by writing only BANKNIFTY.
+        let orphan_bytes = std::fs::read(partial.path().join(MEMBER_FILE)).expect("orphan bytes");
+        let reader = AnchoredSearchLineageV4Ledger::open_read(partial.path(), bounds())
+            .expect("a single NIFTY orphan is readable");
+        assert_eq!(reader.orphan_nifty, Some(prepared.nifty));
+        assert!(reader.receipts.is_empty());
+        drop(reader);
+        let mut other_nifty = prepared.nifty;
+        other_nifty.walk_facts_id[0] ^= 1;
+        other_nifty.source_authority_id = other_nifty.derive_source_authority_id();
+        other_nifty.member_id = other_nifty.derive_member_id();
+        let foreign_retry = PreparedPairV4 {
+            nifty: other_nifty,
+            banknifty: prepared.banknifty,
+            pair_id: derive_pair_id(other_nifty.member_id, prepared.banknifty.member_id),
+        };
+        let mut writer = AnchoredSearchLineageV4Ledger::open_write(partial.path(), bounds())
+            .expect("writer over a NIFTY orphan");
+        assert_refuses(writer.append(&foreign_retry), "is not exact retry");
+        drop(writer);
+        assert_eq!(
+            std::fs::read(partial.path().join(MEMBER_FILE)).expect("orphan bytes after refusal"),
+            orphan_bytes
         );
+        let completed =
+            persist_anchored_search_lineage_v4(partial.path(), bounds(), &nifty, &banknifty)
+                .expect("exact retry completes the orphaned pair");
+        assert!(matches!(
+            completed,
+            AnchoredSearchLineageV4AuthenticatedCommit::Written(_)
+        ));
+        assert_eq!(
+            completed.authority().structural_receipt().pair_id(),
+            prepared.pair_id
+        );
+        assert_eq!(
+            lengths(partial.path()),
+            (
+                2 * ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64,
+                ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES as u64
+            )
+        );
+        let again =
+            persist_anchored_search_lineage_v4(partial.path(), bounds(), &nifty, &banknifty)
+                .expect("rerun reuses");
+        assert!(matches!(
+            again,
+            AnchoredSearchLineageV4AuthenticatedCommit::Reused(_)
+        ));
+
+        // A lone BANKNIFTY member, or a NIFTY member at the wrong sequence, is
+        // not a crash prefix and still refuses.
+        for (label, member_record) in [
+            ("bank-orphan", prepared.members(0)[1]),
+            ("late-orphan", prepared.members(1)[0]),
+        ] {
+            let root = TestRoot::new(label);
+            initialize(root.path());
+            let mut member = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.path().join(MEMBER_FILE))
+                .expect("open bad orphan tail");
+            append_raw(
+                &mut member,
+                &encode_member(&member_record).expect("encode bad orphan"),
+            )
+            .expect("append bad orphan");
+            drop(member);
+            assert_refuses(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
+                "partial trailing pair",
+            );
+        }
 
         let foreign = TestRoot::new("foreign-tail");
         initialize(foreign.path());
@@ -2421,6 +2589,124 @@ mod tests {
         let mut writer = AnchoredSearchLineageV4Ledger::open_write(foreign.path(), bounds())
             .expect("foreign complete tail is structurally valid");
         assert_refuses(writer.append(&other), "not exact retry");
+    }
+
+    #[test]
+    fn a_failed_member_or_completion_write_truncates_back_and_stays_readable() {
+        let (nifty, banknifty) = projections();
+        let root = TestRoot::new("rollback");
+        persist_anchored_search_lineage_v4(root.path(), bounds(), &nifty, &banknifty)
+            .expect("commit V4 pair");
+        for name in [MEMBER_FILE, COMPLETION_FILE] {
+            let path = root.path().join(name);
+            let before = std::fs::read(&path).expect("committed bytes");
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open committed V4 file");
+            let refusal = append_with_rollback(&mut file, &[0x5a; 700], |file, raw| {
+                file.write_all(raw.get(..333).expect("half"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed write must refuse");
+            assert!(
+                refusal.contains("injected short write") && refusal.contains("truncated back"),
+                "refusal `{refusal}` must name the write error and the rollback"
+            );
+            drop(file);
+            assert_eq!(std::fs::read(&path).expect("reread"), before);
+            AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
+                .expect("committed pair stays readable");
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join(MEMBER_FILE))
+            .expect("open member file");
+        append_with_rollback(&mut file, &[], |_, _| Ok(())).expect("a clean write succeeds");
+
+        // AND PRODUCTION IS WIRED THROUGH IT, IN ONE CALL (P1-17-04). Everything
+        // above drives the helper directly, so `append_raw` writing with
+        // `write_all` (no rollback) or `append_locked` going back to one
+        // `append_raw` per member (the D-1620 crash window) passed it. Both
+        // shapes are read from the code, bounded at each function's closing
+        // brace, with comments dropped; the needles are split so this test
+        // cannot match itself.
+        let source = include_str!("anchored_search_lineage_v4.rs");
+        let code_of = |anchor: &str, close: &str| -> String {
+            source
+                .split_once(anchor)
+                .and_then(|(_, rest)| rest.split_once(close))
+                .map_or("", |(body, _)| body)
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let raw = code_of(concat!("\nfn append_", "raw("), "\n}\n");
+        assert_eq!(
+            raw.matches(concat!(
+                "append_with_",
+                "rollback(file, raw, Write::write_all)"
+            ))
+            .count(),
+            1,
+            "append_raw delegates to the rollback helper: {raw}"
+        );
+        assert!(
+            !raw.contains(concat!("file.write_", "all(")),
+            "append_raw must not write around the rollback: {raw}"
+        );
+        let locked = code_of(concat!("\n    fn append_", "locked("), "\n    }\n");
+        assert_eq!(
+            locked.matches(concat!("append_", "raw(")).count(),
+            1,
+            "a pair's members are written in one call: {locked}"
+        );
+        assert!(
+            locked.contains(concat!("None => (encode_", "members(&members)?, 2),")),
+            "and that one call carries both members: {locked}"
+        );
+    }
+
+    #[test]
+    fn a_torn_record_of_its_own_is_cut_by_the_next_writer() {
+        for (label, file_name, magic) in [
+            ("torn-member", MEMBER_FILE, MEMBER_MAGIC),
+            ("torn-completion", COMPLETION_FILE, COMPLETION_MAGIC),
+        ] {
+            let root = TestRoot::new(label);
+            initialize(root.path());
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(root.path().join(file_name))
+                .expect("open V4 file for torn append");
+            file.write_all(&magic[..5]).expect("append torn V4 record");
+            file.sync_all().expect("sync torn V4 record");
+            drop(file);
+            assert_refuses(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
+                "ragged",
+            );
+            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
+            // tail of its own record, and a reader then opens.
+            drop(
+                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
+                    .expect("the writer cuts the ragged tail"),
+            );
+            assert_eq!(
+                std::fs::metadata(root.path().join(file_name))
+                    .expect("measure healed V4 file")
+                    .len(),
+                0,
+                "the torn {label} record is cut"
+            );
+            drop(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
+                    .expect("a reader opens the healed ledger"),
+            );
+        }
     }
 
     #[test]
@@ -2461,6 +2747,26 @@ mod tests {
             assert_refuses(
                 AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
                 "ragged",
+            );
+            // CE-89, D-2794/D-2795: the WRITABLE open refuses the same
+            // foreign-byte file and cuts nothing -- a renamed or foreign file
+            // is never truncated before it is refused.
+            let held = std::fs::read(root.path().join(file_name)).expect("ragged bytes");
+            let (nifty_again, banknifty_again) = projections();
+            assert!(
+                persist_anchored_search_lineage_v4(
+                    root.path(),
+                    bounds(),
+                    &nifty_again,
+                    &banknifty_again
+                )
+                .is_err(),
+                "a writable open over a ragged {label} file refuses"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(file_name)).expect("ragged bytes kept"),
+                held,
+                "the writable open cut nothing"
             );
         }
 
@@ -2644,6 +2950,58 @@ mod tests {
         assert_refuses(
             AnchoredSearchLineageV4Ledger::open_read(child.path(), bounds()),
             "regular non-symlink",
+        );
+    }
+
+    /// **An append that would hold one pair more than the explicit bound is
+    /// refused before any byte is written, and the pair already inside the
+    /// bound is still reused.** R1286-cli-10, D-4100.
+    ///
+    /// A one-pair ledger takes its first pair. A second, different pair would
+    /// make two: it is refused with the bound's own sentence, naming both
+    /// counts, and both files keep their exact lengths. Without the capacity
+    /// check the writer's own post-append length check against the
+    /// member-byte bound (`file_generation`) refuses only AFTER the member
+    /// bytes are down. The first pair's exact retry is reused at the bound,
+    /// not refused by it.
+    #[test]
+    fn an_append_past_the_pair_bound_is_refused_before_any_byte_is_written() {
+        let root = TestRoot::new("pair-bound");
+        let one_pair = AnchoredSearchLineageV4Bounds::new(
+            1,
+            2 * ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64,
+            ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES as u64,
+        )
+        .expect("a one-pair bound is valid");
+        let (nifty, banknifty) = projections();
+        assert!(
+            matches!(
+                persist_anchored_search_lineage_v4(root.path(), one_pair, &nifty, &banknifty),
+                Ok(AnchoredSearchLineageV4AuthenticatedCommit::Written(_))
+            ),
+            "the first pair is written and fills the bound"
+        );
+        let full = lengths(root.path());
+        let (other_nifty, other_banknifty) = zero_population_projections();
+        let refused = persist_anchored_search_lineage_v4(
+            root.path(),
+            one_pair,
+            &other_nifty,
+            &other_banknifty,
+        )
+        .err()
+        .expect("a second pair exceeds the one-pair bound");
+        assert_eq!(
+            refused,
+            "search-lineage V4 append reaches 2 pairs above explicit maximum 1"
+        );
+        assert_eq!(lengths(root.path()), full, "no byte of the refused pair");
+        assert!(
+            matches!(
+                persist_anchored_search_lineage_v4(root.path(), one_pair, &nifty, &banknifty),
+                Ok(AnchoredSearchLineageV4AuthenticatedCommit::Reused(_))
+            ),
+            "the pair inside the bound is reused at the bound"
         );
     }
 }

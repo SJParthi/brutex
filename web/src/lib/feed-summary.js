@@ -6,7 +6,11 @@
  * @param {Response} response
  */
 export function readFeedSummary(wire, response) {
-  if (!response.ok) throw new Error(`Feed ${wire}: census HEAD answered HTTP ${response.status}`);
+  // A HEAD HAS NO BODY, SO THE STAMP IS THE REASON (W2, D-3212): an
+  // unreadable census answers 503 and names itself in `x-brutex-census-note`.
+  if (!response.ok) {
+    throw new Error(`Feed ${wire}: ${refusalSentence('census HEAD', response.status, headerRefusal(response.headers))}`);
+  }
   const state = response.headers.get('x-brutex-census-state');
   const note = response.headers.get('x-brutex-census-note');
   const degraded = response.headers.get('x-brutex-census-degraded');
@@ -58,3 +62,4 @@ export function surveyFeedHeaders(list, request) {
   return pooled(list, 2, async (feed) => ({ ...feed, ...await readFeedHeader(feed.wire, request) }));
 }
 import { pooled } from './pooled.js';
+import { headerRefusal, refusalSentence } from './refusal.js';

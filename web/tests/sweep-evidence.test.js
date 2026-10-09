@@ -226,3 +226,20 @@ test('single-stop execution and qualification lifecycle require their own authen
   assert.equal(canInspectCandidateTrades(result),false);
  }
 });
+
+// W5 (OBSV-16, D-3215): `/sweep-evidence.json` refuses with
+// `{"schema_version":1,"status":"refused","evidence":null,"rows":[],"refusal":…}`
+// (`crates/api/src/sweepevidence.rs` `refusal`); the reader printed the status only.
+test('a refused saved-evidence read names the server refusal beside the status (W5)', async () => {
+  const refused = (/** @type {number} */ status, /** @type {string} */ refusal) =>
+    Response.json({ schema_version: 1, status: 'refused', evidence: null, rows: [], refusal }, { status });
+  await assert.rejects(fetchSweepEvidence(identity, async () => refused(503, 'the saved attempt changed while it was read; retry')),
+    { message: 'Saved evidence request failed (HTTP 503). the saved attempt changed while it was read; retry' });
+  await assert.rejects(fetchSweepEvidence(identity, async () => refused(400, '`kind` must be depth')),
+    { message: 'Saved evidence request failed (HTTP 400). `kind` must be depth' });
+  let pages = 0;
+  await assert.rejects(fetchSweepEvidence(identity, async () => ++pages === 1 ? response(pageOf(300)) : refused(429, 'detail read capacity is full')),
+    { message: 'Saved evidence request failed (HTTP 429). detail read capacity is full' });
+  await assert.rejects(fetchSweepEvidence(identity, async () => new Response('<html>proxy</html>', { status: 502 })),
+    { message: 'Saved evidence request failed (HTTP 502).' });
+});

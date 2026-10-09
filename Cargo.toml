@@ -98,8 +98,11 @@ blake3   = "1"
 crc32c   = "0.6"
 rayon    = "1"
 tracing  = "0.1"
-tokio    = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
+tokio    = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time", "net", "sync"] }
 axum     = "0.8"
+# D-1510: already in the graph under axum and hyper at the locked 1.1.0; named
+# so `api` can wrap a request body in a deadline, which needs its `Frame` type.
+http-body = "1"
 rustls-graviola = "0.4"
 # `gzip` IS FOR ONE ENDPOINT AND IT IS NOT OPTIONAL FOR IT. Zerodha's
 # instrument dump is documented as "a gzipped CSV dump"; without transparent
@@ -108,7 +111,10 @@ rustls-graviola = "0.4"
 # it, so a vendor that does not gzip is unaffected. D-0309.
 reqwest  = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "json", "gzip"] }
 serde    = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `arbitrary_precision`: a JSON number keeps the digits the body carried, so a
+# vendor's rupee price is snapped from its own text and never from an f64's
+# re-rendering (audit-20261003 attackdata-4, D-1570). Adds no crate.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 clap     = { version = "4", features = ["derive"] }
 hmac     = "0.12"
 sha1     = "0.10"

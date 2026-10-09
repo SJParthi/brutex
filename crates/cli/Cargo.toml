@@ -91,10 +91,15 @@ pull       = { path = "../pull", version = "0.1.0" }
 # HERE AND NOT ONE CRATE DEEPER. That gate silences `vocab engine indicators
 # runner`, because those hold the loops: the ladder evaluates `(bits & mask) ==
 # mask` billions of times and its rule is not "each call is cheap" but "the
-# innermost loop calls nothing at all". `cli` holds no loop over bars and no loop
-# over candidates. It is the STRUCTURAL BOUNDARY -- one event per run, one per
-# instrument-month -- which is exactly the granularity gate 17's own comment
-# prescribes as the affordable one.
+# innermost loop calls nothing at all". `cli` is not on that list, and it is NOT
+# loop-free: it walks bars (`window_range_percentile`, for one) and `screen`
+# walks every candidate in `by_evidence.par_iter()`, calling `GridProgress::tick`
+# per candidate -- one relaxed `fetch_add`, with an event only on every
+# `stride`-th candidate. Its EVENTS are at the structural boundaries -- one per
+# run, one per instrument-month, and that `stride` -- which is the granularity
+# gate 17's own comment prescribes as the affordable one. This comment said
+# `cli` held no loop over bars or candidates after CLAUDE.md stopped saying so
+# (D-1448; AC-gates-o1-4, D-4466).
 telemetry  = { path = "../telemetry", version = "0.1.0" }
 
 # THE CORES THE SWEEP NEVER USED.
@@ -133,8 +138,9 @@ sha1 = { workspace = true }
 flate2 = { workspace = true }
 
 [dev-dependencies]
-# The build-time verifier is included directly by its adversarial integration
-# test. Keeping these test-only avoids adding either crate to the CLI binary.
+# The build-time verifier is mounted by the library's test build (D-1119), so
+# its adversarial tests run under `cargo test` and cargo-mutants walks it.
+# Keeping these test-only avoids adding either crate to the CLI binary.
 sha1 = { workspace = true }
 flate2 = { workspace = true }
 

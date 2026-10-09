@@ -150,6 +150,51 @@ fn busy_index_refuses_without_reserving_or_dispatching_an_invocation() {
     );
 }
 
+/// cli1-2, D-2620: a READER of the index — `read`'s shared lock, which the
+/// browser's audited GET routes take on every poll — is waited for, so a
+/// sweep starting while a page polls is admitted rather than FAILED. On the
+/// old code `begin` took one `try_lock` and refused BUSY at once, so the
+/// first `begin` below failed. A shared holder and an exclusive holder that
+/// outlast the bound are both still BUSY, and nothing was reserved by either
+/// refusal.
+#[test]
+fn a_reader_polling_the_index_is_waited_for_and_one_outlasting_the_bound_is_busy() {
+    let root = Scratch::new();
+    drop(begin(&root.0, Origin::Cli, "range-all").unwrap());
+    let index = File::open(base(&root.0).join("index.bin")).unwrap();
+    index.try_lock_shared().unwrap();
+    let admitted = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            index.unlock().unwrap();
+        });
+        let admitted = begin(&root.0, Origin::Cli, "range-all");
+        reader.join().unwrap();
+        admitted
+    });
+    assert_eq!(admitted.unwrap().id(), ID_BASE + 2);
+    for exclusive in [false, true] {
+        let holder = File::open(base(&root.0).join("index.bin")).unwrap();
+        if exclusive {
+            holder.try_lock().unwrap();
+        } else {
+            holder.try_lock_shared().unwrap();
+        }
+        let started = std::time::Instant::now();
+        match begin(&root.0, Origin::Cli, "range-all") {
+            Err(why) => assert!(is_busy(&why), "{why}"),
+            Ok(_) => panic!("a holder past the bound must still refuse"),
+        }
+        assert!(started.elapsed() >= crate::lock_wait::WAIT * crate::lock_wait::WAITS);
+        assert_eq!(holder.metadata().unwrap().len(), 2 * STRIDE);
+        holder.unlock().unwrap();
+    }
+    assert_eq!(
+        begin(&root.0, Origin::Cli, "range-all").unwrap().id(),
+        ID_BASE + 3
+    );
+}
+
 #[test]
 fn busy_or_changed_detail_poisons_the_writer_without_a_success_fallback() {
     let root = Scratch::new();
@@ -312,6 +357,7 @@ struct FailingWriter {
     fail_after: usize,
     sync_fails: bool,
     synced: bool,
+    truncate_fails: bool,
 }
 impl io::Write for FailingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -339,26 +385,66 @@ impl DurableWrite for FailingWriter {
             Ok(())
         }
     }
+    fn end(&mut self) -> io::Result<u64> {
+        Ok(self.bytes.len() as u64)
+    }
+    fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+        if self.truncate_fails {
+            return Err(io::Error::other("private truncation failure"));
+        }
+        self.bytes
+            .truncate(usize::try_from(len).expect("fixture length"));
+        Ok(())
+    }
 }
 
+/// AHA-08 (h-cli-4, D-1854). A failed or short write is never acknowledged
+/// and is truncated back to the record boundary before it, so the file is
+/// never left torn; a failed truncation names both errors; a failed sync after
+/// a whole write is refused and leaves the whole record.
 #[test]
 fn disk_full_partial_write_and_sync_failure_are_never_acknowledged() {
-    for fail_after in [0, 7, 255] {
+    for (prior, fail_after) in [
+        (0, 0),
+        (0, 7),
+        (0, 255),
+        (BYTES, BYTES + 1),
+        (BYTES, 2 * BYTES - 1),
+    ] {
         let mut writer = FailingWriter {
-            bytes: Vec::new(),
+            bytes: vec![9; prior],
             fail_after,
             sync_fails: false,
             synced: false,
+            truncate_fails: false,
         };
-        assert!(write_synced(&mut writer, &[0; BYTES]).is_err());
-        assert_eq!(writer.bytes.len(), fail_after);
+        let refusal = write_synced(&mut writer, &[0; BYTES]).expect_err("refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "invocation audit: private full-disk injection; truncated back to {prior} bytes"
+            )
+        );
+        assert_eq!(writer.bytes, vec![9; prior], "rolled back to the boundary");
         assert!(!writer.synced);
     }
+    let mut writer = FailingWriter {
+        bytes: Vec::new(),
+        fail_after: 7,
+        sync_fails: false,
+        synced: false,
+        truncate_fails: true,
+    };
+    assert_eq!(
+        write_synced(&mut writer, &[0; BYTES]).expect_err("refused"),
+        "invocation audit: private full-disk injection; truncation back to 0 bytes also failed: private truncation failure"
+    );
     let mut writer = FailingWriter {
         bytes: Vec::new(),
         fail_after: BYTES,
         sync_fails: true,
         synced: false,
+        truncate_fails: false,
     };
     assert!(write_synced(&mut writer, &[0; BYTES]).is_err());
     assert!(writer.synced);
@@ -413,4 +499,197 @@ fn durable_id_boundaries_are_exact_before_and_after_index_creation() {
     let mut maximum = first;
     maximum.id = u64::MAX;
     assert_eq!(Record::decode(&maximum.encode().unwrap()).unwrap(), maximum);
+}
+
+/// AHA-08 (D-1854). The real file's rollback measures the true end and its
+/// truncation runs: on a handle that cannot write, the refusal names the
+/// file's real length and the failed truncation, and no byte changes.
+#[test]
+fn a_real_file_write_failure_names_its_true_end_and_leaves_the_bytes() {
+    let root = Scratch::new();
+    let path = root.0.join("index.bin");
+    std::fs::write(&path, [7_u8; 10]).unwrap();
+    let mut file = File::open(&path).unwrap();
+    let refusal = write_synced(&mut file, &[0; BYTES]).expect_err("a read-only handle refuses");
+    assert!(
+        refusal.starts_with("invocation audit: ")
+            && refusal.contains("; truncation back to 10 bytes also failed: "),
+        "{refusal}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), [7_u8; 10]);
+    let mut writable = OpenOptions::new().append(true).open(&path).unwrap();
+    write_synced(&mut writable, &[1; BYTES]).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 10 + BYTES as u64);
+}
+
+/// W2-cli9-5: a crash after `create_new` of the per-invocation journal and
+/// before its first synced record leaves a 0-byte journal. That is the same
+/// fact as a missing journal -- an indexed start nobody confirmed -- and must
+/// read as one, not refuse every page that covers the ID forever. A journal
+/// holding any partial record still refuses. D-1742.
+#[test]
+fn an_empty_journal_left_by_a_crash_reads_as_its_unconfirmed_start() {
+    let root = Scratch::new();
+    let mut first = begin(&root.0, Origin::Cli, "range-all").unwrap();
+    first.armed = false;
+    let mut second = begin(&root.0, Origin::Browser, "sweep").unwrap();
+    second.finish(Phase::Completed, 0).unwrap();
+    drop(second);
+    let path = own(&base(&root.0), ID_BASE + 1);
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    let started = read(&root.0, ID_BASE + 1).unwrap().unwrap();
+    assert_eq!(
+        (started.id, started.phase, started.label.as_str()),
+        (ID_BASE + 1, Phase::Started, "range-all")
+    );
+    let listed = page(&root.0, None, 10).unwrap();
+    assert_eq!(
+        listed.iter().map(|r| (r.id, r.phase)).collect::<Vec<_>>(),
+        vec![
+            (ID_BASE + 2, Phase::Completed),
+            (ID_BASE + 1, Phase::Started)
+        ]
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        0,
+        "nothing was repaired"
+    );
+    for torn in [1, STRIDE - 1, STRIDE + 1] {
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(torn)
+            .unwrap();
+        assert!(read(&root.0, ID_BASE + 1).is_err(), "{torn} bytes refuse");
+        assert!(
+            page(&root.0, None, 10).is_err(),
+            "{torn} bytes refuse a page"
+        );
+    }
+}
+
+/// **A status read's momentary shared lock does not refuse a start.**
+/// conc:cli1-2, D-2799. The reader lets go after 50 ms, well inside
+/// `INDEX_LOCK_WAIT`, and the start then reserves the next ID.
+#[test]
+fn a_start_that_meets_a_status_read_waits_for_it_instead_of_refusing() {
+    let root = Scratch::new();
+    drop(begin(&root.0, Origin::Cli, "range-all").unwrap());
+    let index = File::open(base(&root.0).join("index.bin")).unwrap();
+    index.try_lock_shared().unwrap();
+    let reader = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        index.unlock().unwrap();
+    });
+    let started = begin(&root.0, Origin::Cli, "range-all")
+        .expect("a start waits out a status read rather than refusing busy");
+    assert_eq!(started.id(), ID_BASE + 2);
+    reader.join().unwrap();
+}
+
+/// `within` retries only `WouldBlock`, and only until the wait has passed.
+#[test]
+fn within_retries_only_a_busy_lock_and_only_until_the_wait_ends() {
+    let mut tries = 0_u32;
+    let answer = within(std::time::Duration::from_secs(1), || {
+        tries += 1;
+        if tries < 3 {
+            Err(std::fs::TryLockError::WouldBlock)
+        } else {
+            Ok(tries)
+        }
+    });
+    assert_eq!(answer.ok(), Some(3), "busy twice, then taken");
+
+    let mut tries = 0_u32;
+    let answer: Result<(), _> = within(std::time::Duration::from_secs(1), || {
+        tries += 1;
+        Err(std::fs::TryLockError::Error(std::io::Error::other(
+            "host refused",
+        )))
+    });
+    assert!(matches!(answer, Err(std::fs::TryLockError::Error(_))));
+    assert_eq!(tries, 1, "a host refusal is not retried");
+
+    let began = std::time::Instant::now();
+    let mut tries = 0_u32;
+    let answer: Result<(), _> = within(std::time::Duration::from_millis(30), || {
+        tries += 1;
+        Err(std::fs::TryLockError::WouldBlock)
+    });
+    assert!(matches!(answer, Err(std::fs::TryLockError::WouldBlock)));
+    assert!(began.elapsed() >= std::time::Duration::from_millis(30));
+    assert!(tries > 1, "busy is retried while the wait lasts");
+
+    let mut tries = 0_u32;
+    let answer: Result<(), _> = within(std::time::Duration::ZERO, || {
+        tries += 1;
+        Err(std::fs::TryLockError::WouldBlock)
+    });
+    assert!(matches!(answer, Err(std::fs::TryLockError::WouldBlock)));
+    assert_eq!(tries, 1, "no wait, one try");
+}
+
+std::thread_local! {
+    static FINISH_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next [`Attempt::finish`] on this thread fail as a terminal that
+/// could not be confirmed (sobs-4, D-4462).
+pub(crate) fn fail_next_finish() {
+    FINISH_FAULT.with(|fault| fault.set(true));
+}
+
+pub(super) fn take_finish_fault() -> bool {
+    FINISH_FAULT.with(|fault| fault.replace(false))
+}
+
+/// sobs-4, D-4462: a terminal that cannot be confirmed is logged by `finish`
+/// itself, once, naming the phase and the reason, whether the failure is the
+/// write's or a misuse's, and the attempt is disarmed so `Drop` adds nothing.
+#[test]
+fn an_unconfirmed_terminal_is_logged_once_by_finish_itself() {
+    let root = Scratch::new();
+    let mut attempt = begin(&root.0, Origin::Cli, "range-all").unwrap();
+    drop(crate::noted::take());
+    fail_next_finish();
+    let why = attempt.finish(Phase::Completed, 0).unwrap_err();
+    assert!(why.contains("injected terminal audit fault"), "{why}");
+    drop(attempt);
+    let noted = crate::noted::take();
+    let logged: Vec<&String> = noted
+        .iter()
+        .filter(|line| line.contains("terminal audit unconfirmed"))
+        .collect();
+    assert_eq!(logged.len(), 1, "{noted:#?}");
+    assert!(
+        logged.iter().all(|line| line.starts_with("cli.audit ")
+            && line.contains("completed")
+            && line.contains("injected terminal audit fault")),
+        "{logged:#?}"
+    );
+    assert_eq!(
+        read(&root.0, ID_BASE + 1).unwrap().unwrap().phase,
+        Phase::Started,
+        "the unconfirmed terminal left the start, and nothing claims more"
+    );
+
+    let mut misused = begin(&root.0, Origin::Cli, "range-all").unwrap();
+    let why = misused.finish(Phase::Progress, 0).unwrap_err();
+    assert!(why.contains("explicit terminal phase"), "{why}");
+    assert_eq!(crate::noted::count("terminal audit unconfirmed"), 1);
+    misused.finish(Phase::Refused, 0).unwrap();
+    assert_eq!(crate::noted::count("terminal audit unconfirmed"), 0);
+    drop(misused);
+    assert_eq!(
+        read(&root.0, ID_BASE + 2).unwrap().unwrap().phase,
+        Phase::Refused
+    );
 }

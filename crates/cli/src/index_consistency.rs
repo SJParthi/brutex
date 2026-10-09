@@ -63,6 +63,15 @@ pub enum Policy {
     /// than declared — the same principle D-0595 applied to a single trade. No
     /// constant is introduced and none of the five thresholds moves.
     ///
+    /// **That principle was later found backwards.** D-0602 reversed D-0595:
+    /// a positive pessimistic sum already won under every admissible reading,
+    /// so the bracket bounds the win's size, not its sign, and the "scratch
+    /// day" above is a genuine win. [`Policy::V4`]'s
+    /// [`DayRule::SignUnderBothReadings`] is the corrected rule; V2 and V3 keep
+    /// [`DayRule::ExceedsOwnBracket`] as shipped (§3 rule 8). This note was
+    /// missing while the paragraph above still read as current
+    /// (Z1-slice23-F2, D-1763).
+    ///
     /// V1 is retained and is still the default everywhere; §3 rule 8 forbids
     /// mutating a shipped policy, and the two answer different questions.
     V2,

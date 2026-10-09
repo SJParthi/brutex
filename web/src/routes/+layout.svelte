@@ -43,6 +43,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { watchVisible } from '$lib/page-requests.js';
+  import { refusalFrom } from '$lib/refusal.js';
   import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
@@ -145,6 +146,15 @@
     // beside it and NO page -- so nothing on the server can shadow this path
     // and a click, a reload and a bookmark all render the same application.
     { href: '/backtest', label: 'Backtest' },
+    // THE COMMITTED SELECTION V6 WINNERS. `ledger-v6` wrote them and only its
+    // own terminal text showed them (audit-20261003 gaps-10, D-1578). NO
+    // `reload`: `src/routes/selection/` IS a Svelte route and the server
+    // registers only `/selection-v6.json` beside it, as `/backtest` above.
+    {
+      href: '/selection',
+      label: 'Selection',
+      why: 'The per-rung Top-25 ledger-v6 committed to Selection V6, read from each sealed block. Index families only; no equity enters Selection V6.'
+    },
     // THE TERMINAL, AND IT SHIPPED UNREACHABLE -- THE DEFECT THE ENTRY BELOW
     // IS A 26-LINE ESSAY ABOUT, REPEATED IMMEDIATELY UNDERNEATH IT.
     //
@@ -647,7 +657,8 @@
     try {
       const r = await ask('/feeds.json', { cache: 'no-store', signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      // The body's reason, not the status alone (F4, D-3221).
+      if (!r.ok) throw new Error(await refusalFrom('/feeds.json', r));
       const ct = r.headers.get('content-type') ?? '';
       if (!ct.includes('json')) {
         throw new Error(`answered ${ct || 'no content-type'}, not JSON — the API is not behind this route`);

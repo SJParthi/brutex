@@ -15,6 +15,67 @@ pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R
     run(&fixture.root)
 }
 
+/// One root holding the warmed May 2025 fixture for every symbol in `symbols`,
+/// each month written exactly as [`Fixture::warmed_for`] writes it for one
+/// symbol, so a whole-store walk offers several sweepable months at once. The
+/// first symbol's fixture owns (and removes) the root; the others only write
+/// into it. No symbol is the plain warmed NIFTY store. One helper serves
+/// D-1564's and D-1701's order tests (D-1708).
+pub(crate) fn with_warmed_store_of<R>(
+    symbols: &[&'static str],
+    run: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    let Some((&first, rest)) = symbols.split_first() else {
+        return with_warmed_store(run);
+    };
+    let owner = Fixture::warmed_for(first);
+    for &symbol in rest {
+        let other = std::mem::ManuallyDrop::new(Fixture {
+            root: owner.root.clone(),
+            symbol,
+        });
+        other.seed();
+        other.warm();
+    }
+    run(&owner.root)
+}
+
+/// A warmed NIFTY store whose one-minute series stops `cut` minutes early on
+/// 2025-05-06, every other file as [`with_warmed_store`] writes it. The cut is
+/// at the session's end, so no interior minute is missing and
+/// `minute_gaps::days_with_interior_gaps` names no day; the 5min bars still
+/// close on minutes the one-minute series no longer holds, which is the
+/// exact-minute-unsourceable day pass 1 withholds. `run` is given the store and
+/// that day's IST day number. D-1707.
+pub(crate) fn with_unsourceable_close<R>(
+    cut: usize,
+    run: impl FnOnce(&std::path::Path, i64) -> R,
+) -> R {
+    const SHORT_DAY: u8 = 6;
+    let fixture = Fixture::for_symbol("NIFTY");
+    let mut short_day = None;
+    for day in 5..=13 {
+        let rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        let minutes = if day == SHORT_DAY {
+            short_day = rows.first().map(|bar| indicators::ist_day(bar.ts_micros));
+            &rows[..rows.len().saturating_sub(cut)]
+        } else {
+            &rows[..]
+        };
+        fixture.write(5, Timeframe::MINUTE_1, minutes);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    run(&fixture.root, short_day.expect("2025-05-06 is a session"))
+}
+
 struct Fixture {
     root: PathBuf,
     /// The swept instrument every file and request names. NIFTY unless a
@@ -33,40 +94,48 @@ impl Fixture {
         ));
         fs::create_dir(&root).expect("scratch");
         let fixture = Self { root, symbol };
+        fixture.seed();
+        fixture
+    }
+    /// Writes the two seed sessions of April and May 2025.
+    fn seed(&self) {
         for (month, day) in [(4, 30), (5, 2)] {
             let rows = generated_session(month, day);
             assert!(!rows.is_empty());
-            fixture.write(month, Timeframe::MINUTE_1, &rows);
-            fixture.write(month, Timeframe::DAY_1, &rows[..1]);
+            self.write(month, Timeframe::MINUTE_1, &rows);
+            self.write(month, Timeframe::DAY_1, &rows[..1]);
             if month == 5 {
-                fixture.write(
+                self.write(
                     month,
                     Timeframe::MINUTE_5,
                     &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
                 );
             }
         }
-        fixture
     }
     fn warmed() -> Self {
         Self::warmed_for("NIFTY")
     }
     fn warmed_for(symbol: &'static str) -> Self {
         let fixture = Self::for_symbol(symbol);
+        fixture.warm();
+        fixture
+    }
+    /// Appends the warmed sessions of May 2025 to this fixture's months.
+    fn warm(&self) {
         for day in 5..=13 {
             let rows = generated_session(5, day);
             if rows.is_empty() {
                 continue;
             }
-            fixture.write(5, Timeframe::MINUTE_1, &rows);
-            fixture.write(5, Timeframe::DAY_1, &rows[..1]);
-            fixture.write(
+            self.write(5, Timeframe::MINUTE_1, &rows);
+            self.write(5, Timeframe::DAY_1, &rows[..1]);
+            self.write(
                 5,
                 Timeframe::MINUTE_5,
                 &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
             );
         }
-        fixture
     }
     fn path(&self, month: u8, timeframe: Timeframe) -> PathBuf {
         let key = stored::swept_index(self.symbol).expect("key");
@@ -128,12 +197,17 @@ impl Fixture {
     }
 
     fn audit_range(&self, rung: &str, to: (u16, u8)) -> Result<String, String> {
+        self.audit_span(rung, (2025, 5), to)
+    }
+
+    fn audit_span(&self, rung: &str, from: (u16, u8), to: (u16, u8)) -> Result<String, String> {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            fold_support: runner::validate::FoldSupport::Scaled,
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
             underlying: self.symbol,
             rung,
-            from: (2025, 5),
+            from,
             to,
             min_hits: u64::MAX,
             attempt: Some(7),
@@ -142,6 +216,16 @@ impl Fixture {
     }
 
     fn screen(&self, rung: &str, support_ppm: u64) -> Result<String, String> {
+        self.screen_with(rung, support_ppm, runner::rank::Lens::Detectability)
+    }
+
+    /// [`Self::screen`] under the ranking lens a command names. D-1645.
+    fn screen_with(
+        &self,
+        rung: &str,
+        support_ppm: u64,
+        lens: runner::rank::Lens,
+    ) -> Result<String, String> {
         crate::screen_range_kernel(crate::StoredScreenRequest {
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
@@ -151,7 +235,7 @@ impl Fixture {
             support_ppm,
             policy: crate::Policy {
                 rules: crate::Rules::BASELINE,
-                lens: runner::rank::Lens::Detectability,
+                lens,
                 validate: false,
             },
             attempt: Some(13),
@@ -207,6 +291,50 @@ impl Fixture {
             self.write(5, Timeframe::MINUTE_1, &rows);
         }
     }
+}
+
+/// Moves record `index`'s stamp by `delta_micros` in place, resealing its
+/// checksum block and, at either end, the header slot, exactly as the writer
+/// would have.
+///
+/// **A FILE FROM BEFORE D-0915.** `BarFile::append` now refuses an off-grid
+/// stamp (`StoreError::OffGrid`), so a sealed month holding one can only be a
+/// file written before that refusal existed. Those files still exist and this
+/// reader's own malformed-span refusal is what still faces them, so the state
+/// is laid by hand rather than abandoned.
+fn forge_pre_admission_stamp(path: &std::path::Path, index: u64, delta_micros: i64) {
+    use store::format::{HEADER_LEN, Row};
+    let mut bytes = fs::read(path).expect("the sealed month");
+    let region = usize::try_from(HEADER_LEN).expect("region");
+    let header = store::header::Header::read_region(&bytes[..region], bytes.len() as u64)
+        .expect("a committed header");
+    let layout = store::layout::Layout::for_version(header.format_version).expect("layout");
+    let at = usize::try_from(layout.offset_of(index).expect("offset")).expect("offset");
+    let mut bar = Bar::read_from(&bytes[at..at + Bar::LEN]).expect("a record");
+    bar.ts_micros += delta_micros;
+    bytes[at..at + Bar::LEN].copy_from_slice(&bar.image());
+    let block = index / layout.records_per_block();
+    let (start, end) = layout
+        .covered_byte_range(block, header.n_valid)
+        .expect("covered range");
+    let span = &bytes[usize::try_from(start).expect("s")..usize::try_from(end).expect("e")];
+    let sum = store::block::seal(layout, header.n_valid, block, span).expect("seal");
+    let crc_path = path.with_extension("crc");
+    let mut crc = fs::read(&crc_path).expect("the sidecar");
+    let entry = usize::try_from(block * 4).expect("entry");
+    crc[entry..entry + 4].copy_from_slice(&sum.to_le_bytes());
+    let mut resealed = header;
+    if index == 0 {
+        resealed.first_ts_micros = bar.ts_micros;
+    }
+    if index + 1 == header.n_valid {
+        resealed.last_ts_micros = bar.ts_micros;
+    }
+    let commit = resealed.commit().expect("a header image");
+    let slot = usize::try_from(commit.offset).expect("slot");
+    bytes[slot..slot + commit.bytes.len()].copy_from_slice(&commit.bytes);
+    fs::write(path, &bytes).expect("rewrite the month");
+    fs::write(&crc_path, &crc).expect("rewrite the sidecar");
 }
 
 fn generated_session(month: u8, date: u8) -> Vec<Bar> {
@@ -301,13 +429,16 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
+fn stored_screens_scale_support_to_swept_bars_and_disclose_holed_sessions() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     // An explicit finite operator budget also keeps a generated constant-price
     // vocabulary from consuming a machine if new always-true bits are added.
     crate::knobs::set("BRUTEX_CEILING", "256");
-    for (rung, retained, withheld) in [("1min", 2_625, 374), ("5min", 525, 75)] {
+    // `swept` is the ledger's `bars`: what the column folded past warm-up, as
+    // every door records it since D-1661. Support is scaled to the same rows
+    // since D-2101: the warm-up bars of `retained` can carry no hit.
+    for (rung, retained, withheld, swept) in [("1min", 2_625, 374, 1_500), ("5min", 525, 75, 300)] {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
         let source = fixture.path(5, Timeframe::MINUTE_1);
@@ -317,10 +448,17 @@ fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
         let mut ledger = crate::results::Results::open_read(&fixture.root).expect("screen ledger");
         assert_eq!(ledger.len().expect("parent count"), 1);
         let row = ledger.read(0).expect("screen parent");
-        assert_eq!(row.bars, retained);
+        assert_eq!(row.bars, swept, "{rung}");
         assert_eq!(
-            row.min_hits, retained,
-            "100% support must use the retained sample"
+            row.min_hits, swept,
+            "100% support must ask a hit of every swept row, not of the warm-up"
+        );
+        assert!(row.min_hits < retained, "{rung}");
+        assert!(
+            report.contains(&format!(
+                "Support uses the {swept} swept bar(s) of the remaining {retained} signal bars."
+            )),
+            "{report}"
         );
         assert_eq!(crate::results::read_field(&row.timeframe), rung);
         assert!(report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
@@ -334,12 +472,60 @@ fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
     crate::knobs::clear_all();
 }
 
+/// AC-whp-tb-2, D-1645: every ranking lens a command can name reaches the
+/// stored screen, ranks by its own question and records under its own
+/// identity. `Asymmetry` -- the operator's smallest-win over largest-loss
+/// rule -- had no production caller before `elite` took a LENS.
+#[test]
+fn every_lens_reaches_the_stored_screen_and_records_its_own_identity() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    let fixture = Fixture::warmed();
+    let mut identities = Vec::new();
+    for (index, (lens, label)) in [
+        (runner::rank::Lens::Payoff, "best by payoff, then |t|"),
+        (
+            runner::rank::Lens::Asymmetry,
+            "best by smallest win / largest loss, then largest win, then |t|",
+        ),
+        (
+            runner::rank::Lens::Path,
+            "best by favourable/adverse excursion, then |t|",
+        ),
+        (runner::rank::Lens::Detectability, "best by |t|"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let report = fixture
+            .screen_with("5min", 1_000_000, lens)
+            .expect("screen under a named lens");
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        assert!(
+            report.contains(label),
+            "{lens:?} must rank by {label}: {report}"
+        );
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+        assert_eq!(ledger.len().expect("one row per lens"), index as u64 + 1);
+        let row = ledger.read(index as u64).expect("this lens's row");
+        assert!(
+            !identities.contains(&row.identity),
+            "{lens:?} reused an identity"
+        );
+        identities.push(row.identity);
+    }
+    crate::knobs::clear_all();
+}
+
 #[test]
 fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
-    for (rung, bars) in [("1min", 3_000), ("5min", 600)] {
+    // `bars` is the retained sample; `swept` the ledger's count past warm-up
+    // (D-1661), and the rows support is scaled to since D-2101.
+    for (rung, bars, swept) in [("1min", 3_000, 1_500), ("5min", 600, 300)] {
         let fixture = Fixture::warmed();
         let mut identities = Vec::new();
         for (index, support) in [20_000, 50_000, 1_000_000].into_iter().enumerate() {
@@ -355,8 +541,9 @@ fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
                 index as u64 + 1
             );
             let row = ledger.read(index as u64).expect("exact screen parent");
-            assert_eq!(row.bars, bars);
-            assert_eq!(row.min_hits, bars * support / 1_000_000);
+            assert_eq!(row.bars, swept, "{rung}");
+            assert_eq!(row.min_hits, swept * support / 1_000_000);
+            assert!(row.min_hits <= row.bars && swept < bars, "{rung}");
             assert_eq!((row.months_asked, row.months_found), (1, 1));
             assert!(!identities.contains(&row.identity));
             identities.push(row.identity);
@@ -465,7 +652,9 @@ fn a_damaged_newest_header_slot_screens_as_the_previous_commit() {
         ledger.read(0).expect("whole month"),
         ledger.read(1).expect("previous commit"),
     );
-    assert_eq!((first.bars, second.bars), (600, 525));
+    // `bars` is the swept count past warm-up, as every door records it since
+    // D-1661: the 600- and 525-bar slices sweep 300 and 225 signal bars.
+    assert_eq!((first.bars, second.bars), (300, 225));
     assert_ne!(first.identity, second.identity);
     drop(ledger);
     assert_eq!(
@@ -504,12 +693,8 @@ fn stored_screens_reject_off_grid_execution_before_creating_an_attempt() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Fixture::warmed();
-    fixture.rewrite_owned_minutes(|day, rows| {
-        if day == 2 {
-            rows[0].ts_micros += 1;
-        }
-    });
     let path = fixture.path(5, Timeframe::MINUTE_1);
+    forge_pre_admission_stamp(&path, 0, 1);
     let before = fs::read(&path).expect("owned off-grid execution stream");
     let checksum = path.with_extension("crc");
     let proof = fs::read(&checksum).expect("matching raw-record checksum");
@@ -562,6 +747,7 @@ fn public_screen_admission_preserves_rung_and_build_or_feed_refusals() {
             20_000,
             policy,
             Some(13),
+            &mut crate::ScreenCache::default(),
         );
         assert_eq!(plain, attempted);
         assert!(plain.starts_with("refused: "), "{plain}");
@@ -578,6 +764,13 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
     crate::knobs::set("BRUTEX_VALIDATE", "0");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
+    // test is fast only because validation is OFF. Were the knob not read
+    // as off, the run below would price the full stack for an hour.
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     let commands: &[&[&str]] = &[
         &[
             "auto-stored",
@@ -590,7 +783,7 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             "5",
         ],
         &[
-            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "1000000", "1", "200",
+            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "999999", "1", "200",
             "1",
         ],
     ];
@@ -599,7 +792,7 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
         let mut report = String::new();
         let status = crate::dispatch(&args, &mut report);
         if crate::commit_stamp().is_none() {
-            assert_eq!(status, crate::MISUSED, "{report}");
+            assert_eq!(status, crate::FAILED, "{report}");
             assert!(report.contains("no verified commit stamp"), "{report}");
             assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
             assert!(!crate::results::Results::path(root).exists());
@@ -623,9 +816,15 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             let mut ledger = crate::results::Results::open_read(root)?;
             assert_eq!(ledger.len()?, 1);
             let row = ledger.read(0)?;
+            // 999,999 ppm of the 1,500 swept rows is 1,499 hits: a million is
+            // refused at both support doors since D-1722.
             assert_eq!(
                 (row.bars, row.min_hits, row.months_asked, row.months_found),
-                (3_000, 3_000, 1, 1)
+                // `bars` is the column's swept count, warm-up excluded
+                // (AC-whp-law-2, D-1661): 1,500 of the 3,000 loaded bars.
+                // `min_hits` is scaled to the same 1,500 since D-2101; it
+                // was 2,999, more hits than rows that can hit.
+                (1_500, 1_499, 1, 1)
             );
             assert_eq!(row.halted, 0);
             let attempt =
@@ -643,8 +842,51 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             assert_eq!(fs::read(path)?, saved);
         }
     }
+    elite_ranks_by_the_lens_it_is_given();
     crate::knobs::clear_all();
     Ok(())
+}
+
+/// THE LENS IS THE OPERATOR'S TO NAME AT THE COMMAND (AC-whp-tb-2, D-1645):
+fn elite_ranks_by_the_lens_it_is_given() {
+    // `elite` with an eleventh word ranks every descent step by it.
+    let elite: Vec<String> = [
+        "elite",
+        "zerodha",
+        "NIFTY",
+        "1min",
+        "2025",
+        "5",
+        "2025",
+        "5",
+        "200",
+        "1",
+        "asymmetry",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    // The default 50% win-rate rule has no confidence bound a 1,000-bar span
+    // can reach, and `elite` refuses that pair before any step; drop it.
+    crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "0");
+    // The flow above caps every search at 256 candidates. Since D-2101 the
+    // support is scaled to the 1,500 swept rows, not the 3,000 loaded, so
+    // each step admits more and every step halted on that cap before any
+    // ranking. The lens is what this asks about, so the cap is lifted.
+    crate::knobs::set("BRUTEX_CEILING", "1048576");
+    let mut report = String::new();
+    crate::dispatch(&elite, &mut report);
+    assert!(!report.contains("LENS must"), "{report}");
+    assert!(report.contains("ELITE, SELF-TUNING"), "{report}");
+    if crate::commit_stamp().is_none() {
+        assert!(report.contains("no verified commit stamp"), "{report}");
+    } else {
+        assert!(
+            report.contains("best by smallest win / largest loss, then largest win"),
+            "{report}"
+        );
+        assert!(!report.contains("best by payoff, then |t|"), "{report}");
+    }
 }
 
 #[test]
@@ -776,6 +1018,50 @@ fn monthly_audit_missing_execution_or_prior_context_refuses_before_an_attempt() 
         assert_eq!(
             crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no attempt ledger"),
             None
+        );
+    }
+}
+
+/// conc7-1, D-2667: a span widened by a month that holds nothing computes the
+/// same bars and digest, and used to take the same identity, so its row was
+/// refused as a differing rerun. The requested span is in the identity now:
+/// each span records its own row and each rerun verifies its own.
+#[test]
+fn a_range_widened_by_an_empty_month_records_its_own_row() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    // The widened span ends in June, whose 1day and 1min months are present
+    // and hold no bar: the trailing month adds no bar, only span, so the two
+    // audits differ by identity alone. Widening at the START needs a daily
+    // record before the first signal day, which an empty leading month cannot
+    // give, so that shape refuses by design.
+    drop(fixture.open(6, Timeframe::DAY_1));
+    drop(fixture.open(6, Timeframe::MINUTE_1));
+    let narrow = fixture
+        .audit_span("1min", (2025, 5), (2025, 5))
+        .expect("the stored month audits");
+    assert!(narrow.contains("RESULT RECORDED"), "{narrow}");
+    let wide = fixture
+        .audit_span("1min", (2025, 5), (2025, 6))
+        .expect("an empty trailing month is audited, not refused");
+    assert!(wide.contains("2025-05..2025-06 · 2 of 2 months"), "{wide}");
+    assert!(wide.contains("RESULT RECORDED"), "{wide}");
+    assert!(!wide.contains(crate::NOT_RECORDED), "{wide}");
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("two rows"), 2);
+    let (first, second) = (
+        ledger.read(0).expect("narrow"),
+        ledger.read(1).expect("wide"),
+    );
+    assert_ne!(first.identity, second.identity);
+    assert_eq!((second.to_year, second.to_month), (2025, 6));
+    drop(ledger);
+    for (to, report) in [((2025, 5), "narrow"), ((2025, 6), "wide")] {
+        let retry = fixture.audit_span("1min", (2025, 5), to).expect("rerun");
+        assert!(
+            retry.contains("RESULT ALREADY RECORDED AND VERIFIED"),
+            "{report}: {retry}"
         );
     }
 }
@@ -985,6 +1271,7 @@ fn budgeted_recorded_runs_refuse(root: &std::path::Path) -> Result<(), String> {
     });
     assert_eq!(audit, Err(named.to_owned()));
     let range = crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+        fold_support: runner::validate::FoldSupport::Scaled,
         root: root.to_path_buf(),
         vendor: Vendor::Zerodha,
         underlying: "NIFTY",
@@ -1040,6 +1327,7 @@ fn budgeted_audit_transaction_refuses_only_a_recording(
         feed: "zerodha",
     });
     let options = |recording| crate::AuditOptions {
+        fold_support: runner::validate::FoldSupport::Scaled,
         prepared_column: None,
         replay: None,
         execution: None,
@@ -1243,6 +1531,7 @@ impl Traded {
 
     fn range(&self, rung: &str, min_hits: u64) -> Result<String, String> {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            fold_support: runner::validate::FoldSupport::Scaled,
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
             underlying: self.underlying,
@@ -1377,6 +1666,13 @@ fn moving_session(month: u8, date: u8, index: i64) -> Vec<Bar> {
 fn bounded_header_knobs() {
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_VALIDATE", "0");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
+    // test is fast only because validation is OFF. Were the knob not read
+    // as off, the run below would price the full stack for an hour.
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
     crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
 }
 
@@ -1501,6 +1797,70 @@ fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
             assert!(!top.contains("unit of the index"), "{top}");
         }
     }
+    crate::knobs::clear_all();
+}
+
+/// **`cli top` on a committed store reads the ledger twice and refuses damage
+/// in a row it does not name -- which is why no one-row index replaces it.**
+/// OS-7, D-2319.
+///
+/// A sidecar holding the best row would answer from one read. Two facts,
+/// counted here, rule it out without weakening a gate. The fold is not the only
+/// pass: with a frontier and a receipt on disk, `committed_receipt` opens
+/// `runs.bin` a second time (plus one `of_identity` read), so a call is two
+/// opens and `2 * rows + 1` row reads, beside the frontier and receipt indexes.
+/// And a damaged row that is NOT the best still refuses the whole report; an
+/// answer from one row cannot see the others.
+#[test]
+fn top_reads_the_ledger_twice_and_refuses_damage_in_a_row_it_does_not_name() {
+    let _knobs = crate::knobs::serially();
+    bounded_header_knobs();
+    let fixture = Traded::new("NIFTY");
+    let recorded = fixture
+        .audit("1min", 700)
+        .expect("a recorded generated audit");
+    assert!(recorded.contains("RESULT RECORDED"), "premise:\n{recorded}");
+    let mut ledger = crate::results::Results::open(&fixture.root).expect("the ledger");
+    let committed = ledger.len().expect("a count");
+    assert_eq!(committed, 1, "premise: one audited row");
+    let best = ledger.read(committed - 1).expect("the audited row");
+    assert!(best.has_complete_trade_total(), "premise: {best:?}");
+    // Worse complete rows, with no frontier: the winner does not move.
+    for nth in 1..=7_u8 {
+        let mut worse = best;
+        worse.identity = [nth; 32];
+        worse.pessimistic = best.pessimistic - i64::from(nth);
+        ledger.append(&worse).expect("a worse row");
+    }
+    drop(ledger);
+    let rows = committed + 7;
+    let counted = || {
+        crate::results::OPENS.with(|n| n.set(0));
+        crate::results::ROW_READS.with(|n| n.set(0));
+        let top = crate::top_at(&fixture.root, None, None);
+        (
+            top,
+            crate::results::OPENS.with(std::cell::Cell::get),
+            crate::results::ROW_READS.with(std::cell::Cell::get),
+        )
+    };
+    let (top, opens, reads) = counted();
+    assert!(top.contains(&best.identity_hex()), "{top}");
+    assert!(top.contains("conditions"), "the frontier half ran:\n{top}");
+    assert_eq!((opens, reads), (2, 2 * rows + 1), "{top}");
+
+    // Damage the LAST worse row: never the winner, never read by an answer
+    // that reads only the winner.
+    let path = crate::results::Results::path(&fixture.root);
+    let mut bytes = fs::read(&path).expect("the ledger bytes");
+    let last = usize::try_from(rows - 1).expect("fits");
+    bytes[crate::results::HEADER_BYTES + last * crate::results::STRIDE_BYTES + 40] ^= 1;
+    fs::write(&path, &bytes).expect("damaged");
+    let (top, _, _) = counted();
+    assert!(
+        top.starts_with(&format!("refused: record {last} does not match its seal")),
+        "{top}"
+    );
     crate::knobs::clear_all();
 }
 
@@ -1827,7 +2187,13 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
             .expect("date")
             .days_from_epoch(),
     );
-    for (rung, retained, withheld) in [("1min", 2_625_u64, 374_u64), ("5min", 525, 75)] {
+    // `swept` is what the column folded past warm-up: the ledger's `bars`
+    // (AC-whp-law-2, D-1661). It pinned `retained`, the slice length, which
+    // counts warming bars the sweep never folded.
+    for (rung, retained, withheld, swept) in [
+        ("1min", 2_625_u64, 374_u64, 1_500_u64),
+        ("5min", 525, 75, 300),
+    ] {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
         let source = fixture.path(5, Timeframe::MINUTE_1);
@@ -1885,7 +2251,7 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
         assert!(report.contains("RESULT RECORDED"), "{report}");
         let mut ledger = crate::results::Results::open_read(&fixture.root).expect("sweep ledger");
         assert_eq!(ledger.len().expect("one parent"), 1);
-        assert_eq!(ledger.read(0).expect("sweep parent").bars, retained);
+        assert_eq!(ledger.read(0).expect("sweep parent").bars, swept, "{rung}");
         drop(ledger);
         assert_eq!(fs::read(&source).expect("unmodified source"), source_bytes);
     }
@@ -2058,8 +2424,9 @@ fn month_digest(inputs: &crate::StoredMonthInputs) -> [u8; 32] {
         .map_or(inputs.loaded.bars.as_slice(), |minute| {
             minute.bars.as_slice()
         });
-    crate::stored_executed_digest(
-        &inputs.loaded.bars,
+    // D-1781: the whole folded month, with any withheld days bound.
+    crate::stored_withheld_executed_digest(
+        inputs.withholding(),
         &inputs.exact_minute,
         &inputs.daily,
         execution,
@@ -2084,10 +2451,17 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
+    // Rule 1 (D-0694) withheld interior gaps only. Rule 2 (D-1662) withholds
+    // every day missing its demanded closing minute too. Rule 3 (D-1781,
+    // p11num-1, D-1934) folds a withheld day and withholds only its rows, so
+    // the masks on later days change. Each is a different rule, so each took
+    // the next number and the earlier ones keep meaning what they always
+    // meant (`CLAUDE.md` §3 rule 8). The literal still refuses a silent
+    // renumbering.
     assert_eq!(
         crate::minute_gaps::MINUTE_GAP_POLICY,
-        1,
-        "renumbering the rule re-keys every ordinary stored sweep recorded since D-0694"
+        3,
+        "renumbering the rule re-keys every ordinary stored sweep recorded since D-1781"
     );
     for rung in ["1min", "5min"] {
         let fixture = Fixture::warmed();
@@ -2112,9 +2486,20 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         drop(ledger);
         assert_eq!(
             ordinary_row.identity,
-            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[1])),
-            "{rung}: the ordinary door binds minute-gap rule 1"
+            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[3])),
+            "{rung}: the ordinary door binds minute-gap rule 3"
         );
+        for older in [1, 2] {
+            assert_ne!(
+                ordinary_row.identity,
+                month_identity(
+                    &ordinary,
+                    month_digest(&ordinary),
+                    legacy.with_policy(&[older])
+                ),
+                "{rung}: rule {older}'s word must not name rule 3's computation"
+            );
+        }
         let bound = audited.bind_digest(month_digest(audited.data()));
         assert_eq!(
             audited_row.identity,
@@ -2123,7 +2508,7 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         );
         assert_ne!(
             audited_row.identity,
-            month_identity(audited.data(), bound, legacy.with_policy(&[1])),
+            month_identity(audited.data(), bound, legacy.with_policy(&[3])),
             "{rung}: the rule did not reach the audited door"
         );
     }
@@ -2237,4 +2622,1541 @@ fn every_stored_report_over_a_stock_states_corporate_actions_are_unchecked() {
         }
     }
     crate::knobs::clear_all();
+}
+
+/// **A support descent loads its stored inputs once, and answers byte for byte
+/// as a fresh load does.** o1cli-1, D-0997.
+///
+/// Every step of an `elite` descent re-ran the whole screen kernel, which
+/// loaded the signal span, the one-minute execution span and both contexts and
+/// rebuilt the anchored column, though none of that depends on the support
+/// threshold. Measured before the fix: two steps, two loads. Now two steps over
+/// one shared cache cost one load, the pages equal two uncached screens over an
+/// identical store, and a cache handed a different question loads afresh.
+#[test]
+fn a_descent_loads_its_stored_inputs_once() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fresh = Fixture::warmed();
+    let cached = Fixture::warmed();
+    let supports = [1_000_000, 500_000, 20_000];
+    crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+    let expected: Vec<String> = supports
+        .iter()
+        .map(|support| fresh.screen("5min", *support).expect("fresh step"))
+        .collect();
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 3);
+
+    crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+    let mut cache = crate::ScreenCache::default();
+    let request = |support_ppm| crate::StoredScreenRequest {
+        root: cached.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: cached.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-stored-screen-fixture",
+    };
+    let got: Vec<String> = supports
+        .iter()
+        .map(|support| {
+            crate::screen_range_kernel_cached(request(*support), &mut cache).expect("cached step")
+        })
+        .collect();
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 1);
+    let fresh_root = fresh.root.display().to_string();
+    let cached_root = cached.root.display().to_string();
+    for (want, page) in expected.iter().zip(&got) {
+        assert!(page.contains("RESULT RECORDED"), "{page}");
+        assert_eq!(&page.replace(&cached_root, &fresh_root), want);
+    }
+
+    // A different question is never answered from the held span.
+    let other = crate::StoredScreenRequest {
+        rung: "1min",
+        ..request(1_000_000)
+    };
+    let one_minute = crate::screen_range_kernel_cached(other, &mut cache).expect("1min");
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 2);
+    assert_ne!(one_minute.replace(&cached_root, &fresh_root), expected[0]);
+    crate::knobs::clear_all();
+}
+
+/// **A recorded range rung reads back ITS OWN row, by identity.** W2-cli8-9,
+/// D-1700.
+///
+/// Run A, then a different run B with the same feed, instrument, rung, span
+/// and `min_hits` (another commit, so another identity), then A again, which
+/// takes `Committed::Reused` and appends nothing. The key lookup this replaced
+/// returned the NEWEST row with the key -- B's -- under A's page.
+#[test]
+fn a_reused_range_rung_reads_its_own_row_and_not_the_newest_with_its_key() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let at = |commit: &'static str| {
+        crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            fold_support: runner::validate::FoldSupport::Scaled,
+            root: fixture.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: fixture.symbol,
+            rung: "5min",
+            from: (2025, 5),
+            to: (2025, 5),
+            min_hits: u64::MAX,
+            attempt: Some(7),
+            commit,
+        })
+        .expect("actual stored range audit")
+    };
+    let first = at("generated-range-readback-a");
+    let other = at("generated-range-readback-b");
+    let retry = at("generated-range-readback-a");
+    assert!(retry.contains(crate::REUSED_HEAD), "{retry}");
+    let a = crate::recorded_identity(&first).expect("A's identity");
+    let b = crate::recorded_identity(&other).expect("B's identity");
+    assert_ne!(a, b, "premise: two runs under one key");
+    assert_eq!(crate::recorded_identity(&retry), Ok(a));
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("rows"), 2);
+    let newest = ledger.read(1).expect("newest");
+    assert_eq!(
+        newest.identity, b,
+        "premise: the newest row with the key is B's"
+    );
+    let key = crate::RungKey {
+        feed: "zerodha",
+        underlying: fixture.symbol,
+        rung: "5min",
+        from: (2025, 5),
+        to: (2025, 5),
+        min_hits: newest.min_hits,
+    };
+    let row = crate::recorded_row(&fixture.root, &retry, key).expect("A's row");
+    assert_eq!(row.identity, a, "the rerun reads its own row");
+    assert_eq!(row, ledger.read(0).expect("A's stored row"));
+    // A key the row does not describe is refused, not printed.
+    let foreign = crate::recorded_row(
+        &fixture.root,
+        &retry,
+        crate::RungKey {
+            min_hits: newest.min_hits.wrapping_add(1),
+            ..key
+        },
+    );
+    assert!(
+        foreign
+            .as_ref()
+            .is_err_and(|why| why.contains("does not describe")),
+        "{foreign:?}"
+    );
+    // An identity the ledger does not hold is refused by name.
+    let absent = format!(
+        "{}\n  row 0 in x\n  {}{}\n",
+        crate::RECORDED_HEAD,
+        crate::RECORDED_IDENTITY,
+        "ab".repeat(32)
+    );
+    let missing = crate::recorded_row(&fixture.root, &absent, key);
+    assert!(
+        missing
+            .as_ref()
+            .is_err_and(|why| why.contains("holds no row")),
+        "{missing:?}"
+    );
+    crate::knobs::clear_all();
+}
+
+/// **A span read for one number is the span the screen reads.** o1cli-5,
+/// D-1839.
+///
+/// `screen`, `screen_range_in_points`, the points descent and every descent's
+/// bar count read the signal span for a reference price, measured rules or a
+/// bar count, dropped it, and the screen kernel read the same months again.
+/// Counted before the fix: a descent's bar count and its first step read the
+/// 5min span twice. Now the count reads it once into the cache, the step reads
+/// nothing, and the page equals an unseeded screen's. A seed for another
+/// question is never screened: the kernel reads its own span and leaves the
+/// seed untouched.
+#[test]
+fn a_span_read_for_one_number_seeds_the_screen_that_follows() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fresh = Fixture::warmed();
+    let seeded = Fixture::warmed();
+    let other = Fixture::warmed();
+    let reads = || crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get);
+    let request = |fixture: &Fixture| crate::StoredScreenRequest {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: fixture.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm: 1_000_000,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-stored-screen-fixture",
+    };
+    let key = |fixture: &Fixture, rung: &str| {
+        crate::screen_key(
+            &fixture.root,
+            Vendor::Zerodha,
+            fixture.symbol,
+            rung,
+            ((2025, 5), (2025, 5)),
+        )
+    };
+
+    let before = reads();
+    let expected =
+        crate::screen_range_kernel_cached(request(&fresh), &mut crate::ScreenCache::default())
+            .expect("unseeded screen");
+    assert_eq!(reads() - before, 1, "an unseeded screen reads its span");
+
+    let before = reads();
+    let mut cache = crate::ScreenCache::default();
+    let (bars, _) = crate::descent_bar_count_at(key(&seeded, "5min"), (0, 1), &mut cache)
+        .expect("the bar count reads the span");
+    assert!(bars > 0);
+    let (again, _) = crate::descent_bar_count_at(key(&seeded, "5min"), (0, 1), &mut cache)
+        .expect("a held span is counted again");
+    assert_eq!(again, bars);
+    let page =
+        crate::screen_range_kernel_cached(request(&seeded), &mut cache).expect("seeded screen");
+    assert_eq!(
+        reads() - before,
+        1,
+        "the count and the step share one read (two before D-1839)"
+    );
+    assert!(
+        cache.seed.is_none(),
+        "the step took the seed into its inputs"
+    );
+    assert!(page.contains("RESULT RECORDED"), "{page}");
+    assert_eq!(
+        page.replace(
+            &seeded.root.display().to_string(),
+            &fresh.root.display().to_string()
+        ),
+        expected
+    );
+
+    let before = reads();
+    let span = crate::read_signal_span(
+        &other.root,
+        Vendor::Zerodha,
+        other.symbol,
+        "1min",
+        ((2025, 5), (2025, 5)),
+    )
+    .expect("a 1min span");
+    let mut foreign = crate::ScreenCache::seeded(key(&other, "1min"), span);
+    let page = crate::screen_range_kernel_cached(request(&other), &mut foreign)
+        .expect("a 5min screen beside a 1min seed");
+    assert_eq!(reads() - before, 2, "the 5min screen read its own span");
+    assert!(
+        foreign
+            .seed
+            .as_ref()
+            .is_some_and(|(held, _)| *held == key(&other, "1min")),
+        "a seed for another question is left untouched"
+    );
+    assert_eq!(
+        page.replace(
+            &other.root.display().to_string(),
+            &fresh.root.display().to_string()
+        ),
+        expected
+    );
+    crate::knobs::clear_all();
+}
+
+/// The identity a page names is read exactly, or the page is refused: no
+/// block, two blocks, no identity line, uppercase or short hex. D-1700.
+#[test]
+fn the_record_block_identity_is_read_exactly_or_refused() {
+    let id = |hex: &str| format!("  {}{hex}\n", crate::RECORDED_IDENTITY);
+    let good = "0123456789abcdef".repeat(4);
+    let one = format!(
+        "banner\n{}\n  row 3 in x\n{}\n",
+        crate::RECORDED_HEAD,
+        id(&good)
+    );
+    let parsed = crate::recorded_identity(&one).expect("one block");
+    assert_eq!(parsed[0], 0x01);
+    assert_eq!(parsed[31], 0xef);
+    let reused = format!("{}\n{}", crate::REUSED_HEAD, id(&good));
+    assert_eq!(crate::recorded_identity(&reused), Ok(parsed));
+    for (page, why) in [
+        ("no block here\n".to_owned(), "no record block"),
+        (format!("{one}{reused}"), "2 record blocks"),
+        (
+            format!("{}\n  row 1\n\n{}", crate::RECORDED_HEAD, id(&good)),
+            "no identity line",
+        ),
+        (
+            format!("{}\n{}", crate::RECORDED_HEAD, id(&good.to_uppercase())),
+            "not 64 lowercase",
+        ),
+        (
+            format!("{}\n{}", crate::RECORDED_HEAD, id(&good[1..])),
+            "not 64 lowercase",
+        ),
+        (
+            format!(
+                "{}\n{}",
+                crate::RECORDED_HEAD,
+                id(&format!("{}g", &good[1..]))
+            ),
+            "not 64 lowercase",
+        ),
+    ] {
+        let verdict = crate::recorded_identity(&page);
+        assert!(
+            verdict.as_ref().is_err_and(|e| e.contains(why)),
+            "{why}: {verdict:?}"
+        );
+    }
+    // A sentence merely CONTAINING the head is not a block.
+    assert!(
+        crate::recorded_identity(&format!("x {}\n{}", crate::RECORDED_HEAD, id(&good))).is_err()
+    );
+}
+
+/// AC-whp-law-0, D-1661: `sweep-stored zerodha nifty` then `NIFTY` is ONE run.
+/// The store reads one file for either case and the identity is built from the
+/// canonical key, so the rerun must be accepted as the recorded answer. It was
+/// refused as "deterministic fields differ" because the row stored the typed
+/// word while the identity used the key.
+#[test]
+fn a_case_only_rerun_of_a_stored_sweep_is_the_recorded_answer() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let lower = crate::StoredSweepRequest {
+        underlying: "nifty",
+        ..fixture.month_request("5min")
+    };
+    let first = crate::sweep_stored_kernel(lower).expect("lower case sweeps");
+    assert!(first.contains("RESULT RECORDED"), "{first}");
+    let again = fixture
+        .sweep("5min")
+        .expect("the canonical word is a rerun");
+    assert!(
+        again.contains("RESULT ALREADY RECORDED AND VERIFIED"),
+        "{again}"
+    );
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("one parent"), 1);
+    assert_eq!(
+        crate::results::read_field(&ledger.read(0).expect("parent").underlying),
+        "NIFTY"
+    );
+}
+
+/// W2-cli9-3 and W2-cli8-6, D-1662: three sessions that stop at 15:24 — their
+/// 15:25-15:29 minutes missing while every other day holds them — are found by
+/// the census before any column is built. The screen, which has no retry loop,
+/// sweeps the span instead of refusing it, and the range audit builds its
+/// column once instead of once per holed day plus one.
+#[test]
+fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let holed = [6_u8, 8, 12];
+    fixture.rewrite_owned_minutes(|day, rows| {
+        if holed.contains(&day) {
+            let keep = rows.len().saturating_sub(5);
+            rows.truncate(keep);
+        }
+    });
+    let days: Vec<i64> = holed
+        .iter()
+        .map(|day| {
+            i64::from(
+                pull::session::Day::new(2025, 5, *day)
+                    .expect("date")
+                    .days_from_epoch(),
+            )
+        })
+        .collect();
+
+    let signal =
+        stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "5min", 2025, 5).expect("signal");
+    let minutes =
+        stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "1min", 2025, 5).expect("minutes");
+    let signal_length = stored::rung_length_micros("5min").expect("five minutes");
+    assert!(
+        crate::minute_gaps::days_with_interior_gaps(&minutes.bars).is_empty(),
+        "the interior walk cannot see a session that stops early"
+    );
+    assert_eq!(
+        crate::minute_gaps::days_with_minute_holes(
+            &signal.bars,
+            &minutes.bars,
+            signal_length,
+            crate::stored::nse_session_close_minute
+        ),
+        days
+    );
+    // On `1min` no signal bar demands the missing minutes, so none is withheld.
+    assert!(
+        crate::minute_gaps::days_with_minute_holes(
+            &minutes.bars,
+            &minutes.bars,
+            60_000_000,
+            crate::stored::nse_session_close_minute
+        )
+        .is_empty()
+    );
+    // A day with signal bars and no minutes at all is flagged too.
+    let no_minutes: Vec<_> = minutes
+        .bars
+        .iter()
+        .copied()
+        .filter(|bar| indicators::ist_day(bar.ts_micros) != days[0])
+        .collect();
+    assert!(
+        crate::minute_gaps::days_with_minute_holes(
+            &signal.bars,
+            &no_minutes,
+            signal_length,
+            crate::stored::nse_session_close_minute
+        )
+        .contains(&days[0])
+    );
+
+    let screen = fixture.screen("5min", 1);
+    assert!(screen.is_ok(), "{screen:?}");
+
+    crate::COLUMN_BUILD_ATTEMPTS.with(|count| count.set(0));
+    let range = fixture.audit_range("5min", (2025, 5));
+    assert!(range.is_ok(), "{range:?}");
+    assert_eq!(
+        crate::COLUMN_BUILD_ATTEMPTS.with(std::cell::Cell::get),
+        1,
+        "every holed day was withheld before the first build"
+    );
+}
+
+/// **A seeded descent refuses a rung it does not sweep before it reads
+/// anything, and leaves its seed alone.** o1cli-5, D-1839.
+#[test]
+fn a_seeded_descent_refuses_an_unknown_rung_before_reading() {
+    let before = crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get);
+    let page = crate::elite_descend_seeded(
+        "zerodha",
+        "NIFTY",
+        "7min",
+        ((2025, 5), (2025, 5)),
+        (1_000, 5),
+        runner::rank::Lens::Payoff,
+        None,
+        crate::ScreenCache::default(),
+    );
+    assert_eq!(
+        page,
+        format!(
+            "refused: `7min` is not a rung this engine sweeps. The eight are: {}.\n",
+            crate::EVERY_RUNG.join(", ")
+        )
+    );
+    assert_eq!(crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get), before);
+}
+
+/// **A rung reads its span and builds its column once, the rungs of one
+/// command read the minute and daily spans once between them, and a build
+/// pass reads nothing.** o1cli-2, o1cli-3, o1cli-4, D-1840, re-applied by D-1843.
+///
+/// Counted before the fix: a derived-support `5min` rung built its column
+/// twice (the probe's build, then the kernel's), and every rung read the
+/// execution series once, the minute and daily context spans once per build
+/// pass, and both again after the build: seven reads of rung-independent
+/// spans for one derived `5min` rung on a clean month. Now the probe reads the
+/// kernel's column, two rungs through one share read the three spans three
+/// times in all, and every row equals a fresh, unshared run's.
+#[test]
+fn rungs_share_their_reads_and_build_their_column_once() {
+    use std::cell::Cell;
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let reads = || crate::SHARED_SPAN_READS.with(Cell::get);
+    let builds = || u64::try_from(crate::COLUMN_BUILD_ATTEMPTS.with(Cell::get)).unwrap_or(u64::MAX);
+    let loads = || crate::AUDIT_INPUT_LOADS.with(Cell::get);
+    let store = |fixture: &Fixture| crate::RungStore {
+        root: Ok(fixture.root.clone()),
+        commit: Some("generated-stored-rungs-fixture"),
+    };
+    let ask = |rung, support_ppm| crate::RungAsk {
+        vendor_word: "zerodha",
+        underlying: "NIFTY",
+        rung,
+        from: (2025, 5),
+        to: (2025, 5),
+        support_ppm,
+        attempt: None,
+    };
+
+    // A DERIVED SUPPORT BUILDS ONE COLUMN: the probe sizes the kernel's.
+    let derived = Fixture::warmed();
+    let (r, b, l) = (reads(), builds(), loads());
+    let _ = crate::one_rung_cached(
+        ask("5min", None),
+        store(&derived),
+        &mut crate::AuditCache::default(),
+    );
+    assert_eq!(
+        (reads() - r, builds() - b, loads() - l),
+        (3, 1, 1),
+        "one preparation for the probe and the sweep (two builds and seven reads before)"
+    );
+
+    let fresh = Fixture::warmed();
+    let shared = Fixture::warmed();
+    let (r, b, l) = (reads(), builds(), loads());
+    let alone: Vec<_> = ["5min", "1min"]
+        .map(|rung| {
+            crate::one_rung_cached(
+                ask(rung, Some(600_000)),
+                store(&fresh),
+                &mut crate::AuditCache::default(),
+            )
+            .outcome
+        })
+        .into();
+    assert_eq!(
+        (reads() - r, builds() - b, loads() - l),
+        (6, 2, 2),
+        "unshared, each rung reads its three spans and builds once"
+    );
+
+    let (r, b, l) = (reads(), builds(), loads());
+    let share = std::sync::Arc::new(crate::SpanShare::default());
+    let together: Vec<_> = ["5min", "1min"]
+        .map(|rung| {
+            crate::one_rung_cached(
+                ask(rung, Some(600_000)),
+                store(&shared),
+                &mut crate::AuditCache::sharing(std::sync::Arc::clone(&share)),
+            )
+            .outcome
+        })
+        .into();
+    assert_eq!(
+        (reads() - r, builds() - b, loads() - l),
+        (3, 2, 2),
+        "two rungs share three span reads and each builds once"
+    );
+    assert!(together.iter().all(Result::is_ok), "{together:?}");
+    // Every field but the wall-clock stamp of when each row landed.
+    let unstamped = |rows: Vec<Result<crate::results::Record, String>>| {
+        rows.into_iter()
+            .map(|row| {
+                row.map(|record| crate::results::Record {
+                    finished_micros: 0,
+                    ..record
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(unstamped(together), unstamped(alone));
+    crate::knobs::clear_all();
+}
+
+/// **A build pass that withholds a day reads nothing more.** o1cli-3,
+/// o1cli-4, W2-cli8-6, D-1840, re-applied by D-1843.
+///
+/// Each pass read the daily and minute context spans again. 2025-05-06 loses
+/// its last minute, and the build is handed the whole month with nothing
+/// withheld up front (the census, D-1662, would withhold that day itself; the
+/// loop is the defence behind it): the first pass refuses the 15:25 bar's
+/// close, the day is withheld, and the second pass builds. Both passes derive
+/// from one read of each context span, the build hands back the day, and a
+/// second build through the same share reads nothing at all.
+#[test]
+fn a_build_that_withholds_a_day_reads_nothing_more() {
+    use std::cell::Cell;
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let reads = || crate::SHARED_SPAN_READS.with(Cell::get);
+    let passes = || crate::COLUMN_BUILD_ATTEMPTS.with(Cell::get);
+    let edged = Fixture::warmed();
+    edged.rewrite_owned_minutes(|day, rows| {
+        if day == 6 {
+            rows.pop();
+        }
+    });
+    let whole = stored::load_span(
+        &edged.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        (2025, 5),
+        (2025, 5),
+    )
+    .expect("the month loads")
+    .bars;
+    let withheld = i64::from(
+        pull::session::Day::new(2025, 5, 6)
+            .expect("date")
+            .days_from_epoch(),
+    );
+    let share = crate::SpanShare::default();
+    let build = |share: &crate::SpanShare| {
+        let mut days = Vec::new();
+        let mut bars = whole.clone();
+        let prepared = crate::column_withholding_at_build(
+            &edged.root,
+            Vendor::Zerodha,
+            "NIFTY",
+            ((2025, 5), (2025, 5)),
+            crate::FoldedSeries {
+                folded: &whole,
+                days: &mut days,
+                bars: &mut bars,
+            },
+            stored::rung_length_micros("5min").expect("a rung"),
+            crate::StoredPreparationBuild {
+                rung: "5min",
+                commit: None,
+            },
+            share,
+        )
+        .expect("the edged month builds");
+        (prepared, days, bars.len())
+    };
+    let (r, p) = (reads(), passes());
+    let (prepared, days, kept) = build(&share);
+    assert_eq!(
+        (reads() - r, passes() - p),
+        (2, 2),
+        "a refused pass and a built one over one read of each context span"
+    );
+    assert_eq!(prepared.build_withheld, [withheld]);
+    assert_eq!(days, [withheld], "the build appends the day it withheld");
+    assert!(kept < whole.len(), "the day's bars left the sweep");
+    let (r, p) = (reads(), passes());
+    let (again, _, _) = build(&share);
+    assert_eq!(
+        (reads() - r, passes() - p),
+        (0, 2),
+        "a second build through the same share reads nothing"
+    );
+    assert_eq!(again.digest, prepared.digest, "and prepares the same bytes");
+    crate::knobs::clear_all();
+}
+
+/// A RELIANCE (or index) May whose every price halves from 2025-05-09 on:
+/// an unadjusted 1:2 split, written at all three rungs `warmed_for` writes.
+fn split_on_the_ninth(symbol: &'static str) -> Fixture {
+    let fixture = Fixture::for_symbol(symbol);
+    for day in 5..=13 {
+        let mut rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        if day >= 9 {
+            for row in &mut rows {
+                row.open /= 2;
+                row.high /= 2;
+                row.low /= 2;
+                row.close /= 2;
+            }
+        }
+        fixture.write(5, Timeframe::MINUTE_1, &rows);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    fixture
+}
+
+/// **A stock's stored report names its largest overnight move by date and
+/// size, and an index's never does.** gaps-6, D-1540.
+///
+/// D-0694 says corporate actions are unchecked; nothing told the reader WHERE
+/// to look. Over a month with an unadjusted 1:2 split on 2025-05-09 (close
+/// 1010.00, next open 500.00), every single-instrument stored door that holds
+/// the bars names that session and the -50.49% move, with no threshold
+/// claimed. The same bars as NIFTY carry no such line: an index never splits.
+#[test]
+fn every_stored_stock_report_names_its_largest_overnight_move() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for (symbol, stock) in [("RELIANCE", true), ("NIFTY", false)] {
+        let fixture = split_on_the_ninth(symbol);
+        let audited = Inputs::load(fixture.request("5min")).expect("audited generated inputs");
+        let reports = [
+            ("sweep-stored", fixture.sweep("5min")),
+            (
+                "sweep-audited-stored",
+                crate::stored_month_kernel(
+                    fixture.month_request("5min"),
+                    audited.data(),
+                    Some(&audited),
+                ),
+            ),
+            ("audit-stored", fixture.audit("5min")),
+            ("audit-range", fixture.audit_range("5min", (2025, 5))),
+            ("screen", fixture.screen("5min", 1_000_000)),
+            ("auto-stored", fixture.auto("5min")),
+        ];
+        for (door, report) in reports {
+            let report = report.expect(door);
+            let flat = report.split_whitespace().collect::<Vec<_>>().join(" ");
+            let named = "LARGEST OVERNIGHT MOVE IN THESE BARS: -50.49% into the 2025-05-09 \
+                         session (close 1010.00 to open 500.00). NO THRESHOLD";
+            assert_eq!(flat.contains(named), stock, "{symbol} {door}:\n{report}");
+            assert_eq!(
+                report.contains("LARGEST OVERNIGHT MOVE"),
+                stock,
+                "{symbol} {door}:\n{report}"
+            );
+            if stock {
+                assert!(
+                    report.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED)
+                        < report.find("LARGEST OVERNIGHT MOVE"),
+                    "{door}: the measurement follows the statement it qualifies:\n{report}"
+                );
+                assert!(!crate::carries_refusal(&report), "{door}:\n{report}");
+            }
+        }
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A range descent prepares its stored inputs once, and every step answers
+/// byte for byte as a fresh preparation does.** audit-20261003 o1surface2-1,
+/// D-1557.
+///
+/// Every step of `cli descend` after the first re-ran `one_rung` from scratch:
+/// one raw span load, then the audit kernel's own load of both spans, both
+/// contexts and the anchored column under a fresh preparation attempt. Now
+/// the descent asks one `AuditCache`: the same key reuses what it holds, and a
+/// different key, here another rung, prepares afresh.
+#[test]
+fn a_range_descent_prepares_its_stored_inputs_once() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
+    // test is fast only because validation is OFF. Were the knob not read
+    // as off, the run below would price the full stack for an hour.
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
+    let fixture = Fixture::warmed();
+    let store = crate::RungStore {
+        root: Ok(fixture.root.clone()),
+        commit: Some("generated-stored-descend-fixture"),
+    };
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    crate::RUNG_SPAN_LOADS.with(|loads| loads.set(0));
+    let page = crate::descend_in(
+        &store,
+        "zerodha",
+        "NIFTY",
+        "5min",
+        ((2025, 5), (2025, 5)),
+        600_000,
+        crate::Cadence::PerWeek(20),
+    );
+    let steps = page
+        .lines()
+        .find_map(|line| line.trim_end().strip_suffix(" step(s)"))
+        .and_then(|line| line.rsplit(' ').next())
+        .and_then(|count| count.parse::<u64>().ok())
+        .expect("a step count");
+    assert!(steps >= 2, "a ladder, not one step:\n{page}");
+    assert!(!page.contains("refused"), "{page}");
+    assert_eq!(
+        crate::RUNG_SPAN_LOADS.with(std::cell::Cell::get),
+        1,
+        "{page}"
+    );
+    assert_eq!(
+        crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get),
+        1,
+        "{steps} steps prepared their inputs more than once:\n{page}"
+    );
+
+    // The same audits through one cache and through a fresh one per audit,
+    // on two identical stores, print the same pages.
+    let fresh = Fixture::warmed();
+    let request = |root: &std::path::Path, rung, min_hits| crate::StoredRangeAuditRequest {
+        fold_support: runner::validate::FoldSupport::Scaled,
+        root: root.to_path_buf(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY",
+        rung,
+        from: (2025, 5),
+        to: (2025, 5),
+        min_hits,
+        attempt: None,
+        commit: "generated-stored-descend-fixture",
+    };
+    let cached = Fixture::warmed();
+    let mut cache = crate::AuditCache::default();
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    for min_hits in [900, 600, 450] {
+        let want =
+            crate::audit_range_kernel(request(&fresh.root, "5min", min_hits)).expect("fresh audit");
+        let got =
+            crate::audit_range_kernel_cached(request(&cached.root, "5min", min_hits), &mut cache)
+                .expect("cached audit");
+        assert!(want.contains("RESULT RECORDED"), "{want}");
+        assert_eq!(
+            got.replace(
+                &cached.root.display().to_string(),
+                &fresh.root.display().to_string()
+            ),
+            want,
+            "min_hits {min_hits}"
+        );
+    }
+    assert_eq!(
+        crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get),
+        4,
+        "3 fresh + 1 cached"
+    );
+    // A different key prepares afresh, and the held key is then replaced.
+    let other = crate::audit_range_kernel_cached(request(&cached.root, "1min", 900), &mut cache)
+        .expect("1min audit");
+    assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 5);
+    assert!(other.contains("1min"), "{other}");
+    crate::knobs::clear_all();
+}
+
+/// AN `auto-stored` RUN EXITS AS ITS OWN SWEEP EVIDENCE RECORDS IT. P8-01, D-2720.
+///
+/// The arm read [`crate::carries_refusal`] alone, so a search over a column
+/// that never warmed printed `threshold chosen NONE` under a `NO` verdict,
+/// wrote `Completion::Refused` to its sweep evidence, and exited 0 -- which
+/// made `run_durable` record `Phase::Completed` for the same run. A seeded
+/// month cannot warm the 5min column and must exit `FAILED`; the warmed month
+/// completes and must exit `OK`. Each exit is checked against the completion
+/// the kernel itself wrote.
+#[test]
+fn an_auto_stored_search_exits_as_its_sweep_evidence_records() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for (fixture, completed) in [(Fixture::new(), false), (Fixture::warmed(), true)] {
+        let report = fixture.auto("5min").expect("the kernel renders a page");
+        let evidence = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+            .expect("the evidence reads")
+            .expect("the search recorded an attempt");
+        assert_eq!(
+            evidence.completion == crate::sweep_evidence::Completion::Completed,
+            completed,
+            "{report}"
+        );
+        assert_eq!(
+            crate::auto_stored_exit(&report),
+            if completed { crate::OK } else { crate::FAILED },
+            "{report}"
+        );
+        assert_eq!(crate::untrustworthy(&report), !completed, "{report}");
+    }
+    crate::knobs::clear_all();
+}
+
+/// The finding's repro shape on the stored path: fourteen open sessions of
+/// moving one-minute bars (April 30 as warm-up, then May 2025), each with its
+/// own day record and exact `5min` aggregates. With `hole`, the eleventh
+/// session's one-minute file loses one interior minute; its `5min` bars, as a
+/// vendor printed them, stay whole. p11num-1, D-1781.
+fn fourteen_sessions(hole: bool) -> (Traded, i64) {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-withheld-fold-fixture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("scratch");
+    let fixture = Traded {
+        root,
+        underlying: "NIFTY",
+    };
+    let warm = moving_session(4, 30, 0);
+    fixture.write(4, Timeframe::MINUTE_1, &warm);
+    fixture.write(4, Timeframe::DAY_1, &[aggregate(&warm)]);
+    let open: Vec<u8> = (2..=31)
+        .filter(|date| !moving_session(5, *date, 0).is_empty())
+        .take(14)
+        .collect();
+    assert_eq!(open.len(), 14, "premise: May 2025 holds fourteen sessions");
+    let holed_date = open[10];
+    for (index, date) in (1_i64..).zip(open) {
+        let rows = moving_session(5, date, index);
+        let mut minutes = rows.clone();
+        if hole && date == holed_date {
+            minutes.remove(150);
+        }
+        fixture.write(5, Timeframe::MINUTE_1, &minutes);
+        fixture.write(5, Timeframe::DAY_1, &[aggregate(&rows)]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.chunks(5).map(aggregate).collect::<Vec<_>>(),
+        );
+    }
+    let holed = i64::from(
+        pull::session::Day::new(2025, 5, holed_date)
+            .expect("date")
+            .days_from_epoch(),
+    );
+    (fixture, holed)
+}
+
+/// `request` for the fourteen-session fixture's May.
+fn fourteen_request<'a>(fixture: &Traded, rung: &'a str) -> crate::StoredSweepRequest<'a> {
+    crate::StoredSweepRequest {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: fixture.underlying,
+        rung,
+        year: 2025,
+        month: 5,
+        min_hits: u64::MAX,
+        commit: "generated-withheld-fold-fixture",
+    }
+}
+
+/// Each row of `column` keyed by the timestamp of its source bar in `bars`.
+fn rows_by_stamp(
+    column: &indicators::column::Column,
+    bars: &[indicators::Candle],
+) -> Vec<(i64, vocab::ConditionMask, vocab::ConditionMask)> {
+    column
+        .bits()
+        .iter()
+        .zip(column.known())
+        .zip(column.sources())
+        .map(|((bits, known), &source)| (bars[source].ts_micros, *bits, *known))
+        .collect()
+}
+
+/// **A withheld holed day is folded, not spliced: every later swept row is
+/// the row of the fold that kept the day, and the day's own rows are not
+/// swept.** p11num-1, D-1781.
+///
+/// `5min`: the hole is in the one-minute file only, so the signal bars are
+/// the same with and without it, and the withholding run's column must equal
+/// the unholed month's column with the holed day's rows removed -- every bit
+/// and every availability bit, overlay families included. Before D-1781 the
+/// door built the column from the spliced slice; that column is built here
+/// too and must differ on a later row, or this test could not see the defect.
+///
+/// `1min`: the signal series itself lacks the minute, so the reference is the
+/// whole holed series folded by the plain anchored build, compared on every
+/// position outside the exact-minute ORB (86..=105) and `GapFib` (132..=142)
+/// families the overlay replaces from the minute stream.
+#[test]
+fn a_withheld_holed_day_is_folded_so_every_later_swept_row_is_the_true_fold() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let (clean, _) = fourteen_sessions(false);
+    let (holed, day) = fourteen_sessions(true);
+
+    the_5min_fold_is_the_unholed_months_less_the_held_day(&clean, &holed, day);
+    the_1min_fold_is_the_whole_holed_series_outside_the_overlay(&holed, day);
+    crate::knobs::clear_all();
+}
+
+/// The `5min` half of the D-1781 stored-path proof: the withholding run's
+/// column is the unholed month's less the held day, and the splice differs.
+fn the_5min_fold_is_the_unholed_months_less_the_held_day(clean: &Traded, holed: &Traded, day: i64) {
+    // ── 5min: equal to the unholed month, row for row. ──
+    let rung = "5min";
+    let signal = stored::rung_length_micros(rung).expect("a swept rung");
+    let whole_inputs = crate::stored_sweep_inputs(&fourteen_request(clean, rung)).expect("clean");
+    let inputs = crate::stored_sweep_inputs(&fourteen_request(holed, rung)).expect("holed");
+    let gaps = inputs.minute_gaps.as_ref().expect("the rule is applied");
+    assert_eq!(gaps.day_numbers(), &[day], "premise: the hole is measured");
+    assert_eq!(
+        gaps.signal_bars(),
+        75,
+        "premise: the day's 75 bars are withheld"
+    );
+    assert_eq!(
+        inputs.folded.as_deref(),
+        Some(whole_inputs.loaded.bars.as_slice()),
+        "the folded series is the whole month"
+    );
+    assert!(
+        inputs
+            .loaded
+            .bars
+            .iter()
+            .all(|bar| indicators::ist_day(bar.ts_micros) != day),
+        "the swept slice holds no bar of the holed day"
+    );
+    let availability = stored::vwap_availability(&inputs.loaded.key);
+    let whole = crate::stored_month_column(&whole_inputs, signal, availability).expect("whole");
+    let folded = crate::stored_month_column(&inputs, signal, availability).expect("folded");
+    let expected: Vec<_> = rows_by_stamp(&whole, &whole_inputs.loaded.bars)
+        .into_iter()
+        .filter(|(stamp, _, _)| indicators::ist_day(*stamp) != day)
+        .collect();
+    let actual = rows_by_stamp(&folded, &inputs.loaded.bars);
+    assert!(actual.len() > 600, "premise: the fixture is warm");
+    assert_eq!(
+        actual, expected,
+        "every swept row is the unholed fold's row, and no row is on the holed day"
+    );
+
+    // THE DEFECT THIS REPLACES, MEASURED: the column built from the spliced
+    // slice, as every door did before D-1781.
+    let spliced = crate::stored_anchored_column(
+        &inputs.loaded.bars,
+        &inputs.daily,
+        &inputs.exact_minute,
+        signal,
+        availability,
+    )
+    .expect("the spliced build still succeeds");
+    let spliced = rows_by_stamp(&spliced, &inputs.loaded.bars);
+    let later = |rows: &[(i64, vocab::ConditionMask, vocab::ConditionMask)]| -> Vec<_> {
+        rows.iter()
+            .filter(|(stamp, _, _)| indicators::ist_day(*stamp) > day)
+            .copied()
+            .collect()
+    };
+    let (true_later, spliced_later) = (later(&actual), later(&spliced));
+    assert_eq!(
+        true_later.len(),
+        spliced_later.len(),
+        "the same later bars are swept"
+    );
+    let differing = true_later
+        .iter()
+        .zip(&spliced_later)
+        .filter(|(fold, splice)| fold.1 != splice.1)
+        .count();
+    let trend: Vec<(u32, usize)> = [
+        0_u32, 1, 2, 3, 4, 5, 56, 57, 58, 59, 64, 65, 72, 73, 278, 279,
+    ]
+    .iter()
+    .map(|&bit| {
+        let moved = true_later
+            .iter()
+            .zip(&spliced_later)
+            .filter(|(fold, splice)| fold.1.get(bit) != splice.1.get(bit))
+            .count();
+        (bit, moved)
+    })
+    .filter(|(_, moved)| *moved > 0)
+    .collect();
+    assert!(
+        differing > 0,
+        "the splice must be visible on this fixture, or the equality above proves nothing: \
+         {differing} of {} later rows differ; by bit {trend:?}",
+        true_later.len()
+    );
+}
+
+/// The `1min` half of the D-1781 stored-path proof: the withholding run's
+/// column is the plain fold of the whole holed series outside ORB and `GapFib`.
+fn the_1min_fold_is_the_whole_holed_series_outside_the_overlay(holed: &Traded, day: i64) {
+    // ── 1min: the whole holed series folded, outside the overlay families. ──
+    let rung = "1min";
+    let signal = stored::rung_length_micros(rung).expect("a swept rung");
+    let inputs = crate::stored_sweep_inputs(&fourteen_request(holed, rung)).expect("holed 1min");
+    let availability = stored::vwap_availability(&inputs.loaded.key);
+    let whole_series = inputs.folded.as_deref().expect("a day was withheld");
+    assert_eq!(
+        whole_series.len() - inputs.loaded.bars.len(),
+        374,
+        "premise: the holed day keeps 374 of its minutes, folded and not swept"
+    );
+    let folded = crate::stored_month_column(&inputs, signal, availability).expect("folded 1min");
+    let widths = indicators::evaluator::Widths::pinned().expect("pinned widths");
+    let mut evaluator = indicators::anchored::AnchoredEvaluator::new(
+        widths,
+        availability,
+        indicators::pattern::Thresholds::CLASSICAL,
+        &inputs.daily.references,
+    )
+    .expect("ordered references");
+    let reference =
+        indicators::column::AnchoredColumn::build_required(whole_series, &mut evaluator)
+            .expect("the whole holed series folds")
+            .into_column();
+    let strip = |mask: vocab::ConditionMask| {
+        (86_u32..=105)
+            .chain(132..=142)
+            .fold(mask, vocab::ConditionMask::without_bit)
+    };
+    let outside = |rows: Vec<(i64, vocab::ConditionMask, vocab::ConditionMask)>| -> Vec<_> {
+        rows.into_iter()
+            .filter(|(stamp, _, _)| indicators::ist_day(*stamp) != day)
+            .map(|(stamp, bits, known)| (stamp, strip(bits), strip(known)))
+            .collect()
+    };
+    let expected = outside(rows_by_stamp(&reference, whole_series));
+    let actual = outside(rows_by_stamp(&folded, &inputs.loaded.bars));
+    assert_eq!(
+        actual.len(),
+        folded.len(),
+        "no 1min row is on the holed day"
+    );
+    assert_eq!(
+        actual, expected,
+        "every 1min swept row is the whole fold's row"
+    );
+}
+
+/// A NAMED range support asks its hits of the rows the column SWEPT, the bars
+/// that can hit, not of the retained slice whose warm-up the column folds
+/// without sweeping (D-2101). Before, 600,000 ppm of the 3,000 one-minute bars
+/// this fixture retains asked for 1,800 hits from 1,500 swept rows, so nothing
+/// could ever be frequent, and the rung recorded an empty search as an answer.
+/// The swept count is read from the audit's own cached column, so the rung
+/// still prepares its inputs once.
+#[test]
+fn a_named_range_support_is_scaled_to_the_swept_rows_not_the_warm_up() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018): this
+    // test is fast only because validation is OFF. Were the knob not read
+    // as off, the run below would price the full stack for an hour.
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
+    for (rung, retained, swept) in [("1min", 3_000_u64, 1_500_u64), ("5min", 600, 300)] {
+        for support in [600_000_u64, 999_999, 1] {
+            let fixture = Fixture::warmed();
+            crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+            let row = crate::one_rung_cached(
+                crate::RungAsk {
+                    vendor_word: "zerodha",
+                    underlying: fixture.symbol,
+                    rung,
+                    from: (2025, 5),
+                    to: (2025, 5),
+                    support_ppm: Some(support),
+                    attempt: Some(11),
+                },
+                crate::RungStore {
+                    root: Ok(fixture.root.clone()),
+                    commit: Some("generated-swept-support-fixture"),
+                },
+                &mut crate::AuditCache::default(),
+            );
+            let record = row
+                .outcome
+                .map_err(|why| format!("{rung} {support}: {why}"))
+                .expect("the named range support sizes");
+            assert_eq!(record.bars, swept, "{rung} {support}");
+            assert_eq!(
+                record.min_hits,
+                (swept * support / 1_000_000).max(1),
+                "{rung} {support}"
+            );
+            assert!(
+                record.min_hits <= swept && swept < retained,
+                "{rung} {support}: {} hits of {swept} swept rows",
+                record.min_hits
+            );
+            assert_eq!(
+                crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get),
+                1,
+                "{rung} {support}: the count and the audit share one preparation"
+            );
+        }
+    }
+    crate::knobs::clear_all();
+}
+
+/// An unstamped build reads no input to size a named support: the audit
+/// refuses before any load, so neither does the derivation. D-2101.
+#[test]
+fn an_unstamped_named_range_support_loads_nothing_to_size_itself() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    let row = crate::one_rung_cached(
+        crate::RungAsk {
+            vendor_word: "zerodha",
+            underlying: fixture.symbol,
+            rung: "5min",
+            from: (2025, 5),
+            to: (2025, 5),
+            support_ppm: Some(600_000),
+            attempt: Some(12),
+        },
+        crate::RungStore {
+            root: Ok(fixture.root.clone()),
+            commit: None,
+        },
+        &mut crate::AuditCache::default(),
+    );
+    assert!(row.outcome.is_err(), "an unstamped build records nothing");
+    assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 0);
+    assert!(!crate::results::Results::path(&fixture.root).exists());
+    crate::knobs::clear_all();
+}
+
+/// A descent sizes its floor on the rows its steps' column swept, read
+/// through the cache the steps then reuse, so the count costs no second load;
+/// a question a step would refuse yields no count. D-2101.
+#[test]
+fn a_descent_counts_the_swept_rows_through_the_cache_its_steps_reuse() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let span = ((2025, 5), (2025, 5));
+    for (rung, swept) in [("1min", 1_500_u64), ("5min", 300)] {
+        crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+        let mut cache = crate::ScreenCache::default();
+        let counted = crate::screen_swept_in(
+            &fixture.root,
+            "zerodha",
+            fixture.symbol,
+            rung,
+            span,
+            &mut cache,
+        );
+        assert_eq!(counted, Some(swept), "{rung}");
+        let page = crate::screen_range_kernel_cached(
+            crate::StoredScreenRequest {
+                root: fixture.root.clone(),
+                vendor: Vendor::Zerodha,
+                underlying: fixture.symbol,
+                rung,
+                span,
+                support_ppm: 20_000,
+                policy: crate::Policy {
+                    rules: crate::Rules::BASELINE,
+                    lens: runner::rank::Lens::Detectability,
+                    validate: false,
+                },
+                attempt: Some(14),
+                commit: "generated-swept-descent-fixture",
+            },
+            &mut cache,
+        )
+        .expect("a step");
+        assert!(page.contains("RESULT RECORDED"), "{page}");
+        assert_eq!(
+            crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get),
+            1,
+            "{rung}: the count and the step share one load"
+        );
+    }
+    let mut cache = crate::ScreenCache::default();
+    for (vendor, rung, months) in [
+        ("zerodha", "7min", span),
+        ("nobody", "5min", span),
+        // A span the store does not hold refuses at the load.
+        ("zerodha", "5min", ((2019, 1), (2019, 1))),
+    ] {
+        assert_eq!(
+            crate::screen_swept_in(
+                &fixture.root,
+                vendor,
+                fixture.symbol,
+                rung,
+                months,
+                &mut cache
+            ),
+            None,
+            "{vendor} {rung} {months:?}"
+        );
+    }
+    crate::knobs::set("BRUTEX_SCREEN_BUDGET_MS", "5");
+    assert_eq!(
+        crate::screen_swept_in(
+            &fixture.root,
+            "zerodha",
+            fixture.symbol,
+            "5min",
+            span,
+            &mut cache
+        ),
+        None,
+        "a spent screen budget refuses every step before its load"
+    );
+    crate::knobs::clear_all();
+}
+
+/// The minute-gap census asks the share's dated close, so an eligible
+/// share's 14:15 bucket of a 75-minute rung, which the dated close clamps onto
+/// 15:14 on 2026-08-03 (a CAS day), is not withheld for lacking a 15:29 minute
+/// the share's continuous session never reaches (D-2102).
+#[test]
+fn the_minute_gap_census_asks_the_shares_dated_close() {
+    use std::io::Write as _;
+    const MONDAY_2026_08_03: i64 = 20_668;
+    let minute = |at: i64| indicators::Candle {
+        ts_micros: MONDAY_2026_08_03 * 86_400_000_000 - indicators::IST_OFFSET_MICROS
+            + at * 60_000_000,
+        open: 2_500_000,
+        high: 2_500_100,
+        low: 2_499_900,
+        close: 2_500_000,
+        volume: 0,
+        open_interest: i64::MIN,
+    };
+    let store =
+        std::env::temp_dir().join(format!("brutex-cli-census-dated-{}", std::process::id()));
+    let _ignored = std::fs::remove_dir_all(&store);
+    let isin = brutex_core::universe::nse_isin("RELIANCE").expect("RELIANCE has an ISIN");
+    let csv = format!(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{},1\n",
+        isin.as_str()
+    );
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(csv.as_bytes()).expect("compress fixture");
+    let day = pull::session::Day::new(2026, 8, 3).expect("a civil day");
+    pull::cash_session_cache::install(
+        &store.join("session-masters"),
+        day,
+        &gz.finish().expect("finish gzip"),
+    )
+    .expect("the fixture master installs");
+
+    let signal = [minute(855)];
+    let minutes: Vec<indicators::Candle> = (855..=914).map(minute).collect();
+    let rung = 75 * 60_000_000;
+    let share = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "RELIANCE",
+    )
+    .expect("a share");
+    let cash = crate::stored::span_cash_closes(&store, &share, None, &signal).expect("closes");
+    assert!(
+        crate::minute_gaps::days_with_minute_holes(&signal, &minutes, rung, |day| {
+            crate::stored::session_close_for(cash.as_ref(), day)
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        crate::minute_gaps::days_with_minute_holes(
+            &signal,
+            &minutes,
+            rung,
+            crate::stored::nse_session_close_minute
+        ),
+        vec![MONDAY_2026_08_03],
+        "the venue-blind close demands 15:29 and withholds the day"
+    );
+    let _ignored = std::fs::remove_dir_all(&store);
+}
+
+/// rangeall-1, D-2628: the audit's own load is held to the bars the support
+/// was derived from. The same store read twice agrees; a derivation over any
+/// other bars (what a pull landing between `one_rung_cached`'s raw read and
+/// the audit's read leaves) is refused by name before a sweep; a load that
+/// refuses is left to `audit_range_cached`, which names its own reason. On
+/// the old code nothing compared the two reads, so a moved span was swept
+/// and recorded under a `min_hits` derived from bars it did not hold.
+#[test]
+fn one_rung_derives_and_sweeps_one_read() {
+    let fixture = Fixture::warmed();
+    let commit = "generated-stored-descend-fixture";
+    let months = ((2025, 5), (2025, 5));
+    let key = || crate::AuditKey {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY".to_owned(),
+        rung: "5min".to_owned(),
+        span: months,
+        commit: commit.to_owned(),
+    };
+    // The load takes the share and seed `AuditCache::inputs` hands it
+    // (o1cli-2, D-1843); no raw span is held here, so it reads the store
+    // (D-4616).
+    let load = |share: &crate::SpanShare, seed: Option<crate::stored::Span>| {
+        crate::load_audit_inputs(
+            &fixture.root,
+            Vendor::Zerodha,
+            "NIFTY",
+            "5min",
+            months,
+            commit,
+            share,
+            seed,
+        )
+    };
+    let raw = crate::stored::load_span(
+        &fixture.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        months.0,
+        months.1,
+    )
+    .expect("raw span");
+    let derived_from = runner::identity::data_digest(&raw.bars);
+    let mut cache = crate::AuditCache::default();
+    assert_eq!(
+        crate::span_moved_since_derivation(&mut cache, key(), load, derived_from),
+        None,
+        "one store state read twice agrees"
+    );
+    let mut fewer = raw.bars.clone();
+    fewer.pop();
+    for other in [
+        runner::identity::data_digest(&fewer),
+        runner::identity::data_digest(&[]),
+        [0_u8; 32],
+    ] {
+        let moved = crate::span_moved_since_derivation(&mut cache, key(), load, other)
+            .expect("a derivation over other bars is refused");
+        assert!(moved.contains("changed between the support derivation and the sweep"));
+        assert!(moved.contains("rerun"), "{moved}");
+    }
+    let mut refused = crate::AuditCache::default();
+    assert_eq!(
+        crate::span_moved_since_derivation(
+            &mut refused,
+            key(),
+            |_: &crate::SpanShare, _| Err("injected load refusal".to_owned()),
+            derived_from,
+        ),
+        None,
+        "a refused load is the audit's to name"
+    );
+}
+
+/// p50, p99 and max of `samples` nanoseconds, as one line.
+fn o1cli_quantiles(label: &str, samples: &mut [u128]) {
+    samples.sort_unstable();
+    let at = |permille: usize| {
+        samples
+            .get((samples.len().saturating_sub(1) * permille) / 1_000)
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "O1CLI-MEASURE {label}: n {} p50 {} ns p99 {} ns max {} ns",
+        samples.len(),
+        at(500),
+        at(990),
+        at(1_000)
+    );
+}
+
+/// Times `trials` runs of `run`, each over a fresh warmed fixture.
+fn o1cli_time(label: &str, trials: usize, mut run: impl FnMut(&Fixture)) {
+    let mut samples = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        let fixture = Fixture::warmed();
+        let start = std::time::Instant::now();
+        run(&fixture);
+        samples.push(start.elapsed().as_nanos());
+    }
+    o1cli_quantiles(label, &mut samples);
+}
+
+fn o1cli_ask(rung: &'static str, support_ppm: Option<u64>) -> crate::RungAsk<'static> {
+    crate::RungAsk {
+        vendor_word: "zerodha",
+        underlying: "NIFTY",
+        rung,
+        from: (2025, 5),
+        to: (2025, 5),
+        support_ppm,
+        attempt: None,
+    }
+}
+
+fn o1cli_store(fixture: &Fixture) -> crate::RungStore {
+    crate::RungStore {
+        root: Ok(fixture.root.clone()),
+        commit: Some("generated-o1cli-measure"),
+    }
+}
+
+fn o1cli_screen(fixture: &Fixture) -> crate::StoredScreenRequest<'_> {
+    crate::StoredScreenRequest {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: fixture.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm: 1_000_000,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-o1cli-measure",
+    }
+}
+
+/// o1cli-2/3/4/5 wall time on the warmed May-2025 fixture (D-1843, D-1839).
+/// Run explicitly: `--ignored --exact audited_stored::tests::o1cli_cost_measurement --nocapture`.
+#[test]
+#[ignore = "timing measurement; run explicitly"]
+fn o1cli_cost_measurement() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let trials = 15;
+    o1cli_time("o1cli-2/4 derived 5min rung", trials, |fixture| {
+        let row = crate::one_rung_cached(
+            o1cli_ask("5min", None),
+            o1cli_store(fixture),
+            &mut crate::AuditCache::default(),
+        );
+        assert!(row.outcome.is_ok(), "{:?}", row.outcome);
+    });
+    o1cli_time("o1cli-3 5min+1min rungs", trials, |fixture| {
+        o1cli_two_rungs(fixture);
+    });
+    o1cli_time("o1cli-5 bar count then screen", trials, |fixture| {
+        o1cli_count_then_screen(fixture);
+    });
+    crate::knobs::clear_all();
+}
+
+fn o1cli_two_rungs(fixture: &Fixture) {
+    let share = std::sync::Arc::new(crate::SpanShare::default());
+    for rung in ["5min", "1min"] {
+        let row = crate::one_rung_cached(
+            o1cli_ask(rung, Some(600_000)),
+            o1cli_store(fixture),
+            &mut crate::AuditCache::sharing(std::sync::Arc::clone(&share)),
+        );
+        assert!(row.outcome.is_ok(), "{:?}", row.outcome);
+    }
+}
+
+fn o1cli_count_then_screen(fixture: &Fixture) {
+    let key = crate::screen_key(
+        &fixture.root,
+        Vendor::Zerodha,
+        fixture.symbol,
+        "5min",
+        ((2025, 5), (2025, 5)),
+    );
+    let mut cache = crate::ScreenCache::default();
+    let (bars, _) = crate::descent_bar_count_at(key, (0, 1), &mut cache).expect("count");
+    assert!(bars > 0);
+    let page =
+        crate::screen_range_kernel_cached(o1cli_screen(fixture), &mut cache).expect("screen");
+    assert!(page.contains("RESULT RECORDED"), "{page}");
 }

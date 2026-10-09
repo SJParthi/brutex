@@ -368,7 +368,7 @@ fn run(entry: &audit::Entry, out: &mut String) {
                 //
                 // `Kind::label` already existed for the Rust page and had no
                 // second caller. This is that caller.
-                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"drops":["#,
+                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"version":{},"note_capacity":{},"kept_unclassified_day":{},"drops":["#,
                 entry.ordinal,
                 render::json_string(r.kind.label()),
                 r.at_unix_secs,
@@ -387,6 +387,13 @@ fn run(entry: &audit::Entry, out: &mut String) {
                 r.source_bytes,
                 render::json_string(&r.note),
                 r.note_bytes,
+                r.version,
+                r.note_capacity(),
+                // NULL, NOT ZERO, on a version-1 record: that build kept these
+                // rows without counting them (D-2673).
+                r.drops
+                    .unclassified_kept
+                    .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             );
             // AN ARRAY OF NAMED REASONS, NOT FOUR FIXED KEYS. A fifth drop
             // reason is a row the console draws without being taught its name,
@@ -399,11 +406,119 @@ fn run(entry: &audit::Entry, out: &mut String) {
                     out,
                     r#"{{"reason":{},"rows":{}}}"#,
                     render::json_string(reason.label()),
-                    r.drops.of(reason)
+                    r.drops
+                        .recorded(reason)
+                        .map_or_else(|| "null".to_owned(), |n| n.to_string())
                 );
             }
             out.push_str("]}");
         }
+    }
+}
+
+/// One feed's held months, rolled up: per month the instrument-months and bars
+/// held, then the two totals.
+///
+/// **It walks the ASKED feed's own manifest and no other.** `store_block` used
+/// to walk `census_now`'s merged entry list, every held entry of every vendor,
+/// and probe the asked feed's manifest for each, so a request for one feed paid
+/// for every other feed's store, on every request (W1-api1-0, D-0732). Taking
+/// one `VendorCensus` makes the other feeds unreachable from here. It visits
+/// each of this feed's held keys once, with one manifest probe and one
+/// `BTreeMap` insert each, and [`RollupCache`] runs it once per census
+/// snapshot per feed rather than once per request.
+fn feed_rollup(census: &crate::census::VendorCensus) -> FeedRollup {
+    let mut rollup = FeedRollup::default();
+    let crate::census::Census::Held { ref manifest } = census.state else {
+        return rollup;
+    };
+    for entry in manifest.held_keys().filter_map(|key| manifest.entry(key)) {
+        let cell = rollup.months.entry(entry.key.month).or_insert((0, 0));
+        cell.0 = cell.0.saturating_add(1);
+        cell.1 = cell.1.saturating_add(entry.rows);
+        rollup.instrument_months = rollup.instrument_months.saturating_add(1);
+        rollup.bars = rollup.bars.saturating_add(entry.rows);
+    }
+    rollup
+}
+
+/// What [`feed_rollup`] counts for one feed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FeedRollup {
+    /// Per month, `(instrument_months, bars)`.
+    months: BTreeMap<store::path::YearMonth, (u64, u64)>,
+    /// Held instrument-months, all months together.
+    instrument_months: u64,
+    /// Held bars, all months together.
+    bars: u64,
+}
+
+/// [`feed_rollup`]'s answers for ONE census snapshot, one per feed asked.
+///
+/// # Why a cache and not the walk per request
+///
+/// The audit console polls `/audit.json` every few seconds, and the census it
+/// reads only changes when a manifest does: `census_now` hands back the SAME
+/// `Arc` until a stamp moves. So the rollup is keyed on that `Arc`, exactly as
+/// `store_wire::Cache` keys `/store.json`'s encoded body, and a request against
+/// an unchanged census pays one lock, one pointer comparison and one map probe
+/// instead of a walk over the feed's entries. A new snapshot replaces every
+/// feed's rollup at once, so none can outlive the census it was counted from.
+///
+/// The lock is not held while a rollup is counted: a miss counts outside it and
+/// then publishes, the same order `census_now` keeps for its own read. Two
+/// requests that miss together may each count; they count the same snapshot,
+/// so either answer is the same bytes.
+#[derive(Default, Debug)]
+pub(crate) struct RollupCache(std::sync::Mutex<Option<Rollups>>);
+
+/// The snapshot a [`RollupCache`] holds rollups for, and those rollups.
+#[derive(Debug)]
+struct Rollups {
+    /// The census `Arc` these were counted from. Weak, so the cache never keeps
+    /// an old census alive.
+    source: std::sync::Weak<Vec<crate::census::VendorCensus>>,
+    /// One rollup per feed asked about since that snapshot.
+    feeds: std::collections::HashMap<Vendor, std::sync::Arc<FeedRollup>>,
+}
+
+impl RollupCache {
+    /// `feed`'s rollup of `source`, counted by `count` only when this snapshot
+    /// has not been counted for `feed` yet.
+    fn get(
+        &self,
+        source: &std::sync::Arc<Vec<crate::census::VendorCensus>>,
+        feed: Vendor,
+        count: impl FnOnce() -> FeedRollup,
+    ) -> std::sync::Arc<FeedRollup> {
+        let weak = std::sync::Arc::downgrade(source);
+        {
+            let held = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(rollups) = held.as_ref()
+                && rollups.source.ptr_eq(&weak)
+                && let Some(rollup) = rollups.feeds.get(&feed)
+            {
+                return std::sync::Arc::clone(rollup);
+            }
+        }
+        let rollup = std::sync::Arc::new(count());
+        let mut held = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !held.as_ref().is_some_and(|r| r.source.ptr_eq(&weak)) {
+            *held = Some(Rollups {
+                source: weak,
+                feeds: std::collections::HashMap::with_capacity(Vendor::ALL.len()),
+            });
+        }
+        if let Some(rollups) = held.as_mut() {
+            rollups.feeds.insert(feed, std::sync::Arc::clone(&rollup));
+        }
+        rollup
     }
 }
 
@@ -417,22 +532,20 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
     // existing. The `/store` HTML page reads the cached copy and was measured
     // understating this store 6.8× (20.4 M rows against 139.7 M) after four
     // hours of backfill. A monitoring page must never be that page.
-    let (censuses, entries) = census_now(site);
+    let (censuses, _every_feed) = census_now(site);
     let census = censuses.iter().find(|c| c.vendor == feed);
-
-    let mut months: BTreeMap<store::path::YearMonth, (u64, u64)> = BTreeMap::new();
-    let mut instrument_months = 0u64;
-    let mut bars = 0u64;
-    for (series, month) in entries.iter() {
-        let Some(rows) = census.and_then(|c| c.rows_for(&series.at(*month))) else {
-            continue;
-        };
-        let cell = months.entry(*month).or_insert((0, 0));
-        cell.0 = cell.0.saturating_add(1);
-        cell.1 = cell.1.saturating_add(rows);
-        instrument_months = instrument_months.saturating_add(1);
-        bars = bars.saturating_add(rows);
-    }
+    let rollup = census.map_or_else(
+        || std::sync::Arc::new(FeedRollup::default()),
+        |census| {
+            site.audit_rollup
+                .get(&censuses, feed, || feed_rollup(census))
+        },
+    );
+    let FeedRollup {
+        ref months,
+        instrument_months,
+        bars,
+    } = *rollup;
 
     let _ = write!(
         out,
@@ -761,5 +874,225 @@ mod tests {
         .await;
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(field(&body, r#""page":"#), "0");
+    }
+
+    /// A manifest image for `vendor` holding NSE INDEX `symbol` at the daily
+    /// rung for each `(month, rows)` given.
+    fn manifest_image(vendor: Vendor, held: &[(&str, u16, u8, u64)]) -> Vec<u8> {
+        use brutex_core::instrument::{Exchange, Segment};
+        let mut manifest =
+            pull::manifest::Manifest::open(vendor, &[], &[]).expect("a genesis manifest");
+        for (symbol, year, month, rows) in held {
+            let month = store::path::YearMonth::new(*year, *month).expect("fixture month");
+            let day = Day::new(*year, month.month(), 2).expect("fixture date");
+            let ts = i64::from(day.days_from_epoch()) * 86_400_000_000 + 21_600_000_000;
+            manifest
+                .record(pull::manifest::Entry {
+                    key: pull::manifest::EntryKey {
+                        contract: None,
+                        exchange: Exchange::Nse,
+                        segment: Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(symbol).expect("fixture symbol"),
+                        timeframe: store::path::Timeframe::DAY_1,
+                        month,
+                    },
+                    rows: *rows,
+                    first_ts_micros: ts,
+                    last_ts_micros: ts,
+                })
+                .expect("one held month");
+        }
+        manifest.image()
+    }
+
+    fn install(root: &std::path::Path, vendor: Vendor, image: &[u8]) {
+        let path = pull::manifest::manifest_path(root, vendor);
+        std::fs::create_dir_all(path.parent().expect("manifest parent")).expect("mkdir");
+        std::fs::write(path, image).expect("install the manifest");
+    }
+
+    /// **THE STORE BLOCK ROLLS UP THE ASKED FEED AND ONLY IT.** Dhan holds
+    /// three instrument-months over two months; Groww holds other months that
+    /// must not appear in Dhan's answer (W1-api1-0, D-0732).
+    #[test]
+    fn the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed() {
+        let root = store_root("rollup");
+        install(
+            &root,
+            Vendor::Dhan,
+            &manifest_image(
+                Vendor::Dhan,
+                &[
+                    ("NIFTY", 2025, 1, 3),
+                    ("BANKNIFTY", 2025, 1, 5),
+                    ("NIFTY", 2025, 2, 7),
+                ],
+            ),
+        );
+        install(
+            &root,
+            Vendor::Groww,
+            &manifest_image(
+                Vendor::Groww,
+                &[("NIFTY", 2024, 6, 11), ("NIFTY", 2025, 1, 13)],
+            ),
+        );
+        let site = Site::load(&masters("rollup"), &root);
+
+        let json = body(&site, Vendor::Dhan, 0, moment(), Ok(day()));
+        assert_eq!(field(&json, r#""state":"#), r#""held""#, "{json}");
+        assert_eq!(field(&json, r#""instrument_months":"#), "3", "{json}");
+        assert!(json.contains(r#""bars":15,"months":["#), "{json}");
+        assert!(
+            json.contains(
+                r#""months":[{"month":"2025-01","instrument_months":2,"bars":8},{"month":"2025-02","instrument_months":1,"bars":7}]"#
+            ),
+            "{json}"
+        );
+        assert!(
+            !json.contains("2024-06"),
+            "Groww's month is not Dhan's: {json}"
+        );
+
+        let groww = body(&site, Vendor::Groww, 0, moment(), Ok(day()));
+        assert!(
+            groww.contains(
+                r#""months":[{"month":"2024-06","instrument_months":1,"bars":11},{"month":"2025-01","instrument_months":1,"bars":13}]"#
+            ),
+            "{groww}"
+        );
+    }
+
+    /// **THE ROLLUP CANNOT REACH ANOTHER FEED'S ENTRIES.** `store_block` walks
+    /// the asked census through `feed_rollup`, whose one argument is that
+    /// census, and does not iterate `census_now`'s merged list of every
+    /// vendor's entries, which it did before D-0732.
+    #[test]
+    fn the_store_block_walks_one_census_and_not_every_feeds_entries() {
+        let source = include_str!("audit_json.rs");
+        let from = source.find("fn store_block(").expect("store_block exists");
+        let rest = source.get(from..).expect("a char boundary");
+        let block = rest
+            .get(..rest.find("\n}\n").expect("its end"))
+            .expect("a char boundary");
+        assert!(
+            !block.contains("entries.iter()"),
+            "no loop over every feed's entries: {block}"
+        );
+        assert!(block.contains("|| feed_rollup(census)"), "{block}");
+    }
+
+    /// **WHAT `/audit.json`'s STORE BLOCK STILL PAYS IS STATED IN
+    /// `docs/06-limits.md`, AND THE WALK IT QUOTES IS `feed_rollup`'s OWN.**
+    /// `/audit.json` was listed there only as a `census_now` caller (W1-api1-0,
+    /// D-0732).
+    #[test]
+    fn the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source() {
+        let limits = include_str!("../../../docs/06-limits.md");
+        let section = limits
+            .split_once(
+                "## `/audit.json`'s store block: one count per census snapshot, of the asked feed only — D-0732",
+            )
+            .expect("docs/06-limits.md states the audit rollup's cost")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        let source = include_str!("audit_json.rs");
+        let from = source.find("fn feed_rollup(").expect("feed_rollup exists");
+        let rest = source.get(from..).expect("a char boundary");
+        let walk = rest
+            .get(..rest.find("\n}\n").expect("its end"))
+            .expect("a char boundary");
+        let quoted = "manifest.held_keys()";
+        assert!(section.contains(&format!("`{quoted}`")), "{quoted}");
+        assert!(walk.contains(quoted), "feed_rollup still says {quoted}");
+        for named in ["feed_rollup", "RollupCache", "Not timed."] {
+            assert!(section.contains(named), "the limit names {named}");
+        }
+    }
+
+    /// **ONE COUNT PER FEED PER CENSUS SNAPSHOT.** A second ask of the same
+    /// snapshot for the same feed is the same `Arc` and counts nothing; another
+    /// feed counts once; a new snapshot counts again (D-0732).
+    #[test]
+    fn the_rollup_is_counted_once_per_feed_per_census_snapshot() {
+        let cache = RollupCache::default();
+        let counted = std::cell::Cell::new(0u32);
+        let count = |bars: u64| {
+            counted.set(counted.get() + 1);
+            FeedRollup {
+                bars,
+                ..FeedRollup::default()
+            }
+        };
+        let first = std::sync::Arc::new(Vec::new());
+        let a = cache.get(&first, Vendor::Dhan, || count(1));
+        let b = cache.get(&first, Vendor::Dhan, || count(2));
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        assert_eq!((counted.get(), b.bars), (1, 1));
+        let other = cache.get(&first, Vendor::Groww, || count(3));
+        assert_eq!((counted.get(), other.bars), (2, 3));
+        assert_eq!(cache.get(&first, Vendor::Dhan, || count(4)).bars, 1);
+        assert_eq!(counted.get(), 2);
+
+        let second = std::sync::Arc::new(Vec::new());
+        let c = cache.get(&second, Vendor::Dhan, || count(5));
+        assert_eq!((counted.get(), c.bars), (3, 5));
+        // The new snapshot replaced the old one's rollups, for every feed.
+        assert_eq!(cache.get(&second, Vendor::Groww, || count(6)).bars, 6);
+        assert_eq!(counted.get(), 4);
+    }
+
+    /// **A REQUEST AGAINST AN UNCHANGED CENSUS COUNTS NOTHING, AND A REWRITTEN
+    /// MANIFEST IS COUNTED AGAIN.** The first `/audit.json` body leaves the
+    /// asked feed's rollup cached for the census `census_now` hands back, so a
+    /// later ask of that snapshot does not run its counter. A manifest
+    /// rewritten under a new modified time is a new census and the next body
+    /// carries its months, not the cached ones (D-0732).
+    #[test]
+    fn the_audit_body_reuses_the_rollup_until_the_manifest_changes() {
+        let root = store_root("rollup-cache");
+        install(
+            &root,
+            Vendor::Dhan,
+            &manifest_image(Vendor::Dhan, &[("NIFTY", 2025, 1, 3)]),
+        );
+        let site = Site::load(&masters("rollup-cache"), &root);
+        let path = pull::manifest::manifest_path(&root, Vendor::Dhan);
+        let stamp = |secs: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open the manifest")
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .expect("set its modified time");
+        };
+        stamp(1_000_000);
+
+        let json = body(&site, Vendor::Dhan, 0, moment(), Ok(day()));
+        assert!(
+            json.contains(r#""instrument_months":1,"bars":3,"months":["#),
+            "{json}"
+        );
+        let (censuses, _) = census_now(&site);
+        let cached = site.audit_rollup.get(&censuses, Vendor::Dhan, || {
+            panic!("counted again for an unchanged census")
+        });
+        assert_eq!(cached.bars, 3);
+        assert_eq!(body(&site, Vendor::Dhan, 0, moment(), Ok(day())), json);
+
+        install(
+            &root,
+            Vendor::Dhan,
+            &manifest_image(
+                Vendor::Dhan,
+                &[("NIFTY", 2025, 1, 3), ("NIFTY", 2025, 2, 4)],
+            ),
+        );
+        stamp(2_000_000);
+        let json = body(&site, Vendor::Dhan, 0, moment(), Ok(day()));
+        assert!(
+            json.contains(r#""instrument_months":2,"bars":7,"months":["#),
+            "{json}"
+        );
     }
 }

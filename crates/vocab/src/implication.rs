@@ -29,40 +29,51 @@
 //! this is a statement about meaning.
 //!
 //! [`crate`]'s sibling `runner::closed` removes a set only when a superset ONE
-//! BIT LARGER has IDENTICAL support. It therefore deletes `{above_s2}` and
-//! KEEPS `{above_s2, above_s3, above_s4, above_s5}` — the maximal form, which is
-//! lossless and is exactly why the reported row reads long.
+//! BIT LARGER has IDENTICAL support. Without the join screen below, it would
+//! delete `{above_s2}` and KEEP `{above_s2, above_s3, above_s4, above_s5}` —
+//! the maximal form, which is lossless and is exactly why the reported row read
+//! long. With the screen, `engine` never builds that superset, so `closed`
+//! keeps `{above_s2}` instead: the informative form. This said `closed` keeps
+//! the long form until D-1496 (AC-whp-cx-2).
 //!
 //! # The chain, and it is exact rather than approximate
 //!
-//! `crates/indicators/src/daily.rs:206-215` computes the ten pivot levels in
-//! `i128` from `P = ⌊(H+L+C)/3⌋` and `rr = H − L`. Every adjacent difference
-//! telescopes to `H − P ≥ 0`, `P − L ≥ 0` or `rr ≥ 0`, and `daily.rs:181-189`
-//! refuses `high < low` and a close outside `[L, H]`. So on EVERY session:
+//! `DailyLevels::from_previous_session` in `crates/indicators/src/daily.rs`
+//! computes the ten pivot levels in `i128` from `P = ⌊(H+L+C)/3⌋` and
+//! `rr = H − L`. Every adjacent difference telescopes to `H − P ≥ 0`,
+//! `P − L ≥ 0` or `rr ≥ 0`, and the same constructor refuses `if high < low`
+//! and `if close < low || close > high`. So on EVERY session:
 //!
 //! ```text
 //! s5 ≤ s4 ≤ s3 ≤ s2 ≤ s1 ≤ P ≤ r1 ≤ r2 ≤ r3 ≤ r4 ≤ r5
 //! ```
 //!
-//! **And the band half-width is read ONCE, outside the loop** —
-//! `daily.rs:579` `let half = levels.band_half();` — so all ten levels share one
-//! `half ≥ 0`, and the test at `daily.rs:604` is `close > level + half`. A
-//! shared offset preserves the order, so `close > s2 + half` implies
-//! `close > s3 + half` for every rung below. That is why this is an exact
-//! implication and not a usually-true one: had `half` been per-level, two bands
-//! could overlap and the chain would break.
+//! **And the band half-width is read ONCE, outside the loop** — `bits_with`
+//! in `daily.rs` binds `let half = levels.band_half();` before its `for` over
+//! the plan — so all ten levels share one `half ≥ 0`, and the test is
+//! `close > level.saturating_add(half)`. A shared offset preserves the order,
+//! and saturating addition is non-decreasing in `level`, so
+//! `close > s2.saturating_add(half)` implies `close > s3.saturating_add(half)`
+//! for every rung below, including at the top of the type. That is why this is
+//! an exact implication and not a usually-true one: had `half` been per-level,
+//! two bands could overlap and the chain would break.
 //!
 //! # What is deliberately NOT here
 //!
 //! The opening-range windows look ordered — a 60-minute range contains a
 //! 5-minute one — and they are **not** admitted. A window still forming emits
-//! nothing (`crates/indicators/src/orb.rs:277-281`) while the shorter one
-//! already answers, so between minute 5 and minute 15 the implication is simply
-//! false. Nor are the Fibonacci ladders, whose rungs are mutually exclusive
-//! rather than implied, nor `near_pivot_*`, whose bands can both fire at a
-//! boundary where `r2 − r1` equals `2·half`. An approximate implication pruned
-//! as exact would discard a real distinction, which is worse than the redundancy
-//! it removes.
+//! nothing (`Orb::bits` in `crates/indicators/src/orb.rs` skips a window whose
+//! `extremes` is `None`) while the shorter one already answers, so between
+//! minute 5 and minute 15 the implication is simply false. Nor are the
+//! Fibonacci ladders, whose rungs are neither implied nor, on whole-paisa
+//! levels, always exclusive: below a range of
+//! [`crate::tolerance::RUNG_EXCLUSIVE_MIN_RANGE`] paisa two rungs of one ladder
+//! can fire on the same bar, and across the two previous-day ladders up to
+//! about 1,000 paisa (D-1861). No Fibonacci pair is screened here, so every
+//! pair that fires is enumerated. Nor `near_pivot_*`, whose bands can both
+//! fire at a boundary where `r2 − r1` equals `2·half`. An approximate
+//! implication pruned as exact would discard a real distinction, which is
+//! worse than the redundancy it removes.
 //!
 //! # Cost
 //!
@@ -78,8 +89,10 @@
 /// Written out rather than derived from names: a name is not evidence of a
 /// position, and the ORDER is the whole content of this table. The rung for the
 /// pivot itself is `above_cpr_tc` / `below_cpr_bc`, which
-/// `crates/indicators/src/daily.rs:491-493` proves is the same predicate shape
-/// at `P` — `cpr_span` returns `(P − half, P + half)` because `tc = 2P − bc`.
+/// `DailyLevels::cpr_span` in `crates/indicators/src/daily.rs` makes the same
+/// predicate shape at `P` — `cpr_span` returns `(P − half, P + half)` because
+/// `from_previous_session` builds `tc` as `2 * p - b` and `half` as
+/// `(p - b).abs()`.
 ///
 /// Index in this array IS the rung's rank. Nothing reads the names.
 ///
@@ -291,6 +304,36 @@ mod tests {
                 }
                 assert!(!implies(a, b), "{a} must not imply {b}");
                 assert!(compatible(a, b), "{a} and {b} must stay compatible");
+            }
+        }
+    }
+
+    /// AHB-02 (D-1861). No Fibonacci pair is screened. Two rungs can fire on one
+    /// bar once levels are whole paisa (`tolerance::RUNG_EXCLUSIVE_MIN_RANGE`),
+    /// so a screen that treated them as exclusive would drop combinations that
+    /// do fire. Every live `near_*` row on the session range, with every other
+    /// such row, is a pair the join enumerates.
+    #[test]
+    fn no_session_range_band_pair_is_screened() {
+        let rows: Vec<u16> = crate::table::TABLE
+            .iter()
+            .filter(|row| {
+                row.band == Some(crate::tolerance::Base::SessionRange)
+                    && crate::table::LIVE.get(u32::from(row.index))
+            })
+            .map(|row| row.index)
+            .collect();
+        assert!(
+            rows.len() >= 27,
+            "the fib ladders alone hold 27: {}",
+            rows.len()
+        );
+        for &a in &rows {
+            for &b in &rows {
+                assert!(
+                    pair_is_informative(a, b),
+                    "{a} and {b} must both be enumerated"
+                );
             }
         }
     }

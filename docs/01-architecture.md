@@ -55,6 +55,17 @@ claimed dependency set. It checks all thirteen members, every normal/dev/build
 dependency spelling, both directions of table/manifest equality, and the
 acyclic property. The ASCII diagram is deliberately not the parser's authority.
 
+**What the gate compares is every dependency table, not `--edges normal`.** It
+counts a member named under `[dependencies]`, `[dev-dependencies]`,
+`[build-dependencies]` or any `[target.*]` form of them. The two agree today
+only because no member names another member outside `[dependencies]` (the one
+`[dev-dependencies]` table, `cli`'s, names two external crates); a member added
+as a dev-dependency alone would be an arrow here that `cargo tree --edges
+normal` does not print. **What the gate does not read:** the ASCII diagram, the
+"Owns" column, the "zero external packages" claim below (the parser keeps only
+workspace members), `CLAUDE.md` §5's block, and §2 to §6 of this document.
+(tests-docs-security-pass14 graph note, D-1959.)
+
 That gate found the direct `cli -> pull` edge omitted here while the manifest
 and `cargo tree -p cli --edges normal --depth 1` both named it. The edge is
 production: stored-run calendar attestation calls `pull::calendar::kind_of`,
@@ -185,10 +196,14 @@ instead is `CLAUDE.md` §2: no crate may depend on its toolchain to build, test 
 run, which is the arrow that actually matters and is enforced by `cargo build`
 succeeding on a machine with no Node at all.
 
-The payoff: every display rule — how a price renders, how a percentage is
-computed, what counts as a valid mask — lives in `core` and is compiled twice,
-once native and once to WASM. One implementation, two targets, no drift
-between what the server believes and what the browser shows.
+**There is no WASM build, so there is no "compiled twice" payoff.** This
+paragraph said every display rule lives in `core` and compiles once native and
+once to WASM, with no drift between server and browser. Nothing compiles to
+WASM: the browser formats in JavaScript under `web/`, which is a second
+implementation. What keeps the two from drifting is the server serving the
+facts instead of the browser re-deriving them: `/vocab.json` serves the
+condition table once (D-0288), and routes such as `/bars/window.json` send the
+computed change and its reason. P1-16-07, D-1763.
 
 ---
 
@@ -202,9 +217,9 @@ raw candles ──► validate ──► paisa integers ──► store::append
                                                     │  pwrite, then
                                                     │  publish n_valid
                                                     ▼
-                                            bars/<exch>/<seg>/<sym>/<tf>/<yyyy-mm>.bin
+                                            bars/<vendor>/<exch>/<seg>/<sym>/<tf>/<yyyy-mm>.bin
                                                     │
-                                            store::open (read-only mmap)
+                                            BarFile open (positional reads, no mapping)
                                                     │
                                             store::Bar ──► indicators::Candle
                                                     │      (a plain seven-field record;
@@ -259,23 +274,36 @@ attested long/short dynamic grids + naturally-extinct Candidate Universe V1
 Pre-Admission Data V1
                   │  Data sync, Completion last, fresh reopen, exact ID join
                   ▼
-        [implemented, focused-green D-0475 boundary]
                   │
-                  ├ - - > aligned trade-period observation authority  (open)
-                  ├ - - > Statistics V2 + finalization/admission       (open)
-                  ├ - - > Execution V2 + Selection V4 reconstruction  (open)
-                  └ - - > eight lists / 200-witness Global Replay V2   (open)
+                  ▼
+Population Observations V1 -> Statistics V2/V3 -> Admission V4
+                  -> Finalization V4 -> Population V6
+                  │
+                  ▼
+Execution V4 -> Selection V6 (per rung, then all-rung)
+                  │
+                  ▼
+Global Replay V4
 ```
 
-The solid boundary is callable from non-test Rust and accepts no raw bars,
-digest, calendar receipt, commit string, pre-resolved grid or depth. Its daily
-and minute typed loaders reuse the existing canonical converters after the
-month headers enforce explicit cumulative record ceilings. The dashed arrows
-are deliberately not called implemented by the green Candidate/Pre-Admission
-tests: Candidate now derives an in-memory aligned trade/session observation
-capability, but its bounded fixed-stride receipt-last authority and fresh-reopen
-refusal suite are still being implemented, so it cannot yet construct
-production Statistics V2. The first adversarial warm-up findings are closed:
+**The whole chain is written from an operator command.** `cli ledger-v6`
+dispatches `ledger_v6::ledger_v6`, which drives `step3_orchestrator`: Candidate
+Universe V1 is produced by `candidate_universe::produce_candidate_universe_v1`
+and committed receipt-last by `append_and_reopen` inside
+`commit_candidate_family_guarded_v6`, and `ledger_v6` then commits the Population
+V6 route, Execution V4, Selection V6 and Global Replay V4. The arrows above name
+the modules that route reaches; they are not a claim about every intermediate
+call. This diagram ended at Pre-Admission with four dashed successors marked
+"(open)" and said the path "cannot yet construct production Statistics V2"
+until tests-docs-security-pass14 P14-06 (D-1959). Global Replay V3 and the V5
+population/selection modules are not on this route; `global_replay_v3` has no
+production caller at all (CE-95, D-1956).
+
+The boundary into this path is callable from non-test Rust and accepts no raw
+bars, digest, calendar receipt, commit string, pre-resolved grid or depth. Its
+daily and minute typed loaders reuse the existing canonical converters after
+the month headers enforce explicit cumulative record ceilings. The first
+adversarial warm-up findings are closed:
 canonical NSE session identity classifies every daily/signal day, exact
 terminal-minute geometry binds the prior accepted session, and transformed
 allocations are fallible. D-0475 and `docs/06-limits.md` §156 record the exact
@@ -283,9 +311,11 @@ proof, remaining authority gap and cost boundary.
 
 Three properties matter more than the boxes:
 
-1. **The disk is touched once per slice per launch.** After the initial open,
-   every bar read is pointer arithmetic against a mapping that is already
-   resident.
+1. **A bar read is one positional read and one block check.** No crate maps a
+   bar file (`store` forbids `unsafe`, D-0790): `BarFile::read_record` is one
+   `pread` of the record's bytes plus the CRC check of its block, so a cold
+   block touches the disk. This said every read was pointer arithmetic against
+   a resident mapping (P1-16-05, D-1763).
 2. **Condition bits are computed once and shared read-only** across every
    thread and every candidate. In the predecessor system this recomputation
    was the dominant cost — roughly eleven thousand times the per-mask cost —
@@ -363,14 +393,18 @@ bars/groww/NSE/INDEX/NIFTY/1min/2024-03.bin
      └───────────────────────────── vendor (D-0019)
 ```
 
-Locating a slice is a string join and an open. There is no catalogue to
-consult, no index to rebuild, no registry that can disagree with the
-filesystem. Adding a symbol requires no registration: the first write creates
-the directory.
+Locating a slice is a string join and an open. There is no index to rebuild
+and no registry that can disagree with the filesystem. Adding a symbol requires
+no registration: the first write creates the directory.
 
-Directory listings are never globbed on a read path. A read computes the exact
-path it wants; if the file is absent, that is a specific, named absence rather
-than a scan that returned nothing.
+A read of a NAMED slice never lists a directory: it computes the exact path it
+wants, and an absent file is a specific, named absence rather than a scan that
+returned nothing. **The one exception is the multi-month sweep.**
+`store::catalog::walk` lists the store root to find what `sweep-all` and the
+pool (`cli::batch`, `cli::pool`) should read, and it is `O(entries under root)`.
+It derives the holdings from the filesystem on every call, so it cannot
+disagree with it. This section said no directory is ever listed on a read path
+(P1-16-08, D-1763).
 
 ---
 
@@ -382,7 +416,7 @@ than a scan that returned nothing.
 | `indicators` | single pass, sequential by construction (state carries forward) | none |
 | `engine` | ~~data parallel over candidates via `rayon`~~ — **THIS WAS NEVER TRUE, AND IT CANNOT BE.** No crate took the `rayon` arrow at all: an audit grepped every manifest and every source file and found this row was the only mention in the tree, so the ladder was entirely single-threaded. It cannot be made true here either — CI gate 22 pins `vocab indicators engine` to `vocab` alone, so `engine` may not declare `rayon`. Parallelism over candidates needs a law change, not a patch. D-0232 | none — bar bits are read-only, each shard owns its own output |
 | `cli` | data parallel over **instrument-months** in `batch::sweep_under`, via `rayon` | none — each month is its own file, evaluator, ladder and identity. Determinism holds by shape: indexed `collect` preserves order and `Tally` is folded sequentially afterwards, so no output depends on thread scheduling (§3 rule 5). D-0232 |
-| `store` append | one writer, positional writes, commit counter published last | the counter, published with a release store |
+| `store` append | one writer, positional writes, commit counter published last | the counter, published by one checksummed header-slot `pwrite` after the records are synced (`docs/02-store-format.md` §5). There is no atomic and no release store in `store`; this cell said there was (P1-16-06, D-1763) |
 | `api` | async, request-scoped | none |
 
 The rule that makes this hold: **a sweep never mutates anything a reader can
@@ -402,7 +436,7 @@ made seventeen cost claims between them and measured none. D-0103 is the entry;
 | Locate a slice | O(1) | path join | — |
 | Read bar *i* | O(1) | `base + 32768 + i·56` — see `docs/02-store-format.md` §1 | `C-01` |
 | Read condition bits for bar *i* | O(1) | index into a slice of `ConditionMask`, each `[u64; 6]` = 384 bits | `C-E-01` |
-| Test one candidate against one bar | O(1) | `(bits & mask) == mask`: six ANDs, six XORs, five ORs, one compare — branchless, no early exit | `C-V-01`, `C-V-02`, `C-V-03` |
+| Test one candidate against one bar | O(1) | `(bits & mask) == mask`: six ANDs, six XORs, five ORs, one compare — branchless, no early exit | `C-V-01`, `C-V-02`, `C-V-03`; no early exit is guarded by `vocab::mask::hits_does_the_same_work_for_every_input`, not by a ratio (D-1436) |
 | Reject a duplicate candidate | O(1) expected for the remaining k=1 probe; no probe at k≥2 | one `HashSet` insertion at k=1; the injective prefix join cannot emit duplicates at k≥2. Rust's hash table supplies no adversarial worst-case O(1) guarantee | `C-E-10` measures the historical isolated hit/miss probe; the injectivity tests prove its removal at k≥2 |
 | Append one result | O(1) amortised | `Vec::push`; an individual growth can move the existing allocation, so this is not worst-case O(1) | `C-E-11`, retained as `C-04` |
 | Fold one candle into every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` asserted at compile time | `C-I-01`, `C-I-02`, `C-I-04` |

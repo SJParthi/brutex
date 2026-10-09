@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
-import { foldMinuteOwed } from '../src/lib/calendar-owed.js';
+import { foldMinuteOwed, withheldDays, isoOfEpochDay } from '../src/lib/calendar-owed.js';
 
 const DAY_MS = 86_400_000;
 
@@ -53,4 +54,75 @@ test('a session whose exchange length is itself unknown is not promoted to an in
   assert.equal(folded.exchange.size, 0);
   assert.equal(folded.index.size, 0);
   assert.equal(folded.indexUnknown.size, 0, 'no known exchange count was partially folded');
+});
+
+// THE SHIPPED CONVERTER, NOT A COPY OF IT (P19-06, D-2565). This file held a
+// local `isoOf` with the same body as `isoOfEpochDay`, so the withheld-run
+// tests below passed whatever the module's converter did.
+const isoOf = isoOfEpochDay;
+
+test('withheld runs become every day they name, inclusive, and their months (D-1507)', () => {
+  // 2024-02-01 is epoch day 19754; a leap February is 29 days.
+  const { days, months } = withheldDays([{ from: 19754, to: 19782 }, { from: 19800, to: 19800 }], isoOf);
+  assert.equal(days.size, 30);
+  assert.ok(days.has('2024-02-01') && days.has('2024-02-29'), 'both ends are withheld');
+  assert.ok(!days.has('2024-01-31') && !days.has('2024-03-01'), 'and nothing past them');
+  assert.ok(days.has(isoOf(19800)), 'a one-day run is one day');
+  assert.deepEqual([...months].sort(), ['2024-02', isoOf(19800).slice(0, 7)].sort());
+});
+
+test('an older API without withheld withholds nothing, and an empty list is the same', () => {
+  for (const runs of [undefined, null, []]) {
+    const { days, months } = withheldDays(runs, isoOf);
+    assert.equal(days.size, 0);
+    assert.equal(months.size, 0);
+  }
+});
+
+test('a malformed withheld run is refused, never dropped back into holidays', () => {
+  for (const runs of [
+    'nope',
+    [{ from: 10 }],
+    [{ from: 10, to: 9 }],
+    [{ from: 1.5, to: 2 }],
+    [{ from: '10', to: '11' }],
+    [null]
+  ]) {
+    assert.throws(() => withheldDays(runs, isoOf), /withheld/, JSON.stringify(runs));
+  }
+});
+
+// P19-06 (D-2565): the converter itself, at fixed points and at its range.
+
+test('isoOfEpochDay names the UTC calendar day of an epoch day, and consecutive days stay consecutive', () => {
+  for (const [day, iso] of /** @type {[number, string][]} */ ([
+    [0, '1970-01-01'],
+    [1, '1970-01-02'],
+    [-1, '1969-12-31'],
+    [59, '1970-03-01'],
+    [11_016, '2000-02-29'],
+    [19_000, '2022-01-08'],
+    [19_754, '2024-02-01'],
+    [20_000, '2024-10-04'],
+    [20_089, '2025-01-01'],
+    [-719_162, '0001-01-01']
+  ])) {
+    assert.equal(isoOfEpochDay(day), iso, String(day));
+  }
+  // A one-millisecond shift of the converter moves every day back one (M54).
+  for (let day = 18_990; day < 19_010; day += 1) {
+    assert.equal(addDay(isoOfEpochDay(day), 1), isoOfEpochDay(day + 1), String(day));
+  }
+});
+
+test('isoOfEpochDay refuses a day that is not a finite day in Date range, loudly', () => {
+  for (const day of [NaN, Infinity, -Infinity, 100_000_001, -100_000_001]) {
+    assert.throws(() => isoOfEpochDay(day), RangeError, String(day));
+  }
+});
+
+test('this file uses the module converter and declares no copy of its own (P19-06)', () => {
+  const self = readFileSync(new URL(import.meta.url), 'utf8');
+  assert.doesNotMatch(self, /^function isoOf\(/m);
+  assert.match(self, /^const isoOf = isoOfEpochDay;$/m);
 });

@@ -35,6 +35,11 @@ use crate::json::{push_escaped, push_quoted};
 use crate::value::Value;
 use core::fmt::Write as _;
 
+/// The one key of the object a non-finite float is written as, and the only
+/// object a field's value may be. Shared with [`crate::record`], which reads
+/// it back (D-4417).
+pub(crate) const NONFINITE_KEY: &str = "float";
+
 /// Appends one whole line, terminating newline included.
 ///
 /// `out` is appended to and never cleared here: the sink owns the buffer and
@@ -135,17 +140,25 @@ fn push_value(out: &mut Vec<u8>, value: Value<'_>) -> bool {
 /// * JSON has no literal for a non-finite number. Writing one anyway would
 ///   produce a line no consumer can parse — and it would be the line about the
 ///   calculation that went wrong, which is the line least affordable to lose.
-///   They are written as strings instead, which is loud, greppable and legal.
+///   They are written as the one-member object `{"float":"NaN"}` (or
+///   `"-NaN"`, `"Infinity"`, `"-Infinity"`), which is legal JSON, greppable,
+///   and — unlike the bare string these were until D-4417 — cannot be taken
+///   for a text field: a field's value is otherwise always a scalar, so the
+///   reader maps exactly this shape back to [`crate::OwnedValue::Float`]. A
+///   NaN keeps its sign and not its payload. satk-5.
 fn push_float(out: &mut Vec<u8>, value: f64) {
     if !value.is_finite() {
-        let word = if value.is_nan() {
-            "NaN"
-        } else if value.is_sign_positive() {
-            "Infinity"
-        } else {
-            "-Infinity"
+        let word = match (value.is_nan(), value.is_sign_negative()) {
+            (true, false) => "NaN",
+            (true, true) => "-NaN",
+            (false, false) => "Infinity",
+            (false, true) => "-Infinity",
         };
+        out.extend_from_slice(b"{\"");
+        out.extend_from_slice(NONFINITE_KEY.as_bytes());
+        out.extend_from_slice(b"\":");
         push_quoted(out, word);
+        out.push(b'}');
         return;
     }
     // FORMATTED STRAIGHT INTO THE CALLER'S BUFFER, NOT THROUGH A `String`.
@@ -206,9 +219,17 @@ impl core::fmt::Write for Utf8Sink<'_> {
 /// than a shorter line. This is the same rule and the same reason as
 /// `api::audit::keep`.
 fn push_capped(out: &mut Vec<u8>, text: &str, cap: usize) -> bool {
+    let (kept, cut) = capped(text, cap);
+    push_escaped(out, kept);
+    cut
+}
+
+/// The longest prefix of `text` within `cap` bytes that ends on a character
+/// boundary, and whether anything was cut. What [`push_capped`] writes, so
+/// [`crate::Event::with`] can ask whether two keys would be spelled the same.
+pub(crate) fn capped(text: &str, cap: usize) -> (&str, bool) {
     if text.len() <= cap {
-        push_escaped(out, text);
-        return false;
+        return (text, false);
     }
     let mut end = 0;
     for (at, ch) in text.char_indices() {
@@ -218,8 +239,7 @@ fn push_capped(out: &mut Vec<u8>, text: &str, cap: usize) -> bool {
         }
         end = next;
     }
-    push_escaped(out, text.get(..end).unwrap_or(""));
-    true
+    (text.get(..end).unwrap_or(""), true)
 }
 
 #[cfg(test)]
@@ -316,9 +336,13 @@ mod tests {
 
     #[test]
     fn fields_past_the_ceiling_are_counted_on_the_line() {
+        let keys = [
+            "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "ka", "kb", "kc", "kd",
+            "ke",
+        ];
         let mut event = Event::info("t", "m");
-        for _ in 0..MAX_FIELDS + 3 {
-            event = event.with("k", 1u32);
+        for key in keys.into_iter().take(MAX_FIELDS + 3) {
+            event = event.with(key, 1u32);
         }
         let out = rendered(&event, 1, 0);
         assert!(out.contains("\"dropped\":3"), "{out}");
@@ -369,11 +393,15 @@ mod tests {
             );
         }
         assert_eq!(rendered_float(1.5e-8), "0.000000015");
-        // JSON has no literal for these, so they are strings and the line
-        // stays parseable.
-        assert_eq!(rendered_float(f64::NAN), "\"NaN\"");
-        assert_eq!(rendered_float(f64::INFINITY), "\"Infinity\"");
-        assert_eq!(rendered_float(f64::NEG_INFINITY), "\"-Infinity\"");
+        // JSON has no literal for these, so they are a one-member object the
+        // reader maps back to a float, and the line stays parseable (D-4417).
+        assert_eq!(rendered_float(f64::NAN), r#"{"float":"NaN"}"#);
+        assert_eq!(rendered_float(-f64::NAN), r#"{"float":"-NaN"}"#);
+        assert_eq!(rendered_float(f64::INFINITY), r#"{"float":"Infinity"}"#);
+        assert_eq!(
+            rendered_float(f64::NEG_INFINITY),
+            r#"{"float":"-Infinity"}"#
+        );
     }
 
     #[test]

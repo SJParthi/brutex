@@ -110,9 +110,16 @@ fn no_lookahead() {
 /// or extreme.
 ///
 /// The complement of V-02: instead of truncating the future, this *corrupts* it.
-/// Every bar after the cut is replaced with a pathological one — `i64::MAX` /
-/// `i64::MIN` prices, a far-future timestamp — and the bits at and before the cut
-/// must not move.
+/// Every bar after the cut is replaced with a pathological one, cycling through
+/// four shapes — `i64::MAX` / `i64::MIN` prices with a far-future timestamp,
+/// `±i64::MAX / 4` prices on the original timestamp, `i64::MIN` everywhere with a
+/// timestamp running backwards to `i64::MIN`, and `i64::MAX` everywhere at
+/// `i64::MAX` — and the bits at and before the cut must not move. Every cut from
+/// 1 to `len − 1` is tried, so the first and last bar are both a boundary.
+///
+/// This doc promised the extremes and a far-future timestamp while the loop wrote
+/// only `±i64::MAX / 4` and never touched the timestamp (AC-whp-tb-9); the loop
+/// now does what the row says. D-1666.
 #[test]
 fn suffix_independence() {
     let bars = session(20_100, 60);
@@ -122,11 +129,40 @@ fn suffix_independence() {
         let mut mutated = bars.clone();
         for (offset, slot) in mutated.iter_mut().enumerate().skip(cut) {
             let extreme = i64::from(u32::try_from(offset % 3).unwrap_or(0));
-            slot.high = i64::MAX / 4 - extreme;
-            slot.low = -(i64::MAX / 4) + extreme;
-            slot.open = 0;
-            slot.close = extreme;
-            slot.volume = i64::MAX;
+            match offset % 4 {
+                0 => {
+                    slot.ts_micros = i64::MAX - extreme;
+                    slot.high = i64::MAX;
+                    slot.low = i64::MIN;
+                    slot.open = 0;
+                    slot.close = extreme;
+                    slot.volume = i64::MAX;
+                }
+                1 => {
+                    slot.high = i64::MAX / 4 - extreme;
+                    slot.low = -(i64::MAX / 4) + extreme;
+                    slot.open = 0;
+                    slot.close = extreme;
+                    slot.volume = i64::MAX;
+                }
+                2 => {
+                    slot.ts_micros = i64::MIN + extreme;
+                    slot.open = i64::MIN;
+                    slot.high = i64::MIN;
+                    slot.low = i64::MIN;
+                    slot.close = i64::MIN;
+                    slot.volume = i64::MIN;
+                    slot.open_interest = i64::MAX;
+                }
+                _ => {
+                    slot.ts_micros = i64::MAX;
+                    slot.open = i64::MAX;
+                    slot.high = i64::MAX;
+                    slot.low = i64::MAX;
+                    slot.close = i64::MAX;
+                    slot.volume = i64::MAX;
+                }
+            }
         }
         let got = bits_over(&mutated);
         let (a, b) = got
@@ -141,15 +177,21 @@ fn suffix_independence() {
     }
 }
 
-/// **V-04.** The VWAP family is cleared, not guessed, when volume is unavailable.
+/// The VWAP family is cleared, not guessed, when volume is unavailable.
 ///
 /// `docs/03-vocabulary.md` §4: a bit that cannot be evaluated evaluates **false**,
 /// and never "probably". Measured fact this defends: 0 of 1,222,791 one-minute
 /// index bars carry volume, so `Availability::Absent` is the real answer on the
 /// timeframe the engine sweeps — and all 20 positions must stay false rather than
 /// emitting a plain average wearing a VWAP label.
+///
+/// This is the `Absent` half of VWAP clearing on one-minute bars and drives
+/// `Vwap` alone. It was V-04's only proof and never built a daily bar
+/// (P12-01); the daily timeframe is
+/// `a_daily_bar_series_sets_no_time_of_day_or_vwap_bit` below.
+/// It was named `daily_mask_clears` until D-1666.
 #[test]
-fn daily_mask_clears() {
+fn vwap_positions_stay_clear_without_volume() {
     use indicators::vwap::{Availability, Vwap};
 
     let bars = session(20_200, 120);
@@ -167,21 +209,140 @@ fn daily_mask_clears() {
     }
 }
 
-/// **V-05.** The fast evaluator agrees with a naive reference.
+/// **V-04.** Time-of-day (44-47) and every VWAP position (52-53 among them)
+/// are clear on a daily timeframe, through the production `Evaluator` and
+/// `Column::build`. P12-01.
+///
+/// A daily-rung bar is stamped at 00:00 IST (pinned in `crates/pull` by
+/// `the_daily_rung_is_anchored_at_ist_midnight_and_not_at_the_open`). That is
+/// before the 09:15 open, so `orb::minutes_since_open` is `None` and no
+/// time-of-day window can hold; and a daily bar is the only bar of its IST
+/// session, while a present-volume VWAP needs two contributing bars in the
+/// current session before it can answer. So the bits are clear BY THOSE TWO
+/// MECHANISMS, with volume present and with it absent. In the knowledge mask
+/// they differ, measured: every VWAP position is UNKNOWN (zero known bits),
+/// while 44-47 are KNOWN false, a midnight bar being in no window. Nothing in
+/// the evaluator knows the word "daily"; the test pins that the two
+/// mechanisms still produce the documented answer.
+///
+/// The control re-stamps the same prices at two intraday minutes of each day
+/// and requires a time-of-day bit and a VWAP side bit to appear, so the
+/// assertion is not passing on a fold that never sets these positions at all.
+#[test]
+fn a_daily_bar_series_sets_no_time_of_day_or_vwap_bit() {
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::vwap::Availability;
+
+    const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+    const TEN_IST_UTC_MICROS: i64 = (600 - 330) * 60 * 1_000_000;
+    const DAYS: i64 = 260;
+
+    let candle = |ts_micros: i64, d: i64| {
+        let mid = 2_500_000 + ((d * 137) % 811 - 405) * 70;
+        Candle {
+            ts_micros,
+            open: mid,
+            high: mid + 9_000 + (d % 11) * 200,
+            low: mid - 9_000 - (d % 7) * 200,
+            close: mid + ((d % 5) - 2) * 400,
+            volume: 1_000 + d,
+            open_interest: i64::MIN,
+        }
+    };
+    let daily: Vec<Candle> = (0..DAYS)
+        .map(|d| candle((20_000 + d) * DAY_MICROS - indicators::IST_OFFSET_MICROS, d))
+        .collect();
+    let intraday: Vec<Candle> = (0..DAYS)
+        .flat_map(|d| {
+            let ten = (20_000 + d) * DAY_MICROS + TEN_IST_UTC_MICROS;
+            [candle(ten, d), candle(ten + 60 * 1_000_000, d + 1)]
+        })
+        .collect();
+
+    let mut cleared: Vec<u16> = vec![44, 45, 46, 47];
+    cleared.extend(indicators::vwap::positions());
+    let any_set = |rows: &[vocab::ConditionMask], positions: &[u16]| {
+        rows.iter()
+            .any(|row| positions.iter().any(|&p| row.get(u32::from(p))))
+    };
+    let widths = Widths::pinned().expect("both pinned widths are valid");
+
+    for availability in [Availability::Present, Availability::Absent] {
+        let mut ev = Evaluator::new(widths, availability, Thresholds::CLASSICAL);
+        let column = Column::build(&daily, &mut ev);
+        assert!(
+            !column.is_empty(),
+            "the daily series must warm and emit rows, or the clearing is vacuous"
+        );
+        assert!(
+            !any_set(column.bits(), &cleared),
+            "a daily-rung bar set a time-of-day or VWAP position"
+        );
+        // VWAP is UNKNOWN on a daily bar, so a negation cannot turn it into a
+        // signal; time of day is a KNOWN false (a midnight bar is in no window).
+        assert!(
+            !any_set(column.known(), &indicators::vwap::positions()),
+            "a daily-rung bar certified a VWAP answer"
+        );
+        assert!(
+            column
+                .known()
+                .iter()
+                .all(|row| [44_u32, 45, 46, 47].iter().all(|&p| row.get(p))),
+            "a daily-rung bar left time of day uncertified"
+        );
+    }
+
+    let mut ev = Evaluator::new(widths, Availability::Present, Thresholds::CLASSICAL);
+    let control = Column::build(&intraday, &mut ev);
+    assert!(
+        any_set(control.bits(), &[44, 45, 46, 47]),
+        "the intraday control set no time-of-day bit"
+    );
+    assert!(
+        any_set(control.bits(), &[52, 53]),
+        "the intraday control set no VWAP side bit"
+    );
+}
+
+/// **V-05.** `DailyLevels` agrees with a naive reference, on hand-picked and on
+/// seeded pseudo-random sessions.
 ///
 /// The reference is rebuilt here from the recurrence in `docs/09-design-sources.md`
 /// §1 — read off the source document, not off `daily.rs` — because a reference
 /// derived from the implementation shares the implementation's misreadings. Plain
 /// `i128`, one level at a time, no shared helpers.
+///
+/// The row this proves said "the fast evaluator agrees with a naive reference on
+/// random input", and the test held five hand-picked triples of
+/// `DailyLevels::from_previous_session` and no `Evaluator` (AC-whp-tb-9). The
+/// row now names `DailyLevels`, and 4,096 seeded triples join the five. D-1666.
 #[test]
 fn differential_vs_naive() {
-    for (h, l, c) in [
+    let mut sessions = vec![
         (2_500_000_i64, 2_400_000_i64, 2_490_000_i64),
         (2_500_000, 2_400_000, 2_410_000), // inverted CPR: bc > tc
         (2_500_000, 2_500_000, 2_500_000), // zero range
         (1, 0, 0),
         (9_000_000, 100, 4_500_000),
-    ] {
+    ];
+    // A fixed xorshift seed, so a failure names a session that reproduces. Prices
+    // up to ten billion paisa (a hundred million rupees), ordered `l <= c <= h`.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        i64::try_from(state % 10_000_000_001).expect("below i64::MAX")
+    };
+    for _ in 0..4_096 {
+        let mut three = [next(), next(), next()];
+        three.sort_unstable();
+        let [l, c, h] = three;
+        sessions.push((h, l, c));
+    }
+    for (h, l, c) in sessions {
         // The session is named in a `String` built before the call, because `expect`
         // takes a `&str` and the three prices are what identifies a failing row. A
         // `format!` on the failure path only would be a region a green run cannot

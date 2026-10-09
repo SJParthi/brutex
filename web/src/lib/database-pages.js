@@ -1,5 +1,6 @@
 import { ask } from './ask.js';
 import { parseKey } from './instrument.js';
+import { refusalFrom } from './refusal.js';
 
 /** Read only the displayed rows from the already addressed month files.
  * The census has selected these files and their global base; each native read
@@ -53,9 +54,11 @@ export async function readDatabasePage(feed, files, first, limit, base, desc, si
           timeframe: row.timeframe, from: row.month, to: row.month, sort: 'ts',
           dir: desc ? 'desc' : 'asc', offset: String(offset), limit: String(take), extremes: '0' });
         const response = await request(`/bars/window.json?${query}`, { signal });
+        // THE STATUS BEFORE THE BODY (F4, D-3221): a plain-text refusal was a
+        // JSON parse error here, and a JSON one lost its route and status.
+        if (!response.ok) throw new Error(await refusalFrom('/bars/window.json', response));
         const body = await response.json();
         signal.throwIfAborted();
-        if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`);
         if (body?.months_read !== 1 || body?.months_missing !== 0) {
           throw new Error(`The stored month ${row.instrument} ${row.month} could not be opened for this page.`);
         }

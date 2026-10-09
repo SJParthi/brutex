@@ -11,7 +11,7 @@ use super::{
     AuditOptions, Cadence, Rules, STORED_PROVENANCE, audit_bars, descend_banner, descent_banner,
     month_banner, range_opening, render_top_record, span_banner,
 };
-use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope};
+use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope, NO_OVERNIGHT_MEASURED};
 
 /// A recorded row naming `underlying` and nothing else.
 fn record(underlying: &str) -> crate::results::Record {
@@ -47,6 +47,13 @@ fn banners(underlying: &str) -> [(&'static str, String); 6] {
             "audit-range",
             span_banner(
                 &span(underlying),
+                &crate::stored::DailyContext {
+                    bars: Vec::new(),
+                    references: Vec::new(),
+                    eligibility: Vec::new(),
+                    asked: 0,
+                    found: 0,
+                },
                 underlying,
                 (2025, 1),
                 (2025, 6),
@@ -183,6 +190,16 @@ fn a_stock_banner_is_its_index_banner_with_the_note_put_in_and_nothing_else() {
             let stock_rest = stock_text
                 .strip_prefix(&stock_head)
                 .expect("a stock's banner leads with the provenance and the note");
+            // The span banner is built with its bars in hand, so a stock's
+            // names its largest overnight move next (D-1540); these spans
+            // hold no bars, so it is exactly the "none measured" line.
+            let stock_rest = if surface == "audit-range" {
+                stock_rest
+                    .strip_prefix(NO_OVERNIGHT_MEASURED)
+                    .expect("a stock's span banner states its overnight move (D-1540)")
+            } else {
+                stock_rest
+            };
             let index_rest = index_text
                 .strip_prefix(STORED_PROVENANCE)
                 .expect("an index's banner leads with the provenance");
@@ -280,6 +297,7 @@ fn generated_audit(cost: CostScope, ceiling: usize, min_hits: u64) -> String {
         min_hits,
         None,
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: None,
             execution: None,
@@ -360,7 +378,7 @@ fn a_stock_ranking_states_corporate_actions_inside_its_findings_block() {
 ///
 /// `sweep-stored` now withholds holed sessions "exactly as the other four
 /// doors do". The sequence of checks and loaders in `stored_sweep_inputs` is
-/// the one in `screen_range_inner`: validate the execution minutes, measure
+/// the one in the screen's `load_screen_inputs`: validate the execution minutes, measure
 /// the holed days from them, withhold those days from the signal bars, and
 /// only then derive both reference contexts from what remains. Pinned by name
 /// because the two are separate functions, and a context derived before the
@@ -369,25 +387,38 @@ fn a_stock_ranking_states_corporate_actions_inside_its_findings_block() {
 fn the_ordinary_stored_sweep_withholds_in_the_screens_order() {
     const SEQUENCE: [&str; 5] = [
         "validate_one_minute_execution(",
-        "minute_gaps::days_with_interior_gaps(",
+        "minute_gaps::days_with_minute_holes(",
         "minute_gaps::withhold(",
         "stored::load_daily_context(",
         "stored::load_exact_minute_context(",
     ];
     let lib = include_str!("lib.rs");
-    let body = |name: &str| {
+    // BOTH HALVES ARE BOUNDED, AND BOTH ARE CODE (P1-10-03). The screen half
+    // was everything after `fn screen_range_inner(` to the end of `lib.rs`, so
+    // a later function calling the same loaders in order satisfied it whatever
+    // the screen did -- and `screen_range_inner` itself holds none of the five
+    // steps: it reached them only through that run-on read, which happened to
+    // land on `load_screen_inputs` first. That is the function now read. Each
+    // body ends at its own closing brace, and comment lines are dropped so a
+    // step named only in a comment is not a step.
+    let body = |name: &str| -> String {
         let (_, rest) = lib
             .split_once(&format!("\nfn {name}("))
             .expect("the named function exists");
         rest.split_once("\n}\n")
             .expect("the function has a closing brace")
             .0
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     let sweep = body("stored_sweep_inputs");
-    let screen = lib
-        .split_once("\nfn screen_range_inner(")
-        .expect("the screen exists")
-        .1;
+    let screen = body("load_screen_inputs");
+    assert!(
+        screen.len() < lib.len() / 4,
+        "the screen half must be one function, not the rest of the file"
+    );
     let (mut in_sweep, mut in_screen) = (0, 0);
     for step in SEQUENCE {
         let at_sweep = sweep[in_sweep..].find(step).map(|i| i + in_sweep);

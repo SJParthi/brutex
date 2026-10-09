@@ -146,8 +146,9 @@ impl CostScope {
 /// V6 clause (AF-19). It names no rate, for the reason the audit header names
 /// none: `docs/00-charter.md` records no source for one.
 pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: brokerage,\n  \
-     STT, stamp duty, exchange charges, the SEBI fee and GST apply to a\n  \
-     share trade and none is subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
+     STT, stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges\n  \
+     and GST (an UNVERIFIED list) apply to a share trade and none is\n  \
+     subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
      RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6\n  \
      or execution authority until a charter-sourced equity charge stack\n  \
      exists.";
@@ -166,11 +167,167 @@ pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS O
 /// and to say so on every such report rather than refuse them. This is the
 /// sentence that says so. An index never splits, so no index report carries
 /// it.
-pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus or\n  \
-     demerger detection has run over these bars, so an overnight jump in\n  \
-     them can be a corporate action rather than a market move. D-0018\n  \
+///
+/// It names every action kind that moves a stock's open with no market cause:
+/// split, bonus, rights issue, face-value change, demerger and dividend. It
+/// named only "split, bonus or demerger" until numeric-pass16 p16num-3
+/// (D-1969); an ex-dividend or ex-rights open is the same fake gap, smaller.
+/// A dividend never enters P&L, because every trade has exited by its own
+/// session's close and so never holds through an ex-date (`docs/06-limits.md`,
+/// the D-0694 section, says so); the ex-date gap still reaches the conditions.
+pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus,\n  \
+     rights issue, face-value change, demerger or dividend detection has\n  \
+     run over these bars. An overnight jump in them\n  \
+     can be a corporate action rather than a market move. D-0018\n  \
      requires such a window to be refused with its date named; no\n  \
      threshold for that detector is sourced, so none was applied.";
+
+/// The largest move from one session's last close to the next session's
+/// first open, in a slice of bars. D-1540 (audit-20261003 gaps-6).
+///
+/// # Why a measurement and not a detector
+///
+/// D-0018 asks for a suspected split or bonus to refuse its window, and
+/// names no threshold; `docs/00-charter.md` names no corporate-action
+/// source. So nothing here decides that a move IS a corporate action. It
+/// names the single largest overnight move by its session and its size, so a
+/// reader of a stock's report can check that one date against the
+/// exchange's record instead of being told only that nothing was checked.
+///
+/// # What a split does and does not do to these results
+///
+/// Measured over generated bars with every price halved from one session on
+/// (D-1540): every trade is intraday with a forced square-off, so no trade
+/// spans the split and no trade's P&L is inflated by it; post-split trades
+/// are in the new price scale, so a paisa total mixes two scales. What the
+/// split DOES distort is every condition that reads a previous session --
+/// pivots, previous-day high and low, gap levels, the five-session ladder,
+/// EMA200 -- for days after it. A ranked mask can therefore be selected on
+/// a fake signal while its trades are real ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OvernightMove {
+    /// The IST day (days since 1970-01-01, [`indicators::ist_day`]) of the
+    /// session that OPENED at [`Self::open`].
+    pub day: i64,
+    /// The previous session's last close, in paisa.
+    pub prior_close: i64,
+    /// This session's first open, in paisa.
+    pub open: i64,
+    /// `(open - prior_close) / prior_close`, in parts per million, truncated
+    /// toward zero.
+    pub ppm: i64,
+}
+
+/// The [`OvernightMove`] of largest magnitude in `bars`, or `None` when the
+/// bars hold fewer than two sessions with a positive prior close.
+///
+/// A tie keeps the earlier session, so the answer is a pure function of the
+/// bars. One pass, O(bars), at a once-per-report boundary.
+#[must_use]
+pub fn largest_overnight_move(bars: &[indicators::Candle]) -> Option<OvernightMove> {
+    largest_overnight_move_after(None, bars)
+}
+
+/// [`largest_overnight_move`], with the session BEFORE `bars` measured too.
+///
+/// # The overnight into the first signal day (p16num-1, D-2546)
+///
+/// `bars.windows(2)` measures only the overnights INSIDE the slice, so the
+/// move from the last session before the span to the span's first open was
+/// never measured — while the anchored previous-session families read exactly
+/// that session out of the warm-up month. A split effective on a span's first
+/// session lit `gap_down_day` and shifted every previous-day level, and the
+/// D-1540 line named a different, harmless date.
+///
+/// `prior` is that earlier session's LAST record (a daily bar does: its
+/// `close` is the session close); it is measured against `bars`' first open
+/// as one more pair at the front, under the same rules — a different IST day,
+/// a positive close, a tie keeps the earlier session. A `prior` on or after
+/// the first bar's day is ignored rather than trusted. One extra pair, so
+/// still one pass, O(bars), at a once-per-report boundary.
+#[must_use]
+pub fn largest_overnight_move_after(
+    prior: Option<&indicators::Candle>,
+    bars: &[indicators::Candle],
+) -> Option<OvernightMove> {
+    let mut best: Option<OvernightMove> = None;
+    if let (Some(before), Some(first)) = (prior, bars.first())
+        && indicators::ist_day(before.ts_micros) < indicators::ist_day(first.ts_micros)
+    {
+        keep_larger(&mut best, before, first);
+    }
+    for pair in bars.windows(2) {
+        let [before, after] = pair else { continue };
+        keep_larger(&mut best, before, after);
+    }
+    best
+}
+
+/// Measures the overnight from `before`'s close to `after`'s open into `best`
+/// when the two are different IST days and the close is positive, keeping the
+/// earlier of two equal magnitudes.
+fn keep_larger(
+    best: &mut Option<OvernightMove>,
+    before: &indicators::Candle,
+    after: &indicators::Candle,
+) {
+    let day = indicators::ist_day(after.ts_micros);
+    if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
+        return;
+    }
+    let ratio =
+        i128::from(after.open.saturating_sub(before.close)) * 1_000_000 / i128::from(before.close);
+    // `is_negative`, not `ratio < 0`: zero always fits an `i64`, so the
+    // comparison's boundary was never read and `<=` was an equivalent
+    // mutant (G18-runner, D-2055).
+    let ppm = i64::try_from(ratio).unwrap_or(if ratio.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    });
+    if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
+        *best = Some(OvernightMove {
+            day,
+            prior_close: before.close,
+            open: after.open,
+            ppm,
+        });
+    }
+}
+
+/// What a stock's report says when its bars hold no overnight to measure:
+/// one session, or none. Said rather than omitted, so the absence of the
+/// [`overnight_line`] is never read as "no large move was found".
+pub const NO_OVERNIGHT_MEASURED: &str = "  LARGEST OVERNIGHT MOVE IN THESE BARS: none measured; they hold fewer\n  \
+     than two sessions (D-1540).\n\n";
+
+/// Paisa as rupees with two decimals, in integers (`CLAUDE.md` §7).
+fn rupees(paisa: i64) -> String {
+    let sign = if paisa < 0 { "-" } else { "" };
+    let whole = paisa.unsigned_abs();
+    format!("{sign}{}.{:02}", whole / 100, whole % 100)
+}
+
+/// The line a stock's report carries under [`CORPORATE_ACTIONS_UNCHECKED`]:
+/// the [`largest_overnight_move`] in its bars, with `date` naming the session.
+///
+/// It states a measurement and claims no threshold, because none is sourced.
+#[must_use]
+pub fn overnight_line(found: &OvernightMove, date: &str) -> String {
+    let sign = if found.ppm < 0 { "-" } else { "+" };
+    let size = found.ppm.unsigned_abs();
+    format!(
+        "  LARGEST OVERNIGHT MOVE IN THESE BARS: {sign}{}.{:02}% into the {date}\n  \
+         session (close {} to open {}). NO THRESHOLD is applied to it\n  \
+         (D-0018, D-1540); check that date against the exchange's\n  \
+         corporate-action record before trusting a result that fires on or\n  \
+         after it.\n\n",
+        size / 10_000,
+        (size % 10_000) / 100,
+        rupees(found.prior_close),
+        rupees(found.open),
+    )
+}
 
 /// The charge statement for an index-spot run, byte-identical to the header
 /// every run printed before D-0681.
@@ -222,8 +379,8 @@ fn equity_header(out: &mut String) {
         out,
         "  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n  \
          A stock IS tradeable -- you buy real shares -- so brokerage, STT,\n  \
-         stamp duty, exchange charges, the SEBI fee and GST all apply to a\n  \
-         share trade. This engine has no equity charge path:\n  \
+         stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges\n  \
+         and GST (an UNVERIFIED list) all apply to a share trade. This engine has no equity charge path:\n  \
          `costs::scope::Segment` has no equity variant, so NONE of those\n  \
          charges is subtracted anywhere in this run, and the ranking that\n  \
          chose this combination is on GROSS returns.\n\n  \
@@ -282,7 +439,9 @@ fn equity_header(out: &mut String) {
 /// # What is NOT in these figures, for a cash-equity run
 ///
 /// **Every charge.** A stock is bought as real shares, so brokerage, STT,
-/// stamp duty, exchange charges, the SEBI fee and GST all apply, and no path
+/// stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST
+/// all apply (an UNVERIFIED list: no charter source enumerates the equity
+/// charge stack, D-1779), and no path
 /// in this engine computes any of them. The `scope` argument is what tells the
 /// header which of the two statements is true; it was absent until D-0681, and
 /// the index statement was printed over stocks for as long as it was.
@@ -293,7 +452,7 @@ pub fn render(
     exits: Option<&Grid>,
     folds: Option<&Validated>,
     overfit: Option<&Pbo>,
-    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, Option<usize>)>,
     rows: usize,
 ) -> String {
     render_selected(scope, taken, exits, None, folds, overfit, boot, rows)
@@ -323,7 +482,7 @@ pub fn render_selected(
     selected: Option<&Cell>,
     folds: Option<&Validated>,
     overfit: Option<&Pbo>,
-    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, Option<usize>)>,
     rows: usize,
 ) -> String {
     let mut out = String::with_capacity(4_096);
@@ -627,9 +786,9 @@ fn grid_columns(out: &mut String) {
     let _ = writeln!(
         out,
         "  stop+tsl+ttp+target+time = trades. total/fill cost/worst trip/drawdown \
-         are paisa; the MAE/MFE columns and ret/DD are ppm.\n  total is the WORST \
+         are paisa; winner MAE/MFE and all MAE are ppm; ret/DD and mfe/allMAE are\n  ratios in hundredths (250 = 2.50).\n  total is the WORST \
          reading of BOTH legs: in at the worst price the bar PRINTED, out \
-         at the worse of the two orderings. entry cost is what that entry gave \
+         at the worse of the two orderings. fill cost is what that entry gave \
          up against the open; unknown is what the ordering could still be worth."
     );
 }
@@ -751,7 +910,12 @@ fn excursion_block(out: &mut String, cell: &Cell) {
         (
             "mean MAE, winners only",
             ppm_pct(cell.winner_mae),
-            "the tightest stop that keeps every winner",
+            // Z1-slice00-F1, D-2537. This note said "the tightest stop that
+            // keeps every winner". The value is `adverse_won / n`, a MEAN, so a
+            // stop placed there cuts every winner that went further than the
+            // average one. D-0281 corrected the same claim on `cli results` and
+            // left this copy owed. The bound is the WORST row above.
+            "a mean, NOT a stop level: winners past it would be cut",
         ),
         (
             "mean MFE, winners only",
@@ -847,8 +1011,18 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
             format!("{}%", hundredths(cell.win_rate_bp())),
             "winners / trades",
         ),
-        ("avg winning trade", money(cell.avg_win()), ""),
-        ("avg losing trade", money(cell.avg_loss()), ""),
+        mean_row(
+            "avg winning trade",
+            cell.wins == 0,
+            cell.avg_win(),
+            "no winning trade",
+        ),
+        mean_row(
+            "avg losing trade",
+            losers == 0,
+            cell.avg_loss(),
+            "no losing trade",
+        ),
         (
             "largest winning trade",
             money(cell.best_trade),
@@ -866,7 +1040,7 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
         ),
         (
             "return over drawdown",
-            hundredths(cell.return_over_drawdown()),
+            ratio_or_no_dd(cell.return_over_drawdown()),
             "profit per unit of pain",
         ),
         (
@@ -889,6 +1063,39 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostSco
     }
 
     excursion_block(out, cell);
+}
+
+/// One average row of the STRATEGY REPORT, or a dash when its side is empty.
+///
+/// A MEAN OVER NO TRADES IS NOT `0.00` (p5num-4, D-2712). `avg_win` and
+/// `avg_loss` return 0 when their side is empty, and printed through [`money`]
+/// that read as a measured mean. The dash says nothing was averaged and the note
+/// says why, as the PROFIT FACTOR row already does.
+fn mean_row(
+    label: &'static str,
+    empty: bool,
+    mean: i64,
+    why: &'static str,
+) -> (&'static str, String, &'static str) {
+    if empty {
+        (label, "-".to_owned(), why)
+    } else {
+        (label, money(mean), "")
+    }
+}
+
+/// A return-over-drawdown in hundredths, or `no DD` for the zero-drawdown
+/// sentinel.
+///
+/// The sentinel is [`i64::MAX`], which [`hundredths`] printed as
+/// `92233720368547758.07` in the STRATEGY REPORT — a measured ratio that never
+/// happened. Same words as the grid's [`ret_dd`] cell (p5num-4, D-2712).
+fn ratio_or_no_dd(ratio: i64) -> String {
+    if ratio == i64::MAX {
+        "no DD".to_owned()
+    } else {
+        hundredths(ratio)
+    }
 }
 
 /// An integer in hundredths, rendered with its decimal point. `250` is `2.50`.
@@ -944,7 +1151,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     // comparing "with levels" against "without" must not have to hunt for the
     // row that is the comparison.
     let mut ordered: Vec<(usize, &Cell)> = g.cells.iter().enumerate().collect();
-    ordered.sort_by_key(|&(i, c)| {
+    let key = |&(i, c): &(usize, &Cell)| {
         // `arm` is not tested: it cannot be set without a trail, so a cell with
         // no trail has none, and adding the clause would be a guard against a
         // state `crate::grid::evaluate` does not emit.
@@ -977,7 +1184,22 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
             !base,
             core::cmp::Reverse((c.pessimistic, crate::grid::merit(c), i)),
         )
-    });
+    };
+    // ONLY THE SHOWN ROWS ARE SORTED (o1runner-11, D-1195). The key is total --
+    // the index breaks every tie -- so selecting the `keep` smallest first and
+    // sorting just those prints exactly the rows, in exactly the order, a full
+    // sort did: O(n + keep log keep) rather than O(n log n) over every cell.
+    //
+    // THE PIVOT IS INDEX `shown`, NOT `shown - 1` (G18-runner, D-2065). Either
+    // leaves the `shown` smallest in front, so `shown - 1` against `shown / 1`
+    // could not be told apart; the index `shown` exists whenever any row is
+    // cut, and needs neither the subtraction nor a `shown > 0` guard.
+    let shown = ordered.len().min(keep);
+    if shown < ordered.len() {
+        ordered.select_nth_unstable_by_key(shown, key);
+    }
+    let (head, tail) = ordered.split_at_mut(shown);
+    head.sort_by_key(key);
 
     // Marks are resolved by IDENTITY, not by re-running the comparator: the
     // selectors return a `&Cell` into `g.cells`, so pointer equality answers
@@ -995,16 +1217,15 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         }
     };
 
-    let shown = ordered.len().min(keep);
-    for &(_, c) in ordered.iter().take(keep) {
+    for &(_, c) in head.iter() {
         grid_row(out, c, mark_for(c));
     }
-    if ordered.len() > shown {
+    if !tail.is_empty() {
         let _ = writeln!(
             out,
             "  ... {} further variant(s) NOT SHOWN. The grid is complete; this \
              table is not.",
-            ordered.len().saturating_sub(shown)
+            tail.len()
         );
         // A SELECTOR'S OWN ROW IS NEVER DROPPED BY THE CUT.
         //
@@ -1014,11 +1235,22 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         // variant no row described. Printing it below the cut costs two lines
         // and removes the one way this table could contradict the report around
         // it.
-        for &(_, c) in ordered.iter().skip(shown) {
-            let mark = mark_for(c);
-            if !mark.is_empty() {
-                grid_row(out, c, mark);
-            }
+        //
+        // The tail is unsorted now, and at most two of its cells carry a mark
+        // (one per selector), so those are put in key order by one comparison
+        // instead of by sorting the tail.
+        //
+        // `min_by_key` and `max_by_key`, not a guarded swap: the key is total
+        // over distinct cells, so a `key(b) < key(a)` guard's `<=` boundary
+        // could never be reached and was an equivalent mutant (G18-runner,
+        // D-2056). `None` orders first and prints nothing, so one or zero
+        // marks still work.
+        let mut marked = tail.iter().filter(|&&(_, c)| !mark_for(c).is_empty());
+        let (a, b) = (marked.next(), marked.next());
+        let first = core::cmp::min_by_key(a, b, |slot| slot.map(key));
+        let second = core::cmp::max_by_key(a, b, |slot| slot.map(key));
+        for &(_, c) in first.into_iter().chain(second) {
+            grid_row(out, c, mark_for(c));
         }
     }
     let _ = writeln!(out);
@@ -1060,8 +1292,9 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         let _ = writeln!(
             out,
             "  SHARPEST: variant {}. Winners went {} ppm against before working, \
-             and {} ppm for. Ratio {}. That adverse figure is the tightest stop \
-             that would not have killed a winner.",
+             and {} ppm for. Ratio {}. Both are means over the winners: a stop \
+             at that adverse figure would have cut every winner that went \
+             further.",
             exit_name(sharp),
             sharp.winner_mae,
             sharp.winner_mfe,
@@ -1127,6 +1360,22 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
             "PARTIAL -- these folds ranked a truncated candidate set"
         },
     );
+    // THE CLOSURE FLAG, READ AND PRINTED (D-4503, audit W3-runner1-3, c4a-7).
+    // A halted fold's `candidates` are not only truncated: `closed` cannot see
+    // a superset on a level that was never finished, so some of them may be
+    // counted and priced as closed when they are not. Unconditional, like the
+    // row above, so a zero is visible.
+    let unproved = v.closure_unproved_folds();
+    row(
+        out,
+        "  whose closure is UNPROVED",
+        &unproved.to_string(),
+        if unproved == 0 {
+            "every fold's candidates were checked against a complete level above"
+        } else {
+            "marked ? below -- their candidates may include sets that are not closed"
+        },
+    );
     row(
         out,
         "  still positive out of sample",
@@ -1153,7 +1402,13 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
             f.chosen_side.map_or("-", |d| d.as_str()),
             f.train_bars,
             f.test_bars,
-            f.considered,
+            // `?` after the count when this fold's closure is unproved
+            // (D-4503); the row above the table says what that means.
+            format!(
+                "{}{}",
+                f.considered,
+                if f.closure_unproved { "?" } else { "" }
+            ),
             f.in_sample.worst,
             f.out_of_sample.worst,
             // THE COLUMN `held_up` ACTUALLY JUDGES, and it was not on this table.
@@ -1256,7 +1511,12 @@ pub fn overfitting(out: &mut String, p: &Pbo) {
 }
 
 /// The three bootstrap tests, side by side.
-pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, named: usize) {
+pub fn bootstrap(
+    out: &mut String,
+    rc: Option<&Verdict>,
+    spa: Option<&Verdict>,
+    named: Option<usize>,
+) {
     let _ = writeln!(out, "BOOTSTRAP");
     let _ = writeln!(
         out,
@@ -1280,17 +1540,35 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
             }
         }
     }
+    // A REFUSED STEPDOWN IS NOT A STEPDOWN THAT NAMED NOTHING (p4num-1,
+    // D-2617). A family too short for the block (D-1990) has no Romano-Wolf
+    // answer; printing it as "names 0" told the reader a stepdown had run and
+    // rejected nothing.
+    let shown = named.map_or_else(|| "REFUSED".to_owned(), |n| n.to_string());
     let _ = writeln!(
         out,
         "  {:<28}{:>12}{:>12}{:>10}",
-        "Romano-Wolf (named)", "-", "-", named
+        "Romano-Wolf (named)", "-", "-", shown
     );
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
-         says WHICH, and it names {named}."
-    );
+    match named {
+        Some(named) => {
+            let _ = writeln!(
+                out,
+                "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
+                 says WHICH, and it names {named}."
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
+                 says WHICH, and it was REFUSED: the family's aligned periods are too \
+                 few for the resampling block, so it named nothing because it ran on \
+                 nothing."
+            );
+        }
+    }
 
     // WHAT THE SAMPLE SIZE WAS WORTH, BESIDE THE P-VALUE IT PRODUCED.
     //
@@ -1306,7 +1584,16 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
     // looking at the verdict. So it prints here. D-0172.
     if let Some(v) = rc.or(spa) {
         let _ = writeln!(out);
-        let _ = writeln!(out, "  sample: {}", v.calibration());
+        // THE ACTUAL COUNT, THEN THE BAND. `calibration` names the measured
+        // row the sample falls in, so 57 periods printed "30 periods: ..."
+        // and the count itself was never shown (ET-strategies-trades-ranking-
+        // costs-6, D-1498). The band stays: it is the measurement.
+        let _ = writeln!(
+            out,
+            "  sample: {} period(s); nearest measured row at or below it -- {}",
+            v.periods,
+            v.calibration()
+        );
         if v.periods < 100 {
             let _ = writeln!(
                 out,
@@ -1340,8 +1627,22 @@ mod tests {
             periods: 3,
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&short), None, 1);
+        bootstrap(&mut out, Some(&short), None, Some(1));
         assert!(out.contains("37.1%"), "the measured rate is shown:\n{out}");
+        assert!(
+            out.contains("  sample: 3 period(s);"),
+            "and the count itself:\n{out}"
+        );
+        // BETWEEN TWO ROWS, THE COUNT IS NOT THE ROW'S (D-1498). 57 periods
+        // takes the 30-period row and must still say 57.
+        let between = crate::bootstrap::Verdict {
+            periods: 57,
+            ..short
+        };
+        let mut said = String::new();
+        bootstrap(&mut said, Some(&between), None, Some(1));
+        assert!(said.contains("  sample: 57 period(s);"), "{said}");
+        assert!(said.contains("30 periods: measured 13.3%"), "{said}");
         assert!(
             out.contains("READ THE TWO ROWS ABOVE"),
             "and a short sample is called out rather than left to the reader:\n{out}"
@@ -1352,7 +1653,7 @@ mod tests {
             ..short
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&long), None, 1);
+        bootstrap(&mut out, Some(&long), None, Some(1));
         assert!(out.contains("nominal"), "a long sample says so:\n{out}");
         assert!(
             !out.contains("READ THE TWO ROWS ABOVE"),
@@ -1405,7 +1706,7 @@ mod tests {
     }
     use super::{
         CASH_EQUITY_GROSS, CORPORATE_ACTIONS_UNCHECKED, CostScope, bootstrap, grid, overfitting,
-        render_selected, trades, walk_forward,
+        render_selected, strategy_report, trades, walk_forward,
     };
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};
@@ -1693,7 +1994,7 @@ mod tests {
             Some(selected),
             Some(&Validated::default()),
             Some(&probability_of_overfitting(&[])),
-            Some((None, None, 0)),
+            Some((None, None, Some(0))),
             10,
         )
     }
@@ -1754,7 +2055,7 @@ mod tests {
                 );
             }
             for disclosure in [
-                "apply to a\n  share trade",
+                "and GST (an UNVERIFIED list) all apply to a share trade",
                 "This engine has no equity charge path",
                 "the ranking that\n  chose this combination is on GROSS returns",
                 "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
@@ -1832,6 +2133,67 @@ mod tests {
         );
     }
 
+    /// A SENTINEL OR AN EMPTY MEAN IS NEVER PRINTED AS A MEASUREMENT IN THE
+    /// STRATEGY REPORT (p5num-4, D-2712).
+    ///
+    /// An all-winner variant has no drawdown, so `return_over_drawdown` is the
+    /// `i64::MAX` sentinel; it has no loser, so `avg_loss` is 0. A variant that
+    /// never won has `avg_win` 0. All three printed as numbers.
+    #[test]
+    fn the_strategy_report_names_its_sentinels_and_empty_means_in_words() {
+        let row = |out: &str, label: &str| -> String {
+            out.lines()
+                .find(|line| line.starts_with(&format!("  {label}")))
+                .map(str::to_owned)
+                .expect("the report carries the row")
+        };
+        let all_won = crate::grid::Cell {
+            trades: 3,
+            wins: 3,
+            pessimistic: 300,
+            optimistic: 450,
+            gross_win: 300,
+            best_trade: 150,
+            min_win: 50,
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(all_won.return_over_drawdown(), i64::MAX);
+        let mut out = String::new();
+        strategy_report(&mut out, &all_won, "SL·TP", CostScope::IndexSpot);
+        assert!(!out.contains("92233720368547758"), "{out}");
+        let ret = row(&out, "return over drawdown");
+        assert!(ret.contains("no DD"), "{ret}");
+        let loss = row(&out, "avg losing trade");
+        assert!(loss.contains("no losing trade"), "{loss}");
+        assert!(!loss.contains("0.00"), "{loss}");
+        assert!(row(&out, "avg winning trade").contains("1.00"), "{out}");
+
+        let never_won = crate::grid::Cell {
+            trades: 2,
+            wins: 0,
+            pessimistic: -200,
+            optimistic: -100,
+            gross_loss: -200,
+            worst_trade: -150,
+            max_drawdown: 200,
+            ..crate::grid::Cell::default()
+        };
+        let mut out = String::new();
+        strategy_report(&mut out, &never_won, "SL·TP", CostScope::IndexSpot);
+        let win = row(&out, "avg winning trade");
+        assert!(win.contains("no winning trade"), "{win}");
+        assert!(!win.contains("0.00"), "{win}");
+        assert!(row(&out, "avg losing trade").contains("-₹1.00"), "{out}");
+        // A measured ratio still prints as one.
+        let measured = crate::grid::Cell {
+            max_drawdown: 100,
+            ..all_won
+        };
+        let mut out = String::new();
+        strategy_report(&mut out, &measured, "SL·TP", CostScope::IndexSpot);
+        assert!(row(&out, "return over drawdown").contains("3.00"), "{out}");
+    }
+
     /// A STOCK'S STRATEGY REPORT NEVER CALLS A TOTAL NET PROFIT, AND SAYS THE
     /// ONE SELECTION RANKS ON IS GROSS OF EVERY CHARGE.
     ///
@@ -1899,13 +2261,16 @@ mod tests {
 
     /// Every charge the equity statement says a share trade pays, as it names
     /// them.
-    const SHARE_TRADE_CHARGES: [&str; 6] = [
+    const SHARE_TRADE_CHARGES: [&str; 9] = [
         "brokerage",
         "STT",
         "stamp duty",
         "exchange charges",
         "SEBI fee",
+        "IPFT",
+        "DP charges",
         "GST",
+        "UNVERIFIED list",
     ];
 
     /// The first rate unit or currency `text` names, or `None`.
@@ -2130,7 +2495,8 @@ mod tests {
     /// A CASH-EQUITY AUDIT SAYS CORPORATE ACTIONS ARE UNCHECKED, BESIDE ITS
     /// CHARGE STATEMENT, AND AN INDEX AUDIT NEVER DOES. D-0694.
     ///
-    /// No split, bonus or demerger detector exists (D-0018 names no threshold
+    /// No split, bonus, rights, face-value, demerger or dividend detector
+    /// exists (D-0018 names no threshold
     /// and the charter names no source), so an overnight jump in a stock's
     /// bars can be a corporate action. The operator chose to keep ranking
     /// stocks and to say so; an index never splits and says nothing.
@@ -2150,7 +2516,7 @@ mod tests {
             );
             for fact in [
                 "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
-                "No split, bonus or\n  demerger detection has run",
+                "No split, bonus,\n  rights issue, face-value change, demerger or dividend detection has",
                 "can be a corporate action rather than a market move",
                 "no\n  threshold for that detector is sourced",
             ] {
@@ -2199,7 +2565,9 @@ mod tests {
             "stamp duty",
             "exchange charges",
             "SEBI fee",
-            "GST",
+            "IPFT",
+            "DP charges",
+            "GST (an UNVERIFIED list)",
             "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
             "No equity result carries Selection V6",
             "D-0681",
@@ -2382,13 +2750,65 @@ mod tests {
         );
         assert!(
             out.contains("41 ppm against"),
-            "the sniper figure is the tightest stop that would not have killed a \
-             winner, and it must appear as a number"
+            "the sniper figure is the winners' MEAN adverse excursion, and it \
+             must appear as a number"
         );
         assert!(
             out.contains("depend on intra-bar ordering"),
             "four ambiguous bars must be reported as uncertainty, not hidden"
         );
+    }
+
+    /// THE WINNERS' MEAN ADVERSE EXCURSION IS NEVER CALLED A STOP LEVEL.
+    ///
+    /// Z1-slice00-F1, D-2537. Two winners that went 0 and 100 ppm against have
+    /// a `winner_mae` of 50; a stop at 50 cuts the second. The strategy report
+    /// noted that row "the tightest stop that keeps every winner" and the
+    /// SHARPEST line said "the tightest stop that would not have killed a
+    /// winner" -- both fail this test on the old strings. Every permutation of
+    /// zero, one and both winners, and a cell with no winners at all, is
+    /// rendered, through both surfaces.
+    #[test]
+    fn the_winner_mae_is_never_called_a_stop_level() {
+        let row = |out: &str, label: &str| -> String {
+            let head = format!("  {label}");
+            for line in out.lines() {
+                if line.starts_with(&head) {
+                    return line.to_owned();
+                }
+            }
+            String::new()
+        };
+        for (wins, winner_mae, worst_mae) in [(0_u64, 0, 0), (1, 0, 0), (1, 100, 100), (2, 50, 100)]
+        {
+            let cell = crate::grid::Cell {
+                trades: 2,
+                wins,
+                pessimistic: 100,
+                optimistic: 100,
+                winner_mae,
+                winner_mfe: 400,
+                worst_mae,
+                ..crate::grid::Cell::default()
+            };
+            let mut out = String::new();
+            strategy_report(&mut out, &cell, "SL·TP", CostScope::IndexSpot);
+            assert!(!out.contains("tightest stop"), "{out}");
+            let mean = row(&out, "mean MAE, winners only");
+            assert!(
+                mean.contains("mean") && mean.contains("NOT a stop"),
+                "{mean}"
+            );
+            assert!(
+                row(&out, "WORST MAE, any single trade").contains("THE BOUND"),
+                "{out}"
+            );
+        }
+        let mut out = String::new();
+        grid(&mut out, &populated_grid(), 10);
+        assert!(out.contains("SHARPEST"), "{out}");
+        assert!(!out.contains("tightest stop"), "{out}");
+        assert!(out.contains("Both are means"), "{out}");
     }
 
     /// The risk-policy winner can differ from the unconstrained money maximum;
@@ -2590,7 +3010,7 @@ mod tests {
             strategies: 20,
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&clears), Some(&fails), 2);
+        bootstrap(&mut out, Some(&clears), Some(&fails), Some(2));
 
         assert!(out.contains("White's Reality Check"));
         assert!(out.contains("Hansen's SPA"));
@@ -2636,7 +3056,7 @@ mod tests {
             Some(&grid_in),
             Some(&folds),
             Some(&over),
-            Some((None, None, 0)),
+            Some((None, None, Some(0))),
             10,
         );
 
@@ -2658,12 +3078,143 @@ mod tests {
     #[test]
     fn a_refused_bootstrap_is_shown_as_refused_and_never_as_a_pass() {
         let mut out = String::new();
-        bootstrap(&mut out, None, None, 0);
+        bootstrap(&mut out, None, None, None);
         assert!(out.contains("REFUSED"));
         assert!(
             !out.contains("yes"),
             "a test that was refused must never render as clearing"
         );
+    }
+
+    /// p4num-1 / D-2617: a refused stepdown is printed as REFUSED on its own
+    /// row and in its sentence, never as "names 0"; a stepdown that ran and
+    /// rejected nothing still prints 0.
+    #[test]
+    fn a_refused_romano_wolf_is_never_printed_as_naming_zero() {
+        let mut refused = String::new();
+        bootstrap(&mut refused, None, None, None);
+        let row = refused
+            .lines()
+            .find(|line| line.contains("Romano-Wolf (named)"))
+            .expect("the stepdown row");
+        assert!(row.trim_end().ends_with("REFUSED"), "{row}");
+        assert!(!refused.contains("names 0"), "{refused}");
+        assert!(refused.contains("it was REFUSED"), "{refused}");
+
+        let mut ran = String::new();
+        bootstrap(&mut ran, None, None, Some(0));
+        let row = ran
+            .lines()
+            .find(|line| line.contains("Romano-Wolf (named)"))
+            .expect("the stepdown row");
+        assert!(row.trim_end().ends_with('0'), "{row}");
+        assert!(ran.contains("it names 0."), "{ran}");
+    }
+
+    /// p5num-4 / D-2712: an all-winner variant with no drawdown prints `no DD`,
+    /// not the `i64::MAX` sentinel as a ratio, and no average of nothing.
+    #[test]
+    fn the_strategy_report_never_prints_a_sentinel_or_an_empty_mean_as_measured() {
+        let all_won = crate::grid::Cell {
+            trades: 3,
+            wins: 3,
+            pessimistic: 900,
+            optimistic: 900,
+            gross_win: 900,
+            best_trade: 300,
+            min_win: 300,
+            max_drawdown: 0,
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(all_won.return_over_drawdown(), i64::MAX);
+        let mut out = String::new();
+        super::strategy_report(&mut out, &all_won, "x", CostScope::IndexSpot);
+        assert!(!out.contains("92233720368547758"), "{out}");
+        let row = |label: &str| {
+            out.lines()
+                .find(|l| l.contains(label))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(row("return over drawdown").contains("no DD"), "{out}");
+        assert!(row("avg losing trade").contains("no losing trade"), "{out}");
+        assert!(!row("avg winning trade").contains('-'), "{out}");
+
+        let none_won = crate::grid::Cell {
+            trades: 2,
+            wins: 0,
+            pessimistic: -200,
+            optimistic: -200,
+            gross_loss: -200,
+            worst_trade: -100,
+            max_drawdown: 200,
+            ..crate::grid::Cell::default()
+        };
+        let mut out = String::new();
+        super::strategy_report(&mut out, &none_won, "y", CostScope::IndexSpot);
+        let line = out
+            .lines()
+            .find(|l| l.contains("avg winning trade"))
+            .unwrap_or_default();
+        assert!(line.contains("no winning trade"), "{out}");
+        assert!(!line.contains("0.00"), "{out}");
+    }
+
+    /// o1runner-11 / D-1195: the cut table sorts only its shown rows, and
+    /// must print exactly the rows, in exactly the order, a full sort printed.
+    /// The full render (`keep` past the grid) sorts everything, so it is the
+    /// reference for every shorter `keep`, ties included.
+    #[test]
+    fn a_cut_grid_table_shows_exactly_the_full_tables_leading_rows() {
+        let mut g = populated_grid();
+        let template = g.cells.clone();
+        for (n, pessimistic) in [5, -3, 5, 0, 5, -3, 9, 0, 1, 5, -7, 9]
+            .into_iter()
+            .enumerate()
+        {
+            let mut cell = template
+                .get(n % template.len())
+                .copied()
+                .unwrap_or_default();
+            cell.pessimistic = pessimistic;
+            g.cells.push(cell);
+        }
+        // A winless top earner: `best()` and not `sharpest()`, so the two
+        // selectors mark DIFFERENT rows and their order below the cut is tested.
+        let mut rich = template.first().copied().unwrap_or_default();
+        rich.pessimistic = 9_000_000;
+        rich.wins = 0;
+        g.cells.push(rich);
+        let (best, sharp) = (g.best().copied(), g.sharpest().copied());
+        assert!(best.is_some() && sharp.is_some() && best != sharp);
+        let rows = |out: &str| -> Vec<String> {
+            out.lines()
+                .filter(|l| is_grid_row(l) && !l.contains("NOT SHOWN"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut full = String::new();
+        grid(&mut full, &g, g.cells.len() + 1);
+        let full = rows(&full);
+        assert_eq!(full.len(), g.cells.len());
+        for keep in 0..=g.cells.len() {
+            let mut out = String::new();
+            grid(&mut out, &g, keep);
+            let cut = rows(&out);
+            assert_eq!(
+                cut.get(..keep),
+                full.get(..keep),
+                "keep={keep}: the shown rows differ from the full table's"
+            );
+            // Below the cut only the selectors' rows, in full-table order.
+            let below: Vec<&String> = full
+                .iter()
+                .skip(keep)
+                .filter(|l| l.contains("<-"))
+                .collect();
+            let printed: Vec<&String> = cut.iter().skip(keep).collect();
+            assert_eq!(printed, below, "keep={keep}: rows below the cut");
+        }
     }
 
     #[test]
@@ -2992,6 +3543,34 @@ mod tests {
         );
     }
 
+    /// Two rescued rows print in the table's own key order, whatever order
+    /// the selection left them in the tail (G18-runner-01, D-2056).
+    #[test]
+    fn two_chosen_rows_below_the_cut_print_in_key_order() {
+        // `best()` takes the 900 total, `SHARPEST` the 900 mfe, so both marks
+        // fall below a cut of one and the 900 total sorts first. Both cell
+        // orders are fed, so neither tail arrangement can pass by accident.
+        for flip in [false, true] {
+            let mut cells = vec![winner(Some(0), 500, 900), winner(Some(1), 900, 400)];
+            if flip {
+                cells.reverse();
+            }
+            cells.insert(0, crate::grid::Cell::default());
+            let g = crate::grid::Grid {
+                cells,
+                ..crate::grid::Grid::default()
+            };
+            let mut out = String::new();
+            grid(&mut out, &g, 1);
+            let best = out.find("<- best()").expect("best() is rescued");
+            let sharp = out.find("<- SHARPEST").expect("SHARPEST is rescued");
+            assert!(
+                best < sharp,
+                "flip={flip}: key order puts 900 first:\n{out}"
+            );
+        }
+    }
+
     /// The sniper line identifies the variant it describes.
     #[test]
     fn the_sharpest_line_names_the_variant_and_not_only_its_numbers() {
@@ -3125,5 +3704,288 @@ mod tests {
             "the table must lead with the variant that reached the same total \
              with less machinery\nbest(): {chosen}\nrow:    {top}\n{out}"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod overnight_tests {
+    use super::{OvernightMove, largest_overnight_move, overnight_line};
+    use indicators::Candle;
+
+    /// Thirty generated sessions with every price halved from session 20 on:
+    /// an unadjusted 1:2 split, which is what D-0018 says a stock's bars do.
+    fn split_at_twenty() -> (Vec<Candle>, usize) {
+        let raw = crate::synthetic::sessions(30);
+        let first = 20 * 375;
+        let split_day = indicators::ist_day(raw[first].ts_micros);
+        let bars = raw
+            .iter()
+            .map(|b| {
+                if indicators::ist_day(b.ts_micros) >= split_day {
+                    Candle::new(
+                        b.ts_micros,
+                        b.open / 2,
+                        b.high / 2,
+                        b.low / 2,
+                        b.close / 2,
+                        b.volume,
+                        b.open_interest,
+                    )
+                } else {
+                    *b
+                }
+            })
+            .collect();
+        (bars, first)
+    }
+
+    /// AN UNADJUSTED SPLIT IS NAMED BY ITS DATE AND ITS SIZE, WITH NO
+    /// THRESHOLD. gaps-6, D-1540.
+    #[test]
+    fn an_unadjusted_split_is_the_largest_overnight_move_and_is_named_by_its_session() {
+        let (bars, first) = split_at_twenty();
+        let found = largest_overnight_move(&bars).expect("thirty sessions have overnights");
+        assert_eq!(found.day, indicators::ist_day(bars[first].ts_micros));
+        assert_eq!(found.prior_close, bars[first - 1].close);
+        assert_eq!(found.open, bars[first].open);
+        assert!(
+            (-510_000..=-490_000).contains(&found.ppm),
+            "a 1:2 split is a move of about -50%: {found:?}"
+        );
+    }
+
+    /// A SPLIT ON THE FIRST SIGNAL DAY IS THE NAMED OVERNIGHT MOVE WHEN THE
+    /// SESSION BEFORE THE SPAN IS GIVEN. p16num-1, D-2546.
+    ///
+    /// The span starts ON the split session, so `bars.windows(2)` never sees
+    /// the pre-split close and the old measure named a small in-span overnight
+    /// instead. With the prior session's daily record (close 20,002.00) and a
+    /// first open of 10,001.00 the named day is the first signal day and the
+    /// move is -500,000 ppm. A prior on the first day itself, or after it, is
+    /// ignored; no prior, an empty span and a non-positive prior close each
+    /// fall back to the in-span answer.
+    #[test]
+    fn a_split_on_the_first_signal_day_is_the_named_overnight_move() {
+        let (bars, first) = split_at_twenty();
+        let span = &bars[first..];
+        let first_day = indicators::ist_day(span[0].ts_micros);
+        let in_span = largest_overnight_move(span).expect("ten sessions have overnights");
+        assert_ne!(in_span.day, first_day, "the old measure cannot see it");
+        assert_eq!(
+            super::largest_overnight_move_after(None, span),
+            Some(in_span)
+        );
+
+        let previous = bars[first - 1];
+        let daily = |ts: i64, close: i64| Candle::new(ts, close, close, close, close, 0, i64::MIN);
+        let first_open = Candle::new(
+            span[0].ts_micros,
+            1_000_100,
+            1_000_100,
+            1_000_100,
+            1_000_100,
+            0,
+            i64::MIN,
+        );
+        let mut seeded_span = span.to_vec();
+        seeded_span[0] = first_open;
+        let seeded = super::largest_overnight_move_after(
+            Some(&daily(previous.ts_micros, 2_000_200)),
+            &seeded_span,
+        )
+        .expect("a seeded span has an overnight");
+        assert_eq!(seeded.day, first_day);
+        assert_eq!(seeded.prior_close, 2_000_200);
+        assert_eq!(seeded.open, 1_000_100);
+        assert_eq!(seeded.ppm, -500_000);
+
+        // A prior on the first signal day, or later, is not an overnight.
+        for ts in [span[0].ts_micros - 1, span[0].ts_micros, span[1].ts_micros] {
+            assert!(indicators::ist_day(ts) >= first_day, "fixture: {ts}");
+            let same = super::largest_overnight_move_after(Some(&daily(ts, 2_000_200)), span);
+            assert_eq!(same, Some(in_span), "prior at {ts} is ignored");
+        }
+        // A non-positive prior close is skipped like any other.
+        for close in [0, -1, i64::MIN] {
+            let skipped =
+                super::largest_overnight_move_after(Some(&daily(previous.ts_micros, close)), span);
+            assert_eq!(skipped, Some(in_span), "close {close}");
+        }
+        // An empty span has nothing to measure the prior against.
+        assert_eq!(
+            super::largest_overnight_move_after(Some(&daily(previous.ts_micros, 2_000_200)), &[]),
+            None
+        );
+        // One bar plus a prior is exactly one overnight.
+        let one = super::largest_overnight_move_after(
+            Some(&daily(previous.ts_micros, 2_000_200)),
+            &seeded_span[..1],
+        );
+        assert_eq!(one.map(|m| (m.day, m.ppm)), Some((first_day, -500_000)));
+        // A tie keeps the EARLIER session: the seed, measured first.
+        let tie = [
+            Candle::new(span[0].ts_micros, 100, 100, 100, 100, 0, i64::MIN),
+            Candle::new(span[375].ts_micros, 200, 200, 200, 200, 0, i64::MIN),
+        ];
+        let tied = super::largest_overnight_move_after(Some(&daily(previous.ts_micros, 50)), &tie)
+            .expect("two overnights");
+        assert_eq!(tied.day, first_day, "+100% then +100%: the earlier is kept");
+    }
+
+    /// ONLY A SESSION BOUNDARY IS AN OVERNIGHT MOVE. A jump inside a session
+    /// is a market move this measure does not describe.
+    #[test]
+    fn an_intraday_jump_is_not_an_overnight_move_and_one_session_has_none() {
+        let mut bars = crate::synthetic::sessions(3);
+        let inside = 375 + 100;
+        let bar = bars[inside];
+        bars[inside] = Candle::new(
+            bar.ts_micros,
+            bar.open * 3,
+            bar.high * 3,
+            bar.low * 3,
+            bar.close * 3,
+            bar.volume,
+            bar.open_interest,
+        );
+        let found = largest_overnight_move(&bars).expect("three sessions");
+        assert!(
+            found.ppm.abs() < 10_000,
+            "the tripled bar sits inside a session and must not be reported: {found:?}"
+        );
+        assert_eq!(
+            largest_overnight_move(&crate::synthetic::sessions(1)),
+            None,
+            "one session has no overnight"
+        );
+        assert_eq!(largest_overnight_move(&[]), None);
+    }
+
+    /// THE LINE STATES THE MEASURED FACT, CLAIMS NO THRESHOLD, AND NEVER
+    /// READS AS A REFUSAL.
+    #[test]
+    fn the_overnight_line_names_date_size_and_prices_and_claims_no_threshold() {
+        let line = overnight_line(
+            &OvernightMove {
+                day: 0,
+                prior_close: 200_000,
+                open: 100_000,
+                ppm: -500_000,
+            },
+            "2024-06-14",
+        );
+        let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        for fact in [
+            "LARGEST OVERNIGHT MOVE IN THESE BARS",
+            "-50.00%",
+            "2024-06-14",
+            "2000.00",
+            "1000.00",
+            "NO THRESHOLD",
+        ] {
+            assert!(flat.contains(fact), "missing {fact:?}:\n{line}");
+        }
+        assert!(line.ends_with('\n'), "{line}");
+        for each in line.lines().filter(|each| !each.is_empty()) {
+            assert!(each.starts_with("  "), "indented like the note: {each:?}");
+        }
+        let small = overnight_line(
+            &OvernightMove {
+                day: 0,
+                prior_close: 100_000,
+                open: 99_995,
+                ppm: -50,
+            },
+            "2024-06-14",
+        );
+        assert!(
+            small.contains("-0.00%"),
+            "a sub-basis-point fall keeps its sign:\n{small}"
+        );
+        let flat = overnight_line(
+            &OvernightMove {
+                day: 0,
+                prior_close: 100_000,
+                open: 100_000,
+                ppm: 0,
+            },
+            "2024-06-14",
+        );
+        assert!(
+            flat.contains("+0.00%"),
+            "no move is not a fall (G18-runner-02):\n{flat}"
+        );
+    }
+
+    /// One bar per session, each at its own 09:15: `closes[i]` closes
+    /// session `i` and `opens[i]` opens session `i + 1`.
+    fn overnights(closes: &[i64], opens: &[i64]) -> Vec<Candle> {
+        let mut bars = Vec::new();
+        let mut open = closes.first().copied().unwrap_or(1);
+        for (day, &close) in closes.iter().enumerate() {
+            let ts = crate::synthetic::bar(i64::try_from(day).expect("small"), 0).ts_micros;
+            bars.push(Candle::new(
+                ts,
+                open,
+                open.max(close),
+                open.min(close),
+                close,
+                1,
+                indicators::OI_NULL,
+            ));
+            open = opens.get(day).copied().unwrap_or(close);
+        }
+        let ts = crate::synthetic::bar(i64::try_from(closes.len()).expect("small"), 0).ts_micros;
+        bars.push(Candle::new(
+            ts,
+            open,
+            open,
+            open,
+            open,
+            1,
+            indicators::OI_NULL,
+        ));
+        bars
+    }
+
+    /// A TIE KEEPS THE EARLIER SESSION, sign or no sign (G18-runner-03,
+    /// D-2055): +10% into session one and -10% into session two are the same
+    /// magnitude, and the answer must not depend on which came last.
+    #[test]
+    fn a_tie_in_magnitude_keeps_the_earlier_session() {
+        let bars = overnights(&[100_000, 100_000], &[110_000, 90_000]);
+        let found = largest_overnight_move(&bars).expect("three sessions");
+        assert_eq!(found.ppm, 100_000, "{found:?}");
+        assert_eq!(found.day, indicators::ist_day(bars[1].ts_micros));
+        let later = overnights(&[100_000, 100_000], &[90_000, 110_000]);
+        let found = largest_overnight_move(&later).expect("three sessions");
+        assert_eq!(found.ppm, -100_000, "{found:?}");
+        assert_eq!(found.day, indicators::ist_day(later[1].ts_micros));
+    }
+
+    /// A move no `i64` of ppm can hold saturates toward its own sign
+    /// (G18-runner-04, D-2055).
+    #[test]
+    fn an_unrepresentable_move_saturates_toward_its_sign() {
+        let up = largest_overnight_move(&overnights(&[1], &[i64::MAX])).expect("two sessions");
+        assert_eq!(up.ppm, i64::MAX);
+        let down = largest_overnight_move(&overnights(&[1], &[i64::MIN])).expect("two sessions");
+        assert_eq!(down.ppm, i64::MIN);
+    }
+
+    /// Paisa render as signed rupees: zero carries no sign and a fall under
+    /// one rupee keeps its minus (G18-runner-05, D-2055).
+    #[test]
+    fn rupees_signs_only_a_negative_amount() {
+        assert_eq!(super::rupees(0), "0.00");
+        assert_eq!(super::rupees(5), "0.05");
+        assert_eq!(super::rupees(-5), "-0.05");
+        assert_eq!(super::rupees(-12_345), "-123.45");
+        assert_eq!(super::rupees(i64::MIN), "-92233720368547758.08");
     }
 }

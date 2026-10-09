@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use crate::{
-    Breach, Column, Excluded, Frontier, Halt, Itemset, Ladder, Progress, Sink, Sweep, Why,
+    Breach, Column, Excluded, Frontier, Halt, Itemset, Ladder, Progress, Sink, Sweep, Why, keep,
 };
 use vocab::ConditionMask;
 
@@ -153,6 +153,16 @@ impl Checkpoint {
     /// # Errors
     /// Refuses identity, row-count, offered-sequence or exact policy mismatch.
     /// The caller remains responsible for the complete column-byte identity.
+    ///
+    /// # Support lanes are deliberately NOT compared
+    ///
+    /// The lane count is a scheduling sentinel (`Ladder::support_lanes`), never
+    /// a depth or answer parameter, and the run identity leaves it out:
+    /// `a_support_lane_bound_changes_only_scheduling` proves the answer is the
+    /// same at every lane count. Comparing it refused an interrupted
+    /// `sweep-stored` resume on any machine or container with a different core
+    /// count, because `cli` derives lanes from `available_parallelism`. The
+    /// resumed walk schedules with the CALLER's lanes. D-1439.
     pub fn validate_for(
         &self,
         ladder: Ladder,
@@ -166,7 +176,6 @@ impl Checkpoint {
             || self.ladder.min_hits != ladder.min_hits
             || self.ladder.ceiling != ladder.ceiling
             || self.ladder.pair_budget != ladder.pair_budget
-            || self.ladder.support_lanes != ladder.support_lanes
         {
             return Err(Error::Invalid(
                 "run identity, column, offers or configuration mismatch",
@@ -187,6 +196,7 @@ impl Checkpoint {
             ladder: self.ladder,
             live: &self.live,
             retired,
+            retired_count: retired.len(),
             current,
             progress: &self.progress,
         }
@@ -242,7 +252,7 @@ impl Checkpoint {
         if admitted != crate::len_u64(self.progress.admitted)
             || self.progress.admitted > self.ladder.ceiling
             || admitted > self.progress.pairs
-            || (self.progress.halted.is_none() && self.progress.pairs >= self.ladder.pair_budget)
+            || (self.progress.halted.is_none() && self.progress.pairs > self.ladder.pair_budget)
         {
             return Err(Error::Invalid("cumulative candidate or pair accounting"));
         }
@@ -296,6 +306,11 @@ pub struct CheckpointView<'a> {
     ladder: Ladder,
     live: &'a [u32],
     retired: &'a [Frontier],
+    /// How many levels this walk has retired. Equal to `retired.len()` on a
+    /// retaining walk; on a streamed one the levels were handed on and
+    /// dropped, so `retired` is empty and only the count remains. AC-whp-o1-1,
+    /// D-1844.
+    retired_count: usize,
     current: &'a Frontier,
     progress: &'a Progress,
 }
@@ -339,10 +354,41 @@ impl CheckpointView<'_> {
 
     /// Encode the fixed version using constant scratch space.
     ///
+    /// Exactly [`Self::write_prefix_to`] followed by every retained level and
+    /// then the current one, each as [`Self::write_current_to`] writes it.
+    ///
     /// # Errors
     /// Propagates any write failure. This writes no cryptographic envelope;
     /// sealing, flushing, durable publication and identity binding belong to the caller.
     pub fn write_to(&self, writer: &mut impl Write) -> Result<(), Error> {
+        // A STREAMED BOUNDARY HOLDS NO EARLIER LEVEL, so it cannot write the
+        // whole history; its caller saved each level as it was reached and
+        // writes the prefix and the current level only. D-1844.
+        if self.retired.len() != self.retired_count {
+            return Err(Error::Invalid(
+                "a streamed boundary holds no earlier level to write",
+            ));
+        }
+        self.write_prefix_to(writer)?;
+        for level in self.retired.iter().chain(std::iter::once(self.current)) {
+            write_level(writer, level)?;
+        }
+        Ok(())
+    }
+
+    /// Encode everything [`Self::write_to`] writes before its first level: the
+    /// header with this boundary's counters and level count, the offered
+    /// positions and the exclusions.
+    ///
+    /// It writes `192 + 8 × offered + 24 × excluded` bytes, and no level. A
+    /// durable caller that has already saved every earlier level writes this
+    /// and [`Self::write_current_to`] at a boundary, not the whole history;
+    /// the prefix of its newest boundary followed by every level in depth
+    /// order is byte for byte what [`Self::write_to`] writes there.
+    ///
+    /// # Errors
+    /// Propagates any write failure.
+    pub fn write_prefix_to(&self, writer: &mut impl Write) -> Result<(), Error> {
         writer.write_all(&MAGIC)?;
         words(writer, [VERSION, u64::from(vocab::VOCAB_VERSION)])?;
         writer.write_all(&self.identity)?;
@@ -364,7 +410,7 @@ impl CheckpointView<'_> {
             [
                 crate::len_u64(self.live.len()),
                 crate::len_u64(self.progress.excluded.len()),
-                crate::len_u64(self.retired.len()) + 1,
+                crate::len_u64(self.retired_count) + 1,
             ],
         )?;
         for &position in self.live {
@@ -385,26 +431,38 @@ impl CheckpointView<'_> {
                 ],
             )?;
         }
-        for level in self.retired.iter().chain(std::iter::once(self.current)) {
-            words(
-                writer,
-                [
-                    u64::from(level.k),
-                    crate::len_u64(level.frequent.len()),
-                    level.generated,
-                    level.duplicates,
-                    level.excluded,
-                    level.pruned,
-                    level.infrequent,
-                ],
-            )?;
-            for item in &level.frequent {
-                words(writer, item.mask.words())?;
-                words(writer, [item.hits])?;
-            }
-        }
         Ok(())
     }
+
+    /// Encode the current level alone, as [`Self::write_to`] writes it among
+    /// the others: `56 + 56 × survivors` bytes, whatever the retained levels
+    /// hold.
+    ///
+    /// # Errors
+    /// Propagates any write failure.
+    pub fn write_current_to(&self, writer: &mut impl Write) -> Result<(), Error> {
+        write_level(writer, self.current)
+    }
+}
+
+fn write_level(writer: &mut impl Write, level: &Frontier) -> Result<(), Error> {
+    words(
+        writer,
+        [
+            u64::from(level.k),
+            crate::len_u64(level.frequent.len()),
+            level.generated,
+            level.duplicates,
+            level.excluded,
+            level.pruned,
+            level.infrequent,
+        ],
+    )?;
+    for item in &level.frequent {
+        words(writer, item.mask.words())?;
+        words(writer, [item.hits])?;
+    }
+    Ok(())
 }
 
 type Reporter<'a> = &'a mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>;
@@ -429,6 +487,56 @@ impl Sink for Retaining<'_> {
             ladder: self.ladder,
             live: self.live,
             retired: &self.levels,
+            retired_count: self.levels.len(),
+            current,
+            progress,
+        })
+        .map_err(Error::Callback)
+    }
+}
+
+/// Hands each retired level of a checkpointed walk to `on_retire` with its
+/// adjacent successor, keeps its tally, and drops it. AC-whp-o1-1, D-1844.
+///
+/// The checkpointed walk kept every survivor of every level until the end,
+/// only so its caller could rank them afterwards; a ranker that takes each
+/// level as it retires needs at most two levels at once, which is what the
+/// streamed uncheckpointed walk already holds.
+pub type Retirement<'a> = &'a mut dyn FnMut(&Frontier, Option<&Frontier>);
+
+struct Handing<'a> {
+    tallies: Vec<keep::Tally>,
+    streamed: u64,
+    identity: [u8; 32],
+    ladder: Ladder,
+    live: &'a [u32],
+    reporter: Reporter<'a>,
+    on_retire: Retirement<'a>,
+}
+
+impl Handing<'_> {
+    fn hand(&mut self, level: &Frontier, next: Option<&Frontier>) {
+        (self.on_retire)(level, next);
+        self.streamed = self
+            .streamed
+            .saturating_add(crate::len_u64(level.frequent.len()));
+        self.tallies.push(keep::Tally::of(level));
+    }
+}
+
+impl Sink for Handing<'_> {
+    type Error = Error;
+    fn report(&mut self, _: &Frontier, _: usize, _: u64) {}
+    fn retire(&mut self, level: Frontier, next: Option<&Frontier>) {
+        self.hand(&level, next);
+    }
+    fn checkpoint(&mut self, current: &Frontier, progress: &Progress) -> Result<(), Error> {
+        (self.reporter)(&CheckpointView {
+            identity: self.identity,
+            ladder: self.ladder,
+            live: self.live,
+            retired: &[],
+            retired_count: self.tallies.len(),
             current,
             progress,
         })
@@ -470,8 +578,9 @@ impl Ladder {
     /// The existing boundary is reported again, allowing idempotent durable
     /// acknowledgement. Earlier levels are retained but never recomputed.
     /// Extinct and resource-halted checkpoints return their original outcome;
-    /// a partial frontier never seeds another level. All configuration is exact,
-    /// including the requested support-lane policy.
+    /// a partial frontier never seeds another level. Every answer-bearing term
+    /// of the configuration is exact; the support-lane count is scheduling only
+    /// and is taken from the caller (see [`Checkpoint::validate_for`]).
     ///
     /// # Errors
     /// Refuses a foreign identity, column length, offered sequence or config,
@@ -485,6 +594,23 @@ impl Ladder {
         reporter: Reporter<'_>,
     ) -> Result<Sweep, Error> {
         checkpoint.validate_for(self, column, live, expected_identity)?;
+        // A HOST HALT IS NOT AN ANSWER (engine-1, CE-9, D-2614). The walk no
+        // longer saves a Memory or Workers halt, but a journal written before
+        // that change can hold one, and replaying it would return this
+        // machine's refusal as the run's outcome for good. It cannot be
+        // rewound either: the pair count at the level below was never saved.
+        // So it is refused by name, and the operator removes that checkpoint
+        // to rerun the level.
+        if let Some(Halt {
+            breach: Breach::Memory | Breach::Workers,
+            ..
+        }) = checkpoint.progress.halted
+        {
+            return Err(Error::Invalid(
+                "checkpoint holds a host Memory or Workers halt, which is never replayed; \
+                 remove it to rerun the level",
+            ));
+        }
         let current = checkpoint
             .levels
             .pop()
@@ -506,6 +632,82 @@ impl Ladder {
         )
     }
 
+    /// [`Self::walk_checkpointed`] that hands each level to `on_retire` as it
+    /// retires and keeps only its tally. The walk, every checkpoint the
+    /// reporter sees (prefix and current level, byte for byte) and the levels
+    /// handed on are exactly those of the retaining walk; only the survivors
+    /// are no longer held. AC-whp-o1-1, D-1844.
+    ///
+    /// # Errors
+    /// As [`Self::walk_checkpointed`].
+    pub fn walk_checkpointed_streamed(
+        self,
+        column: &Column,
+        live: &[u32],
+        identity: [u8; 32],
+        reporter: Reporter<'_>,
+        on_retire: Retirement<'_>,
+    ) -> Result<keep::Streamed, Error> {
+        let tallies = crate::reserved(crate::level_slots())?;
+        let (current, progress) = self.first_level(column, live)?;
+        let mut sink = Handing {
+            tallies,
+            streamed: 0,
+            identity,
+            ladder: self,
+            live,
+            reporter,
+            on_retire,
+        };
+        let tail = self.continue_walk(column, current, progress, &mut sink)?;
+        Ok(streamed_of(sink, tail))
+    }
+
+    /// [`Self::resume_checkpointed`] that hands every level on as
+    /// [`Self::walk_checkpointed_streamed`] does: first each restored earlier
+    /// level, in depth order with its restored successor (none when that
+    /// successor is the partial level a halt left), dropping each once it is
+    /// handed on, then every level the walk retires. D-1844.
+    ///
+    /// # Errors
+    /// As [`Self::resume_checkpointed`].
+    pub fn resume_checkpointed_streamed(
+        self,
+        column: &Column,
+        live: &[u32],
+        expected_identity: [u8; 32],
+        mut checkpoint: Checkpoint,
+        reporter: Reporter<'_>,
+        on_retire: Retirement<'_>,
+    ) -> Result<keep::Streamed, Error> {
+        checkpoint.validate_for(self, column, live, expected_identity)?;
+        let current = checkpoint
+            .levels
+            .pop()
+            .ok_or(Error::Invalid("no resume frontier"))?;
+        let mut sink = Handing {
+            tallies: crate::reserved(crate::level_slots())?,
+            streamed: 0,
+            identity: expected_identity,
+            ladder: self,
+            live,
+            reporter,
+            on_retire,
+        };
+        let halted_at = checkpoint.progress.halted.map(|halt| halt.k);
+        let mut restored = checkpoint.levels.into_iter();
+        if let Some(mut level) = restored.next() {
+            for next in restored {
+                sink.hand(&level, Some(&next));
+                level = next;
+            }
+            let successor = Some(&current).filter(|next| halted_at != Some(next.k));
+            sink.hand(&level, successor);
+        }
+        let tail = self.continue_walk(column, current, checkpoint.progress, &mut sink)?;
+        Ok(streamed_of(sink, tail))
+    }
+
     fn finish_checkpointed(
         self,
         column: &Column,
@@ -521,6 +723,17 @@ impl Ladder {
             min_hits: tail.min_hits,
             halted: tail.halted,
         })
+    }
+}
+
+fn streamed_of(sink: Handing<'_>, tail: crate::Tail) -> keep::Streamed {
+    keep::Streamed {
+        levels: sink.tallies,
+        excluded: tail.excluded,
+        bars: tail.bars,
+        min_hits: tail.min_hits,
+        halted: tail.halted,
+        streamed: sink.streamed,
     }
 }
 

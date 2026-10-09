@@ -35,13 +35,9 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "Execution V3 remains crate-private until Selection V5 consumes its source-retaining production capability"
-)]
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -61,6 +57,11 @@ use crate::population_v5::{
     CommittedStoredPopulationV5, PopulationV5ExecutionDispositionSourceV1,
     PopulationV5ExecutionV3SourceV1,
 };
+
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Execution V3 fixed record";
 
 /// Bytes in one canonical Execution V3 parameter record.
 pub(crate) const EXECUTION_V3_PARAMETER_BYTES: usize = 1_024;
@@ -127,10 +128,8 @@ const FORCED_STOP_DISABLED_TAG: u8 = 0;
 const FORCED_STOP_INCLUDE_TAG: u8 = 1;
 const FORCED_STOP_REQUIRE_TAG: u8 = 2;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PARAMETER_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V3_PARAMETER_BYTES);
 const _: () = assert!(PERCENTILE_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V3_PERCENTILE_BYTES);
@@ -352,7 +351,7 @@ impl ExecutionV3ParameterRecord {
         }
         let [min_hits, ceiling, pair_budget, _policy] = self.run_params;
         if !matches!(self.range_policy_tag, 1 | 2)
-            || !matches!(self.selector_policy_tag, 1..=3)
+            || !matches!(self.selector_policy_tag, 1..=4)
             || self.rung == 0
             || self.horizon_bars == 0
             || min_hits == 0
@@ -1513,16 +1512,20 @@ impl PreparedExecutionV3 {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "ONE struct literal, 44 fields named once each in declaration \
-              order. The length is the record's width, not branching: there are \
-              no early returns and the eight `match` arms are per-field \
-              conversions. Splitting it would put fields that must agree with \
-              the on-disk stride into two functions, and the stride is checked \
-              against the writer in one place precisely so it can be READ in one \
-              place"
-)]
+/// The one-based selector tag this codec stores. The validator admits exactly
+/// the tags this function returns, and the test
+/// `every_exit_grid_selector_tag_the_encoder_writes_is_admitted` walks every
+/// selector through both. W2-cli4-1, `docs/04-invariants.md` C4-CLI-03-01.
+const fn selector_policy_tag(selector: ExitGridSelectorV1) -> u8 {
+    match selector {
+        ExitGridSelectorV1::PessimisticTotal => 1,
+        ExitGridSelectorV1::EdgeThenPessimistic => 2,
+        ExitGridSelectorV1::GuaranteedFloor => 3,
+        // APPENDED AS 4; the three above keep their numbers. D-0594.
+        ExitGridSelectorV1::OperatorRule => 4,
+    }
+}
+
 fn parameter_from_population_source(
     receipt: &crate::population_v5::PopulationV5StructuralReceipt,
     facts: &CandidateExecutionParameterFactsV1,
@@ -1534,13 +1537,7 @@ fn parameter_from_population_source(
         RangeResolutionV1::PpmFloor => 1,
         RangeResolutionV1::PpmCeiling => 2,
     };
-    let selector_policy_tag = match facts.selector {
-        ExitGridSelectorV1::PessimisticTotal => 1,
-        ExitGridSelectorV1::EdgeThenPessimistic => 2,
-        ExitGridSelectorV1::GuaranteedFloor => 3,
-        // APPENDED AS 4; the three above keep their numbers. D-0594.
-        ExitGridSelectorV1::OperatorRule => 4,
-    };
+    let selector_policy_tag = selector_policy_tag(facts.selector);
     let forced_stop_policy_tag = match facts.forced_stop {
         ForcedStopV1::Disabled => FORCED_STOP_DISABLED_TAG,
         ForcedStopV1::IncludeExactObserved(_) => FORCED_STOP_INCLUDE_TAG,
@@ -1991,6 +1988,37 @@ impl ExecutionV3Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("Execution V3 root changed while child files opened".to_owned());
             }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock, as Execution V4 does (D-1910). The bytes past
+                // the last whole record were never acknowledged; a whole record
+                // is never cut. Readers still refuse the ragged length.
+                for (file, path, stride) in [
+                    (
+                        &parameter_file,
+                        &parameter_path,
+                        EXECUTION_V3_PARAMETER_BYTES,
+                    ),
+                    (
+                        &percentile_file,
+                        &percentile_path,
+                        EXECUTION_V3_PERCENTILE_BYTES,
+                    ),
+                    (
+                        &disposition_file,
+                        &disposition_path,
+                        EXECUTION_V3_DISPOSITION_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        EXECUTION_V3_COMPLETION_BYTES,
+                    ),
+                ] {
+                    let stride = usize_to_u64(stride, "heal stride")?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let parameter_generation =
                 file_generation(&parameter_file, &parameter_path, bounds.parameters.bytes)?;
@@ -2219,7 +2247,7 @@ impl ExecutionV3Ledger {
         if let Some(existing) = self.receipts.get(&prepared.population_id).copied() {
             return self.reuse_existing(prepared, existing);
         }
-        let trailing = self.trailing.clone().unwrap_or(TrailingExecutionV3 {
+        let mut trailing = self.trailing.clone().unwrap_or(TrailingExecutionV3 {
             first_parameter_record: self.parameter_records,
             first_percentile_record: self.percentile_records,
             first_disposition_record: self.disposition_records,
@@ -2227,32 +2255,34 @@ impl ExecutionV3Ledger {
             percentiles: Vec::new(),
             dispositions: Vec::new(),
         });
-        Self::require_exact_prefix(prepared, &trailing)?;
+        if let Err(foreign) = Self::require_exact_prefix(prepared, &trailing) {
+            // A RECEIPT-LESS TAIL THAT IS NOT THIS EXACT RETRY IS SCRATCH
+            // (pop2-4, ledgerall-1, D-2556): no Completion acknowledged it,
+            // and refusing every other block because of it wedged the rung
+            // once a rebuild or new data changed the identity.
+            self.discard_trailing(&trailing, &foreign)?;
+            trailing = TrailingExecutionV3 {
+                first_parameter_record: self.parameter_records,
+                first_percentile_record: self.percentile_records,
+                first_disposition_record: self.disposition_records,
+                parameters: Vec::new(),
+                percentiles: Vec::new(),
+                dispositions: Vec::new(),
+            };
+        }
         self.require_append_bound(prepared, &trailing)?;
 
         self.append_parameter_suffix(prepared, trailing.parameters.len())?;
-        self.parameters
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V3 parameters: {why}"))?;
         self.parameters.refresh()?;
         self.parameter_records = self.parameters.record_count()?;
         self.require_unchanged()?;
 
         self.append_percentile_suffix(prepared, trailing.percentiles.len())?;
-        self.percentiles
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V3 percentiles: {why}"))?;
         self.percentiles.refresh()?;
         self.percentile_records = self.percentiles.record_count()?;
         self.require_unchanged()?;
 
         self.append_disposition_suffix(prepared, trailing.dispositions.len())?;
-        self.dispositions
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V3 dispositions: {why}"))?;
         self.dispositions.refresh()?;
         self.disposition_records = self.dispositions.record_count()?;
         self.require_unchanged()?;
@@ -2324,6 +2354,38 @@ impl ExecutionV3Ledger {
         sync_directory(&self.root_file, &self.root)?;
         self.require_unchanged()?;
         Ok(ExecutionV3StructuralCommit::Reused(existing))
+    }
+
+    /// Cuts each of the three record files back to where `trailing` began,
+    /// under the append lock, with a `cli.ledger` warn event per file cut.
+    fn discard_trailing(
+        &mut self,
+        trailing: &TrailingExecutionV3,
+        why: &str,
+    ) -> Result<(), ExecutionV3Refusal> {
+        for (held, first) in [
+            (&mut self.parameters, trailing.first_parameter_record),
+            (&mut self.percentiles, trailing.first_percentile_record),
+            (&mut self.dispositions, trailing.first_disposition_record),
+        ] {
+            let at = first
+                .checked_mul(held.stride as u64)
+                .ok_or_else(|| format!("Execution V3 {} offset overflowed", held.name))?;
+            if held.generation.len > at {
+                crate::fixed_tail::discard_orphan(
+                    &held.file,
+                    &held.path,
+                    at,
+                    &format!("an Execution V3 block that is not this exact retry ({why})"),
+                )?;
+                held.refresh()?;
+            }
+        }
+        self.parameter_records = self.parameters.record_count()?;
+        self.percentile_records = self.percentiles.record_count()?;
+        self.disposition_records = self.dispositions.record_count()?;
+        self.trailing = None;
+        Ok(())
     }
 
     fn require_exact_prefix(
@@ -2405,12 +2467,19 @@ impl ExecutionV3Ledger {
         prepared: &PreparedExecutionV3,
         start: usize,
     ) -> Result<(), ExecutionV3Refusal> {
-        for record in prepared.parameters.get(start..).ok_or_else(|| {
+        let records = prepared.parameters.get(start..).ok_or_else(|| {
             format!("Execution V3 parameter suffix start {start} is outside the block")
-        })? {
-            append_raw(&mut self.parameters.file, &record.encode()?)?;
-        }
-        Ok(())
+        })?;
+        // One block, one barrier: a failed write or barrier cuts every record
+        // this call wrote, so no unconfirmed orphan is left for a retry to
+        // "confirm" from the page cache (D-1900, sel-1).
+        crate::fixed_tail::append_block(
+            &mut self.parameters.file,
+            &self.parameters.path,
+            records.iter().map(ExecutionV3ParameterRecord::encode),
+            File::sync_data,
+        )
+        .map(|_| ())
     }
 
     fn append_percentile_suffix(
@@ -2418,12 +2487,19 @@ impl ExecutionV3Ledger {
         prepared: &PreparedExecutionV3,
         start: usize,
     ) -> Result<(), ExecutionV3Refusal> {
-        for record in prepared.percentiles.get(start..).ok_or_else(|| {
+        let records = prepared.percentiles.get(start..).ok_or_else(|| {
             format!("Execution V3 percentile suffix start {start} is outside the block")
-        })? {
-            append_raw(&mut self.percentiles.file, &record.encode()?)?;
-        }
-        Ok(())
+        })?;
+        // One block, one barrier: a failed write or barrier cuts every record
+        // this call wrote, so no unconfirmed orphan is left for a retry to
+        // "confirm" from the page cache (D-1900, sel-1).
+        crate::fixed_tail::append_block(
+            &mut self.percentiles.file,
+            &self.percentiles.path,
+            records.iter().map(ExecutionV3PercentileRecord::encode),
+            File::sync_data,
+        )
+        .map(|_| ())
     }
 
     fn append_disposition_suffix(
@@ -2431,12 +2507,19 @@ impl ExecutionV3Ledger {
         prepared: &PreparedExecutionV3,
         start: usize,
     ) -> Result<(), ExecutionV3Refusal> {
-        for record in prepared.dispositions.get(start..).ok_or_else(|| {
+        let records = prepared.dispositions.get(start..).ok_or_else(|| {
             format!("Execution V3 disposition suffix start {start} is outside the block")
-        })? {
-            append_raw(&mut self.dispositions.file, &record.encode()?)?;
-        }
-        Ok(())
+        })?;
+        // One block, one barrier: a failed write or barrier cuts every record
+        // this call wrote, so no unconfirmed orphan is left for a retry to
+        // "confirm" from the page cache (D-1900, sel-1).
+        crate::fixed_tail::append_block(
+            &mut self.dispositions.file,
+            &self.dispositions.path,
+            records.iter().map(ExecutionV3DispositionRecord::encode),
+            File::sync_data,
+        )
+        .map(|_| ())
     }
 
     fn append_completion(
@@ -2452,11 +2535,12 @@ impl ExecutionV3Ledger {
             first_percentile_record,
             first_disposition_record,
         )?;
-        append_raw(&mut self.completions.file, &completion.encode()?)?;
-        self.completions
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Execution V3 Completion: {why}"))?;
+        crate::fixed_tail::append_block(
+            &mut self.completions.file,
+            &self.completions.path,
+            [completion.encode()],
+            File::sync_data,
+        )?;
         sync_directory(&self.root_file, &self.root)?;
         self.completions.refresh()?;
         self.completion_records = self.completions.record_count()?;
@@ -2564,6 +2648,11 @@ impl ExecutionV3Ledger {
         self.require_unchanged()
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     fn authenticated_disposition(
         &mut self,
         receipt: ExecutionV3StructuralReceipt,
@@ -2693,6 +2782,11 @@ impl ExecutionV3Authority {
         self.receipt
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) fn authenticated_disposition(
         &mut self,
         global_sequence: u64,
@@ -2773,6 +2867,11 @@ impl ExecutionV3SuccessorDisposition {
     }
 
     #[must_use]
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn parameter_id(&self) -> [u8; 32] {
         self.record.parameter_id
     }
@@ -4048,12 +4147,6 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
-fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), ExecutionV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Execution V3 fixed record: {why}"))
-}
-
 fn bounded_vec<T>(count: u64, max: u64, name: &str) -> Result<Vec<T>, ExecutionV3Refusal> {
     if count > max {
         return Err(format!(
@@ -4369,6 +4462,7 @@ impl<'a> FixedReader<'a> {
     reason = "private fixed-record tests fail fixture setup loudly and intentionally inspect exact canonical slots"
 )]
 mod tests {
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(unix)]
@@ -4377,6 +4471,68 @@ mod tests {
     use super::*;
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+
+    /// `docs/02-store-format.md` §31 states the Execution V3 records this build
+    /// writes: one row per file naming its magic, domain and stride, the
+    /// layout number, and the fingerprint width the parameter table assumes.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_execution_v3_layout_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 31. Execution V3 authority")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — record layout {VERSION}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = |magic: [u8; 16]| String::from_utf8_lossy(&magic).replace('\0', "\\0");
+        let thousands = |bytes: usize| {
+            if bytes >= 1_000 {
+                format!("{},{:03}", bytes / 1_000, bytes % 1_000)
+            } else {
+                bytes.to_string()
+            }
+        };
+        for (file, magic, domain, stride) in [
+            (
+                PARAMETER_FILE,
+                PARAMETER_MAGIC,
+                PARAMETER_DOMAIN,
+                EXECUTION_V3_PARAMETER_BYTES,
+            ),
+            (
+                PERCENTILE_FILE,
+                PERCENTILE_MAGIC,
+                PERCENTILE_DOMAIN,
+                EXECUTION_V3_PERCENTILE_BYTES,
+            ),
+            (
+                DISPOSITION_FILE,
+                DISPOSITION_MAGIC,
+                DISPOSITION_DOMAIN,
+                EXECUTION_V3_DISPOSITION_BYTES,
+            ),
+            (
+                COMPLETION_FILE,
+                COMPLETION_MAGIC,
+                COMPLETION_DOMAIN,
+                EXECUTION_V3_COMPLETION_BYTES,
+            ),
+        ] {
+            let row = format!(
+                "| `{file}` | `{}` | {domain} | {} |",
+                shown(magic),
+                thousands(stride)
+            );
+            assert!(section.contains(&row), "§31 lacks the row {row}");
+        }
+        assert!(section.contains(&format!("| `{LOCK_FILE}` | none; must be empty |")));
+        assert!(section.contains(&format!("| 16 | 4 | layout `{VERSION}`, `u32` |")));
+        assert!(section.contains(&format!(
+            "| 536 | {EVALUATION_FINGERPRINT_BYTES} | evaluation fingerprint |"
+        )));
+        assert!(section.contains(&format!("| stride − {SEAL_BYTES} | {SEAL_BYTES} | seal |")));
+    }
 
     struct TestRoot {
         path: PathBuf,
@@ -4682,6 +4838,53 @@ mod tests {
         parameter.parameter_core_id = parameter.derive_core_id();
         parameter.parameter_id = parameter.derive_parameter_id();
         parameter
+    }
+
+    /// W2-cli4-1, C4-CLI-03-01: the encoder writes tag 4 for `OperatorRule` (D-0594),
+    /// and the validator used to admit only 1..=3, so every `OperatorRule`
+    /// parameter was refused as "a zero required bound/policy". Every selector
+    /// the encoder can name must validate and survive a decode; the tags on
+    /// either side of the table must not.
+    #[test]
+    fn every_exit_grid_selector_tag_the_encoder_writes_is_admitted() {
+        let base = prepared(91)
+            .parameters
+            .first()
+            .expect("fixture has a parameter")
+            .clone();
+        // AS-09 (P12-04, D-1793): every tag pinned BY VALUE. Only
+        // `OperatorRule => 4` was, so a coordinated shift of the other three
+        // in the encoder and the validator passed this test.
+        for (selector, tag) in [
+            (ExitGridSelectorV1::PessimisticTotal, 1_u8),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 2),
+            (ExitGridSelectorV1::GuaranteedFloor, 3),
+            (ExitGridSelectorV1::OperatorRule, 4),
+        ] {
+            assert_eq!(selector_policy_tag(selector), tag, "{selector:?}");
+            let mut parameter = base.clone();
+            parameter.selector_policy_tag = tag;
+            let parameter = reidentify_parameter(parameter);
+            let validated = parameter.validate();
+            assert!(
+                validated.is_ok(),
+                "{selector:?} must validate: {validated:?}"
+            );
+            let raw = parameter.encode().expect("parameter encode");
+            assert_eq!(
+                ExecutionV3ParameterRecord::decode(&raw).expect("parameter decode"),
+                parameter,
+                "{selector:?} must survive a decode"
+            );
+        }
+        for outside in [0, 5] {
+            let mut parameter = base.clone();
+            parameter.selector_policy_tag = outside;
+            assert!(
+                reidentify_parameter(parameter).validate().is_err(),
+                "selector tag {outside} names no selector and must be refused"
+            );
+        }
     }
 
     fn rebind_disposition(
@@ -5228,6 +5431,39 @@ mod tests {
         );
     }
 
+    /// sel-1, D-1900: the Execution V3 copy of the same rollback.
+    #[test]
+    fn a_failed_write_or_barrier_in_any_file_is_cut_and_the_rerun_commits() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let prepared = prepared(30);
+        for (name, stride) in [
+            (PARAMETER_FILE, EXECUTION_V3_PARAMETER_BYTES),
+            (PERCENTILE_FILE, EXECUTION_V3_PERCENTILE_BYTES),
+            (DISPOSITION_FILE, EXECUTION_V3_DISPOSITION_BYTES),
+            (COMPLETION_FILE, EXECUTION_V3_COMPLETION_BYTES),
+        ] {
+            for kind in [Kind::Write { keep: stride / 2 }, Kind::Sync] {
+                let root = TestRoot::new("fault-rollback");
+                let armed = Armed::arm(name, kind);
+                let refusal = commit_prepared_for_test(&root.path, bounds(), &prepared)
+                    .err()
+                    .unwrap_or_default();
+                assert!(!Armed::pending(), "{name} {kind:?} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "{name} {kind:?}: {refusal}");
+                let len = std::fs::metadata(root.path.join(name))
+                    .expect("faulted file metadata")
+                    .len();
+                assert_eq!(len % stride as u64, 0, "{name} {kind:?} is whole");
+                ExecutionV3Ledger::open_read(&root.path, bounds())
+                    .expect("the faulted ledger still opens");
+                let rerun = commit_prepared_for_test(&root.path, bounds(), &prepared)
+                    .expect("the exact rerun commits");
+                assert!(rerun.was_written(), "{name} {kind:?}");
+            }
+        }
+    }
+
     #[test]
     fn receipt_last_append_fresh_reopen_and_reuse_are_exact() {
         let root = TestRoot::new("append-reuse");
@@ -5298,22 +5534,52 @@ mod tests {
     }
 
     #[test]
-    fn foreign_or_out_of_order_orphans_are_refused_without_overwrite() {
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let prepared = prepared(80);
+        let root = TestRoot::new("append-rollback");
+        append_exact_prefix(&root.path, &prepared, 2, 0, 0);
+        for (name, width) in [
+            (PARAMETER_FILE, EXECUTION_V3_PARAMETER_BYTES),
+            (PERCENTILE_FILE, EXECUTION_V3_PERCENTILE_BYTES),
+            (DISPOSITION_FILE, EXECUTION_V3_DISPOSITION_BYTES),
+            (COMPLETION_FILE, EXECUTION_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path.join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let committed = commit_prepared_for_test(&root.path, bounds(), &prepared)
+            .expect("the next append continues the exact prefix after the rollback");
+        assert!(committed.was_written());
+        assert_eq!(
+            committed.authority().structural_receipt().population_id(),
+            prepared.population_id
+        );
+        drop(committed);
+        ExecutionV3Ledger::open_read(&root.path, bounds()).expect("the ledger stays readable");
+    }
+
+    /// pop2-4 / ledgerall-1, D-2556: a receipt-less prefix of ANOTHER block
+    /// was never acknowledged, so the writer discards it and commits its own;
+    /// a reader still refuses an out-of-order orphan.
+    #[test]
+    fn a_foreign_orphan_is_discarded_and_an_out_of_order_one_refuses_a_reader() {
         let expected = prepared(50);
         let foreign = prepared(60);
         let foreign_root = TestRoot::new("foreign-prefix");
         append_exact_prefix(&foreign_root.path, &foreign, 1, 0, 0);
-        let before = std::fs::read(foreign_root.path.join(PARAMETER_FILE))
-            .expect("read foreign prefix before");
-        assert!(
-            commit_prepared_for_test(&foreign_root.path, bounds(), &expected).is_err(),
-            "foreign valid prefix must not be overwritten"
-        );
+        let committed = commit_prepared_for_test(&foreign_root.path, bounds(), &expected)
+            .expect("a foreign receipt-less prefix is scratch");
+        assert!(committed.was_written());
         assert_eq!(
-            std::fs::read(foreign_root.path.join(PARAMETER_FILE))
-                .expect("read foreign prefix after"),
-            before
+            committed.authority().structural_receipt().population_id(),
+            expected.population_id
         );
+        drop(committed);
+        ExecutionV3Ledger::open_read(&foreign_root.path, bounds())
+            .expect("the ledger reads with the foreign prefix gone");
 
         let out_of_order = TestRoot::new("out-of-order");
         drop(
@@ -5383,6 +5649,48 @@ mod tests {
             symlink(&target.path, &link).expect("create root symlink");
             assert!(ExecutionV3Ledger::open_write(&link, bounds()).is_err());
         }
+    }
+
+    /// rnew-1, D-4460: a process killed while writing any of the four files
+    /// leaves a sub-record tail. A reader still refuses it; the next writer
+    /// cuts it under its lock, says so once, and keeps every committed record.
+    #[test]
+    fn a_kill_torn_tail_in_any_file_is_cut_by_the_writer_and_history_kept() {
+        let prepared = prepared(70);
+        let root = TestRoot::new("kill-torn");
+        let committed =
+            commit_prepared_for_test(&root.path, bounds(), &prepared).expect("commit fixture");
+        let receipt = committed.authority().structural_receipt();
+        drop(committed);
+        let paths = [
+            PARAMETER_FILE,
+            PERCENTILE_FILE,
+            DISPOSITION_FILE,
+            COMPLETION_FILE,
+        ]
+        .map(|name| root.path.join(name));
+        let strides = [
+            EXECUTION_V3_PARAMETER_BYTES,
+            EXECUTION_V3_PERCENTILE_BYTES,
+            EXECUTION_V3_DISPOSITION_BYTES,
+            EXECUTION_V3_COMPLETION_BYTES,
+        ];
+        let files: Vec<(&Path, u64)> = paths
+            .iter()
+            .zip(strides)
+            .map(|(path, stride)| (path.as_path(), stride as u64))
+            .collect();
+        crate::fixed_tail::attack::torn_tails(
+            &files,
+            &mut || {
+                let ledger = ExecutionV3Ledger::open_read(&root.path, bounds())?;
+                Ok(format!(
+                    "{:?}",
+                    ledger.structural_receipt(&receipt.population_id())?
+                ))
+            },
+            &mut || ExecutionV3Ledger::open_write(&root.path, bounds()).map(drop),
+        );
     }
 
     #[test]

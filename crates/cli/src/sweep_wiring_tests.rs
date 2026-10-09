@@ -18,11 +18,7 @@ fn root() -> PathBuf {
 fn id() -> RunId {
     let key = stored::swept_index("NIFTY").expect("known fixture key");
     identity(&Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the identity API supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         direction: Direction::Undirected,
         instrument: &key,
         timeframe: "1min",
@@ -35,6 +31,7 @@ fn id() -> RunId {
 
 fn options(root: &Path) -> AuditOptions<'_> {
     AuditOptions {
+        fold_support: runner::validate::FoldSupport::Scaled,
         prepared_column: None,
         replay: None,
         execution: None,
@@ -170,11 +167,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
 fn refused_unadmitted_children_never_publish_a_parent_summary() {
     let id = id();
     let scored = runner::rank::Scored {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the public scored type supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 1,
         edge: runner::outcome::Edge::default(),
     };
@@ -297,11 +290,7 @@ fn empty_cold_refused_and_inconsistent_samples_cannot_be_completed_or_resource_h
 fn a_real_candidate_budget_halt_and_certified_completion_keep_opposite_terminal_states() {
     use super::sweep_evidence::Completion;
     let empty = runner::rank::Scored {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the scored type supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 0,
         edge: runner::outcome::Edge::default(),
     }
@@ -366,6 +355,7 @@ fn the_audit_header_is_the_scope_the_caller_supplied() {
             1_400,
             None,
             AuditOptions {
+                fold_support: runner::validate::FoldSupport::Scaled,
                 prepared_column: None,
                 replay: None,
                 execution: None,
@@ -417,6 +407,7 @@ fn generated_audit(
         min_hits,
         None,
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: None,
             execution: None,
@@ -984,4 +975,113 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
     assert!(names_a_rate("(D-06961)"));
     assert!(names_a_rate("Selection V7"));
     assert!(!names_a_rate("(D-0509, D-0525, D-0681) Selection V6"));
+}
+
+/// CE-19, D-1981: a TOP above what `/frontier.json` and `/top` serve is
+/// refused at the writer, and nothing reaches the store.
+#[test]
+fn the_frontier_writer_refuses_a_top_the_api_cannot_serve() {
+    let dir = root();
+    let mut rules = Rules::elite(400, 25);
+    rules.top = crate::frontier::MAX_ROWS + 1;
+    let priced = std::collections::HashMap::with_capacity(1);
+    let refused = super::record_frontier(&dir, &id(), &[], rules, &priced);
+    let why = refused.expect_err("a TOP past the reader bound must be refused");
+    assert!(why.contains("TOP is 4097 and must be 1 to 4096"), "{why}");
+    assert!(!dir.exists(), "a refused TOP wrote under {}", dir.display());
+}
+
+/// CE-19, D-1981: the elite descent refuses a TOP the API cannot serve before
+/// it opens a store, a span or a rung. D-1727's door bound, 1,000, is the
+/// tighter of the two and is the one named (D-1934).
+#[test]
+fn the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read() {
+    let span = ((2024, 1), (2024, 1));
+    let said = crate::elite_descend("zerodha", "NIFTY", "no-such-rung", span.0, span.1, 0, 4_097);
+    assert!(said.contains("TOP must be 1000 or fewer"), "{said}");
+    let said = crate::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, 1, 4_097);
+    assert!(said.contains("TOP must be 1000 or fewer"), "{said}");
+}
+
+/// GAP11-3: `record_unadmitted` published its frontier, receipt and ledger
+/// row with neither the process-wide `LEDGER` mutex nor the cross-process
+/// result-set lock, and with no directory barrier before the ledger row. Every
+/// other result-set commit holds both locks and confirms the directory first.
+/// A writer holding the result-set lock must keep this commit from writing a
+/// single child until it releases. D-1745.
+#[test]
+fn an_unadmitted_commit_waits_for_the_result_set_writer_lock() {
+    let id = id();
+    let scored = runner::rank::Scored {
+        mask: vocab::ConditionMask::default(),
+        hits: 1,
+        edge: runner::outcome::Edge::default(),
+    };
+    let sweep = engine::keep::Streamed::default();
+    let priced = std::collections::HashMap::new();
+    let retained = [&scored];
+    let what = super::Unadmitted {
+        sweep: &sweep,
+        bars: 1,
+        min_hits: 1,
+        by_evidence: &retained,
+        rules: Rules::BASELINE,
+        priced: &priced,
+    };
+    let root = root();
+    let held = super::ResultSetLock::acquire(&root).expect("the competing writer locks");
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let into = options(&root).recording.expect("fixture recording target");
+            done_tx
+                .send(super::record_unadmitted(into, &id, &what))
+                .expect("the waiting test receives the outcome");
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the unadmitted commit finished while another writer held the result set"
+        );
+        assert!(
+            !super::frontier::Frontier::path(&root).exists(),
+            "no child was prepared under another writer's lock"
+        );
+        assert!(!super::results::Results::path(&root).exists());
+        held.0.release().expect("the competing writer unlocks");
+        let report = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the commit proceeds once the lock is free")
+            .expect("the unadmitted commit records");
+        assert!(report.contains("No final screened candidate was admitted"));
+    });
+    assert!(super::results::Results::path(&root).is_file());
+    assert!(super::frontier::Frontier::path(&root).is_file());
+}
+
+/// The unadmitted commit names both locks before its first child and the
+/// directory barrier between its receipt and its ledger row, in that order.
+#[test]
+fn the_unadmitted_commit_takes_both_locks_and_the_directory_barrier_in_order() {
+    let source = include_str!("lib.rs");
+    let body = source
+        .split_once("\nfn record_unadmitted(")
+        .and_then(|(_, after)| after.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .expect("record_unadmitted remains one function");
+    let at = |needle: &str| {
+        body.find(needle)
+            .expect("record_unadmitted names every step")
+    };
+    let order = [
+        at("LEDGER.lock()"),
+        at("ResultSetLock::acquire(into.root)"),
+        at("record_frontier("),
+        at("ensure_detail_receipt("),
+        at("confirm_result_directory(into.root)"),
+        at("record_swept_run("),
+        at(".release()"),
+    ];
+    assert!(order.is_sorted(), "persistence order {order:?}");
 }

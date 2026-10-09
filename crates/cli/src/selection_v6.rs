@@ -13,14 +13,20 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::execution_v4::CommittedStoredExecutionV4;
 use runner::topn::{RankedCandidate, RankingPolicyV1};
 
+#[path = "selection_v6_read.rs"]
+mod read;
 #[path = "selection_v6_source.rs"]
 mod source;
+pub use read::{
+    SELECTION_V6_EQUITY_REFUSAL, StoredSelectionV6Family, StoredSelectionV6Record,
+    StoredSelectionV6Rung, StoredSelectionV6Winner, read_stored_selection_v6, selection_v6_family,
+};
 use source::{Prepared, Winner};
 
 pub(crate) const SELECTION_V6_BLOCK_BYTES: usize = 16_384;
@@ -82,14 +88,15 @@ pub(crate) struct CommittedStoredSelectionV6 {
 }
 
 impl CommittedStoredSelectionV6 {
+    /// The authenticated Top-25 and the block it was proven against.
+    ///
+    /// `snapshot` read the Top-25, then prepared the source a third time and
+    /// scanned the committed file a second time to take the envelope from a
+    /// block it had just proven (W2-cli14-2, D-1848). The envelope is now cut
+    /// from the block the Top-25 read already proved committed, between its
+    /// two equal preparations: two preparations and one scan per snapshot.
     pub(crate) fn snapshot(&mut self) -> Result<SelectionV6Snapshot, String> {
-        let winners = self.top_twenty_five()?;
-        let prepared = Prepared::from_execution(&mut self.source, self.policy)?;
-        let block = prepared.block()?;
-        if prepared.identity()? != self.identity {
-            return Err("Selection V6 snapshot changed identity".to_owned());
-        }
-        require_committed(&self.root, self.bounds, &block)?;
+        let (winners, block) = self.authenticated()?;
         let envelope = block
             .get(..960)
             .ok_or("Selection V6 envelope bounds")?
@@ -139,6 +146,12 @@ impl CommittedStoredSelectionV6 {
 
     /// Reproduces source and ranking before and after a freshly opened record.
     pub(crate) fn top_twenty_five(&mut self) -> Result<Vec<SelectionV6Winner>, String> {
+        Ok(self.authenticated()?.0)
+    }
+
+    /// [`Self::top_twenty_five`] and the committed block it proved, so a
+    /// snapshot needs no third preparation and no second scan. D-1848.
+    fn authenticated(&mut self) -> Result<(Vec<SelectionV6Winner>, Block), String> {
         let before = Prepared::from_execution(&mut self.source, self.policy)?;
         if before.identity()? != self.identity {
             return Err("Selection V6 retained source now identifies another selection".to_owned());
@@ -148,12 +161,13 @@ impl CommittedStoredSelectionV6 {
         if after != before {
             return Err("Selection V6 source changed during authoritative winner read".to_owned());
         }
-        before
+        let winners = before
             .winners
             .iter()
             .enumerate()
             .map(|(rank, winner)| public_winner(rank, winner))
-            .collect()
+            .collect::<Result<_, _>>()?;
+        Ok((winners, before.block()?))
     }
 
     /// Exact actual prefix of the same authenticated Top-25.
@@ -228,10 +242,7 @@ fn open(root: &Path, writable: bool) -> Result<(File, PathBuf), String> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100);
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        options.custom_flags(0x20_000);
+        options.custom_flags(store::open_flags::O_NOFOLLOW);
     }
     let file = options
         .open(&path)
@@ -244,7 +255,12 @@ fn open(root: &Path, writable: bool) -> Result<(File, PathBuf), String> {
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.nlink() != 1 {
-            return Err("Selection V6 refuses aliased hard-linked files".to_owned());
+            return Err(format!(
+                "Selection V6 refuses aliased hard-linked file {} ({} links); remove \
+                 the other hard link to it (CE-40, D-1769)",
+                path.display(),
+                metadata.nlink()
+            ));
         }
     }
     crate::result_set::file_generation(&file, &path)?;
@@ -305,15 +321,15 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
     file.lock().map_err(|why| why.to_string())?;
     let result = (|| {
         let (len, found) = scan(&mut file, &path, bounds, expected)?;
+        let first = len - len % BLOCK_BYTES;
         if found {
             if len % BLOCK_BYTES != 0 {
-                return Err("Selection V6 has an incomplete trailing block".to_owned());
+                set_aside_abandoned_tail(&mut file, root, first, len)?;
             }
             file.sync_all().map_err(|why| why.to_string())?;
             sync_directory(root)?;
             return Ok(false);
         }
-        let first = len - len % BLOCK_BYTES;
         if first / BLOCK_BYTES >= bounds.records
             || first
                 .checked_add(BLOCK_BYTES)
@@ -321,7 +337,8 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
         {
             return Err("Selection V6 has no space inside declared record bounds".to_owned());
         }
-        let partial = usize::try_from(len % BLOCK_BYTES).map_err(|why| why.to_string())?;
+        let mut partial = usize::try_from(len % BLOCK_BYTES).map_err(|why| why.to_string())?;
+        let mut len = len;
         if partial != 0 {
             let mut prefix = [0; SELECTION_V6_BLOCK_BYTES];
             file.seek(SeekFrom::Start(first))
@@ -331,13 +348,17 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
                 .ok_or("Selection V6 prefix bound")?;
             file.read_exact(prefix).map_err(|why| why.to_string())?;
             if Some(&*prefix) != expected.get(..partial) {
-                return Err(
-                    "Selection V6 incomplete prefix belongs to different source; nothing repaired"
-                        .to_owned(),
-                );
+                // ANOTHER SOURCE'S UNSEALED TAIL. It was never authority, and
+                // leaving it in place wedged the rung for every other source.
+                // It is moved aside whole, under this exclusive lock, before
+                // anything is appended (D-1569).
+                set_aside_abandoned_tail(&mut file, root, first, len)?;
+                partial = 0;
+                len = first;
             }
         }
-        // Reuse only the exact acknowledged prefix; never truncate or replace.
+        // Reuse only the exact acknowledged prefix; a foreign unsealed tail was
+        // moved aside above, and committed blocks are never touched.
         file.seek(SeekFrom::Start(len))
             .map_err(|why| why.to_string())?;
         if partial < SEAL_AT {
@@ -361,6 +382,102 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
     result.and_then(|value| released.map(|()| value))
 }
 
+/// Moves an interrupted writer's unsealed tail, `committed..len`, into
+/// `<file>.abandoned-<committed>-<blake3 of the tail>` and cuts it from the
+/// ledger. audit-20261003 hunt-cli-a-5, D-1569; conc4-1, D-2554.
+///
+/// The bytes are copied and synced, with their directory, BEFORE the ledger
+/// is shortened, so a crash between the two leaves the tail in both places
+/// rather than in neither. Committed sealed blocks, `..committed`, are never
+/// rewritten. The copy is written under a scratch name, synced, and only then
+/// renamed to a name keyed by the tail's CONTENT as well as its offset, so a
+/// torn or failed copy never sits under a final name, and a second abandoned
+/// tail at the same offset gets its own quarantine rather than wedging the
+/// rung against the first. A failed copy removes its scratch file. The move is
+/// named in the log, so the repair is never silent.
+///
+/// NAMED BY OFFSET AND CONTENT. The committed length moves only when a block
+/// commits, so two interrupted writes with no commit between them land at one
+/// offset: an offset-only name made the second quarantine collide with the
+/// first and wedged every later persist (CE-88, D-2790).
+fn set_aside_abandoned_tail(
+    file: &mut File,
+    root: &Path,
+    committed: u64,
+    len: u64,
+) -> Result<(), String> {
+    // ONE SUBTRACTION, read by the cut and the event alike: a second copy in
+    // the event alone was a figure no test can observe (G18-cli-b-19, D-2027).
+    let tail_bytes = len - committed;
+    let tail_len = usize::try_from(tail_bytes).map_err(|why| why.to_string())?;
+    let mut tail = vec![0; tail_len];
+    file.seek(SeekFrom::Start(committed))
+        .map_err(|why| why.to_string())?;
+    file.read_exact(&mut tail).map_err(|why| why.to_string())?;
+    let digest = brutex_core::blake3::hash(&tail);
+    let hex = digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}"));
+    let scratch = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}.writing"));
+    // A STALE SCRATCH IS UNLINKED, NEVER OPENED, and the new one is made with
+    // `create_new`, so no FIFO, device or link at that name is ever opened or
+    // waited on under the ledger's lock (CE-65, D-2684, carried to the scratch
+    // name by conc4-1). A directory there refuses below by name.
+    let stale = match std::fs::remove_file(&scratch) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    let copied = stale
+        .and_then(|()| {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&scratch)
+        })
+        .and_then(|mut out| {
+            crate::fixed_tail::write_at_end(
+                &mut out,
+                &scratch.display(),
+                0,
+                &tail,
+                Write::write_all,
+            )
+            .map_err(std::io::Error::other)?;
+            crate::fixed_tail::sync_all_hooked(&out, &scratch)
+        })
+        .and_then(|()| std::fs::rename(&scratch, &aside));
+    if let Err(why) = copied {
+        let removed = match std::fs::remove_file(&scratch) {
+            Err(gone) if gone.kind() != std::io::ErrorKind::NotFound => {
+                format!(
+                    "; removing scratch {} also failed: {gone}",
+                    scratch.display()
+                )
+            }
+            _ => String::new(),
+        };
+        return Err(format!(
+            "Selection V6 abandoned tail quarantine {}: {why}{removed}; the ledger was not changed",
+            aside.display()
+        ));
+    }
+    sync_directory(root)?;
+    file.set_len(committed).map_err(|why| why.to_string())?;
+    file.sync_all().map_err(|why| why.to_string())?;
+    crate::note(
+        &telemetry::Event::warn("cli.selection_v6", "abandoned unsealed tail set aside")
+            .with("committed_bytes", committed)
+            .with("tail_bytes", tail_bytes)
+            .with("quarantine", aside.display().to_string().as_str()),
+    );
+    Ok(())
+}
+
 fn sync_directory(root: &Path) -> Result<(), String> {
     File::open(root)
         .and_then(|directory| directory.sync_all())
@@ -374,11 +491,13 @@ fn require_committed(
 ) -> Result<(), String> {
     let (mut file, path) = open(root, false)?;
     file.lock_shared().map_err(|why| why.to_string())?;
-    let checked = scan(&mut file, &path, bounds, expected).and_then(|(len, found)| {
-        if len % BLOCK_BYTES != 0 || !found {
-            Err("Selection V6 is incomplete or lacks the requested exact block".to_owned())
-        } else {
+    // An unsealed trailing partial block is never authority, and it no longer
+    // hides the committed blocks before it (D-1569).
+    let checked = scan(&mut file, &path, bounds, expected).and_then(|(_, found)| {
+        if found {
             Ok(())
+        } else {
+            Err("Selection V6 lacks the requested exact committed block".to_owned())
         }
     });
     let released = file.unlock().map_err(|why| why.to_string());

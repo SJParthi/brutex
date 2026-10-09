@@ -3,7 +3,7 @@
 //!
 //! # What was unproven
 //!
-//! This crate holds nine emit sites and, until this module, not one of them
+//! This crate holds eleven emit sites and, until this module, not one of them
 //! was asserted to reach a file. Each could have been deleted outright — the
 //! whole body replaced with `()` — and `cargo test`, `cargo clippy` and the
 //! mutation gate would all have stayed green, because nothing anywhere read
@@ -11,22 +11,24 @@
 //! untested branch is worth, which is what `CLAUDE.md` §4's ban on a test that
 //! asserts nothing says in the other direction.
 //!
-//! It is worse than an ordinary coverage hole. Eight of these nine fire only
+//! It is worse than an ordinary coverage hole. Ten of these eleven fire only
 //! once something has already gone wrong — a header region of zeros, a commit
 //! walked back a generation, a block whose bytes are not the bytes that were
 //! sealed, an append that died before its header slot reached the disk, a lock
-//! whose unlock the host refused — so the run that needs them is the run nobody
-//! can repeat afterwards. A line that was never proved to be written is not
-//! evidence.
+//! whose unlock the host refused, a month with no usable time index — so the
+//! run that needs them is the run nobody can repeat afterwards. A line that was
+//! never proved to be written is not evidence.
 //!
-//! Four of those eight are not refusals. `store.open` **accepts** the month and
+//! Six of those ten are not refusals. `store.open` **accepts** the month and
 //! names the damage. Since D-0688 the `store.block` interrupted-append line
 //! accepts a tail block whose entry was sealed past the commit and names the
 //! append that died. The `store.header` fall-back returns an older committed
-//! generation's header and names the newer one it rejected. Those three hand
-//! back working data, so the line is the only trace there is. The fourth is
+//! generation's header and names the newer one it rejected. Since D-2329 the
+//! two `store.tix` lines name a month whose time lookup bisects and a month
+//! whose time index a writer rebuilt from its bars. Those five hand
+//! back working data, so the line is the only trace there is. The sixth is
 //! `store.flock` (D-0693): it fires from a `Drop`, which cannot hand anybody
-//! anything. Those are the four sites in this crate whose deletion is
+//! anything. Those are the six sites in this crate whose deletion is
 //! invisible from outside the log. The other four hand the caller a
 //! `FormatError` as well as writing a line, so a lost emit still leaves a
 //! trace somewhere: the unreadable header, the refused commit, the block with
@@ -215,14 +217,15 @@ enum Handed {
     Success,
 }
 
-/// `n` as the header spells it, for the nine sites and the tallies of them.
+/// `n` as the header spells it, for the eleven sites and the tallies of them.
 fn spelt(n: usize) -> &'static str {
     [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven",
     ]
     .get(n)
     .copied()
-    .unwrap_or_else(|| panic!("the header spells no count above nine, got {n}"))
+    .unwrap_or_else(|| panic!("the header spells no count above eleven, got {n}"))
 }
 
 /// [`spelt`] opening a sentence.
@@ -266,7 +269,8 @@ fn drive_header_unreadable(_root: &Path) -> Handed {
 /// so `read_region` walks back to generation 0 instead of condemning the file,
 /// which is exactly the recovery that used to happen in silence.
 fn drive_header_fell_back(_root: &Path) -> Handed {
-    let genesis = Header::genesis(SYMBOL, 60, 0);
+    // Sealed: version 3 refuses to commit a slot without the flag (D-1571).
+    let genesis = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS);
     let unsupported = genesis
         .advance(1_000, T0, T0 + MINUTE)
         .expect("advancing by 1000 records is arithmetically fine");
@@ -292,7 +296,7 @@ fn drive_header_fell_back(_root: &Path) -> Handed {
 /// site through `commit_image`. The offset is the arm reachable without
 /// hand-building a header state no constructor produces.
 fn drive_commit_refused(_root: &Path) -> Handed {
-    let past_the_end = Header::genesis(SYMBOL, 60, 0)
+    let past_the_end = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
         .advance(u64::MAX, T0, T0)
         .expect("a counter of u64::MAX is arithmetically fine; its offset is not");
     let refused = past_the_end
@@ -304,11 +308,11 @@ fn drive_commit_refused(_root: &Path) -> Handed {
 
 /// A verification asked of a file carrying no checksums: `note_unverifiable`.
 ///
-/// No writer in this workspace sets [`FLAG_CHECKSUMS`] — `docs/04-invariants.md`
-/// S-06 and S-06b — so the operator who first trips this is the one running the
-/// first build that turns checksums on, against files every build before it
-/// wrote. Their file is not corrupt; it predates the flag, and the line is the
-/// only place that distinction survives.
+/// `store::file::initialise` sets [`FLAG_CHECKSUMS`] on every month it
+/// creates, so only a direct `block::verify` of a flag-clear header — a month
+/// an earlier build wrote — trips this; `docs/04-invariants.md` S-06b,
+/// corrected by D-1448. That file is not corrupt; it predates the flag, and the
+/// line is the only place that distinction survives.
 fn drive_block_unverifiable(_root: &Path) -> Handed {
     let plain = Header::genesis(SYMBOL, 60, 0)
         .advance(1, T0, T0)
@@ -478,6 +482,65 @@ fn drive_flock_unlock_refused(root: &Path) -> Handed {
     Handed::Nothing
 }
 
+/// A month with no `.tix`, asked how it looks a timestamp up: the
+/// `store.tix` warning in `crate::file`'s `bisecting`. D-2329.
+///
+/// Empty, so nothing commits and `store.append` stays silent: the writer door
+/// makes the month and its index, the index is taken away, and a READ handle
+/// is asked. `time_lookup` hands back the reason — working data, and the line
+/// is the only other trace of it.
+fn drive_tix_absent(root: &Path) -> Handed {
+    let made = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
+    drop(made);
+    std::fs::remove_file(bars_path().with_file(FileKind::TimeIndex).to_path_buf(root))
+        .expect("the writer door made the index");
+    let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("the month reads");
+    assert_eq!(
+        reader.time_lookup(),
+        crate::file::TimeLookup::Bisection(crate::time_index::Why::Absent)
+    );
+    Handed::Data
+}
+
+/// A month holding bars and no `.tix`, opened by a writer: the `store.tix`
+/// rebuild line in `crate::file`'s `rebuild_index`. D-2329.
+///
+/// The two bars are committed by hand — records, block checksum, header slot,
+/// exactly the bytes `BarFile::append` writes — because an append would fire
+/// `store.append`, a second line for a site this table drives once. Then the
+/// index is taken away and the writer door opens the month: it rebuilds the
+/// index from the bars and the lookup is served by it.
+fn drive_tix_rebuilt(root: &Path) -> Handed {
+    let made = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
+    let (layout, header) = (made.layout(), made.header());
+    let bars = made.path().to_path_buf();
+    drop(made);
+    let mut image = Vec::new();
+    for index in 0..2 {
+        crate::format::Row::write_into(&bar(index), &mut image);
+    }
+    let sum = block::seal(layout, 2, 0, &image).expect("one block of two records");
+    let commit = header
+        .advance(2, bar(0).ts_micros, bar(1).ts_micros)
+        .and_then(|next| next.commit())
+        .expect("two bars after nothing");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&bars)
+        .expect("the month is there");
+    std::os::unix::fs::FileExt::write_all_at(&file, &image, HEADER_LEN).expect("records");
+    std::os::unix::fs::FileExt::write_all_at(&file, &commit.bytes, commit.offset).expect("slot");
+    std::fs::write(bars.with_extension("crc"), sum.to_le_bytes()).expect("the block sum");
+    std::fs::remove_file(bars_path().with_file(FileKind::TimeIndex).to_path_buf(root))
+        .expect("the writer door made the index");
+
+    let writer = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("the month opens");
+    assert_eq!(writer.records(), 2, "the premise: two committed bars");
+    assert_eq!(writer.time_lookup(), crate::file::TimeLookup::Indexed);
+    assert_eq!(writer.first_at_or_after(bar(1).ts_micros), Ok(1));
+    Handed::Data
+}
+
 /// Copies one commit's 64 bytes into the region at the offset it names.
 ///
 /// Written as a zipped walk rather than a slice assignment for the reason
@@ -532,7 +595,7 @@ fn scratch(tag: &str) -> PathBuf {
 ///
 /// At module scope rather than inside the test that walks it, so the table can
 /// grow without the test body growing with it.
-const SITES: [Site; 9] = [
+const SITES: [Site; 11] = [
     Site {
         target: "store.header",
         message: "no committed header",
@@ -586,6 +649,18 @@ const SITES: [Site; 9] = [
         message: "advisory lock not released by its guard",
         level: telemetry::Level::Warn,
         drive: drive_flock_unlock_refused,
+    },
+    Site {
+        target: "store.tix",
+        message: "time lookup falls back to bisection",
+        level: telemetry::Level::Warn,
+        drive: drive_tix_absent,
+    },
+    Site {
+        target: "store.tix",
+        message: "time index rebuilt from the bars",
+        level: telemetry::Level::Info,
+        drive: drive_tix_rebuilt,
     },
 ];
 
@@ -665,7 +740,13 @@ fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
     let handed: Vec<Handed> = SITES
         .iter()
         .enumerate()
-        .map(|(ordinal, site)| (site.drive)(&root.join(format!("site-{ordinal}"))))
+        .map(|(ordinal, site)| {
+            // The store root exists before the writer runs: the writer no
+            // longer creates a missing root (D-1522).
+            let site_root = root.join(format!("site-{ordinal}"));
+            std::fs::create_dir_all(&site_root).expect("a scratch store root");
+            (site.drive)(&site_root)
+        })
         .collect();
 
     let found = telemetry::tail(&dir, sink.keep_files(), &telemetry::Query::last(64));

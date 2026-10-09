@@ -5,8 +5,13 @@
 //! Both laws are closed-form remainders, and this is the module the operator's
 //! "must not scan a calendar" applies to, so it is stated precisely.
 //!
-//! * **Weekly.** `next = on + (target − weekday(on)) mod 7`. One remainder and
-//!   one addition. It does not step forward day by day looking for a Thursday.
+//! * **Weekly.** `next = from + (target − weekday(from)) mod 7`. One remainder
+//!   and one addition per pass. It does not step forward day by day looking for
+//!   a Thursday. A pass whose answer would reach a later row's start moves
+//!   `from` to that start and reads the regime again (D-0770), and `from` only
+//!   moves to a strictly later row start, so there are at most
+//!   `dated::MAX_LATER_ROWS + 1` passes, each one table lookup and one walk of
+//!   the fixed `later` array.
 //! * **Monthly** — "the last `<weekday>` of the calendar month". The month's
 //!   last day comes from [`TradeDay::last_of_its_month`], which starts at the
 //!   28th — a real day of every month — and asks `core`'s calendar about the
@@ -18,7 +23,8 @@
 //! So the cost is bounded by two compile-time constants and by nothing else:
 //! at most **two** month resolutions, each of at most **three** calendar probes,
 //! plus at most **three** table lookups of `dated::MAX_LATER_ROWS`
-//! iterations. No input can raise any of those numbers. There is no loop over
+//! iterations on the monthly path, and at most `dated::MAX_LATER_ROWS + 1`
+//! passes on the weekly one. No input can raise any of those numbers. There is no loop over
 //! days, weeks or months anywhere on the path.
 //!
 //! Three lookups rather than two because the monthly path asks two different
@@ -35,8 +41,10 @@
 //! contract settles on the previous trading day, and this module does not
 //! account for that — exactly as the source does not. It is stated here rather
 //! than left to be discovered: an expiry returned by this module is the
-//! *calendar* expiry, and a holiday calendar is a separate, unbuilt thing.
-//! `docs/06-limits.md` carries it.
+//! *calendar* expiry. The holiday calendar is `pull::calendar`, which this
+//! crate cannot name (`pull` depends on `costs`), so the caller that files
+//! contracts, `pull::rolling::expiry_of`, refuses an expiry it marks closed
+//! (CE-14, D-1769). `docs/06-limits.md` carries it.
 //!
 //! # Why the weekday regime is dated, and where it refuses
 //!
@@ -327,10 +335,11 @@ pub fn monthly_regime(slot: SweptSlot, day: TradeDay) -> Result<Weekday, Refusal
 ///
 /// let nifty = swept_slot(Symbol::new("NIFTY")?)?;
 ///
-/// // 2025-09-01 is a Monday, still in the Thursday regime.
+/// // 2025-09-01 is a Monday, still in the Thursday regime — but its Thursday,
+/// // 2025-09-04, falls in the Tuesday regime, so it is not an expiry.
 /// assert_eq!(
 ///     next_weekly_expiry(nifty, TradeDay::new(2025, 9, 1)?)?,
-///     Some(TradeDay::new(2025, 9, 4)?),
+///     Some(TradeDay::new(2025, 9, 2)?),
 /// );
 /// // 2025-09-02 is the first day of the Tuesday regime, and is a Tuesday.
 /// assert_eq!(
@@ -405,17 +414,48 @@ pub fn next_monthly_expiry(slot: SweptSlot, on: TradeDay) -> Result<TradeDay, Co
 /// Separate from the public entry point so the tests can drive it with a table
 /// whose refusal row is not the anchor — a shape the shipped tables do not have
 /// and which would otherwise leave an arm unreachable and unproven.
+///
+/// # The regime is read at the expiry, not only at the day asked
+///
+/// The answer is the first day on or after `on` whose own regime names its own
+/// weekday. Reading the regime once, at `on`, and projecting its weekday forward
+/// used to cross a row boundary without noticing: NIFTY asked on 2025-08-29
+/// answered 2025-09-04, a Thursday, while the table says the regime from
+/// 2025-09-02 is "weekly on Tue". So each pass takes the regime at `from`, and
+/// when a later row starts on or before that regime's next weekday, it moves
+/// `from` to that row's start and reads again. The pass that finds no row start
+/// in the way answers. A withdrawal or a refusal met on the way is the answer or
+/// the refusal, never a projection across it.
+/// `a_weekly_regime_change_is_read_at_the_expiry_and_not_at_the_day_asked` pins
+/// the two shipped boundaries, and
+/// `every_weekly_answer_is_an_expiry_by_its_own_regime_and_the_answers_never_go_backwards`
+/// states the rule over the whole verified window.
+///
+/// Each pass is one [`DatedTable::value_on`] and one walk of the fixed-size
+/// `later` array, and `from` only ever moves to a strictly later row start, so
+/// the pass count is bounded by the table's fixed row count and by no input.
 fn next_weekly_on(
     table: &DatedTable<WeeklyRegime>,
     on: TradeDay,
 ) -> Result<Option<TradeDay>, CostError> {
-    match table.value_on(on)? {
-        WeeklyRegime::Withdrawn => Ok(None),
-        // One remainder, one addition. `days_until` is inclusive, so a Thursday
-        // asked on a Thursday answers with itself.
-        WeeklyRegime::Expires(target) => on
-            .plus_days(i32::from(on.weekday().days_until(target)))
-            .map(Some),
+    let mut from = on;
+    loop {
+        let WeeklyRegime::Expires(target) = table.value_on(from)? else {
+            return Ok(None);
+        };
+        // `days_until` is inclusive, so a Thursday asked on a Thursday answers
+        // with itself.
+        let days = i32::from(from.weekday().days_until(target));
+        let crossed = table
+            .later
+            .iter()
+            .flatten()
+            .map(|row| row.start)
+            .find(|start| from.before(*start) && start.ordinal() - from.ordinal() <= days);
+        match crossed {
+            Some(start) => from = start,
+            None => return from.plus_days(days).map(Some),
+        }
     }
 }
 
@@ -624,7 +664,9 @@ mod tests {
         for (underlying, (y, m, d), want) in [
             // The Thursday regime's last week, then the Tuesday regime's first
             // day, which is itself a Tuesday.
-            ("NIFTY", (2025, 9, 1), Some((2025, 9, 4))),
+            // W3-costs1-0: the Monday before the boundary is answered by the
+            // new regime's first Tuesday, not by the old regime's Thursday.
+            ("NIFTY", (2025, 9, 1), Some((2025, 9, 2))),
             ("NIFTY", (2025, 9, 2), Some((2025, 9, 2))),
             ("NIFTY", (2025, 9, 3), Some((2025, 9, 9))),
             // BANKNIFTY's last weekly, then the withdrawal.
@@ -632,7 +674,7 @@ mod tests {
             ("BANKNIFTY", (2024, 11, 14), None),
             ("BANKNIFTY", (2025, 6, 1), None),
             // The Thursday-to-Wednesday flip, either side.
-            ("BANKNIFTY", (2023, 9, 3), Some((2023, 9, 7))),
+            ("BANKNIFTY", (2023, 9, 3), Some((2023, 9, 6))),
             ("BANKNIFTY", (2023, 9, 4), Some((2023, 9, 6))),
         ] {
             let got = next_weekly_expiry(slot(underlying), day(y, m, d))
@@ -679,16 +721,22 @@ mod tests {
                         assert_eq!(next_weekly_expiry(subject, today), Ok(None));
                         withdrawn += 1;
                     }
-                    WeeklyRegime::Expires(target) => {
+                    WeeklyRegime::Expires(_) => {
                         let got = next_weekly_expiry(subject, today)
                             .expect("in window")
                             .expect("not withdrawn");
+                        // The regime is re-read at every day walked, so the
+                        // scan stops on the first day whose OWN regime names
+                        // its own weekday (W3-costs1-0), not on the first day
+                        // with the weekday in force when it was asked.
                         let mut want = today;
                         let mut walked = 0u8;
-                        while want.weekday() != target {
+                        while weekly_regime(subject, want)
+                            != Ok(WeeklyRegime::Expires(want.weekday()))
+                        {
                             want = want.plus_days(1).expect("within a week of today");
                             walked += 1;
-                            assert!(walked <= 6, "no {target} within a week of {today}");
+                            assert!(walked <= 6, "no expiry within a week of {today}");
                         }
                         assert_eq!(got, want, "{underlying} on {today}");
                         assert_eq!(got.ordinal() - today.ordinal(), i32::from(walked));
@@ -1265,5 +1313,174 @@ mod tests {
             next_monthly_expiry(slot("BANKNIFTY"), day(2024, 3, 1)),
             Ok(day(2024, 3, 27))
         );
+    }
+
+    #[test]
+    fn a_weekly_regime_change_is_read_at_the_expiry_and_not_at_the_day_asked() {
+        // W3-costs1-0. The NIFTY Tuesday row starts 2025-09-02 and the
+        // BANKNIFTY Wednesday row starts 2023-09-04 (its citation: "the first
+        // Wednesday weekly expired 2023-09-06"). A day asked in the last days of
+        // the old regime used to answer with the old weekday projected past the
+        // boundary: 2025-09-04 and 2023-09-07, dates the table's own regime says
+        // are not expiries.
+        for (underlying, asked, want) in [
+            (
+                "NIFTY",
+                [(2025, 8, 29), (2025, 8, 30), (2025, 8, 31), (2025, 9, 1)],
+                (2025, 9, 2),
+            ),
+            (
+                "BANKNIFTY",
+                [(2023, 9, 1), (2023, 9, 2), (2023, 9, 3), (2023, 9, 4)],
+                (2023, 9, 6),
+            ),
+        ] {
+            let subject = slot(underlying);
+            let want = day(want.0, want.1, want.2);
+            for (y, m, d) in asked {
+                assert_eq!(
+                    next_weekly_expiry(subject, day(y, m, d)),
+                    Ok(Some(want)),
+                    "{underlying} asked {y}-{m}-{d}"
+                );
+            }
+            // The answer is a day whose own regime names its own weekday.
+            assert_eq!(
+                weekly_regime(subject, want),
+                Ok(WeeklyRegime::Expires(want.weekday()))
+            );
+        }
+    }
+
+    #[test]
+    fn every_weekly_answer_is_an_expiry_by_its_own_regime_and_the_answers_never_go_backwards() {
+        // Over the whole verified window on both underlyings: whatever is
+        // returned is a day on which the table's regime names that day's
+        // weekday, and asking one day later never returns an earlier expiry.
+        let last = TradeDay::MAX.ordinal() - 7;
+        let mut checked = 0u32;
+        for underlying in ["NIFTY", "BANKNIFTY"] {
+            let subject = slot(underlying);
+            let mut previous: Option<TradeDay> = None;
+            for today in crate::day::every_representable_day() {
+                if today.before(EXPIRY_VERIFIED_FROM) || today.ordinal() > last {
+                    continue;
+                }
+                let got = next_weekly_expiry(subject, today).expect("inside the window");
+                if let Some(expiry) = got {
+                    assert!(!expiry.before(today), "{underlying} on {today}");
+                    assert_eq!(
+                        weekly_regime(subject, expiry),
+                        Ok(WeeklyRegime::Expires(expiry.weekday())),
+                        "{underlying} asked {today} answered {expiry}"
+                    );
+                    if let Some(before) = previous {
+                        assert!(!expiry.before(before), "{underlying} went back at {today}");
+                    }
+                    checked += 1;
+                }
+                previous = got;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn a_boundary_on_the_old_regimes_expiry_day_is_crossed_and_one_past_it_is_not() {
+        // A table whose Tuesday row starts ON a Thursday: asked the Monday
+        // before, the Thursday is no longer a Thursday-regime day, so the next
+        // expiry is the first Tuesday of the new regime.
+        let table = DatedTable::<WeeklyRegime> {
+            subject: "a weekly regime that changes on its own expiry day",
+            exchange: Some(Exchange::Nse),
+            remediation: "none",
+            anchor: DatedRow::verified(
+                TradeDay::MIN,
+                WeeklyRegime::Expires(Weekday::Thursday),
+                "the anchor",
+            ),
+            later: [
+                Some(DatedRow::verified(
+                    day(2030, 1, 10),
+                    WeeklyRegime::Expires(Weekday::Tuesday),
+                    "the change",
+                )),
+                Some(DatedRow::verified(
+                    day(2030, 2, 1),
+                    WeeklyRegime::Withdrawn,
+                    "the withdrawal",
+                )),
+                Some(DatedRow::unverified(day(2030, 3, 1), "the hole")),
+                None,
+                None,
+            ],
+        };
+        assert!(table.is_shipping_shape());
+        assert_eq!(day(2030, 1, 10).weekday(), Weekday::Thursday);
+        // Monday 2030-01-07: the Thursday is the boundary day itself.
+        assert_eq!(
+            next_weekly_on(&table, day(2030, 1, 7)),
+            Ok(Some(day(2030, 1, 15)))
+        );
+        // Thursday 2030-01-03 is its own expiry, a week before the boundary.
+        assert_eq!(
+            next_weekly_on(&table, day(2030, 1, 3)),
+            Ok(Some(day(2030, 1, 3)))
+        );
+        // Friday 2030-01-04: the old regime's next Thursday IS the boundary.
+        assert_eq!(
+            next_weekly_on(&table, day(2030, 1, 4)),
+            Ok(Some(day(2030, 1, 15)))
+        );
+        // Wednesday 2030-01-09: one day before the boundary, the Thursday would
+        // be the boundary day; the answer is the new regime's first Tuesday.
+        assert_eq!(
+            next_weekly_on(&table, day(2030, 1, 9)),
+            Ok(Some(day(2030, 1, 15)))
+        );
+        // 2030-01-29 is the last Tuesday before the withdrawal on the 1st.
+        assert_eq!(
+            next_weekly_on(&table, day(2030, 1, 29)),
+            Ok(Some(day(2030, 1, 29)))
+        );
+        // Wednesday 2030-01-30: the next Tuesday falls after the withdrawal, so
+        // there is none, rather than a Tuesday the table says did not exist.
+        assert_eq!(next_weekly_on(&table, day(2030, 1, 30)), Ok(None));
+        assert_eq!(next_weekly_on(&table, day(2030, 2, 1)), Ok(None));
+    }
+
+    #[test]
+    fn a_boundary_into_a_refusal_before_the_expiry_is_refused_rather_than_projected() {
+        let table = DatedTable::<WeeklyRegime> {
+            subject: "a weekly regime with a hole in it",
+            exchange: Some(Exchange::Nse),
+            remediation: "fill the hole",
+            anchor: DatedRow::verified(
+                TradeDay::MIN,
+                WeeklyRegime::Expires(Weekday::Thursday),
+                "the anchor",
+            ),
+            later: [
+                Some(DatedRow::unverified(day(2030, 1, 8), "the hole")),
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+        assert!(table.is_shipping_shape());
+        // Thursday 2030-01-03 answers itself; Friday 2030-01-04's Thursday is
+        // 2030-01-10, inside the hole, so the hole's refusal comes out.
+        assert_eq!(
+            next_weekly_on(&table, day(2030, 1, 3)),
+            Ok(Some(day(2030, 1, 3)))
+        );
+        let refusal =
+            next_weekly_on(&table, day(2030, 1, 4)).expect_err("the expiry is in the hole");
+        assert_eq!(
+            refusal,
+            CostError::Unverified(table.value_on(day(2030, 1, 8)).expect_err("the hole"))
+        );
+        assert!(refusal.to_string().contains("the hole"), "{refusal}");
     }
 }

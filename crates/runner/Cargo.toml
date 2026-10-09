@@ -23,11 +23,12 @@ description  = "Drives one sweep: bars in, condition-bit column, Apriori ladder,
 # name a filesystem, and this crate — which also does not — is what carries data
 # between them.
 #
-# NO ARROW TO `store`, DELIBERATELY, AND NOT YET. This crate takes a slice of
-# candles the caller already holds. Reading them from disk is a separate unit
-# with a separate decision, and the operator's standing rule is that neither a
-# vendor pull nor the bars already on disk may be used at all — so the only
-# input this crate has ever been driven with is generated in-process.
+# NO ARROW TO `store`, DELIBERATELY. This crate takes a slice of candles the
+# caller already holds and never reads a file. That is not the same as only
+# ever seeing generated bars: `cli sweep-stored` loads REAL stored bars through
+# `store` and hands them here (CLAUDE.md section 5, D-0208), so `runner` is
+# driven with real market data as well as with `crate::synthetic`. This said
+# the only input it had ever seen was generated in-process until D-1498 (c4a-8).
 [dependencies]
 # A version alongside the path is required: deny.toml sets `wildcards = "deny"`
 # and a path dependency with no version IS a wildcard. The dependency KEY is
@@ -37,15 +38,22 @@ vocab       = { path = "../vocab", version = "0.1.0" }
 indicators  = { path = "../indicators", version = "0.1.0" }
 engine      = { path = "../engine", version = "0.1.0" }
 
-# THE FILL MODEL. `crate::trade` prices every entry and exit through
-# `costs::fill::worst_case_fills` rather than reimplementing a tick of adverse
-# movement here -- that function is the one `COSTS_VERIFIED` checks its examples
-# against, and a second copy of the rule would be a second thing to get wrong.
+# THE FILL MODEL. `crate::trade` and `crate::grid` price every entry and exit
+# through `costs::fill::fills_at` (at `Anchor::Open` and
+# `Anchor::PrintedExtreme`) rather than reimplementing a fill here -- a second
+# copy of the rule would be a second thing to get wrong. NOTHING in this crate
+# charges: `costs::trip::price` is never called, because a spot index places
+# no order and an equity has no charter-sourced charge stack yet, so every
+# figure is gross of every charge (`trade`'s module doc). This named
+# `costs::fill::worst_case_fills`, which nothing here calls, until D-1498, and
+# said trades are charged through `costs::trip::price` until D-1646
+# (ET-strategies-trades-ranking-costs-7).
 #
 # The graph stays acyclic: `costs` declares `brutex_core` and nothing else, so
 # this adds `runner -> costs -> core` beside the `runner -> core` that already
-# exists. CLAUDE.md section 5 does not list `costs` or `runner` at all; D-0095
-# records that gap rather than pretending the drawing is complete.
+# exists. CLAUDE.md section 5 now draws both (`core costs engine indicators
+# vocab <-- runner`); this said it listed neither until D-1498 (c4a-8), and
+# D-0095 records the gap as it was then.
 costs       = { path = "../costs", version = "0.1.0" }
 
 # THE TEN PERFORMANCE CORES THE RANKING NEVER TOUCHED.
@@ -56,11 +64,13 @@ costs       = { path = "../costs", version = "0.1.0" }
 # parallelism over CANDIDATE ENUMERATION is not expressible without a law
 # change. That is still true and this arrow does not attempt one.
 #
-# WHAT IT DOES REACH IS THE OTHER HALF OF THE COST. `rank::walk` calls
-# `outcome::edge` once per frequent itemset and each call is O(bars), so the
+# WHAT IT DOES REACH IS THE OTHER HALF OF THE COST. `rank`'s scoring
+# (`top_of`, fed in parallel chunks by `offer_part`) calls `outcome::edge` once
+# per frequent itemset and each call is O(bars), so the
 # ranking pass is O(|frequent| x bars) -- the largest single cost after the
 # enumeration and, unlike the enumeration, embarrassingly parallel. Nothing in
-# `docs/06-limits.md` claims otherwise; it was simply never spread.
+# `docs/06-limits.md` claims otherwise; it was simply never spread. (This named
+# a `rank::walk`, which does not exist, until D-1498.)
 #
 # GATE 22 PERMITS THIS AND THE GATE SAYS SO ITSELF. `runner` is on `SWEEP` and
 # not on `PINNED`, and the two lists ask different questions: `PINNED` fixes a

@@ -3,6 +3,7 @@
 #![allow(clippy::expect_used, reason = "fixture failures must fail the test")]
 
 use super::*;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn root() -> PathBuf {
@@ -499,6 +500,7 @@ fn real_screen_keeps_nonwinning_candidate_traces_and_actual_cap_across_tiers() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     )
     .expect("real first pricing pass");
     let selected = first.selected.expect("one candidate chosen");
@@ -514,6 +516,7 @@ fn real_screen_keeps_nonwinning_candidate_traces_and_actual_cap_across_tiers() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     )
     .expect("real second pricing pass");
     assert!(!second.admitted_any);
@@ -583,6 +586,7 @@ fn actual_screen_callback_failure_refuses_the_pass_and_never_seals_catalog() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     );
     assert!(result.is_err());
     assert!(capture.finish().is_err());
@@ -624,6 +628,7 @@ fn actual_audit_refuses_a_failed_capture_before_publishing_its_parent() {
         500,
         Some(&id),
         crate::AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: Some(column.clone()),
             replay: None,
             execution: None,
@@ -818,6 +823,489 @@ fn expression_capture_replays_or_not_without_relabelling_the_same_referenced_and
         );
     }
 }
+/// W2-cli5-2, D-1641: a caller-held digest of the same bars writes the same
+/// start record as hashing them per capture, so hoisting the hash out of the
+/// per-candidate path changes no byte; a wrong digest conflicts with it.
+#[test]
+fn a_held_execution_digest_writes_the_same_start_as_hashing_per_capture() {
+    let (bars, column) = fixture();
+    let expression = Expression::parse("0 | !0").expect("predicate");
+    let digest = runner::identity::data_digest(bars);
+    let hashed_root = root();
+    let hashed_attempt = attempt(&hashed_root);
+    let hashed =
+        Capture::begin_expression(&hashed_root, &hashed_attempt, bars, column, &expression)
+            .expect("hashing capture");
+    let held_root = root();
+    let held_attempt = attempt(&held_root);
+    let held = Capture::begin_expression_with_digest(
+        &held_root,
+        &held_attempt,
+        bars,
+        column,
+        &expression,
+        digest,
+    )
+    .expect("held-digest capture");
+    assert_eq!(held.execution_digest, hashed.execution_digest);
+    assert_eq!(
+        std::fs::read(held.directory.join("start.bin")).expect("held start"),
+        std::fs::read(hashed.directory.join("start.bin")).expect("hashed start")
+    );
+    let mut wrong = digest;
+    wrong[0] ^= 1;
+    assert!(
+        Capture::begin_expression_with_digest(
+            &held_root,
+            &held_attempt,
+            bars,
+            column,
+            &expression,
+            wrong,
+        )
+        .is_err(),
+        "a different digest conflicts with the reserved start"
+    );
+}
+
 fn root_for_limit() -> PathBuf {
     root()
+}
+
+/// D-1184, source shape: one capture materialises every candidate over ONE
+/// `SliceFacts`, built on first use, and the consistency pass replays each
+/// row over the facts its caller already built. Both answers equal the
+/// per-call doors, so only the source can tell the two apart.
+#[test]
+fn materialisation_reuses_one_slice_facts_per_capture() {
+    let source = include_str!("../candidate_trades.rs");
+    let body = source
+        .split_once("    fn materialize(\n")
+        .map(|(_, rest)| rest.split_once("\n    }\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    assert!(
+        body.contains(".get_or_init("),
+        "facts are built once per capture"
+    );
+    assert!(
+        body.contains("materialize_cell_over(")
+            && body.contains("materialize_expression_cell_over("),
+        "both replays take the shared facts"
+    );
+    assert!(!body.contains(concat!("SliceFacts", "::of(bars")));
+    let lib = include_str!("../lib.rs");
+    let consistency = lib
+        .split_once("fn consistency_of(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    assert!(consistency.contains("grid::per_trade_over("));
+    assert!(!consistency.contains("grid::per_trade("));
+}
+
+/// D-0991: one `Summary` verifies its catalog cold ONCE; every later page,
+/// tier read and reader open pins it by filesystem generation instead of
+/// re-reading and re-hashing the whole catalog. A changed catalog still refuses.
+#[test]
+fn a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change() {
+    let root = root();
+    let attempt = attempt(&root);
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    let tier = capture.tier(tier_input()).expect("tier");
+    record_both(&capture, &tier, &ConditionMask::default());
+    let summary = capture.finish().expect("complete");
+
+    CATALOG_VERIFICATIONS.with(|count| count.set(0));
+    for _ in 0..10 {
+        assert_eq!(
+            candidates_page(&root, &summary, 0, 0, 2, DEFAULT_MAX_BYTES)
+                .expect("page")
+                .len(),
+            2
+        );
+        assert_eq!(
+            super::tier(&root, &summary, 0, DEFAULT_MAX_BYTES).expect("tier"),
+            tier
+        );
+        assert!(TradeReader::open(&root, &summary, key_at(0, 0), DEFAULT_MAX_BYTES).is_ok());
+    }
+    assert_eq!(
+        CATALOG_VERIFICATIONS.with(std::cell::Cell::get),
+        1,
+        "thirty page-level reads of one summary hash the catalog once, not twice per read"
+    );
+
+    // A summary opened by `read` is already verified: its pages add nothing.
+    CATALOG_VERIFICATIONS.with(|count| count.set(0));
+    let reread = read(&root, [42; 32], attempt.token(), DEFAULT_MAX_BYTES)
+        .expect("read")
+        .expect("sealed");
+    assert_eq!(reread.digest, summary.digest);
+    for _ in 0..5 {
+        assert!(candidates_page(&root, &reread, 0, 0, 2, DEFAULT_MAX_BYTES).is_ok());
+    }
+    assert_eq!(CATALOG_VERIFICATIONS.with(std::cell::Cell::get), 1);
+
+    // The catalog changes between pages: same bytes, new file. Refused warm.
+    // The old file is renamed aside and kept until the refusals are asserted,
+    // so its inode is still allocated and the replacement cannot reuse it: the
+    // generations differ by identity, not by a timestamp tick that a coarse
+    // clock could collapse.
+    let catalog = capture.directory.join("catalog.bin");
+    let aside = capture.directory.join("catalog.bin.aside");
+    let bytes = fs::read(&catalog).expect("catalog bytes");
+    fs::rename(&catalog, &aside).expect("move catalog aside");
+    fs::write(&catalog, &bytes).expect("rewrite identical catalog");
+    for refusal in [
+        candidates_page(&root, &summary, 0, 0, 2, DEFAULT_MAX_BYTES).map(|_| ()),
+        super::tier(&root, &summary, 0, DEFAULT_MAX_BYTES).map(|_| ()),
+        TradeReader::open(&root, &summary, key_at(0, 0), DEFAULT_MAX_BYTES).map(|_| ()),
+        candidates_page(&root, &reread, 0, 0, 2, DEFAULT_MAX_BYTES).map(|_| ()),
+    ] {
+        let why = refusal.expect_err("a replaced catalog must refuse a pinned summary");
+        assert!(why.contains("changed between pages"), "{why}");
+    }
+    fs::remove_file(&aside).expect("remove the old catalog");
+    // A fresh cold read of the identical bytes is still valid evidence.
+    let fresh = read(&root, [42; 32], attempt.token(), DEFAULT_MAX_BYTES)
+        .expect("read")
+        .expect("sealed");
+    assert!(candidates_page(&root, &fresh, 0, 0, 2, DEFAULT_MAX_BYTES).is_ok());
+    // A removed catalog is refused warm, never treated as completed-empty.
+    fs::remove_file(&catalog).expect("remove catalog");
+    assert!(candidates_page(&root, &fresh, 0, 0, 2, DEFAULT_MAX_BYTES).is_err());
+}
+
+/// D-0991: an empty catalog (no visited tier) pins exactly like a full one.
+#[test]
+fn an_empty_catalog_is_verified_once_and_its_absent_tier_refuses() {
+    let root = root();
+    let attempt = attempt(&root);
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    let summary = capture.finish().expect("an empty capture still seals");
+    assert_eq!((summary.tiers, summary.candidates), (0, 0));
+    CATALOG_VERIFICATIONS.with(|count| count.set(0));
+    for _ in 0..3 {
+        let why =
+            super::tier(&root, &summary, 0, DEFAULT_MAX_BYTES).expect_err("no tier was visited");
+        assert!(why.contains("out of bounds"), "{why}");
+    }
+    assert_eq!(CATALOG_VERIFICATIONS.with(std::cell::Cell::get), 1);
+}
+
+/// D-0991: a capture derives the slice facts once for all of its candidates,
+/// a side with no trading cell is recorded with no rows, and one candidate side
+/// costs exactly four `fsync`s (two immutable files, each data + directory).
+#[test]
+fn a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side() {
+    let root = root();
+    let attempt = attempt(&root);
+    let (bars, column) = fixture();
+    CAPTURE_FACTS_BUILT.with(|built| built.set(0));
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    assert_eq!(
+        CAPTURE_FACTS_BUILT.with(std::cell::Cell::get),
+        0,
+        "a capture that has replayed nothing has derived nothing"
+    );
+    let tier = capture
+        .tier(Tier {
+            evaluated: 3,
+            ..tier_input()
+        })
+        .expect("tier");
+    let firing = ConditionMask::default();
+    let silent = (0..60).fold(ConditionMask::default(), ConditionMask::with_bit);
+    let mut zero_trade_sides = 0;
+    for (rank, mask) in [(1, &firing), (2, &firing), (3, &silent)] {
+        for (direction, grid) in grids(mask) {
+            let selected = crate::shown_cell(&grid, tier.rules);
+            if selected.is_none_or(|(cell, _)| cell.trades == 0) {
+                zero_trade_sides += 1;
+            }
+            DURABLE_SYNCS.with(|count| count.set(0));
+            capture
+                .record(
+                    &tier,
+                    &Evaluated {
+                        rank,
+                        mask,
+                        direction,
+                        selected,
+                        grid: &grid,
+                    },
+                )
+                .expect("exact capture");
+            assert_eq!(
+                DURABLE_SYNCS.with(std::cell::Cell::get),
+                4,
+                "one candidate side publishes two files, each with a data and a directory fsync"
+            );
+        }
+    }
+    assert_eq!(
+        zero_trade_sides, 2,
+        "the every-condition mask selects no trading cell on either side"
+    );
+    assert_eq!(
+        CAPTURE_FACTS_BUILT.with(std::cell::Cell::get),
+        1,
+        "six recorded candidate sides share one slice-fact derivation"
+    );
+    let summary = capture.finish().expect("complete");
+    let pages = candidates_page(&root, &summary, 0, 0, 6, DEFAULT_MAX_BYTES).expect("page");
+    assert_eq!(pages.len(), 6);
+    for candidate in &pages {
+        let trades = candidate.cell.map_or(0, |cell| cell.trades);
+        let mut reader =
+            TradeReader::open(&root, &summary, candidate.key, DEFAULT_MAX_BYTES).expect("reader");
+        assert_eq!(
+            reader.page(0, MAX_PAGE).expect("page").len() as u64,
+            trades.min(MAX_PAGE as u64)
+        );
+    }
+}
+
+/// **A detail file stopped part-way never appears under its name, and does
+/// not wedge the retry.** conc:cli2-5, D-3603. A write that dies after the
+/// header (a panic stands in for the kill) leaves the final name absent; the
+/// retry lands whole and reads back sealed, and a second identical write
+/// reuses it.
+#[test]
+fn a_detail_write_stopped_part_way_leaves_no_torn_file_and_the_retry_lands() {
+    let dir = root();
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("detail.bin");
+    let died = std::panic::catch_unwind(|| {
+        let mut calls = 0;
+        let _ = write_exact_via(&path, TRADES, b"payload", |file, bytes| {
+            calls += 1;
+            assert!(calls < 2, "killed after the header");
+            file.write_all(bytes)
+        });
+    });
+    assert!(died.is_err(), "the write was stopped");
+    assert!(!path.exists(), "no torn file under the final name");
+    let digest = write_exact(&path, TRADES, b"payload").expect("the retry is not wedged");
+    let (payload, seal) = read_sealed(&path, TRADES, 1 << 20).expect("whole and sealed");
+    assert_eq!((payload.as_slice(), seal), (b"payload".as_slice(), digest));
+    assert_eq!(write_exact(&path, TRADES, b"payload"), Ok(digest), "reused");
+    assert!(
+        write_exact(&path, TRADES, b"different payload").is_err(),
+        "an existing file with other bytes is refused, never replaced"
+    );
+    assert_eq!(
+        read_sealed(&path, TRADES, 1 << 20).map(|(p, _)| p),
+        Ok(b"payload".to_vec())
+    );
+    let refused = write_exact_via(&dir.join("full.bin"), TRADES, b"x", |_, _| {
+        Err(std::io::Error::other("disk full"))
+    })
+    .expect_err("a failed write refuses");
+    assert!(refused.contains("disk full"), "{refused}");
+    assert!(!dir.join("full.bin").exists());
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .expect("listing")
+        .map(|entry| entry.expect("entry").file_name())
+        .filter(|name| name.to_string_lossy().contains("full.bin"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the failed write's sibling is removed: {left:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The aside is locked from its creation until its name is gone.** D-4602.
+/// Unlinking the aside after the link changes the inode's ctime, which every
+/// pinned generation compares (D-2624), so a reader must never pin one in
+/// that window: a shared lock on the inode, taken while the writer runs,
+/// would block, and a reader meets `busy` instead. Without the writer's lock
+/// the shared lock below is granted.
+#[test]
+fn a_detail_being_written_is_locked_against_every_reader() {
+    let dir = root();
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("locked.bin");
+    let mut probed = 0;
+    write_exact_via(&path, TRADES, b"payload", |file, bytes| {
+        let aside = std::fs::read_dir(&dir)
+            .expect("listing")
+            .map(|entry| entry.expect("entry").path())
+            .find(|name| name.to_string_lossy().ends_with(".partial"))
+            .expect("the aside exists while it is written");
+        let reader = File::open(&aside).expect("the aside opens");
+        assert!(
+            matches!(
+                Flock::try_lock_shared(&reader, aside.as_path()),
+                Err(std::fs::TryLockError::WouldBlock)
+            ),
+            "a reader meets the writer's lock"
+        );
+        probed += 1;
+        file.write_all(bytes)
+    })
+    .expect("the write lands");
+    assert_eq!(
+        probed, 3,
+        "header, payload and seal were each written under the lock"
+    );
+    assert!(read_sealed(&path, TRADES, 1 << 20).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only a lost race to the same name is not a link failure (D-3603).
+#[test]
+fn only_a_lost_link_race_is_not_a_failure() {
+    assert!(linked_or_lost_race(Ok(())).is_ok());
+    assert!(
+        linked_or_lost_race(Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))).is_ok()
+    );
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::StorageFull,
+    ] {
+        assert_eq!(
+            linked_or_lost_race(Err(std::io::Error::from(kind))).map_err(|why| why.kind()),
+            Err(kind)
+        );
+    }
+}
+
+/// cli2-5, D-2624: an empty `catalog.bin` — what a reader sees between a
+/// writer's `create_new` and its lock, or what a kill there leaves — reads as
+/// no catalog, and an empty detail file is answered busy, not as the
+/// corruption "truncated". On the old code both refused with "nonregular,
+/// truncated or above its byte admission", so the first assertion failed. A
+/// file with ANY byte short of a whole header and seal is still truncated,
+/// at every length from 1 to one byte short.
+#[test]
+fn an_empty_catalog_reads_as_absent_and_an_empty_detail_is_busy_not_truncated() {
+    let root = root();
+    let identity = [61_u8; 32];
+    let directory = directory_for(&root, &identity, 7, Model::And);
+    crate::durable_dir::create_all(&directory).expect("attempt directory");
+    let catalog = directory.join("catalog.bin");
+    fs::write(&catalog, b"").expect("empty catalog");
+    assert!(matches!(
+        read_model(&root, identity, 7, Model::And, DEFAULT_MAX_BYTES),
+        Ok(None)
+    ));
+    let why = read_sealed(&catalog, CATALOG, DEFAULT_MAX_BYTES).expect_err("empty");
+    assert!(why.contains("busy"), "{why}");
+    assert!(!why.contains("truncated"), "{why}");
+    for len in [1, HEADER, HEADER + SEAL - 1] {
+        fs::write(&catalog, vec![0_u8; len]).expect("partial catalog");
+        let why = read_model(&root, identity, 7, Model::And, DEFAULT_MAX_BYTES)
+            .expect_err("a partial catalog is damage");
+        assert!(why.contains("truncated"), "{len}: {why}");
+    }
+}
+
+/// cli2-5, D-2624: a 0-byte file at a detail's final name, left by a kill
+/// between `create_new` and the first byte, is filled by the next writer of
+/// that name, and the retry is idempotent after it. On the old code
+/// `write_exact`'s `AlreadyExists` arm re-read the empty file and refused it
+/// as truncated on every retry, so the first `expect` failed. A file that
+/// holds other whole bytes is still refused, and an empty file whose lock a
+/// live writer holds is left to that writer: the call answers busy and
+/// writes nothing.
+#[test]
+fn a_zero_byte_remnant_is_filled_by_the_next_writer_and_nothing_else_is() {
+    let root = root();
+    fs::create_dir_all(&root).expect("root");
+    let path = root.join("0-0-long-trades.bin");
+    fs::write(&path, b"").expect("kill remnant");
+    let digest = write_exact(&path, TRADES, b"exact payload").expect("the remnant is filled");
+    let (payload, seal) = read_sealed(&path, TRADES, DEFAULT_MAX_BYTES).expect("whole");
+    assert_eq!((payload.as_slice(), seal), (&b"exact payload"[..], digest));
+    assert_eq!(
+        write_exact(&path, TRADES, b"exact payload"),
+        Ok(digest),
+        "an exact retry is idempotent"
+    );
+    let why = write_exact(&path, TRADES, b"other payload").expect_err("other bytes");
+    assert!(why.contains("different bytes"), "{why}");
+
+    let held = root.join("0-0-short-trades.bin");
+    fs::write(&held, b"").expect("live writer's file");
+    let owner = File::open(&held).expect("live writer");
+    owner.lock().expect("the live writer's lock");
+    let why = write_exact(&held, TRADES, b"exact payload").expect_err("held");
+    assert!(why.contains("busy"), "{why}");
+    owner.unlock().expect("release");
+    assert_eq!(fs::metadata(&held).expect("held file").len(), 0);
+    assert!(write_exact(&held, TRADES, b"exact payload").is_ok());
+}
+
+/// cli2-5, D-2624, D-3603, D-4602: a failed barrier on a detail write leaves
+/// nothing under the final name, because the bytes are synced under the aside
+/// name before the link, so the retry lands rather than refusing a partial or
+/// unproven file for good. On the code before D-2624 the synced-or-not bytes
+/// stayed in place; D-2624 cut them back to 0 bytes; the merged write never
+/// links an unsynced file at all.
+#[test]
+fn a_failed_detail_barrier_leaves_nothing_under_the_name_and_the_retry_lands() {
+    let root = root();
+    fs::create_dir_all(&root).expect("root");
+    let path = root.join("1-0-long-candidate.bin");
+    {
+        let _armed = crate::fixed_tail::fault::Armed::arm(
+            "1-0-long-candidate.bin",
+            crate::fixed_tail::fault::Kind::Sync,
+        );
+        let why = write_exact(&path, CANDIDATE, b"candidate").expect_err("injected");
+        assert!(why.contains("injected sync fault"), "{why}");
+    }
+    assert!(
+        matches!(fs::symlink_metadata(&path), Err(why) if why.kind() == std::io::ErrorKind::NotFound),
+        "an unsynced detail never takes its final name"
+    );
+    let aside_left = fs::read_dir(&root)
+        .expect("root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".partial"))
+        .count();
+    assert_eq!(aside_left, 0, "the aside is removed after a failed barrier");
+    let digest = write_exact(&path, CANDIDATE, b"candidate").expect("the retry lands");
+    assert_eq!(
+        read_sealed(&path, CANDIDATE, DEFAULT_MAX_BYTES).expect("whole"),
+        (b"candidate".to_vec(), digest)
+    );
+}
+
+/// xcut-3, D-2623: the attempt directory
+/// `results/<model>/<identity>/<token>` is created by the durable walker,
+/// which syncs each new level's parent, and never by `create_dir_all`, which
+/// synced none of up to four new levels. Measured on the source because a
+/// lost directory entry cannot be produced without a power cut; on the old
+/// code `begin_digested` called `create_dir_all`, so the first assertion
+/// failed. The behavioural half: a capture on a store with no candidate
+/// tree lays out every level and its start file.
+#[test]
+fn candidate_trades_creates_each_level_durably() {
+    let source = include_str!("../candidate_trades.rs");
+    let (_, begin) = source
+        .split_once("fn begin_digested(")
+        .expect("begin_digested exists");
+    let begin = begin
+        .split_once("\n    }\n")
+        .map_or(begin, |(body, _)| body);
+    assert!(!begin.contains("create_dir_all("), "{begin}");
+    assert!(
+        begin.contains("crate::durable_dir::create_all(&directory)"),
+        "{begin}"
+    );
+    let root = root();
+    let attempt = attempt(&root);
+    assert!(
+        !root.join("results").join("candidate-trades-v1").exists(),
+        "the premise: no candidate tree yet"
+    );
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    assert!(capture.directory.join("start.bin").is_file());
+    assert!(capture.directory.starts_with(root.join("results")));
 }

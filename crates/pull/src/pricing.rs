@@ -248,15 +248,12 @@ impl Rate {
         // wrong number here, and it prices every option in the run wrongly
         // without erroring anywhere downstream: the model accepts it, the
         // greeks come out finite, and nothing says a word. Refused by name.
-        #[expect(
-            clippy::float_arithmetic,
-            reason = "negating a bound to make the band symmetric. Negative \
-                      rates are real, so the screen must not be a floor at \
-                      zero, and `pull` denies float arithmetic because §7 is \
-                      about PRICES — this is a comparison against a typo \
-                      screen, not a price"
-        )]
-        let band = -MAX_PLAUSIBLE_RATE..=MAX_PLAUSIBLE_RATE;
+        //
+        // The lower bound is its own negative literal, not `-MAX_PLAUSIBLE_RATE`:
+        // a negation is float arithmetic, and this site carried the crate's
+        // second `float_arithmetic` exception while `Tenor::years` claimed to
+        // be the only one. crash-edge-pass20 CE-97, D-1958.
+        let band = MIN_PLAUSIBLE_RATE..=MAX_PLAUSIBLE_RATE;
         if !band.contains(&annual) {
             return Err(PricingError::RateImplausible { annual });
         }
@@ -294,6 +291,27 @@ impl Rate {
 /// greek comes out finite, and nothing downstream says a word. Negative rates
 /// are real and are allowed, which is why the band is symmetric.
 pub const MAX_PLAUSIBLE_RATE: f64 = 1.0;
+
+/// The narrowest rate this build will accept: [`MAX_PLAUSIBLE_RATE`] with its
+/// sign flipped, written as a literal so no float arithmetic produces it.
+pub const MIN_PLAUSIBLE_RATE: f64 = -1.0;
+
+// The band stays symmetric: the two bounds differ in the sign bit and nowhere
+// else. Checked on the bit pattern, which needs no float arithmetic.
+const _: () = assert!(MIN_PLAUSIBLE_RATE.to_bits() == MAX_PLAUSIBLE_RATE.to_bits() ^ (1 << 63));
+
+/// The vendor volatility below which the figure is read as a decimal.
+///
+/// **A unit screen, not a market view** (grk-1, D-2603). The one real Dhan IV
+/// the charter records (`docs/00-charter.md` §4b) is in PERCENT
+/// (`11.939…`, `9.789…`), and nothing records the unit of the rolling overlay's
+/// `iv`, so the unit is UNVERIFIED. A value in `[1, 10]` is ambiguous: `9.79`
+/// is a 9.79 % percent figure or a 979 % decimal one, and the model accepts
+/// both. A value below one is unambiguous: an index option at under 1 %
+/// implied volatility is not a quote. So a figure at or above one is refused
+/// by name rather than guessed, and a decimal volatility of 100 % or more is
+/// refused with it until a recorded source settles the unit.
+pub const MAX_UNAMBIGUOUS_VENDOR_VOLATILITY: f64 = 1.0;
 
 /// One option, at one bar, in paisa.
 ///
@@ -362,23 +380,49 @@ pub struct Quote {
 #[derive(Debug, Clone, Default)]
 pub struct SpotBook {
     by_stamp: HashMap<i64, i64>,
+    /// Stamps two bars claimed with DIFFERENT closes. Answered by nobody.
+    ambiguous: std::collections::HashSet<i64>,
 }
 
 impl SpotBook {
     /// Indexes one month of index bars by their stamp.
     ///
-    /// A later bar at a stamp already seen REPLACES the earlier one, which
-    /// cannot arise from a well-formed month — `store::file::BarFile` keeps its
-    /// rows strictly ascending — and is chosen over keeping the first so that
-    /// a malformed input behaves the same way twice rather than depending on
-    /// which duplicate arrived.
+    /// **Two bars at one stamp with different closes leave that stamp
+    /// unanswered**, and [`Self::ambiguous`] counts it. Until D-3110 the later
+    /// bar silently replaced the earlier one: deterministic, but a definite
+    /// level for a minute whose level the book could not know, picked by
+    /// arrival order — the fallback that hides a failure `CLAUDE.md` §4 bans.
+    /// `store::file::BarFile` keeps its rows strictly ascending, so a
+    /// well-formed month never reaches this; a malformed one now refuses those
+    /// stamps instead of guessing. An EXACT repeat (same stamp, same close) is
+    /// one witness said twice and still answers.
+    ///
+    /// O(bars) to build, one probe and at most one insert per bar; the order
+    /// of the slice does not change the result.
     #[must_use]
     pub fn of(bars: &[store::format::Bar]) -> Self {
-        let mut by_stamp = HashMap::with_capacity(bars.len());
+        let mut by_stamp: HashMap<i64, i64> = HashMap::with_capacity(bars.len());
+        let mut ambiguous = std::collections::HashSet::new();
         for bar in bars {
-            by_stamp.insert(bar.ts_micros, bar.close);
+            if ambiguous.contains(&bar.ts_micros) {
+                continue;
+            }
+            match by_stamp.entry(bar.ts_micros) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(bar.close);
+                }
+                std::collections::hash_map::Entry::Occupied(seen) => {
+                    if *seen.get() != bar.close {
+                        seen.remove();
+                        ambiguous.insert(bar.ts_micros);
+                    }
+                }
+            }
         }
-        Self { by_stamp }
+        Self {
+            by_stamp,
+            ambiguous,
+        }
     }
 
     /// The underlying's close at that stamp, or `None`.
@@ -387,16 +431,39 @@ impl SpotBook {
     /// minute: an option that printed in a minute the index did not is a row
     /// this build cannot price, and pricing it against the previous minute's
     /// level would be an invented spot that no report could later tell from a
-    /// real one.
+    /// real one. A stamp two bars contradicted is also `None`; [`Self::lookup`]
+    /// says which of the two refusals it was.
     #[must_use]
     pub fn at(&self, ts_micros: i64) -> Option<i64> {
         self.by_stamp.get(&ts_micros).copied()
     }
 
-    /// How many stamps this book holds.
+    /// The close at that stamp, or the named reason there is none.
+    ///
+    /// # Errors
+    ///
+    /// [`PricingError::SpotAmbiguous`] when bars disagreed at that stamp, and
+    /// [`PricingError::NoSpotAtStamp`] when no bar was there at all.
+    pub fn lookup(&self, ts_micros: i64) -> Result<i64, PricingError> {
+        if let Some(close) = self.at(ts_micros) {
+            return Ok(close);
+        }
+        if self.ambiguous.contains(&ts_micros) {
+            return Err(PricingError::SpotAmbiguous { ts_micros });
+        }
+        Err(PricingError::NoSpotAtStamp { ts_micros })
+    }
+
+    /// How many stamps this book answers.
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_stamp.len()
+    }
+
+    /// How many stamps were declined because their bars disagreed.
+    #[must_use]
+    pub fn ambiguous(&self) -> usize {
+        self.ambiguous.len()
     }
 
     /// Whether the book holds nothing.
@@ -464,6 +531,19 @@ pub enum PricingError {
         /// The stamp that found nothing.
         ts_micros: i64,
     },
+    /// Two index bars at this stamp carried different closes. D-3110.
+    SpotAmbiguous {
+        /// The contradicted stamp.
+        ts_micros: i64,
+    },
+    /// A vendor volatility whose unit cannot be told from its value.
+    ///
+    /// See [`MAX_UNAMBIGUOUS_VENDOR_VOLATILITY`] (grk-1, D-2603). Also the arm
+    /// for a non-finite or non-positive figure, which has no unit at all.
+    VendorVolatilityUnitAmbiguous {
+        /// The figure the vendor sent.
+        sent: f64,
+    },
     /// The model itself refused, with its own reason kept intact.
     ///
     /// Wrapped rather than flattened: `greeks` distinguishes a price below
@@ -520,6 +600,22 @@ impl std::fmt::Display for PricingError {
                  no underlying level to price against. Nothing was priced \
                  rather than the previous minute's level being borrowed, which \
                  no later report could tell from a real one"
+            ),
+            Self::SpotAmbiguous { ts_micros } => write!(
+                f,
+                "two index bars stored at {ts_micros} disagree on the close, so \
+                 the underlying level at this stamp is unknown. Nothing was \
+                 priced rather than one of the two being picked by the order \
+                 it arrived in"
+            ),
+            Self::VendorVolatilityUnitAmbiguous { sent } => write!(
+                f,
+                "the vendor sent an implied volatility of {sent}, which is not \
+                 a positive figure below {MAX_UNAMBIGUOUS_VENDOR_VOLATILITY}. \
+                 The only recorded Dhan IV is in percent and the rolling \
+                 overlay's unit is UNVERIFIED, so this figure could be a \
+                 percent read as a decimal (9.79 read as 979 %). Refused by \
+                 name rather than guessed"
             ),
             Self::Model(why) => write!(f, "the model refused this quote: {why}"),
         }
@@ -729,12 +825,12 @@ pub struct Priced {
 /// # Cost
 ///
 /// **O(1) time, O(1) space, no allocation.** One dated table lookup bounded by a
-///
-/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
-/// property of the shape, not a timing.
 /// compile-time constant, one closed-form at-the-money rounding, one closed-form
 /// greeks evaluation, and — only when solving — an iteration count bounded by
 /// `greeks::solver::MAX_ITERATIONS` and returned so the bound is observable.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 pub fn price(
     quote: Quote,
     volatility: Option<f64>,
@@ -757,18 +853,24 @@ pub fn price(
             }
         })?;
 
+    // ONE WIDENING FOR BOTH PATHS: the solver reads the premium, and the vendor
+    // path screens it (D-3117). Two copies of this cast were two copies of one
+    // fact, and gate 11 rule 2 counted both (D-3189).
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "see contract_of — paisa is exact in f64 at this magnitude"
+    )]
+    let premium = quote.premium as f64;
     let (volatility, vol_from) = if let Some(sent) = volatility {
         // THE VENDOR'S OWN NUMBER, UNCHANGED. Dhan's `iv` off the rolling
         // overlay, which makes this a CHECK of the vendor rather than a
-        // substitute for it.
+        // substitute for it. Its unit is screened first (grk-1, D-2603).
+        if sent.is_nan() || sent <= 0.0 || sent >= MAX_UNAMBIGUOUS_VENDOR_VOLATILITY {
+            return Err(PricingError::VendorVolatilityUnitAmbiguous { sent });
+        }
         (sent, VolSource::Vendor(quote.vendor))
     } else {
         {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "see contract_of — paisa is exact in f64 at this magnitude"
-            )]
-            let premium = quote.premium as f64;
             let solved = contract.implied_volatility(premium, kind)?;
             (
                 solved.volatility,
@@ -781,6 +883,14 @@ pub fn price(
     };
 
     let greeks = contract.greeks(volatility, kind)?;
+    // ONE FACT, ONE ANSWER. The solved path refuses a premium at or below the
+    // discounted intrinsic value or at or above the no-arbitrage maximum;
+    // until D-3114 the vendor path priced the same premium, because it never
+    // read it. Refused here by the solver's own screen (D-3117), so the two
+    // paths cannot hold two copies of one bound.
+    if matches!(vol_from, VolSource::Vendor(_)) {
+        contract.screen_premium(premium, kind)?;
+    }
 
     #[expect(
         clippy::cast_precision_loss,
@@ -890,21 +1000,64 @@ pub fn price_all(
         refused: 0,
         why: Vec::new(),
     };
+    // The CLASS of each kept sentence, parallel to `out.why`. At most
+    // `REASONS_KEPT` entries, so the membership probe below is bounded by a
+    // constant rather than by the rows.
+    let mut kept: Vec<ReasonClass> = Vec::with_capacity(REASONS_KEPT);
     for quote in quotes {
         match price(*quote, volatility(quote.ts_micros), rate, basis) {
             Ok(row) => out.rows.push(row),
             Err(why) => {
                 out.refused = out.refused.saturating_add(1);
-                let sentence = why.to_string();
-                // ONE COPY OF EACH DISTINCT REASON. Five thousand rows refused
-                // for one reason is one fact, not five thousand.
-                if out.why.len() < REASONS_KEPT && !out.why.contains(&sentence) {
-                    out.why.push(sentence);
+                // ONE COPY OF EACH DISTINCT REASON, and a reason is its CLASS,
+                // not its sentence. A sentence carries the row's own numbers,
+                // so until D-3111 five rows below intrinsic at five premiums
+                // were five "distinct reasons", filled every slot, and a later
+                // row refused for a different reason was counted and never
+                // named. The first sentence of each class is kept verbatim.
+                let class = ReasonClass::of(&why);
+                if kept.len() < REASONS_KEPT && !kept.contains(&class) {
+                    kept.push(class);
+                    out.why.push(why.to_string());
                 }
             }
         }
     }
     out
+}
+
+/// What makes two refusals "the same reason" for [`price_all`]'s dedupe: the
+/// arm of [`PricingError`], the arm of a wrapped [`GreeksError`], and the
+/// named field where an arm carries one — a zero spot and a zero premium are
+/// two reasons, a premium of 1 and a premium of 2 below intrinsic are one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReasonClass {
+    arm: std::mem::Discriminant<PricingError>,
+    model: Option<std::mem::Discriminant<GreeksError>>,
+    field: &'static str,
+}
+
+impl ReasonClass {
+    fn of(why: &PricingError) -> Self {
+        let (model, field) = match why {
+            PricingError::NotPositive { field, .. } => (None, *field),
+            PricingError::Model(inner) => (
+                Some(std::mem::discriminant(inner)),
+                match inner {
+                    GreeksError::NotFinite { field }
+                    | GreeksError::NotPositive { field, .. }
+                    | GreeksError::OutOfRange { field, .. } => field,
+                    _ => "",
+                },
+            ),
+            _ => (None, ""),
+        };
+        Self {
+            arm: std::mem::discriminant(why),
+            model,
+            field,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1147,6 +1300,22 @@ mod tests {
         // AND A NEGATIVE RATE IS REAL, so the band is symmetric rather than a
         // floor at zero.
         assert!(Rate::measured(-0.004, YearBasis::Calendar365, RateSource::Operator).is_ok());
+        // Both ends of the band are inclusive and the lower one is the literal
+        // `MIN_PLAUSIBLE_RATE`, so each edge is admitted and the next float
+        // past it is refused. CE-97, D-1958.
+        for edge in [MIN_PLAUSIBLE_RATE, MAX_PLAUSIBLE_RATE] {
+            assert!(
+                Rate::measured(edge, YearBasis::Calendar365, RateSource::Operator).is_ok(),
+                "{edge} is inside the band"
+            );
+        }
+        for outside in [-1.000_000_1, 1.000_000_1] {
+            assert_eq!(
+                Rate::measured(outside, YearBasis::Calendar365, RateSource::Operator),
+                Err(PricingError::RateImplausible { annual: outside }),
+                "{outside} is outside the band"
+            );
+        }
         // `assert_eq!` CANNOT BE USED HERE and the reason is the bug it would
         // hide: `PartialEq` on this type is derived, so it compares the `f64`,
         // and `NaN != NaN` by IEEE-754. The assertion fails while PRINTING two
@@ -1361,6 +1530,47 @@ mod tests {
         );
     }
 
+    /// grk-1, D-2603: a vendor volatility whose unit cannot be told from its
+    /// value is refused by name. The charter's own Dhan sample `9.789…` is a
+    /// percent figure that the model would accept as 979 % volatility; it, the
+    /// sample's `11.939…`, a decimal at or above one, zero, a negative and a
+    /// NaN are all refused, while a decimal below one passes through.
+    #[test]
+    fn a_vendor_volatility_of_ambiguous_unit_is_refused_by_name() {
+        for sent in [
+            9.789_193_798_280_868,
+            11.939_337_251_984_934,
+            MAX_UNAMBIGUOUS_VENDOR_VOLATILITY,
+            0.0,
+            -0.15,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            let refused = price(atm_call(), Some(sent), test_rate(), YearBasis::Calendar365);
+            assert!(
+                matches!(
+                    refused,
+                    Err(PricingError::VendorVolatilityUnitAmbiguous { sent: got })
+                        if got.to_bits() == sent.to_bits()
+                ),
+                "{sent}: {refused:?}"
+            );
+        }
+        let kept = price(
+            atm_call(),
+            Some(0.097_891_937_982_808_68),
+            test_rate(),
+            YearBasis::Calendar365,
+        )
+        .expect("a decimal below one is unambiguous");
+        assert!(matches!(kept.vol_from, VolSource::Vendor(_)));
+        let message = PricingError::VendorVolatilityUnitAmbiguous { sent: 9.79 }.to_string();
+        assert!(
+            message.contains("UNVERIFIED") && message.contains("9.79"),
+            "{message}"
+        );
+    }
+
     /// **MONEYNESS IS PLACED ON THE DATED LADDER, IN BOTH DIRECTIONS.**
     ///
     /// `greeks::moneyness::Moneyness` had no caller anywhere in the workspace
@@ -1449,16 +1659,23 @@ mod tests {
         assert_eq!(empty.at(stamp()), None);
     }
 
-    /// A duplicate stamp resolves the same way twice.
+    /// A contradicted stamp answers nothing, whichever copy arrived first.
     ///
-    /// It cannot arise from a well-formed month, and the point is that a
-    /// malformed one behaves deterministically rather than depending on which
-    /// copy arrived first.
+    /// It cannot arise from a well-formed month. This test used to pin
+    /// last-wins (`Some(2_600_000)`), which was the defect D-3110 removes: a
+    /// level picked by arrival order is a guess no report can tell from a spot.
     #[test]
     fn a_repeated_stamp_resolves_deterministically() {
         let bars = [bar(stamp(), 2_500_000), bar(stamp(), 2_600_000)];
-        assert_eq!(SpotBook::of(&bars).at(stamp()), Some(2_600_000));
-        assert_eq!(SpotBook::of(&bars).len(), 1, "one stamp, one entry");
+        assert_eq!(SpotBook::of(&bars).at(stamp()), None);
+        assert_eq!(
+            SpotBook::of(&bars).len(),
+            0,
+            "a contradicted stamp is not held"
+        );
+        assert_eq!(SpotBook::of(&bars).ambiguous(), 1, "and it is counted");
+        let same = [bar(stamp(), 2_500_000), bar(stamp(), 2_500_000)];
+        assert_eq!(SpotBook::of(&same).at(stamp()), Some(2_500_000));
     }
 
     /// **ONE BAD ROW DOES NOT DISCARD THE MONTH**, and the reasons do not

@@ -35,8 +35,9 @@ use runner::admission::{
     CompletenessV1, ObservedI64V1, ObservedU64V1,
 };
 use runner::exit_grid_policy::{
-    EvaluatedExitGridV1, ExecutionDispositionV1, ExecutionRunV1, ExecutionSeriesV1,
-    InstrumentFamilyV1 as RunnerInstrumentFamilyV1, ResolvedExitGridV1, ValidatedExitGridV1,
+    AttestedTrainingV1, EvaluatedExitGridV1, ExecutionDispositionV1, ExecutionRunV1,
+    ExecutionSeriesV1, InstrumentFamilyV1 as RunnerInstrumentFamilyV1, ResolvedExitGridV1,
+    ValidatedExitGridV1,
 };
 use runner::grid::{Cell, Chosen};
 use runner::outcome::Horizon;
@@ -311,6 +312,8 @@ impl ProducedPopulationAdmissionV1 {
 pub fn derive_population_id_v1(
     authority: &CompletePopulationAuthorityV1<'_>,
 ) -> Result<[u8; 32], PopulationAdmissionWriterRefusal> {
+    #[cfg(test)]
+    tests::POPULATION_ID_DERIVATIONS.with(|count| count.set(count.get() + 1));
     validate_complete_population_authority(authority)?;
     let mut hasher = Hasher::new();
     hasher.update(POPULATION_ID_DOMAIN_V1);
@@ -334,46 +337,30 @@ pub fn derive_population_id_v1(
 /// resolution and coordinate.  Metrics and admission verdicts are results, not
 /// strategy semantics, so neither enters the digest.
 ///
+/// # Cost
+///
+/// O(1) per cell: `validated` is the grid's one
+/// `ResolvedExitGridV1::validate_evaluation`, taken once by the caller and
+/// checked here to belong to `resolved` and `evaluated`. Until D-1834 a second
+/// public entry, `derive_strategy_digest_v1`, validated the whole grid on every
+/// call, so a grid derived through it cost O(G²) (W2-cli10-2); it had no
+/// production caller and is gone. Pinned by
+/// `cli::population_admission_writer::tests::no_strategy_digest_entry_validates_the_whole_grid_per_cell`.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
-/// Refuses an absent identity, a torn/foreign evaluation, a side mismatch, an
-/// empty or non-live mask, or an exit index that cannot be represented by the
-/// append-only Population V1 coordinate.
+/// Refuses an absent identity, a validation of another resolution or
+/// evaluation, a side mismatch, an empty or non-live mask, or an exit index
+/// that cannot be represented by the append-only Population V1 coordinate.
 #[expect(
     clippy::too_many_arguments,
     reason = "each argument is an independently validated strategy-identity term and no term may be defaulted"
 )]
-pub fn derive_strategy_digest_v1(
-    population_id: [u8; 32],
-    instrument_family: InstrumentFamilyV1,
-    rung_seconds: u32,
-    evaluation_policy_digest: [u8; 32],
-    direction: TradeDirectionV1,
-    resolved: &ResolvedExitGridV1,
-    evaluated: &EvaluatedExitGridV1,
-    cell_ordinal: usize,
-) -> Result<[u8; 32], PopulationAdmissionWriterRefusal> {
-    let validated = resolved.validate_evaluation(evaluated).map_err(|why| {
-        format!("strategy identity received a torn exit-grid evaluation: {why:?}")
-    })?;
-    derive_strategy_digest_from_validated_v1(
-        population_id,
-        instrument_family,
-        rung_seconds,
-        evaluation_policy_digest,
-        direction,
-        resolved,
-        evaluated,
-        &validated,
-        cell_ordinal,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the validated fast path preserves every independently sourced strategy-identity term"
-)]
-pub(crate) fn derive_strategy_digest_from_validated_v1(
+pub fn derive_strategy_digest_from_validated_v1(
     population_id: [u8; 32],
     instrument_family: InstrumentFamilyV1,
     rung_seconds: u32,
@@ -574,9 +561,20 @@ where
 {
     let population_id = derive_population_id_v1(&authority)?;
     let mut evaluated_sides = Vec::new();
+    // ONE TRAINING ATTESTATION PER SIDE, taken at that side's first closed
+    // mask (W3-runner4-1, D-1837). `evaluate_training_grid_attested` per mask
+    // re-validated, re-hashed and re-indexed the same execution slice and
+    // column for every closed mask and side: O(B) per candidate.
+    let mut attested = SideAttestations::default();
     let population_run =
         sweeper.run_prepared_population_by_reporting(signal_column, on_level, |member| {
-            evaluate_population_member(&authority, member, &mut evaluated_sides, &mut execution_run)
+            evaluate_population_member(
+                &authority,
+                member,
+                &mut attested,
+                &mut evaluated_sides,
+                &mut execution_run,
+            )
         })?;
     let expanded_cell_count = evaluated_cell_count(&evaluated_sides)?;
     let reconciliation =
@@ -763,9 +761,18 @@ pub fn commit_population_admission_v1(
     })
 }
 
-fn evaluate_population_member<RunAuthority>(
-    authority: &CompletePopulationAuthorityV1<'_>,
+/// Each side's TRAINING attestation, taken once at its first closed mask and
+/// reused for every later one (D-1837).
+#[derive(Default)]
+struct SideAttestations<'a> {
+    long: Option<AttestedTrainingV1<'a>>,
+    short: Option<AttestedTrainingV1<'a>>,
+}
+
+fn evaluate_population_member<'a, RunAuthority>(
+    authority: &CompletePopulationAuthorityV1<'a>,
     member: PopulationMember,
+    attested: &mut SideAttestations<'a>,
     evaluated_sides: &mut Vec<EvaluatedPopulationSideV1>,
     execution_run: &mut RunAuthority,
 ) -> Result<(), PopulationAdmissionWriterRefusal>
@@ -784,6 +791,7 @@ where
                 member,
                 TradeDirectionV1::Long,
                 authority.long_exit_grid,
+                &mut attested.long,
                 evaluated_sides,
                 execution_run,
             )?;
@@ -792,6 +800,7 @@ where
                 member,
                 TradeDirectionV1::Short,
                 authority.short_exit_grid,
+                &mut attested.short,
                 evaluated_sides,
                 execution_run,
             )
@@ -799,11 +808,12 @@ where
     }
 }
 
-fn evaluate_population_side<RunAuthority>(
-    authority: &CompletePopulationAuthorityV1<'_>,
+fn evaluate_population_side<'a, RunAuthority>(
+    authority: &CompletePopulationAuthorityV1<'a>,
     member: PopulationMember,
     direction: TradeDirectionV1,
     resolved: &ResolvedExitGridV1,
+    attested: &mut Option<AttestedTrainingV1<'a>>,
     evaluated_sides: &mut Vec<EvaluatedPopulationSideV1>,
     execution_run: &mut RunAuthority,
 ) -> Result<(), PopulationAdmissionWriterRefusal>
@@ -824,20 +834,31 @@ where
             direction_name(direction)
         ));
     }
-    let evaluated = resolved
-        .evaluate_training_grid_attested(
-            authority.execution_series,
-            authority.execution_column,
-            authority.horizon,
-            run,
+    let refused = |why: runner::exit_grid_policy::ExitGridErrorV1| {
+        format!(
+            "{} complete exit-grid evaluation refused mask {:?}: {why:?}",
+            direction_name(direction),
+            member.item.mask.words()
         )
-        .map_err(|why| {
-            format!(
-                "{} complete exit-grid evaluation refused mask {:?}: {why:?}",
-                direction_name(direction),
-                member.item.mask.words()
-            )
-        })?;
+    };
+    let attested = if let Some(attested) = attested {
+        attested
+    } else {
+        #[cfg(test)]
+        tests::ATTESTATIONS.with(|count| count.set(count.get() + 1));
+        attested.insert(
+            resolved
+                .attest_training(
+                    authority.execution_series,
+                    authority.execution_column,
+                    authority.horizon,
+                )
+                .map_err(refused)?,
+        )
+    };
+    let evaluated = resolved
+        .evaluate_with_attested(attested, run)
+        .map_err(refused)?;
     let cell_count = u64::try_from(evaluated.grid().cells.len())
         .map_err(|_| "evaluated exit-cell count does not fit u64".to_owned())?;
     if cell_count != resolved.cell_count() {
@@ -847,8 +868,13 @@ where
             resolved.cell_count()
         ));
     }
+    // `try_reserve`, not an exact reservation of one slot: that
+    // grows the vector by one slot per push, forfeiting `Vec`'s geometric
+    // growth, so each push could reallocate and copy every retained side
+    // (O(n²) over a population). This keeps the fallible reservation and the
+    // amortised O(1) append §3 rule 4 names (W2-cli10-1, D-1639).
     evaluated_sides
-        .try_reserve_exact(1)
+        .try_reserve(1)
         .map_err(|why| format!("could not reserve one evaluated population side: {why}"))?;
     evaluated_sides.push(EvaluatedPopulationSideV1 {
         mask_words,
@@ -1290,7 +1316,7 @@ pub(crate) fn metrics_from_cell(
         u64::try_from(cell.min_win).map_err(|_| "cell minimum win does not fit u64".to_owned())?;
     let average_win =
         u64::try_from(cell.avg_win()).map_err(|_| "cell average win is negative".to_owned())?;
-    let average_loss = negative_magnitude(cell.avg_loss());
+    let average_loss = cell.avg_loss_magnitude_ceil();
     Ok(TopMetricsV1 {
         drawdown,
         worst_loss,
@@ -1675,6 +1701,105 @@ fn require_consistent_i64(
     reason = "focused writer fixtures fail loudly when their own canonical setup is invalid"
 )]
 mod tests {
+
+    std::thread_local! {
+        /// [`super::derive_population_id_v1`] calls on this thread (test-only
+        /// probe, D-1835).
+        pub(super) static POPULATION_ID_DERIVATIONS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
+        /// TRAINING attestations the population producer took on this thread
+        /// (test-only probe, D-1837).
+        pub(super) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// [`super::derive_population_id_v1`] calls made on this thread so far.
+    fn population_id_derivations_on_this_thread() -> u64 {
+        POPULATION_ID_DERIVATIONS.with(std::cell::Cell::get)
+    }
+
+    /// One validation per grid, then the O(1)-per-cell entry (D-1834).
+    /// Proof:
+    /// `cli::population_admission_writer::no_strategy_digest_entry_validates_the_whole_grid_per_cell`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the strategy identity's own terms, passed through unchanged"
+    )]
+    fn derive_strategy_digest_v1(
+        population_id: [u8; 32],
+        family: InstrumentFamilyV1,
+        rung: u32,
+        policy: [u8; 32],
+        direction: TradeDirectionV1,
+        resolved: &ResolvedExitGridV1,
+        evaluated: &EvaluatedExitGridV1,
+        ordinal: usize,
+    ) -> Result<[u8; 32], PopulationAdmissionWriterRefusal> {
+        let validated = resolved
+            .validate_evaluation(evaluated)
+            .expect("complete fixture grid validates");
+        derive_strategy_digest_from_validated_v1(
+            population_id,
+            family,
+            rung,
+            policy,
+            direction,
+            resolved,
+            evaluated,
+            &validated,
+            ordinal,
+        )
+    }
+
+    /// W2-cli10-2, D-1834: no strategy-digest entry validates the whole grid
+    /// per cell. The public `derive_strategy_digest_v1` ran
+    /// `validate_evaluation` (O(G)) for every cell it was asked about, so a
+    /// caller deriving a grid through it paid O(G²); the only entry now takes
+    /// the grid's one validation and is O(1) per cell. Proof:
+    /// `cli::population_admission_writer::no_strategy_digest_entry_validates_the_whole_grid_per_cell`.
+    #[test]
+    fn no_strategy_digest_entry_validates_the_whole_grid_per_cell() {
+        let source = include_str!("population_admission_writer.rs");
+        let production = source
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("production source");
+        assert!(!production.contains("fn derive_strategy_digest_v1("));
+        let derive = production
+            .split_once("pub fn derive_strategy_digest_from_validated_v1(")
+            .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+            .unwrap_or_default();
+        assert!(derive.contains("validated: &ValidatedExitGridV1<'_>,"));
+        assert!(!derive.contains("validate_evaluation("));
+    }
+
+    /// W2-cli10-1, D-1639: the evaluated-side append keeps `Vec`'s geometric
+    /// growth: no exact one-slot reservation anywhere in production source.
+    #[test]
+    fn evaluated_sides_grow_geometrically_not_one_slot_per_push() {
+        let source = include_str!("population_admission_writer.rs");
+        let production = source
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("production source");
+        assert!(!production.contains("try_reserve_exact(1)"));
+        assert_eq!(
+            production
+                .matches("evaluated_sides\n        .try_reserve(1)")
+                .count(),
+            1
+        );
+        let mut sides: Vec<u64> = Vec::new();
+        let mut reallocations = 0_u32;
+        for value in 0..4_096_u64 {
+            let before = sides.capacity();
+            sides.try_reserve(1).expect("reserve");
+            if sides.capacity() != before {
+                reallocations += 1;
+            }
+            sides.push(value);
+        }
+        assert!(reallocations <= 14, "{reallocations} reallocations");
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -1693,7 +1818,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v1,
+        printed_ohlcv_cost_model_id_v3,
     };
     use runner::identity::{Direction, Params, Run};
 
@@ -1847,7 +1972,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("wide exact ratio interval is valid"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -2491,6 +2616,203 @@ mod tests {
                 u64::try_from(sequence).expect("sequence fits")
             );
             assert_eq!((row.mask_words, row.direction, row.exit), observed);
+        }
+    }
+
+    /// **The population is verified once, not once per cell (W2-cli7-0,
+    /// W2-cli15-2, D-1835).** Every cell's institutional evidence is built
+    /// with a `Measured` complete-population authority. Counted: the
+    /// population identity (an O(E) authority validation and hash) is derived
+    /// by the writer once and by the evidence binding once, whatever the cell
+    /// count; before D-1835 the evidence builder derived it again for every
+    /// cell.
+    #[test]
+    fn evidence_binds_the_complete_population_once_not_per_cell() {
+        use crate::institutional_evidence::{
+            BoundPopulationCompletenessV1, DataCompletenessSourceV1, EvidenceSourceV1,
+            FullPrecisionStatisticsSourceV1, InstitutionalCompletenessV1,
+            InstitutionalEvidenceSourcesV1, build_institutional_evidence_v1,
+        };
+        let bars = runner::synthetic::sessions(8);
+        let instrument = instrument("NIFTY");
+        let mut evaluator = evaluator();
+        let column = Column::build(&bars, &mut evaluator);
+        let (series, long, short) = resolved_grids(&instrument, &bars);
+        let policy = admission_policy();
+        let authority = authority(&bars, &column, series, &long, &short, &policy);
+        let held = authority;
+        let before = population_id_derivations_on_this_thread();
+        let bound =
+            BoundPopulationCompletenessV1::bind(&held, DataCompletenessSourceV1::Unmeasured)
+                .expect("the fixture population binds");
+        assert_eq!(population_id_derivations_on_this_thread() - before, 1);
+        let signal_column = column.clone();
+        let ladder = Ladder::with_min_hits(600).with_ceiling(50_000);
+        let mut cells = 0_u64;
+        let produced = produce_population_admission_v1(
+            &Sweeper::new(ladder),
+            signal_column,
+            authority,
+            &|_, _, _| {},
+            |words, direction| execution_run(&instrument, &bars, ladder, words, direction),
+            |context| {
+                cells += 1;
+                let admission = build_institutional_evidence_v1(InstitutionalEvidenceSourcesV1 {
+                    context,
+                    ranking_policy_digest: held.identities.ranking_policy_digest,
+                    trade_rows: EvidenceSourceV1::Unmeasured,
+                    independent_sessions: EvidenceSourceV1::Unmeasured,
+                    validation: EvidenceSourceV1::Unmeasured,
+                    family_tests: EvidenceSourceV1::Unmeasured,
+                    completeness: InstitutionalCompletenessV1 {
+                        population_authority: EvidenceSourceV1::Measured(&bound),
+                        data: DataCompletenessSourceV1::Unmeasured,
+                    },
+                    full_precision_statistics: FullPrecisionStatisticsSourceV1::Unmeasured,
+                })?;
+                assert_eq!(
+                    admission.values().population_complete,
+                    CompletenessV1::Complete
+                );
+                assert_eq!(
+                    admission.values().calendar_complete,
+                    CompletenessV1::Complete
+                );
+                assert_eq!(admission.values().data_complete, CompletenessV1::Unmeasured);
+                Ok(PopulationCellEvidenceV1 {
+                    assurance_ppm: cell_evidence(&context).assurance_ppm,
+                    admission,
+                })
+            },
+        )
+        .expect("complete population with measured evidence");
+        let derived = population_id_derivations_on_this_thread() - before;
+        assert!(cells > 1, "the fixture has more than one cell");
+        assert_eq!(
+            u64::try_from(produced.prepared().rows().len()).expect("row count fits"),
+            cells
+        );
+        assert_eq!(bound.population_id(), produced.population_id());
+        assert_eq!(
+            derived, 2,
+            "{cells} cells: evidence binding once, writer once"
+        );
+    }
+
+    /// **A population attests its TRAINING slice once per side, not once per
+    /// closed mask and side (W3-runner4-1, D-1837).** Counted over a complete
+    /// population with many closed masks: two attestations. The rows equal
+    /// the ones a fresh run of the same population produces.
+    #[test]
+    fn a_population_attests_its_training_slice_once_per_side() {
+        let bars = runner::synthetic::sessions(8);
+        let instrument = instrument("NIFTY");
+        let mut evaluator = evaluator();
+        let column = Column::build(&bars, &mut evaluator);
+        let (series, long, short) = resolved_grids(&instrument, &bars);
+        let policy = admission_policy();
+        let authority = authority(&bars, &column, series, &long, &short, &policy);
+        let ladder = Ladder::with_min_hits(600).with_ceiling(50_000);
+        let produce = || {
+            produce_population_admission_v1(
+                &Sweeper::new(ladder),
+                column.clone(),
+                authority,
+                &|_, _, _| {},
+                |words, direction| execution_run(&instrument, &bars, ladder, words, direction),
+                |context| Ok(cell_evidence(&context)),
+            )
+            .expect("complete population")
+        };
+        let before = ATTESTATIONS.with(std::cell::Cell::get);
+        let first = produce();
+        let attestations = ATTESTATIONS.with(std::cell::Cell::get) - before;
+        assert!(
+            first.population_run().closed > 1,
+            "more than one closed mask"
+        );
+        assert_eq!(attestations, 2, "one per side");
+        assert_eq!(produce().prepared().rows(), first.prepared().rows());
+    }
+
+    /// A bound population still refuses, per cell and in O(1), a foreign
+    /// ranking policy, a data source other than the one it verified, and a
+    /// cell of another population (D-1835). Proof:
+    /// `cli::population_admission_writer::a_bound_population_refuses_a_foreign_cell_policy_or_data_source`.
+    #[test]
+    fn a_bound_population_refuses_a_foreign_cell_policy_or_data_source() {
+        use crate::institutional_evidence::{
+            BoundPopulationCompletenessV1, DataCompletenessSourceV1, EvidenceSourceV1,
+            FullPrecisionStatisticsSourceV1, InstitutionalCompletenessV1,
+            InstitutionalEvidenceSourcesV1, build_institutional_evidence_v1,
+        };
+        let bars = runner::synthetic::sessions(8);
+        let instrument = instrument("NIFTY");
+        let mut evaluator = evaluator();
+        let column = Column::build(&bars, &mut evaluator);
+        let (series, long, short) = resolved_grids(&instrument, &bars);
+        let policy = admission_policy();
+        let authority = authority(&bars, &column, series, &long, &short, &policy);
+        let held = authority;
+        let bound =
+            BoundPopulationCompletenessV1::bind(&held, DataCompletenessSourceV1::Unmeasured)
+                .expect("the fixture population binds");
+        let ladder = Ladder::with_min_hits(600).with_ceiling(50_000);
+        let ranking = held.identities.ranking_policy_digest;
+        let mut foreign_ranking = ranking;
+        foreign_ranking[0] ^= 1;
+        for (ranking_policy_digest, data, foreign_population, refusal) in [
+            (
+                foreign_ranking,
+                DataCompletenessSourceV1::Unmeasured,
+                false,
+                "ranking policy differs from its complete population authority",
+            ),
+            (
+                ranking,
+                DataCompletenessSourceV1::Refused,
+                false,
+                "data source differs from the one its population binding verified",
+            ),
+            (
+                ranking,
+                DataCompletenessSourceV1::Unmeasured,
+                true,
+                "derives another population identity",
+            ),
+        ] {
+            let why = produce_population_admission_v1(
+                &Sweeper::new(ladder),
+                column.clone(),
+                authority,
+                &|_, _, _| {},
+                |words, direction| execution_run(&instrument, &bars, ladder, words, direction),
+                |mut context| {
+                    if foreign_population {
+                        context.population_id[0] ^= 1;
+                    }
+                    let admission =
+                        build_institutional_evidence_v1(InstitutionalEvidenceSourcesV1 {
+                            context,
+                            ranking_policy_digest,
+                            trade_rows: EvidenceSourceV1::Unmeasured,
+                            independent_sessions: EvidenceSourceV1::Unmeasured,
+                            validation: EvidenceSourceV1::Unmeasured,
+                            family_tests: EvidenceSourceV1::Unmeasured,
+                            completeness: InstitutionalCompletenessV1 {
+                                population_authority: EvidenceSourceV1::Measured(&bound),
+                                data,
+                            },
+                            full_precision_statistics: FullPrecisionStatisticsSourceV1::Unmeasured,
+                        })?;
+                    Ok(PopulationCellEvidenceV1 {
+                        assurance_ppm: cell_evidence(&context).assurance_ppm,
+                        admission,
+                    })
+                },
+            )
+            .expect_err("a foreign cell, policy or data source is refused");
+            assert!(why.contains(refusal), "{why}");
         }
     }
 

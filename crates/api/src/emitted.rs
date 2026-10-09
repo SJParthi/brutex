@@ -79,11 +79,21 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 /// record written afterwards would go somewhere no reader can find.
 pub(crate) fn sink() -> &'static telemetry::Sink {
     static PREPARED: std::sync::Once = std::sync::Once::new();
+    // ONE INSTALL AT A TIME. Two tests calling this at once both passed
+    // `install`'s emptiness check; the second's `Sink::open` of the same file
+    // was refused while the first had not yet published its sink, so
+    // `global()` was still empty and the `expect` below fired. Seen when
+    // `server::shutdown_tests` joined the `emitted` tests as a reader of this
+    // sink (D-2771).
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let dir = crate::scratch::path("telemetry");
     PREPARED.call_once(|| {
         let _ignored = std::fs::remove_dir_all(&dir);
     });
     let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    let _one = INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let installed = match telemetry::install(&config) {
         Ok(installed) => installed,
         Err(_refused) => telemetry::global()
@@ -175,6 +185,25 @@ pub(crate) fn counts(record: &telemetry::Record, key: &str, want: u64) -> bool {
     record.field(key).and_then(telemetry::OwnedValue::as_u64) == Some(want)
 }
 
+/// Every record the shared sink holds for one log run, oldest first.
+///
+/// sobs-14, D-4451: a test that drives its work inside [`telemetry::in_run`]
+/// under an id from [`telemetry::reserve_run_id`] reads back its own events and
+/// no other test's, which [`mark`] cannot promise while tests running in
+/// parallel write the same target and message.
+pub(crate) fn run_story(run: u64) -> Vec<telemetry::Record> {
+    let sink = sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes a file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_run(run);
+    let mut records = telemetry::tail(&dir, sink.keep_files(), &query).records;
+    records.reverse();
+    records
+}
+
 /// One production emit site, and the record it must leave in the file.
 struct Case {
     /// Where the `telemetry::emit` call lives, so a failure names the line
@@ -218,7 +247,11 @@ struct Case {
 /// all three browser engine entry points. The marker is driven directly here;
 /// proving an audit site must not require launching the expensive sweep it
 /// brackets.
-const ROWS: usize = 30;
+/// 30 -> 31 at D-1443: `api.calendar withheld`, a calendar month inside the
+/// span whose daily rung was not read, driven over two daily bars on disk.
+/// 31 -> 33 at D-1765: `api.backtest limit ignored`, an unparseable `limit`,
+/// and `api.logs filter ignored`, a `level` or `run` that could not be read.
+const ROWS: usize = 33;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -281,6 +314,55 @@ fn cases() -> Vec<Case> {
             },
             mine: Box::new(|record| {
                 says(record, "path", "emit-census") && says(record, "state", "absent")
+            }),
+        });
+    }
+
+    // crates/api/src/calendar_of.rs — a month inside the span whose daily
+    // rung was not read is withheld, and said so once per derivation. D-1443.
+    {
+        let root = fixture("emit-calendar-withheld");
+        cases.push(Case {
+            site: "calendar_of.rs api.calendar withheld",
+            target: "api.calendar",
+            message: "withheld",
+            level: telemetry::Level::Warn,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    use crate::calendar_of::tests::{OPEN, epoch_day, stamp, write_bars_for};
+                    let month = |m| store::path::YearMonth::new(2026, m).expect("a real month");
+                    let (january, february, march) = (month(1), month(2), month(3));
+                    write_bars_for(
+                        &root,
+                        "EMITWITHHELD",
+                        store::path::Timeframe::DAY_1,
+                        january,
+                        &[stamp(epoch_day(2026, 1, 6), OPEN)],
+                    );
+                    write_bars_for(
+                        &root,
+                        "EMITWITHHELD",
+                        store::path::Timeframe::DAY_1,
+                        march,
+                        &[stamp(epoch_day(2026, 3, 2), OPEN)],
+                    );
+                    let derived = crate::calendar_of::cached(
+                        &crate::calendar_of::Cache::default(),
+                        &root,
+                        Vendor::Zerodha,
+                        "NSE",
+                        "INDEX",
+                        "EMITWITHHELD",
+                        None,
+                        &[january, february, march],
+                        |_, _| false,
+                    );
+                    assert!(derived.unopened.is_empty(), "nothing held failed to open");
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "symbol", "EMITWITHHELD") && counts(record, "months_withheld", 1)
             }),
         });
     }
@@ -761,11 +843,13 @@ fn cases() -> Vec<Case> {
                 2,
             );
             progress.finished_micros = Some(2);
-            progress.refusal = Some("no result was recorded".to_owned());
-            crate::sweeprun::emit_completion(&progress, "sweep", 1);
+            progress.refusal = Some("no result was recorded".into());
+            crate::sweeprun::emit_completion(&progress, "sweep", std::time::Instant::now());
         }),
         mine: Box::new(|record| {
-            says(record, "operation", "sweep")
+            // CE-86 / D-2754: the duration is monotonic and says so.
+            says(record, "elapsed_basis", "monotonic")
+                && says(record, "operation", "sweep")
                 && says(record, "outcome", "refused")
                 && says(record, "why", "no result was recorded")
         }),
@@ -1063,6 +1147,46 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/backtest.rs — an unparseable `limit` answered the default
+    // page and said nothing (P1-01-03, D-1765).
+    cases.push(Case {
+        site: "backtest.rs api.backtest limit ignored",
+        target: "api.backtest",
+        message: "limit ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            assert_eq!(
+                crate::backtest::limit_asked("limit=emit-site-probe"),
+                crate::backtest::DEFAULT_LIMIT
+            );
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "limit")
+        }),
+    });
+
+    // crates/api/src/logs.rs — a `level` or `run` filter that could not be read
+    // answered the unfiltered tail as if it were the filtered one (P1-01-02,
+    // D-1765).
+    cases.push(Case {
+        site: "logs.rs api.logs filter ignored",
+        target: "api.logs",
+        message: "filter ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let (status, _headers, body) = block_on(crate::logs::logs_json(
+                "/logs.json?level=emit-site-probe&limit=1"
+                    .parse()
+                    .expect("a real uri"),
+            ));
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert!(body.contains("emit-site-probe"), "{body}");
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "level")
+        }),
+    });
+
     cases
 }
 
@@ -1121,7 +1245,9 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1350,7 +1476,9 @@ fn clean_month_reads_every_row(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1528,11 +1656,64 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `server::census_request_tests::an_absence_its_stamps_contradict_is_logged_at_warn`.
     // Four additional refusal sites are read back by the partial/interrupted
     // broker basket, recovery resume refusal, and partial cash replay tests.
-    const REACHED_IN_SERVER_TESTS: usize = 19;
+    // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
+    // driven and read back by `server::credential_law_tests::
+    // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
+    // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
+    // could not be stamped`, driven through `note_unstamped_lock` and read back
+    // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
+    // 20 -> 21 at D-2771: `api.serve shutdown drain ended with requests
+    // still in flight`, driven and read back by `server::shutdown_tests::
+    // a_request_still_running_after_the_signal_does_not_hold_the_server_open`.
+    // 21 -> 22 when both met in the PR #74 merge (D-2779): the two lines above
+    // were each written as 20 -> 21 on their own side, and both sites are driven.
+    // 21 -> 22 at D-2526 (conc13-2): `pull.http transport failed, retrying`,
+    // driven over a loopback vendor that closes its first socket unanswered and
+    // read back by `server::tests::a_retried_transport_failure_is_logged_at_warn`.
+    // 22 -> 24 at D-2575 and D-2594: `api.pull cash schedule refused`
+    // (equity-1), read back by
+    // `server::tests::cash_partial_month_replay_refuses_missing_or_corrupt_earlier_receipt`,
+    // and `api.accept accept refused` (conc11-3), read back by
+    // `server::tests::an_accept_failure_is_logged_once_per_window`.
+    // The three lines above were counted on the zero/next side, without
+    // D-2771's site; both sides' sites are driven, and the figure is re-taken
+    // after the zero/next merge.
+    // 24 -> 25 at that merge (D-4610): the zero/next side's 24 plus D-2771's
+    // shutdown drain WARN, which the other side drove; measured on the merged
+    // tree by the sum below.
+    // The other side went 21 -> 25 at D-4449, D-4450, D-4454 and D-4455
+    // (fxb2): `api.pull contract not landed`
+    // (`an_fno_landing_keeps_five_refusal_reasons_and_counts_all_six`),
+    // `pull.run refused before it started`
+    // (`a_run_refused_before_it_starts_is_logged_with_its_reason`), `api.verify
+    // scrub` (`server::verification_route_tests::every_scrub_writes_its_
+    // verdict_to_the_log_once`) and `pull.http retrying a refused request`
+    // (`server::fno_boundary_tests::every_retry_on_the_bars_ladder_is_one_
+    // event_with_its_reason`), each read back from this sink.
+    // 25 -> 28 at the audit-fix merge (D-4627): the four above join this
+    // side's 25, less D-2526's `pull.http transport failed, retrying`, which
+    // logged the same retry `note_retry` logs and was removed so each retry
+    // writes one line; its test reads `note_retry`'s now.
+    const REACHED_IN_SERVER_TESTS: usize = 28;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
-    const REACHED_IN_RECOVERY_TESTS: usize = 2;
+    // 2 -> 3 at D-4448: `pull.recovery recovery blocked`, read back by
+    // `recovery::tests::every_refused_recovery_names_its_stage_and_reason_in_the_log`.
+    const REACHED_IN_RECOVERY_TESTS: usize = 3;
+    // Four sites read back by their own module's tests. `autopilot`'s verdicts
+    // (`autopilot::note_decision`: halted, stalled, backing off; conc13-4,
+    // D-2595), by `autopilot::tests::a_halt_a_stall_and_a_backoff_are_logged`
+    // and `autopilot::tests::a_stall_and_a_halt_are_logged_once_each_with_feed_and_month`;
+    // `autopilot`'s pass halt, clock wait and end (`autopilot::note_backfill`,
+    // sobs-6, D-4453), by the same module's sobs-6 tests; `api.pullrun`
+    // (`pullrun::note_press`, D-4452), by
+    // `pullrun::tests::a_press_logs_its_legs_and_verdict_under_one_run_and_nothing_else`;
+    // and the `api.sweep` lease refusal, by
+    // `sweeprun::tests::a_lease_refusal_is_logged_with_its_reason`. Each side
+    // counted its own; the merge keeps one writer per verdict and per leg, so
+    // this side's `api.pull leg failed` is gone (D-4627, D-4657): 3 + 2 - 1.
+    const REACHED_IN_MODULE_TESTS: usize = 4;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1604,10 +1785,41 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// own tests cover the landing and the transport pairing against a
     /// recording transport, which is the half that has no network in it.
     ///
+    /// ONE THAT LEFT THIS LIST, added with D-1481 (v3b-2) and moved to
+    /// `REACHED_IN_SERVER_TESTS` by P1-17-02 (D-1920): `api.serve the serve
+    /// lock is held but could not be stamped`. It fires only when writing the
+    /// stamp fails while emptying the same file succeeds, a split no fixture
+    /// produces on one descriptor. The report step now lives in
+    /// `note_unstamped_lock`, which
+    /// `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+    /// calls directly with the warning `stamp_outcome` produced, and reads the
+    /// event back.
+    ///
     /// The rows of the table above, every one of them struck through — plus
     /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 8;
+    ///
+    /// AND TWO MORE, added with D-1582 and D-1583 (audit-20261003):
+    /// `api.main engine tasks abandoned at shutdown`, whose arm
+    /// `sweeprun::tests::stopping_does_not_wait_out_a_running_engine_task`
+    /// drives, but which only ever writes into the sink of a process that is
+    /// ending; and `api.request failed-request lines suppressed in the
+    /// previous window`, which needs more than fifty cross-site failures and
+    /// then a minute's wait — the ration it reports is proven by
+    /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
+    ///
+    /// AND FIVE MORE, added by the zero-findings fixes (2026-10-06), emitted
+    /// but read back by no test here: `autopilot feeds admitted` (clock-1,
+    /// D-2578), `pull.press started` (atomics-1, D-2582), `api.pull partial
+    /// day refused` (clock-2, D-2584), and `api.server background work
+    /// drained` and `api.server background work abandoned at shutdown`
+    /// (autopilot-4, lifecycle-1, D-2583), whose arms the shutdown tests drive
+    /// but which only write into the sink of a process that is ending.
+    ///
+    /// ONE OF THOSE FIVE IS GONE: `pull.press started` went with the press's
+    /// claim on the shared run key, which the per-task log scope replaced at
+    /// the audit-fix merge (D-4625). 15 -> 14.
+    const UNREACHABLE: usize = 14;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1620,17 +1832,62 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 57 -> 58 at D-0695's ninth repair: a census row served unreadable
     // because its stamps contradict its absence, driven in `server`'s census
     // request tests.
+    //
+    // 58 -> 59 at D-0948: the credential re-read in `credential_law::note`.
+    //
+    // 59 -> 60 at D-1443: `api.calendar withheld`, driven in the table above.
+    //
+    // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
+    // unreachable list above.
+    //
+    // 61 -> 63 at D-1765: `api.backtest limit ignored` and `api.logs filter
+    // ignored`, both driven in the table above.
+    //
+    // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
+    // named above.
+    //
+    // 63 -> 64 at D-2771: the bounded shutdown drain's WARN, driven in
+    // `server::shutdown_tests`.
+    //
+    // 65 -> 66 when both met in the PR #74 merge (D-2779): D-2771 counted its
+    // WARN as 63 -> 64 on a side without D-1765's two sites.
+    //
+    // 65 -> 66 at D-2526 (conc13-2): `pull.http transport failed, retrying` in
+    // `server::note_transport_retry`, counted in `REACHED_IN_SERVER_TESTS`.
+    //
+    // 66 -> 76 by the zero-findings fixes of 2026-10-06: two read back in
+    // server tests, three in their own module's tests, five named
+    // unreachable (see the three constants).
+    //
+    // The two lines above were counted on the zero/next side, without D-2771's
+    // site; the figure is re-taken after the zero/next merge.
+    //
+    // 76 -> 77 at that merge (D-4610): the zero/next side's 76 plus D-2771's
+    // WARN. Measured: `lib_emit_sites()` returns 77 on the merged tree.
+    //
+    // The other side went 65 -> 72 at D-4448 to D-4455 (fxb2): seven new
+    // sites, each read back in the column its test lives in, above.
+    //
+    // 77 -> 81 at the audit-fix merge: this side's 77 plus that side's seven,
+    // less the three this side's sites duplicated or that the log scope
+    // retired (`pull.http transport failed, retrying`, `api.pull leg failed`
+    // and `pull.press started`; D-4625, D-4627).
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 58,
+        lib_sites, 81,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
+        SITES_HERE
+            + REACHED_IN_SERVER_TESTS
+            + REACHED_IN_RECOVERY_TESTS
+            + REACHED_IN_MODULE_TESTS
+            + UNREACHABLE,
         lib_sites,
-        "every emit site is proven here, in server::tests or recovery::tests, or named above"
+        "every emit site is proven here, in server::tests, recovery::tests or its own \
+         module's tests, or named above"
     );
 }

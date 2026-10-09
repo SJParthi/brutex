@@ -182,6 +182,98 @@ impl Credential {
             key: Some(key),
         }
     }
+
+    /// The SHA-256 fingerprint of this credential, for one comparison and
+    /// nothing else.
+    ///
+    /// # Why it exists — `CLAUDE.md` §8 on the shipped path
+    ///
+    /// *"A stale token is re-read; if the re-read returns the same dead value,
+    /// the pull halts loudly."* That rule is a COMPARISON between the value a
+    /// vendor rejected and the value a re-read returned. The shipped pull never
+    /// held the rejected value anywhere it could be compared — `HttpSource`
+    /// folds it into a header at construction — so the comparison was never
+    /// made and every remaining instrument was sent the dead token again
+    /// (GAP2-36, D-0948).
+    ///
+    /// Keeping the token itself around to compare would keep a second copy of
+    /// the secret alive for the life of a run. A fingerprint keeps 32 bytes that
+    /// are equal exactly when the two values are equal, and that cannot be
+    /// turned back into either.
+    ///
+    /// # Domain-separated and length-prefixed
+    ///
+    /// The input is a fixed label, then each secret preceded by its byte
+    /// length, then whether a key is present. Without the lengths, the pair
+    /// `("ab", "c")` and the pair `("a", "bc")` would hash the same bytes.
+    ///
+    /// # Cost
+    ///
+    /// One SHA-256 over at most a few hundred bytes, once per credential read —
+    /// never per request.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
+    #[must_use]
+    pub fn print(&self) -> CredentialPrint {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"brutex-credential-print-v1\0");
+        hasher.update((self.token.len() as u64).to_le_bytes());
+        hasher.update(self.token.as_bytes());
+        match &self.key {
+            None => hasher.update([0u8]),
+            Some(key) => {
+                hasher.update([1u8]);
+                hasher.update((key.len() as u64).to_le_bytes());
+                hasher.update(key.as_bytes());
+            }
+        }
+        CredentialPrint(hasher.finalize().into())
+    }
+}
+
+/// A credential's fingerprint: equal exactly when the credentials are equal.
+///
+/// # What it may be used for
+///
+/// Comparing a re-read with the value a vendor just rejected — `CLAUDE.md` §8.
+/// It is not `Display`, its `Debug` prints nothing of the digest, and it has no
+/// accessor for the bytes, so it cannot reach a log, a page or an error by any
+/// route this crate offers. A digest of a secret is not the secret, but a
+/// printed digest still lets anyone holding a guess confirm it, and nothing here
+/// needs to print it.
+///
+/// # The comparison is constant-time
+///
+/// Every byte is XOR-folded before the answer is read, so how long the
+/// comparison takes does not depend on where the two digests first differ.
+/// Nothing in this repository exposes the timing to an attacker; it costs
+/// thirty-two XORs, and it means the question never has to be asked again.
+///
+/// **UNVERIFIED as a measurement.** No test or bench times the comparison;
+/// the claim is argued from the shape of the code. `CLAUDE.md` §3 rule 6.
+#[derive(Clone, Copy)]
+pub struct CredentialPrint([u8; 32]);
+
+impl PartialEq for CredentialPrint {
+    fn eq(&self, other: &Self) -> bool {
+        let mut diff = 0u8;
+        for (left, right) in self.0.iter().zip(other.0.iter()) {
+            diff |= left ^ right;
+        }
+        diff == 0
+    }
+}
+
+impl Eq for CredentialPrint {}
+
+impl core::fmt::Debug for CredentialPrint {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CredentialPrint(<redacted>)")
+    }
 }
 
 /// A vendor reached over HTTPS, driven entirely by its descriptor.
@@ -215,7 +307,19 @@ pub struct HttpSource {
     /// Holding the assembled value is not a wider exposure than holding the
     /// token was — it is the same secret, in the same struct, behind the same
     /// hand-written `Debug`.
-    header_value: String,
+    ///
+    /// # A validated, SENSITIVE `HeaderValue` (P1-19-01, P11-03, D-2525)
+    ///
+    /// This was a `String` handed to the request builder on every send. A token
+    /// holding a byte a header cannot carry — a stored newline — passed
+    /// construction and failed inside `send`, where it was reported as
+    /// `TransportFailed` ("was not reached") and retried like a network blip.
+    /// It is now parsed ONCE here, and a value that is not a header value
+    /// refuses construction as [`FetchError::CredentialNotAHeaderValue`]
+    /// before a client or a permit exists. It is marked sensitive, so the
+    /// HTTP stack's own `Debug` of a header map prints `Sensitive` rather than
+    /// the token.
+    header_value: reqwest::header::HeaderValue,
     client: reqwest::Client,
     /// THE BUDGET, ENFORCED RATHER THAN MERELY DECLARED.
     ///
@@ -297,6 +401,12 @@ pub struct HttpSource {
     /// governed either way -- which is the property the other candidate fix,
     /// deleting the api's five charge sites, would have given up.
     charged_by_caller: bool,
+    /// The fingerprint of the credential this source was built with.
+    ///
+    /// Computed once in [`HttpSource::new`] and never recomputed: the header
+    /// is fixed at construction, so the credential a request carries is the
+    /// one this names. See [`Credential::print`] for why it exists.
+    print: CredentialPrint,
 }
 
 // The token is the reason this is hand-written. A derived `Debug` prints every
@@ -408,6 +518,24 @@ impl HttpSource {
         }
     }
 
+    /// The assembled auth value as a header the HTTP client will send, marked
+    /// sensitive (P1-19-01, P11-03, D-2525).
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::CredentialNotAHeaderValue`] naming the header and never
+    /// the value, for a credential holding a byte no header can carry. The
+    /// caller drops the assembled `String` either way; nothing else holds it.
+    fn sensitive_header(
+        header: &'static str,
+        assembled: &str,
+    ) -> Result<reqwest::header::HeaderValue, FetchError> {
+        let mut value = reqwest::header::HeaderValue::from_str(assembled)
+            .map_err(|_| FetchError::CredentialNotAHeaderValue { header })?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
+
     /// Builds a source for one vendor.
     ///
     /// # Errors
@@ -417,11 +545,18 @@ impl HttpSource {
     /// deployment fault rather than a vendor one.
     /// [`FetchError::CredentialMismatch`] if the credential does not match the
     /// scheme — see [`Self::header_value`].
+    /// [`FetchError::CredentialNotAHeaderValue`] if the assembled credential
+    /// cannot be sent as a header — see [`Self::sensitive_header`].
     pub fn new(spec: HttpSpec, credential: Credential) -> Result<Self, FetchError> {
         // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
         // costs nothing to find; building a TLS client first would spend that
         // work to throw it away.
-        let header_value = Self::header_value(spec.auth.scheme, credential)?;
+        // FINGERPRINTED BEFORE THE CREDENTIAL IS CONSUMED by the header. The
+        // print is what `CLAUDE.md` §8's comparison is made on; see
+        // `Credential::print`.
+        let print = credential.print();
+        let assembled = Self::header_value(spec.auth.scheme, credential)?;
+        let header_value = Self::sensitive_header(spec.auth.header, &assembled)?;
         let client = pooled_client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
         })?;
@@ -467,7 +602,19 @@ impl HttpSource {
             // OWNED, THEREFORE CHARGED HERE. `sharing` is the only thing that
             // moves the charge to the caller.
             charged_by_caller: false,
+            print,
         })
+    }
+
+    /// The fingerprint of the credential every request from this source
+    /// carries.
+    ///
+    /// The one fact about the credential a caller may hold after the source is
+    /// built, and only for `CLAUDE.md` §8's comparison: a re-read whose print
+    /// equals this one returned the same dead value.
+    #[must_use]
+    pub const fn credential_print(&self) -> CredentialPrint {
+        self.print
     }
 
     /// Replaces this source's governor with one the caller already holds.
@@ -484,18 +631,35 @@ impl HttpSource {
     /// A source whose feed declares no budget is left ungoverned: handing one a
     /// governor would enforce a ceiling nobody wrote down, which is the
     /// invention §3 rule 1 forbids.
+    ///
+    /// # `None` keeps the private governor (pull1-2, D-2524)
+    ///
+    /// Handing over NOTHING is not handing over "no budget". This used to
+    /// assign the argument unconditionally, so a governed source given `None`
+    /// dropped the private governor `new` built and `wait_for_permit` became a
+    /// no-op: the api's `shared_governor` answers `None` for a poisoned budget
+    /// list, and that one panic elsewhere switched the vendor's ceiling off for
+    /// every later source. A `None` is now a no-op: the source stays governed
+    /// by its own instance and charges it itself.
     #[must_use]
     pub fn sharing(
         mut self,
         governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
     ) -> Self {
-        if self.governor.is_some() {
-            // THE CALLER NOW CHARGES, and only if it actually handed one over.
+        // NOTHING HANDED OVER IS NOT "NO GOVERNOR". `None` used to replace the
+        // source's own governor and clear its charge, so a caller that had no
+        // shared instance to give left a budgeted feed ungoverned: no permit
+        // was asked for by anyone. The source keeps its own and charges it.
+        // conc:pull1-2, D-2799. The same rule was reached independently as
+        // pull1-2, D-2524 (see the doc above): replace only when the source is
+        // governed AND a governor was actually handed over.
+        if let (Some(_), Some(shared)) = (&self.governor, governor) {
+            // THE CALLER NOW CHARGES, because it actually handed one over.
             // Sharing a governor and spending from it are one act; both sides
             // calling `admit` is two permits for one request. See
             // `charged_by_caller`.
-            self.charged_by_caller = governor.is_some();
-            self.governor = governor;
+            self.charged_by_caller = true;
+            self.governor = Some(shared);
         }
         self
     }
@@ -523,60 +687,71 @@ impl HttpSource {
     ///
     /// # Cost
     ///
-    /// One `admit` per attempt, and `admit` walks [`crate::rate::WINDOW_COUNT`]
-    /// windows -- a constant three -- so this is O(1) per request and does not
-    /// grow with how many requests came before it.
+    /// ONE [`crate::rate::Governor::reserve`] per request, never a retry.
+    /// `reserve` walks [`crate::rate::WINDOW_COUNT`] windows -- a constant
+    /// three -- so this is O(1) per request and does not grow with how many
+    /// requests came before it or how many are waiting beside it.
+    ///
+    /// This was a loop of `admit` and sleep until o1api-54 (D-1203): every
+    /// waiter that slept the same named wait woke at the same instant and raced
+    /// for one permit, so service was not first-come-first-served, and the loop
+    /// had no bound. A reservation is granted in lock order and slept once.
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.
     /// `CLAUDE.md` §3 rule 6: a structural argument is not a
     /// measurement, however sound it is.
-    async fn wait_for_permit(&self) {
+    ///
+    /// # Errors
+    ///
+    /// The governor's reservation saturated: its cursor plus the wait passes
+    /// the end of the clock, so no instant exists to sleep to. Nothing is sent
+    /// and nothing is charged; the reason names the cursor. Until the fix to
+    /// D-1203 this slept toward `u64::MAX` instead, which never ends.
+    async fn wait_for_permit(&self) -> Result<(), String> {
         // THE CALLER ALREADY WITHDREW. Charging again here is two permits for
         // one request -- see `charged_by_caller` for what that measured and how
         // it surfaced as a 502.
         //
         // THE FEEDBACK IS NOT SKIPPED. `record_success` and `record_throttled`
-        // still run on every answer below, because a shared governor must learn
-        // from every path whether or not that path is the one that pays.
+        // still run below on every answer that earns one, because a shared
+        // governor must learn from every path whether or not that path is the
+        // one that pays.
         if self.charged_by_caller {
-            return;
+            return Ok(());
         }
         let Some(lock) = self.governor.as_ref() else {
-            return;
+            return Ok(());
         };
-        loop {
-            let wait = {
-                let now = Self::now_micros();
-                // POISON IS NOT A REASON TO STOP GOVERNING. A panic in another
-                // chain must not turn the ceiling off for every remaining one,
-                // so the guard is taken either way.
-                let mut g = lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match g.admit(now) {
-                    crate::rate::Verdict::Admit => return,
-                    crate::rate::Verdict::Deny { wait_micros, .. } => wait_micros,
-                }
-            };
-            // A DENY THAT ASKS FOR NO WAIT WOULD SPIN. The governor does not
-            // emit one, and this floor means a future change to it cannot turn
-            // this loop into a busy wait.
-            let at_least = wait.max(1);
-            // COUNTED BEFORE THE SLEEP, NOT AFTER. A run cancelled mid-wait
-            // still absorbed the part it waited, and a counter that only
-            // credits completed sleeps under-reports exactly the runs an
-            // operator is most likely to be asking about.
-            crate::rate::note_absorbed(at_least);
-            tokio::time::sleep(core::time::Duration::from_micros(at_least)).await;
+        let now = crate::rate::monotonic_micros();
+        let (at, cursor) = {
+            // POISON IS NOT A REASON TO STOP GOVERNING. A panic in another
+            // chain must not turn the ceiling off for every remaining one,
+            // so the guard is taken either way.
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (g.reserve(now), g.cursor_micros())
+        };
+        let Some(at) = at else {
+            return Err(format!(
+                "the rate governor's reservation saturated: its cursor is at \
+                 {cursor} µs and the wait for the next permit passes the end \
+                 of the clock, so there is no instant to sleep to. Nothing \
+                 was sent and nothing was charged."
+            ));
+        };
+        let wait = at.saturating_sub(now);
+        if wait == 0 {
+            return Ok(());
         }
-    }
-
-    /// Microseconds since the epoch, for the governor's windows.
-    fn now_micros() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+        // COUNTED BEFORE THE SLEEP, NOT AFTER. A run cancelled mid-wait
+        // still absorbed the part it waited, and a counter that only
+        // credits completed sleeps under-reports exactly the runs an
+        // operator is most likely to be asking about.
+        crate::rate::note_absorbed(wait);
+        tokio::time::sleep(core::time::Duration::from_micros(wait)).await;
+        Ok(())
     }
 
     /// This feed's endpoint with every value segment left as its placeholder —
@@ -707,8 +882,12 @@ impl HttpSource {
     ///
     /// Returned as a pair rather than applied inside, so a test can assert the
     /// NAME without ever seeing the value.
-    fn header(&self) -> (&'static str, &str) {
-        (self.spec.auth.header, &self.header_value)
+    ///
+    /// The value is a refcounted clone of the one validated, sensitive
+    /// `HeaderValue` built in [`Self::new`] (P11-03, D-2525): the flag travels
+    /// with it into the request.
+    fn header(&self) -> (&'static str, reqwest::header::HeaderValue) {
+        (self.spec.auth.header, self.header_value.clone())
     }
 }
 
@@ -808,8 +987,127 @@ fn note_answer(
 /// declared shape, and whatever [`RawWindow::decode`] refuses — which includes
 /// **the seven arrays disagreeing in length**, the trap that would otherwise
 /// yield a short window filed as complete.
+///
+/// # Memory — a whole tree, MEASURED
+///
+/// The body is parsed into one `serde_json::Value` tree before any field is
+/// read, so the tree, the body and the decoded columns are alive at once. A
+/// `Value` is 32 bytes on this build (pinned by
+/// `the_json_tree_is_thirty_two_bytes_a_node`) against as few as two bytes of
+/// text for one array element (`0,`), and since D-1570
+/// (`arbitrary_precision`) a number node also owns its digits in one heap
+/// allocation. The peak above the body is COUNTED by
+/// `a_json_decodes_peak_memory_is_measured_against_its_body` in
+/// `crates/pull/tests/allocation.rs` (D-2291): 12x the body for a Dhan
+/// 34,000-bar chunk as the vendor quotes it, 7x for a Zerodha answer of the
+/// same size, and 17x for the cheapest hostile text per node, one array of a
+/// million zeros, under the [`MAX_RESPONSE_BYTES`] cap (so at most about
+/// 1.1 GiB for a 64 MiB hostile body). Bytes asked of the allocator: its own
+/// per-block overhead is not counted. The typed or streaming decode that would
+/// remove the tree is not built. o1api-33, D-1203, D-2291; `docs/06-limits.md`
+/// states it.
 pub fn decode_body(
     body: &str,
+    spec: &HttpSpec,
+    listing: crate::vendor::Listing,
+) -> Result<RawWindow, FetchError> {
+    let root = parse_answer(body).map_err(|why| not_json(&why))?;
+    // A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS IN ONE BODY
+    // (attackdata-3, D-1531). `serde_json` keeps the last and says nothing, so
+    // `"open":[100],"open":[200]` decoded as an open of 200. `container`
+    // already refuses two objects' fields mixed; this is the same case inside
+    // one object, and it is refused by name.
+    if let Some(key) = repeated_key(body) {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "the vendor's answer repeats the key {key:?} inside one object, \
+                 so it carries two values for one field; refused rather than \
+                 silently keeping the last"
+            ),
+        });
+    }
+    decode_value(&root, spec, listing)
+}
+
+/// The first key that appears twice in one JSON object of `body`, decoded.
+///
+/// Run only over a body `serde_json` has already parsed, so every string is
+/// well formed and balanced. One pass over the bytes: a `{` opens a key set, a
+/// `[` opens a level with none, and a string followed by `:` is a key, decoded
+/// by `serde_json` so an escaped spelling of a held key is the same key. The
+/// cost is linear in the body, which the parse above already paid; the sets
+/// hold at most every key of the body once.
+pub(crate) fn repeated_key(body: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    let mut open: Vec<Option<std::collections::HashSet<String>>> = Vec::new();
+    let mut at = 0usize;
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b'{' => open.push(Some(std::collections::HashSet::new())),
+            b'[' => open.push(None),
+            b'}' | b']' => {
+                open.pop();
+            }
+            b'"' => {
+                let mut end = at.saturating_add(1);
+                while let Some(&inner) = bytes.get(end) {
+                    match inner {
+                        b'\\' => end = end.saturating_add(2),
+                        b'"' => break,
+                        _ => end = end.saturating_add(1),
+                    }
+                }
+                let after = bytes
+                    .get(end.saturating_add(1)..)
+                    .unwrap_or_default()
+                    .iter()
+                    .copied()
+                    .find(|b| !b.is_ascii_whitespace());
+                if after == Some(b':')
+                    && let Some(Some(keys)) = open.last_mut()
+                    && let Some(key) = body
+                        .get(at..=end)
+                        .and_then(|token| serde_json::from_str::<String>(token).ok())
+                    && !keys.insert(key.clone())
+                {
+                    return Some(key);
+                }
+                at = end;
+            }
+            _ => {}
+        }
+        at = at.saturating_add(1);
+    }
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`parse_answer`] ran on this thread, so a test can count
+    /// the parses one answer costs. Test builds only.
+    static PARSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The one JSON parse a vendor answer goes through, whichever reader wants it.
+///
+/// [`crate::refusal::disposition_of`] parses through it as well, so a count of
+/// its calls sees a parse by the refusal reader and by the decode alike.
+pub(crate) fn parse_answer(body: &str) -> Result<serde_json::Value, serde_json::Error> {
+    #[cfg(test)]
+    PARSES.with(|c| c.set(c.get().saturating_add(1)));
+    serde_json::from_str(body)
+}
+
+/// The fault a body that is not JSON decodes to.
+fn not_json(why: &serde_json::Error) -> FetchError {
+    FetchError::TransportFailed {
+        detail: format!("the vendor's answer is not JSON: {why}"),
+    }
+}
+
+/// [`decode_body`] over a body already parsed by [`parse_answer`].
+fn decode_value(
+    root: &serde_json::Value,
     spec: &HttpSpec,
     listing: crate::vendor::Listing,
 ) -> Result<RawWindow, FetchError> {
@@ -817,10 +1115,6 @@ pub fn decode_body(
     // a `telemetry::emit` inside the decode loop; one per window is the
     // granularity `CLAUDE.md` section 3 rule 4 affords. See `one_volume`.
     let mut corrected = 0usize;
-    let root: serde_json::Value =
-        serde_json::from_str(body).map_err(|why| FetchError::TransportFailed {
-            detail: format!("the vendor's answer is not JSON: {why}"),
-        })?;
 
     let decoded = match spec.response {
         ResponseShape::ParallelArrays { envelope } => {
@@ -852,7 +1146,7 @@ pub fn decode_body(
             // exactly that path. The other two arms return a `Result` into
             // `decoded` and were never affected. D-0332.
             (|| -> Result<RawWindow, FetchError> {
-                let root = container(&root, envelope)?;
+                let root = container(root, envelope)?;
                 let f = spec.fields;
                 // THE MASK FIRST, so every column below is filtered the same
                 // way and a minute the vendor did not trade is skipped rather
@@ -898,8 +1192,17 @@ pub fn decode_body(
                 note_negative_volume_bars(decided.negative_volume, keep.len());
                 note_negative_interest_bars(decided.negative_open_interest, keep.len());
                 let mut arrays = arrays;
-                note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
-                RawWindow::decode(&arrays)
+                // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+                finish(
+                    &mut arrays,
+                    keep.len(),
+                    crate::fetch::DecodeSkips {
+                        null_price: decided.null_bars,
+                        negative_volume: decided.negative_volume,
+                        negative_open_interest: decided.negative_open_interest,
+                        impossible_ohlc: 0,
+                    },
+                )
             })()
         }
         // ONE OBJECT PER BAR — the shape `crate::vendor`'s Groww row declares.
@@ -916,10 +1219,10 @@ pub fn decode_body(
         // conversions run per object: rupees to paisa through `csv::paisa`, no
         // float, and a value off the tick grid refused by name.
         ResponseShape::ArrayOfObjects { envelope } => {
-            decode_objects(&root, spec, envelope, listing, &mut corrected)
+            decode_objects(root, spec, envelope, listing, &mut corrected)
         }
         ResponseShape::PositionalRows { envelope, array } => {
-            decode_positional(&root, spec, envelope, array, listing, &mut corrected)
+            decode_positional(root, spec, envelope, array, listing, &mut corrected)
         }
     };
     // ONLY WHEN A WINDOW ACTUALLY LANDED. A refused window wrote nothing, so an
@@ -1037,7 +1340,7 @@ fn decode_objects(
         open_interest: Vec::new(),
     };
 
-    let mut null_bars = 0usize;
+    let mut skipped = crate::fetch::DecodeSkips::default();
     for (i, item) in items.iter().enumerate() {
         // A field missing from ONE object is refused naming both the field and
         // which bar it was, because "the vendor sent 400 bars and one of them
@@ -1061,7 +1364,7 @@ fn decode_objects(
         // that had no trade, and this store cannot tell an invented zero from a
         // real one afterwards.
         //
-        // Skipped rather than silent: `null_bars` is counted and travels with
+        // Skipped rather than silent: `skipped.null_price` is counted and travels with
         // the window, so a run that dropped half its bars says so. `CLAUDE.md`
         // §4 — degrade loudly and name the reason.
         //
@@ -1074,8 +1377,24 @@ fn decode_objects(
             .iter()
             .any(|name| one(name).is_ok_and(serde_json::Value::is_null))
         {
-            null_bars += 1;
+            skipped.null_price += 1;
             continue;
+        }
+        // THE SAME COUNT RULE AS THE COLUMNAR SHAPE (c4a-1, c4a-2, D-1490).
+        match count_verdict(
+            item.get(f.volume),
+            f.open_interest.and_then(|name| item.get(name)),
+            listing,
+        ) {
+            CountVerdict::Keep => {}
+            CountVerdict::NegativeVolume => {
+                skipped.negative_volume = skipped.negative_volume.saturating_add(1);
+                continue;
+            }
+            CountVerdict::NegativeInterest => {
+                skipped.negative_open_interest = skipped.negative_open_interest.saturating_add(1);
+                continue;
+            }
         }
         arrays
             .open
@@ -1102,8 +1421,8 @@ fn decode_objects(
     // window an operator has to know about — it is not an error, and it is not
     // a full answer either. Emitted once per window rather than once per bar,
     // because 375 lines of "skipped" is noise and one count is information.
-    if null_bars > 0 {
-        // BOTH, and the event is the load-bearing one. `eprintln!` reaches the
+    if skipped.null_price > 0 {
+        // BOTH, and the event is the load-bearing one. The stderr line reaches the
         // operator watching a terminal; the event reaches the log FILE, which is
         // the thing handed to somebody diagnosing a run that already finished.
         // A diagnostic that exists only on a terminal nobody kept is a fact this
@@ -1114,22 +1433,31 @@ fn decode_objects(
                 "pull.decode",
                 "bars carried a null price and were skipped",
             )
-            .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
+            .with(
+                "skipped",
+                u64::try_from(skipped.null_price).unwrap_or(u64::MAX),
+            )
             .with("bars", u64::try_from(items.len()).unwrap_or(u64::MAX)),
         );
-        eprintln!(
-            "brutex: {null_bars} of {} bars carried a null price and were \
+        // The count is the carried `DecodeSkips` field (D-3122); the line goes
+        // through `stderr_line`, which cannot panic (r53-1, D-4413; D-4648).
+        let _printed = telemetry::stderr_line(format_args!(
+            "brutex: {} of {} bars carried a null price and were \
              skipped — the vendor reported no trade in those minutes",
+            skipped.null_price,
             items.len()
-        );
+        ));
     }
+
+    note_negative_volume_bars(skipped.negative_volume, items.len());
+    note_negative_interest_bars(skipped.negative_open_interest, items.len());
 
     // THE THIRD DOOR GETS THE RULE AT THE SAME TIME AS THE FIRST. Three
     // separate rules in this decoder reached two of the three shapes and missed
     // the same one; this one is applied at every `RawWindow::decode` in the
     // file, so a shape cannot be forgotten without deleting the call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), items.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(&mut arrays, items.len(), skipped)
 }
 
 /// The unit [`decode_body`] leaves prices in, whatever the vendor quoted.
@@ -1150,8 +1478,11 @@ pub const DECODED_PRICE_SCALE: PriceScale = PriceScale::Paisa;
 /// The second scaled before rounding — `24500.75 × 100` — which is *arithmetically*
 /// right and still wrong for this repository: `clippy::float_arithmetic` is
 /// denied workspace-wide, precisely so that `CLAUDE.md` §7's "never a float"
-/// cannot be walked back one expression at a time. The lint was correct. There
-/// is no float in a price here, not even briefly.
+/// cannot be walked back one expression at a time. The lint was correct. No
+/// float ARITHMETIC touches a price here. The wire number is still parsed by
+/// `serde_json` into an `f64` before `Display` renders it back to text, so the
+/// text read below is exact only when that parse is: D-1494 and
+/// `docs/06-limits.md` state when (GAP16-24).
 ///
 /// # What it does instead
 ///
@@ -1212,6 +1543,215 @@ fn prices(
         .collect()
 }
 
+/// The vendor's own text for one JSON number, in plain decimal notation.
+///
+/// **THE TEXT IS THE VENDOR'S, NOT AN f64's (audit-20261003 attackdata-4,
+/// D-1570).** The workspace builds `serde_json` with `arbitrary_precision`, so
+/// a [`serde_json::Number`] keeps the digits the body carried and
+/// `to_string()` returns them unchanged. Without it the number was an `f64`
+/// and the snap read that float's shortest rendering: past about seventeen
+/// significant digits it had already rounded, and `100.12499999999999999`
+/// snapped to 100.13 where its own text says 100.12.
+///
+/// An exponent (`2.450075E4`) is shifted into a plain decimal exactly, by
+/// moving the point over the digits, so the readers below — which walk plain
+/// decimals digit by digit — see the same value. `None` when the exponent
+/// would put the point more than [`brutex_core::price::MAX_PRICE_TEXT`] places
+/// outside the digits: no price or count this build reads is that long, and
+/// the caller refuses the cell by name.
+pub(crate) fn number_text(number: &serde_json::Number) -> Option<String> {
+    let text = number.to_string();
+    let Some(at) = text.find(['e', 'E']) else {
+        return Some(text);
+    };
+    let mantissa = text.get(..at)?;
+    let exponent: i64 = text.get(at.checked_add(1)?..)?.parse().ok()?;
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = format!("{whole}{fraction}");
+    let width = i64::try_from(digits.len()).ok()?;
+    let bound = i64::try_from(brutex_core::price::MAX_PRICE_TEXT).ok()?;
+    let point = i64::try_from(whole.len()).ok()?.checked_add(exponent)?;
+    if point < bound.checked_neg()? || point > width.checked_add(bound)? {
+        return None;
+    }
+    let mut out = String::with_capacity(digits.len().saturating_add(3));
+    if negative {
+        out.push('-');
+    }
+    if point <= 0 {
+        out.push_str("0.");
+        out.push_str(&"0".repeat(usize::try_from(point.checked_neg()?).ok()?));
+        out.push_str(&digits);
+    } else if point >= width {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat(usize::try_from(point.checked_sub(width)?).ok()?));
+    } else {
+        let split = usize::try_from(point).ok()?;
+        out.push_str(digits.get(..split)?);
+        out.push('.');
+        out.push_str(digits.get(split..)?);
+    }
+    Some(out)
+}
+
+/// Why a JSON number is not a whole `i64` (audit r64-4, D-4508).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotWhole {
+    /// The text is not an optional `-`, decimal digits, an optional point
+    /// with digits after it, and an optional `e`/`E` exponent.
+    NotDecimal,
+    /// A non-zero digit falls after the point: a fraction, not a whole number.
+    Fractional,
+    /// A whole number, and outside `i64`.
+    OutOfRange,
+}
+
+impl NotWhole {
+    /// The reason in words, for a refusal that names it.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::NotDecimal => "it is not a decimal number",
+            Self::Fractional => "it has a non-zero digit after the point, so it is a fraction",
+            Self::OutOfRange => "it is a whole number outside i64",
+        }
+    }
+}
+
+/// A JSON number that is exactly a whole number, as an `i64`, or the reason
+/// it is not (audit r64-4, D-4508).
+///
+/// # Why the price reader could not do this
+///
+/// Since D-1570 a [`serde_json::Number`] carries the vendor's own digits, so a
+/// whole count written `7.000` arrives as `7.000` rather than as an `f64` that
+/// printed `7.0`. The count and stamp readers sent that text through
+/// [`crate::csv::paisa`], a TWO-decimal price reader, and a third decimal is a
+/// refusal there: `7.000`, `1700000000.000` and `-0.000` were refused as
+/// unreadable while `7.0` and `1.7e9` were accepted. D-1491 accepts a
+/// whole-number decimal, and that reader also multiplied by 100 first, so a
+/// whole number above `i64::MAX / 100` written with a point was refused as well.
+///
+/// # What this accepts
+///
+/// Any number of digits after the point, so long as every one is zero, and
+/// any exponent: `7.000`, `7.` followed by a hundred thousand zeros, `0.7e1`,
+/// `-0.000` (zero), `9223372036854775807.000` and `-9223372036854775808.0`
+/// (the caller decides whether `i64::MIN` is legal for its field). A non-zero
+/// digit after the point, wherever the exponent puts it, is [`NotWhole::Fractional`].
+/// A zero mantissa is zero at any exponent, even one past `i64`.
+///
+/// # Cost
+///
+/// O(text length) in one pass, plus at most 19 digit steps to accumulate the
+/// magnitude: the text is the cell the body already holds, bounded by the
+/// response cap, and nothing is allocated beyond `to_string`. No exponent
+/// widens the work: digits the exponent moves past the text are zeros that
+/// are counted, not written.
+pub(crate) fn whole_number(number: &serde_json::Number) -> Result<i64, NotWhole> {
+    whole_text(&number.to_string())
+}
+
+/// [`whole_number`] on the vendor's text itself.
+fn whole_text(text: &str) -> Result<i64, NotWhole> {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        None => (text, None),
+        Some(at) => (
+            text.get(..at).ok_or(NotWhole::NotDecimal)?,
+            Some(
+                text.get(at.saturating_add(1)..)
+                    .ok_or(NotWhole::NotDecimal)?,
+            ),
+        ),
+    };
+    // An exponent, when there is one, is a sign and digits; `7e` is not `7`.
+    if exponent.is_some_and(|exponent| !exponent_reads(exponent)) {
+        return Err(NotWhole::NotDecimal);
+    }
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return Err(NotWhole::NotDecimal),
+        None => (unsigned, ""),
+    };
+    let decimal = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !decimal(whole) || !decimal(fraction) {
+        return Err(NotWhole::NotDecimal);
+    }
+    // The digits as one run, `whole` then `fraction`, with the point after
+    // `whole.len()` of them before the exponent moves it.
+    let digit = |at: usize| {
+        whole
+            .as_bytes()
+            .get(at)
+            .or_else(|| fraction.as_bytes().get(at.checked_sub(whole.len())?))
+            .map_or(0, |byte| byte.saturating_sub(b'0'))
+    };
+    let width = whole.len().saturating_add(fraction.len());
+    // The first and last non-zero digits. All zero is zero at any exponent.
+    let mut first = None;
+    let mut last = 0_usize;
+    for at in 0..width {
+        if digit(at) != 0 {
+            first = first.or(Some(at));
+            last = at;
+        }
+    }
+    let Some(first) = first else {
+        return Ok(0);
+    };
+    // Where the point lands, in digits from the start of the run. An exponent
+    // past `i64` puts it past every digit (a magnitude past `i64`) or before
+    // every digit (a fraction), and either answer is decided by its sign.
+    let shift: i128 = match exponent.map(|exponent| (exponent, exponent.parse::<i64>())) {
+        None => 0,
+        Some((_, Ok(shift))) => i128::from(shift),
+        Some((exponent, Err(_))) if exponent.starts_with('-') => {
+            return Err(NotWhole::Fractional);
+        }
+        Some(_) => return Err(NotWhole::OutOfRange),
+    };
+    let point = i128::try_from(whole.len())
+        .map_err(|_| NotWhole::OutOfRange)?
+        .saturating_add(shift);
+    let first_at = i128::try_from(first).map_err(|_| NotWhole::OutOfRange)?;
+    let last_at = i128::try_from(last).map_err(|_| NotWhole::OutOfRange)?;
+    if last_at >= point {
+        return Err(NotWhole::Fractional);
+    }
+    // `|i64::MIN|` has nineteen digits, so a twentieth is out of range
+    // whatever it is, and nineteen bounds the loop below.
+    if point.saturating_sub(first_at) > 19 {
+        return Err(NotWhole::OutOfRange);
+    }
+    let mut magnitude: i128 = 0;
+    let mut at = first_at;
+    while at < point {
+        let place = usize::try_from(at).map_err(|_| NotWhole::OutOfRange)?;
+        magnitude = magnitude
+            .saturating_mul(10)
+            .saturating_add(i128::from(digit(place)));
+        at = at.saturating_add(1);
+    }
+    let signed = if negative { -magnitude } else { magnitude };
+    i64::try_from(signed).map_err(|_| NotWhole::OutOfRange)
+}
+
+/// Whether an exponent is an optional sign and at least one decimal digit.
+fn exponent_reads(exponent: &str) -> bool {
+    let digits = exponent
+        .strip_prefix('-')
+        .or_else(|| exponent.strip_prefix('+'))
+        .unwrap_or(exponent);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// One price value, whatever shape carried it.
 ///
 /// Shared by both response shapes so a rupee is converted the same way whether
@@ -1235,16 +1775,20 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
-        // Rupees: the text is the truth, and `core`'s half-up reader owns the
-        // rule. NOT `csv::paisa`, which refuses past two decimals — see the
-        // header on `prices` for why that refusal was wrong and what it cost.
+        // Rupees: `core`'s half-up reader owns the rule, applied to the
+        // VENDOR'S OWN TEXT as [`number_text`] recovers it (the number's
+        // digits, kept by `arbitrary_precision`; an exponent shifted exactly).
+        // Until D-1570 this read an f64's re-rendering, which past ~17
+        // significant digits had already rounded (audit-20261003
+        // attackdata-4). NOT `csv::paisa`, which refuses past two decimals —
+        // see the header on `prices` for why that refusal was wrong and what
+        // it cost.
         //
-        // STILL NO FLOAT. `serde_json` renders the number back to its shortest
-        // round-tripping text and the conversion walks that text digit by digit,
-        // so `clippy::float_arithmetic` stays satisfied and a two-decimal price
-        // round-trips character for character.
+        // STILL NO FLOAT. The conversion walks the text digit by digit, so
+        // `clippy::float_arithmetic` stays satisfied and a price round-trips
+        // character for character.
         PriceScale::Rupees => {
-            let text = number.to_string();
+            let text = number_text(number).ok_or_else(refuse)?;
             let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
                 .map_err(|_| refuse())?
                 .raw();
@@ -1373,7 +1917,7 @@ fn volumes(
 /// fallback that hides a failure; a bar dropped and counted is the loud degrade
 /// the same rule allows.
 ///
-/// **BOTH, and the event is the load-bearing one.** `eprintln!` reaches an
+/// **BOTH, and the event is the load-bearing one.** The stderr line reaches an
 /// operator watching a terminal; the event reaches the log FILE, which is what
 /// is handed to somebody diagnosing a run that already finished.
 fn note_null_bars(null_bars: usize, bars: usize) {
@@ -1395,10 +1939,10 @@ fn note_null_bars(null_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {null_bars} of {bars} bars carried a null price and were \
          skipped — the vendor reported no trade in those minutes"
-    );
+    ));
 }
 
 /// One event per WINDOW for rows dropped over an impossible volume.
@@ -1430,12 +1974,12 @@ fn note_negative_volume_bars(negative_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {negative_bars} of {bars} bars carried a NEGATIVE volume and \
          were skipped — a volume counts shares traded, so those rows carry no \
          quantity. The rest of the window is kept: this used to refuse all of \
          it, which cost one instrument every intraday rung it had."
-    );
+    ));
 }
 
 /// One event per WINDOW for rows whose open interest cannot be a count.
@@ -1464,12 +2008,33 @@ fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {negative_bars} of {bars} bars carried a NEGATIVE open \
          interest and were skipped — open interest is contracts outstanding \
          and is never below zero. `i64::MIN` is NOT counted here: that is the \
          null sentinel and is refused by name."
-    );
+    ));
+}
+
+/// Drops the impossible bars (counted and logged by [`note_impossible_bars`]),
+/// decodes the arrays, and attaches every skip to the window — or the refusal
+/// as it was.
+///
+/// One site for all three shapes, so a shape cannot attach the rows and forget
+/// the count — which is how the count was forgotten in the first place: each
+/// skip was logged and never reached the window, so the receipt balanced over
+/// candles that were not on it (D-3122).
+fn finish(
+    arrays: &mut ParallelArrays,
+    bars: usize,
+    mut skipped: crate::fetch::DecodeSkips,
+) -> Result<RawWindow, FetchError> {
+    skipped.impossible_ohlc = drop_impossible_bars(arrays);
+    note_impossible_bars(skipped.impossible_ohlc, bars);
+    RawWindow::decode(arrays).map(|mut window| {
+        window.skipped = skipped;
+        window
+    })
 }
 
 /// One event per WINDOW for rows whose four prices cannot be a bar.
@@ -1495,12 +2060,12 @@ fn note_impossible_bars(dropped: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {dropped} of {bars} bars carried an impossible OHLC and were \
          skipped — a high below its low, or a negative price. Caught here, \
          where the vendor's own row is still in hand, rather than at the store \
          append where the index names nothing an operator can open."
-    );
+    ));
 }
 
 /// Which rows of a columnar body are bars at all, and how many are not.
@@ -1606,68 +2171,19 @@ fn kept_rows(
             keep.push(false);
             continue;
         }
-        // A NEGATIVE VOLUME SKIPS ITS ROW RATHER THAN REFUSING THE WINDOW.
-        //
-        // The sign is read here, off the JSON, because `one_volume` can only
-        // answer with an `Err` and an `Err` in a column `map` refuses all of it.
-        // That is what the measured `-125` on `ADANIENT` cost: one row killed a
-        // 90-day window, the window's failure ended the backfill at request 1
-        // of 21, and losing 1-minute lost all eight intraday rungs with it,
-        // because 2/3/5/10/15/30/60 are rolled up locally from it.
-        //
-        // **The refusal was right about the value and wrong about its reach.**
-        // A volume counts shares traded and a negative one is not a quantity —
-        // D-0323 stands. What changes is the granularity: a skipped ROW is a
-        // legal gap in an append-only month, because bars need only be strictly
-        // increasing; a skipped CHUNK is not, because `Header::advance` refuses
-        // any batch beginning at or before what is committed, which is why the
-        // chunk loop's suffix discard must stay exactly as it is.
-        //
-        // AN INDEX IS NOT FILTERED HERE and that is P-60, not an oversight.
-        // Its volume column has no referent at all — measured across 6,493
-        // stored BANKNIFTY minute bars, the only distinct value is `0` — so
-        // `one_volume` records the zero the column always is and counts it. An
-        // equity's negative means shares DID trade and the decoder is reading
-        // the wrong column, so its row carries no usable quantity and goes.
-        let quantity_is_impossible = listing != crate::vendor::Listing::Index
-            && volume.get(i).is_some_and(|v| {
-                v.as_i64().is_some_and(|n| n < 0) || v.as_f64().is_some_and(|n| n < 0.0)
-            });
-        // AND AN OPEN INTEREST THAT IS NOT A COUNT EITHER.
-        //
-        // An open interest is contracts outstanding: never negative, exactly as
-        // a volume is never negative. D-0323 gave the volume its guard and left
-        // this field one column over with none, so `open_interest: -5` decoded,
-        // landed, and died a crate later at `survey` as `ImpossibleCount` —
-        // against a batch index that names no vendor row.
-        //
-        // **`i64::MIN` IS EXEMPT AND MUST STAY EXEMPT.** §7 spends that value on
-        // "the vendor sent no open interest", so a vendor sending it literally
-        // is a SENTINEL COLLISION, not a bad count — `one_number` refuses it by
-        // name, loudly, and skipping the row here would swallow the one case
-        // that needs to be shouted about.
-        //
-        // THE `match` IS NOT A STYLE CHOICE. Written as
-        // `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)` the sentinel
-        // falls straight through: `as_i64()` answers `Some(i64::MIN)`, the
-        // predicate correctly says "not impossible", and the fallback then asks
-        // `as_f64()`, which answers `-9.22e18` and says "negative" — so the row
-        // is skipped and the loud refusal never fires. An existing test caught
-        // exactly that. The integer spelling, when there IS one, is the whole
-        // answer; `as_f64` is only for a value that is not an integer at all.
-        let interest_is_impossible =
-            open_interest_column
-                .get(i)
-                .is_some_and(|v| match v.as_i64() {
-                    Some(n) => n < 0 && n != i64::MIN,
-                    None => v.as_f64().is_some_and(|n| n < 0.0),
-                });
-        if quantity_is_impossible {
-            negative = negative.saturating_add(1);
-        } else if interest_is_impossible {
-            interest = interest.saturating_add(1);
+        // ONE RULE FOR ALL THREE SHAPES (c4a-1, c4a-2, D-1490). The reasons
+        // live on [`count_verdict`], which every decode door calls.
+        match count_verdict(volume.get(i), open_interest_column.get(i), listing) {
+            CountVerdict::Keep => keep.push(true),
+            CountVerdict::NegativeVolume => {
+                negative = negative.saturating_add(1);
+                keep.push(false);
+            }
+            CountVerdict::NegativeInterest => {
+                interest = interest.saturating_add(1);
+                keep.push(false);
+            }
         }
-        keep.push(!quantity_is_impossible && !interest_is_impossible);
     }
     Ok(Kept {
         keep,
@@ -1675,6 +2191,97 @@ fn kept_rows(
         negative_volume: negative,
         negative_open_interest: interest,
     })
+}
+
+/// What a traded row's two counts say about whether it is a bar at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CountVerdict {
+    /// Both counts can be stored.
+    Keep,
+    /// The volume is negative on a listing whose volume is a quantity.
+    NegativeVolume,
+    /// The open interest is negative and is not the `i64::MIN` sentinel.
+    NegativeInterest,
+}
+
+/// The one count rule every decode shape applies to a traded row.
+///
+/// **It was one door's rule and the other two refused or kept the same
+/// value (c4a-1, c4a-2, D-1490).** [`kept_rows`] skipped a row whose volume or
+/// open interest was negative. [`decode_positional`] — Zerodha and Groww —
+/// refused the WHOLE window over a negative equity volume and kept a negative
+/// open interest; [`decode_objects`] did the same. Same vendor fault, opposite
+/// outcome, decided by the response shape alone. All three now ask this one
+/// function, before any column is pushed, and count what it skips for the
+/// per-window events.
+///
+/// A `None` cell is not judged here: a missing or short column is the shape
+/// error the callers already name.
+fn count_verdict(
+    volume: Option<&serde_json::Value>,
+    open_interest: Option<&serde_json::Value>,
+    listing: crate::vendor::Listing,
+) -> CountVerdict {
+    // A NEGATIVE VOLUME SKIPS ITS ROW RATHER THAN REFUSING THE WINDOW.
+    //
+    // The sign is read here, off the JSON, because `one_volume` can only
+    // answer with an `Err` and an `Err` in a column `map` refuses all of it.
+    // That is what the measured `-125` on `ADANIENT` cost: one row killed a
+    // 90-day window, the window's failure ended the backfill at request 1
+    // of 21, and losing 1-minute lost all eight intraday rungs with it,
+    // because 2/3/5/10/15/30/60 are rolled up locally from it.
+    //
+    // **The refusal was right about the value and wrong about its reach.**
+    // A volume counts shares traded and a negative one is not a quantity —
+    // D-0323 stands. What changes is the granularity: a skipped ROW is a
+    // legal gap in an append-only month, because bars need only be strictly
+    // increasing; a skipped CHUNK is not, because `Header::advance` refuses
+    // any batch beginning at or before what is committed, which is why the
+    // chunk loop's suffix discard must stay exactly as it is.
+    //
+    // AN INDEX IS NOT FILTERED HERE and that is P-60, not an oversight.
+    // Its volume column has no referent at all — measured across 6,493
+    // stored BANKNIFTY minute bars, the only distinct value is `0` — so
+    // `one_volume` records the zero the column always is and counts it. An
+    // equity's negative means shares DID trade and the decoder is reading
+    // the wrong column, so its row carries no usable quantity and goes.
+    let quantity_is_impossible = listing != crate::vendor::Listing::Index
+        && volume.is_some_and(|v| {
+            v.as_i64().is_some_and(|n| n < 0) || v.as_f64().is_some_and(|n| n < 0.0)
+        });
+    // AND AN OPEN INTEREST THAT IS NOT A COUNT EITHER.
+    //
+    // An open interest is contracts outstanding: never negative, exactly as
+    // a volume is never negative. D-0323 gave the volume its guard and left
+    // this field one column over with none, so `open_interest: -5` decoded,
+    // landed, and died a crate later at `survey` as `ImpossibleCount` —
+    // against a batch index that names no vendor row.
+    //
+    // **`i64::MIN` IS EXEMPT AND MUST STAY EXEMPT.** §7 spends that value on
+    // "the vendor sent no open interest", so a vendor sending it literally
+    // is a SENTINEL COLLISION, not a bad count — `one_number` refuses it by
+    // name, loudly, and skipping the row here would swallow the one case
+    // that needs to be shouted about.
+    //
+    // THE `match` IS NOT A STYLE CHOICE. Written as
+    // `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)` the sentinel
+    // falls straight through: `as_i64()` answers `Some(i64::MIN)`, the
+    // predicate correctly says "not impossible", and the fallback then asks
+    // `as_f64()`, which answers `-9.22e18` and says "negative" — so the row
+    // is skipped and the loud refusal never fires. An existing test caught
+    // exactly that. The integer spelling, when there IS one, is the whole
+    // answer; `as_f64` is only for a value that is not an integer at all.
+    let interest_is_impossible = open_interest.is_some_and(|v| match v.as_i64() {
+        Some(n) => n < 0 && n != i64::MIN,
+        None => v.as_f64().is_some_and(|n| n < 0.0),
+    });
+    if quantity_is_impossible {
+        CountVerdict::NegativeVolume
+    } else if interest_is_impossible {
+        CountVerdict::NegativeInterest
+    } else {
+        CountVerdict::Keep
+    }
 }
 
 /// What [`kept_rows`] decided, and what it had to skip to decide it.
@@ -1856,35 +2463,42 @@ fn kept<'a>(
 /// reachable branch to check, and an unreachable branch is a coverage hole with
 /// a comment on it.
 ///
+/// **Amended by D-4508 (audit r64-4).** The second arm no longer divides by
+/// 100: it reads any whole-number decimal with [`whole_number`], which CAN
+/// produce `i64::MIN` from `-9223372036854775808.0`. So the sentinel check now
+/// runs after both arms, and that branch is reachable and tested.
+///
 /// # Errors
 ///
-/// [`FetchError::TransportFailed`] naming the field and the value.
+/// [`FetchError::TransportFailed`] naming the field, the value and the reason:
+/// not a number, a fraction, a whole number past `i64`, or the sentinel.
 fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
-    if let Some(n) = v.as_i64() {
-        if n == i64::MIN {
-            return Err(FetchError::TransportFailed {
-                detail: format!(
-                    "{name:?} holds {v}, which is the value this store reserves \
-                     for a field the vendor did NOT send (CLAUDE.md §7: \
-                     i64::MIN is the open-interest null and zero means zero). \
-                     Stored, it would read back as an absence rather than as \
-                     the number that arrived, so it is refused here where the \
-                     vendor's own value is still visible."
-                ),
-            });
-        }
-        return Ok(n);
-    }
-    let refuse = || FetchError::TransportFailed {
-        detail: format!("{name:?} holds {v}, which is not a whole number"),
-    };
-    let number = v.as_number().ok_or_else(refuse)?;
-    let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
-    if hundredths % 100 == 0 {
-        Ok(hundredths / 100)
+    // ANY NUMBER OF ZERO DECIMALS IS A WHOLE NUMBER (audit r64-4, D-4508).
+    // This read the text through `csv::paisa`, a two-decimal price reader, so
+    // `7.000` refused the whole answer as unreadable while `7.0` was accepted;
+    // a fraction is now refused by name, and so is a whole number past `i64`.
+    let n = if let Some(n) = v.as_i64() {
+        n
     } else {
-        Err(refuse())
+        let refuse = |why: &str| FetchError::TransportFailed {
+            detail: format!("{name:?} holds {v}, which is not a whole number: {why}"),
+        };
+        let number = v.as_number().ok_or_else(|| refuse("it is not a number"))?;
+        whole_number(number).map_err(|not| refuse(not.reason()))?
+    };
+    if n == i64::MIN {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "{name:?} holds {v}, which is the value this store reserves \
+                 for a field the vendor did NOT send (CLAUDE.md §7: \
+                 i64::MIN is the open-interest null and zero means zero). \
+                 Stored, it would read back as an absence rather than as \
+                 the number that arrived, so it is refused here where the \
+                 vendor's own value is still visible."
+            ),
+        });
     }
+    Ok(n)
 }
 
 /// One VOLUME, which counts shares traded and is therefore never negative.
@@ -2108,7 +2722,7 @@ fn trim(body: &str) -> String {
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] if a frame never arrives.
-async fn body_within(
+pub(crate) async fn body_within(
     answer: &mut reqwest::Response,
     cap: usize,
 ) -> Result<(String, usize), FetchError> {
@@ -2313,8 +2927,11 @@ impl HttpSource {
     ///
     /// # Cost
     ///
-    /// One request, one permit. O(1). Unchanged — the type carries a number the
-    /// function had already computed.
+    /// One request and one permit, and a body read linear in the answer's
+    /// bytes, held to [`MAX_RESPONSE_BYTES`]. An answer declaring more is
+    /// refused before the read and one that runs past the cap is abandoned
+    /// there. Until D-0723 this said O(1) while `text()` held the whole answer
+    /// with no cap at all.
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.
@@ -2327,7 +2944,7 @@ impl HttpSource {
     ) -> Result<String, crate::chain::Refusal> {
         use crate::chain::Refusal;
 
-        self.wait_for_permit().await;
+        self.wait_for_permit().await.map_err(Refusal::transport)?;
         let (name, value) = self.header();
         let mut builder = self.client.post(url);
         for (header, word) in self.spec.extra_headers {
@@ -2336,7 +2953,7 @@ impl HttpSource {
         // NOTHING ANSWERED, SO THERE IS NO STATUS TO CARRY — a dropped socket, a
         // DNS failure or a timeout. The caller's ladder sizes a blip differently
         // from a backend that answered 500, and only this arm can say which.
-        let answer = builder
+        let mut answer = builder
             .header(name, value)
             .header("content-type", "application/json")
             .body(body)
@@ -2345,16 +2962,9 @@ impl HttpSource {
             .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
-        if let Some(lock) = self.governor.as_ref() {
-            let mut g = lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status.as_u16() == 429 {
-                g.record_throttled();
-            } else if status.is_success() {
-                g.record_success();
-            }
-        }
+        // ONLY THE THROTTLE IS RECORDED HERE. The success half waits for the
+        // body, exactly as `window_async` does: see `weigh_refused_body`.
+        self.record_throttle_status(status.as_u16());
         if !status.is_success() {
             // THE VENDOR'S OWN STATUS, for the reason `Discovery::get` gives
             // one line away: a 401 and a 429 mean different things to an
@@ -2362,19 +2972,113 @@ impl HttpSource {
             //
             // CARRIED AS A NUMBER BESIDE THE SENTENCE, which is what makes the
             // rolling path's retry decidable at all.
-            return Err(Refusal::answered(
-                status.as_u16(),
-                format!("the vendor answered {status}"),
-            ));
+            return Err(self.refused_status(&mut answer).await);
         }
         // A FAILED BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status
         // was already a success; what failed is the socket delivering the rest.
-        let body = answer
-            .text()
-            .await
-            .map_err(|why| Refusal::transport(format!("{why}")))?;
+        //
+        // AND THE READ IS BOUNDED, AT THE BARS WINDOW'S OWN CAP. This was
+        // `answer.text()`, which holds the whole answer before anything can
+        // look at its size, and nothing looked afterwards. A rolling answer is
+        // a window of bars, so it is held to `MAX_RESPONSE_BYTES` as
+        // `window_async` is, through the reader discovery already uses: a
+        // declared length past the cap is refused before the read, and an
+        // undeclared one is abandoned at the cap. Both refusals carry the
+        // vendor's status. D-0723.
+        let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;
+        // THE ANSWER IS CREDITED ONLY ONCE ITS BODY IS ACCEPTED. This credit ran
+        // on any 2xx status before the body was read, so a body the socket cut
+        // short, one past the cap and one that is not UTF-8 each counted toward
+        // the next step up although this build refused them (D-0726). The credit
+        // now lives in `weigh_refused_body`, after the body is weighed for a
+        // refusal, so a 2xx carrying one is not credited either (D-0950).
         self.keep_first(crate::capture::Method::Post, url, &body);
+        // A REFUSAL UNDER A 200 IS A REFUSAL (W1-pull2-11, D-0950).
+        self.weigh_refused_body(&body, status.as_u16())?;
         Ok(body)
+    }
+
+    /// A non-2xx answer on the rolling POST or the discovery GET, as a
+    /// [`crate::chain::Refusal`] that carries what the BODY said.
+    ///
+    /// Both paths returned the status alone and never read the body (CE-29,
+    /// D-1769). Dhan answers a dead token with HTTP 400 and `DH-906` "Invalid
+    /// Token" in the body (D-0325), so without it the token was sent on to
+    /// every remaining cell instead of halting the feed, and a 403 "not
+    /// entitled" was read as a dead token. This reads the body under the same
+    /// bound and through the same classifier as `window_async`
+    /// ([`refusal_words`]), marks a named dead session as one, and records a
+    /// throttle the vendor named under a status other than 429 — the one the
+    /// status test above cannot see, so the shared governor learns it exactly
+    /// once.
+    async fn refused_status(&self, answer: &mut reqwest::Response) -> crate::chain::Refusal {
+        use crate::chain::Refusal;
+        use crate::refusal::Disposition;
+        let status = answer.status();
+        let (detail, named) = refusal_words(answer, self.spec.error_names).await;
+        if named == Some(Disposition::Throttled)
+            && status.as_u16() != 429
+            && let Some(lock) = self.governor.as_ref()
+        {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+        }
+        let said = if detail.is_empty() {
+            format!("the vendor answered {status}")
+        } else {
+            format!("the vendor answered {status}: {detail}")
+        };
+        let refusal = if named == Some(Disposition::SessionDead) {
+            Refusal::credential(Some(status.as_u16()), said)
+        } else {
+            Refusal::answered(status.as_u16(), said)
+        };
+        refusal.named_by_vendor(named)
+    }
+
+    /// The throttle half of the governor feedback, the only half that can be
+    /// decided from the status alone.
+    ///
+    /// 429 is the only status read as rate. The success half is recorded only
+    /// once the body has been weighed, by [`Self::weigh_body`].
+    fn record_throttle_status(&self, status: u16) {
+        if status == 429
+            && let Some(lock) = self.governor.as_ref()
+        {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+        }
+    }
+
+    /// [`Self::weigh_body`] for the two paths that answer a
+    /// [`crate::chain::Refusal`]: `post_json` and `Discovery::get`.
+    ///
+    /// These two used to call `record_success` on any 2xx and hand the body
+    /// back as `Ok`, so a Dhan `DH-901` under a 200 raised the allowance and
+    /// reached the caller as a body to decode. `window_async` had already been
+    /// corrected; these had not (W1-pull2-11, D-0950).
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::chain::Refusal`] carrying the status sent and the body, with
+    /// `credential_dead` set exactly when the body names a dead session.
+    fn weigh_refused_body(&self, text: &str, status: u16) -> Result<(), crate::chain::Refusal> {
+        use crate::chain::Refusal;
+        match self.weigh_body(text) {
+            None => Ok(()),
+            Some(named) => {
+                let detail = refused_in_body(status, text);
+                Err(if named == crate::refusal::Disposition::SessionDead {
+                    Refusal::credential(Some(status), detail)
+                } else {
+                    Refusal::answered(status, detail)
+                })
+            }
+        }
     }
 
     /// Record this answer if the capture budget has room.
@@ -2406,6 +3110,10 @@ impl HttpSource {
 }
 
 /// A successful discovery document must be bounded and preserve exact UTF-8.
+///
+/// A rolling answer too: [`HttpSource::post_json`] reads through this with
+/// [`MAX_RESPONSE_BYTES`], and `Discovery::get` with
+/// `crate::masters::MAX_BODY_BYTES`. D-0723.
 async fn strict_discovery_body(
     answer: &mut reqwest::Response,
     cap: usize,
@@ -2440,7 +3148,7 @@ impl crate::chain::Discovery for HttpSource {
     async fn get(&self, url: &str) -> Result<String, crate::chain::Refusal> {
         use crate::chain::Refusal;
 
-        self.wait_for_permit().await;
+        self.wait_for_permit().await.map_err(Refusal::transport)?;
         let (name, value) = self.header();
         let mut builder = self.client.get(url);
         for (header, word) in self.spec.extra_headers {
@@ -2457,16 +3165,8 @@ impl crate::chain::Discovery for HttpSource {
             .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
-        if let Some(lock) = self.governor.as_ref() {
-            let mut g = lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status.as_u16() == 429 {
-                g.record_throttled();
-            } else if status.is_success() {
-                g.record_success();
-            }
-        }
+        // ONLY THE THROTTLE HERE; the success half waits for the body.
+        self.record_throttle_status(status.as_u16());
         if !status.is_success() {
             // THE VENDOR'S OWN STATUS, NOT A PARAPHRASE. A 401 here and a 429
             // here mean different things to an operator -- one is a credential
@@ -2478,10 +3178,7 @@ impl crate::chain::Discovery for HttpSource {
             // this was retryable had to search prose for `429` — which is the
             // coupling `api::server::with_retry` refuses by name on the bars
             // path, and the reason discovery had no retry ladder at all.
-            return Err(Refusal::answered(
-                status.as_u16(),
-                format!("the vendor answered {status}"),
-            ));
+            return Err(self.refused_status(&mut answer).await);
         }
         // THE BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status was
         // already a success; what failed is the socket delivering the rest of
@@ -2491,6 +3188,8 @@ impl crate::chain::Discovery for HttpSource {
         // expiries and contracts answers are parsed by field names taken from
         // its documentation and never from an observed response.
         self.keep_first(crate::capture::Method::Get, url, &body);
+        // A REFUSAL UNDER A 200 IS A REFUSAL (W1-pull2-11, D-0950).
+        self.weigh_refused_body(&body, status.as_u16())?;
         Ok(body)
     }
 }
@@ -2598,7 +3297,9 @@ impl HttpSource {
         // THE BUDGET IS SPENT BEFORE THE SOCKET IS OPENED, never after. Asking
         // permission afterwards would already have made the request the ceiling
         // exists to prevent.
-        self.wait_for_permit().await;
+        self.wait_for_permit()
+            .await
+            .map_err(|detail| FetchError::TransportFailed { detail })?;
 
         let mut answer = builder.header(name, value).send().await.map_err(|why| {
             FetchError::TransportFailed {
@@ -2709,7 +3410,7 @@ impl HttpSource {
         //
         // Read through the WHOLE contract, so a code the vendor misfiled is
         // still read by its sentence — the rule D-0325 established.
-        self.weigh_answered_body(&text, status)?;
+        let decoded = self.settle_answer(&text, status, request.listing)?;
 
         // NAMED AS A DECODE FAULT, BECAUSE THE EXCHANGE ALREADY SUCCEEDED.
         //
@@ -2717,7 +3418,7 @@ impl HttpSource {
         // `TransportFailed` it read as "the vendor was not reached" — false,
         // and it sent `with_retry` through its whole ladder re-asking for bytes
         // that will come back identical. See `FetchError::BodyNotUnderstood`.
-        decode_body(&text, &self.spec, request.listing).map_err(|why| {
+        decoded.map_err(|why| {
             // THE INNER SENTENCE, NOT THE INNER ERROR'S WHOLE DISPLAY.
             //
             // `decode_body` reports its faults as `TransportFailed`, whose
@@ -2782,6 +3483,35 @@ impl HttpSource {
         ));
     }
 
+    /// A 2xx answer weighed for a refusal and then decoded.
+    ///
+    /// # Errors
+    ///
+    /// The outer [`FetchError::VendorRefused`] when the body names a refusal;
+    /// the inner result is [`decode_body`]'s, left for the caller to name.
+    fn settle_answer(
+        &self,
+        text: &str,
+        status: u16,
+        listing: crate::vendor::Listing,
+    ) -> Result<Result<RawWindow, FetchError>, FetchError> {
+        // ONE PARSE FOR BOTH READERS. Each used to run its own `from_str` over
+        // the same text, so every success body was parsed twice. W1-pull2-1.
+        let parsed = parse_answer(text);
+        self.weigh_parsed(parsed.as_ref().ok(), text, status)?;
+        Ok(match &parsed {
+            Ok(root) => decode_value(root, &self.spec, listing),
+            Err(why) => Err(not_json(why)),
+        })
+    }
+
+    /// [`Self::weigh_parsed`] over a body it parses itself. Tests only: the
+    /// live path parses once in [`Self::settle_answer`].
+    #[cfg(test)]
+    fn weigh_answered_body(&self, text: &str, status: u16) -> Result<(), FetchError> {
+        self.weigh_parsed(parse_answer(text).ok().as_ref(), text, status)
+    }
+
     /// Whether a 2xx answer is actually a success, and the governor feedback
     /// that follows from the answer.
     ///
@@ -2811,14 +3541,52 @@ impl HttpSource {
     /// A feed declaring no `error_names` has no contract to read and takes the
     /// success path unchanged, exactly as it did before this existed.
     ///
+    /// `parsed` is the body's one parse from [`Self::settle_answer`], and `None`
+    /// when the body was not JSON, which no contract can read a refusal from.
+    ///
     /// # Errors
     ///
     /// [`FetchError::VendorRefused`] carrying the disposition the body named, so
     /// the caller's ladder sees the same verdict it would have seen had the
     /// vendor used the status.
-    fn weigh_answered_body(&self, text: &str, status: u16) -> Result<(), FetchError> {
+    fn weigh_parsed(
+        &self,
+        parsed: Option<&serde_json::Value>,
+        text: &str,
+        status: u16,
+    ) -> Result<(), FetchError> {
+        match self.weigh_body_parsed(parsed) {
+            None => Ok(()),
+            Some(named) => Err(FetchError::VendorRefused {
+                status,
+                detail: refused_in_body(status, text),
+                named: Some(named),
+            }),
+        }
+    }
+
+    /// [`Self::weigh_body_parsed`] over a body it parses itself, for the two
+    /// paths that hand the caller text rather than a decoded window:
+    /// `post_json` and `Discovery::get`. A body that is not JSON names no
+    /// refusal, exactly as on the window path.
+    fn weigh_body(&self, text: &str) -> Option<crate::refusal::Disposition> {
+        self.weigh_body_parsed(parse_answer(text).ok().as_ref())
+    }
+
+    /// The disposition a 2xx body names, if any, with the governor feedback
+    /// that follows from it: a body-named throttle is recorded as a throttle,
+    /// any other named refusal moves nothing, and only a body naming no
+    /// refusal is recorded as a success.
+    ///
+    /// The one place that decision is made, for `window_async`, `post_json`
+    /// and `Discovery::get` alike (W1-pull2-11, D-0950).
+    fn weigh_body_parsed(
+        &self,
+        parsed: Option<&serde_json::Value>,
+    ) -> Option<crate::refusal::Disposition> {
         if let Some(contract) = self.spec.error_names
-            && let Some(named) = crate::refusal::disposition_of(text, contract)
+            && let Some(named) =
+                parsed.and_then(|value| crate::refusal::disposition_of_value(value, contract))
         {
             // THE GOVERNOR LEARNS THE RIGHT THING FROM IT. A throttle named in
             // the body is still a throttle; any other refusal is one the
@@ -2832,14 +3600,7 @@ impl HttpSource {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 g.record_throttled();
             }
-            return Err(FetchError::VendorRefused {
-                status,
-                detail: format!(
-                    "the vendor answered {status} and put a refusal in the \
-                     body: {text}"
-                ),
-                named: Some(named),
-            });
+            return Some(named);
         }
         // ONLY NOW IS IT A SUCCESS. The status was 2xx and the body carries no
         // refusal this vendor's contract can name, so the additive increase is
@@ -2850,8 +3611,19 @@ impl HttpSource {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             g.record_success();
         }
-        Ok(())
+        None
     }
+}
+
+/// The sentence for a refusal the vendor put in a 2xx body: the status it sent
+/// and the body itself, unparaphrased but CUT, like every other refusal that
+/// reaches an error: this body is bounded only by `MAX_RESPONSE_BYTES`, and
+/// `trim` is the rule the non-2xx door already obeys. UC-22.
+fn refused_in_body(status: u16, text: &str) -> String {
+    format!(
+        "the vendor answered {status} and put a refusal in the body: {}",
+        trim(text)
+    )
 }
 
 /// One array per bar, read by POSITION: `[ts, open, high, low, close, volume]`
@@ -2898,6 +3670,8 @@ fn decode_positional(
     };
 
     let mut null_bars = 0usize;
+    let mut negative = 0usize;
+    let mut interest = 0usize;
     for (i, row) in rows.iter().enumerate() {
         let cells = row.as_array().ok_or_else(|| FetchError::TransportFailed {
             detail: format!("bar {i} is {row}, and this vendor sends one ARRAY per bar"),
@@ -2941,6 +3715,21 @@ fn decode_positional(
         if (1..=4).any(|at| cell(at).is_ok_and(serde_json::Value::is_null)) {
             null_bars += 1;
             continue;
+        }
+        // THE SAME COUNT RULE AS THE COLUMNAR SHAPE: a negative volume on a
+        // traded listing, or a negative open interest other than the sentinel,
+        // skips this row and is counted, instead of refusing the window or
+        // landing (c4a-1, c4a-2, D-1490).
+        match count_verdict(cells.get(5), cells.get(6), listing) {
+            CountVerdict::Keep => {}
+            CountVerdict::NegativeVolume => {
+                negative = negative.saturating_add(1);
+                continue;
+            }
+            CountVerdict::NegativeInterest => {
+                interest = interest.saturating_add(1);
+                continue;
+            }
         }
         arrays
             .timestamp
@@ -3003,18 +3792,29 @@ fn decode_positional(
             .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
             .with("bars", u64::try_from(rows.len()).unwrap_or(u64::MAX)),
         );
-        eprintln!(
+        let _printed = telemetry::stderr_line(format_args!(
             // "in those intervals", not "in those minutes": this decoder is
             // rung-blind by design and a daily pull comes through it too.
             "brutex: {null_bars} of {} bars carried a null price and were skipped \
              — the vendor reported no trade in those intervals",
             rows.len()
-        );
+        ));
     }
 
+    note_negative_volume_bars(negative, rows.len());
+    note_negative_interest_bars(interest, rows.len());
     // AND THE SECOND DOOR. See the note on the object shape's call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(
+        &mut arrays,
+        rows.len(),
+        crate::fetch::DecodeSkips {
+            null_price: null_bars,
+            negative_volume: negative,
+            negative_open_interest: interest,
+            impossible_ohlc: 0,
+        },
+    )
 }
 
 /// One timestamp cell, in whichever spelling this feed uses.
@@ -3051,7 +3851,9 @@ fn one_stamp(
             let text = v.as_str().ok_or_else(|| FetchError::TransportFailed {
                 detail: format!("bar {at} stamps {v}, and this feed spells its timestamps as text"),
             })?;
-            let local = local_seconds(text).ok_or_else(|| FetchError::TransportFailed {
+            // THE FIRST 19 BYTES ONLY: the zone after them is `stated_offset`'s.
+            let head = text.get(..19).unwrap_or(text);
+            let local = local_seconds(head).ok_or_else(|| FetchError::TransportFailed {
                 detail: format!(
                     "bar {at} stamps {text:?}, which is not YYYY-MM-DD followed by HH:MM:SS"
                 ),
@@ -3090,23 +3892,24 @@ fn stated_offset(text: &str) -> Option<i64> {
     if tail == "Z" {
         return Some(0);
     }
-    let sign = match tail.as_bytes().first()? {
+    // READ BY POSITION, AND BY LENGTH FIRST. `+0530` and `+05:30` are the only
+    // two shapes, so the tail is five or six bytes and the colon, when there
+    // is one, sits between the hours and the minutes. This used to strip every
+    // colon from the whole tail into a new `String` and count what was left,
+    // which walked a tail of any length and read `+0:530` as IST. W1-pull2-7.
+    let ([sign, h1, h2, m1, m2] | [sign, h1, h2, b':', m1, m2]) = *tail.as_bytes() else {
+        return None;
+    };
+    let sign = match sign {
         b'+' => 1,
         b'-' => -1,
         _ => return None,
     };
-    // `+0530` and `+05:30` differ only by the colon, so the digits are read by
-    // position from a form with it stripped rather than by two parsers.
-    let digits: String = tail
-        .get(1..)?
-        .chars()
-        .filter(|c| *c != ':')
-        .collect::<String>();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if ![h1, h2, m1, m2].iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let hours: i64 = digits.get(0..2)?.parse().ok()?;
-    let minutes: i64 = digits.get(2..4)?.parse().ok()?;
+    let hours = i64::from(h1 - b'0') * 10 + i64::from(h2 - b'0');
+    let minutes = i64::from(m1 - b'0') * 10 + i64::from(m2 - b'0');
     // BOTH FIELDS ARE BOUNDED, and the hours one was not.
     //
     // A minutes field past 59 is not a zone, it is a malformed value, and
@@ -3180,9 +3983,27 @@ fn path_safe<'a>(value: &'a str, placeholder: &'static str) -> Result<&'a str, F
 /// local. The separator is a `T` on Groww's live endpoint and a space on its
 /// deprecated one — and its documentation says space for both — so this accepts
 /// either rather than believing the annotation.
+///
+/// # The whole shape, and nothing after it (UC-23, D-0951)
+///
+/// Exactly 19 bytes: digits at every numeric position, `-` at 4 and 7, `T` or
+/// a space at 10, `:` at 13 and 16. This read six numbers at fixed offsets and
+/// checked nothing between or after them, so `2026-08-04T09:15:00Z` on an
+/// `IsoDateTimeText` feed was read as 09:15 local and then shifted by IST, and
+/// `i64::from_str` took a sign, so `-1` passed as an hour. A stamp carrying a
+/// zone is `IsoDateTimeOffset`'s, which hands this its first 19 bytes.
 fn local_seconds(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
-    if bytes.len() < 19 {
+    if bytes.len() != 19 {
+        return None;
+    }
+    let shaped = bytes.iter().enumerate().all(|(at, &b)| match at {
+        4 | 7 => b == b'-',
+        10 => b == b'T' || b == b' ',
+        13 | 16 => b == b':',
+        _ => b.is_ascii_digit(),
+    });
+    if !shaped {
         return None;
     }
     let num = |from: usize, to: usize| -> Option<i64> { text.get(from..to)?.parse().ok() };
@@ -3389,6 +4210,26 @@ mod tests {
     /// moves it forward only. The cursor therefore answers the exact question
     /// this test is about -- **was the governor asked at all** -- with no sleep,
     /// no ceiling to exhaust, and no race against the second rolling over.
+    /// **A source handed no governor keeps its own and charges it.**
+    /// conc:pull1-2, D-2799.
+    #[test]
+    fn sharing_nothing_keeps_the_sources_own_governor() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let own = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let kept = owned.sharing(None);
+        assert!(
+            kept.governor
+                .as_ref()
+                .is_some_and(|held| std::sync::Arc::ptr_eq(held, &own)),
+            "the source's own governor stays"
+        );
+        assert!(!kept.charged_by_caller, "and the source still charges it");
+    }
+
     #[tokio::test]
     async fn a_shared_governor_is_charged_by_the_caller_and_not_again_here() {
         let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
@@ -3422,7 +4263,10 @@ mod tests {
         };
 
         let untouched = cursor_of(&held);
-        shared.wait_for_permit().await;
+        shared
+            .wait_for_permit()
+            .await
+            .expect("a shared source waits for nothing");
         assert_eq!(
             untouched,
             cursor_of(&held),
@@ -3433,11 +4277,203 @@ mod tests {
         // `wait_for_permit` charged nobody at all, the assertion above would
         // hold for entirely the wrong reason. A source that owns its governor
         // must still move that cursor.
-        owned.wait_for_permit().await;
+        //
+        // THE CLOCK MUST HAVE MOVED FIRST. `monotonic_micros` reads 0 on its
+        // first call in the process, and a reservation at 0 against a cursor
+        // at 0 leaves the cursor where it was; run alone, this test was that
+        // first call and failed for that reason only. Read it once and let a
+        // millisecond pass so the reservation's instant is past the cursor.
+        let _origin = crate::rate::monotonic_micros();
+        tokio::time::sleep(core::time::Duration::from_millis(2)).await;
+        owned
+            .wait_for_permit()
+            .await
+            .expect("a fresh governor has a permit");
         assert!(
             cursor_of(&held) > untouched,
             "a source that owns its governor is still the one that spends it"
         );
+    }
+
+    /// **A RESERVATION IN THE FUTURE IS SLEPT TO.** G18-rest-14, D-2074.
+    ///
+    /// The second's permits are spent at an instant 300 ms ahead, so the next
+    /// one exists only after it. The wait is slept and counted as absorbed; a
+    /// `wait == 0` test turned around would return at once on exactly this
+    /// path and charge the request to a second that has no permit left.
+    #[tokio::test]
+    async fn a_reservation_in_the_future_is_slept_to_and_counted() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let ahead = crate::rate::monotonic_micros().saturating_add(300_000);
+        let pin = || {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit(ahead)
+        };
+        while pin() == crate::rate::Verdict::Admit {}
+        let absorbed = crate::rate::absorbed_micros();
+        let started = std::time::Instant::now();
+        owned
+            .wait_for_permit()
+            .await
+            .expect("a permit exists, later");
+        let waited = started.elapsed();
+        assert!(
+            waited >= core::time::Duration::from_millis(250),
+            "the reservation 300 ms ahead was slept to: {waited:?}"
+        );
+        assert!(
+            crate::rate::absorbed_micros().saturating_sub(absorbed) >= 250_000,
+            "and the wait was counted as absorbed"
+        );
+    }
+
+    /// **AN ESCAPED QUOTE INSIDE A KEY DOES NOT END IT.** G18-rest-13, D-2074.
+    ///
+    /// Read as the end of the string, the `\"` in `"a\"b"` leaves `b"` to
+    /// open a string of its own, and the repeat is never seen.
+    #[test]
+    fn an_escaped_quote_inside_a_key_does_not_end_the_key() {
+        assert_eq!(
+            repeated_key(r#"{"a\"b":1,"a\"b":2}"#),
+            Some("a\"b".to_owned())
+        );
+        assert_eq!(repeated_key(r#"{"a\"b":1,"b":2}"#), None);
+    }
+
+    /// **A SATURATED RESERVATION IS REFUSED BY NAME, NOT SLEPT TOWARD.** The
+    /// fix to D-1203.
+    ///
+    /// A governor whose cursor stands at `u64::MAX` with its second spent has
+    /// no instant at which the next permit exists. `reserve` used to answer
+    /// `u64::MAX` and this slept `u64::MAX - now` microseconds, which never
+    /// ends; the timeout below is what that looked like. It now refuses with
+    /// the cursor named and charges nothing — and the permit still free before
+    /// the second is spent goes at once rather than at the cursor.
+    #[tokio::test]
+    async fn a_saturated_reservation_is_refused_and_never_slept() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let pin = || {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit(u64::MAX)
+        };
+        assert_eq!(pin(), crate::rate::Verdict::Admit, "the pin spends one");
+        let bound = core::time::Duration::from_secs(5);
+        // A PERMIT IS FREE, SO IT GOES NOW, with the cursor far ahead.
+        let free = tokio::time::timeout(bound, owned.wait_for_permit()).await;
+        assert_eq!(free, Ok(Ok(())), "a free permit is not slept for");
+        while pin() == crate::rate::Verdict::Admit {}
+        let credit = |held: &std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .credit_micro_permits(crate::rate::WindowSpan::Second)
+        };
+        let before = credit(&held);
+        let refused = tokio::time::timeout(bound, owned.wait_for_permit())
+            .await
+            .expect("a saturated reservation must not sleep");
+        let why = refused.expect_err("a saturated reservation is refused");
+        assert!(why.contains("reservation saturated"), "{why}");
+        assert!(
+            why.contains(&u64::MAX.to_string()),
+            "names the cursor: {why}"
+        );
+        assert_eq!(credit(&held), before, "nothing was charged");
+    }
+
+    /// **`sharing(None)` KEEPS THE PRIVATE GOVERNOR (pull1-2, D-2524).**
+    ///
+    /// On the old code `sharing` assigned its argument whenever the source was
+    /// governed, so `sharing(None)` left `governor == None` and
+    /// `charged_by_caller == false` -- nobody charged anything, and the first
+    /// assertion below failed. Every ordering of the two calls a server makes
+    /// is walked, plus the ungoverned source that must stay ungoverned.
+    #[tokio::test]
+    async fn sharing_none_keeps_the_private_governor() {
+        type Shared = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let build =
+            || HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let same = |a: Option<&Shared>, b: &Shared| a.is_some_and(|a| std::sync::Arc::ptr_eq(a, b));
+        let cursor_of = |held: &Shared| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cursor_micros()
+        };
+
+        // NONE ALONE: the private instance survives and is still charged here.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("Dhan is budgeted"));
+        let source = source.sharing(None);
+        assert!(
+            same(source.governor.as_ref(), &private),
+            "sharing(None) must keep the governor `new` built, not drop it"
+        );
+        assert!(
+            !source.charged_by_caller,
+            "nobody handed a governor over, so this source still charges its own"
+        );
+        // AND IT REALLY IS CHARGED: the cursor moves on a permit. The clock is
+        // read first for the reason the shared-governor test gives.
+        let _origin = crate::rate::monotonic_micros();
+        tokio::time::sleep(core::time::Duration::from_millis(2)).await;
+        let before = cursor_of(&private);
+        source
+            .wait_for_permit()
+            .await
+            .expect("a fresh governor admits");
+        assert!(
+            cursor_of(&private) > before,
+            "the kept private governor is the one spent"
+        );
+
+        // NONE TWICE: idempotent.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("budgeted"));
+        let source = source.sharing(None).sharing(None);
+        assert!(same(source.governor.as_ref(), &private));
+        assert!(!source.charged_by_caller);
+
+        // SOME THEN NONE: a later `None` does not undo a real hand-over.
+        let held = std::sync::Arc::clone(build().governor.as_ref().expect("budgeted"));
+        let source = build()
+            .sharing(Some(std::sync::Arc::clone(&held)))
+            .sharing(None);
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(
+            source.charged_by_caller,
+            "the caller that handed it over still charges"
+        );
+
+        // NONE THEN SOME: the hand-over still lands after a no-op.
+        let source = build()
+            .sharing(None)
+            .sharing(Some(std::sync::Arc::clone(&held)));
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(source.charged_by_caller);
+
+        // AN UNGOVERNED SOURCE stays ungoverned whatever it is handed.
+        for offered in [None, Some(std::sync::Arc::clone(&held))] {
+            let mut source = build();
+            source.governor = None;
+            let source = source.sharing(offered);
+            assert!(source.governor.is_none(), "no ceiling nobody wrote down");
+            assert!(!source.charged_by_caller);
+        }
     }
 
     /// A throttle lowers the allowance; clean answers raise it again.
@@ -3634,6 +4670,54 @@ mod tests {
     /// `CLAUDE.md` §7 puts the tick grid at two decimals and the single snap at
     /// the write boundary. Rounding to whole rupees is a snap at the wrong
     /// granularity, in the wrong place.
+    /// audit-20261003 attackdata-3 (D-1531). A vendor answer that repeats a
+    /// key inside one object is refused, not silently resolved to the last
+    /// value. It is two answers in one body, the case `container` already
+    /// refuses across objects; `serde_json`'s map kept the second array and
+    /// decoded `"open":[100],"open":[200]` as an open of 200.
+    #[test]
+    fn an_answer_repeating_a_key_in_one_object_is_refused() {
+        let body = r#"{"open":[100],"open":[200],"high":[200],"low":[100],
+            "close":[150],"volume":[1],"timestamp":[1751337900]}"#;
+        let refused = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        );
+        let Err(FetchError::TransportFailed { detail }) = refused else {
+            panic!("a repeated key must be refused: {refused:?}");
+        };
+        assert!(
+            detail.contains("repeats") && detail.contains("open"),
+            "the refusal names the repeated key: {detail}"
+        );
+
+        // The same key spelled with an escape is the same key.
+        let escaped = r#"{"open":[100],"op\u0065n":[200],"high":[200],"low":[100],
+            "close":[150],"volume":[1],"timestamp":[1751337900]}"#;
+        assert!(
+            decode_body(
+                escaped,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity
+            )
+            .is_err(),
+            "an escaped spelling of a held key is a repeat"
+        );
+
+        // One key per object, and a string VALUE equal to a key, are not
+        // repeats.
+        let clean = r#"{"open":[100],"high":[200],"low":[100],"close":[150],
+            "volume":[1],"timestamp":[1751337900],"symbol":{"code":"open","p":"code"}}"#;
+        let window = decode_body(
+            clean,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("one key per object decodes");
+        assert_eq!(window.rows.len(), 1);
+    }
+
     #[test]
     fn a_fractional_rupee_price_keeps_its_paise() {
         let body = r#"{
@@ -3659,6 +4743,25 @@ mod tests {
         assert_eq!(row.volume, 250, "a volume is a count and is not scaled");
     }
 
+    /// **THE TREE NODE THE MEMORY NOTE ON `decode_body` IS ARGUED FROM.**
+    ///
+    /// o1api-33, D-1203, D-2291: the peak memory of a decode is counted by
+    /// `crates/pull/tests/allocation.rs`, and the per-node part of it rests on
+    /// this size. A `serde_json` feature that widens the
+    /// node (`arbitrary_precision`, for one) changes the bound, and this fails
+    /// so the note and `docs/06-limits.md` are revisited rather than left wrong.
+    #[test]
+    fn the_json_tree_is_thirty_two_bytes_a_node() {
+        assert_eq!(size_of::<serde_json::Value>(), 32);
+        let source = include_str!("http.rs");
+        let doc = &source[..source
+            .find(&format!("{}{}", "pub fn decode_", "body("))
+            .expect("decode_body exists")];
+        assert!(doc.contains("# Memory — a whole tree, MEASURED"));
+        assert!(doc.contains("12x the body for a Dhan"));
+        assert!(doc.contains("17x for the cheapest hostile text per node"));
+    }
+
     /// Every price the paisa grid can hold, held exactly.
     #[test]
     fn every_price_on_the_paisa_grid_survives_intact() {
@@ -3682,6 +4785,102 @@ mod tests {
             .expect("decodes");
             assert_eq!(window.rows[0].open, want, "{sent} rupees is {want} paisa");
         }
+    }
+
+    /// **A JSON PRICE IS SNAPPED FROM THE VENDOR'S OWN TEXT, NOT FROM AN f64
+    /// (audit-20261003 attackdata-4, D-1570).**
+    ///
+    /// Each text below is one an `f64` rounds before the snap sees it, so the
+    /// old re-rendering landed one paisa from the vendor's own digits (the
+    /// right-hand comment is what the f64 path gave). An exponent form is read
+    /// exactly as well, and a count in exponent form is still a whole count.
+    #[test]
+    fn a_json_price_is_snapped_from_the_vendors_own_text() {
+        for (sent, want) in [
+            ("100.12499999999999999", 10_012_i64), // f64: 100.125 -> 10013
+            ("100.0049999999999999999", 10_000),   // f64: 100.005 -> 10001
+            ("0.0149999999999999999", 1),          // f64: 0.015 -> 2
+            ("92233720368547758.07", i64::MAX),    // f64: refused out of range
+            ("1.0012499999999999999e2", 10_012),   // f64: 100.125 -> 10013
+            ("24500.75", 2_450_075),
+            ("2.450075E4", 2_450_075),
+        ] {
+            let body = format!(
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[2.5e2],\"timestamp\":[1751337900]}}"
+            );
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .unwrap_or_else(|why| panic!("{sent}: {why:?}"));
+            let row = &window.rows[0];
+            assert_eq!(
+                (row.open, row.high, row.low, row.close),
+                (want, want, want, want),
+                "{sent} rupees is {want} paisa by its own text"
+            );
+            assert_eq!(row.volume, 250, "2.5e2 is the whole count 250");
+        }
+    }
+
+    /// An exponent that puts the decimal point exactly at the front of the
+    /// digits (`point == 0`) gains its leading zero: `number_text` promises
+    /// plain decimal notation, and `csv::paisa`, which the whole-number readers
+    /// walk, refuses a text with no whole part. So a zero count written `0e-1`
+    /// reads as the zero it is. P10-07: `point <= 0` mutated to `< 0` rendered
+    /// `.5` and `.0`, and the only negative exponent anywhere was refused for
+    /// its precision before reaching this branch. (`one_price` is not the
+    /// witness: `core`'s half-up reader accepts `.5`.)
+    #[test]
+    fn an_exponent_that_lands_the_point_at_the_front_keeps_a_whole_part() {
+        for (sent, want) in [
+            ("5e-1", "0.5"),
+            ("2.5e-1", "0.25"),
+            ("-5e-1", "-0.5"),
+            ("0e-1", "0.0"),
+        ] {
+            let number: serde_json::Number = serde_json::from_str(sent).expect("a JSON number");
+            assert_eq!(number_text(&number).as_deref(), Some(want), "{sent}");
+        }
+        let zero: serde_json::Value = serde_json::from_str("0e-1").expect("a JSON number");
+        assert_eq!(
+            one_number(&zero, "volume").expect("0e-1 is the whole number zero"),
+            0
+        );
+    }
+
+    /// **AN EXPONENT MAY MOVE THE POINT EXACTLY `MAX_PRICE_TEXT` PLACES PAST
+    /// THE DIGITS, AND NOT ONE MORE (Gate 18, D-1464).**
+    ///
+    /// `number_text` refuses a point more than the bound outside the digits,
+    /// on either side, so an exponent like `1e999999999` can never ask it for
+    /// a billion zeros. Each edge is pinned here: the bound itself is shifted
+    /// exactly, one past it is `None`. Every mutant of that one comparison
+    /// line survived the price tests, which never reach either edge.
+    #[test]
+    fn an_exponent_shifts_the_point_up_to_the_bound_and_refuses_one_past_it() {
+        let bound = i64::try_from(brutex_core::price::MAX_PRICE_TEXT).expect("small");
+        let text =
+            |sent: String| number_text(&sent.parse::<serde_json::Number>().expect("a JSON number"));
+        let width = usize::try_from(bound).expect("small");
+        // "1e{k}": one digit, so the point sits at 1 + k.
+        assert_eq!(
+            text(format!("1e{}", -bound - 1)),
+            Some(format!("0.{}1", "0".repeat(width))),
+            "the point exactly the bound left of the digits"
+        );
+        assert_eq!(text(format!("1e{}", -bound - 2)), None, "one further left");
+        assert_eq!(
+            text(format!("-1e{bound}")),
+            Some(format!("-1{}", "0".repeat(width))),
+            "the point exactly the bound right of the digits"
+        );
+        assert_eq!(text(format!("1e{}", bound + 1)), None, "one further right");
+        let huge = "9".repeat(9);
+        assert_eq!(text(format!("1e{huge}")), None, "an exponent far right");
+        assert_eq!(text(format!("1e-{huge}")), None, "an exponent far left");
     }
 
     /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
@@ -4015,6 +5214,163 @@ mod tests {
         let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
             .expect("the object shape skips a null row");
         assert_eq!(window.rows.len(), 1, "array of objects");
+    }
+
+    /// **THE JSON PARSE IS EXACT FOR A VENDOR'S PRICE TEXT AT EVERY LENGTH
+    /// (GAP16-24, D-1494; widened by D-1570).**
+    ///
+    /// For every text below — all three-decimal values in two ranges and all
+    /// four-decimal ones around a measured Dhan float — the JSON parse yields
+    /// the same paisa as reading the vendor's text directly. Until D-1570 the
+    /// parse went through an `f64` and the widest `i64` paisa price did NOT
+    /// survive it; with `arbitrary_precision` the number keeps its digits, and
+    /// that extreme is asserted equal so the limit cannot come back unseen.
+    /// (The name is kept: invariant AFX-05 cites it.)
+    #[test]
+    fn the_json_parse_is_exact_for_price_text_up_to_fifteen_digits() {
+        let direct = |text: &str| {
+            brutex_core::price::Paisa::from_rupee_text_half_up(text)
+                .map(brutex_core::price::Paisa::raw)
+        };
+        let through_json = |text: &str| {
+            let value: serde_json::Value = serde_json::from_str(text).expect("a JSON number");
+            let number = value.as_number().expect("a number").to_string();
+            brutex_core::price::Paisa::from_rupee_text_half_up(&number)
+                .map(brutex_core::price::Paisa::raw)
+        };
+        let mut checked = 0u32;
+        for (whole, decimals) in [(0..40, 3u32), (24_000..24_100, 3), (35_922..35_924, 4)] {
+            let steps = 10_i64.pow(decimals);
+            for w in whole {
+                for f in 0..steps {
+                    let text = format!("{w}.{f:0width$}", width = decimals as usize);
+                    assert_eq!(through_json(&text), direct(&text), "{text}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 40_000 + 100_000 + 20_000);
+        let widest = "92233720368547758.07";
+        assert_eq!(direct(widest), Ok(i64::MAX));
+        assert_eq!(
+            through_json(widest),
+            direct(widest),
+            "the parse keeps the vendor's digits, so even the widest price is one rounding"
+        );
+    }
+
+    /// **ALL THREE SHAPES APPLY ONE COUNT RULE (c4a-1, c4a-2, D-1490).**
+    ///
+    /// The positional shape (Zerodha, Groww) refused the whole window over one
+    /// negative equity volume, and kept a negative open interest, while the
+    /// columnar shape skipped both rows. The same two faults, at the extremes
+    /// `-1` and `i64::MIN + 1`, now skip one row in every shape; the good row
+    /// survives with its own counts; an index's negative volume is still the
+    /// zero its column always is; and the `i64::MIN` open-interest sentinel is
+    /// still refused rather than skipped.
+    #[test]
+    fn all_three_decode_shapes_skip_a_negative_count_alike() {
+        let positional = HttpSpec {
+            response: ResponseShape::PositionalRows {
+                envelope: None,
+                array: "candles",
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let objects = HttpSpec {
+            response: ResponseShape::ArrayOfObjects { envelope: None },
+            fields: FieldNames {
+                open_interest: Some("open_interest"),
+                ..spec(PriceScale::Rupees).fields
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let columnar = HttpSpec {
+            fields: FieldNames {
+                open_interest: Some("open_interest"),
+                ..spec(PriceScale::Rupees).fields
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let shapes = |volume: &str, interest: &str| {
+            [
+                (
+                    "the positional shape",
+                    format!(
+                        "{{\"candles\":[[1751337900,100.00,100.00,100.00,100.00,9,41],\
+                          [1751337960,100.00,100.00,100.00,100.00,{volume},{interest}]]}}"
+                    ),
+                    positional,
+                ),
+                (
+                    "the object shape",
+                    format!(
+                        "[{{\"open\":100.00,\"high\":100.00,\"low\":100.00,\"close\":100.00,\
+                           \"volume\":9,\"timestamp\":1751337900,\"open_interest\":41}},\
+                          {{\"open\":100.00,\"high\":100.00,\"low\":100.00,\"close\":100.00,\
+                           \"volume\":{volume},\"timestamp\":1751337960,\"open_interest\":{interest}}}]"
+                    ),
+                    objects,
+                ),
+                (
+                    "the columnar shape",
+                    format!(
+                        "{{\"open\":[100.00,100.00],\"high\":[100.00,100.00],\
+                           \"low\":[100.00,100.00],\"close\":[100.00,100.00],\
+                           \"volume\":[9,{volume}],\"timestamp\":[1751337900,1751337960],\
+                           \"open_interest\":[41,{interest}]}}"
+                    ),
+                    columnar,
+                ),
+            ]
+        };
+        let worst = (i64::MIN + 1).to_string();
+        let seven = 7.to_string();
+        let seven = seven.as_str();
+        for (volume, interest) in [
+            ("-1", seven),
+            (worst.as_str(), seven),
+            ("-0.5", seven),
+            (seven, "-1"),
+            (seven, worst.as_str()),
+            (seven, "-5.0"),
+        ] {
+            for (name, body, shape) in shapes(volume, interest) {
+                let window = decode_body(&body, &shape, crate::vendor::Listing::Derivative)
+                    .unwrap_or_else(|why| {
+                        panic!("{name} ({volume}, {interest}): one row goes, not the window: {why}")
+                    });
+                assert_eq!(window.rows.len(), 1, "{name} ({volume}, {interest})");
+                assert_eq!(window.rows[0].volume, 9, "{name}: the good row stayed");
+                assert_eq!(
+                    window.rows[0].open_interest,
+                    Some(41),
+                    "{name}: with its own open interest"
+                );
+            }
+        }
+        // AN INDEX'S NEGATIVE VOLUME IS STILL ITS ZERO, IN EVERY SHAPE.
+        for (name, body, shape) in shapes("-125", seven) {
+            let window = decode_body(&body, &shape, crate::vendor::Listing::Index)
+                .unwrap_or_else(|why| panic!("{name}: an index keeps the row: {why}"));
+            assert_eq!(window.rows.len(), 2, "{name}: both rows kept");
+            assert_eq!(window.rows[1].volume, 0, "{name}: recorded as zero");
+        }
+        // AND THE SENTINEL IS STILL REFUSED BY NAME, IN EVERY SHAPE.
+        for (name, body, shape) in shapes(seven, &i64::MIN.to_string()) {
+            let why = decode_body(&body, &shape, crate::vendor::Listing::Derivative)
+                .expect_err("the sentinel is refused, not skipped");
+            assert!(
+                format!("{why}").contains("open_interest"),
+                "{name}: the refusal names the column: {why}"
+            );
+        }
+        // ZERO IS NOT NEGATIVE ON EITHER COUNT.
+        for (name, body, shape) in shapes("0", "0") {
+            let window = decode_body(&body, &shape, crate::vendor::Listing::Equity)
+                .unwrap_or_else(|why| panic!("{name}: zero is a reading: {why}"));
+            assert_eq!(window.rows.len(), 2, "{name}: zero keeps its row");
+        }
     }
 
     /// **A ROW WHOSE FOUR PRICES CANNOT BE A BAR IS DROPPED, AND THE WINDOW
@@ -4482,6 +5838,343 @@ mod tests {
         );
     }
 
+    /// **A REFUSAL UNDER A 200 ON THE ROLLING POST AND ON A DISCOVERY GET IS A
+    /// REFUSAL, AND IT IS NOT COUNTED AS A SUCCESS.** W1-pull2-11, D-0950.
+    ///
+    /// `window_async` weighs a 2xx body before it tells the governor the call
+    /// succeeded. `post_json` and `Discovery::get` did not: both called
+    /// `record_success` on any 2xx and returned the body as `Ok`. So a Dhan
+    /// `DH-901` under a 200 raised the allowance and reached the caller as a
+    /// body.
+    ///
+    /// The governor is primed one clean answer short of a step up
+    /// (`SUCCESSES_PER_STEP - 1` recorded after a throttle), so one more
+    /// `record_success` moves `permitted` and none leaves it where it was.
+    /// Each row is driven over a real loopback socket.
+    #[test]
+    fn a_refusal_under_a_200_on_the_post_and_discovery_paths_is_never_a_success() {
+        use core::cmp::Ordering;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let dead = r#"{"errorType":"Invalid_Authentication","errorCode":"DH-901","errorMessage":"Client ID or access token is invalid"}"#;
+        let throttled = r#"{"errorCode":"DH-904","errorMessage":"Too many requests"}"#;
+        let wrong = r#"{"errorCode":"DH-905","errorMessage":"Missing required fields"}"#;
+        let clean = r#"{"data":{"open":[1]}}"#;
+        // (body, refused?, credential dead?, how the allowance must move)
+        let rows: [(&str, bool, bool, Ordering); 4] = [
+            (dead, true, true, Ordering::Equal),
+            (throttled, true, false, Ordering::Less),
+            (wrong, true, false, Ordering::Equal),
+            (clean, false, false, Ordering::Greater),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (body, refused, credential_dead, moves) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                {
+                    let mut g = source
+                        .governor
+                        .as_ref()
+                        .expect("Dhan is budgeted")
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.record_throttled();
+                    for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                        g.record_success();
+                    }
+                }
+                let before = allowance(&source).expect("a per-second span");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post {
+                    "HttpSource::post_json"
+                } else {
+                    "Discovery::get"
+                };
+                if refused {
+                    let refusal = got.expect_err(&format!("{path}: {body} is a refusal"));
+                    assert_eq!(refusal.status, Some(200), "{path}: the status sent");
+                    assert_eq!(
+                        refusal.credential_dead, credential_dead,
+                        "{path}: {body} names whether the token is dead"
+                    );
+                    assert!(refusal.detail.contains(body), "{path}: {}", refusal.detail);
+                } else {
+                    assert_eq!(got.expect("a clean body is a success"), body, "{path}");
+                }
+                let after = allowance(&source).expect("a per-second span");
+                assert_eq!(
+                    after.cmp(&before),
+                    moves,
+                    "{path}: {body} moved the allowance {before} -> {after}"
+                );
+            }
+        }
+    }
+
+    /// **A REFUSING STATUS ON THE ROLLING POST AND ON A DISCOVERY GET IS READ
+    /// FOR ITS BODY.** CE-29, D-1769.
+    ///
+    /// Both paths returned a non-2xx refusal as its status alone, so Dhan's
+    /// dead-token answer — HTTP 400 carrying `DH-906` "Invalid Token" (D-0325)
+    /// — was an ordinary answered refusal and the token went on to every
+    /// remaining cell. Each row is driven over a real loopback socket: the
+    /// body's words reach the detail, the vendor's named disposition travels
+    /// with the refusal, a named dead session is marked as one, and a throttle
+    /// named under a 400 narrows the allowance by exactly one step.
+    #[test]
+    fn a_refusing_status_on_the_post_and_discovery_paths_is_read_for_its_body() {
+        use crate::refusal::Disposition;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let once = {
+            let mut g = crate::rate::Governor::new(
+                shipped.budget.per_second,
+                shipped.budget.per_minute,
+                shipped.budget.per_day,
+            )
+            .expect("the shipped budget");
+            g.record_throttled();
+            g.permitted(crate::rate::WindowSpan::Second)
+        };
+        let full = shipped.budget.per_second;
+        let dead =
+            r#"{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}"#;
+        let throttled = r#"{"errorCode":"DH-904","errorMessage":"Too many requests"}"#;
+        let wrong = r#"{"errorCode":"DH-905","errorMessage":"Missing required fields"}"#;
+        // (status line, body, credential dead?, named, allowance after, a word the detail carries)
+        let rows = [
+            (
+                "400 Bad Request",
+                dead,
+                true,
+                Some(Disposition::SessionDead),
+                full,
+                "Invalid Token",
+            ),
+            (
+                "400 Bad Request",
+                throttled,
+                false,
+                Some(Disposition::Throttled),
+                once,
+                "DH-904",
+            ),
+            (
+                "400 Bad Request",
+                wrong,
+                false,
+                Some(Disposition::RequestWrong),
+                full,
+                "Missing required",
+            ),
+            (
+                "502 Bad Gateway",
+                "upstream down",
+                false,
+                None,
+                full,
+                "upstream down",
+            ),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (line, body, credential_dead, named, after, word) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 {line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post { "post_json" } else { "Discovery::get" };
+                let refusal = got.expect_err(&format!("{path}: {line} is a refusal"));
+                assert_eq!(refusal.credential_dead, credential_dead, "{path}: {body}");
+                assert_eq!(refusal.named, named, "{path}: {body}");
+                assert!(refusal.detail.contains(word), "{path}: {}", refusal.detail);
+                assert!(
+                    refusal
+                        .detail
+                        .contains(line.split(' ').next().unwrap_or_default()),
+                    "{path}: the status is still named: {}",
+                    refusal.detail
+                );
+                assert_eq!(allowance(&source), after, "{path}: {body}");
+            }
+        }
+    }
+
+    /// **A 429 ON THE ROLLING POST AND ON A DISCOVERY GET STILL NARROWS THE
+    /// ALLOWANCE, AND NO OTHER REFUSING STATUS MOVES IT.** W1-pull2-11, D-0950.
+    ///
+    /// The correction moved the success half of the governor feedback behind
+    /// the body and left the throttle half on the status, in
+    /// `record_throttle_status`. This pins that half: with the governor primed
+    /// as in the 2xx test, a 429 must narrow the per-second allowance on both
+    /// paths, and a 503 and a 401 must leave it where it was.
+    #[test]
+    fn a_429_on_the_post_and_discovery_paths_narrows_the_allowance() {
+        use core::cmp::Ordering;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let rows: [(u16, &str, Ordering); 3] = [
+            (429, "Too Many Requests", Ordering::Less),
+            (503, "Service Unavailable", Ordering::Equal),
+            (401, "Unauthorized", Ordering::Equal),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (status, reason, moves) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                {
+                    let mut g = source
+                        .governor
+                        .as_ref()
+                        .expect("Dhan is budgeted")
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.record_throttled();
+                    for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                        g.record_success();
+                    }
+                }
+                let before = allowance(&source).expect("a per-second span");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post {
+                    "HttpSource::post_json"
+                } else {
+                    "Discovery::get"
+                };
+                let refusal = got.expect_err(&format!("{path}: a {status} is a refusal"));
+                assert_eq!(refusal.status, Some(status), "{path}: the status sent");
+                let after = allowance(&source).expect("a per-second span");
+                assert_eq!(
+                    after.cmp(&before),
+                    moves,
+                    "{path}: a {status} moved the allowance {before} -> {after}"
+                );
+            }
+        }
+    }
+
+    /// **A TEXT STAMP IS READ ONLY WHEN EVERY SEPARATOR AND DIGIT IS WHERE IT
+    /// BELONGS, AND NOTHING FOLLOWS IT.** UC-23, D-0951.
+    ///
+    /// `local_seconds` read six numbers at fixed offsets and checked nothing
+    /// between them, and nothing after byte 19. So `2026-08-04T09:15:00Z` on an
+    /// `IsoDateTimeText` feed was read as 09:15 local and then shifted by IST,
+    /// a 5h30m error that stores cleanly. `i64::from_str` also takes a sign,
+    /// so `-1` passed as an hour.
+    #[test]
+    fn a_text_stamp_is_refused_unless_its_whole_shape_is_right() {
+        use crate::vendor::TimestampEncoding as T;
+        let good = local_seconds("2026-08-04T09:15:00").expect("the live Groww shape");
+        assert_eq!(
+            local_seconds("2026-08-04 09:15:00"),
+            Some(good),
+            "a space is the documented separator and reads the same"
+        );
+        let bad = [
+            "2026x08-04 09:15:00",
+            "2026-08x04 09:15:00",
+            "2026-08-04x09:15:00",
+            "2026-08-04 09x15:00",
+            "2026-08-04 09:15x00",
+            "2026X08Y04Z09A15B00",
+            "2026-+8-04 09:15:00",
+            "2026-08-04 -1:15:00",
+            "2026-08-04 09:-5:00",
+            "+026-08-04 09:15:00",
+            "2026-08-04T09:15:00Z",
+            "2026-08-04T09:15:00+0530",
+            "2026-08-04 09:15:00 ",
+            "2026-08-04 24:00:00",
+            "2026-08-04 09:60:00",
+            "2026-08-04 09:15:60",
+        ];
+        for text in bad {
+            assert_eq!(local_seconds(text), None, "{text:?} must be refused");
+            let cell = serde_json::Value::String(text.to_owned());
+            for encoding in [T::IsoDateTimeText, T::IstDateTimeText] {
+                assert!(
+                    one_stamp(&cell, encoding, 0).is_err(),
+                    "{text:?} under {encoding:?}"
+                );
+            }
+        }
+        // THE OFFSET ARM STILL READS ITS 19-BYTE PREFIX, and still refuses one
+        // whose separators are wrong.
+        let zoned = serde_json::Value::String("2026-08-04T09:15:00+0530".to_owned());
+        assert_eq!(
+            one_stamp(&zoned, T::IsoDateTimeOffset, 0).expect("a zoned stamp"),
+            good - 19_800
+        );
+        let zoned_bad = serde_json::Value::String("2026x08-04T09:15:00+0530".to_owned());
+        assert!(one_stamp(&zoned_bad, T::IsoDateTimeOffset, 0).is_err());
+    }
+
     #[test]
     fn arrays_that_disagree_in_length_refuse_the_whole_window() {
         let body = r#"{"open":[1,2],"high":[1,2],"low":[1,2],"close":[1,2],
@@ -4841,9 +6534,11 @@ mod tests {
         let (name, value) = source.header();
         assert_eq!(name, "Authorization");
         assert_eq!(
-            value, "token APIKEY:TOKEN",
+            value.to_str().expect("an ASCII header"),
+            "token APIKEY:TOKEN",
             "key first, one colon, one trailing space in the prefix"
         );
+        assert!(value.is_sensitive(), "P11-03, D-2525");
         assert!(
             zerodha
                 .extra_headers
@@ -4884,6 +6579,91 @@ mod tests {
                 given_two: true
             }
         );
+    }
+
+    /// **A CREDENTIAL THAT IS NOT A HEADER VALUE REFUSES AT CONSTRUCTION, AND A
+    /// GOOD ONE IS HELD SENSITIVE (P1-19-01, P11-03, D-2525).**
+    ///
+    /// On the old code `header_value` was a `String` and `new` never parsed it,
+    /// so every "bad" case below BUILT a source (the first `expect_err` failed)
+    /// and the newline surfaced only at send time as `TransportFailed`; and
+    /// there was no `HeaderValue` to ask `is_sensitive` of. Walked for every
+    /// HTTP feed in `Feed::ALL`, with each refused byte at the start, the
+    /// middle and the end of the token, and in the key of a two-secret scheme.
+    /// A scheme mismatch still refuses FIRST, as `CredentialMismatch`.
+    #[test]
+    fn a_credential_that_is_not_a_header_value_is_refused_at_construction() {
+        const TOKEN: &str = "TOKENBYTES";
+        let refused_bytes = ['\n', '\r', '\0', '\u{01}', '\u{1f}', '\u{7f}'];
+        let mut walked = 0_usize;
+        for feed in crate::vendor::Feed::ALL {
+            let crate::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let two = spec.auth.scheme.names_two_secrets();
+            let credential = |token: String, key: String| {
+                if two {
+                    Credential::pair(key, token)
+                } else {
+                    Credential::token(token)
+                }
+            };
+            for bad in refused_bytes {
+                let mut cases = vec![
+                    (format!("{bad}{TOKEN}"), "KEY".to_owned()),
+                    (format!("TOKEN{bad}BYTES"), "KEY".to_owned()),
+                    (format!("{TOKEN}{bad}"), "KEY".to_owned()),
+                ];
+                if two {
+                    cases.push((TOKEN.to_owned(), format!("KEY{bad}")));
+                }
+                for (token, key) in cases {
+                    let why = HttpSource::new(spec, credential(token, key))
+                        .expect_err("a credential no header can carry refuses");
+                    assert_eq!(
+                        why,
+                        FetchError::CredentialNotAHeaderValue {
+                            header: spec.auth.header
+                        },
+                        "{feed} {bad:?}"
+                    );
+                    let said = why.to_string();
+                    assert!(!said.contains("TOKEN"), "the value is never shown: {said}");
+                    assert!(said.contains(spec.auth.header), "{said}");
+                    walked += 1;
+                }
+            }
+            // THE ORDER: a mismatch is named before the bytes are looked at.
+            let mismatched = if two {
+                Credential::token(format!("{TOKEN}\n"))
+            } else {
+                Credential::pair("KEY".to_owned(), format!("{TOKEN}\n"))
+            };
+            assert!(
+                matches!(
+                    HttpSource::new(spec, mismatched),
+                    Err(FetchError::CredentialMismatch { .. })
+                ),
+                "{feed}: a scheme mismatch refuses first"
+            );
+            // A GOOD CREDENTIAL, including a tab and a space a header CAN
+            // carry, builds, and its header is sensitive everywhere it goes.
+            for good in [TOKEN, "TOKEN\tBYTES", "TOKEN BYTES"] {
+                let source = HttpSource::new(spec, credential(good.to_owned(), "KEY".to_owned()))
+                    .expect("a header-safe credential builds");
+                let (name, value) = source.header();
+                assert!(value.is_sensitive(), "{feed}: the auth header is sensitive");
+                let mut map = reqwest::header::HeaderMap::new();
+                map.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                        .expect("a header name"),
+                    value,
+                );
+                let printed = format!("{map:?} {source:?}");
+                assert!(!printed.contains("BYTES"), "{feed}: {printed}");
+            }
+        }
+        assert!(walked >= 18, "at least one HTTP feed was walked: {walked}");
     }
 
     /// The blocking seam refuses by name rather than silently blocking, and
@@ -4954,33 +6734,77 @@ mod tests {
     /// with no declared length the pre-read check has nothing to check, and
     /// what the answer costs is decided entirely by the read loop.
     fn flooding_listener(header: &'static str, frame: usize, chunks: usize) -> String {
-        use std::io::{Read as _, Write as _};
+        counted_flood(header, frame, chunks).0
+    }
+
+    /// How far a [`counted_flood`] got before it ended.
+    #[derive(Debug)]
+    struct Flooded {
+        /// Body bytes the socket accepted, the header not counted.
+        sent: usize,
+        /// Whether all `chunks` frames went out. `false` means a write failed,
+        /// which on loopback is the client hanging up.
+        finished: bool,
+    }
+
+    /// [`flooding_listener`], and a report of how many body bytes the socket
+    /// accepted before the flood ended. D-0723.
+    ///
+    /// A refusal naming the cap says the client refused. It does not say WHEN
+    /// the client stopped reading: a reader that held the whole answer and
+    /// measured it afterwards refuses in the same words. The other end of the
+    /// socket is the witness to where the read stopped. The report is sent
+    /// once the thread is done, so the caller waits on it with a timeout
+    /// rather than joining a thread that might never be accepted.
+    fn counted_flood(
+        header: &'static str,
+        frame: usize,
+        chunks: usize,
+    ) -> (String, std::sync::mpsc::Receiver<Flooded>) {
+        use std::io::{ErrorKind, Read as _, Write as _};
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let Ok((mut stream, _)) = socket.accept() else {
                 return;
             };
             let mut buf = [0u8; 4096];
             let _request = stream.read(&mut buf);
-            if stream.write_all(header.as_bytes()).is_err() {
-                return;
-            }
+            let mut sent: usize = 0;
+            let mut finished = stream.write_all(header.as_bytes()).is_ok();
             let filler = vec![b'x'; frame];
-            for _ in 0..chunks {
-                // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
-                // Once it has seen more than it will hold it drops the
-                // response, the connection resets, and this write fails — which
-                // is the signal to stop rather than something to report. Rust
-                // ignores SIGPIPE at startup, so this is an `Err` and not a
-                // killed test process.
-                if stream.write_all(&filler).is_err() {
-                    return;
+            'frames: for _ in 0..chunks {
+                if !finished {
+                    break;
+                }
+                let mut rest = filler.as_slice();
+                while !rest.is_empty() {
+                    // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
+                    // Once it has seen more than it will hold it drops the
+                    // response, the connection resets, and this write fails —
+                    // which is the signal to stop and report how far it got.
+                    // Rust ignores SIGPIPE at startup, so this is an `Err` and
+                    // not a killed test process. Every byte the socket accepts
+                    // is counted, not every whole frame.
+                    match stream.write(rest) {
+                        Ok(n) if n > 0 => {
+                            sent = sent.saturating_add(n);
+                            rest = rest.get(n..).unwrap_or_default();
+                        }
+                        Err(why) if why.kind() == ErrorKind::Interrupted => {}
+                        Ok(_) | Err(_) => {
+                            finished = false;
+                            break 'frames;
+                        }
+                    }
                 }
             }
             let _flushed = stream.flush();
+            drop(stream);
+            let _reported = tx.send(Flooded { sent, finished });
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
     }
 
     /// **THE CREDENTIAL MUST NOT FOLLOW A REDIRECT.**
@@ -5194,6 +7018,368 @@ mod tests {
         assert!(
             detail.contains(&MAX_RESPONSE_BYTES.to_string()),
             "and it names the cap: {detail}"
+        );
+    }
+
+    /// **A ROLLING ANSWER WITH NO DECLARED LENGTH STOPS AT THE SAME CAP.**
+    /// D-0723.
+    ///
+    /// `post_json` read its success body with `text()`, which holds the whole
+    /// answer before anything can look at its size. The bars path had stopped
+    /// doing that; the rolling path, which `api` sends once per cell of its
+    /// "`offsets × sides × cadences × ordinals`" cross product, had not.
+    ///
+    /// This offers 64 MiB more than `MAX_RESPONSE_BYTES` with no
+    /// `Content-Length`, so the bound has to live in the read loop, and holds
+    /// WHERE the read stopped as well as that it refused. A reader that held
+    /// the whole answer and measured it afterwards would refuse in the same
+    /// words, so the refusal alone cannot tell the two apart. The server can:
+    /// the client must hang up before the flood ends, with fewer than 32 MiB
+    /// past the cap accepted by the socket. The margin is room for bytes in
+    /// flight between the two ends, which this test does not measure.
+    ///
+    /// The refusal carries the vendor's status, 200, rather than none, so it is
+    /// not read as a transport blip: `api::server::step` maps a status it has
+    /// no other arm for to `Some(_) => Step::Answered` and does not re-ask.
+    #[test]
+    fn a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap() {
+        const FRAME: usize = 64 * 1024;
+        const EXCESS: usize = 64 * 1024 * 1024;
+        let offered = MAX_RESPONSE_BYTES.saturating_add(EXCESS);
+        let (url, report) = counted_flood(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Connection: close\r\n\r\n",
+            FRAME,
+            offered.div_euclid(FRAME),
+        );
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        // THE READ STOPPED AT THE CAP, NOT AFTER THE ANSWER ENDED.
+        let flooded = report
+            .recv_timeout(core::time::Duration::from_secs(5))
+            .expect("the flood reports how far it got, and a client that never connected gets no report");
+        assert!(
+            !flooded.finished,
+            "the client hangs up before the flood ends: {} of {offered} bytes \
+             went out",
+            flooded.sent
+        );
+        assert!(
+            flooded.sent < MAX_RESPONSE_BYTES.saturating_add(EXCESS / 2),
+            "the read stops at the cap, not at the end of the answer: {} of \
+             {offered} bytes went out",
+            flooded.sent
+        );
+
+        let refusal = match outcome {
+            Ok(body) => panic!(
+                "a rolling answer past the cap is refused, not returned: {} bytes \
+                 were held",
+                body.len()
+            ),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(refusal.status, Some(200), "the vendor did answer");
+        assert!(
+            refusal.detail.contains("ceiling")
+                && refusal.detail.contains(&MAX_RESPONSE_BYTES.to_string()),
+            "it names the cap: {}",
+            refusal.detail
+        );
+        assert!(
+            !refusal.credential_dead,
+            "a size says nothing about a token"
+        );
+    }
+
+    /// **A ROLLING ANSWER DECLARING MORE THAN THE CAP IS REFUSED BEFORE ITS
+    /// BODY IS READ.** D-0723.
+    ///
+    /// Two bytes follow a `Content-Length` one past the cap. `text()` waited
+    /// for the declared length and failed as a dropped socket, a transport
+    /// refusal carrying no status. Checked against the header first, it is
+    /// the vendor's own claim that is refused, under the status it came with.
+    #[test]
+    fn a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading() {
+        let declared = MAX_RESPONSE_BYTES.saturating_add(1);
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {declared}\r\nConnection: close\r\n\r\n{{}}"
+        )));
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the request has to go out, or this proves nothing"
+        );
+        let refusal = outcome.expect_err("a declared length past the cap is refused");
+        assert_eq!(refusal.status, Some(200), "under the status it came with");
+        assert!(
+            refusal.detail.contains("ceiling"),
+            "and it says the cap was the reason: {}",
+            refusal.detail
+        );
+    }
+
+    /// **A ROLLING ANSWER UNDER THE CAP COMES BACK BYTE FOR BYTE.** D-0723.
+    #[test]
+    fn a_rolling_answer_under_the_cap_is_returned_exactly() {
+        let body = r#"{"data":{"ce":{"close":[101.5]}}}"#;
+        let (url, _seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let got = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
+            .block_on_post(&url)
+            .expect("a small answer is returned");
+        assert_eq!(got, body);
+    }
+
+    /// **A ROLLING ANSWER THAT IS NOT UTF-8 IS REFUSED, NOT REPAIRED.** D-0723.
+    ///
+    /// `text()` decoded lossily: an invalid byte became U+FFFD and the body
+    /// was returned as if the vendor had sent that character. The bounded read
+    /// is the one discovery already used, and it keeps the bytes exact or
+    /// refuses them by name.
+    ///
+    /// The fixture server is never joined. It reports the request it read
+    /// over a channel instead, so a `post_json` that never connects fails this
+    /// test at a five-second wait rather than hanging it on `accept`.
+    #[test]
+    fn a_rolling_answer_that_is_not_utf8_is_refused_not_repaired() {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let received = stream.read(&mut request).unwrap_or(0);
+            let _written = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}",
+            );
+            let _flushed = stream.flush();
+            let _sent = tx.send(received);
+        });
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
+            .block_on_post(&format!("http://{addr}"));
+
+        let refusal = match outcome {
+            Ok(body) => panic!("an invalid byte is refused, not replaced: {body:?}"),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            rx.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok_and(|received| received > 0),
+            "the request has to reach the fixture, or this proves nothing"
+        );
+        assert_eq!(refusal.status, Some(200));
+        assert!(
+            refusal.detail.contains("UTF-8"),
+            "it names what was wrong with the body: {}",
+            refusal.detail
+        );
+    }
+
+    /// A shared governor, as the governor tests below hold it.
+    type SharedGovernor = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+
+    /// A loopback server that answers one request with `answer`, byte for
+    /// byte, and reports how many request bytes it read.
+    ///
+    /// It is never joined. A caller that never connects fails at its own timed
+    /// wait on the report rather than hanging on `accept`.
+    fn answer_once(answer: Vec<u8>) -> (String, std::sync::mpsc::Receiver<usize>) {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let received = stream.read(&mut request).unwrap_or(0);
+            let _written = stream.write_all(&answer);
+            let _flushed = stream.flush();
+            let _sent = tx.send(received);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Asserts the fixture behind `report` read a request within five seconds.
+    fn reached(what: &str, report: &std::sync::mpsc::Receiver<usize>) {
+        assert!(
+            report
+                .recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok_and(|received| received > 0),
+            "{what}: the request has to reach the fixture, or this proves nothing"
+        );
+    }
+
+    /// The per-second allowance a shared governor stands at.
+    fn allowance(held: &SharedGovernor) -> u32 {
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .permitted(crate::rate::WindowSpan::Second)
+            .expect("a bounded span")
+    }
+
+    /// A budgeted source sharing its governor with the caller, the governor
+    /// throttled once and then banked one success short of a step, and the
+    /// allowance it stands at. One more credit steps it up.
+    fn one_credit_short() -> (HttpSource, SharedGovernor, u32) {
+        let budgeted = HttpSpec {
+            budget: Budget {
+                per_second: Some(crate::rate::DHAN_PER_SECOND),
+                per_minute: None,
+                per_day: None,
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let owned = HttpSource::new(budgeted, Credential::token("SUPERSECRET".to_owned()))
+            .expect("a client builds");
+        let governor = owned.governor();
+        let held = governor.clone().expect("a budgeted spec is governed");
+        {
+            let mut g = held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+            for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                g.record_success();
+            }
+        }
+        let lowered = allowance(&held);
+        (owned.sharing(governor), held, lowered)
+    }
+
+    /// **A ROLLING ANSWER THIS BUILD REFUSES EARNS THE GOVERNOR NOTHING.**
+    /// D-0726.
+    ///
+    /// `post_json` credited the governor with a success on any 2xx status,
+    /// before its body was read. A body the socket cuts short was refused
+    /// after that credit, and D-0723 added two more refusals there: a body
+    /// declaring more than `MAX_RESPONSE_BYTES`, and one that is not UTF-8.
+    /// Each counted toward the allowance's next step up. The credit now comes
+    /// after the body is accepted.
+    ///
+    /// One success moves nothing visible until `SUCCESSES_PER_STEP` are
+    /// banked, so each answer gets a governor of its own from
+    /// `one_credit_short`. A refused answer must leave its allowance where it
+    /// was, and a clean one must step it up. Every refused answer is tried
+    /// before anything is asserted, so a failure names each one that was
+    /// credited. Each governor is shared with its source, so the source
+    /// charges no permit and the throttle's drained bucket makes no request
+    /// wait.
+    #[test]
+    fn a_rolling_answer_this_build_refuses_earns_the_governor_nothing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let past_the_cap = MAX_RESPONSE_BYTES.saturating_add(1);
+        let mut credited = Vec::new();
+        let mut returned = Vec::new();
+        for (what, answer) in [
+            (
+                "a body the socket cuts short",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}".to_vec(),
+            ),
+            (
+                "a body declaring more than the cap",
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {past_the_cap}\r\n\
+                     Connection: close\r\n\r\n{{}}"
+                )
+                .into_bytes(),
+            ),
+            (
+                "a body that is not UTF-8",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}".to_vec(),
+            ),
+        ] {
+            let (source, held, lowered) = one_credit_short();
+            let (url, report) = answer_once(answer);
+            let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
+            reached(what, &report);
+            let now = allowance(&held);
+            if now != lowered {
+                credited.push(format!("{what} ({lowered} to {now})"));
+            }
+            if outcome.is_ok() {
+                returned.push(what);
+            }
+        }
+        assert!(
+            credited.is_empty(),
+            "a refused answer earned the governor a success it did not deliver: {}",
+            credited.join("; ")
+        );
+        assert!(returned.is_empty(), "each is refused: {returned:?}");
+
+        // THE OTHER HALF, WHICH KEEPS THE ABOVE FROM BEING VACUOUS: a source
+        // that never credited anything would also leave the allowance alone.
+        let (source, held, lowered) = one_credit_short();
+        let body = r#"{"data":{"ce":{"close":[101.5]}}}"#;
+        let (url, report) = answer_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        );
+        let got = runtime
+            .block_on(source.post_json(&url, "{}".to_owned()))
+            .expect("a clean answer is returned");
+        reached("a clean answer", &report);
+        assert_eq!(got, body);
+        assert!(
+            allowance(&held) > lowered,
+            "a clean answer completes the step: {} !> {lowered}",
+            allowance(&held)
+        );
+    }
+
+    /// **A ROLLING 429 BACKS THE GOVERNOR OFF BEFORE ITS REFUSAL RETURNS.**
+    /// D-0726.
+    ///
+    /// D-0726 kept `post_json`'s throttle above the body read and moved only
+    /// the success credit below it. No test drove `post_json` with a 429 and
+    /// then read the governor, so matching a different status in that branch,
+    /// or dropping its `record_throttled`, passed every test in the crate.
+    ///
+    /// The governor starts one success short of a step. A throttle that is
+    /// never recorded leaves the allowance where it was, and one credited as
+    /// a success steps it up. Only a recorded throttle lowers it. The refusal
+    /// still carries the vendor's 429.
+    #[test]
+    fn a_rolling_429_backs_the_governor_off_before_its_refusal_returns() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (source, held, lowered) = one_credit_short();
+        let (url, report) = answer_once(
+            b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        );
+        let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
+        reached("a 429", &report);
+        let now = allowance(&held);
+        assert!(
+            now < lowered,
+            "a 429 on the rolling path backs the governor off: {now} !< {lowered}"
+        );
+        let refusal = outcome.expect_err("a 429 is refused");
+        assert_eq!(
+            refusal.status,
+            Some(429),
+            "the vendor's own status reaches the caller: {refusal:?}"
         );
     }
 
@@ -5441,6 +7627,106 @@ mod tests {
             one_number(&serde_json::json!(41), "open_interest").expect("an ordinary count"),
             41
         );
+    }
+
+    /// **A WHOLE NUMBER WITH ANY NUMBER OF ZERO DECIMALS IS A WHOLE NUMBER,
+    /// AND A FRACTION IS REFUSED BY NAME** (audit r64-4, D-4508).
+    ///
+    /// Since D-1570 the reader sees the vendor's own digits, and the two-decimal
+    /// price reader it went through refused `7.000` as unreadable. The extremes:
+    /// `i64::MAX` and `i64::MIN` with zero decimals, `-0.000`, a hundred
+    /// thousand zeros, exponents that land the point on, inside and past the
+    /// digits, exponents past `i64`, and the one-digit-past-`i64` neighbours.
+    #[test]
+    fn a_whole_number_with_any_zero_decimals_reads_and_a_fraction_is_refused_by_name() {
+        use super::{NotWhole, whole_text};
+        let zeros = format!("7.{}", "0".repeat(100_000));
+        let max = format!("{}.000", i64::MAX);
+        let min = format!("{}.0", i64::MIN);
+        for (text, want) in [
+            ("7", Ok(7)),
+            ("7.0", Ok(7)),
+            ("7.00", Ok(7)),
+            ("7.000", Ok(7)),
+            ("7.0000000", Ok(7)),
+            (zeros.as_str(), Ok(7)),
+            ("1700000000.000", Ok(1_700_000_000)),
+            ("-0.000", Ok(0)),
+            ("-0", Ok(0)),
+            ("0.000", Ok(0)),
+            (max.as_str(), Ok(i64::MAX)),
+            (min.as_str(), Ok(i64::MIN)),
+            ("1.7e9", Ok(1_700_000_000)),
+            ("1.7E+9", Ok(1_700_000_000)),
+            ("0.7e1", Ok(7)),
+            ("700e-2", Ok(7)),
+            ("7000.000e-3", Ok(7)),
+            ("0e-1", Ok(0)),
+            ("0.000e99999999999999999999", Ok(0)),
+            ("-0e-99999999999999999999", Ok(0)),
+            ("9.223372036854775807e18", Ok(i64::MAX)),
+            ("7.5", Err(NotWhole::Fractional)),
+            ("7.0001", Err(NotWhole::Fractional)),
+            ("-0.001", Err(NotWhole::Fractional)),
+            ("5e-1", Err(NotWhole::Fractional)),
+            ("7e-99999999999999999999", Err(NotWhole::Fractional)),
+            ("9223372036854775808.000", Err(NotWhole::OutOfRange)),
+            ("-9223372036854775809.0", Err(NotWhole::OutOfRange)),
+            ("1e19", Err(NotWhole::OutOfRange)),
+            ("1e20", Err(NotWhole::OutOfRange)),
+            ("1e21", Err(NotWhole::OutOfRange)),
+            ("123456789012345678901", Err(NotWhole::OutOfRange)),
+            ("7e99999999999999999999", Err(NotWhole::OutOfRange)),
+            ("", Err(NotWhole::NotDecimal)),
+            ("-", Err(NotWhole::NotDecimal)),
+            (".5", Err(NotWhole::NotDecimal)),
+            ("7.", Err(NotWhole::NotDecimal)),
+            ("7.0x", Err(NotWhole::NotDecimal)),
+            ("x7", Err(NotWhole::NotDecimal)),
+            ("7e", Err(NotWhole::NotDecimal)),
+            ("7e+", Err(NotWhole::NotDecimal)),
+            ("7e1.5", Err(NotWhole::NotDecimal)),
+            ("0e", Err(NotWhole::NotDecimal)),
+            ("0ex", Err(NotWhole::NotDecimal)),
+            ("--7", Err(NotWhole::NotDecimal)),
+        ] {
+            let shown = text.get(..40).unwrap_or(text);
+            assert_eq!(whole_text(text), want, "{shown}");
+        }
+        // Each reason is distinct and names itself.
+        assert!(NotWhole::Fractional.reason().contains("fraction"));
+        assert!(NotWhole::OutOfRange.reason().contains("outside i64"));
+        assert!(NotWhole::NotDecimal.reason().contains("not a decimal"));
+
+        // Through `one_number`, from a JSON body, as the vendor sends it.
+        let read = |body: &str| {
+            let v: serde_json::Value = serde_json::from_str(body).expect("JSON");
+            one_number(&v, "volume")
+        };
+        for (body, want) in [
+            ("7.000", 7),
+            ("1700000000.000", 1_700_000_000),
+            ("-0.000", 0),
+            (max.as_str(), i64::MAX),
+            (zeros.as_str(), 7),
+        ] {
+            let shown = body.get(..40).unwrap_or(body);
+            assert_eq!(read(body).expect(shown), want, "{shown}");
+        }
+        for (body, says) in [
+            ("7.5", "fraction"),
+            ("9223372036854775808.000", "outside i64"),
+            (min.as_str(), "did NOT send"),
+            ("\"7\"", "not a number"),
+        ] {
+            let Err(FetchError::TransportFailed { detail }) = read(body) else {
+                panic!("{body} must be refused")
+            };
+            assert!(
+                detail.contains(says) && detail.contains("\"volume\""),
+                "{body}: {detail}"
+            );
+        }
     }
 
     /// And the refusal reaches the whole decode, not just the leaf.
@@ -6063,6 +8349,15 @@ mod tests {
                 .expect("a runtime")
                 .block_on(self.0.window_async(request))
         }
+
+        /// One rolling POST to `url`, driven to its answer.
+        fn block_on_post(&self, url: &str) -> Result<String, crate::chain::Refusal> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(self.0.post_json(url, "{}".to_owned()))
+        }
     }
 
     /// **THE RUNG GOES ON THE WIRE, AND A RUNG WITH NO RECORDED WORD REFUSES
@@ -6470,5 +8765,260 @@ mod tests {
                 "and adds no per-rung parameter"
             );
         }
+    }
+
+    /// **A REFUSAL UNDER A 2XX REACHES ITS ERROR TRIMMED, like every other.**
+    ///
+    /// `trim` states the rule: a refusal body is unbounded input and an error
+    /// string reaches a log, so it is cut at 500 characters. The non-2xx door
+    /// obeyed it; the 2xx door formatted the whole body into
+    /// `VendorRefused::detail`, and that body is bounded only by
+    /// `MAX_RESPONSE_BYTES`. UC-22.
+    #[test]
+    fn a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error() {
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a client for the shipped Dhan row");
+        let pad = "x".repeat(10_000);
+        let dead = format!(
+            r#"{{"errorCode":"DH-901","errorType":"Invalid_Authentication","errorMessage":"Client ID or access token is invalid","errorDetail":"{pad}"}}"#
+        );
+        let Err(FetchError::VendorRefused { detail, named, .. }) =
+            source.weigh_answered_body(&dead, 200)
+        else {
+            panic!("a body naming DH-901 is a refusal whatever the status says")
+        };
+        assert_eq!(named, Some(crate::refusal::Disposition::SessionDead));
+        let prefix = "the vendor answered 200 and put a refusal in the body: ";
+        assert!(detail.starts_with(prefix), "{detail:.120}");
+        assert!(detail.contains("DH-901"), "the code survives the cut");
+        assert_eq!(
+            detail.chars().count(),
+            prefix.chars().count() + 500,
+            "the body is cut to `trim`'s 500 characters, not carried whole"
+        );
+    }
+
+    /// **A 2XX BODY IS PARSED ONCE, NOT ONCE FOR THE REFUSAL CHECK AND AGAIN
+    /// FOR THE DECODE.**
+    ///
+    /// `window_async` weighed a success body for a refusal and then decoded
+    /// it, and each step ran its own `serde_json::from_str` over the same
+    /// text — up to `MAX_RESPONSE_BYTES` parsed twice per window, on the path
+    /// every good request takes. The count is read from `parse_answer`, which
+    /// both `decode_body` and `refusal::disposition_of` parse through, on this
+    /// thread only, so either reader parsing the text again is counted.
+    /// W1-pull2-1.
+    #[test]
+    fn a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode() {
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a client for the shipped Dhan row");
+        let body = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+            "close":[24500.75],"volume":[250],"timestamp":[1751337900]}"#;
+
+        // THE COUNTER SEES THE REFUSAL READER'S OWN PARSE, so a refusal check
+        // that parsed the text again would be counted, not missed.
+        let contract = source
+            .spec
+            .error_names
+            .expect("Dhan declares its error names");
+        PARSES.with(|c| c.set(0));
+        assert_eq!(crate::refusal::disposition_of(body, contract), None);
+        assert_eq!(
+            PARSES.with(std::cell::Cell::get),
+            1,
+            "disposition_of parses once"
+        );
+
+        PARSES.with(|c| c.set(0));
+        let window = source
+            .settle_answer(body, 200, crate::vendor::Listing::Equity)
+            .expect("no refusal in a bars body")
+            .expect("and it decodes");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(PARSES.with(std::cell::Cell::get), 1, "one parse, not two");
+
+        // A REFUSAL IS STILL FOUND FROM THAT ONE PARSE, and still first.
+        PARSES.with(|c| c.set(0));
+        let dead = r#"{"errorType":"Invalid_Authentication","errorCode":"DH-901",
+                       "errorMessage":"Client ID or access token is invalid"}"#;
+        let Err(FetchError::VendorRefused { named, .. }) =
+            source.settle_answer(dead, 200, crate::vendor::Listing::Equity)
+        else {
+            panic!("a refusal under a 200 is still a refusal")
+        };
+        assert_eq!(named, Some(crate::refusal::Disposition::SessionDead));
+        assert_eq!(PARSES.with(std::cell::Cell::get), 1);
+
+        // AND A BODY THAT IS NOT JSON IS STILL A DECODE FAULT, NOT A SUCCESS.
+        PARSES.with(|c| c.set(0));
+        let Ok(Err(FetchError::TransportFailed { detail })) =
+            source.settle_answer("not json", 200, crate::vendor::Listing::Equity)
+        else {
+            panic!("a body that is not JSON fails the decode")
+        };
+        assert!(detail.contains("not JSON"), "{detail}");
+        assert_eq!(PARSES.with(std::cell::Cell::get), 1);
+    }
+
+    /// **AND THE LIVE PATH PARSES IT ONCE: `window_async` OVER A REAL SOCKET.**
+    ///
+    /// The test above drives `settle_answer` directly, so a `window_async`
+    /// that decoded the text again after it would pass there. This one serves a
+    /// 200 bars body on loopback to a source that declares Dhan's error names,
+    /// so the refusal check runs, and counts every `parse_answer` call the
+    /// whole fetch makes. The runtime is current-thread, so the parse runs on
+    /// this thread and the thread-local count sees it. W1-pull2-1.
+    #[test]
+    fn a_window_fetched_over_a_socket_parses_its_body_once() {
+        let crate::vendor::Transport::Http(dhan) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("this feed is HTTP")
+        };
+        assert!(
+            dhan.error_names.is_some(),
+            "the refusal check must run, or this counts only the decode"
+        );
+        let body = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+                       "close":[24500.75],"volume":[250],"timestamp":[1751337900]}"#;
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            error_names: dhan.error_names,
+            ..spec(PriceScale::Rupees)
+        };
+        let source = source_of(spec, "SUPERSECRET");
+        PARSES.with(|c| c.set(0));
+        let window = source.block_on_window().expect("a window comes back");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(window.rows[0].open, 2_450_075);
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the vendor was contacted"
+        );
+        assert_eq!(
+            PARSES.with(std::cell::Cell::get),
+            1,
+            "one parse for the refusal check and the decode together"
+        );
+    }
+
+    /// **THE OFFSET IS READ BY POSITION, SO A COLON ANYWHERE ELSE IS REFUSED.**
+    ///
+    /// The reader stripped every `:` from the whole tail and then counted the
+    /// digits left, which walked and copied a tail of any length into a new
+    /// `String` per bar, against its own doc's "no allocation", and accepted a
+    /// colon at any position: `+0:530`, `+:0530` and `+0530:` all read as
+    /// IST. ISO-8601 places it between hours and minutes only. W1-pull2-7.
+    #[test]
+    fn a_stated_offset_is_read_by_position_and_a_misplaced_colon_is_refused() {
+        let at = "2017-12-15T09:15:00";
+        assert_eq!(stated_offset(&format!("{at}+0530")), Some(19_800));
+        assert_eq!(stated_offset(&format!("{at}+05:30")), Some(19_800));
+        assert_eq!(stated_offset(&format!("{at}-0330")), Some(-12_600));
+        assert_eq!(stated_offset(&format!("{at}Z")), Some(0));
+        // EVERY DIGIT POSITION CARRIES WEIGHT. The cases above all have a zero
+        // tens-of-hours digit and a zero minutes-units digit, so a reader that
+        // divided the tens digit or subtracted the units digit read them the
+        // same. These do not, and the edges of both bounds are read as well.
+        for (tail, seconds) in [
+            ("+1045", 38_700),
+            ("-0945", -35_100),
+            ("+1000", 36_000),
+            ("+14:00", 50_400),
+            ("-1400", -50_400),
+            ("+0559", 21_540),
+        ] {
+            assert_eq!(
+                stated_offset(&format!("{at}{tail}")),
+                Some(seconds),
+                "{tail}"
+            );
+        }
+        for bad in [
+            "+0:530", "+:0530", "+0530:", "+053:0", "+0:5:3:0", "+05::30",
+        ] {
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad}");
+        }
+        // A wrong length, a non-digit, no sign, a field past its bound, and a
+        // NUL or a space where a byte of the zone belongs.
+        for bad in [
+            "+053", "+05300", "+05:3", "+05:300", "+0a30", "+05:3a", "Z0530", "005:30", "+1500",
+            "+15:00", "+0560", "+05:60", "+05-30", "", "+0530\0", "+05 30", " +0530",
+        ] {
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad:?}");
+        }
+        // A STAMP SHORTER THAN ITS CLOCK, OR ONE WHOSE BYTE 19 FALLS INSIDE A
+        // CHARACTER, states no offset and does not panic.
+        assert_eq!(stated_offset(""), None);
+        assert_eq!(stated_offset("2017-12-15T09:15:0\u{e9}0530"), None);
+        // A REFUSAL CHECK, NOT A MEASUREMENT OF COST: the old reader refused
+        // this tail too. That the new one does not walk it is the slice
+        // pattern's shape in `stated_offset`, not something this asserts.
+        let long = format!("{at}+{}", "0".repeat(1 << 20));
+        assert_eq!(
+            stated_offset(&long),
+            None,
+            "a tail past six bytes is refused, not read as a zone"
+        );
+    }
+
+    /// `CLAUDE.md` §8's comparison is made on fingerprints, so a fingerprint
+    /// must be equal exactly when the credentials are — and must never print.
+    ///
+    /// GAP2-36 / D-0948. Equal tokens give equal prints; one changed byte, a
+    /// key added, and a key/token split moved by one byte all give different
+    /// ones. The source carries the print of the credential it was built
+    /// with, and neither `Debug` shows a byte of the token or the digest.
+    #[test]
+    fn a_credential_print_is_equal_exactly_when_the_credential_is() {
+        let stale = Credential::token("stale".to_owned()).print();
+        assert_eq!(stale, Credential::token("stale".to_owned()).print());
+        assert_ne!(stale, Credential::token("fresh".to_owned()).print());
+        assert_ne!(stale, Credential::token("Stale".to_owned()).print());
+        assert_ne!(
+            stale,
+            Credential::pair(String::new(), "stale".to_owned()).print(),
+            "a present-but-empty key is a different credential from no key"
+        );
+        // THE LENGTH PREFIX: the same eight bytes split differently between
+        // key and token must not collide.
+        assert_ne!(
+            Credential::pair("The".to_owned(), "-token".to_owned()).print(),
+            Credential::pair("The-".to_owned(), "token".to_owned()).print()
+        );
+        // And a key/token transposition is a different credential.
+        assert_ne!(
+            Credential::pair("stale".to_owned(), "fresh".to_owned()).print(),
+            Credential::pair("fresh".to_owned(), "stale".to_owned()).print()
+        );
+
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let source = HttpSource::new(spec, Credential::token("stale".to_owned()))
+            .expect("an offline source builds");
+        assert_eq!(source.credential_print(), stale);
+        assert_ne!(
+            source.credential_print(),
+            Credential::token("fresh".to_owned()).print()
+        );
+        for shown in [format!("{stale:?}"), format!("{source:?}")] {
+            assert!(!shown.contains("stale"), "{shown}");
+        }
+        assert_eq!(format!("{stale:?}"), "CredentialPrint(<redacted>)");
     }
 }

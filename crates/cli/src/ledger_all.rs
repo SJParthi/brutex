@@ -63,7 +63,7 @@ use runner::admission::{AdmissionPolicyDraftV1, AdmissionPolicyV1};
 use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1,
-    RatioLimitsV1, RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+    RatioLimitsV1, RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
 };
 use runner::outcome::Horizon;
 use runner::topn::{RankingPolicyV1, Weights};
@@ -182,7 +182,8 @@ impl LedgerTree {
             let execution_rung = execution_parent.join(rung);
             let selection_rung = selection_parent.join(rung);
             for path in [&authority_rung, &execution_rung, &selection_rung] {
-                std::fs::create_dir_all(path)
+                // Durable level by level (ledgerv6-3, D-2623).
+                crate::durable_dir::create_all(path)
                     .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
             }
             execution.push(execution_rung);
@@ -282,7 +283,7 @@ fn exit_policy_with(side: Side, raw: Option<&str>) -> Result<ExitGridPolicyV1, S
         // refuses explicitly rather than losing cells to it.
         EXIT_CELL_CEILING,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v3(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,
@@ -756,7 +757,7 @@ pub(crate) fn stage_refused_event<'a>(
 pub(crate) fn rung_sized_event<'a>(
     verb: &'a str,
     rung: &'a str,
-    bars: usize,
+    bars: u64,
     min_hits: u64,
     support_ppm: u64,
 ) -> telemetry::Event<'a> {
@@ -823,7 +824,7 @@ pub(crate) fn gates_refused_event(verb: &str, missing: usize) -> telemetry::Even
 /// rule 4 bounds five per-operation costs and this is none of them.
 pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
     let mut out = String::new();
-    out.push_str(crate::STORED_PROVENANCE);
+    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-ALL  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points",
@@ -872,9 +873,12 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
     let (admission, active_gates) = admission_policy(request, LEDGER_ALL_VERB)?;
     render_gate_census(out, &active_gates);
     let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
-    let tree = LedgerTree::create(request.root)?;
-
+    // THE SPAN IS SIZED BEFORE THE TREE EXISTS (P1-20-01, D-2638), as
+    // `ledger_v6` does. `build_sweepers` is where every rung's span is first
+    // read; a span it refuses used to leave the 24 stage roots behind under
+    // a report that said nothing was read.
     let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_ALL_VERB)?;
+    let tree = LedgerTree::create(request.root)?;
 
     let ranking = RankingPolicyV1::new(Weights::equal())
         .map_err(|why| format!("ranking policy refused: {why:?}"))?;
@@ -944,8 +948,10 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
 /// operator to go and decode a ledger to find out what it decided, which is the
 /// same as not answering.
 ///
-/// Ten and not twenty-five: `visit_canonical` yields all two hundred, and the
-/// full set is on disk for anything that wants it. A terminal report that runs
+/// Ten and not twenty-five: `visit_committed` yields every committed winner
+/// (two hundred when every rung had 25 eligible, fewer when one did not:
+/// ledgerall-2, D-2627), and the full set is on disk for anything that wants
+/// it. A terminal report that runs
 /// to two hundred rows is one nobody reads, and the Top-10 of each rung is the
 /// prefix the selector itself treats as the answer.
 ///
@@ -954,15 +960,19 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
 /// Refuses if the retained topology stops authenticating mid-visit -- the rows
 /// are read under the same reauthentication every other stage uses, so a
 /// partially-read set is a refusal rather than a short table.
-fn render_winners(
+pub(crate) fn render_winners(
     out: &mut String,
     selection: crate::all_rung_selection_v5::CommittedStoredAllRungSelectionV5,
 ) -> Result<(), String> {
     out.push_str(
         "\nTOP 10 BY RUNG -- paisa unless a column says ppm; profit is the PESSIMISTIC fill\n",
     );
-    let mut current = String::new();
-    selection.into_successor_set()?.visit_canonical(|winner| {
+    let mut current: OpenRung = None;
+    // `visit_committed`, not `visit_canonical`: a rung with fewer than 25
+    // eligible candidates commits fewer winners, legally, and refusing to
+    // RENDER it after all three stages were durably committed reported a
+    // successful run as refused on every rerun (ledgerall-2, D-2627).
+    selection.into_successor_set()?.visit_committed(|winner| {
         let row = winner.row();
         let rank = row.rank();
         // THE SELECTOR'S OWN CONSTANT, not a literal ten. `all_rung_selection_v5`
@@ -972,36 +982,100 @@ fn render_winners(
         if u64::from(rank) > crate::all_rung_selection_v5::TOP_TEN_U64 {
             return Ok(());
         }
-        let rung = row.rung_seconds();
-        if current != rung.to_string() {
-            current = rung.to_string();
-            let _ = writeln!(
-                out,
-                "\n  {rung}s\n    {:>4}  {:>9}  {:>6}  {:>8}  {:>8}  {:>7}  {:>6}",
-                "rank", "profit", "win%", "worstLoss", "drawdown", "avgWin", "R:R"
-            );
-        }
-        let m = row.metrics();
-        let _ = writeln!(
-            out,
-            "    {:>4}  {:>9}  {:>5}.{}  {:>8}  {:>8}  {:>7}  {:>6}",
-            rank,
-            m.pessimistic_profit,
-            m.win_rate_ppm / 10_000,
-            (m.win_rate_ppm / 1_000) % 10,
-            m.worst_loss,
-            m.drawdown,
-            m.average_win,
-            // ABSENT, NOT ZERO. `reward_to_risk_ppm` is `None` when there is no
-            // losing trade to divide by, and printing that as 0.00 would read
-            // as the worst possible ratio when it is the best possible one.
-            m.reward_to_risk_ppm.map_or_else(
-                || "none".to_owned(),
-                |ppm| format!("{}.{:02}", ppm / 1_000_000, (ppm / 10_000) % 100)
-            ),
-        );
+        file_winner(out, &mut current, row.rung_seconds(), rank, row.metrics());
         Ok(())
-    })
+    })?;
+    if let Some((open, rows)) = current {
+        winners_table(out, open, &rows);
+    }
+    Ok(())
+}
+
+/// The rung table being filled and its rows, in visit order.
+type OpenRung = Option<(u32, Vec<(u32, runner::topn::Metrics)>)>;
+
+/// Files one visited winner under its rung: the open table takes it when the
+/// rung is the same, and a new rung first writes the open table out.
+///
+/// Split from [`render_winners`] so the grouping is asserted over plain rows
+/// (G18-cli-a-10, D-2007): the committed selection it walks has no cheap
+/// fixture, and no test saw two rungs' rows land in one table.
+fn file_winner(
+    out: &mut String,
+    current: &mut OpenRung,
+    rung: u32,
+    rank: u32,
+    metrics: runner::topn::Metrics,
+) {
+    match current {
+        Some((open, rows)) if *open == rung => rows.push((rank, metrics)),
+        _ => {
+            if let Some((open, rows)) = current.take() {
+                winners_table(out, open, &rows);
+            }
+            *current = Some((rung, vec![(rank, metrics)]));
+        }
+    }
+}
+
+/// One rung's Top-10 block: its heading, the column header and one row per
+/// winner, in the order the selection visited them.
+fn winners_table(out: &mut String, rung: u32, rows: &[(u32, runner::topn::Metrics)]) {
+    use crate::columns::right;
+    let body = rows
+        .iter()
+        .map(|(rank, m)| {
+            vec![
+                rank.to_string(),
+                m.pessimistic_profit.to_string(),
+                format!(
+                    "{}.{}",
+                    m.win_rate_ppm / 10_000,
+                    (m.win_rate_ppm / 1_000) % 10
+                ),
+                m.worst_loss.to_string(),
+                m.drawdown.to_string(),
+                m.average_win.to_string(),
+                // ABSENT, NOT ZERO. `reward_to_risk_ppm` is `None` when there is
+                // no losing trade to divide by, and printing that as 0.00 would
+                // read as the worst possible ratio when it is the best possible
+                // one.
+                m.reward_to_risk_ppm.map_or_else(
+                    || "none".to_owned(),
+                    |ppm| format!("{}.{:02}", ppm / 1_000_000, (ppm / 10_000) % 100),
+                ),
+            ]
+        })
+        .collect();
+    // LAID OUT TOGETHER (D-1420). `worstLoss` is nine characters and sat over
+    // an eight-character column, one place right of its own figures on every
+    // run; a paisa figure past its width pushed every later column off its
+    // header too.
+    let lines = crate::columns::with_header(
+        &[
+            right(4),
+            right(9).after(2),
+            right(7).after(2),
+            right(8).after(2),
+            right(8).after(2),
+            right(7).after(2),
+            right(6).after(2),
+        ],
+        &[
+            "rank",
+            "profit",
+            "win%",
+            "worstLoss",
+            "drawdown",
+            "avgWin",
+            "R:R",
+        ],
+        body,
+    );
+    let _ = writeln!(out, "\n  {rung}s");
+    for line in std::iter::once(&lines.header).chain(&lines.rows) {
+        let _ = writeln!(out, "    {line}");
+    }
 }
 
 /// Everything the Population V5 stage borrows for the length of its commit.
@@ -1345,20 +1419,38 @@ pub(crate) fn build_sweepers(
     verb: &str,
 ) -> Result<[Sweeper; 8], String> {
     let mut sweepers = Vec::with_capacity(LEDGER_RUNGS.len());
+    let bounds = candidate_bounds()?;
+    let evaluation = crate::candidate_universe::CandidateEvaluationInputsV1 {
+        widths: Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?,
+        availability: Availability::Absent,
+        thresholds: Thresholds::CLASSICAL,
+    };
     for rung in LEDGER_RUNGS {
         // SIZED ON NIFTY'S BARS, and the pair is why that is not a narrowing.
         // Both families are swept at the same threshold, and the two share a
         // calendar and a session length, so either one answers "how many bars
         // does this rung hold over this span". NIFTY is the one the store
         // actually has.
-        let span = crate::stored::load_span(root, vendor, "NIFTY", rung, request.from, request.to)
-            .map_err(|why| {
-                let first = why.lines().next().unwrap_or("").to_owned();
-                let refusal = format!("{rung} span refused: {first}");
-                crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
-                refusal
-            })?;
-        let min_hits = crate::min_hits_for(span.bars.len(), request.support_ppm);
+        //
+        // SWEPT BARS, NOT RETAINED ONES (D-2103). The support denominator is
+        // the rows NIFTY's Candidate column sweeps, read from the very build
+        // its commit runs, so the warm-up rows no combination can hit do not
+        // raise the threshold.
+        let swept = crate::step3_orchestrator::stored_candidate_swept_v1(
+            root,
+            vendor,
+            ("NIFTY", rung),
+            (request.from, request.to),
+            bounds,
+            &evaluation,
+        )
+        .map_err(|why| {
+            let first = why.lines().next().unwrap_or("").to_owned();
+            let refusal = format!("{rung} span refused: {first}");
+            crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
+            refusal
+        })?;
+        let min_hits = crate::min_hits_for_swept(swept, request.support_ppm);
         let ladder = crate::ladder_for(min_hits).map_err(|why| {
             let refusal = format!("{rung} ladder: {why}");
             crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
@@ -1367,7 +1459,7 @@ pub(crate) fn build_sweepers(
         crate::note(&rung_sized_event(
             verb,
             rung,
-            span.bars.len(),
+            swept,
             min_hits,
             request.support_ppm,
         ));
@@ -1393,8 +1485,38 @@ pub(crate) fn build_sweepers(
 pub(crate) mod tests {
     use super::{
         ALL_GATES, LEDGER_ALL_VERB, LEDGER_RUNGS, LEDGER_TARGET, LedgerAllRequest, LedgerTree,
-        PAISA_PER_POINT,
+        OpenRung, PAISA_PER_POINT, file_winner, winners_table,
     };
+
+    /// G18-cli-a-10, D-2007: consecutive winners of one rung share its table,
+    /// and a new rung writes the open table before starting its own.
+    #[test]
+    fn winners_of_one_rung_share_a_table_and_a_new_rung_closes_it() {
+        let metrics = |profit: i64| runner::topn::Metrics {
+            drawdown: 1,
+            worst_loss: 2,
+            losing_rate_ppm: 0,
+            losing_trades: 0,
+            loss_ratio_ppm: None,
+            pessimistic_profit: profit,
+            winning_trades: 1,
+            win_rate_ppm: 1_000_000,
+            reward_to_risk_ppm: None,
+            average_win: 3,
+            average_loss: 0,
+            assurance_ppm: 0,
+        };
+        let mut out = String::new();
+        let mut current: OpenRung = None;
+        file_winner(&mut out, &mut current, 60, 1, metrics(111));
+        file_winner(&mut out, &mut current, 60, 2, metrics(222));
+        assert!(out.is_empty(), "one rung open: nothing written yet: {out}");
+        file_winner(&mut out, &mut current, 300, 1, metrics(333));
+        let mut first = String::new();
+        winners_table(&mut first, 60, &[(1, metrics(111)), (2, metrics(222))]);
+        assert_eq!(out, first, "the 60s table holds both of its rows, alone");
+        assert_eq!(current, Some((300, vec![(1, metrics(333))])));
+    }
 
     /// The one telemetry sink this crate's test binary installs.
     ///
@@ -1889,5 +2011,97 @@ pub(crate) mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// D-1420: one rung's Top-10 block at the extremes its metrics can carry.
+    /// The header's `worstLoss` is nine characters over an eight-character
+    /// column, so it sat one character right of its own figures even at
+    /// ordinary values; `i64::MIN` paisa in the nine-character `profit`
+    /// column pushed every column after it off its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_top_ten_table_keeps_extreme_metrics_apart_and_under_their_headers() {
+        use crate::columns::Align::Right as R;
+        let metrics = |extreme: i64, count: u64| runner::topn::Metrics {
+            drawdown: count,
+            worst_loss: count,
+            losing_rate_ppm: count,
+            losing_trades: count,
+            loss_ratio_ppm: Some(count),
+            pessimistic_profit: extreme,
+            winning_trades: count,
+            win_rate_ppm: count,
+            reward_to_risk_ppm: Some(count),
+            average_win: count,
+            average_loss: count,
+            assurance_ppm: count,
+        };
+        let rows = [
+            (u32::MAX, metrics(i64::MIN, u64::MAX)),
+            (2, metrics(i64::MAX, 0)),
+            (3, metrics(-1, 1)),
+            (
+                4,
+                runner::topn::Metrics {
+                    reward_to_risk_ppm: None,
+                    ..metrics(5, 5)
+                },
+            ),
+        ];
+        let mut out = String::new();
+        super::winners_table(&mut out, 3_600, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "  3600s", "{out}");
+        for row in &lines[3..] {
+            crate::columns::assert_under(lines[2], row, &[R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+        }
+        assert_eq!(lines.len(), 3 + rows.len(), "{out}");
+    }
+
+    /// P1-20-01 (D-2638): a month outside 1..=12 or a backwards range is
+    /// refused at the arm, before a policy is read or a directory is made, on
+    /// both routes; and inside the chain the span is sized before the tree
+    /// is created. The source-shape half fails on the old order, where
+    /// `LedgerTree::create` preceded `build_sweepers`.
+    #[test]
+    fn ledger_all_refuses_a_bad_month_or_backwards_range_before_creating_its_tree() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-ledger-all-bad-span-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.to_str().expect("utf-8 scratch root");
+        for v6 in [false, true] {
+            for (from, to, needle) in [
+                (("2026", "13"), ("2026", "13"), "not a month"),
+                (("2026", "0"), ("2026", "1"), "not a month"),
+                (("2026", "1"), ("2026", "13"), "not a month"),
+                (("2026", "255"), ("2026", "255"), "not a month"),
+                (("2026", "3"), ("2026", "2"), "runs backwards"),
+                (("2026", "1"), ("2025", "12"), "runs backwards"),
+                (("2026", "256"), ("2026", "1"), "MONTH must be 1..=12"),
+            ] {
+                let mut out = String::new();
+                let code =
+                    crate::ledger_all_arm(&mut out, "dhan", from, to, ("200000", "50"), path, v6);
+                assert_eq!(code, crate::MISUSED, "{from:?}..{to:?}: {out}");
+                assert!(out.contains(needle), "{from:?}..{to:?}: {out}");
+                assert!(
+                    !root.exists(),
+                    "{from:?}..{to:?} created {}",
+                    root.display()
+                );
+            }
+        }
+        let source = include_str!("ledger_all.rs");
+        let body = source
+            .split_once("fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String)")
+            .expect("run_chain exists")
+            .1;
+        let sized = body.find("build_sweepers(").expect("sizing in run_chain");
+        let created = body.find("LedgerTree::create(").expect("tree in run_chain");
+        assert!(
+            sized < created,
+            "run_chain must size every rung's span before creating its tree"
+        );
     }
 }

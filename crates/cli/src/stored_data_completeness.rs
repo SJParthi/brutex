@@ -41,6 +41,9 @@ use crate::stored::calendar_receipt_v2;
 /// Operator-facing refusal from the stored-data completeness boundary.
 pub type StoredDataCompletenessRefusal = String;
 
+/// Highest `runner::identity::ReferenceIntegrity::byte` this receipt names:
+/// `ChecksumReceiptV1`. Pinned by a test against the runner vocabulary.
+const MAX_INTEGRITY_BYTE: u8 = 1;
 const RECEIPT_VERSION_V1: u32 = 1;
 const RECEIPT_CONTENT_DOMAIN_V1: &[u8] = b"brutex.stored-data-completeness.receipt.v1\0";
 const DAILY_POLICY_DOMAIN_V1: &[u8] = b"brutex.stored-data-completeness.daily-policy.v1\0";
@@ -322,7 +325,12 @@ impl StoredDataCompletenessReceiptV1 {
         ] {
             require_digest(name, &digest)?;
         }
-        if self.daily_integrity > 0 || self.minute_integrity > 0 {
+        // `runner::identity::ReferenceIntegrity` is an append-only byte
+        // vocabulary: 0 = `UnverifiedNoReceipt`, 1 = `ChecksumReceiptV1`. This
+        // refused every byte above 0, so the strict route, which binds
+        // `ChecksumReceiptV1`, could never seal a receipt here (W2-cli15-4,
+        // D-1635). A byte the vocabulary does not name is still refused.
+        if self.daily_integrity > MAX_INTEGRITY_BYTE || self.minute_integrity > MAX_INTEGRITY_BYTE {
             return Err(
                 "stored-data completeness receipt carries an unknown integrity-evidence byte"
                     .to_owned(),
@@ -765,6 +773,16 @@ impl StoredDataCompletenessLedgerV1 {
                 file.sync_all().map_err(|why| {
                     format!("{} header could not be synced: {why}", path.display())
                 })?;
+            }
+            if writable {
+                // The writer cuts a torn tail under its lock (D-1901, cli3-3).
+                crate::fixed_tail::heal_torn_tail(
+                    &file,
+                    &path,
+                    HEADER_BYTES as u64,
+                    RECEIPT_STRIDE_BYTES as u64,
+                    &HEADER_MAGIC_V1,
+                )?;
             }
             let receipts = scan_file(&mut file, &path, max_receipts)?;
             let generation = snapshot(&mut file, &path)?;
@@ -1422,7 +1440,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
         ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v1,
+        printed_ohlcv_cost_model_id_v3,
     };
     use runner::identity::{DailyReferenceBinding, ReferenceIntegrity};
     use runner::outcome::Horizon;
@@ -1544,6 +1562,68 @@ mod tests {
         }
     }
 
+    /// W2-cli15-4, D-1635: the strict route's `ChecksumReceiptV1` byte is a
+    /// valid receipt byte and round-trips; a byte outside the vocabulary is not.
+    /// cli3-3, D-1901: a sub-record tail is refused by a reader and cut by
+    /// the next writer under its exclusive lock; committed bytes stay.
+    #[test]
+    fn a_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let temp = Temp::new("torn-tail");
+        drop(StoredDataCompletenessLedgerV1::open(&temp.path, 4).expect("the writer opens"));
+        let path = StoredDataCompletenessLedgerV1::path(&temp.path);
+        let whole = std::fs::metadata(&path).expect("metadata").len();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("reopen for the torn fixture");
+        file.write_all(&[7_u8; 3]).expect("torn tail");
+        drop(file);
+        assert!(
+            StoredDataCompletenessLedgerV1::open_read(&temp.path, 4).is_err(),
+            "a reader refuses the torn tail"
+        );
+        drop(StoredDataCompletenessLedgerV1::open(&temp.path, 4).expect("the writer cuts"));
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), whole);
+        drop(
+            StoredDataCompletenessLedgerV1::open_read(&temp.path, 4)
+                .expect("a reader opens the cut file"),
+        );
+    }
+
+    #[test]
+    fn a_checksum_receipt_integrity_byte_seals_and_an_unknown_byte_refuses() {
+        assert_eq!(
+            ReferenceIntegrity::ChecksumReceiptV1([1; 32]).byte(),
+            super::MAX_INTEGRITY_BYTE
+        );
+        assert_eq!(ReferenceIntegrity::UnverifiedNoReceipt.byte(), 0);
+        let fixture = fixture();
+        let base = fixture.prepared().receipt;
+        for (daily, minute) in [(1, 0), (0, 1), (1, 1)] {
+            let mut receipt = base;
+            receipt.daily_integrity = daily;
+            receipt.minute_integrity = minute;
+            receipt.validate().expect("a named integrity byte is valid");
+            let raw = receipt.to_bytes().expect("encode strict receipt");
+            assert_eq!(
+                super::StoredDataCompletenessReceiptV1::from_bytes(&raw)
+                    .expect("decode strict receipt"),
+                receipt
+            );
+        }
+        for (daily, minute) in [(2, 0), (0, 2), (u8::MAX, u8::MAX)] {
+            let mut receipt = base;
+            receipt.daily_integrity = daily;
+            receipt.minute_integrity = minute;
+            assert!(
+                receipt
+                    .validate()
+                    .expect_err("unknown byte")
+                    .contains("unknown integrity-evidence byte")
+            );
+        }
+    }
+
     #[test]
     fn strict_receipt_content_changes_data_identity_but_not_shared_cohort_policy() {
         let fixture = fixture();
@@ -1647,7 +1727,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("wide ratio limits"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -1951,6 +2031,26 @@ mod tests {
         )
         .expect_err("a different evidence population cannot borrow complete data authority");
         assert!(why.contains("another evidence population"));
+        // D-1835: the per-population binding reconciles the same data authority
+        // once and carries its verdict to every cell.
+        let bound = crate::institutional_evidence::BoundPopulationCompletenessV1::bind(
+            &population_authority,
+            DataCompletenessSourceV1::Complete(&data_authority),
+        )
+        .expect("matching durable authority binds");
+        assert_eq!(bound.population_id(), fixture.population_id);
+        let mut foreign_identities = fixture.identities;
+        foreign_identities.run_identity[0] ^= 1;
+        let foreign = fixture.authority_with_identities(&foreign_identities);
+        let why = crate::institutional_evidence::BoundPopulationCompletenessV1::bind(
+            &foreign,
+            DataCompletenessSourceV1::Complete(&data_authority),
+        )
+        .expect_err("a data authority of another population does not bind");
+        assert!(
+            why.contains("stored-data completeness authority refused"),
+            "{why}"
+        );
     }
 
     #[test]

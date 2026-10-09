@@ -85,6 +85,44 @@ impl Fixture {
         fs::write(path, manifest.image()).expect("publish complete fixture census");
     }
 
+    /// A census entry for `symbol` at `timeframe`, and NO bar file anywhere.
+    ///
+    /// At a rung `calendar_of::derive` never opens (it reads `1day` and
+    /// `1min`), the derivation opens nothing the census holds, so it is not a
+    /// refusal: it is an empty calendar. GAP14-63.
+    fn census_only(&self, vendor: Vendor, segment: Segment, symbol: &str, timeframe: Timeframe) {
+        let month = YearMonth::new(2025, 5).expect("fixture month");
+        let ts = i64::from(
+            Day::new(2025, 5, 2)
+                .expect("fixture date")
+                .days_from_epoch(),
+        ) * 86_400_000_000;
+        let path = manifest_path(&self.root, vendor);
+        let bytes = if path.exists() {
+            fs::read(&path).expect("existing manifest")
+        } else {
+            Vec::new()
+        };
+        let mut manifest = Manifest::open_image(vendor, &bytes).expect("manifest");
+        manifest
+            .record(Entry {
+                key: EntryKey {
+                    contract: None,
+                    exchange: Exchange::Nse,
+                    segment,
+                    symbol: Symbol::new(symbol).expect("symbol"),
+                    timeframe,
+                    month,
+                },
+                rows: 1,
+                first_ts_micros: ts,
+                last_ts_micros: ts,
+            })
+            .expect("one entry with no file behind it");
+        fs::create_dir_all(path.parent().expect("manifest parent")).expect("manifest directory");
+        fs::write(path, manifest.image()).expect("publish the census");
+    }
+
     async fn get(&self, query: &str) -> (axum::http::StatusCode, Value) {
         let uri = format!("/calendar.json?{query}").parse().expect("uri");
         let (status, headers, body) =
@@ -138,6 +176,68 @@ async fn calendar_reads_current_feed_and_cash_identity_after_startup() {
     assert!(unknown.to_string().contains("notafeed"));
 }
 
+/// **A symbol this feed holds no file for is not a voter, and is not named in
+/// `derivedFrom`.** GAP14-63, D-1446.
+///
+/// The exchange branch of `/calendar.json` keeps a reading only when its
+/// calendar has a session (`calendar.sessions() > 0`). Nothing tested that
+/// guard: with it removed, every symbol below would be listed as a source the
+/// exchange calendar was derived from, though none of them contributed a day,
+/// and their empty calendars would vote in `agree`. Two census-only symbols at
+/// rungs the derivation never opens (one index, one cash), and a symbol only
+/// another feed holds a file for.
+#[tokio::test]
+async fn a_symbol_this_feed_holds_no_file_for_is_not_named_in_from() {
+    let fixture = Fixture::new("calendar-route-empty-voter");
+    fixture.day(Vendor::Dhan, Segment::Index, "NIFTY", 2);
+    fixture.census_only(
+        Vendor::Dhan,
+        Segment::Index,
+        "GHOSTIDX",
+        Timeframe::MINUTE_5,
+    );
+    fixture.census_only(Vendor::Dhan, Segment::Cash, "GHOSTEQ", Timeframe::MINUTE_15);
+    fixture.day(Vendor::Zerodha, Segment::Index, "ZONLY", 5);
+
+    let (status, exchange) = fixture.get("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{exchange}");
+    let from: Vec<_> = exchange["derivedFrom"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .map(|name| name.as_str().expect("source name"))
+        .collect();
+    assert_eq!(from, ["NIFTY"], "{exchange}");
+    assert_eq!(exchange["sessions"], 1, "{exchange}");
+    assert_eq!(
+        exchange["days"][0]["day"],
+        Day::new(2025, 5, 2).expect("date").days_from_epoch()
+    );
+
+    // THE SAME SYMBOLS, ASKED BY NAME, ARE AN EMPTY ANSWER AND NOT A REFUSAL:
+    // the census names them and no held file failed to open.
+    for name in ["GHOSTIDX", "GHOSTEQ"] {
+        let (status, body) = fixture.get(&format!("feed=dhan&symbol={name}")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{name}: {body}");
+        assert_eq!(body["sessions"], 0, "{name}: {body}");
+    }
+    // AND A FEED HOLDING ONLY CENSUS-ONLY SYMBOLS NAMES NO SOURCE AT ALL.
+    fixture.census_only(
+        Vendor::Groww,
+        Segment::Index,
+        "GHOSTIDX",
+        Timeframe::MINUTE_5,
+    );
+    let (status, groww) = fixture.get("feed=groww").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{groww}");
+    assert_eq!(
+        groww["derivedFrom"].as_array().expect("sources").len(),
+        0,
+        "{groww}"
+    );
+    assert_eq!(groww["sessions"], 0, "{groww}");
+}
+
 #[tokio::test]
 async fn calendar_refuses_a_symbol_held_under_multiple_identities() {
     let fixture = Fixture::new("calendar-route-ambiguous");
@@ -153,4 +253,120 @@ async fn calendar_refuses_a_symbol_held_under_multiple_identities() {
             .contains("ambiguous")
     );
     assert!(body.get("sessions").is_none());
+}
+
+/// **THE CALENDAR ROUTES DERIVE OFF THE ASYNC WORKERS, BEHIND ADMISSION.**
+/// W1-api2-11, D-1443.
+///
+/// `calendar_json` held no `.await`: a cache miss derived every spot series on
+/// a Tokio worker, and `gaps_json` derived its peer vote the same way. Read off
+/// the source, because what is claimed is where the call sits.
+#[test]
+fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
+    let source = include_str!("server.rs");
+    let body_of = |head: &str| {
+        let at = source.find(head).expect("the handler exists");
+        let rest = &source[at..];
+        rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
+    };
+    let calendar = body_of("async fn calendar_json(");
+    assert!(
+        calendar.contains("crate::detail::run_calendar(move ||")
+            && calendar.contains("calendar_json_reading(&site, &uri, census_now_stamped)"),
+        "/calendar.json derives inside the admitted blocking pool:\n{calendar}"
+    );
+    let gaps = body_of("async fn gaps_json(");
+    let call = gaps
+        .find("peer_calendar(&peers_site, &asked)")
+        .expect("the peer vote is derived");
+    let admitted = gaps
+        .find("crate::detail::run_calendar(move ||")
+        .expect("inside the calendar pool");
+    assert!(admitted < call, "the peer vote is derived inside the pool");
+    assert!(
+        !gaps.contains("peer_calendar(&site, &asked)"),
+        "and never inline on the worker"
+    );
+}
+
+/// **A REFUSED ADMISSION IS ANSWERED, NAMED AND RETRYABLE.** Saturation is
+/// 429, a join failure 503, and both say why. W1-api2-11, D-1443.
+#[test]
+fn a_refused_calendar_admission_names_why_and_the_bound() {
+    let (status, _, body) = calendar_admission_refused(&crate::detail::RunError::Saturated);
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        body.contains("Saturated") && body.contains("at most 8"),
+        "{body}"
+    );
+    let (status, _, body) =
+        calendar_admission_refused(&crate::detail::RunError::Join("shut down".to_owned()));
+    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("shut down"), "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("JSON");
+    assert!(parsed["error"].is_string());
+}
+
+/// **THE REST OF W1-api2-11: NO STORE OR MASTERS READ ON AN ASYNC WORKER.**
+/// D-1508.
+///
+/// `/gaps.json`'s month audits, `/folder.json`'s folder walk and
+/// `/indexmap.json`'s catalogue read ran inline in their handlers. Read off the
+/// source, as the calendar half is, because what is claimed is where each
+/// call sits: inside the admitted closure, and nowhere outside it.
+#[test]
+fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
+    let server = include_str!("server.rs");
+    let folder = include_str!("folder.rs");
+    let body_of = |source: &str, head: &str| {
+        let at = source.find(head).expect("the handler exists");
+        let rest = &source[at..];
+        rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
+    };
+
+    let handler = body_of(server, "async fn gaps_json(");
+    assert!(
+        handler.contains("audit_span(&site, asked, span.clone(), peers).await"),
+        "/gaps.json audits its span through the admitted helper:\n{handler}"
+    );
+    for call in ["audit_one(", "audit_cash_schedule("] {
+        assert!(!handler.contains(call), "and calls no {call} inline");
+    }
+    let gaps = body_of(server, "async fn audit_span(");
+    let pool = gaps
+        .rfind("crate::detail::run_calendar(move ||")
+        .expect("the audits are admitted to the calendar pool");
+    for call in ["audit_one(", "audit_cash_schedule("] {
+        let at: Vec<usize> = gaps.match_indices(call).map(|(i, _)| i).collect();
+        assert!(!at.is_empty(), "/gaps.json calls {call}");
+        assert!(
+            at.iter().all(|&i| i > pool),
+            "every {call} in /gaps.json sits inside the admitted closure:\n{gaps}"
+        );
+    }
+    assert!(
+        gaps.contains("runtime.block_on(audit_cash_schedule("),
+        "the evidence reader is driven on the blocking thread, not awaited on a worker"
+    );
+    assert!(
+        !gaps.contains("audit_cash_schedule(&site, &asked, *month).await"),
+        "and is never awaited inline"
+    );
+
+    let walk = body_of(folder, "pub async fn folder_json(");
+    assert!(
+        walk.contains("crate::detail::run_store_read(move || answer(feed, shape, &root))"),
+        "/folder.json walks the folder in the store-read pool:\n{walk}"
+    );
+    assert_eq!(walk.matches("answer(").count(), 1, "and nowhere else");
+
+    let map = body_of(server, "async fn indexmap_json(");
+    assert!(
+        map.contains("crate::detail::run_store_read(move || indexmap_reading(&site, feed))"),
+        "/indexmap.json reads its catalogue in the store-read pool:\n{map}"
+    );
+    assert!(
+        !map.contains("Published::read") && !map.contains("masters_dir()"),
+        "and never inline in the handler"
+    );
 }

@@ -1,12 +1,21 @@
 //! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! One nonblocking execution lease per canonical store for cooperating CLI and
 //! HTTP sweep entry points. This is admission authority, not a result receipt.
+//! `Lease::acquire` asks a held slot again for at most one second before it
+//! answers `Busy`, so a probe's brief hold is not a refusal (cli1-3, D-2620).
 //!
 //! A probe opens one fixed path and checks one OS lock. It reads no history and
 //! allocates no storage proportional to bars, candidates or previous commands.
 //! OS/file latency is not constant-time. Older binaries and callers that bypass
 //! the entry points do not participate; their telemetry must remain visible.
 //! The empty lock file is never removed or replaced by this protocol.
+//!
+//! A probe locks the lease file for an instant to read it, and a claimant that
+//! met that instant used to be refused as though a sweep owned the store. So
+//! both take a second empty file, the probe gate, around their look at the
+//! lease: a probe touches the lease only while it holds the gate, so a
+//! claimant refused once retries under the gate, where a refusal can only be
+//! an owner's. Nobody holds the gate across a run. D-2774.
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -14,6 +23,8 @@ use std::path::{Path, PathBuf};
 use store::flock::Flock;
 
 const NAME: &str = ".sweep-execution-v1.lock";
+/// Held only around a look at [`NAME`], never across a run (D-2774).
+const GATE: &str = ".sweep-execution-v1.probe-gate";
 
 /// A current inability to claim the store, distinct from a command outcome.
 #[derive(Debug, PartialEq, Eq)]
@@ -55,10 +66,7 @@ fn options() -> OpenOptions {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = OpenOptions::new();
     // Same no-follow/nonblocking flags as operation_audit's native file door.
-    #[cfg(target_os = "macos")]
-    options.custom_flags(0x100 | 0x4);
-    #[cfg(target_os = "linux")]
-    options.custom_flags(0x20000 | 0x800);
+    options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     options
 }
 
@@ -67,6 +75,22 @@ fn options() -> OpenOptions {
 /// another thread spawned would otherwise keep the store busy (D-0693).
 fn lock(file: File, path: &Path) -> Result<Flock<File>, Refusal> {
     Flock::try_lock(file, path.to_path_buf()).map_err(|why| match why {
+        fs::TryLockError::WouldBlock => Refusal::Busy,
+        fs::TryLockError::Error(why) => unavailable(why),
+    })
+}
+
+/// [`lock`] asked again for a bounded second through a `try_clone` of one
+/// open description, so a refused attempt holds nothing (cli1-3, D-2620).
+/// Only `WouldBlock` is asked again; a host refusal is `Unavailable` at once.
+fn lock_patiently(file: &File, path: &Path) -> Result<Flock<File>, Refusal> {
+    crate::lock_wait::patiently(|| {
+        Flock::try_lock(
+            file.try_clone().map_err(fs::TryLockError::Error)?,
+            path.to_path_buf(),
+        )
+    })
+    .map_err(|why| match why {
         fs::TryLockError::WouldBlock => Refusal::Busy,
         fs::TryLockError::Error(why) => unavailable(why),
     })
@@ -82,9 +106,17 @@ fn verify(file: &File, path: &Path) -> Result<(), Refusal> {
         || !named.is_file()
         || (held.dev(), held.ino()) != (named.dev(), named.ino())
     {
-        return Err(unavailable(
-            "the execution lock is not the same empty regular file; nothing was repaired",
-        ));
+        // NAMED, WITH THE REMEDY. An extra hard link (a `cp -al` snapshot, an
+        // `ln`) refused every sweep for good with a sentence that named no
+        // file (CE-40, D-1769).
+        return Err(unavailable(format!(
+            "the execution lock {} is not the same empty regular file with one \
+             link (it has {} link(s), {} byte(s)); nothing was repaired. Remove \
+             any other hard link to it, or the file itself if no sweep is running",
+            path.display(),
+            held.nlink(),
+            held.len()
+        )));
     }
     Ok(())
 }
@@ -99,24 +131,66 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// Atomically claims the one store slot. It never waits for another writer.
+    /// Atomically claims the one store slot. A held slot is asked again for a
+    /// bounded second (`crate::lock_wait`, D-2620), then once more under the
+    /// probe gate, where it may wait for one probe's look at the slot
+    /// (D-2774), and then refused `Busy`.
+    ///
+    /// # Why it waits at all (cli1-3)
+    ///
+    /// [`probe`] takes this same exclusive lock for microseconds, and the api
+    /// probes on every `/backtest/run.json` poll. One `try_lock` made a real
+    /// launch refuse "another sweep owns this store's execution lease" while
+    /// nothing but a page owned it. A real owner holds the lease for its whole
+    /// run, minutes, so it is still `Busy`, one second later than before.
     ///
     /// # Errors
-    /// Refuses a held lease, an unavailable store, or an unsafe/nonempty lock
-    /// path. No command is queued and no existing file is repaired.
+    /// Refuses a lease held past the bound, an unavailable store, or an
+    /// unsafe/nonempty lock path. No command is queued and no existing file is
+    /// repaired.
     pub fn acquire(root: &Path) -> Result<Self, Refusal> {
         let path = path(root)?;
-        let file = options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(unavailable)?;
-        let held = lock(file, &path)?;
+        // THE GATE EXISTS BEFORE THE LEASE IT GUARDS, so a probe that finds
+        // the lease also finds the gate, unless the lease predates the gate.
+        let gate_path = path.with_file_name(GATE);
+        let gate = create(&gate_path)?;
+        // The bounded second is spent OUTSIDE the gate, so a refused claimant
+        // never holds the gate past one look (D-2620 inside D-2774).
+        let file = create(&path)?;
+        let first = lock_patiently(&file, &path);
+        drop(file);
+        match first {
+            Ok(held) => {
+                verify(&held, &path)?;
+                return Ok(Self { _file: held });
+            }
+            Err(Refusal::Busy) => {}
+            Err(why) => return Err(why),
+        }
+        // REFUSED ONCE: by an owner, or by a probe's instant. A probe holds
+        // the gate while it holds the lease, so under the gate a refusal is an
+        // owner's (or a non-participating older binary's). The wait for the
+        // gate is one probe's open, lock, two stats and unlock. conc:runs-2.
+        #[cfg(test)]
+        tests::refused_once();
+        let gate = Flock::lock(gate, gate_path.clone()).map_err(unavailable)?;
+        verify(&gate, &gate_path)?;
+        let held = lock(create(&path)?, &path)?;
         verify(&held, &path)?;
+        drop(gate);
         Ok(Self { _file: held })
     }
+}
+
+/// Opens, creating when absent, one of this protocol's empty lock files.
+fn create(path: &Path) -> Result<File, Refusal> {
+    options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(unavailable)
 }
 
 /// Checks current admission without creating a file or changing a result.
@@ -125,6 +199,10 @@ impl Lease {
 /// # Errors
 /// Refuses a held lease, an unavailable store, or an unsafe/nonempty lock
 /// path. A missing lock file in an existing store is an available snapshot.
+///
+/// The look at the lease is made under the probe gate, so a claimant that met
+/// it retries under the gate rather than being refused (D-2774). A lease left
+/// by a binary that predates the gate is looked at without it.
 pub fn probe(root: &Path) -> Result<(), Refusal> {
     let path = path(root)?;
     let file = match options().read(true).open(&path) {
@@ -132,9 +210,21 @@ pub fn probe(root: &Path) -> Result<(), Refusal> {
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(why) => return Err(unavailable(why)),
     };
+    let gate_path = path.with_file_name(GATE);
+    let gate = match options().read(true).open(&gate_path) {
+        Ok(gate) => {
+            let gate = Flock::lock(gate, gate_path.clone()).map_err(unavailable)?;
+            verify(&gate, &gate_path)?;
+            Some(gate)
+        }
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
+        Err(why) => return Err(unavailable(why)),
+    };
     let held = lock(file, &path)?;
     verify(&held, &path)?;
-    held.release().map_err(unavailable)
+    held.release().map_err(unavailable)?;
+    drop(gate);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -145,6 +235,60 @@ pub fn probe(root: &Path) -> Result<(), Refusal> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    thread_local! {
+        /// Run once when a claimant is refused on its first, ungated attempt.
+        static ON_REFUSED_ONCE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn refused_once() {
+        if let Some(hook) = ON_REFUSED_ONCE.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// **A probe's look at the lease does not refuse a claimant.**
+    /// conc:runs-2, D-2774.
+    ///
+    /// A status GET probes by locking the lease file for an instant, and a
+    /// claim that met that instant was refused as "another sweep owns this
+    /// store" with no sweep running. The probe is modelled mid-look, holding
+    /// the gate and the lease as `probe` does; it finishes when the claimant
+    /// has been refused once, and the claimant must then own the slot.
+    #[test]
+    fn a_claim_that_meets_a_probe_mid_look_owns_the_slot_once_the_probe_ends() {
+        let root = Scratch::new();
+        drop(Lease::acquire(&root.0).expect("the lock files exist"));
+        let lease_path = root.0.join(NAME);
+        let gate_path = root.0.join(GATE);
+        let probe_gate = Flock::lock(
+            options().read(true).open(&gate_path).expect("the gate"),
+            gate_path,
+        )
+        .expect("the probe takes the gate");
+        let probe_look = lock(
+            options().read(true).open(&lease_path).expect("the lease"),
+            &lease_path,
+        )
+        .expect("the probe locks the lease for its look");
+        ON_REFUSED_ONCE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                probe_look.release().expect("the probe's unlock");
+                drop(probe_gate);
+            }));
+        });
+        let owned = Lease::acquire(&root.0);
+        ON_REFUSED_ONCE.with(|slot| slot.borrow_mut().take());
+        let owned = owned.expect("a probe's instant is not an owner");
+        assert!(
+            matches!(Lease::acquire(&root.0), Err(Refusal::Busy)),
+            "and a real owner still refuses the next claimant, under the gate too"
+        );
+        assert_eq!(probe(&root.0), Err(Refusal::Busy));
+        drop(owned);
+        assert_eq!(probe(&root.0), Ok(()));
+    }
 
     struct Scratch(PathBuf);
     impl Scratch {
@@ -207,6 +351,37 @@ mod tests {
         let again = Lease::acquire(&root.0).expect("and the slot can be claimed again");
         drop(again);
         drop(child);
+    }
+
+    /// cli1-3, D-2620: a probe's microsecond hold no longer refuses a real
+    /// launch. A thread holds the lease file's exclusive lock for 20 ms, as
+    /// `probe` does; `Lease::acquire` on this thread is admitted once it lets
+    /// go. On the old code `acquire` made one `try_lock` and answered `Busy`
+    /// at once, so the first assertion failed. A holder past the bound (an
+    /// owner) is still `Busy`, and only after the whole bound was waited.
+    #[test]
+    fn a_probe_holding_the_lock_briefly_does_not_refuse_a_launch() {
+        let root = Scratch::new();
+        assert!(Lease::acquire(&root.0).is_ok(), "creates the lock file");
+        let lock_path = root.0.join(NAME);
+        let prober = File::open(&lock_path).expect("the probe's own description");
+        prober.try_lock().expect("the probe's exclusive lock");
+        let admitted = std::thread::scope(|scope| {
+            let release = scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                prober.unlock().expect("the probe releases");
+            });
+            let admitted = Lease::acquire(&root.0);
+            release.join().expect("probe thread");
+            admitted
+        });
+        let lease = admitted.expect("a probe's brief hold is waited out");
+        assert_eq!(probe(&root.0), Err(Refusal::Busy), "the launch owns it");
+        let started = std::time::Instant::now();
+        assert!(matches!(Lease::acquire(&root.0), Err(Refusal::Busy)));
+        assert!(started.elapsed() >= crate::lock_wait::WAIT * crate::lock_wait::WAITS);
+        drop(lease);
+        assert_eq!(probe(&root.0), Ok(()));
     }
 
     #[test]
@@ -299,5 +474,16 @@ mod tests {
         fs::remove_file(&lock_path).expect("remove private symlink");
         fs::hard_link(&target, &lock_path).expect("hardlink fixture");
         assert!(matches!(probe(&root.0), Err(Refusal::Unavailable(_))));
+        // CE-40, D-1769: the refusal names the lock file, its link count and
+        // what to remove.
+        let why = probe(&root.0)
+            .expect_err("a hard-linked lock refuses")
+            .to_string();
+        let canonical = fs::canonicalize(&root.0)
+            .expect("canonical root")
+            .join(NAME);
+        assert!(why.contains(&canonical.display().to_string()), "{why}");
+        assert!(why.contains("it has 2 link(s)"), "{why}");
+        assert!(why.contains("Remove any other hard link"), "{why}");
     }
 }

@@ -163,7 +163,7 @@ fn the_tail_is_flat_in_the_size_of_the_file_too() -> bool {
             sink.emit(&Event::info("bench", "one timed event"))
         });
         drop(sink);
-        let _ignored = std::fs::remove_dir_all(&dir);
+        drop(dir);
         d.at(990)
     };
     let small = at(SMALL, "p99-small");
@@ -308,8 +308,28 @@ fn refuse(what: &str) -> ! {
     std::process::exit(1)
 }
 
+/// A scratch directory that is removed when it goes out of scope.
+///
+/// `loaded` used to hand back a bare `PathBuf`, and only one of its callers
+/// removed it, so every bench run left about 60 MB of preloaded sinks in the
+/// temp directory; repeated runs filled the disk (D-2331).
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ignored = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A sink over a fresh directory, with `preload` events already written.
-fn loaded(name: &str, preload: u32) -> (Sink, PathBuf) {
+fn loaded(name: &str, preload: u32) -> (Sink, Scratch) {
     let dir = scratch(name);
     let config = Config::new(dir.clone()).with_max_file_bytes(NO_ROTATION);
     let Ok(sink) = Sink::open(&config) else {
@@ -321,7 +341,7 @@ fn loaded(name: &str, preload: u32) -> (Sink, PathBuf) {
             refuse("a preloaded event was not written");
         }
     }
-    (sink, dir)
+    (sink, Scratch(dir))
 }
 
 /// The per-emit floor: a filtered event on the same sink.
@@ -511,6 +531,75 @@ fn the_tail_is_flat_in_the_size_of_the_file() -> bool {
     ok
 }
 
+/// O1P-06 — `tail(20)` is flat AT p99 from 10^3 to 10^6 events in the file
+/// (D-3306).
+///
+/// C-T-03 times `tail` as a minimum over trials of a mean, and its sharper
+/// half is a count of bytes read. Neither can see a tail: a walk that touched
+/// the whole file on one call in fifty would move the mean by a fraction and
+/// leave the byte count of an untouched call unchanged. This times every call
+/// on its own, 5 rounds of 1,000, and gates the smallest round p99 against
+/// the 10^3 one under the same [`CEILING_PERMILLE`]. 10^6 events is ~10x
+/// C-T-03's largest file.
+fn the_tail_is_flat_at_p99() -> bool {
+    /// Rounds per size; the smallest round p99 is gated.
+    const ROUNDS: usize = 5;
+    let mut ok = true;
+    let mut base = 0u128;
+    for (step, n) in [SMALL, MEDIUM, LARGE, 1_000_000].into_iter().enumerate() {
+        let (sink, dir) = loaded(&format!("tail-p99-{step}"), n);
+        drop(sink);
+        let query = Query::last(TAIL_LIMIT);
+        let mut p50 = u128::MAX;
+        let mut p99 = u128::MAX;
+        let mut max = 0u128;
+        for _ in 0..ROUNDS {
+            let d = Dist::of(1_000, || tail(black_box(&dir), 8, black_box(&query)));
+            p50 = p50.min(d.at(500));
+            p99 = p99.min(d.at(990));
+            max = max.max(d.max());
+        }
+        drop(dir);
+        println!(
+            "  {:<44} n={n:>9}  p50 {p50:>8} ns  p99 {p99:>8} ns  max {max:>9} ns",
+            "O1P-06 tail(20)"
+        );
+        if step == 0 {
+            base = p99;
+            continue;
+        }
+        // `ratio` prints picoseconds; the samples are nanoseconds.
+        ok &= ratio(
+            &format!("O1P-06 tail(20) p99, {n} against 1000 events"),
+            base.saturating_mul(1_000),
+            p99.saturating_mul(1_000),
+        );
+    }
+    ok
+}
+
+/// A filtered `tail` that matches nothing walks to its scan cap — what one
+/// `cli.lifecycle` lookup on an idle `/backtest/run.json` poll costs when no
+/// marker is near the end (D-3311). REPORTED, never gated: the cost is the cap,
+/// by design, and the cap is the api's `logs::SCAN_BYTES`, 4 MiB, which this
+/// crate cannot name, so the number is restated here.
+fn a_filtered_tail_that_matches_nothing_reads_its_cap() {
+    /// `api::logs::SCAN_BYTES`.
+    const CAP: u64 = 4 * 1024 * 1024;
+    let (sink, dir) = loaded("tail-capped", LARGE);
+    drop(sink);
+    let query = Query::last(256)
+        .from_target("absent.target")
+        .scanning_at_most(CAP);
+    let d = Dist::of(50, || tail(black_box(&dir), 8, black_box(&query)));
+    let read = tail(&dir, 8, &query).bytes_read;
+    d.report("capped filtered tail, 100,000 events, no match");
+    println!(
+        "  {:<52} {read} bytes read per call",
+        "capped filtered tail"
+    );
+}
+
 fn main() {
     println!("gate 8 — crates/telemetry, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -519,8 +608,10 @@ fn main() {
     ok &= a_filtered_event_touches_nothing_and_stays_flat();
     ok &= the_tail_is_flat_in_the_size_of_the_file();
     ok &= the_tail_is_flat_in_the_size_of_the_file_too();
+    ok &= the_tail_is_flat_at_p99();
     println!();
     the_worst_case_is_named_rather_than_averaged_away();
+    a_filtered_tail_that_matches_nothing_reads_its_cap();
     println!();
     if ok {
         println!("all ratios within the ceiling");

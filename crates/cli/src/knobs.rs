@@ -47,14 +47,15 @@
 //!
 //! # Cost
 //!
-//! `CLAUDE.md` §3 rule 4 asks that each operation be O(1), and both are:
+//! `CLAUDE.md` §3 rule 4 asks that each operation be O(1). The table says which
+//! are, and the environment read is the one that is not:
 //!
 //! | operation | cost | why |
 //! |---|---|---|
-//! | `var` (set) | **O(1)** | one hash probe |
-//! | `var` (unset) | **O(1)** | one hash probe, then one `getenv` |
+//! | `var` (set) | one expected-O(1) hash probe, plus a copy of the value | the store answers, so the environment is not read |
+//! | `var` (unset) | not claimed O(1) | one hash probe, then `std::env::var_os`: a lookup over the process environment, whose size this workspace neither bounds nor measures |
 //! | `set` | **O(1)** | one hash insert |
-//! | `count` | **O(1)** | one `var`, one parse, and at most one tree insert |
+//! | `count` | the `var` row it takes | one `var`, one parse, and at most one tree insert |
 //! | `clear_all` | O(set knobs) | and that count is bounded by 24 |
 //! | `refused` | O(refused knobs) | bounded by the same 24, and it is called ONCE per run |
 //!
@@ -135,7 +136,7 @@ fn refuse(name: &str, raw: &str) {
 ///
 /// `u64` because this is also the reader for counts whose domain really is
 /// `u64`, such as a millisecond budget. Machine-sized counts go through
-/// [`count_usize`] so a value that parses as `u64` but cannot fit this target is
+/// [`count_usize_within`] so a value that parses as `u64` but cannot fit this target is
 /// recorded rather than disappearing at a later conversion.
 #[must_use]
 pub(crate) fn count(name: &str) -> Option<u64> {
@@ -151,18 +152,13 @@ pub(crate) fn count(name: &str) -> Option<u64> {
     }
 }
 
-/// A positive, machine-sized count, with representation failures recorded.
+/// A positive, machine-sized count, with representation failures recorded,
+/// refusing anything above `ceiling`.
 ///
 /// Parsing in the target type matters on a 32-bit target: `u64::MAX` is a valid
 /// [`count`] but cannot be a `Vec` bound or an iterator count there. Letting each
 /// caller append `.and_then(usize::try_from(..).ok())` would reintroduce the
 /// exact silent fallback this module exists to expose, one step after parsing.
-#[must_use]
-pub(crate) fn count_usize(name: &str) -> Option<usize> {
-    count_usize_within(name, usize::MAX)
-}
-
-/// [`count_usize`], refusing anything above `ceiling`.
 ///
 /// **An unbounded count is a way to kill the process from a text box.** Three
 /// knobs reach a `with_capacity` before a single bar is scored -- the priced
@@ -198,6 +194,31 @@ pub(crate) fn machine_count(raw: &str, ceiling: usize) -> Option<usize> {
 
 pub(crate) fn nonnegative_floor(raw: &str) -> Option<i64> {
     raw.trim().parse::<i64>().ok().filter(|value| *value >= 0)
+}
+
+/// One policy knob's value, by the ONE rule every reader of it applies.
+///
+/// # Three readers, two rules (P8-04, D-2723)
+///
+/// `Rules::stated` (screen, elite, ranges, pool, ledgers, the browser sweep)
+/// and `strict_range_knobs` admitted any `i64 >= 0` through
+/// [`nonnegative_floor`], while `expression_pricing::validate_overrides`
+/// refused a win rate above 10,000 bp and any `BRUTEX_PROTECTED_EXITS` other
+/// than `0` or `1`. So `BRUTEX_MIN_WIN_RATE_BP=20000` -- a 200% win rate --
+/// ran silently on one path and was refused on the other, and
+/// `BRUTEX_PROTECTED_EXITS=2` was "on" on one and refused on the other. Every
+/// reader now asks this function; what each does with a `None` (a named
+/// fallback, or a refusal) is still that reader's own documented choice.
+///
+/// A win rate is a fraction of trades and cannot exceed 10,000 bp; the
+/// protective-exit switch is a boolean and has exactly two spellings.
+pub(crate) fn policy_floor(name: &str, raw: &str) -> Option<i64> {
+    let value = nonnegative_floor(raw)?;
+    match name {
+        "BRUTEX_MIN_WIN_RATE_BP" => (value <= 10_000).then_some(value),
+        "BRUTEX_PROTECTED_EXITS" => matches!(raw.trim(), "0" | "1").then_some(value),
+        _ => Some(value),
+    }
 }
 
 pub(crate) fn horizon_count(raw: &str) -> Option<runner::outcome::Horizon> {
@@ -281,12 +302,9 @@ pub fn refused() -> Option<String> {
 /// behaviour, not a silent substitute for it.
 #[must_use]
 pub fn var(name: &str) -> Option<String> {
-    resolve(
-        set_here(name).as_deref(),
-        std::env::var_os(name)
-            .map(|raw| raw.to_string_lossy().into_owned())
-            .as_deref(),
-    )
+    resolve(set_here(name), || {
+        std::env::var_os(name).map(|raw| raw.to_string_lossy().into_owned())
+    })
 }
 
 /// What this process has been asked to use for `name`, if anything.
@@ -302,8 +320,12 @@ fn set_here(name: &str) -> Option<String> {
 /// test needs an `unsafe` block, which this workspace denies — and rightly, since
 /// the process environment is shared by every test running in parallel and a
 /// test that mutates it can fail a test it never names.
-fn resolve(here: Option<&str>, environment: Option<&str>) -> Option<String> {
-    here.or(environment).map(str::to_owned)
+///
+/// The environment is a closure, called only when nothing is set: a set knob
+/// never reads it, so the set path's cost does not include a lookup over the
+/// process environment. W2-cli7-4, D-0931.
+fn resolve(here: Option<String>, environment: impl FnOnce() -> Option<String>) -> Option<String> {
+    here.or_else(environment)
 }
 
 /// Set one knob for every run this process performs until it is cleared.
@@ -421,8 +443,8 @@ fn render(mut pairs: Vec<(&str, &str)>) -> String {
 mod tests {
     use super::serially;
     use super::{
-        clear_all, count, count_usize, describe, refuse_value, refused, render, resolve, set,
-        set_here, var,
+        clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve,
+        set, set_here, var,
     };
 
     /// The whole point: a knob nobody set reads through to the environment, so
@@ -435,24 +457,84 @@ mod tests {
     #[test]
     fn an_unset_knob_falls_through_to_the_environment() {
         assert_eq!(
-            resolve(None, Some("from-the-environment")).as_deref(),
+            resolve(None, || Some("from-the-environment".to_owned())).as_deref(),
             Some("from-the-environment")
         );
-        assert_eq!(resolve(None, None), None, "and nothing set is no answer");
+        assert_eq!(resolve(None, || None), None, "and nothing set is no answer");
     }
 
     /// The caller is the more specific statement, so it wins.
     #[test]
     fn a_set_knob_beats_the_environment() {
         assert_eq!(
-            resolve(Some("caller"), Some("environment")).as_deref(),
+            resolve(Some("caller".to_owned()), || Some("environment".to_owned())).as_deref(),
             Some("caller"),
             "the request knows which question is being asked"
         );
         assert_eq!(
-            resolve(Some("caller"), None).as_deref(),
+            resolve(Some("caller".to_owned()), || None).as_deref(),
             Some("caller"),
             "and it does not need the environment to have an opinion"
+        );
+    }
+
+    /// A set knob does not read the environment at all, which is what lets
+    /// the cost table's set row leave the environment lookup out.
+    ///
+    /// Before this row `var` evaluated `std::env::var_os(name)` as an argument,
+    /// so the lookup ran on every read even when the store already answered.
+    /// W2-cli7-4, D-0931.
+    #[test]
+    fn a_set_knob_never_reads_the_environment() {
+        let reads = std::cell::Cell::new(0_u32);
+        let environment = || {
+            reads.set(reads.get() + 1);
+            Some("environment".to_owned())
+        };
+        assert_eq!(
+            resolve(Some("caller".to_owned()), environment).as_deref(),
+            Some("caller")
+        );
+        assert_eq!(
+            reads.get(),
+            0,
+            "the store answered, so nothing looked further"
+        );
+        assert_eq!(resolve(None, environment).as_deref(), Some("environment"));
+        assert_eq!(reads.get(), 1, "an unset knob reads the environment once");
+    }
+
+    /// The module's cost table does not call an environment read O(1).
+    ///
+    /// `var` reads `std::env::var_os`, a lookup over the process environment
+    /// whose size this workspace neither bounds nor measures. The table said
+    /// `var` (unset) was "**O(1)** | one hash probe, then one `getenv`" and
+    /// `var` (set) "**O(1)** | one hash probe" while the set path read the
+    /// environment too. W2-cli7-4, D-0931. Proved here:
+    /// `cli::knobs::the_cost_table_does_not_call_an_environment_read_constant`.
+    #[test]
+    fn the_cost_table_does_not_call_an_environment_read_constant() {
+        let source = include_str!("knobs.rs");
+        let row = |label: &str| {
+            source
+                .lines()
+                .find(|line| line.starts_with(&format!("//! | {label} |")))
+                .unwrap_or_else(|| panic!("the cost table has a {label} row"))
+        };
+        let unset = row("`var` (unset)");
+        assert!(
+            unset.contains("not claimed O(1)") && unset.contains("environment"),
+            "an environment read is not claimed constant: {unset}"
+        );
+        let set_row = row("`var` (set)");
+        assert!(
+            set_row.contains("environment is not read"),
+            "the set path must say it does not read the environment: {set_row}"
+        );
+        let count_row = row("`count`");
+        assert!(
+            !count_row.contains("**O(1)**"),
+            "count reads through `var`, so it inherits the unset row: {count_row}"
         );
     }
 
@@ -626,7 +708,11 @@ mod tests {
         let too_large = "999999999999999999999999999999999999999";
         set(name, too_large);
 
-        assert_eq!(count_usize(name), None, "the count cannot be represented");
+        assert_eq!(
+            count_usize_within(name, usize::MAX),
+            None,
+            "the count cannot be represented"
+        );
         let block = refused().expect("the failed count must be reportable");
         assert!(
             block.contains(name) && block.contains(too_large),
@@ -636,7 +722,7 @@ mod tests {
         clear_all();
         set(name, "42");
         assert_eq!(
-            count_usize(name),
+            count_usize_within(name, usize::MAX),
             Some(42),
             "a representable count is taken"
         );

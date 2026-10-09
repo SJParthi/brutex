@@ -19,8 +19,12 @@
 //! at `offset_of(index)` — `docs/07-o1-architecture.md` layer 1, the whole point
 //! of a fixed-stride format. So the row at index 40,000 costs exactly what the
 //! row at index 0 costs, and a page of 200 is 200 reads regardless of which page
-//! it is. Nothing here scans, and nothing here holds a month in memory: a
-//! request for page 5 touches the 200 records of page 5 and no others.
+//! it is. The PAGE route scans nothing and holds no month in memory: a request
+//! for page 5 touches the 200 records of page 5 and no others. The WINDOW
+//! route ([`window`]) is the exception in this module: sorted by a price
+//! column, or asked for extremes, it reads every bar of every month in its
+//! range and holds them, up to `MAX_WINDOW_MONTHS` months —
+//! `docs/06-limits.md`, D-0733. Its `ts` order does not (D-3304).
 //!
 //! `n_valid` comes off the header, so the page count is a division rather than a
 //! walk — the same arithmetic `/store` and `/instruments` page by.
@@ -98,7 +102,7 @@ pub fn ist_clock(ts_micros: i64) -> String {
     // then the two fields. `div_euclid` so a pre-epoch timestamp floors rather
     // than truncating toward zero — the store cannot hold one, and a formatter
     // that is wrong for an input it cannot receive is still wrong.
-    let secs = ts_micros.div_euclid(1_000_000) + 5 * 3600 + 1800;
+    let secs = ts_micros.div_euclid(1_000_000) + pull::session::IST_OFFSET_SECS;
     let day_secs = secs.rem_euclid(86_400);
     let (h, m) = (day_secs / 3600, (day_secs % 3600) / 60);
     format!("{h:02}:{m:02}")
@@ -126,7 +130,7 @@ pub fn ist_clock(ts_micros: i64) -> String {
 /// formatter that lies.
 #[must_use]
 pub fn ist_day(ts_micros: i64) -> String {
-    let secs = ts_micros.div_euclid(1_000_000) + 5 * 3600 + 1800;
+    let secs = ts_micros.div_euclid(1_000_000) + pull::session::IST_OFFSET_SECS;
     let days = secs.div_euclid(86_400);
     u32::try_from(days)
         .ok()
@@ -371,11 +375,20 @@ fn open_classified(
 /// reason for the shape below, not as a measurement. `CLAUDE.md` §3 rule 6, and
 /// `docs/06-limits.md` §44.
 ///
-/// **What IS bounded here, structurally:** this function has exactly one call
-/// site — [`read_page`], outside every loop — and it returns on the first line
+/// **What IS bounded here, structurally:** this function has three call
+/// sites — [`page`], [`window`]'s seek branch, and `read_in_time`, which only
+/// [`window`] calls, once — each reached once per request and outside every
+/// loop over files or records, and it returns on the first line
 /// when `faults` is empty and otherwise emits once. So the real cost is at most
-/// one event per request regardless of how many records a file refuses, which is
-/// the property the shape was chosen for.
+/// one event per request regardless of how many records, or how many of a
+/// window's up to [`MAX_WINDOW_MONTHS`] files, refuse, which is the property the
+/// shape was chosen for.
+///
+/// It was called from inside [`slots`], which a window calls once per month
+/// file, so a sorted or `extremes=1` window over 240 damaged months emitted up
+/// to 240 lines for one request while this doc said one (Z1-slice11-F3,
+/// D-1762). `file` is the FIRST file that refused a record; `faults` counts
+/// every refusal across all of them.
 ///
 /// The faults were already counted in a
 /// `Vec` the caller renders; this reports its length and the first reason, which
@@ -415,6 +428,19 @@ fn note_unreadable_records(file: &BarFile, faults: &[String], rows: usize, skip:
 /// be named on the page — `CLAUDE.md` §4, degrade loudly.
 #[must_use]
 pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>) {
+    let (read, faults) = slots(file, skip, take);
+    let rows: Vec<Bar> = read.into_iter().flatten().collect();
+    note_unreadable_records(file, &faults, rows.len(), skip);
+    (rows, faults)
+}
+
+/// [`page`], with every POSITION kept: `None` where the record would not read.
+///
+/// The window needs the gap and not only its name. A row after an unreadable
+/// record has no readable predecessor, and a page that met an unreadable
+/// record has still used that position up. [`page`] drops the `None`s, and
+/// with them both facts; W1-api1-10 found the window paying for that (D-0730).
+fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, Vec<String>) {
     let n = file.header().n_valid;
     let mut rows = Vec::with_capacity(take.min(PAGE_BARS));
     let mut faults = Vec::new();
@@ -426,14 +452,17 @@ pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>)
             break;
         }
         match file.read_record(index) {
-            Ok(bar) => rows.push(bar),
+            Ok(bar) => rows.push(Some(bar)),
             // COUNTED IN THE `Vec`, NOT EMITTED HERE. This arm is inside the
-            // per-record loop; a line placed at it would be bounded by the data
-            // and not by the request. The aggregate is one call below.
-            Err(why) => faults.push(format!("record {index}: {why}")),
+            // per-record loop, and `slots` itself runs once per month file of
+            // a window; a line placed at either would be bounded by the data
+            // and not by the request. The caller emits the aggregate once.
+            Err(why) => {
+                rows.push(None);
+                faults.push(format!("record {index}: {why}"));
+            }
         }
     }
-    note_unreadable_records(file, &faults, rows.len(), skip);
     (rows, faults)
 }
 
@@ -519,6 +548,24 @@ pub const MAX_WINDOW_MONTHS: usize = 240;
 /// The most rows one window request may return.
 pub const MAX_WINDOW_LIMIT: usize = 1_000;
 
+/// The most stored records a window ordered by anything but `ts` may read.
+///
+/// Such an order is a question no index answers, so every record of the
+/// window is read, change-folded and held, and [`MAX_WINDOW_MONTHS`] alone
+/// let that reach about 1.9 million one-minute bars in one request
+/// (W1-api5-4). 2^20 is about ten years of one-minute bars for one series, or
+/// every daily bar the range cap allows many times over. A window past it is
+/// refused by name, before any record is read, rather than cut. The cost at
+/// the ceiling is measured in `docs/06-limits.md`'s D-4439 row. D-4439.
+pub const MAX_SCAN_WINDOW_RECORDS: u64 = 1 << 20;
+
+/// How many months' extremes [`month_fold`] keeps before it starts over.
+///
+/// One entry per stored instrument-month ever asked for with `extremes=1`;
+/// a full map is dropped whole rather than grown, so memory stays bounded by
+/// this and a working set past it pays the cold read it paid before D-4439.
+pub const MONTH_FOLDS_KEPT: usize = 4_096;
+
 /// Which column a window is ordered by.
 ///
 /// # Why `Ts` is not just another variant
@@ -547,7 +594,13 @@ pub enum SortKey {
     Close,
     /// Traded volume.
     Volume,
-    /// Open interest, nulls last.
+    /// Open interest, nulls last IN BOTH DIRECTIONS.
+    ///
+    /// A null is "this feed stamps none", not a small number, so it never
+    /// leads a page. Mapping it to `i64::MIN` alone put every null FIRST on an
+    /// ascending page while this line said last (Z1-slice11-F5, D-1762); the
+    /// window's comparator now ranks null-ness ahead of the value and does not
+    /// invert it with the direction.
     OpenInterest,
 }
 
@@ -575,9 +628,10 @@ impl SortKey {
 
     /// The field this orders on, for one bar.
     ///
-    /// `OI_NULL` is mapped to `i64::MIN` — which it already is — so a null open
-    /// interest sorts as the smallest value rather than as a real number. Zero
-    /// means zero here exactly as `CLAUDE.md` §7 says it does.
+    /// `OI_NULL` is `i64::MIN`, and the value is returned as it is: the
+    /// window's comparator puts null rows last before it compares this, so a
+    /// null is never ordered as a real number. Zero means zero here exactly as
+    /// `CLAUDE.md` §7 says it does.
     #[must_use]
     const fn of(self, bar: &Bar) -> i64 {
         match self {
@@ -640,42 +694,61 @@ pub struct WindowBar {
     pub oichg_why: &'static str,
 }
 
-/// Folds the change columns over one file's records, IN THE ORDER WRITTEN.
-///
-/// `crate::server::basis_points` is called rather than re-implemented: it rounds
-/// half away from zero and returns a named refusal, and a second spelling of
-/// that arithmetic would drift the first time either was touched.
-fn with_change(rows: Vec<Bar>) -> Vec<WindowBar> {
+/// What stands behind a row in time, for its change columns.
+#[derive(Debug, Clone, Copy)]
+enum Behind {
+    /// The first record of the file: there is no predecessor to measure against.
+    Nothing,
+    /// The predecessor exists and would not read. Not "first in file", and not a
+    /// zero: the row before a gap is not this row's predecessor (D-0730).
+    Unreadable,
+    /// The record written immediately before.
+    Bar(Bar),
+}
+
+fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
     let mut out = Vec::with_capacity(rows.len());
-    let mut previous: Option<Bar> = None;
-    for bar in rows {
+    let mut previous = behind;
+    for slot in rows {
+        let Some(bar) = slot else {
+            previous = Behind::Unreadable;
+            continue;
+        };
         let (chg, chg_why) = match previous {
-            None => (None, "first_bar_in_file"),
-            Some(before) => match crate::server::basis_points(before.close, bar.close) {
+            Behind::Nothing => (None, "first_bar_in_file"),
+            Behind::Unreadable => (None, "previous_unreadable"),
+            Behind::Bar(before) => match crate::server::basis_points(before.close, bar.close) {
                 Ok(bps) => (Some(bps), ""),
                 Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                Err(_) => (None, "previous_close_zero"),
+                // ZERO AND NEGATIVE ARE DIFFERENT FACTS (gap-audit #13, D-3685):
+                // a zero close is a real zero, a negative one a corrupt stored
+                // value, and both were called "is zero".
+                Err(_) if before.close == 0 => (None, "previous_close_zero"),
+                Err(_) => (None, "previous_close_negative"),
             },
         };
         // OPEN INTEREST HAS A NULL AND A REAL ZERO, and they are not the same
         // cell. `OI_NULL` is the sentinel `CLAUDE.md` §7 names; a stored zero is
         // a stored zero and must not be erased into "unknown".
         let oi_null = bar.open_interest == OI_NULL;
-        let prev_oi = previous.map(|b| b.open_interest);
         let (oichg, oichg_why) = if oi_null {
             (None, "oi_null")
         } else {
-            match prev_oi {
-                None => (None, "first_bar_in_file"),
-                Some(before) if before == OI_NULL => (None, "oi_null_before"),
-                Some(before) => match crate::server::basis_points(before, bar.open_interest) {
-                    Ok(bps) => (Some(bps), ""),
-                    Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                    Err(_) => (None, "previous_oi_zero"),
-                },
+            match previous {
+                Behind::Nothing => (None, "first_bar_in_file"),
+                Behind::Unreadable => (None, "previous_unreadable"),
+                Behind::Bar(before) if before.open_interest == OI_NULL => (None, "oi_null_before"),
+                Behind::Bar(before) => {
+                    match crate::server::basis_points(before.open_interest, bar.open_interest) {
+                        Ok(bps) => (Some(bps), ""),
+                        Err(crate::server::Unknown::Overflow) => (None, "overflow"),
+                        Err(_) if before.open_interest == 0 => (None, "previous_oi_zero"),
+                        Err(_) => (None, "previous_oi_negative"),
+                    }
+                }
             }
         };
-        previous = Some(bar);
+        previous = Behind::Bar(bar);
         out.push(WindowBar {
             bar,
             chg,
@@ -758,6 +831,94 @@ fn extremes_of(bars: &[WindowBar]) -> Extremes {
     })
 }
 
+/// One month's extremes and unreadable records, as [`extremes_of`] and
+/// [`slots`] find them over every record, with the header the open handle
+/// read them under.
+#[derive(Debug, Clone)]
+struct MonthFold {
+    header: store::header::Header,
+    extremes: Extremes,
+    faults: Vec<String>,
+}
+
+/// The kept folds, by bar-file path, each under the stamp its file had
+/// BEFORE it was opened. See [`MONTH_FOLDS_KEPT`].
+type KeptFolds =
+    std::collections::HashMap<std::path::PathBuf, (crate::answer_memo::FileStamp, MonthFold)>;
+
+/// See [`KeptFolds`].
+static MONTH_FOLDS: std::sync::LazyLock<std::sync::Mutex<KeptFolds>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(std::collections::HashMap::with_capacity(MONTH_FOLDS_KEPT))
+    });
+
+/// The extremes and unreadable records of one month, read whole only when no
+/// kept fold answers for the file as it now stands. W1-api5-4, D-4439.
+///
+/// # When a kept fold answers
+///
+/// `before` is one `stat` of the path taken BEFORE the window opened it. A
+/// kept fold answers only when that stamp (device, inode, length, both
+/// clocks) and the open handle's whole header (generation, `n_valid`, both
+/// stamps) equal the ones it was kept under. Any write moves the
+/// status-change time and any commit moves the generation, so a month that
+/// reads differently cannot match.
+///
+/// # When a fold is kept
+///
+/// Only when a second `stat`, taken after every record was read, equals
+/// `before`: then nothing replaced or wrote the file between the stamp and
+/// the read, so the handle read the stamped file. A fold whose stamps differ,
+/// or whose stamp could not be taken, still answers this request and is not
+/// kept, so the next request reads the month again. Unreadable records are
+/// kept with it and named on every answer, exactly as a full read names
+/// them, so a kept fold never hides a fault.
+fn month_fold(file: &BarFile, before: Option<crate::answer_memo::FileStamp>) -> MonthFold {
+    let header = file.header();
+    let path = file.path();
+    if let Some(stamp) = before {
+        let kept = MONTH_FOLDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .filter(|(kept, fold)| *kept == stamp && fold.header == header)
+            .map(|(_, fold)| fold.clone());
+        if let Some(fold) = kept {
+            return fold;
+        }
+    }
+    #[cfg(test)]
+    tests::COLD_FOLDS.with(|count| count.set(count.get() + 1));
+    let mut extremes = Extremes::default();
+    let mut faults = Vec::new();
+    for slot in 0..header.n_valid {
+        match file.read_record(slot) {
+            Ok(bar) => {
+                extremes.range = extremes.range.max(bar.high.saturating_sub(bar.low));
+                extremes.volume = extremes.volume.max(bar.volume);
+            }
+            Err(why) => faults.push(format!("record {slot}: {why}")),
+        }
+    }
+    let fold = MonthFold {
+        header,
+        extremes,
+        faults,
+    };
+    if let Some(stamp) = before
+        && crate::answer_memo::FileStamp::of(path).ok() == Some(stamp)
+    {
+        let mut kept = MONTH_FOLDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.len() >= MONTH_FOLDS_KEPT && !kept.contains_key(path) {
+            kept.clear();
+        }
+        kept.insert(path.to_path_buf(), (stamp, fold.clone()));
+    }
+    fold
+}
+
 /// The rows at `offset..offset+limit` of a window, WITHOUT reading the rest.
 ///
 /// The files arrive in the order their rows come out in, so the prefix sum over
@@ -777,21 +938,76 @@ fn extremes_of(bars: &[WindowBar]) -> Extremes {
 /// page needs the record before it or the cell is blank. Reading one back costs
 /// a single extra seek and fills it — which is strictly better than the browser
 /// managed while holding whole months, because there the first row of EVERY
-/// month had nothing behind it. The only row that still has none is the first
-/// record of the first file, where none exists.
+/// month had nothing behind it.
+///
+/// A ROW THAT OPENS A MONTH FILE READS THE PREVIOUS MONTH'S LAST RECORD. This
+/// doc said that already and the code did not: `start.checked_sub(LOOKBACK)`
+/// is `None` at the start of EVERY file, so the first bar of every month in a
+/// window answered `first_bar_in_file` while the month before it sat open in
+/// the same request (Z1-slice11-F4, D-1762). [`earlier_in_time`] names, for
+/// each file, the nearest earlier non-empty file of the window, and both paths
+/// measure against its last record. The only row that still has none is the
+/// first record of the window's earliest non-empty file, where none was read.
 const LOOKBACK: usize = 1;
+
+/// For each file of a window, the nearest EARLIER-IN-TIME file holding at
+/// least one record, or `None`, in the order of `files`.
+///
+/// `files` are in time order, newest first when `newest_first`. One pass, so
+/// it is `O(months)` header reads however the empty months fall — a lookback
+/// that walked back per file would be `O(months²)` over a sparse window.
+fn earlier_in_time(files: &[BarFile], newest_first: bool) -> Vec<Option<&BarFile>> {
+    let mut last: Option<&BarFile> = None;
+    let mut out: Vec<Option<&BarFile>> = Vec::with_capacity(files.len());
+    if newest_first {
+        for file in files.iter().rev() {
+            out.push(last);
+            if file.header().n_valid > 0 {
+                last = Some(file);
+            }
+        }
+        out.reverse();
+    } else {
+        for file in files {
+            out.push(last);
+            if file.header().n_valid > 0 {
+                last = Some(file);
+            }
+        }
+    }
+    out
+}
+
+/// The last record of `file` as a lookback: a bar, or a named gap.
+fn last_of(file: &BarFile) -> Behind {
+    file.header()
+        .n_valid
+        .checked_sub(1)
+        .map_or(Behind::Nothing, |last| {
+            file.read_record(last)
+                .map_or(Behind::Unreadable, Behind::Bar)
+        })
+}
 
 fn seek_page(
     files: &[BarFile],
     desc: bool,
     offset: usize,
     limit: usize,
-) -> (Vec<WindowBar>, Vec<String>) {
+) -> (Vec<WindowBar>, Vec<String>, Option<&BarFile>) {
     let mut bars: Vec<WindowBar> = Vec::with_capacity(limit.min(PAGE_BARS));
+    let mut first_faulted = None;
     let mut faults = Vec::new();
     let mut seen = 0usize;
-    for file in files {
-        if bars.len() >= limit {
+    /* POSITIONS USED, NOT ROWS RETURNED. An unreadable record still occupies
+    its place in the window: it is named in `faults` on the page that covers
+    it. Counting only the rows that read made a page that met damage fill the
+    gap from the next file, and the next offset page returned those same rows
+    a second time (W1-api1-10, D-0730). */
+    let mut filled = 0usize;
+    let earlier = earlier_in_time(files, desc);
+    for (at, file) in files.iter().enumerate() {
+        if filled >= limit {
             break;
         }
         let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
@@ -801,7 +1017,7 @@ fn seek_page(
             continue;
         }
         let skip_in_file = offset.saturating_sub(lo);
-        let take = limit.saturating_sub(bars.len());
+        let take = limit - filled;
         /* THE BLOCK IN FILE ORDER, WHICHEVER DIRECTION THE PAGE RUNS.
         `start..end` is always ascending because the change fold needs the
         order the records were WRITTEN; the reversal for a descending page
@@ -812,22 +1028,144 @@ fn seek_page(
         } else {
             (skip_in_file, skip_in_file.saturating_add(take).min(held))
         };
-        let back = start.min(LOOKBACK);
-        let (block, mut bad) = page(file, start - back, end.saturating_sub(start - back));
-        let mut folded = with_change(block);
-        /* THE LOOKBACK ROW IS DROPPED AFTER IT HAS DONE ITS WORK. It exists to
-        give the row behind it a predecessor and is not part of the page. */
-        if back > 0 && !folded.is_empty() {
-            folded.drain(..back);
-        }
+        /* THE LOOKBACK IS READ ON ITS OWN, AND ITS FAILURE IS NOT THE PAGE'S.
+        It used to be the first record of the block and was dropped by
+        POSITION after the fold; with it unreadable, `page` had already left
+        it out, and the row dropped was the page's own first row, unnamed.
+        Read apart, an unreadable lookback costs the first row its change
+        cell (`previous_unreadable`) and nothing else. It is not added to
+        `faults`: it is not a row of this page, and the page that covers it
+        names it, so a reader walking every page meets each fault once. */
+        let behind = match start.checked_sub(LOOKBACK) {
+            None => earlier
+                .get(at)
+                .copied()
+                .flatten()
+                .map_or(Behind::Nothing, last_of),
+            Some(before) => file
+                .read_record(u64::try_from(before).unwrap_or(u64::MAX))
+                .map_or(Behind::Unreadable, Behind::Bar),
+        };
+        let (block, mut bad) = slots(file, start, end - start);
+        filled += end - start;
+        let mut folded = with_change(behind, block);
         if desc {
             folded.reverse();
         }
         bars.append(&mut folded);
+        if !bad.is_empty() {
+            first_faulted = first_faulted.or(Some(file));
+        }
         faults.append(&mut bad);
     }
-    bars.truncate(limit);
-    (bars, faults)
+    (bars, faults, first_faulted)
+}
+
+/// Every record of a window's files, change-folded IN TIME ORDER, for the
+/// reading path. `files` are newest first when `newest_first`. Faults are
+/// returned, and reported once for the request (Z1-slice11-F3).
+///
+/// # Errors
+///
+/// [`reserved_window`]'s refusal, when `total` rows cannot be held.
+fn read_in_time(
+    files: &[BarFile],
+    newest_first: bool,
+    total: u64,
+) -> Result<(Vec<WindowBar>, Vec<String>), String> {
+    let mut all: Vec<WindowBar> = reserved_window(total)?;
+    let mut record_faults = Vec::new();
+    let mut first_faulted = None;
+    /* IN TIME ORDER, so each file's first row is measured against the last
+    record of the month before it (Z1-slice11-F4). `ordered` was reversed
+    above only when the order is newest-first by time. */
+    let mut in_time: Vec<&BarFile> = files.iter().collect();
+    if newest_first {
+        in_time.reverse();
+    }
+    let mut behind = Behind::Nothing;
+    for file in in_time {
+        let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+        let (rows, mut bad) = slots(file, 0, held);
+        // AN EMPTY MONTH LEAVES THE LOOKBACK WHERE IT WAS: the bar before the
+        // next month's first row is still the last one read before it.
+        let next = match rows.last() {
+            None => behind,
+            Some(Some(bar)) => Behind::Bar(*bar),
+            Some(None) => Behind::Unreadable,
+        };
+        all.append(&mut with_change(behind, rows));
+        behind = next;
+        if !bad.is_empty() {
+            first_faulted = first_faulted.or(Some(file));
+        }
+        record_faults.append(&mut bad);
+    }
+    if let Some(file) = first_faulted {
+        note_unreadable_records(file, &record_faults, all.len(), 0);
+    }
+    Ok((all, record_faults))
+}
+
+/// Room for a whole window's `total` rows, or a refusal naming the number.
+///
+/// `Vec::with_capacity` aborts the process on a size no allocation can hold
+/// (`handle_alloc_error`; the release profile also aborts on panic), and a
+/// window sums `n_valid` over up to [`MAX_WINDOW_MONTHS`] months. The store
+/// bounds each month's counter by its grid (D-2685), and that still leaves a
+/// sum the machine may not have. `try_reserve_exact` turns it into an answer
+/// (CE-61, D-2685).
+///
+/// # Errors
+///
+/// A sentence naming `total`, when it does not fit `usize` or the reservation
+/// fails.
+fn reserved_window(total: u64) -> Result<Vec<WindowBar>, String> {
+    let refused = || {
+        format!(
+            "the window holds {total} stored records, more than this process \
+             can reserve at once; ask for fewer months"
+        )
+    };
+    let rows = usize::try_from(total).map_err(|_| refused())?;
+    let mut all = Vec::new();
+    all.try_reserve_exact(rows).map_err(|_| refused())?;
+    Ok(all)
+}
+
+/// The window's extremes from each month's kept fold, every month's unreadable
+/// records named in time order, and the first month that had one (W1-api5-4,
+/// D-4439).
+///
+/// The window's widest range and heaviest volume are the widest and heaviest
+/// of its months, and a month's are kept by [`month_fold`] until its file
+/// moves, so a `ts` page with `extremes=1` costs the seek page plus one probe a
+/// month instead of every record of every month. `stamps` are the files'
+/// stamps taken before they were opened; a month without one is folded again.
+fn kept_extremes<'f>(
+    files: &'f [BarFile],
+    desc: bool,
+    stamps: Option<&std::collections::HashMap<std::path::PathBuf, crate::answer_memo::FileStamp>>,
+) -> (Extremes, Vec<String>, Option<&'f BarFile>) {
+    let mut top = Extremes::default();
+    let mut named = Vec::new();
+    let mut first_faulted = None;
+    let in_time: Vec<&BarFile> = if desc {
+        files.iter().rev().collect()
+    } else {
+        files.iter().collect()
+    };
+    for file in in_time {
+        let before = stamps.and_then(|stamps| stamps.get(file.path())).copied();
+        let fold = month_fold(file, before);
+        top.range = top.range.max(fold.extremes.range);
+        top.volume = top.volume.max(fold.extremes.volume);
+        if !fold.faults.is_empty() {
+            first_faulted = first_faulted.or(Some(file));
+        }
+        named.extend(fold.faults);
+    }
+    (top, named, first_faulted)
 }
 
 /// One page of bars across a range of months, in one request.
@@ -843,10 +1181,16 @@ fn seek_page(
 ///
 /// Ordered by anything else, it reads every row once, sorts, and slices. That
 /// is the honest price of a question the store has no index for, and it is paid
-/// here rather than by moving every row to a browser.
+/// here rather than by moving every row to a browser. Since D-4439 a window
+/// of more than [`MAX_SCAN_WINDOW_RECORDS`] stored records is refused by name
+/// on that path before a record is read.
 ///
-/// `want_extremes` forces the reading path either way, because the widest range
-/// in a window is not knowable from a header.
+/// `want_extremes` used to force the reading path either way, because the
+/// widest range in a window is not knowable from a header. Since D-4439 a
+/// `ts` window keeps its seek page and takes the extremes from each month's
+/// kept fold ([`month_fold`]): the first request after a month's file moves
+/// reads that month whole, and every other request costs one `stat` and one
+/// probe per month (W1-api5-4).
 ///
 /// # Errors
 ///
@@ -895,6 +1239,22 @@ pub fn window(
         ordered.reverse();
     }
 
+    // STAMPED BEFORE THE OPEN, for the kept month folds (D-4439): a fold is
+    // served only for a file whose stamp before this open is the one it was
+    // kept under. Only the seek path with extremes asks; one `stat` a month.
+    let parts = PathParts {
+        vendor,
+        exchange,
+        segment,
+        symbol,
+        contract,
+        timeframe,
+        month: from,
+        file: FileKind::Bars,
+    };
+    let stamps =
+        (want_extremes && !sort.scans()).then(|| stamp_months(store_root, parts, &ordered));
+
     /* OPENED ONCE, HELD FOR THE REQUEST. A month with no file is counted and
     skipped: a sparse store is legal and the count is what tells a reader a
     gap from a refusal. */
@@ -902,20 +1262,7 @@ pub fn window(
         files,
         missing,
         mut faults,
-    } = open_window_months(
-        store_root,
-        PathParts {
-            vendor,
-            exchange,
-            segment,
-            symbol,
-            contract,
-            timeframe,
-            month: from,
-            file: FileKind::Bars,
-        },
-        &ordered,
-    )?;
+    } = open_window_months(store_root, parts, &ordered)?;
     if files.is_empty() {
         return Ok(Window {
             total: 0,
@@ -932,8 +1279,24 @@ pub fn window(
         .map(|f| f.header().n_valid)
         .fold(0u64, u64::saturating_add);
 
-    if !sort.scans() && !want_extremes {
-        let (bars, mut record_faults) = seek_page(&files, desc, offset, limit);
+    if !sort.scans() {
+        let (bars, mut record_faults, mut first_faulted) = seek_page(&files, desc, offset, limit);
+        // EXTREMES WITHOUT THE READING PATH (W1-api5-4, D-4439). The window's
+        // widest range and heaviest volume are the widest and heaviest of its
+        // months, and a month's are kept by `month_fold` until its file moves,
+        // so a `ts` page with `extremes=1` is the seek page plus one probe a
+        // month instead of every record of every month. Every unreadable
+        // record of every month is named, as the full read named them, in
+        // time order; the page's own are among them.
+        let extremes = want_extremes.then(|| {
+            let (top, named, first) = kept_extremes(&files, desc, stamps.as_ref());
+            record_faults = named;
+            first_faulted = first;
+            top
+        });
+        if let Some(file) = first_faulted {
+            note_unreadable_records(file, &record_faults, bars.len(), offset);
+        }
         faults.append(&mut record_faults);
         return Ok(Window {
             total,
@@ -941,22 +1304,22 @@ pub fn window(
             months_missing: missing,
             bars,
             faults,
-            extremes: None,
+            extremes,
         });
     }
+
+    // A SCAN PAST ITS CEILING IS REFUSED BY NAME, before a record is read
+    // (W1-api5-4, D-4439): ordering by a price column reads and holds every
+    // record of the window.
+    scan_admitted(total)?;
 
     /* ---- THE READING PATH. One pass, then order, then slice. ----
     THE CHANGE IS FOLDED PER FILE, BEFORE ANYTHING IS SORTED, because it is
     against the previous bar in TIME and a sorted page has no time
     neighbours. Folding after the sort would compute each row against
     whichever row happened to land above it. */
-    let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
-    for file in &files {
-        let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-        let (rows, mut bad) = page(file, 0, held);
-        all.append(&mut with_change(rows));
-        faults.append(&mut bad);
-    }
+    let (all, mut record_faults) = read_in_time(&files, desc && !sort.scans(), total)?;
+    faults.append(&mut record_faults);
 
     let extremes = want_extremes.then(|| extremes_of(&all));
 
@@ -965,10 +1328,16 @@ pub fn window(
     through them would see one row twice and another never. The timestamp is
     unique within a series, so it is the tie-break and it is NOT inverted
     with the direction. */
+    let null_last =
+        |row: &WindowBar| matches!(sort, SortKey::OpenInterest) && row.bar.open_interest == OI_NULL;
     let order = |a: &WindowBar, b: &WindowBar| {
         let (x, y) = (sort.of(&a.bar), sort.of(&b.bar));
         let primary = if desc { y.cmp(&x) } else { x.cmp(&y) };
-        primary.then_with(|| a.bar.ts_micros.cmp(&b.bar.ts_micros))
+        // NULL OPEN INTEREST LAST, whichever way the page runs (F5).
+        null_last(a)
+            .cmp(&null_last(b))
+            .then(primary)
+            .then_with(|| a.bar.ts_micros.cmp(&b.bar.ts_micros))
     };
 
     // THE PAGE IS BOUNDED, SO THE ORDERING IS TOO -- AND IT WAS NOT.
@@ -986,15 +1355,13 @@ pub fn window(
     // asks for a bounded page and never O(universe); an audit found this route
     // breaching it.
     //
-    // The partition below is O(n) and leaves the first `want` elements as the
-    // `want` smallest under this order, unordered among themselves. Only those
-    // are then ordered. The cost goes from `O(n log n)` to
-    // `O(n) + O(want log want)`, and `want` is the caller's own page rather
-    // than the number of months asked for.
+    // `page_of` partitions in O(n) and orders only the page's own rows, so the
+    // cost goes from `O(n log n)` to `O(n) + O(limit log limit)`. D-0733 first
+    // bounded it by the nearer end of the window; D-1446 bounds it by the page.
     //
     // THE OUTPUT IS UNCHANGED, and that is what a TOTAL comparator buys: with
     // the timestamp as tie-break no two rows ever compare equal, so the set of
-    // the `want` smallest is unique and ordering it is byte-identical to
+    // the page's rows is unique and ordering it is byte-identical to
     // ordering everything and slicing -- §3 rule 5. An unstable partition may
     // reorder only what it is free to reorder, and here there is nothing.
     // `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
@@ -1005,20 +1372,14 @@ pub fn window(
     // `extremes_of` and the per-file change fold each need every row; the read
     // is O(bars) because of the question being asked. What is removed is the
     // ordering of rows nobody will see.
-    let want = offset.saturating_add(limit);
-    if want == 0 {
-        all.clear();
-    } else if want < all.len() {
-        all.select_nth_unstable_by(want - 1, order);
-        all.truncate(want);
-    }
-    all.sort_by(order);
-
-    let bars = all
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<WindowBar>>();
+    //
+    // AND THE ROWS BEFORE THE PAGE ARE NOT ORDERED EITHER. `want` was
+    // `offset + limit`, and `offset` comes off the query string uncapped, so a
+    // page near the end of a 1.9-million-bar window ordered all of them again,
+    // and an offset past the end ordered every row to answer none. `page_of`
+    // partitions twice instead: once at `offset`, once at `limit` inside what
+    // is left, and orders only the page. W1-api5-4, D-1446.
+    let bars = page_of(all, offset, limit, order);
 
     Ok(Window {
         total,
@@ -1028,6 +1389,87 @@ pub fn window(
         faults,
         extremes,
     })
+}
+
+/// The rows `offset .. offset + limit` of `all` under `order`, in that order.
+///
+/// Equal to ordering all of `all` and slicing, when `order` is a total order
+/// (no two rows compare equal), which is what `window`'s comparator is: its
+/// timestamp tie-break is unique within a series.
+///
+/// # Cost
+///
+/// Two partitions and one ordering of the page: an `O(n)` partition at
+/// `offset` (skipped when it is zero), an `O(n - offset)` partition at `limit`
+/// inside what is left, then `O(limit log limit)` to order the page. An offset
+/// at or past the end answers empty with no comparison at all. The ordering of
+/// rows before or after the page, which an `offset + limit` partition paid
+/// near the end of a window, is gone. `std`'s `select_nth_unstable_by` is the
+/// partition, and the comparison count is measured, not argued, by
+/// `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
+/// W1-api5-4, D-1446.
+fn page_of<T>(
+    mut all: Vec<T>,
+    offset: usize,
+    limit: usize,
+    mut order: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) -> Vec<T> {
+    if limit == 0 || offset >= all.len() {
+        return Vec::new();
+    }
+    if offset > 0 {
+        all.select_nth_unstable_by(offset, &mut order);
+    }
+    let mut page = all.split_off(offset);
+    if limit < page.len() {
+        page.select_nth_unstable_by(limit - 1, &mut order);
+        page.truncate(limit);
+    }
+    page.sort_by(&mut order);
+    page
+}
+
+/// Whether a window of `total` stored records may be read whole to order it
+/// by a price column: at most [`MAX_SCAN_WINDOW_RECORDS`], refused by name
+/// past it. W1-api5-4, D-4439.
+///
+/// # Errors
+///
+/// The sentence naming `total` and the ceiling.
+fn scan_admitted(total: u64) -> Result<(), String> {
+    if total > MAX_SCAN_WINDOW_RECORDS {
+        return Err(format!(
+            "ordering by a column other than ts reads every stored record of the \
+             window, {total} here, and one request reads at most \
+             {MAX_SCAN_WINDOW_RECORDS} (MAX_SCAN_WINDOW_RECORDS); ask for fewer \
+             months, or order by ts, which seeks"
+        ));
+    }
+    Ok(())
+}
+
+/// One `stat` of each month's bar file, by the path [`open_window_months`]
+/// opens it at, for every month whose path is valid and whose stamp could be
+/// taken. A month missing here is simply never served from a kept fold.
+fn stamp_months(
+    root: &std::path::Path,
+    parts: PathParts<'_>,
+    months: &[YearMonth],
+) -> std::collections::HashMap<std::path::PathBuf, crate::answer_memo::FileStamp> {
+    let mut stamps = std::collections::HashMap::with_capacity(months.len());
+    for month in months {
+        let Ok(path) = StorePath::new(PathParts {
+            month: *month,
+            ..parts
+        }) else {
+            continue;
+        };
+        let path = path.to_path_buf(root);
+        if let Ok(stamp) = crate::answer_memo::FileStamp::of(&path) {
+            stamps.insert(path, stamp);
+        }
+    }
+    stamps
 }
 
 struct OpenedWindow {
@@ -1082,6 +1524,11 @@ fn open_window_months(
 )]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Months [`month_fold`] read whole on this thread.
+        pub(super) static COLD_FOLDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     /// **NO FLOAT REACHES A PRICE, INCLUDING ON THE WAY TO A SCREEN.**
     ///
@@ -1269,7 +1716,8 @@ mod tests {
     /// 240-month window that is roughly 1.9 million rows ordered to hand back a
     /// thousand, and `docs/07-o1-architecture.md` layer 12 asks for a bounded
     /// page and never O(universe). It now partitions with
-    /// `select_nth_unstable_by`, keeps `offset + limit`, and sorts only those.
+    /// `select_nth_unstable_by`, keeps the fewer of the first `offset + limit`
+    /// and the last `n - offset` rows, and sorts only those (D-0733).
     ///
     /// The risk in that trade is not speed, it is ORDER: an unstable partition
     /// may reorder anything it is free to reorder, so a page could come back
@@ -1298,27 +1746,154 @@ mod tests {
             .collect();
         let order = |a: &(i64, i64), b: &(i64, i64)| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));
 
-        for (offset, limit) in [(0, 1), (0, 10), (5, 10), (57, 10), (0, 60), (59, 1), (0, 0)] {
+        // EVERY OFFSET, including each one past the end, against the
+        // unbounded page (D-0733, and since D-1446 through `page_of`).
+        for offset in 0..=62 {
+            for limit in [0, 1, 2, 10, 29, 30, 31, 60, 61] {
+                let mut whole = rows.clone();
+                whole.sort_by(order);
+                let expected: Vec<(i64, i64)> =
+                    whole.into_iter().skip(offset).take(limit).collect();
+                let got = super::page_of(rows.clone(), offset, limit, order);
+                assert_eq!(
+                    got, expected,
+                    "offset={offset} limit={limit}: the bounded page must be the \
+                     same rows in the same order as the unbounded one"
+                );
+            }
+        }
+        // AND THE EDGES NO OFFSET ABOVE REACHES: limits and offsets at
+        // `usize::MAX`, where `offset + limit` would overflow (W1-api5-4, D-1446).
+        for (offset, limit) in [(usize::MAX, usize::MAX), (1, usize::MAX), (59, usize::MAX)] {
             let mut whole = rows.clone();
             whole.sort_by(order);
             let expected: Vec<(i64, i64)> = whole.into_iter().skip(offset).take(limit).collect();
-
-            let mut paged = rows.clone();
-            let want = offset.saturating_add(limit);
-            if want == 0 {
-                paged.clear();
-            } else if want < paged.len() {
-                paged.select_nth_unstable_by(want - 1, order);
-                paged.truncate(want);
-            }
-            paged.sort_by(order);
-            let got: Vec<(i64, i64)> = paged.into_iter().skip(offset).take(limit).collect();
-
             assert_eq!(
-                got, expected,
-                "offset={offset} limit={limit}: the bounded page must be the \
-                 same rows in the same order as the unbounded one"
+                super::page_of(rows.clone(), offset, limit, order),
+                expected,
+                "offset={offset} limit={limit}"
             );
+        }
+    }
+
+    /// **THE SORTED WINDOW'S FULL READ IS STATED IN `docs/06-limits.md`, AND
+    /// EVERY LINE IT QUOTES IS THIS FILE'S OWN.** It was stated only in comments
+    /// here (W1-api1-3, D-0733). Each quoted line must appear in the limits
+    /// section and in this file's code above its tests, so a line that changes
+    /// here without the limit changing fails.
+    #[test]
+    fn the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source() {
+        let squash = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let limits = include_str!("../../../docs/06-limits.md");
+        let section = limits
+            .split_once("## A sorted or extremes window reads every bar in its range — D-0733")
+            .expect("docs/06-limits.md states the sorted window's read")
+            .1;
+        let section = squash(section.split_once("\n## ").map_or(section, |(own, _)| own));
+        let source = include_str!("bars.rs");
+        let code = squash(
+            source
+                .split_once("\n#[cfg(test)]\n")
+                .expect("the tests follow the code")
+                .0,
+        );
+        for quoted in [
+            "let mut all: Vec<WindowBar> = reserved_window(total)?;",
+            "let (rows, mut bad) = slots(file, 0, held);",
+            "match file.read_record(index)",
+            "let extremes = want_extremes.then(|| extremes_of(&all));",
+            "page.select_nth_unstable_by(limit - 1, &mut order);",
+            "page.sort_by(&mut order);",
+            "pub const MAX_WINDOW_MONTHS: usize = 240;",
+            "pub const MAX_WINDOW_LIMIT: usize = 1_000;",
+        ] {
+            assert!(
+                section.contains(&format!("`{quoted}`")),
+                "the limit quotes {quoted}"
+            );
+            assert!(code.contains(quoted), "bars.rs still says {quoted}");
+        }
+    }
+
+    /// **A page orders itself and nothing else, wherever its offset lands.**
+    /// W1-api5-4, D-1446.
+    ///
+    /// `window` partitioned at `offset + limit` and ordered everything before
+    /// that, so a page near the end of the window (or an offset past it, which
+    /// the query string does not cap) ordered every row. Counted here with a
+    /// comparator that counts: over 200,000 rows in three adversarial input
+    /// orders, the page at the very end costs a linear number of comparisons,
+    /// within a bound an `n log n` ordering of the whole window (some 3.5
+    /// million comparisons here) cannot meet, and an offset past the end costs
+    /// none.
+    #[test]
+    fn the_page_orders_only_itself_wherever_the_offset_lands() {
+        const N: usize = 200_000;
+        const N_I64: i64 = 200_000;
+        const LIMIT: usize = 1_000;
+        let inputs: [(&str, Vec<(i64, i64)>); 3] = [
+            ("ascending", (0..N_I64).map(|i| (i, i)).collect()),
+            ("descending", (0..N_I64).rev().map(|i| (i, i)).collect()),
+            (
+                "one primary value",
+                (0..N_I64).map(|i| (7, (i * 7919) % N_I64)).collect(),
+            ),
+        ];
+        for (name, rows) in inputs {
+            for offset in [0, N / 2, N - LIMIT, N - 1, N, N + 1, usize::MAX] {
+                let compared = std::cell::Cell::new(0_u64);
+                let order = |a: &(i64, i64), b: &(i64, i64)| {
+                    compared.set(compared.get() + 1);
+                    a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+                };
+                let got = super::page_of(rows.clone(), offset, LIMIT, order);
+                let mut whole = rows.clone();
+                whole.sort_unstable();
+                let expected: Vec<_> = whole.into_iter().skip(offset).take(LIMIT).collect();
+                assert_eq!(got, expected, "{name} offset={offset}");
+                // Two linear partitions and one ordering of the page.
+                let bound = 12 * N as u64 + 2 * (LIMIT as u64) * 10;
+                assert!(
+                    compared.get() <= bound,
+                    "{name} offset={offset}: {} comparisons against a linear bound of {bound}",
+                    compared.get()
+                );
+                if offset >= N {
+                    assert_eq!(
+                        compared.get(),
+                        0,
+                        "{name} offset={offset}: an empty page compares nothing"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A PAGE THAT NEEDS NO PARTITION PAYS FOR NONE.** At offset zero there
+    /// is nothing before the page to cut away, and a limit that reaches the end
+    /// of what is left has nothing after it: either partition there is a full
+    /// linear pass that changes no row. Results alone cannot see it, so the
+    /// comparison count is held EXACTLY to that of ordering the rows alone.
+    /// G18-api-04.
+    #[test]
+    fn a_page_needing_no_partition_compares_only_to_order_itself() {
+        let rows: Vec<i64> = (0..64).collect();
+        let plain = std::cell::Cell::new(0_u64);
+        let mut alone = rows.clone();
+        alone.sort_by(|a, b| {
+            plain.set(plain.get() + 1);
+            a.cmp(b)
+        });
+        assert!(plain.get() > 0);
+        // limit == len (no cut after) and limit > len (none either).
+        for limit in [rows.len(), rows.len() + 1] {
+            let compared = std::cell::Cell::new(0_u64);
+            let page = super::page_of(rows.clone(), 0, limit, |a, b| {
+                compared.set(compared.get() + 1);
+                a.cmp(b)
+            });
+            assert_eq!(page, rows, "limit={limit}");
+            assert_eq!(compared.get(), plain.get(), "limit={limit}");
         }
     }
 
@@ -1415,6 +1990,24 @@ mod window_tests {
 
     const SYMBOL: &str = "WINDOWTEST";
 
+    /// **CE-61. A WINDOW TOTAL NO ALLOCATION CAN HOLD IS REFUSED BY NAME.**
+    ///
+    /// The reading path reserved `total` rows with `Vec::with_capacity`, so a
+    /// counter no machine can hold aborted the server (`panic = "abort"`,
+    /// and an allocation failure aborts in any profile). The store now refuses
+    /// a counter past the month at open (D-2685); this is the second wall, for
+    /// a sum over many months that is legal per month and still too large.
+    #[test]
+    fn a_window_total_no_allocation_can_hold_is_refused_by_name() {
+        let why = read_in_time(&[], false, u64::MAX)
+            .map(|(all, _)| all.len())
+            .expect_err("refused, not aborted");
+        assert!(why.contains(&u64::MAX.to_string()), "{why}");
+        // A total that fits is reserved, and nothing is read for it.
+        let (all, faults) = read_in_time(&[], false, 3).expect("three rows fit");
+        assert!(all.is_empty() && all.capacity() >= 3 && faults.is_empty());
+    }
+
     /// A scratch store nobody else in this process shares, emptied first.
     fn scratch(tag: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1471,7 +2064,11 @@ mod window_tests {
                 }
             })
             .collect();
-        file.append(&rows).expect("the batch appends");
+        // n = 0 is a month whose file EXISTS and holds nothing: created, never
+        // appended to, since the store refuses an empty batch.
+        if !rows.is_empty() {
+            file.append(&rows).expect("the batch appends");
+        }
     }
 
     /// Midnight UTC on the first of a month, in micros.
@@ -1801,6 +2398,193 @@ mod window_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A `ts` window with extremes reads each month whole once, until that
+    /// month's file moves; its pages are the seek pages, its extremes are the
+    /// full read's, and a kept fold still names every unreadable record.**
+    /// W1-api5-4, D-4439.
+    #[test]
+    fn a_ts_window_with_extremes_reads_each_month_once_until_it_moves() {
+        let root = scratch("kept-folds");
+        let (jan, feb, mar) = (
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 2).expect("m"),
+            YearMonth::new(2026, 3).expect("m"),
+        );
+        write_month(&root, jan, 10, 1_000);
+        write_month(&root, feb, 40, 2_000);
+        write_month(&root, mar, 25, 3_000);
+        let cold = || super::tests::COLD_FOLDS.with(std::cell::Cell::get);
+        let start = cold();
+        let ask = |desc, offset, extremes| {
+            window_over(&root, mar, SortKey::Ts, desc, offset, 7, extremes)
+        };
+
+        let first = ask(false, 3, true);
+        assert_eq!(cold() - start, 3, "each month is read whole once");
+        let top = first.extremes.expect("asked for");
+        assert_eq!(
+            (top.range, top.volume),
+            (20, 78),
+            "over every month, not the page"
+        );
+        assert_eq!(
+            first.bars,
+            ask(false, 3, false).bars,
+            "the page is the seek page"
+        );
+        assert_eq!(first.total, 75);
+        // The full read's extremes, from the reading path a price order takes.
+        let full = window_over(&root, mar, SortKey::Close, false, 0, 1, true);
+        assert_eq!(full.extremes, Some(top));
+
+        for (desc, offset) in [(false, 0), (true, 0), (true, 40), (false, 74)] {
+            let again = ask(desc, offset, true);
+            assert_eq!(again.extremes, Some(top));
+            assert_eq!(again.bars, ask(desc, offset, false).bars);
+        }
+        assert_eq!(cold() - start, 3, "every later page is warm");
+
+        // A month rewritten under the same name is read again, and only it.
+        let path = |month| {
+            StorePath::new(PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month,
+                file: FileKind::Bars,
+            })
+            .expect("a legal path")
+            .to_path_buf(&root)
+        };
+        std::fs::remove_file(path(feb)).expect("owned fixture");
+        write_month(&root, feb, 60, 2_000);
+        let grown = ask(false, 0, true);
+        assert_eq!(cold() - start, 4, "only the moved month is read again");
+        assert_eq!(
+            grown.extremes.expect("asked").volume,
+            118,
+            "59*2, the new month's"
+        );
+        assert_eq!(grown.total, 95);
+
+        // A damaged record is named on the cold read AND on every warm one.
+        damage_record(&root, mar, 4);
+        let damaged = ask(false, 0, true);
+        assert_eq!(cold() - start, 5);
+        // A sealed block refuses every record it holds, so the damage is named
+        // once per record of that block, record 4 among them.
+        assert!(
+            damaged
+                .faults
+                .iter()
+                .any(|fault| fault.starts_with("record 4:")),
+            "{:?}",
+            damaged.faults
+        );
+        let warm = ask(true, 0, true);
+        assert_eq!(cold() - start, 5, "warm");
+        assert_eq!(
+            warm.faults, damaged.faults,
+            "a kept fold never hides a fault"
+        );
+        assert_eq!(
+            full_faults(&root, mar),
+            damaged.faults,
+            "and names exactly what the full read names"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The record faults the reading path names for the window to `to`.
+    fn full_faults(root: &std::path::Path, to: YearMonth) -> Vec<String> {
+        window_over(root, to, SortKey::Close, false, 0, 1, true).faults
+    }
+
+    /// **A price order past `MAX_SCAN_WINDOW_RECORDS` is refused by name, and
+    /// the ceiling itself is admitted.** W1-api5-4, D-4439.
+    #[test]
+    fn a_scan_past_its_ceiling_is_refused_by_name() {
+        assert_eq!(scan_admitted(MAX_SCAN_WINDOW_RECORDS), Ok(()));
+        assert_eq!(scan_admitted(0), Ok(()));
+        let why = scan_admitted(MAX_SCAN_WINDOW_RECORDS + 1).expect_err("past it");
+        assert!(why.contains("1048577 here"), "{why}");
+        assert!(why.contains("MAX_SCAN_WINDOW_RECORDS"), "{why}");
+        let source = include_str!("bars.rs");
+        let window_body = source
+            .split_once("\npub fn window(")
+            .expect("window")
+            .1
+            .split_once("\n}\n")
+            .expect("its end")
+            .0;
+        let at = |needle: &str| window_body.find(needle).expect(needle);
+        assert!(
+            at("scan_admitted(total)?;") < at("read_in_time("),
+            "refused before any record is read"
+        );
+    }
+
+    /// What a `ts` page with extremes and a price-ordered page cost over long
+    /// windows of full one-minute months: the first request (every month read)
+    /// against a later one (kept folds), and a price order at about the scan
+    /// ceiling. A measurement, run on purpose; the numbers are in
+    /// `docs/06-limits.md`'s D-4439 row. W1-api5-4.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_window_extremes_and_scan() {
+        let root = scratch("latency");
+        let months = months_of(
+            YearMonth::new(2006, 1).expect("m"),
+            YearMonth::new(2025, 12).expect("m"),
+        )
+        .expect("240 months");
+        for month in &months {
+            write_month(&root, *month, 8_250, 1_000);
+        }
+        let ask = |to: YearMonth, sort, extremes| {
+            window(
+                &root,
+                Vendor::Dhan,
+                "NSE",
+                "INDEX",
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                None,
+                YearMonth::new(2006, 1).expect("m"),
+                to,
+                sort,
+                true,
+                0,
+                200,
+                extremes,
+            )
+        };
+        let last = YearMonth::new(2025, 12).expect("m");
+        let cold =
+            crate::latency::Timed::run(1, || ask(last, SortKey::Ts, true).map(drop)).expect("cold");
+        let warm = crate::latency::Timed::run(200, || ask(last, SortKey::Ts, true).map(drop))
+            .expect("warm");
+        let seek = crate::latency::Timed::run(200, || ask(last, SortKey::Ts, false).map(drop))
+            .expect("seek");
+        // 127 months of 8,250 is 1,047,750 records, just under 2^20.
+        let scan_to = months[126];
+        let scan = crate::latency::Timed::run(10, || ask(scan_to, SortKey::Close, false).map(drop))
+            .expect("scan");
+        let refused = ask(months[127], SortKey::Close, false).expect_err("past the ceiling");
+        println!("{}", cold.line("ts + extremes, 240 x 8,250, first request"));
+        println!("{}", warm.line("ts + extremes, 240 x 8,250, kept folds"));
+        println!("{}", seek.line("ts, no extremes, 240 x 8,250"));
+        println!(
+            "{}",
+            scan.line("close order, 127 x 8,250 = 1,047,750 records")
+        );
+        println!("128 months refused: {refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **THE CHANGE IS AGAINST THE PREVIOUS BAR IN TIME, EVEN WHEN THE PAGE IS
     /// SORTED BY PRICE.**
     ///
@@ -1973,6 +2757,727 @@ mod window_tests {
         );
         assert_eq!(got.bars.len(), 100, "and it still returns what exists");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Flips one byte inside record `index` of the test month, so the block
+    /// checksum that covers it refuses every record in that 73-record block.
+    fn damage_record(root: &std::path::Path, month: YearMonth, index: u64) {
+        let file = open_classified(
+            root,
+            PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month,
+                file: FileKind::Bars,
+            },
+        )
+        .map_err(|why| why.message)
+        .expect("the month opens");
+        let at = file.layout().offset_of(index).expect("a committed record");
+        let path = file.path().to_path_buf();
+        drop(file);
+        let mut bytes = std::fs::read(&path).expect("the bar file reads");
+        let at = usize::try_from(at).expect("a test file offset fits usize");
+        bytes[at + 8] ^= 0xff;
+        std::fs::write(&path, bytes).expect("the damaged file writes");
+    }
+
+    fn ts_page(
+        root: &std::path::Path,
+        to: YearMonth,
+        desc: bool,
+        offset: usize,
+        limit: usize,
+    ) -> Window {
+        window(
+            root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            to,
+            SortKey::Ts,
+            desc,
+            offset,
+            limit,
+            false,
+        )
+        .expect("a legal window")
+    }
+
+    fn window_over(
+        root: &std::path::Path,
+        to: YearMonth,
+        sort: SortKey,
+        desc: bool,
+        offset: usize,
+        limit: usize,
+        extremes: bool,
+    ) -> Window {
+        window(
+            root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            to,
+            sort,
+            desc,
+            offset,
+            limit,
+            extremes,
+        )
+        .expect("a legal window")
+    }
+
+    /// **A ROW THAT OPENS A MONTH IS MEASURED AGAINST THE MONTH BEFORE IT.**
+    ///
+    /// `LOOKBACK`'s doc said only the window's very first record has nothing
+    /// behind it; the code gave `first_bar_in_file` to the first bar of EVERY
+    /// month, mid-window, on the seek path and the reading path alike
+    /// (Z1-slice11-F4, D-1762). Both directions, both paths, and a missing
+    /// month in between, which must not reset the lookback.
+    #[test]
+    fn a_row_opening_a_month_is_measured_against_the_last_bar_of_the_month_before() {
+        let root = scratch("cross-month");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 10, 1_000);
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 10, 2_000);
+        // March has no file at all; April's first row stands behind February.
+        write_month(&root, YearMonth::new(2026, 4).expect("m"), 10, 4_000);
+        let april = YearMonth::new(2026, 4).expect("m");
+        let jan_to_feb = crate::server::basis_points(1_009, 2_000).expect("a change");
+        let feb_to_apr = crate::server::basis_points(2_009, 4_000).expect("a change");
+        let change_at = |bars: &[WindowBar], close: i64| {
+            let row = bars
+                .iter()
+                .filter(|row| row.bar.close == close)
+                .collect::<Vec<_>>();
+            assert_eq!(row.len(), 1, "close {close} is on the page once");
+            (row[0].chg, row[0].chg_why)
+        };
+
+        // SEEK, ascending: 1008, 1009, 2000, 2001.
+        let page = window_over(&root, april, SortKey::Ts, false, 8, 4, false);
+        assert_eq!(page.bars.len(), 4);
+        assert_eq!(change_at(&page.bars, 2_000), (Some(jan_to_feb), ""));
+        assert_eq!(change_at(&page.bars, 2_001).0, Some(5));
+        // SEEK, ascending, a page that OPENS on April: offset 20 is April's first.
+        let page = window_over(&root, april, SortKey::Ts, false, 20, 2, false);
+        assert_eq!(change_at(&page.bars, 4_000), (Some(feb_to_apr), ""));
+        // SEEK, descending: April 4009..4000 are offsets 0..9, then Feb.
+        let page = window_over(&root, april, SortKey::Ts, true, 8, 4, false);
+        assert_eq!(
+            page.bars
+                .iter()
+                .map(|row| row.bar.close)
+                .collect::<Vec<_>>(),
+            vec![4_001, 4_000, 2_009, 2_008]
+        );
+        assert_eq!(change_at(&page.bars, 4_000), (Some(feb_to_apr), ""));
+        let page = window_over(&root, april, SortKey::Ts, true, 18, 4, false);
+        assert_eq!(change_at(&page.bars, 2_000), (Some(jan_to_feb), ""));
+
+        // READING path, by close, both directions, and the time-ordered
+        // extremes read in both directions.
+        for (sort, extremes) in [(SortKey::Close, false), (SortKey::Ts, true)] {
+            for desc in [false, true] {
+                let page = window_over(&root, april, sort, desc, 0, 30, extremes);
+                assert_eq!(page.bars.len(), 30);
+                assert_eq!(change_at(&page.bars, 2_000), (Some(jan_to_feb), ""));
+                assert_eq!(change_at(&page.bars, 4_000), (Some(feb_to_apr), ""));
+                // The window's earliest record is the one row with nothing behind it.
+                assert_eq!(change_at(&page.bars, 1_000), (None, "first_bar_in_file"));
+                assert_eq!(
+                    page.bars
+                        .iter()
+                        .filter(|row| row.chg_why == "first_bar_in_file")
+                        .count(),
+                    1
+                );
+            }
+        }
+        // And the seek path agrees that January's first row has none.
+        let page = window_over(&root, april, SortKey::Ts, false, 0, 1, false);
+        assert_eq!(change_at(&page.bars, 1_000), (None, "first_bar_in_file"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN EMPTY MONTH FILE IS SKIPPED BY THE LOOKBACK, IN BOTH DIRECTIONS.**
+    ///
+    /// A month whose file exists and holds no record has no last bar, so the
+    /// next month's first row stands behind the month before the empty one.
+    /// `earlier_in_time` keeps a file only when `n_valid > 0`; counting an
+    /// empty file as "earlier" gave April's first row `first_bar_in_file`
+    /// mid-window. Ascending and descending seek pages both reach it, one per
+    /// branch of `earlier_in_time`. G18-api-03.
+    #[test]
+    fn an_empty_month_file_between_two_months_does_not_reset_the_lookback() {
+        let root = scratch("cross-month-empty");
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 10, 2_000);
+        // March's file EXISTS and is empty: zero valid records.
+        write_month(&root, YearMonth::new(2026, 3).expect("m"), 0, 3_000);
+        write_month(&root, YearMonth::new(2026, 4).expect("m"), 10, 4_000);
+        let april = YearMonth::new(2026, 4).expect("m");
+        let feb_to_apr = crate::server::basis_points(2_009, 4_000).expect("a change");
+        let opening = |bars: &[WindowBar]| {
+            let rows = bars
+                .iter()
+                .filter(|row| row.bar.close == 4_000)
+                .map(|row| (row.chg, row.chg_why))
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 1, "April's first row is on the page once");
+            rows[0]
+        };
+        // Ascending: offset 10 is April's first row, the page opens on it.
+        let up = window_over(&root, april, SortKey::Ts, false, 10, 2, false);
+        assert_eq!(up.bars[0].bar.close, 4_000);
+        assert_eq!(opening(&up.bars), (Some(feb_to_apr), ""));
+        // Descending: offsets 8 and 9 are 4001 and 4000.
+        let down = window_over(&root, april, SortKey::Ts, true, 8, 2, false);
+        assert_eq!(
+            down.bars
+                .iter()
+                .map(|row| row.bar.close)
+                .collect::<Vec<_>>(),
+            vec![4_001, 4_000]
+        );
+        assert_eq!(opening(&down.bars), (Some(feb_to_apr), ""));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE `records unreadable` LINE NAMES THE FIRST FILE THAT REFUSED A
+    /// RECORD, NOT THE FIRST FILE READ.** January reads clean and February is
+    /// damaged: on the seek path the line names February's file. G18-api-27.
+    #[test]
+    fn the_unreadable_line_names_the_first_damaged_file_not_the_first_file() {
+        let root = scratch("first-faulted");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        write_month(&root, jan, 10, 1_000);
+        write_month(&root, feb, 10, 2_000);
+        damage_record(&root, feb, 5);
+        let path_of = |month| {
+            open_classified(
+                &root,
+                PathParts {
+                    vendor: Vendor::Dhan,
+                    exchange: "NSE",
+                    segment: "INDEX",
+                    symbol: SYMBOL,
+                    contract: None,
+                    timeframe: Timeframe::MINUTE_1,
+                    month,
+                    file: FileKind::Bars,
+                },
+            )
+            .map_err(|why| why.message)
+            .expect("the month opens")
+            .path()
+            .display()
+            .to_string()
+        };
+        let (jan_path, feb_path) = (path_of(jan), path_of(feb));
+        let from = crate::emitted::mark();
+        let page = window_over(&root, feb, SortKey::Ts, false, 0, 20, false);
+        assert!(
+            !page.faults.is_empty(),
+            "February's damage is named on the page"
+        );
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.bars", "records unreadable")
+                .into_iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "file", &feb_path)
+                        || crate::emitted::says(record, "file", &jan_path)
+                })
+                .collect();
+        assert_eq!(mine.len(), 1, "one line for the request: {mine:?}");
+        assert!(
+            crate::emitted::says(&mine[0], "file", &feb_path),
+            "{mine:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE READING PATH NAMES THE FIRST DAMAGED FILE TOO.** G18-api-27 pins
+    /// the seek path; ordered by close the window goes through `read_in_time`,
+    /// whose own `first_faulted` decides the `records unreadable` line. Three
+    /// placements of the damage: a clean month before a damaged one, a damaged
+    /// month before a clean one, and both months damaged. The first two rule
+    /// out "first file read"; only the third tells the first damaged file from
+    /// the last, so it is the case that pins the rule. R1286-api-02, D-4131.
+    #[test]
+    fn the_reading_path_names_the_first_damaged_file_in_time_order() {
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        for (tag, damaged, clean_closes) in [
+            ("first-faulted-scan-feb", vec![feb], 1_000..1_010),
+            ("first-faulted-scan-jan", vec![jan], 2_000..2_010),
+            ("first-faulted-scan-both", vec![jan, feb], 0..0),
+        ] {
+            let root = scratch(tag);
+            write_month(&root, jan, 10, 1_000);
+            write_month(&root, feb, 10, 2_000);
+            for &month in &damaged {
+                damage_record(&root, month, 5);
+            }
+            let path_of = |month| {
+                open_classified(
+                    &root,
+                    PathParts {
+                        vendor: Vendor::Dhan,
+                        exchange: "NSE",
+                        segment: "INDEX",
+                        symbol: SYMBOL,
+                        contract: None,
+                        timeframe: Timeframe::MINUTE_1,
+                        month,
+                        file: FileKind::Bars,
+                    },
+                )
+                .map_err(|why| why.message)
+                .expect("the month opens")
+                .path()
+                .display()
+                .to_string()
+            };
+            let (jan_path, feb_path) = (path_of(jan), path_of(feb));
+            // January is earlier in time, so it is the first damaged file
+            // whenever it is damaged at all.
+            let first_damaged = if damaged.contains(&jan) {
+                &jan_path
+            } else {
+                &feb_path
+            };
+            let from = crate::emitted::mark();
+            let page = window_over(&root, feb, SortKey::Close, false, 0, 20, false);
+            // One flipped byte fails its whole checksum block, which in a
+            // ten-row month is every row of it.
+            assert_eq!(
+                page.faults.len(),
+                10 * damaged.len(),
+                "{tag}: every damaged month is named"
+            );
+            let mut closes: Vec<i64> = page.bars.iter().map(|row| row.bar.close).collect();
+            closes.sort_unstable();
+            assert_eq!(
+                closes,
+                clean_closes.collect::<Vec<i64>>(),
+                "{tag}: a clean month still reads whole"
+            );
+            let mine: Vec<telemetry::Record> =
+                crate::emitted::landed(from, "api.bars", "records unreadable")
+                    .into_iter()
+                    .filter(|record| {
+                        crate::emitted::says(record, "file", &jan_path)
+                            || crate::emitted::says(record, "file", &feb_path)
+                    })
+                    .collect();
+            assert_eq!(mine.len(), 1, "{tag}: one line for the request: {mine:?}");
+            assert!(
+                crate::emitted::says(&mine[0], "file", first_damaged),
+                "{tag}: {mine:?}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// An unreadable LAST record of the month before is a named gap for the
+    /// next month's first row, not "first in file" and not a number measured
+    /// across the gap (Z1-slice11-F4).
+    #[test]
+    fn an_unreadable_last_record_of_the_month_before_is_named_not_measured_across() {
+        let root = scratch("cross-month-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        write_month(&root, feb, 10, 2_000);
+        // Records 146..200 are January's last checksum block.
+        damage_record(&root, jan, 199);
+        let seek = window_over(&root, feb, SortKey::Ts, false, 200, 1, false);
+        assert_eq!(seek.bars[0].bar.close, 2_000);
+        assert_eq!(seek.bars[0].chg, None);
+        assert_eq!(seek.bars[0].chg_why, "previous_unreadable");
+        let scan = window_over(&root, feb, SortKey::Close, true, 9, 1, false);
+        assert_eq!(scan.bars[0].bar.close, 2_000);
+        assert_eq!(scan.bars[0].chg_why, "previous_unreadable");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `records unreadable` is emitted once per REQUEST, never per month file:
+    /// `slots` runs once per file of a window and must not emit
+    /// (Z1-slice11-F3, D-1762). Shape test, because the sink is process-global.
+    #[test]
+    fn unreadable_records_are_reported_once_per_request_not_once_per_file() {
+        let source = include_str!("bars.rs");
+        let code = source
+            .split_once("\n#[cfg(test)]\n")
+            .expect("the tests follow the code")
+            .0;
+        let slots = code
+            .split_once("fn slots(")
+            .expect("slots exists")
+            .1
+            .split_once("\n}\n")
+            .expect("slots ends")
+            .0;
+        assert!(!slots.contains("note_unreadable_records"));
+        // `page`, the seek branch of `window`, and `read_in_time`: three call
+        // sites, each after its loop, plus the definition.
+        assert_eq!(code.matches("note_unreadable_records(").count(), 4);
+        // `read_in_time` is reached only from `window`, once, so its call is
+        // still one per request (P2-01-04, D-1766).
+        assert_eq!(code.matches("read_in_time(").count(), 2);
+        assert!(!code.contains("[`read_page`]"));
+        let limits = include_str!("../../../docs/06-limits.md");
+        assert!(
+            limits.contains(
+                "has three call sites — `page`, `window`'s seek branch, and `read_in_time`"
+            )
+        );
+    }
+
+    /// Null open interest sorts LAST in both directions, as `SortKey`
+    /// documents, and real values, zero included, keep their order ahead of it
+    /// (Z1-slice11-F5, D-1762).
+    #[test]
+    fn null_open_interest_sorts_last_in_both_directions() {
+        let root = scratch("oi-nulls");
+        // `write_month` stamps no open interest, so every January row is null.
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 3, 1_000);
+        let parts = PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2026, 2).expect("m"),
+            file: FileKind::Bars,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the same 32-bit id `write_month` folds"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a(SYMBOL) as u32;
+        let mut file = store::file::BarFile::open_or_create(
+            &root,
+            StorePath::new(parts).expect("a legal path"),
+            symbol_id,
+        )
+        .expect("a bar file");
+        let start = month_start_micros(YearMonth::new(2026, 2).expect("m"));
+        let rows: Vec<Bar> = [7, 0, 3]
+            .into_iter()
+            .zip(0i64..)
+            .map(|(oi, nth)| Bar {
+                ts_micros: start + nth * 60_000_000,
+                open: 2_000,
+                high: 2_010,
+                low: 1_990,
+                close: 2_000,
+                volume: 1,
+                open_interest: oi,
+            })
+            .collect();
+        file.append(&rows).expect("the batch appends");
+        drop(file);
+        let feb = YearMonth::new(2026, 2).expect("m");
+        let interest = |desc| {
+            window_over(&root, feb, SortKey::OpenInterest, desc, 0, 6, false)
+                .bars
+                .iter()
+                .map(|row| row.bar.open_interest)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(interest(false), vec![0, 3, 7, OI_NULL, OI_NULL, OI_NULL]);
+        assert_eq!(interest(true), vec![7, 3, 0, OI_NULL, OI_NULL, OI_NULL]);
+        // The nulls keep the timestamp tie-break among themselves.
+        let nulls = window_over(&root, feb, SortKey::OpenInterest, false, 3, 3, false);
+        assert_eq!(
+            nulls
+                .bars
+                .iter()
+                .map(|row| row.bar.close)
+                .collect::<Vec<_>>(),
+            vec![1_000, 1_001, 1_002]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN UNREADABLE LOOKBACK RECORD MUST NOT EAT THE PAGE'S FIRST ROW.**
+    ///
+    /// The lookback used to be read as part of the page block and then dropped
+    /// by POSITION, but `page` returns only the records that read. With the
+    /// lookback unreadable, the dropped row was the page's own first row, and
+    /// no fault named it (W1-api1-10, D-0730).
+    #[test]
+    fn an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page() {
+        let root = scratch("lookback-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        // Block 1 holds records 73..146; record 145 is the lookback of offset 146.
+        damage_record(&root, jan, 100);
+
+        let got = ts_page(&root, jan, false, 146, 5);
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(
+            closes,
+            [1_146, 1_147, 1_148, 1_149, 1_150],
+            "the page starts at the offset asked for: {:?}",
+            got.faults
+        );
+        assert_eq!(got.bars[0].chg, None, "its predecessor did not read");
+        assert_eq!(got.bars[0].chg_why, "previous_unreadable");
+        assert_eq!(
+            got.bars[0].oichg_why, "oi_null",
+            "a null OI is still named first"
+        );
+        assert!(
+            got.bars[1].chg.is_some(),
+            "the second row has a read predecessor"
+        );
+        assert!(
+            got.faults.is_empty(),
+            "no record on this page failed, so none is named: {:?}",
+            got.faults
+        );
+
+        // A readable lookback still fills the first cell.
+        let ok = ts_page(&root, jan, false, 147, 2);
+        assert_eq!(ok.bars[0].bar.close, 1_147);
+        assert!(ok.bars[0].chg.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAMAGED RECORD USES UP ITS PAGE POSITION.** A page that met an
+    /// unreadable record used to fill the gap from the next file, and the next
+    /// offset page returned those same rows again. Walking every page, both
+    /// directions, must return each readable row exactly once and name each
+    /// unreadable one exactly once (W1-api1-10, D-0730).
+    #[test]
+    fn paging_across_a_damaged_block_returns_every_readable_row_exactly_once() {
+        let root = scratch("paging-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        write_month(&root, jan, 100, 1_000);
+        write_month(&root, feb, 100, 2_000);
+        // Records 73..100 of January are one checksum block.
+        damage_record(&root, jan, 80);
+
+        let first = ts_page(&root, feb, false, 70, 10);
+        let closes: Vec<i64> = first.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(
+            closes,
+            [1_070, 1_071, 1_072],
+            "no row is borrowed from February"
+        );
+        assert_eq!(
+            first.faults.len(),
+            7,
+            "records 73..80 are named: {:?}",
+            first.faults
+        );
+
+        for desc in [false, true] {
+            let mut seen: Vec<i64> = Vec::new();
+            let mut faults = 0usize;
+            for offset in (0..200).step_by(10) {
+                let got = ts_page(&root, feb, desc, offset, 10);
+                assert!(got.bars.len() <= 10);
+                seen.extend(got.bars.iter().map(|r| r.bar.close));
+                faults += got.faults.len();
+            }
+            let mut expected: Vec<i64> = (1_000..1_073).chain(2_000..2_100).collect();
+            if desc {
+                expected.reverse();
+            }
+            assert_eq!(
+                seen, expected,
+                "desc={desc}: each readable row once, in order"
+            );
+            assert_eq!(faults, 27, "desc={desc}: each unreadable record named once");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A SORTED PAGE DOES NOT MEASURE A ROW ACROSS AN UNREADABLE BLOCK.**
+    ///
+    /// The reading path folded the change over the records that read, so the
+    /// first row after a damaged block was measured against the last row BEFORE
+    /// it — a real-looking number against a bar that is not its predecessor
+    /// (W1-api1-10, D-0730).
+    #[test]
+    fn a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it() {
+        let root = scratch("scan-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        // Records 73..146 are one checksum block; 0..73 and 146..200 read.
+        damage_record(&root, jan, 100);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            jan,
+            jan,
+            SortKey::Close,
+            false,
+            73,
+            2,
+            false,
+        )
+        .expect("a legal window");
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(closes, [1_146, 1_147], "the 74th smallest readable close");
+        assert_eq!(
+            got.bars[0].chg, None,
+            "its predecessor, record 145, did not read"
+        );
+        assert_eq!(got.bars[0].chg_why, "previous_unreadable");
+        assert!(
+            got.bars[1].chg.is_some(),
+            "record 146 read, so 147 is measured"
+        );
+        assert_eq!(got.faults.len(), 73, "every unreadable record is named");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The open-interest column says the same thing for the same gap, and a
+    /// predecessor that read is still measured.
+    #[test]
+    fn the_fold_names_an_unreadable_predecessor_in_both_change_columns() {
+        let bar = |close: i64, open_interest: i64| Bar {
+            ts_micros: 0,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0,
+            open_interest,
+        };
+        let rows = with_change(
+            Behind::Unreadable,
+            vec![
+                Some(bar(100, 50)),
+                Some(bar(110, 55)),
+                None,
+                Some(bar(120, 60)),
+            ],
+        );
+        assert_eq!(rows.len(), 3, "an unreadable slot yields no row");
+        for row in [&rows[0], &rows[2]] {
+            assert_eq!((row.chg, row.chg_why), (None, "previous_unreadable"));
+            assert_eq!((row.oichg, row.oichg_why), (None, "previous_unreadable"));
+        }
+        assert_eq!(rows[1].chg, Some(1_000), "110 against 100 is +10%");
+        assert_eq!(rows[1].oichg, Some(1_000), "55 against 50 is +10%");
+
+        let first = with_change(Behind::Nothing, vec![Some(bar(100, 50))]);
+        assert_eq!(first[0].chg_why, "first_bar_in_file");
+        assert_eq!(first[0].oichg_why, "first_bar_in_file");
+    }
+
+    /// **A zero base and a negative base are named apart.** Gap-audit #13,
+    /// D-3685: a corrupt negative previous close or open interest was reported
+    /// as "is zero".
+    #[test]
+    fn a_negative_base_is_not_called_zero() {
+        let bar = |close: i64, open_interest: i64| Bar {
+            ts_micros: 0,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0,
+            open_interest,
+        };
+        let rows = with_change(
+            Behind::Nothing,
+            vec![
+                Some(bar(0, 0)),
+                Some(bar(-100, -1)),
+                Some(bar(i64::MIN + 1, i64::MIN + 1)),
+                Some(bar(100, 10)),
+            ],
+        );
+        assert_eq!(rows[1].chg_why, "previous_close_zero");
+        assert_eq!(rows[1].oichg_why, "previous_oi_zero");
+        assert_eq!(rows[2].chg_why, "previous_close_negative");
+        assert_eq!(rows[2].oichg_why, "previous_oi_negative");
+        assert_eq!(rows[3].chg_why, "previous_close_negative");
+        assert_eq!(rows[3].oichg_why, "previous_oi_negative");
+        assert!(rows.iter().all(|row| row.chg.is_none()));
+    }
+
+    /// **THE `records unreadable` LINE COUNTS THE ROWS THAT READ, NOT THE
+    /// POSITIONS WALKED.** `slots` keeps a `None` for every unreadable record,
+    /// so the count it hands `note_unreadable_records` is kept apart from the
+    /// `Vec`'s length. A page over 200 records with one 73-record block damaged
+    /// must say 127 rows and 73 faults (W1-api1-10, D-0730).
+    #[test]
+    fn the_unreadable_records_line_counts_the_rows_that_read() {
+        let root = scratch("telemetry-rows");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        damage_record(&root, jan, 100);
+        let file = open_classified(
+            &root,
+            PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month: jan,
+                file: FileKind::Bars,
+            },
+        )
+        .map_err(|why| why.message)
+        .expect("the month opens");
+
+        let from = crate::emitted::mark();
+        let (rows, faults) = page(&file, 0, 200);
+        assert_eq!((rows.len(), faults.len()), (127, 73));
+
+        // FILTERED ON THIS FIXTURE'S OWN DIRECTORY: a sibling test damages the
+        // same block of a month the same size, in parallel.
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.bars", "records unreadable")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "file", "-telemetry-rows"))
+                .collect();
+        assert_eq!(mine.len(), 1, "one line for the page: {mine:?}");
+        assert!(
+            crate::emitted::counts(&mine[0], "rows", 127),
+            "the rows that read: {mine:?}"
+        );
+        assert!(
+            crate::emitted::counts(&mine[0], "faults", 73),
+            "the records that did not: {mine:?}"
+        );
+
+        drop(file);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

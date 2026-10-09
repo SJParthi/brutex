@@ -67,16 +67,17 @@
 //! # Integer square root, no floats
 //!
 //! Sigma needs a square root and §7 forbids floating point at any layer. This uses
-//! a Newton iteration on `i128` whose total step count is **bounded** by two
-//! compile-time constants — `ITERATION_CEILING` = 130 — for every `i128`. Measured
-//! by `C-I-03`, in `crates/indicators/benches/ratio.rs`, which folds the count at
-//! 1, `i64::MAX`, `10^30` and `i128::MAX`: 1, 37, 55 and 69 iterations.
+//! a decreasing Newton iteration on `i128` from a seed at or above the root, whose
+//! step count is **bounded** by one compile-time constant — `ITERATION_CEILING` =
+//! 16 — for every `i128`. Measured by `C-I-03`, in
+//! `crates/indicators/benches/ratio.rs`, which folds the count at 1, `i64::MAX`,
+//! `10^30` and `i128::MAX`: 2, 5, 5 and 6 iterations (D-1665; the old loop took
+//! 1, 37, 55 and 69, and 128 or 129 at every `k^2 - 1`).
 //!
-//! **Bounded, not flat.** This paragraph said "so the cost is O(1) for every
-//! `i128`", which reads as *the cost does not vary*. It varies by 217x, because the
-//! Newton loop exits on convergence. The honest limit is in `docs/06-limits.md` and
-//! the long version is on [`isqrt_i128`], which also records why an earlier 64-step
-//! cap was worse than this.
+//! **Bounded, not flat.** The count varies with the operand and each iteration is
+//! a 128-bit division. The honest limit is in `docs/06-limits.md` and the long
+//! version is on [`isqrt_i128`], which also records why the earlier loops were
+//! worse than this.
 //!
 //! # Sigma refuses on one observation
 //!
@@ -119,7 +120,7 @@ pub const BAND_SIGMA: [i128; 3] = [1, 2, 3];
 /// The ceiling this module will let `sum(p² · v)` reach before refusing.
 ///
 /// `i128::MAX` is 1.7 × 10³⁸. This stops at 10³⁴ — four orders of margin, which
-/// leaves room for the `sigma² = E[p²] − E[p]²` arithmetic that follows without
+/// leaves room for the centred `p2v − q·(pv + r)` arithmetic sigma does without
 /// having to prove a second bound.
 const ACC_CEILING: i128 = 10_i128.pow(34);
 
@@ -129,52 +130,42 @@ const ACC_CEILING: i128 = 10_i128.pow(34);
 /// `i128::isqrt` exists but is not `const`, and an unbounded loop would make
 /// sigma's cost depend on the value, which `CLAUDE.md` §3 rule 4 forbids.
 ///
-/// # Why the cap is [`NEWTON_STEPS`] and not 64
+/// # Decreasing Newton from a seed at or above the root (D-1665)
 ///
-/// An earlier version capped Newton at 64 and then stepped down without a bound,
-/// under a doc comment claiming "64 iterations is past the point of convergence
-/// for any `i128`". **That claim was false and was measured false.** Starting from
-/// `guess = v`, each iteration roughly halves the guess until it nears `sqrt(v)`,
-/// so a 127-bit input needs about 64 halvings *before* quadratic convergence even
-/// begins. Above roughly `10^34.3` the 64-step cap returned early and the
-/// unbounded step-down absorbed the remainder: at `i128::MAX` it needed
-/// **1,638,791,155,897,336,446 decrements**, i.e. `O(sqrt(v))`, in a `pub fn`
-/// documented as constant-cost.
+/// The seed is `1 << ceil(bits(v) / 2)`, which is at least `sqrt(v)` and at most
+/// twice it. From a seed at or above the root, the integer Newton step
+/// `(g + v / g) / 2` strictly decreases until it reaches `floor(sqrt(v))`, and the
+/// first step that does NOT decrease is the exit: the textbook rule, which returns
+/// the exact floor with no correction afterwards.
 ///
-/// 128 steps covers the ~64 halvings plus the handful of quadratic steps for every
-/// `i128`, and the step-down is now bounded at [`STEP_DOWN_STEPS`]. Both are
-/// compile-time constants, so the iteration count is **bounded** by
-/// [`ITERATION_CEILING`] for every input in the type — including the ones no
-/// caller reaches today.
+/// The seed's relative error `e` is at most 1, and each step leaves at most
+/// `e^2 / 2`, so six steps take it below `2^-64` -- under one unit for any root an
+/// `i128` can have -- and one or two more steps reach the exit. **Measured**
+/// (W3-indicators2-0): at most 5 iterations over every `v` in `1..=10^6`, 7 at
+/// `isqrt(i128::MAX)^2 - 1`, and 8 as the worst of five million pseudo-random
+/// inputs across every bit length. [`NEWTON_STEPS`] = 16 is twice that.
 ///
-/// # BOUNDED IS NOT FLAT, and this doc used to say it was
+/// # What it replaced, and why the old figures were wrong (W3-indicators2-1)
 ///
-/// Proven by `C-I-03` — `indicators::bench::the_integer_square_root_is_bounded_and_flat_per_iteration`
-/// in `crates/indicators/benches/ratio.rs` — which asserts the iteration count
-/// against [`ITERATION_CEILING`] and prints the cost spread without comparing it to
-/// a ceiling, because there is no honest ceiling to compare it to.
+/// The previous loop started at `guess = v` and stopped on `guess == previous`.
+/// From `v` a 127-bit input spends about sixty-four halvings before Newton even
+/// converges -- so 69 iterations at `i128::MAX` -- and every `v = k^2 - 1`
+/// (3, 8, 143, ...) never stops at all: Newton oscillates between `k - 1` and `k`,
+/// `guess` never equals `previous`, and the loop ran its whole 128-step cap, then
+/// a bounded step-down fixed the root. 999 of the inputs in `1..=10^6` hit that
+/// cap. The root was right; the documented 1-to-69 iteration range was not.
 ///
-/// The sentence above ended "so the cost is O(1) for every input in the type",
-/// and that reads as *the cost does not vary*. **It varies by a factor of 217.**
-/// Measured, `cargo bench -p indicators`: 4.3 ns at `v = 1` against 928 ns at
-/// `i128::MAX`. The Newton loop exits on convergence — `guess != previous` — so a
-/// small input finishes in one or two iterations and a 127-bit one needs about
-/// sixty-six, and each of those iterations is a 128-bit division whose own cost
-/// rises with the operands.
+/// # BOUNDED IS NOT FLAT
 ///
-/// Both readings of "O(1)" are defensible in isolation and only one of them is
-/// what a reader of `CLAUDE.md` §3 rule 4 will take from it, so the claim is now
-/// stated as the bound it is. **The honest limit is recorded in
-/// `docs/06-limits.md`**, which §10 makes the authority on what is not
-/// constant-time, and the bench measures cost PER ITERATION rather than end to
-/// end — see [`isqrt_i128_counted`].
+/// The count still depends on the operand -- 2 at `v = 1`, up to 8 measured --
+/// and each iteration is a 128-bit division whose own cost rises with its
+/// operands. The honest limit is in `docs/06-limits.md` §51; `C-I-03` in
+/// `crates/indicators/benches/ratio.rs` asserts the count against
+/// [`ITERATION_CEILING`] and prints the cost as context, not as a ceiling.
 ///
-/// Making it genuinely flat is possible and was rejected: dropping the
-/// convergence exit would run all 128 iterations every time, paying the worst
-/// case on every call to buy a flatness no caller needs. VWAP abstains entirely
-/// on spot indices, so this function does not execute on those runs. Eligible
-/// cash-stock sweeps do execute it; their per-bar cost includes this bounded,
-/// operand-dependent work.
+/// VWAP abstains entirely on spot indices, so this function does not execute on
+/// those runs. Eligible cash-stock sweeps do execute it; their per-bar cost
+/// includes this bounded, operand-dependent work.
 #[must_use]
 pub fn isqrt_i128(v: i128) -> i128 {
     isqrt_i128_counted(v).0
@@ -197,43 +188,46 @@ pub fn isqrt_i128_counted(v: i128) -> (i128, u32) {
     if v <= 0 {
         return (0, 0);
     }
-    let mut guess = v;
-    let mut previous = 0;
+    // AT OR ABOVE THE ROOT: `bits` is at most 127, so the shift is at most 64
+    // and the seed fits. `v >= 2^(bits - 1)` makes `2^ceil(bits / 2)` at least
+    // `sqrt(v)`, and `v < 2^bits` makes it at most twice the root.
+    let bits = i128::BITS.saturating_sub(v.leading_zeros());
+    let mut guess: i128 = 1_i128 << bits.div_ceil(2);
     let mut i: u32 = 0;
-    while i < NEWTON_STEPS && guess != previous {
-        previous = guess;
-        guess = guess.midpoint(v / guess);
-        i = i.saturating_add(1);
+    for step in 1..=NEWTON_STEPS {
+        i = step;
+        let next = guess.midpoint(v / guess);
+        // THE TEXTBOOK EXIT: from above, Newton decreases until it reaches the
+        // floor, and the first step that does not decrease means it has.
+        if next >= guess {
+            break;
+        }
+        guess = next;
     }
-    // Newton can land one above. A bounded step-down keeps the never-over-reports
-    // property without letting a pathological input turn this into a scan: with
-    // NEWTON_STEPS = 128 the residual is provably at most 1, and the bound of 2
-    // leaves a step of margin rather than sitting exactly on the proof.
-    let mut down: u32 = 0;
-    while down < STEP_DOWN_STEPS && guess > 0 && guess.saturating_mul(guess) > v {
-        guess = guess.saturating_sub(1);
-        down = down.saturating_add(1);
-    }
-    (guess, i.saturating_add(down))
+    // A RANGE, NOT `while i < NEWTON_STEPS` (R1286-rest-04, D-4152). The same
+    // steps, the same exit and the same count, with no comparison on the bound:
+    // no input reaches it -- 8 steps is the most any of 41,656,974 measured
+    // inputs took -- so `<` and `<=` there were one program, and Gate 18 run
+    // 1286 could not kill the second.
+    (guess, i)
 }
 
-/// Newton iterations. Enough for the full `i128` range — see [`isqrt_i128`].
-pub const NEWTON_STEPS: u32 = 128;
-
-/// Bound on the corrective step-down. The residual after [`NEWTON_STEPS`] is at
-/// most 1; this leaves one step of margin.
-pub const STEP_DOWN_STEPS: u32 = 2;
+/// Newton iterations allowed. Twice the measured worst case — see
+/// [`isqrt_i128`] for the proof sketch and the measurement.
+pub const NEWTON_STEPS: u32 = 16;
 
 /// The most iterations [`isqrt_i128`] can ever perform.
 ///
 /// A compile-time constant, which is what bounds the function's cost. Measured by
 /// `C-I-03`, in `crates/indicators/benches/ratio.rs`, which asserts the real count
 /// against this ceiling at both ends of the input range rather than trusting the
-/// constants to be large enough — the previous ceiling was 64 and was not.
+/// constant to be large enough.
 ///
 /// It bounds the cost and does **not** make it uniform; the spread is recorded in
-/// `docs/06-limits.md`.
-pub const ITERATION_CEILING: u32 = NEWTON_STEPS + STEP_DOWN_STEPS;
+/// `docs/06-limits.md`. It equals [`NEWTON_STEPS`]: the decreasing iteration
+/// lands exactly on the floor, so the bounded step-down the old oscillating loop
+/// needed is gone (D-1665).
+pub const ITERATION_CEILING: u32 = NEWTON_STEPS;
 
 /// The running VWAP accumulators for one session.
 ///
@@ -312,8 +306,48 @@ impl Vwap {
     /// One standard deviation of the volume-weighted price, in paisa. `None` when
     /// VWAP itself is unavailable.
     ///
-    /// `sigma² = E[p²] − E[p]²`, both weighted. Computed on the ×3 scale and
-    /// divided down once, so no per-bar rounding accumulates.
+    /// # Exactly `floor(σ)`, and the formula it replaced was not (D-0940)
+    ///
+    /// With `P = high + low + close` per bar (the ×3 scale), `V = Σv`,
+    /// `pv = ΣPv` and `p2v = ΣP²v`, the weighted variance on the ×3 scale is
+    /// `σ₃² = (V·p2v − pv²) / V²`, and this returns `floor(σ₃ / 3)` — the floor of
+    /// the exact volume-weighted standard deviation in paisa, nothing coarser.
+    ///
+    /// This used to compute `isqrt(floor(p2v/V) − floor(pv/V)²)`. Flooring the
+    /// mean BEFORE squaring it adds up to `2·M·frac(M)` to the variance
+    /// (`M = pv/V`, about three times the price), so two bars at 100.00 and
+    /// 100.01 rupees — half a paisa of dispersion — reported 57 paisa, and at
+    /// 57,000 rupees 1,378. Every band position (146–152, 190–197) and the near
+    /// scale of 145 were decided on that number for every cash-equity run
+    /// (`Availability::Present`). F-9A880B, ET-indicators-0, ET-indicators-12.
+    ///
+    /// **The exact form, in O(1).** Let `q = floor(pv/V)` and `r = pv − qV`,
+    /// so `0 <= r < V`. Then
+    ///
+    /// * `C = p2v − q·(pv + r) = Σ v·(P − q)²`, since `q·(pv + r) = 2q·pv − q²V`;
+    ///   so `C >= 0` and it is an integer;
+    /// * `σ₃² = C/V − (r/V)²`, since `pv/V = q + r/V`;
+    /// * with `C = wV + s`, `0 <= s < V`: `σ₃² = w + s/V − r²/V²`, both fractions
+    ///   in `[0, 1)`, so `floor(σ₃²) = w` when `s·V >= r²` and `w − 1` otherwise;
+    /// * `floor(sqrt(x)) = isqrt(floor(x))` for real `x >= 0`, and
+    ///   `floor(floor(y)/3) = floor(y/3)`, so `isqrt(floor(σ₃²)) / 3` is
+    ///   `floor(σ₃/3)` exactly.
+    ///
+    /// **Overflow.** For any state a fold produces, `p2v <= ACC_CEILING`, every
+    /// `P >= 3`, and Cauchy–Schwarz gives `pv² <= V·p2v`; so
+    /// `q·pv <= pv²/V <= p2v` and `q·r < q·V <= pv <= p2v/3`, and `q·(pv + r)`
+    /// stays below `2 × 10³⁴`, far inside `i128`. `s·V` and `r²` do NOT: `V`
+    /// passes `2^64` after two bars at `i64::MAX` volume, so they are compared as
+    /// 256-bit products by [`wide_mul`]. Every `i128` step is still `checked_`,
+    /// so a hostile private state refuses rather than wraps.
+    ///
+    /// Proven against an independent big-integer oracle by
+    /// `sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean`,
+    /// `sigma_is_exact_where_the_remainder_squared_leaves_i128` and
+    /// `maximal_volumes_at_minimal_prices_stay_exact`. Those prove exactness,
+    /// not cost: the O(1) above is by construction (a fixed number of checked
+    /// operations and one `isqrt_i128`, no loop over bars) and is UNVERIFIED as a
+    /// bench.
     #[must_use]
     pub fn sigma(&self) -> Option<i64> {
         if self.availability == Availability::Absent || self.v <= 0 {
@@ -330,15 +364,24 @@ impl Vwap {
         if self.contributing < MIN_FOR_SIGMA {
             return None;
         }
-        let mean = self.pv.div_euclid(self.v);
-        let mean_sq = self.p2v.div_euclid(self.v);
-        // `mean * mean` was the third unchecked multiply on this path. With the
-        // checked fold above, p2v <= ACC_CEILING bounds it — but the bound is an
-        // argument and this is a mechanism.
-        let mean_squared = mean.checked_mul(mean)?;
-        let variance = mean_sq.checked_sub(mean_squared)?;
-        // Negative variance is impossible in exact arithmetic and reachable here
-        // only through the two floor divisions above; clamp rather than sqrt a
+        // The derivation and the overflow bound are in the doc comment above.
+        // Every i128 step is checked: the ceiling bounds them for a folded state,
+        // but the bound is an argument and this is a mechanism.
+        let q = self.pv.div_euclid(self.v);
+        let r = self.pv.rem_euclid(self.v);
+        let centred = q
+            .checked_mul(self.pv.checked_add(r)?)
+            .and_then(|t| self.p2v.checked_sub(t))?;
+        let whole = centred.div_euclid(self.v);
+        let rest = centred.rem_euclid(self.v);
+        // floor(C/V − r²/V²): one less than floor(C/V) exactly when s·V < r².
+        let borrow = wide_mul(rest.unsigned_abs(), self.v.unsigned_abs())
+            < wide_mul(r.unsigned_abs(), r.unsigned_abs());
+        // `borrow` needs r > 0, so V >= 2 and |whole| <= |i128::MIN| / 2: the
+        // subtraction cannot saturate; saturating only so it cannot panic.
+        let variance = whole.saturating_sub(i128::from(borrow));
+        // Negative variance is impossible for any folded state (C >= 0); it is
+        // reachable only from a hostile private state. Clamp rather than sqrt a
         // negative, and never report a negative sigma.
         let sigma_scaled = isqrt_i128(variance.max(0));
         i64::try_from(sigma_scaled.div_euclid(3)).ok()
@@ -442,12 +485,46 @@ impl Vwap {
         Ok(self.bits(bar.close, tolerance))
     }
 
+    /// `x = 3V·close − pv`: the close's exact distance from VWAP, on the `3V`
+    /// scale (ind1-1, ind1-2, D-2612).
+    ///
+    /// Inside `i128` for every close a fold has seen, since `3V·close <= pv`'s
+    /// own bound there. A close on a zero-volume bar is not folded and can
+    /// leave it; then `|3V·close|` exceeds `i128::MAX` while `|pv| <= 10^34`,
+    /// so the side is the close's own sign and the distance is past every band
+    /// (`m²·D <= 9·V·p2v < 10^68`), which [`Reach::Beyond`] carries exactly.
+    fn reach(&self, close: i64) -> Reach {
+        self.v
+            .checked_mul(3)
+            .and_then(|scaled| scaled.checked_mul(i128::from(close)))
+            .and_then(|scaled| scaled.checked_sub(self.pv))
+            .map_or(Reach::Beyond(close.cmp(&0)), Reach::Within)
+    }
+
+    /// `D = V·p2v − pv²` as a 256-bit value, so `σ = √D / 3V` exactly.
+    ///
+    /// Non-negative for every folded state by Cauchy–Schwarz; a hostile private
+    /// state that breaks it is clamped to zero, the same clamp [`Self::sigma`]
+    /// applies.
+    fn dispersion(&self) -> (u128, u128) {
+        let spread = wide_mul(self.v.unsigned_abs(), self.p2v.unsigned_abs());
+        let mean = wide_mul(self.pv.unsigned_abs(), self.pv.unsigned_abs());
+        if spread < mean {
+            (0, 0)
+        } else {
+            wide_sub(spread, mean)
+        }
+    }
+
     /// The 20 positions for one closing price.
     ///
     /// # Cost
     ///
-    /// One division for the mean, one for the mean square, one fixed-iteration
-    /// square root, then 20 comparisons. Every count is a compile-time constant.
+    /// Two Euclidean divisions for the mean's quotient and remainder, two for the
+    /// centred sum's, two fixed-size 256-bit products for the floor correction
+    /// (D-0940), one bounded square root, then 20 comparisons. Every count is a
+    /// compile-time constant; the square root's cost is bounded, not flat
+    /// (`docs/06-limits.md`).
     #[must_use]
     pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
         let mut mask = ConditionMask::ZERO;
@@ -463,11 +540,24 @@ impl Vwap {
         // set, because retiring a shipped position needs a decisions entry and a
         // VOCAB_VERSION bump, and quietly setting only one would make the shipped
         // pair silently dead instead.
-        if close > vwap {
+        //
+        // EXACT, NOT FLOORED (ind1-2, ind1-1, D-2612): every side and band test
+        // below is decided on the unrounded rationals. `value()` and `sigma()`
+        // floor, and a close equal to the floor of a fractional VWAP is below
+        // it, while `floor(vwap) ± m·floor(σ)` put a band edge up to 1 + m paisa
+        // from the true one. The floored levels still feed the near bands and
+        // the representability gate, which are unchanged.
+        let reach = self.reach(close);
+        let dispersion = self.dispersion();
+        let side = match reach {
+            Reach::Within(x) => x.cmp(&0),
+            Reach::Beyond(side) => side,
+        };
+        if side == core::cmp::Ordering::Greater {
             mask = set(mask, 52);
             mask = set(mask, 143);
         }
-        if close < vwap {
+        if side == core::cmp::Ordering::Less {
             mask = set(mask, 53);
             mask = set(mask, 144);
         }
@@ -490,13 +580,16 @@ impl Vwap {
             let Some((upper, lower)) = band_levels(vwap, sigma, *multiple) else {
                 continue;
             };
-            if close > upper {
+            // close > vwap + m·σ  ⇔  x > m·√D  ⇔  x > 0 and x² > m²·D, with
+            // x = 3V·close − pv and D = V·p2v − pv² (so σ = √D / 3V).
+            let outside = band_outside(reach, dispersion, *multiple);
+            if outside && side == core::cmp::Ordering::Greater {
                 mask = set(mask, above);
             }
-            if close < lower {
+            if outside && side == core::cmp::Ordering::Less {
                 mask = set(mask, below);
             }
-            if lower <= close && close <= upper {
+            if !outside {
                 mask = set(mask, inside);
             }
             mask = near(mask, near_up, tolerance, close, upper, sigma);
@@ -531,6 +624,68 @@ impl Vwap {
         }
         known
     }
+}
+
+/// `a · b` as a 256-bit `(high, low)` pair, for operands below `2^127`.
+///
+/// [`Vwap::sigma`] has to compare `s · V` against `r²`, and with `V` past `2^64`
+/// — reachable: two bars at `i64::MAX` volume — either product can leave `i128`.
+/// Four 64-bit partial products, no loop, no branch: a fixed cost for every
+/// input. The tuple compares lexicographically, high word first, which is the
+/// order of the 256-bit values. Exact for every `a, b < 2^128`; the caller's
+/// operands are non-negative `i128`s, so below `2^127`.
+const fn wide_mul(a: u128, b: u128) -> (u128, u128) {
+    const LOW: u128 = u64::MAX as u128;
+    let (a_hi, a_lo) = (a >> 64, a & LOW);
+    let (b_hi, b_lo) = (b >> 64, b & LOW);
+    let low_low = a_lo * b_lo;
+    let high_low = a_hi * b_lo;
+    let low_high = a_lo * b_hi;
+    let high_high = a_hi * b_hi;
+    // Each term is below 2^64, so three of them cannot leave u128, and the two
+    // halves of `low` occupy disjoint bits, so their sum cannot carry.
+    let middle = (low_low >> 64) + (high_low & LOW) + (low_high & LOW);
+    let low = (low_low & LOW) + ((middle & LOW) << 64);
+    let high = high_high + (high_low >> 64) + (low_high >> 64) + (middle >> 64);
+    (high, low)
+}
+
+/// A close's exact distance from VWAP: `3V·close − pv` when it fits `i128`,
+/// otherwise only its side, which is then past every band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Within(i128),
+    Beyond(core::cmp::Ordering),
+}
+
+/// `a − b` for 256-bit `(high, low)` pairs with `a >= b`.
+const fn wide_sub(a: (u128, u128), b: (u128, u128)) -> (u128, u128) {
+    let (low, borrow) = a.1.overflowing_sub(b.1);
+    (a.0.wrapping_sub(b.0).wrapping_sub(borrow as u128), low)
+}
+
+/// `a · k` for a 256-bit `a` and a small `k`, or `None` past 256 bits.
+fn wide_times(a: (u128, u128), k: u128) -> Option<(u128, u128)> {
+    const LOW: u128 = u64::MAX as u128;
+    let low_low = (a.1 & LOW).checked_mul(k)?;
+    let low_high = (a.1 >> 64).checked_mul(k)?.checked_add(low_low >> 64)?;
+    let low = (low_low & LOW) | ((low_high & LOW) << 64);
+    let high = a.0.checked_mul(k)?.checked_add(low_high >> 64)?;
+    Some((high, low))
+}
+
+/// Whether the close lies strictly outside `vwap ± m·σ`, exactly:
+/// `x² > m²·D` (ind1-1, D-2612). A product past 256 bits on the right is
+/// above any `x²` an `i128` can square, so it reads as inside.
+fn band_outside(reach: Reach, dispersion: (u128, u128), multiple: i128) -> bool {
+    let Reach::Within(x) = reach else {
+        return true;
+    };
+    let squared = wide_mul(x.unsigned_abs(), x.unsigned_abs());
+    let m = multiple.unsigned_abs();
+    m.checked_mul(m)
+        .and_then(|m2| wide_times(dispersion, m2))
+        .is_some_and(|edge| squared > edge)
 }
 
 /// Truth and availability share exactly the same representable band bounds.
@@ -621,16 +776,16 @@ mod tests {
     /// **not** reset the accumulators before reaching the guard under test.
     /// **`isqrt` of a perfect square is exact, and the step-down must not overrun.**
     ///
-    /// The Newton loop can overshoot by one, so a bounded step-down corrects it
-    /// while `guess * guess > v`. Mutated to `>= v` that condition is TRUE at a
-    /// perfect square, so the correction fires once too often and `isqrt(144)`
-    /// answers **11**. A standard deviation one unit low on every exact square is
-    /// the kind of wrong that never looks wrong.
+    /// The exit is `next >= guess`. Mutated to `next > guess` the loop keeps
+    /// stepping at the floor -- the count jumps to the cap -- and the root is
+    /// unchanged, so the counts below are what catch it. Mutated so the exit never
+    /// fires, or the seed starts below the root, the floor itself moves.
     #[test]
     fn isqrt_is_exact_on_perfect_squares_and_does_not_overshoot_down() {
         for n in [1_i128, 2, 3, 12, 100, 1_000, 46_341, 1_000_000] {
-            let (root, _) = isqrt_i128_counted(n * n);
+            let (root, steps) = isqrt_i128_counted(n * n);
             assert_eq!(root, n, "isqrt({}) must be exactly {n}", n * n);
+            assert!(steps <= 8, "isqrt({}) took {steps}", n * n);
         }
         // And one either side of a square, so the floor is a floor.
         let (below, _) = isqrt_i128_counted(143);
@@ -639,20 +794,57 @@ mod tests {
         assert_eq!(above, 12, "floor above 144");
     }
 
-    /// **The iteration ceiling is the sum of its two halves.**
+    /// **W3-indicators2-1: `k^2 - 1` no longer oscillates to the cap.**
+    ///
+    /// The old loop stopped on `guess == previous`, and at every `v = k^2 - 1`
+    /// Newton alternates between `k - 1` and `k`, so it ran all 128 steps and a
+    /// step-down repaired the root: 128 or 129 iterations at every one of these,
+    /// measured on the old code. Each must now be exact in at most 8.
+    #[test]
+    fn one_below_a_square_is_exact_in_a_handful_of_steps() {
+        for k in [2_i128, 3, 12, 975, 1_000_000_000_000_000, i128::MAX.isqrt()] {
+            let v = k * k - 1;
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, k - 1, "isqrt({v})");
+            assert!(steps <= 8, "isqrt({v}) took {steps} iterations");
+        }
+    }
+
+    /// Every input in `1..=10^6`, against the standard library, and the most
+    /// iterations any of them takes -- the figure the docs quote as measured.
+    #[test]
+    fn every_input_to_a_million_is_exact_and_takes_at_most_five_steps() {
+        let mut worst = 0_u32;
+        for v in 1..=1_000_000_i128 {
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, v.isqrt(), "isqrt({v})");
+            worst = worst.max(steps);
+        }
+        assert_eq!(worst, 5, "the measured worst case below 10^6 moved");
+        for v in [
+            i128::MAX,
+            i128::MAX - 1,
+            1_i128 << 126,
+            (1_i128 << 126) - 1,
+            2,
+            3,
+            4,
+        ] {
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, v.isqrt(), "isqrt({v})");
+            assert!(steps <= 8, "isqrt({v}) took {steps}");
+        }
+    }
+
+    /// **The iteration ceiling is the Newton budget, and nothing else.**
     ///
     /// `ITERATION_CEILING` is what the ratio bench compares a measured step count
-    /// against. Mutated from `+` to `-` it becomes 126 — BELOW the Newton budget
-    /// alone — and to `*` it becomes 256. Either silently changes what the bench
-    /// is allowed to accept, and nothing in the library asserted the arithmetic.
+    /// against. The decreasing iteration needs no step-down, so the ceiling is the
+    /// Newton budget alone: twice the measured worst case of 8.
     #[test]
-    fn the_iteration_ceiling_is_the_sum_of_the_two_loops() {
-        assert_eq!(
-            ITERATION_CEILING,
-            NEWTON_STEPS + STEP_DOWN_STEPS,
-            "the ceiling is the two budgets added, not any other operation"
-        );
-        assert_eq!(ITERATION_CEILING, 130, "128 Newton steps plus 2 step-downs");
+    fn the_iteration_ceiling_is_the_newton_budget() {
+        assert_eq!(ITERATION_CEILING, NEWTON_STEPS);
+        assert_eq!(ITERATION_CEILING, 16, "twice the measured worst case");
     }
 
     /// **A close exactly ON the VWAP is neither above it nor below it.**
@@ -797,6 +989,85 @@ mod tests {
             close: price,
             volume,
             open_interest: i64::MIN,
+        }
+    }
+
+    /// ind1-1, ind1-2, D-2612: every side and band bit agrees with the exact
+    /// rational answer, checked against a plain-`i128` oracle on small
+    /// sessions where nothing can overflow. The audit's own session comes
+    /// first: exact VWAP 1016.65, σ 1.93, band-1 upper 1018.58, so close 1018
+    /// is NOT above it (the floored edge was 1017). Then a close equal to the
+    /// floor of a fractional VWAP (1000.5) is below it.
+    #[test]
+    fn side_and_band_bits_are_decided_on_the_exact_rationals() {
+        let bar = |minute: i64, high: i64, low: i64, close: i64, volume: i64| Candle {
+            high,
+            low,
+            open: close,
+            close,
+            ..at(minute, close, volume)
+        };
+        let oracle = |v: &Vwap, close: i64| -> Vec<(u16, bool)> {
+            let x = 3 * v.v * i128::from(close) - v.pv;
+            let d = v.v * v.p2v - v.pv * v.pv;
+            let mut out = vec![(52, x > 0), (53, x < 0), (143, x > 0), (144, x < 0)];
+            for (m, (above, below, _, _, inside)) in BAND_SIGMA.iter().zip(BAND_POSITIONS) {
+                let outside = x * x > m * m * d;
+                out.push((above, outside && x > 0));
+                out.push((below, outside && x < 0));
+                out.push((inside, !outside));
+            }
+            out
+        };
+        let check = |bars: &[Candle], close: i64| {
+            let mut v = Vwap::for_slice(Availability::Present);
+            for b in bars {
+                v.fold(b).expect("a legal bar");
+            }
+            let bits = v.bits(close, tol());
+            for (position, want) in oracle(&v, close) {
+                assert_eq!(
+                    bits.get(u32::from(position)),
+                    want,
+                    "position {position} at close {close} over {bars:?}"
+                );
+            }
+            bits
+        };
+        let audit = [
+            bar(0, 1016, 1014, 1014, 602),
+            bar(1, 1020, 1017, 1017, 37),
+            bar(2, 1017, 1016, 1016, 470),
+            bar(3, 1022, 1018, 1018, 481),
+        ];
+        let bits = check(&audit, 1018);
+        assert!(!bits.get(146), "1018 is inside band 1 (upper edge 1018.58)");
+        let half = [at(0, 1001, 5), at(1, 1000, 5)];
+        let bits = check(&half, 1000);
+        assert!(
+            bits.get(53) && bits.get(144),
+            "1000 is below a VWAP of 1000.5"
+        );
+
+        // A deterministic sweep of small sessions.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |span: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            i64::try_from(seed % span).expect("small")
+        };
+        for _ in 0..2_000 {
+            let bars: Vec<Candle> = (0..4)
+                .map(|minute| {
+                    let low = 990 + next(20);
+                    let high = low + next(6);
+                    let close = low + next(u64::try_from(high - low + 1).expect("small"));
+                    bar(minute, high, low, close, 1 + next(700))
+                })
+                .collect();
+            let close = 985 + next(40);
+            check(&bars, close);
         }
     }
 
@@ -1100,30 +1371,31 @@ mod tests {
     ///
     /// `exactly_one_relation_holds_per_band` already asserts the exclusivity,
     /// and it did not catch this: its four closes are round numbers that never
-    /// land on a computed edge. The edge has to be COMPUTED from the live VWAP
-    /// and sigma to be tested, which is what this does.
+    /// land on a computed edge.
+    ///
+    /// Since D-2612 the bands are decided on the exact rationals, so a floored
+    /// `vwap ± m·sigma` is no longer an edge at all. The fixture therefore
+    /// builds a session whose VWAP and sigma are EXACT integers — equal volume
+    /// at `P - d` and `P + d`, so VWAP is `P` and sigma is `d` with no residue —
+    /// and the edges `P ± m·d` are then the true edges, inside, with one paisa
+    /// past each outside.
     #[test]
     fn a_close_exactly_on_a_band_edge_is_inside_that_band() {
+        const P: i64 = 2_500_000;
+        const D: i64 = 1_000;
         let mut v = Vwap::for_slice(Availability::Present);
         for minute in 0..60 {
-            let price = 2_500_000 + (minute * 137) % 4_000;
-            assert!(v.step(&at(minute, price, 1_000 + minute), tol()).is_ok());
+            let price = if minute % 2 == 0 { P - D } else { P + D };
+            assert!(v.step(&at(minute, price, 1_000), tol()).is_ok());
         }
-        let vwap = v.value().expect("a primed session has a vwap");
-        let sigma = v.sigma().expect("and a sigma");
-        assert!(
-            sigma > 0,
-            "the fixture must have spread, or the edges collapse"
-        );
+        assert_eq!(v.value(), Some(P), "the fixture's VWAP is exact");
+        assert_eq!(v.sigma(), Some(D), "and so is its sigma");
 
         for (band, (multiple, (above, below, _, _, inside))) in
             BAND_SIGMA.iter().zip(BAND_POSITIONS).enumerate()
         {
-            let offset = i64::try_from(multiple * i128::from(sigma)).expect("fits");
-            for (edge, name) in [
-                (vwap.saturating_add(offset), "upper"),
-                (vwap.saturating_sub(offset), "lower"),
-            ] {
+            let offset = i64::try_from(multiple * i128::from(D)).expect("fits");
+            for (edge, name) in [(P + offset, "upper"), (P - offset, "lower")] {
                 let mask = v.bits(edge, tol());
                 assert!(
                     mask.get(u32::from(inside)),
@@ -1134,6 +1406,10 @@ mod tests {
                     "band {band}: a close on the {name} edge is not outside it"
                 );
             }
+            let past = v.bits(P + offset + 1, tol());
+            assert!(past.get(u32::from(above)) && !past.get(u32::from(inside)));
+            let past = v.bits(P - offset - 1, tol());
+            assert!(past.get(u32::from(below)) && !past.get(u32::from(inside)));
         }
     }
 
@@ -1410,6 +1686,9 @@ mod tests {
     /// explaining is the single most damaging answer this function can give. The
     /// VWAP itself is still answerable here, which is the point: the refusal is the
     /// checked multiply and not a general unavailability.
+    ///
+    /// Since D-0940 the guarded product is `q·(pv + r)` rather than `mean²`; on this
+    /// state `r = 0` and it is the same `4e44`, refused by the same kind of check.
     #[test]
     fn sigma_refuses_when_the_mean_square_leaves_i128() {
         let v = primed(0, 20_000_000_000_000_000_000, 1, 0);
@@ -1492,16 +1771,15 @@ mod tests {
     /// thing measuring it was `benches/ratio.rs` — which `cargo test` does not run,
     /// which coverage does not run, and which lives behind its own CI gate. The four
     /// counts below are the ones that bench prints and the module documentation
-    /// quotes; a quoted number rots and an asserted one does not. Lower
-    /// [`NEWTON_STEPS`] and the count at `i128::MAX` moves, which is the failure the
-    /// old 64-step cap hid behind an unbounded step-down.
+    /// quotes; a quoted number rots and an asserted one does not. A change to the
+    /// seed or the exit moves these counts (D-1665).
     #[test]
     fn the_documented_iteration_counts_are_the_measured_ones() {
         for (v, want) in [
-            (1_i128, 1_u32),
-            (i128::from(i64::MAX), 37),
-            (10_i128.pow(30), 55),
-            (i128::MAX, 69),
+            (1_i128, 2_u32),
+            (i128::from(i64::MAX), 5),
+            (10_i128.pow(30), 5),
+            (i128::MAX, 6),
         ] {
             let (root, steps) = isqrt_i128_counted(v);
             assert_eq!(root, v.isqrt(), "the root of {v} is not the exact one");
@@ -1521,5 +1799,341 @@ mod tests {
             (0, 0),
             "a negative input has no root and must not be iterated on",
         );
+    }
+
+    /// An exact, independent oracle for the weighted standard deviation in paisa.
+    ///
+    /// Arbitrary-precision unsigned arithmetic on 32-bit limbs — multiply, add and
+    /// compare, nothing else — so it shares no code and no algebra with
+    /// [`Vwap::sigma`]. It answers the largest `s >= 0` with
+    /// `(3·s·V)² + pv² <= V·p2v`, i.e. `s = floor(sqrt(V·p2v − pv²) / (3·V))`:
+    /// the floor of the exact volume-weighted standard deviation of `hlc3`, in
+    /// paisa. `None` when that numerator is negative, which no fold can produce.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "a limb-array oracle in a test; every index is bounded by the \
+                  lengths it is computed from, and a panic is a failed test"
+    )]
+    mod oracle {
+        fn limbs(x: u128) -> Vec<u64> {
+            (0..4)
+                .map(|i| u64::try_from((x >> (32 * i)) & 0xffff_ffff).expect("32 bits"))
+                .collect()
+        }
+
+        fn trim(mut x: Vec<u64>) -> Vec<u64> {
+            while x.last() == Some(&0) {
+                x.pop();
+            }
+            x
+        }
+
+        fn mul(a: &[u64], b: &[u64]) -> Vec<u64> {
+            let mut out = vec![0_u64; a.len() + b.len() + 1];
+            for (i, &x) in a.iter().enumerate() {
+                let mut carry = 0_u64;
+                for (j, &y) in b.iter().enumerate() {
+                    let t = out[i + j] + x * y + carry;
+                    out[i + j] = t & 0xffff_ffff;
+                    carry = t >> 32;
+                }
+                let mut k = i + b.len();
+                while carry > 0 {
+                    let t = out[k] + carry;
+                    out[k] = t & 0xffff_ffff;
+                    carry = t >> 32;
+                    k += 1;
+                }
+            }
+            trim(out)
+        }
+
+        fn add(a: &[u64], b: &[u64]) -> Vec<u64> {
+            let n = a.len().max(b.len()) + 1;
+            let mut out = vec![0_u64; n];
+            let mut carry = 0_u64;
+            for (i, slot) in out.iter_mut().enumerate() {
+                let t = a.get(i).copied().unwrap_or(0) + b.get(i).copied().unwrap_or(0) + carry;
+                *slot = t & 0xffff_ffff;
+                carry = t >> 32;
+            }
+            trim(out)
+        }
+
+        fn le(a: &[u64], b: &[u64]) -> bool {
+            let (a, b) = (trim(a.to_vec()), trim(b.to_vec()));
+            if a.len() != b.len() {
+                return a.len() < b.len();
+            }
+            for (x, y) in a.iter().rev().zip(b.iter().rev()) {
+                if x != y {
+                    return x < y;
+                }
+            }
+            true
+        }
+
+        /// `a·b` as a `(high, low)` pair of 128-bit words, from the limbs.
+        pub(super) fn product(a: u128, b: u128) -> (u128, u128) {
+            let limbs = mul(&limbs(a), &limbs(b));
+            let word = |from: usize| {
+                (from..from + 4).rev().fold(0_u128, |acc, i| {
+                    (acc << 32) | u128::from(limbs.get(i).copied().unwrap_or(0))
+                })
+            };
+            (word(4), word(0))
+        }
+
+        /// `(a·b) <= (c·d)` exactly, for the wide-compare test.
+        pub(super) fn product_le(a: u128, b: u128, c: u128, d: u128) -> bool {
+            le(&mul(&limbs(a), &limbs(b)), &mul(&limbs(c), &limbs(d)))
+        }
+
+        pub(super) fn sigma(pv: i128, v: i128, p2v: i128) -> Option<i64> {
+            let pv = u128::try_from(pv).ok()?;
+            let v = u128::try_from(v).ok()?;
+            let p2v = u128::try_from(p2v).ok()?;
+            let rhs = mul(&limbs(v), &limbs(p2v));
+            let pv_sq = mul(&limbs(pv), &limbs(pv));
+            let fits = |s: u128| {
+                let three_s_v = mul(&limbs(3 * s), &limbs(v));
+                le(&add(&mul(&three_s_v, &three_s_v), &pv_sq), &rhs)
+            };
+            if !fits(0) {
+                return None;
+            }
+            // Largest s in [0, 2^63) that fits: plain bisection.
+            let (mut lo, mut hi) = (0_u128, 1_u128 << 63);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            i64::try_from(lo).ok()
+        }
+    }
+
+    /// A deterministic generator, so every fixture is reproducible byte for byte.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 11
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// **Sigma is the exact floor of the weighted standard deviation, whatever the
+    /// remainder of the mean** (ET-indicators-0, ET-indicators-12, F-9A880B, D-0940).
+    ///
+    /// Every earlier sigma fixture had a mean that divided exactly — 200/300 at
+    /// volume 1, 1,000,000/1,000,200 at volume 100 — so `pv mod v` was zero and the
+    /// old formula's two floors cancelled. This folds 600 generated sessions of real
+    /// bars (prices from 1 paisa to 5 × 10⁸, volumes from 1 to `i64::MAX`) and checks
+    /// `sigma()` after every bar against [`oracle::sigma`], and requires that most of
+    /// the states it checked had a non-zero remainder. On the old
+    /// `isqrt(floor(p2v/v) − floor(pv/v)²)` it fails on the first such state.
+    #[test]
+    fn sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean() {
+        let mut rng = Lcg(0x9A88_0B00_0940);
+        let bases: [i64; 6] = [1, 37, 10_000, 1_000_000, 5_700_000, 500_000_000];
+        let volume_caps: [u64; 4] = [1, 20_000, 1_000_000_000, i64::MAX.unsigned_abs()];
+        let (mut checked, mut with_remainder, mut nonzero_sigma) = (0_u32, 0_u32, 0_u32);
+        for session in 0..600_u64 {
+            let mut v = Vwap::for_slice(Availability::Present);
+            let base = *bases
+                .get(usize::try_from(session % 6).expect("small"))
+                .expect("six bases");
+            let cap = *volume_caps
+                .get(usize::try_from((session / 6) % 4).expect("small"))
+                .expect("four caps");
+            let bars = 2 + rng.below(40);
+            let mut price = base;
+            for minute in 0..bars {
+                let step = i64::try_from(rng.below(2 * 50 + 1)).expect("small") - 50;
+                price = (price + step * (base / 1_000 + 1)).max(1);
+                let volume = i64::try_from(1 + rng.below(cap)).expect("below i64::MAX");
+                let minute = i64::try_from(minute).expect("small");
+                if v.fold(&at(minute, price, volume)).is_err() {
+                    break; // past the accumulator ceiling: refused, never wrapped
+                }
+                if v.contributing < MIN_FOR_SIGMA {
+                    continue;
+                }
+                let want = oracle::sigma(v.pv, v.v, v.p2v);
+                assert_eq!(
+                    v.sigma(),
+                    want,
+                    "session {session} bar {minute}: pv {} v {} p2v {}",
+                    v.pv,
+                    v.v,
+                    v.p2v,
+                );
+                checked += 1;
+                with_remainder += u32::from(v.pv.rem_euclid(v.v) != 0);
+                nonzero_sigma += u32::from(want.is_some_and(|s| s > 0));
+            }
+        }
+        assert!(checked > 5_000, "only {checked} states checked");
+        assert!(
+            with_remainder * 2 > checked,
+            "only {with_remainder} of {checked} states had pv mod v != 0, \
+             so this test no longer exercises the defect it exists for",
+        );
+        assert!(
+            nonzero_sigma > 1_000,
+            "only {nonzero_sigma} non-zero sigmas"
+        );
+    }
+
+    /// The same oracle at the far end of the range a fold can reach: total volume
+    /// past `2^64`, so `r²` and `s·V` leave `i128` and only the 256-bit comparison
+    /// can decide the floor. Each state is a sum of whole bars of two prices, so it
+    /// is one a fold could produce; it is primed because folding 10¹⁵ bars is not a
+    /// test.
+    #[test]
+    fn sigma_is_exact_where_the_remainder_squared_leaves_i128() {
+        let mut rng = Lcg(0x0940);
+        let mut wide = 0_u32;
+        for _ in 0..2_000 {
+            // Two bar classes: hlc3·3 prices p1, p2 >= 3, total volumes a, b.
+            let p1 = i128::from(3 + rng.below(30));
+            let p2 = i128::from(3 + rng.below(3_000_000_000));
+            let a = i128::from(rng.next()) * i128::from(rng.next() >> 20) + 1;
+            let b_cap = (ACC_CEILING - p1 * p1 * a) / (p2 * p2);
+            if b_cap < 1 {
+                continue;
+            }
+            let b = i128::from(rng.next()).rem_euclid(b_cap) + 1;
+            let (pv, v, p2v) = (p1 * a + p2 * b, a + b, p1 * p1 * a + p2 * p2 * b);
+            assert!(p2v <= ACC_CEILING, "fixture left the fold's own ceiling");
+            let r = pv.rem_euclid(v);
+            if r.checked_mul(r).is_none() {
+                wide += 1;
+            }
+            assert_eq!(
+                primed(0, pv, v, p2v).sigma(),
+                oracle::sigma(pv, v, p2v),
+                "pv {pv} v {v} p2v {p2v}",
+            );
+        }
+        assert!(wide > 500, "only {wide} states needed the wide comparison");
+    }
+
+    /// Real folds, every volume `i64::MAX`, prices one and two paisa: total volume
+    /// passes `2^64` within three bars and `r²` leaves `i128` — the extreme a legal
+    /// bar sequence reaches without touching [`ACC_CEILING`].
+    #[test]
+    fn maximal_volumes_at_minimal_prices_stay_exact() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        let mut seen_wide = false;
+        for minute in 0..200_i64 {
+            let price = 1 + minute % 2 + i64::from(minute % 7 == 0);
+            v.fold(&at(minute, price, i64::MAX - minute))
+                .expect("far inside the ceiling");
+            if v.contributing < MIN_FOR_SIGMA {
+                continue;
+            }
+            let r = v.pv.rem_euclid(v.v);
+            seen_wide |= r.checked_mul(r).is_none();
+            assert_eq!(
+                v.sigma(),
+                oracle::sigma(v.pv, v.v, v.p2v),
+                "minute {minute}"
+            );
+        }
+        assert!(seen_wide, "no state needed the 256-bit comparison");
+    }
+
+    /// The finding's shape, reproduced from two ordinary bars (F-9A880B, D-0940).
+    ///
+    /// 100.00 and 100.01 rupees at volume 1 each: the exact dispersion is half a
+    /// paisa, so sigma floors to **0** and all three bands sit on the VWAP of
+    /// 10,000. The old formula floored the mean before squaring it and reported
+    /// **57** paisa. At 57,000.00/57,000.01 it reported **1,378** for the same half
+    /// paisa. A close of 10,020 is therefore ABOVE every band (146, 148, 193), where
+    /// the old sigma put it INSIDE every band (152, 192, 197).
+    #[test]
+    fn a_half_paisa_spread_has_no_band_width() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        v.fold(&at(0, 10_000, 1)).expect("first bar");
+        v.fold(&at(1, 10_001, 1)).expect("second bar");
+        assert_eq!(v.value(), Some(10_000));
+        assert_eq!(v.sigma(), Some(0), "the old formula said 57");
+        assert_eq!(v.sigma(), oracle::sigma(v.pv, v.v, v.p2v));
+        let mask = v.bits(10_020, tol());
+        for above in [146_u32, 148, 193] {
+            assert!(mask.get(above), "10,020 is above band position {above}");
+        }
+        for inside in [152_u32, 192, 197, 147, 149, 194] {
+            assert!(!mask.get(inside), "position {inside} must not be set");
+        }
+
+        let mut big = Vwap::for_slice(Availability::Present);
+        big.fold(&at(0, 5_700_000, 1)).expect("first bar");
+        big.fold(&at(1, 5_700_001, 1)).expect("second bar");
+        assert_eq!(big.sigma(), Some(0), "the old formula said 1,378");
+
+        // A real dispersion survives untouched, and an odd total volume (r != 0)
+        // with zero spread is exactly zero.
+        let mut spread = Vwap::for_slice(Availability::Present);
+        spread.fold(&at(0, 10_000, 1)).expect("first bar");
+        spread.fold(&at(1, 10_101, 2)).expect("second bar");
+        assert_eq!(
+            spread.sigma(),
+            oracle::sigma(spread.pv, spread.v, spread.p2v)
+        );
+        assert_eq!(spread.sigma(), Some(47), "sqrt(2/9)·101 = 47.6");
+        let mut flat = Vwap::for_slice(Availability::Present);
+        flat.fold(&at(0, 12_345, 3)).expect("first bar");
+        flat.fold(&at(1, 12_345, 4)).expect("second bar");
+        assert_eq!(flat.sigma(), Some(0));
+    }
+
+    /// The first `checked_` on the new path: `pv + r` leaving `i128` refuses rather
+    /// than wraps. Unreachable from a fold, built from the private fields.
+    #[test]
+    fn sigma_refuses_when_the_remainder_sum_leaves_i128() {
+        let v = primed(0, i128::MAX, 2, 0);
+        assert_eq!(v.sigma(), None);
+    }
+
+    /// The 256-bit product comparison against the limb oracle, at the edges.
+    #[test]
+    fn the_wide_product_comparison_is_exact() {
+        let max = i128::MAX.unsigned_abs();
+        let mut rng = Lcg(7);
+        let mut cases = vec![
+            (0, 0, 0, 0),
+            (max, max, max, max),
+            (max, max - 1, max - 1, max),
+            (max, 1, 1, max),
+            (1 << 64, 1 << 64, 1, u128::MAX >> 1),
+            ((1 << 64) - 1, (1 << 64) + 1, 1 << 64, 1 << 64),
+        ];
+        for _ in 0..5_000 {
+            let mut n =
+                || (u128::from(rng.next()) << 64 | u128::from(rng.next())) >> rng.below(127);
+            cases.push((n(), n(), n(), n()));
+        }
+        for (a, b, c, d) in cases {
+            let (a, b, c, d) = (a & max, b & max, c & max, d & max);
+            assert_eq!(wide_mul(a, b), oracle::product(a, b), "{a}·{b}");
+            assert_eq!(
+                wide_mul(a, b) <= wide_mul(c, d),
+                oracle::product_le(a, b, c, d),
+                "{a}·{b} <= {c}·{d}",
+            );
+        }
     }
 }

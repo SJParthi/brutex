@@ -102,6 +102,17 @@ pub struct Refusal {
     /// one bool; re-deriving it downstream from prose is guesswork that a
     /// reworded sentence silently breaks. D-0351.
     pub credential_dead: bool,
+    /// The refusal the vendor NAMED in its body, read through its own error
+    /// contract where the whole body was in hand.
+    ///
+    /// The rolling POST and the discovery GET returned a non-2xx refusal as
+    /// its status alone and never read the body, so Dhan's dead-token answer —
+    /// HTTP 400 carrying `DH-906` "Invalid Token" (D-0325) — was a plain
+    /// answered refusal and the token was sent to every remaining cell, while a
+    /// 403 "not entitled" was read as a dead token. The bars path already read
+    /// and classified the body; this carries the same verdict here (CE-29,
+    /// D-1769).
+    pub named: Option<crate::refusal::Disposition>,
 }
 
 impl Refusal {
@@ -116,6 +127,7 @@ impl Refusal {
             // network blip, which is the opposite of the defect it exists to
             // fix.
             credential_dead: false,
+            named: None,
         }
     }
 
@@ -126,6 +138,7 @@ impl Refusal {
             status: Some(status),
             detail,
             credential_dead: false,
+            named: None,
         }
     }
 
@@ -141,7 +154,15 @@ impl Refusal {
             status,
             detail,
             credential_dead: true,
+            named: None,
         }
+    }
+
+    /// This refusal, carrying the disposition the vendor named in its body.
+    #[must_use]
+    pub const fn named_by_vendor(mut self, named: Option<crate::refusal::Disposition>) -> Self {
+        self.named = named;
+        self
     }
 }
 
@@ -288,12 +309,32 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         .by_name()
         .map_or("contracts", |d| d.contracts_field);
 
+    // THE EXCHANGE THIS WALK ASKED ON, read from the request's own fixed
+    // `exchange` parameter rather than restated here, so the comparison below
+    // is against what was actually sent. D-3115.
+    let asked_exchange = asked_exchange(&spec);
+    // ONE FILING PER DECODED CONTRACT across the whole walk, keyed on what
+    // `read_contract` decoded rather than on the vendor's spelling. D-3116.
+    // Keyed `(underlying, Contract)`, valued with the vendor name filed.
+    let mut filed = std::collections::HashMap::new();
+    // ONE FILING PER VENDOR NAME across the whole walk, and the expiry it was
+    // first listed under. A monthly name (`Mar25`) carries no day, so
+    // `read_contract` accepts it under ANY expiry of its month: listed beside
+    // two dates it decoded to two contracts and the same series was fetched
+    // twice and stored once under an expiry that is not its own. D-3126.
+    let mut listed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
     let url = fno::expiries_url(&spec, ask).map_err(ChainError::Lookup)?;
     let body = from.get(&url).await.map_err(|why| ChainError::Transport {
         url: url.clone(),
         why: why.to_string(),
     })?;
-    let expiries = fno::names(&body, field).map_err(ChainError::Lookup)?;
+    // A REPEATED EXPIRY IS ASKED ONCE. The vendor's list was trusted to hold
+    // each date once; a date named twice was asked twice and every contract of
+    // it was filed twice. Collapsing the repeat drops no date. D-1392.
+    let mut expiries = fno::names(&body, field).map_err(ChainError::Lookup)?;
+    let mut seen_expiries = std::collections::HashSet::with_capacity(expiries.len());
+    expiries.retain(|expiry| seen_expiries.insert(expiry.clone()));
 
     let mut chain = Chain {
         expiries: expiries.clone(),
@@ -309,6 +350,17 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
             year: ask.year,
             month: ask.month,
             expiry,
+        };
+        // DECODED BEFORE IT IS SENT. The vendor's expiry string went into the
+        // next request's URL and was validated only after that request had
+        // been made, so the "its contracts were not asked for" below was
+        // false and a malformed value reached the vendor (CE-15, D-1769).
+        let Some(keyed_expiry) = iso_expiry(&keyed.expiry) else {
+            chain.unreadable.push(format!(
+                "expiry {:?} (its contracts were not asked for)",
+                keyed.expiry
+            ));
+            continue;
         };
         let url = fno::contracts_url(&spec, &keyed).map_err(ChainError::Lookup)?;
         let body = from.get(&url).await.map_err(|why| ChainError::Transport {
@@ -327,15 +379,50 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         // An expiry this build cannot decode takes its own contracts down and
         // says so by name, rather than the whole walk failing or the batch
         // vanishing: the vendor answered, and what could not be read is the
-        // thing to report.
-        let Some(keyed_expiry) = iso_expiry(&keyed.expiry) else {
-            chain.unreadable.push(format!(
-                "expiry {:?} (its contracts were not asked for)",
-                keyed.expiry
-            ));
-            continue;
-        };
-        for name in fno::names(&body, contracts_field).map_err(ChainError::Lookup)? {
+        // thing to report. The decode itself is above, before the request.
+        let names = fno::names(&body, contracts_field).map_err(ChainError::Lookup)?;
+        // ROOM FOR THIS ANSWER BEFORE IT IS FILED (gate 11 rule 3, D-3189):
+        // `filed` and `listed` cannot be sized when the walk starts, because the contract
+        // count is known one expiry at a time; it is grown once per expiry by
+        // the size of that answer, so no insert below reallocates.
+        filed.reserve(names.len());
+        listed.reserve(names.len());
+        // A repeated name WITHIN THIS EXPIRY'S ANSWER is filed once: one
+        // contract held as two inflates the count and builds its bars request
+        // twice. Scoped to the one answer on purpose: the same name under a
+        // second expiry is a disagreement, not a repeat, and is refused by name
+        // — by `read_contract`'s token check when the name carries a day, and
+        // by `listed` below when it does not (a monthly name; D-3126).
+        let mut seen_names = std::collections::HashSet::with_capacity(names.len());
+        for name in names {
+            if !seen_names.insert(name.clone()) {
+                continue;
+            }
+            // THE SAME NAME UNDER AN EARLIER EXPIRY (D-3126). Refused by name,
+            // naming the expiry it was filed under; one vendor name is one
+            // series, whatever date the vendor listed it beside.
+            if let Some(why) = relisted(&listed, &name, &keyed.expiry) {
+                chain.unreadable.push(why);
+                continue;
+            }
+            // THE EXCHANGE TOKEN AGAINST THE ASK. `read_contract` binds it to
+            // `_`, so a `BSE-` name, or one with an empty exchange, answering
+            // an NSE ask was filed as NSE. Equality, not a normalisation, for
+            // the reason the underlying comparison below gives. D-3115.
+            if let Some((exchange, _)) = name.split_once('-')
+                && asked_exchange != Some(exchange)
+            {
+                chain.unreadable.push(format!(
+                    "{name}: this contract names exchange {exchange:?} and the \
+                     walk asked on {}. Refused rather than filed under the \
+                     exchange that was asked for.",
+                    asked_exchange.map_or_else(
+                        || "no stated exchange, so no name can be checked".to_owned(),
+                        |e| format!("{e:?}")
+                    )
+                ));
+                continue;
+            }
             match fno::read_contract(&name, keyed_expiry) {
                 // THE ANSWER IS CHECKED AGAINST THE ASK, AND IT WAS NOT.
                 //
@@ -368,13 +455,64 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
                         found.underlying, ask.underlying
                     ));
                 }
-                Some(found) => chain.contracts.push(found),
+                // A SECOND SPELLING OF A CONTRACT ALREADY FILED. The month word
+                // reads case-blind and `77.5`/`77.50` read to one paisa, so two
+                // names can decode to one contract; filing both would fetch and
+                // store its bars twice. The first is kept and the later one is
+                // refused naming the first, never merged silently. D-3116.
+                Some(found) => match filed.entry((found.underlying.clone(), found.contract)) {
+                    std::collections::hash_map::Entry::Occupied(first) => {
+                        chain.unreadable.push(format!(
+                            "{name}: decodes to the same contract as {}, which \
+                                 was already filed. Two spellings of one contract \
+                                 are not two contracts; this one was refused \
+                                 rather than filed twice.",
+                            first.get()
+                        ));
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        listed.insert(name.clone(), keyed.expiry.clone());
+                        slot.insert(name);
+                        chain.contracts.push(found);
+                    }
+                },
                 // REPORTED, NEVER SKIPPED. See the module header.
                 None => chain.unreadable.push(name),
             }
         }
     }
     Ok(chain)
+}
+
+/// Why `name` is refused when an earlier expiry of this walk already filed it,
+/// or `None` when it is new. One probe of `listed`. D-3126.
+fn relisted(
+    listed: &std::collections::HashMap<String, String>,
+    name: &str,
+    expiry: &str,
+) -> Option<String> {
+    listed.get(name).map(|first| {
+        format!(
+            "{name}: already filed under expiry {first}, and expiry {expiry} \
+             lists it again. One vendor name is one series; it was refused \
+             rather than filed under two expiries."
+        )
+    })
+}
+
+/// The value of the request's fixed `exchange` parameter, or `None` when the
+/// descriptor states none — in which case every name is refused, because there
+/// is nothing to check its exchange against. D-3115.
+fn asked_exchange(spec: &HttpSpec) -> Option<&'static str> {
+    let discovery = spec.fno.by_name()?;
+    for param in discovery.contracts_params {
+        if param.name == "exchange"
+            && let crate::vendor::ParamValue::Fixed(value) = param.value
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// `2024-01-25` into an expiry.
@@ -388,6 +526,14 @@ fn iso_expiry(text: &str) -> Option<brutex_core::instrument::Expiry> {
     let bytes = text.as_bytes();
     if bytes.len() != 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
         return None;
+    }
+    // EVERY OTHER BYTE A DIGIT. `str::parse` accepts a leading `+`, so without
+    // this `"2024-+1-25"` read as 2024-01-25 — a malformed vendor string keyed
+    // to a real expiry rather than filed as unreadable. D-3112.
+    for (at, byte) in bytes.iter().enumerate() {
+        if at != 4 && at != 7 && !byte.is_ascii_digit() {
+            return None;
+        }
     }
     let year: u16 = text.get(0..4)?.parse().ok()?;
     let month: u8 = text.get(5..7)?.parse().ok()?;
@@ -523,10 +669,8 @@ mod tests {
         );
     }
 
-    /// A name this build cannot read is REPORTED and does not discard the rest.
-    ///
-    /// The whole point of the module. A contract dropped in silence is a month
-    /// that looks complete and is not.
+    /// The expiries are asked first, and each contracts call carries an expiry
+    /// that first answer named.
     #[tokio::test]
     async fn the_expiries_are_asked_first_and_each_contracts_call_is_keyed_on_the_answer() {
         // THE ORDER IS THE REQUIREMENT, not a side effect of how this reads.
@@ -600,6 +744,10 @@ mod tests {
         assert_eq!(chain.contracts.len(), 2, "one contract from each expiry");
     }
 
+    /// A name this build cannot read is REPORTED and does not discard the rest.
+    ///
+    /// The whole point of the module. A contract dropped in silence is a month
+    /// that looks complete and is not.
     #[tokio::test]
     async fn an_unreadable_name_is_reported_and_the_readable_ones_still_land() {
         let canned = Canned {
@@ -684,6 +832,121 @@ mod tests {
         );
     }
 
+    /// **A HYPHENATED UNDERLYING'S CONTRACTS ARE FILED, AND AN OFF-KEY NAME
+    /// BESIDE THEM IS STILL REFUSED.** D-0722.
+    ///
+    /// `BAJAJ-AUTO` is an F&O underlying, and every name answered for it was
+    /// unreadable to `fno::read_contract`, so none of its contracts was filed
+    /// and its month could never be whole. The third name reads now as the
+    /// underlying `BAJAJ-AUTO-X`, and the ask check refuses it by name. That
+    /// check is what stands between a name whose middle carries an extra piece
+    /// and a series nobody asked for.
+    ///
+    /// The fourth is the same series with the hyphen dropped. Which spelling
+    /// the vendor uses is UNVERIFIED, and a dropped hyphen reads as
+    /// `BAJAJAUTO`, which the ask check refuses rather than files.
+    #[tokio::test]
+    async fn a_hyphenated_underlyings_contracts_are_filed_and_an_off_key_one_is_refused() {
+        let canned = Canned {
+            answers: std::cell::RefCell::new(vec![
+                r#"{"expiries":["2024-01-25"]}"#.to_owned(),
+                r#"{"contracts":["NSE-BAJAJ-AUTO-25Jan24-7000-CE","NSE-BAJAJ-AUTO-25Jan24-FUT","NSE-BAJAJ-AUTO-X-25Jan24-FUT","NSE-BAJAJAUTO-25Jan24-FUT"]}"#
+                    .to_owned(),
+            ]),
+        };
+        let asked = Ask {
+            underlying: "BAJAJ-AUTO".to_owned(),
+            ..ask()
+        };
+        let chain = month(Feed::Groww, &asked, &canned)
+            .await
+            .expect("the call itself succeeded");
+
+        assert_eq!(
+            chain
+                .contracts
+                .iter()
+                .map(|found| (found.underlying.as_str(), found.contract.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("BAJAJ-AUTO", "2024-01-25-700000-CE"),
+                ("BAJAJ-AUTO", "2024-01-25-FUT"),
+            ],
+            "both contracts of the asked-for series are filed under it"
+        );
+        assert_eq!(chain.unreadable.len(), 2, "both off-key names are carried");
+        for named in ["names BAJAJ-AUTO-X", "names BAJAJAUTO"] {
+            assert!(
+                chain
+                    .unreadable
+                    .iter()
+                    .any(|why| why.contains(named) && why.contains("BAJAJ-AUTO was asked for")),
+                "refused by the ask check, which {named} and the asked-for series: \
+                 {:?}",
+                chain.unreadable
+            );
+        }
+        assert!(!chain.whole(), "a month that refused a name is not whole");
+    }
+
+    /// **A REPEATED EXPIRY IS ASKED ONCE, AND A REPEATED NAME IS FILED ONCE.**
+    ///
+    /// The walk trusted the vendor's lists to hold each date and each name once.
+    /// An expiries answer naming one date twice was asked twice and every
+    /// contract of that date was returned twice; a contracts answer naming one
+    /// contract twice filed it twice. Either way `contracts` held one contract
+    /// as two, the "Contracts discovered" count was inflated, and the bars
+    /// request was built twice. The month's contract SET is unchanged by
+    /// collapsing a repeat, so nothing is hidden: no name is dropped. D-1392.
+    #[tokio::test]
+    async fn a_repeated_expiry_or_name_is_asked_and_filed_once() {
+        struct Counting {
+            asked: std::cell::RefCell<Vec<String>>,
+            answers: std::cell::RefCell<Vec<String>>,
+        }
+        impl Discovery for Counting {
+            async fn get(&self, url: &str) -> Result<String, Refusal> {
+                self.asked.borrow_mut().push(url.to_owned());
+                let mut left = self.answers.borrow_mut();
+                if left.is_empty() {
+                    return Err(Refusal::transport("no answer left".to_owned()));
+                }
+                Ok(left.remove(0))
+            }
+        }
+        let from = Counting {
+            asked: std::cell::RefCell::new(Vec::new()),
+            answers: std::cell::RefCell::new(vec![
+                r#"{"expiries":["2024-01-25","2024-01-25"]}"#.to_owned(),
+                r#"{"contracts":["NSE-NIFTY-25Jan24-21000-CE","NSE-NIFTY-25Jan24-21000-CE","NSE-NIFTY-25Jan24-FUT"]}"#.to_owned(),
+                // A second contracts answer exists only so the defect is a
+                // duplicate, not a transport refusal.
+                r#"{"contracts":["NSE-NIFTY-25Jan24-21000-CE","NSE-NIFTY-25Jan24-FUT"]}"#.to_owned(),
+            ]),
+        };
+        let chain = month(Feed::Groww, &ask(), &from)
+            .await
+            .expect("the walk completes");
+        assert_eq!(
+            from.asked.borrow().len(),
+            2,
+            "one expiries call and ONE contracts call: {:?}",
+            from.asked.borrow()
+        );
+        assert_eq!(chain.expiries, vec!["2024-01-25".to_owned()]);
+        let symbols: Vec<&str> = chain
+            .contracts
+            .iter()
+            .map(|f| f.vendor_symbol.as_str())
+            .collect();
+        assert_eq!(
+            symbols,
+            vec!["NSE-NIFTY-25Jan24-21000-CE", "NSE-NIFTY-25Jan24-FUT"],
+            "each contract once, in the vendor's order"
+        );
+        assert!(chain.whole(), "a repeat is not an unreadable name");
+    }
+
     /// A transport refusal stops the walk and carries the host's own words.
     #[tokio::test]
     async fn a_transport_refusal_names_the_url_and_the_reason() {
@@ -705,5 +968,167 @@ mod tests {
             }
             other => panic!("expected a transport refusal, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod attack_pricing {
+    use super::iso_expiry;
+
+    /// **AN EXPIRY IS TEN ASCII CHARACTERS, EIGHT OF THEM DIGITS.**
+    ///
+    /// `str::parse::<u8>` accepts a leading `+`, so on the unmodified code
+    /// `"2024-+1-25"` read as 2024-01-25: a malformed vendor string was keyed
+    /// to a real expiry instead of being filed as unreadable. D-3112.
+    #[test]
+    fn dpp_a_signed_or_non_digit_field_is_not_an_expiry() {
+        for bad in [
+            "2024-+1-25",
+            "2024-01-+5",
+            "+024-01-25",
+            "2024-1 -25",
+            "2024- 1-25",
+            "2024-01-2 ",
+            "2024/01/25",
+            "2024-01-251",
+            "2024-01-2",
+            "",
+            "2024-00-25",
+            "2024-13-01",
+            "2023-02-29",
+            "2024-02-30",
+            "1989-12-31",
+            "2101-01-01",
+            "２０２４-01-25",
+        ] {
+            assert_eq!(iso_expiry(bad), None, "{bad:?} was read as an expiry");
+        }
+        let leap = iso_expiry("2024-02-29").expect("a leap day");
+        assert_eq!((leap.year(), leap.month(), leap.day()), (2024, 2, 29));
+        let edge = iso_expiry("2100-12-31").expect("the last representable day");
+        assert_eq!((edge.year(), edge.month(), edge.day()), (2100, 12, 31));
+    }
+
+    struct Canned(std::cell::RefCell<Vec<String>>);
+
+    impl super::Discovery for Canned {
+        async fn get(&self, _url: &str) -> Result<String, super::Refusal> {
+            let mut left = self.0.borrow_mut();
+            if left.is_empty() {
+                return Err(super::Refusal::transport("no answer left".to_owned()));
+            }
+            Ok(left.remove(0))
+        }
+    }
+
+    fn walk(expiry: &str, names: &[&str]) -> super::Chain {
+        let contracts = names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let canned = Canned(std::cell::RefCell::new(vec![
+            format!(r#"{{"expiries":["{expiry}"]}}"#),
+            format!(r#"{{"contracts":[{contracts}]}}"#),
+        ]));
+        let ask = crate::fno::Ask {
+            underlying: "NIFTY".to_owned(),
+            year: 2024,
+            month: 1,
+            expiry: String::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        runtime
+            .block_on(super::month(crate::vendor::Feed::Groww, &ask, &canned))
+            .expect("the walk completes")
+    }
+
+    /// **THE EXCHANGE TOKEN IS CHECKED AGAINST THE ASK.** `read_contract`
+    /// binds it to `_`, and on the unmodified code `month` compared only the
+    /// underlying, so a `BSE-` name or one with no exchange at all, answering
+    /// an NSE ask, was filed as NSE NIFTY. D-3115.
+    #[test]
+    fn dpp_a_name_on_another_exchange_is_refused_by_name() {
+        let chain = walk(
+            "2024-01-25",
+            &[
+                "BSE-NIFTY-25Jan24-21000-CE",
+                "-NIFTY-25Jan24-21000-PE",
+                "nse-NIFTY-25Jan24-21100-CE",
+                "NSE-NIFTY-25Jan24-21000-CE",
+            ],
+        );
+        assert_eq!(chain.contracts.len(), 1, "{chain:#?}");
+        assert_eq!(
+            chain.contracts[0].vendor_symbol,
+            "NSE-NIFTY-25Jan24-21000-CE"
+        );
+        assert_eq!(chain.unreadable.len(), 3, "{chain:#?}");
+        for (said, name) in chain.unreadable.iter().zip([
+            "BSE-NIFTY-25Jan24-21000-CE",
+            "-NIFTY-25Jan24-21000-PE",
+            "nse-NIFTY-25Jan24-21100-CE",
+        ]) {
+            assert!(said.starts_with(name), "{said}");
+            assert!(said.contains("exchange"), "{said}");
+        }
+        assert!(!chain.whole());
+    }
+
+    /// **ONE CONTRACT, ONE FILING, WHATEVER IT IS CALLED.** The month word is
+    /// read case-blind and a strike's trailing zero reads to the same paisa,
+    /// so on the unmodified code `04JAN24`/`04Jan24` and `77.5`/`77.50` were
+    /// two names for one contract and both were filed. The first is kept and
+    /// every later spelling is refused, naming the one it collided with.
+    /// D-3116.
+    #[test]
+    fn dpp_two_spellings_of_one_contract_are_filed_once_and_the_second_is_named() {
+        let chain = walk(
+            "2024-01-04",
+            &[
+                "NSE-NIFTY-04JAN24-21000-CE",
+                "NSE-NIFTY-04Jan24-21000-CE",
+                "NSE-NIFTY-04Jan24-21077.5-PE",
+                "NSE-NIFTY-04Jan24-21077.50-PE",
+                "NSE-NIFTY-04Jan24-FUT",
+                "NSE-NIFTY-Jan24-FUT",
+                "NSE-NIFTY-04Jan24-21000-CE",
+                "NSE-NIFTY-04JAN24-21000-CE",
+            ],
+        );
+        let filed: Vec<&str> = chain
+            .contracts
+            .iter()
+            .map(|f| f.vendor_symbol.as_str())
+            .collect();
+        assert_eq!(
+            filed,
+            [
+                "NSE-NIFTY-04JAN24-21000-CE",
+                "NSE-NIFTY-04Jan24-21077.5-PE",
+                "NSE-NIFTY-04Jan24-FUT",
+            ],
+            "{chain:#?}"
+        );
+        // Three collisions named; the exact repeat of the FIRST name is one
+        // name said twice and is not a second spelling.
+        assert_eq!(chain.unreadable.len(), 3, "{chain:#?}");
+        assert!(chain.unreadable[0].starts_with("NSE-NIFTY-04Jan24-21000-CE"));
+        assert!(chain.unreadable[0].contains("NSE-NIFTY-04JAN24-21000-CE"));
+        assert!(chain.unreadable[1].contains("NSE-NIFTY-04Jan24-21077.5-PE"));
+        assert!(chain.unreadable[2].contains("NSE-NIFTY-04Jan24-FUT"));
+        for said in &chain.unreadable {
+            assert!(said.contains("same contract"), "{said}");
+        }
+        assert!(!chain.whole());
     }
 }

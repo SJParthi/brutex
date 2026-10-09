@@ -385,14 +385,34 @@ impl InstrumentKey {
             Err(InstrumentError::NotSweepable)
         }
     }
+
+    /// Every key [`Self::is_sweepable`] admits: the two [`Self::SWEPT`]
+    /// indices first, then each NSE cash equity of
+    /// [`crate::universe::FNO_UNDERLYINGS`] that the predicate admits, in that
+    /// list's order — 210 keys (D-0506, D-0682).
+    ///
+    /// The one enumeration of the engine surface (D-3507). Before it, a caller
+    /// that needed the list rather than a yes or no wrote its own, and
+    /// `api::census` wrote the 2016 pair. Each candidate passes through
+    /// `is_sweepable`, so the list cannot admit what the predicate refuses.
+    pub fn swept_surface() -> impl Iterator<Item = Self> {
+        let indices = Self::SWEPT
+            .into_iter()
+            .filter_map(|(exchange, name)| Self::index(exchange, name).ok());
+        let shares = crate::universe::FNO_UNDERLYINGS
+            .into_iter()
+            .filter_map(|name| Self::cash(Exchange::Nse, name).ok());
+        indices.chain(shares).filter(Self::is_sweepable)
+    }
 }
 
 impl fmt::Display for InstrumentKey {
     /// Renders the canonical name used as a store path segment.
     ///
-    /// The format is chosen so that sorting the names sorts by underlying,
-    /// then expiry, then strike — which is the order a human reads an option
-    /// chain in.
+    /// Sorting the names as TEXT sorts by underlying and then expiry, but NOT
+    /// by strike: the strike is unpadded paisa, so `500000` sorts after
+    /// `1500000` (core-1, D-2609). Order contracts with [`Contract`]'s [`Ord`],
+    /// which compares the strike numerically.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.exchange.as_str(), self.underlying)?;
         match self.kind {
@@ -438,10 +458,52 @@ pub const CONTRACT_CAPACITY: usize = 24;
 /// as `24650.00` puts a `.` in a path segment and invites a reader to parse it
 /// back as a float; rendered as `2465000` it is the integer the store already
 /// holds, and it round-trips exactly.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// # Ordering is by strike NUMERICALLY (core-1, D-2609)
+///
+/// The strike is unpadded text, so a derived byte order put the ₹5,000 strike
+/// (`500000`) after the ₹15,000 one (`1500000`). [`Ord`] compares the
+/// `-`-separated parts in turn, an all-digit part by its value and any other
+/// part by its bytes, then breaks a remaining tie on the whole text so the
+/// order agrees with [`Eq`]. The path format is unchanged.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Contract {
     bytes: [u8; CONTRACT_CAPACITY],
     len: u8,
+}
+
+impl Ord for Contract {
+    /// Reads at most [`CONTRACT_CAPACITY`] bytes on each side.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn digits(part: &str) -> bool {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+        }
+        let (left, right) = (self.as_str(), other.as_str());
+        let mut ours = left.split('-');
+        let mut theirs = right.split('-');
+        loop {
+            let order = match (ours.next(), theirs.next()) {
+                (None, None) => return left.cmp(right),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(a), Some(b)) if digits(a) && digits(b) => {
+                    let a = a.trim_start_matches('0');
+                    let b = b.trim_start_matches('0');
+                    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+                }
+                (Some(a), Some(b)) => a.cmp(b),
+            };
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+        }
+    }
+}
+
+impl PartialOrd for Contract {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Contract {
@@ -472,8 +534,18 @@ impl Contract {
     /// Refused rather than truncated: a truncated
     /// strike names a DIFFERENT contract and would merge two series into one
     /// file, which is the exact failure this type exists to prevent.
+    ///
+    /// `None` as well for a strike of zero or below (D-3150). No option has
+    /// one, the vendor-master path already refuses one, and a negative strike
+    /// rendered `2025-09-30--500-PE`: a doubled hyphen that the lax reader this
+    /// type used to have accepted back as an option.
     fn render(expiry: Expiry, option: Option<(Paisa, OptionSide)>) -> Option<Self> {
         use std::fmt::Write as _;
+        if let Some((strike, _)) = option
+            && strike <= Paisa::ZERO
+        {
+            return None;
+        }
         let mut text = String::with_capacity(CONTRACT_CAPACITY);
         // `write!` to a String cannot fail; the capacity check below is the
         // real bound and it is checked explicitly rather than trusted.
@@ -519,6 +591,18 @@ impl Contract {
     /// Refuses anything over [`CONTRACT_CAPACITY`] or holding a byte a path
     /// segment may not — a `/` here would escape the directory it names, and a
     /// truncated contract is a DIFFERENT contract, so neither is repaired.
+    ///
+    /// # Only what [`Self::of`] renders (D-3151)
+    ///
+    /// This used to check the byte alphabet and nothing else, so `FUT`, 24
+    /// `A`s, `2025-9-30-FUT` (a second spelling of `2025-09-30-FUT`),
+    /// `2025-02-30-FUT` (no such day) and `2025-09-30-0002465000-CE` (a second
+    /// spelling of a strike) were all contracts, and [`Self::is_option`]
+    /// answered `true` for every one that did not end `-FUT`. A second
+    /// spelling of one contract is a second directory for one series. The text
+    /// is now read into the [`Kind`] it names, rendered again, and accepted
+    /// only if the rendering is byte-identical — so the one grammar is the
+    /// renderer's, and there is no second one here to drift from it.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         if text.is_empty() || text.len() > CONTRACT_CAPACITY {
@@ -530,14 +614,29 @@ impl Contract {
         {
             return None;
         }
-        let mut bytes = [0u8; CONTRACT_CAPACITY];
-        bytes
-            .get_mut(..text.len())?
-            .copy_from_slice(text.as_bytes());
-        Some(Self {
-            bytes,
-            len: u8::try_from(text.len()).ok()?,
-        })
+        // The alphabet above admits no `+`, so `str::parse` sees digits only
+        // and any shape it reads leniently is caught by the comparison below.
+        let mut parts = text.splitn(4, '-');
+        let (year, month, day, rest) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        let expiry =
+            Expiry::new(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?).ok()?;
+        let kind = if rest == "FUT" {
+            Kind::Future { expiry }
+        } else {
+            let (strike, side) = rest.split_once('-')?;
+            let side = match side {
+                "CE" => OptionSide::Call,
+                "PE" => OptionSide::Put,
+                _ => return None,
+            };
+            Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(strike.parse().ok()?),
+                side,
+            }
+        };
+        let rendered = Self::of(kind)?;
+        (rendered.as_str() == text).then_some(rendered)
     }
 
     /// Whether this names a FUTURES contract.
@@ -591,6 +690,106 @@ impl fmt::Display for Contract {
 )]
 mod tests {
 
+    /// D-3507 (ONEAUTH-08). `swept_surface` is the one enumeration of what
+    /// `is_sweepable` admits, compared with that predicate over every key the
+    /// universe could spell: both indices and every F&O name as index and as
+    /// cash, on both exchanges.
+    #[test]
+    fn the_swept_surface_is_exactly_what_is_sweepable_admits() {
+        use super::{Exchange, InstrumentKey, Segment};
+        use std::collections::BTreeSet;
+        let surface: Vec<InstrumentKey> = InstrumentKey::swept_surface().collect();
+        assert_eq!(surface.len(), 210, "two indices and 208 shares (D-0682)");
+        let distinct: BTreeSet<String> = surface.iter().map(ToString::to_string).collect();
+        assert_eq!(distinct.len(), surface.len(), "no key twice");
+        assert_eq!(
+            surface
+                .iter()
+                .filter(|k| k.segment == Segment::Index)
+                .count(),
+            2
+        );
+        assert!(surface.iter().all(InstrumentKey::is_sweepable));
+        assert_eq!(
+            surface[0],
+            InstrumentKey::index(Exchange::Nse, "NIFTY").expect("key")
+        );
+        assert_eq!(
+            surface[1],
+            InstrumentKey::index(Exchange::Nse, "BANKNIFTY").expect("key")
+        );
+        let reliance = InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("key");
+        assert!(surface.contains(&reliance));
+        let mut admitted = 0;
+        for exchange in [Exchange::Nse, Exchange::Bse] {
+            for name in crate::universe::FNO_UNDERLYINGS {
+                for key in [
+                    InstrumentKey::index(exchange, name).expect("key"),
+                    InstrumentKey::cash(exchange, name).expect("key"),
+                ] {
+                    assert_eq!(key.is_sweepable(), surface.contains(&key), "{key}");
+                    admitted += usize::from(key.is_sweepable());
+                }
+            }
+        }
+        assert_eq!(admitted, surface.len());
+    }
+
+    #[test]
+    fn contracts_order_by_strike_numerically_and_agree_with_equality() {
+        // core-1, D-2609: the audit's pair, ₹5,000 against ₹15,000.
+        let option = |strike: i64, side: OptionSide| {
+            Contract::of(Kind::Option {
+                expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+                strike: Paisa::from_raw(strike),
+                side,
+            })
+            .expect("fits")
+        };
+        let five = option(500_000, OptionSide::Call);
+        let fifteen = option(1_500_000, OptionSide::Call);
+        assert_eq!(five.cmp(&fifteen), std::cmp::Ordering::Less);
+        assert_eq!(fifteen.cmp(&five), std::cmp::Ordering::Greater);
+        assert_eq!(five.cmp(&five), std::cmp::Ordering::Equal);
+        let mut chain = [
+            option(1_500_000, OptionSide::Put),
+            option(5_000, OptionSide::Call),
+            option(1_500_000, OptionSide::Call),
+            option(500_000, OptionSide::Call),
+        ];
+        chain.sort();
+        assert_eq!(
+            chain.map(|contract| contract.as_str().to_owned()),
+            [
+                "2025-09-30-5000-CE",
+                "2025-09-30-500000-CE",
+                "2025-09-30-1500000-CE",
+                "2025-09-30-1500000-PE",
+            ]
+            .map(str::to_owned)
+        );
+        // A second spelling of one strike is not a contract at all (D-3151),
+        // so the order never has to choose between two spellings of one
+        // value; the whole-text tie-break stays, and agrees with `Eq` for
+        // every contract that can exist (D-4612).
+        assert_eq!(Contract::parse("2025-09-30-0500000-CE"), None);
+        // A part that is not all digits is compared by its bytes, as before:
+        // the future sorts after every option of its own expiry.
+        let future = Contract::of(Kind::Future {
+            expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+        })
+        .expect("fits");
+        assert_eq!(future.cmp(&fifteen), std::cmp::Ordering::Greater);
+        // Expiry still leads the strike.
+        let later = Contract::of(Kind::Option {
+            expiry: Expiry::new(2025, 10, 28).expect("a real expiry"),
+            strike: Paisa::from_raw(5_000),
+            side: OptionSide::Call,
+        })
+        .expect("fits");
+        assert_eq!(fifteen.cmp(&later), std::cmp::Ordering::Less);
+    }
+
     #[test]
     fn contract_rendering_accepts_the_exact_capacity_and_refuses_the_next_digit() {
         let expiry = Expiry::new(2025, 9, 30).expect("a real expiry");
@@ -627,11 +826,19 @@ mod tests {
     fn a_contract_refuses_what_it_cannot_hold_and_what_a_path_may_not_carry() {
         // AT THE BOUND, and one past it. `parse` is the inverse of `as_str`,
         // so the two must agree about exactly where the edge is.
-        let at = "A".repeat(CONTRACT_CAPACITY);
+        // A legal contract at exactly the bound. This used to be 24 `A`s, which
+        // names no contract at all and was accepted only because the reader
+        // checked the alphabet and not the grammar (D-3151).
+        let at = "2025-09-30-9999999999-CE";
         assert_eq!(
-            Contract::parse(&at).map(|c| c.as_str().len()),
+            Contract::parse(at).map(|c| c.as_str().len()),
             Some(CONTRACT_CAPACITY),
             "{CONTRACT_CAPACITY} bytes is inside"
+        );
+        assert_eq!(
+            Contract::parse(&"A".repeat(CONTRACT_CAPACITY)),
+            None,
+            "the right length and alphabet is not a contract"
         );
         assert_eq!(
             Contract::parse(&"A".repeat(CONTRACT_CAPACITY + 1)),

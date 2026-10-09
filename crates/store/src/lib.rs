@@ -31,7 +31,10 @@
 //!    offsets, the checksum and the block length all changed, so this is
 //!    format **version 2** with magic `BRUTEXB2`. Version 1's number is
 //!    retired, never reused — `CLAUDE.md` §3 rule 8. See
-//!    [`format::RETIRED_VERSIONS`].
+//!    [`format::RETIRED_VERSIONS`]. Version 3 (`BRUTEXB3`, D-1571) keeps
+//!    version 2's geometry byte for byte and makes block checksums
+//!    mandatory; it is the version written now, and a version-2 file is
+//!    still read and never rewritten.
 //! 4. **A header update is one write of one self-checked unit.** There is no
 //!    API that can update the counter, the timestamp and the checksum
 //!    separately, because [`header::Commit`] carries one offset and one
@@ -64,8 +67,11 @@ pub mod flock;
 pub mod format;
 pub mod header;
 pub mod layout;
+/// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).
+pub mod open_flags;
 pub mod path;
 pub mod repair;
+pub mod time_index;
 
 /// Proof that this crate's nine `telemetry::emit` sites — `store.flock`'s
 /// unreleased-lock note among them (D-0693) — reach a file, driven
@@ -74,3 +80,9 @@ pub mod repair;
 /// and not of the store.
 #[cfg(test)]
 mod emits;
+
+/// Test-only: re-runs a test where the permission bits bind, even as root. The
+/// same file serves this crate's integration tests. D-0995, D-1485.
+#[cfg(all(test, unix))]
+#[path = "../tests/support/mod.rs"]
+mod support;

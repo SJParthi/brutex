@@ -1773,7 +1773,7 @@ impl SelectionLedger {
         let parent = path
             .parent()
             .ok_or_else(|| "selection ledger has no parent directory".to_owned())?;
-        std::fs::create_dir_all(parent).map_err(|why| {
+        crate::fixed_tail::create_dir_all_durable(parent).map_err(|why| {
             format!(
                 "selection ledger directory {} could not be created: {why}",
                 parent.display()
@@ -1821,6 +1821,15 @@ impl SelectionLedger {
                 .map_err(|why| format!("{} could not be shared-locked: {why}", path.display()))?;
         }
         let opened = (|| {
+            if writable {
+                crate::fixed_tail::heal_header_and_tail(
+                    &file,
+                    &path,
+                    &header_bytes()?,
+                    SELECTION_STRIDE,
+                    &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+                )?;
+            }
             let len = file
                 .metadata()
                 .map_err(|why| format!("{} length could not be read: {why}", path.display()))?
@@ -1829,6 +1838,10 @@ impl SelectionLedger {
                 if !writable {
                     return Err(format!("{} is empty and read-only", path.display()));
                 }
+                // The new name is made durable BEFORE the header is written
+                // (sobs-12, D-4461): a kill between the two leaves an empty
+                // file, which the next writer treats as new and barriers again.
+                crate::fixed_tail::sync_parent(&path)?;
                 write_header(&mut file)?;
                 file.sync_all().map_err(|why| {
                     format!("{} header could not be synced: {why}", path.display())
@@ -1914,6 +1927,17 @@ impl SelectionLedger {
     /// duplicate identity (including an exact duplicate), same-id/different
     /// bytes, arithmetic/I/O/locking failure. No prior byte is replaced.
     pub fn append(&mut self, receipt: &SelectionReceiptV1) -> Result<(), SelectionRefusal> {
+        self.append_with(receipt, std::io::Write::write_all)
+    }
+
+    /// [`Self::append`] with the receipt write supplied, so a test can inject a
+    /// short write. A failed write is truncated back to the scanned end, so the
+    /// file stays whole and the next append lands on a record boundary (D-1850).
+    fn append_with(
+        &mut self,
+        receipt: &SelectionReceiptV1,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), SelectionRefusal> {
         if !self.writable {
             return Err("a read-only selection ledger cannot append".to_owned());
         }
@@ -1954,12 +1978,22 @@ impl SelectionLedger {
                 format!("selection latest index could not reserve one slot: {why}")
             })?;
             let raw = receipt.to_bytes()?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .map_err(|why| format!("selection ledger could not seek to append: {why}"))?;
-            self.file
-                .write_all(&raw)
-                .map_err(|why| format!("selection receipt could not be appended: {why}"))?;
+            if let Err(why) = crate::append_rollback::append_with(
+                &mut self.file,
+                &raw,
+                "selection receipt",
+                write,
+            ) {
+                // The rollback restored exactly the scanned bytes under this
+                // handle's lock; retain that generation as a successful append
+                // retains its own, so this handle stays usable (D-1850). A failed
+                // rollback leaves the length wrong, the generation stale, and the
+                // next append refuses.
+                if let Ok(generation) = validated_generation(&self.file, &self.path, self.scanned) {
+                    self.generation = generation;
+                }
+                return Err(why);
+            }
             self.file
                 .sync_all()
                 .map_err(|why| format!("selection receipt could not be synced: {why}"))?;
@@ -2010,6 +2044,14 @@ impl SelectionLedger {
             self.generation = observed;
             return Ok(());
         }
+        require_indexed_records_unchanged(
+            &mut self.file,
+            HEADER,
+            &self.path,
+            &self.order,
+            &self.receipts,
+            SelectionReceiptV1::to_bytes,
+        )?;
         let held = self.order.len();
         let new_count = total
             .checked_sub(held)
@@ -2088,7 +2130,7 @@ impl SelectionLedgerV2 {
         let parent = path
             .parent()
             .ok_or_else(|| "selection V2 ledger has no parent directory".to_owned())?;
-        std::fs::create_dir_all(parent).map_err(|why| {
+        crate::fixed_tail::create_dir_all_durable(parent).map_err(|why| {
             format!(
                 "selection V2 ledger directory {} could not be created: {why}",
                 parent.display()
@@ -2134,6 +2176,15 @@ impl SelectionLedgerV2 {
                 .map_err(|why| format!("{} could not be shared-locked: {why}", path.display()))?;
         }
         let opened = (|| {
+            if writable {
+                crate::fixed_tail::heal_header_and_tail(
+                    &file,
+                    &path,
+                    &header_bytes_v2()?,
+                    SELECTION_V2_STRIDE,
+                    &crate::fixed_tail::magic_and_version(MAGIC_V2, VERSION_V2),
+                )?;
+            }
             let len = file
                 .metadata()
                 .map_err(|why| format!("{} length could not be read: {why}", path.display()))?
@@ -2142,6 +2193,10 @@ impl SelectionLedgerV2 {
                 if !writable {
                     return Err(format!("{} is empty and read-only", path.display()));
                 }
+                // The new name is made durable BEFORE the header is written
+                // (sobs-12, D-4461): a kill between the two leaves an empty
+                // file, which the next writer treats as new and barriers again.
+                crate::fixed_tail::sync_parent(&path)?;
                 write_header_v2(&mut file)?;
                 file.sync_all().map_err(|why| {
                     format!("{} header could not be synced: {why}", path.display())
@@ -2221,6 +2276,17 @@ impl SelectionLedgerV2 {
     /// Refuses read-only use, invalid or duplicate bytes, a stale generation,
     /// bound/arithmetic failure, or any I/O/locking failure.
     pub fn append(&mut self, receipt: &SelectionReceiptV2) -> Result<(), SelectionRefusal> {
+        self.append_with(receipt, std::io::Write::write_all)
+    }
+
+    /// [`Self::append`] with the receipt write supplied, so a test can inject a
+    /// short write. A failed write is truncated back to the scanned end, so the
+    /// file stays whole and the next append lands on a record boundary (D-1850).
+    fn append_with(
+        &mut self,
+        receipt: &SelectionReceiptV2,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), SelectionRefusal> {
         if !self.writable {
             return Err("a read-only selection V2 ledger cannot append".to_owned());
         }
@@ -2261,12 +2327,22 @@ impl SelectionLedgerV2 {
                 format!("selection V2 latest index could not reserve one slot: {why}")
             })?;
             let raw = receipt.to_bytes()?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .map_err(|why| format!("selection V2 ledger could not seek to append: {why}"))?;
-            self.file
-                .write_all(&raw)
-                .map_err(|why| format!("selection V2 receipt could not be appended: {why}"))?;
+            if let Err(why) = crate::append_rollback::append_with(
+                &mut self.file,
+                &raw,
+                "selection V2 receipt",
+                write,
+            ) {
+                // The rollback restored exactly the scanned bytes under this
+                // handle's lock; retain that generation as a successful append
+                // retains its own, so this handle stays usable (D-1850). A failed
+                // rollback leaves the length wrong, the generation stale, and the
+                // next append refuses.
+                if let Ok(generation) = validated_generation(&self.file, &self.path, self.scanned) {
+                    self.generation = generation;
+                }
+                return Err(why);
+            }
             self.file
                 .sync_all()
                 .map_err(|why| format!("selection V2 receipt could not be synced: {why}"))?;
@@ -2317,6 +2393,14 @@ impl SelectionLedgerV2 {
             self.generation = observed;
             return Ok(());
         }
+        require_indexed_records_unchanged(
+            &mut self.file,
+            HEADER,
+            &self.path,
+            &self.order,
+            &self.receipts,
+            SelectionReceiptV2::to_bytes,
+        )?;
         let held = self.order.len();
         let new_count = total
             .checked_sub(held)
@@ -2712,6 +2796,15 @@ const fn metrics_from_row(metrics: TopMetricsV1) -> Metrics {
 }
 
 fn write_header(file: &mut File) -> Result<(), SelectionRefusal> {
+    let header = header_bytes()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("selection header seek failed: {why}"))?;
+    file.write_all(&header)
+        .map_err(|why| format!("selection header write failed: {why}"))
+}
+
+/// The one header a V1 ledger begins with.
+fn header_bytes() -> Result<[u8; HEADER_BYTES], SelectionRefusal> {
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&MAGIC)?;
@@ -2722,10 +2815,7 @@ fn write_header(file: &mut File) -> Result<(), SelectionRefusal> {
     encoder.u64(SCORE_SCALE)?;
     encoder.zeros(8)?;
     encoder.finish()?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|why| format!("selection header seek failed: {why}"))?;
-    file.write_all(&header)
-        .map_err(|why| format!("selection header write failed: {why}"))
+    Ok(header)
 }
 
 #[derive(Debug)]
@@ -2853,6 +2943,15 @@ fn scan_receipts(
 }
 
 fn write_header_v2(file: &mut File) -> Result<(), SelectionRefusal> {
+    let header = header_bytes_v2()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("selection V2 header seek failed: {why}"))?;
+    file.write_all(&header)
+        .map_err(|why| format!("selection V2 header write failed: {why}"))
+}
+
+/// The one header a V2 ledger begins with.
+fn header_bytes_v2() -> Result<[u8; HEADER_BYTES], SelectionRefusal> {
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&MAGIC_V2)?;
@@ -2863,10 +2962,7 @@ fn write_header_v2(file: &mut File) -> Result<(), SelectionRefusal> {
     encoder.u64(SCORE_SCALE)?;
     encoder.zeros(8)?;
     encoder.finish()?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|why| format!("selection V2 header seek failed: {why}"))?;
-    file.write_all(&header)
-        .map_err(|why| format!("selection V2 header write failed: {why}"))
+    Ok(header)
 }
 
 #[derive(Debug)]
@@ -2995,6 +3091,54 @@ fn scan_receipts_v2(
         )?;
     }
     Ok(indexes)
+}
+
+/// Re-reads every already-indexed record after the `header` bytes (each format
+/// passes its own) and requires it to equal the canonical bytes held in
+/// memory, in exact file order.
+///
+/// Growth changes the filesystem generation legitimately, so the constant-size
+/// generation check cannot tell an append from an in-place rewrite that also
+/// appended. This is the check that can, and it is O(indexed records). It runs
+/// only when the file grew past the indexed length; an append through the same
+/// handle leaves the length equal to the indexed length. W2-cli14-5.
+pub(crate) fn require_indexed_records_unchanged<R, const N: usize>(
+    file: &mut File,
+    header: u64,
+    path: &Path,
+    order: &[[u8; 32]],
+    receipts: &HashMap<[u8; 32], R>,
+    canonical: impl Fn(&R) -> Result<[u8; N], SelectionRefusal>,
+) -> Result<(), SelectionRefusal> {
+    file.seek(SeekFrom::Start(header)).map_err(|why| {
+        format!(
+            "{} could not seek to recheck its indexed records: {why}",
+            path.display()
+        )
+    })?;
+    let mut raw = [0_u8; N];
+    for (position, selection_id) in order.iter().enumerate() {
+        let held = receipts.get(selection_id).ok_or_else(|| {
+            format!(
+                "{} indexes selection {} without its receipt",
+                path.display(),
+                hex(selection_id)
+            )
+        })?;
+        file.read_exact(&mut raw).map_err(|why| {
+            format!(
+                "{} indexed selection record {position} could not be reread: {why}",
+                path.display()
+            )
+        })?;
+        if raw != canonical(held)? {
+            return Err(format!(
+                "{} rewrote already-indexed selection record {position} while also growing; append-only history was violated",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validated_generation(
@@ -4552,6 +4696,116 @@ mod tests {
         std::fs::remove_dir_all(root).expect("selection fixture cleanup");
     }
 
+    /// Rewrites the first already-indexed record in place and appends one
+    /// valid record through a second handle. The length grew, so the
+    /// same-length generation check never runs; only a re-read of the indexed
+    /// prefix can see the rewrite. W2-cli14-5.
+    fn rewrite_and_grow(path: &std::path::Path, offset: u64, appended: &[u8]) {
+        let original = std::fs::read(path).expect("ledger bytes");
+        let index = usize::try_from(offset).expect("offset fits usize");
+        let changed = original.get(index).copied().expect("indexed byte") ^ 1;
+        let mut external = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("external writer");
+        external
+            .seek(SeekFrom::Start(offset))
+            .expect("external seek");
+        external.write_all(&[changed]).expect("in-place rewrite");
+        external.seek(SeekFrom::End(0)).expect("external end seek");
+        external.write_all(appended).expect("external append");
+        external.sync_all().expect("external sync");
+    }
+
+    #[test]
+    fn rewrite_plus_append_of_an_indexed_selection_record_refuses_before_append() {
+        let root = root("rewrite-plus-append");
+        let ranking = policy();
+        let receipts: Vec<SelectionReceiptV1> = [
+            ("population-one", 37_u8, 67_u8),
+            ("population-two", 39_u8, 69_u8),
+            ("population-three", 41_u8, 71_u8),
+        ]
+        .into_iter()
+        .map(|(name, id_seed, identity_seed)| {
+            selection_fixture(
+                &root.join(name),
+                2,
+                300,
+                ranking,
+                pair_variant(id_seed, identity_seed, span()),
+            )
+        })
+        .collect();
+        let mut ledger = SelectionLedger::open(&root, 3).expect("selection writer");
+        ledger.append(&receipts[0]).expect("first selection");
+        let path = SelectionLedger::path(&root);
+        let appended = receipts[2].to_bytes().expect("canonical third receipt");
+        rewrite_and_grow(&path, super::HEADER, &appended);
+        let grown = std::fs::metadata(&path).expect("grown metadata").len();
+
+        let why = ledger
+            .append(&receipts[1])
+            .expect_err("a rewritten indexed record must not be absorbed with the growth");
+        assert!(why.contains("rewrote already-indexed"), "{why}");
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), grown);
+        drop(ledger);
+        std::fs::remove_dir_all(root).expect("rewrite fixture cleanup");
+    }
+
+    #[test]
+    fn selection_v2_rewrite_plus_append_of_an_indexed_record_refuses_before_append() {
+        let root = root("v2-rewrite-plus-append");
+        let ranking = policy();
+        let first = selection_fixture_v2(&root.join("population-first"), 2, 300, ranking);
+        let second = selection_fixture_v2(&root.join("population-second"), 2, 600, ranking);
+        let third = selection_fixture_v2(&root.join("population-third"), 3, 300, ranking);
+        let mut ledger = SelectionLedgerV2::open(&root, 3).expect("V2 writer");
+        ledger.append(&first).expect("first V2 append");
+        let path = SelectionLedgerV2::path(&root);
+        let appended = third.to_bytes().expect("canonical third V2 receipt");
+        rewrite_and_grow(&path, super::HEADER, &appended);
+        let grown = std::fs::metadata(&path).expect("grown V2 metadata").len();
+
+        let why = ledger
+            .append(&second)
+            .expect_err("a rewritten indexed V2 record must not be absorbed");
+        assert!(why.contains("rewrote already-indexed"), "{why}");
+        assert_eq!(std::fs::metadata(&path).expect("V2 metadata").len(), grown);
+        drop(ledger);
+        std::fs::remove_dir_all(root).expect("V2 rewrite fixture cleanup");
+    }
+
+    /// W2-cli14-5 control: an honest append by another V2 handle is still
+    /// absorbed, in file order, after the indexed-record recheck.
+    #[test]
+    fn selection_v2_honest_growth_by_another_handle_is_absorbed_in_file_order() {
+        let root = root("v2-honest-growth");
+        let ranking = policy();
+        let first = selection_fixture_v2(&root.join("population-first"), 2, 300, ranking);
+        let second = selection_fixture_v2(&root.join("population-second"), 2, 600, ranking);
+        let third = selection_fixture_v2(&root.join("population-third"), 3, 300, ranking);
+        let mut ledger = SelectionLedgerV2::open(&root, 3).expect("V2 writer");
+        let mut other = SelectionLedgerV2::open(&root, 3).expect("other V2 writer");
+        ledger.append(&first).expect("first V2 append");
+        other.append(&second).expect("other handle absorbs first");
+        ledger
+            .append(&third)
+            .expect("first handle absorbs the other handle's append");
+        let expected = [
+            first.selection_id(),
+            second.selection_id(),
+            third.selection_id(),
+        ];
+        assert_eq!(ledger.selection_ids(), &expected);
+        drop(ledger);
+        drop(other);
+        let reopened = SelectionLedgerV2::open_read(&root, 3).expect("V2 reopen");
+        assert_eq!(reopened.selection_ids(), &expected);
+        drop(reopened);
+        std::fs::remove_dir_all(root).expect("V2 honest growth fixture cleanup");
+    }
+
     #[test]
     fn latest_lookup_is_exactly_isolated_by_cohort_and_rung() {
         let root = root("latest-isolation");
@@ -5153,6 +5407,181 @@ mod tests {
         );
         drop(populations);
         std::fs::remove_dir_all(root).expect("codec cleanup");
+    }
+
+    #[test]
+    fn a_failed_v1_or_v2_append_truncates_back_and_the_same_handle_appends_next() {
+        let root = root("append-rollback");
+        let ranking = policy();
+        let first = selection_fixture(
+            &root.join("population-v1"),
+            2,
+            300,
+            ranking,
+            pair_variant(41, 71, span()),
+        );
+        let mut ledger = SelectionLedger::open(&root, 2).expect("V1 writer");
+        let path = SelectionLedger::path(&root);
+        let before = std::fs::read(&path).expect("V1 bytes");
+        let why = ledger
+            .append_with(&first, |file, raw| {
+                file.write_all(&raw[..raw.len() / 2])?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed V1 write refuses");
+        assert!(
+            why.contains("selection receipt: injected short write; truncated back"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read(&path).expect("V1 bytes"), before);
+        assert!(ledger.receipt(&first.selection_id()).is_none());
+        ledger
+            .append(&first)
+            .expect("the same V1 handle appends next");
+        drop(ledger);
+        let reopened = SelectionLedger::open_read(&root, 2).expect("V1 reopen");
+        assert_eq!(reopened.selection_ids(), &[first.selection_id()]);
+        drop(reopened);
+
+        let second = selection_fixture_v2(&root.join("population-v2"), 2, 300, ranking);
+        let mut ledger = SelectionLedgerV2::open(&root, 2).expect("V2 writer");
+        let path = SelectionLedgerV2::path(&root);
+        let before = std::fs::read(&path).expect("V2 bytes");
+        let why = ledger
+            .append_with(&second, |file, raw| {
+                file.write_all(&raw[..raw.len() / 2])?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed V2 write refuses");
+        assert!(
+            why.contains("selection V2 receipt: injected short write; truncated back"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read(&path).expect("V2 bytes"), before);
+        ledger
+            .append(&second)
+            .expect("the same V2 handle appends next");
+        drop(ledger);
+        let reopened = SelectionLedgerV2::open_read(&root, 2).expect("V2 reopen");
+        assert_eq!(reopened.selection_ids(), &[second.selection_id()]);
+        drop(reopened);
+        std::fs::remove_dir_all(root).expect("append rollback fixture cleanup");
+    }
+
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail,
+    /// and one killed while writing a new ledger's header leaves a strict
+    /// prefix of it. Readers still refuse both; the next V1 or V2 writer cuts
+    /// either, says so once, and keeps every committed receipt.
+    #[test]
+    fn a_kill_torn_tail_or_header_is_cut_by_the_v1_and_v2_writers_and_history_kept() {
+        let root = root("kill-torn");
+        let ranking = policy();
+        let first = selection_fixture(
+            &root.join("population-v1"),
+            2,
+            300,
+            ranking,
+            pair_variant(41, 71, span()),
+        );
+        let mut ledger = SelectionLedger::open(&root, 2).expect("V1 writer");
+        ledger.append(&first).expect("V1 receipt committed");
+        drop(ledger);
+        let v1 = SelectionLedger::path(&root);
+        crate::fixed_tail::attack::torn_tails(
+            &[(v1.as_path(), super::SELECTION_STRIDE)],
+            &mut || {
+                Ok(format!(
+                    "{:?}",
+                    SelectionLedger::open_read(&root, 2)?.selection_ids()
+                ))
+            },
+            &mut || SelectionLedger::open(&root, 2).map(drop),
+        );
+
+        let second = selection_fixture_v2(&root.join("population-v2"), 2, 300, ranking);
+        let mut ledger = SelectionLedgerV2::open(&root, 2).expect("V2 writer");
+        ledger.append(&second).expect("V2 receipt committed");
+        drop(ledger);
+        let v2 = SelectionLedgerV2::path(&root);
+        crate::fixed_tail::attack::torn_tails(
+            &[(v2.as_path(), super::SELECTION_V2_STRIDE)],
+            &mut || {
+                Ok(format!(
+                    "{:?}",
+                    SelectionLedgerV2::open_read(&root, 2)?.selection_ids()
+                ))
+            },
+            &mut || SelectionLedgerV2::open(&root, 2).map(drop),
+        );
+
+        let v1_header = super::header_bytes().expect("V1 header");
+        let v2_header = super::header_bytes_v2().expect("V2 header");
+        for torn in [1, super::HEADER_BYTES / 2, super::HEADER_BYTES - 1] {
+            let fresh = root.join(format!("torn-header-{torn}"));
+            std::fs::create_dir_all(fresh.join("results")).expect("torn-header results");
+            std::fs::write(SelectionLedger::path(&fresh), &v1_header[..torn])
+                .expect("torn V1 header");
+            std::fs::write(SelectionLedgerV2::path(&fresh), &v2_header[..torn])
+                .expect("torn V2 header");
+            assert!(SelectionLedger::open_read(&fresh, 2).is_err());
+            assert!(SelectionLedgerV2::open_read(&fresh, 2).is_err());
+            drop(crate::noted::take());
+            drop(SelectionLedger::open(&fresh, 2).expect("V1 writer heals its header"));
+            drop(SelectionLedgerV2::open(&fresh, 2).expect("V2 writer heals its header"));
+            assert_eq!(crate::noted::count("torn ledger header truncated"), 2);
+            assert_eq!(
+                std::fs::read(SelectionLedger::path(&fresh)).expect("V1 bytes"),
+                v1_header.to_vec()
+            );
+            assert_eq!(
+                std::fs::read(SelectionLedgerV2::path(&fresh)).expect("V2 bytes"),
+                v2_header.to_vec()
+            );
+            assert!(
+                SelectionLedger::open_read(&fresh, 2)
+                    .expect("healed V1 reads")
+                    .selection_ids()
+                    .is_empty()
+            );
+        }
+        // sobs-12, D-4461: a new ledger's name is made durable BEFORE its
+        // header is written, and a failed directory barrier is refused by name.
+        let unsynced = root.join("unsynced");
+        let v1 = SelectionLedger::path(&unsynced);
+        let v2 = SelectionLedgerV2::path(&unsynced);
+        let results = v1
+            .parent()
+            .expect("a ledger has a directory")
+            .display()
+            .to_string();
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &results,
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedger::open(&unsynced, 2).expect_err("V1 barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &results,
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedgerV2::open(&unsynced, 2).expect_err("V2 barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        for path in [&v1, &v2] {
+            assert_eq!(std::fs::metadata(path).expect("created").len(), 0);
+        }
+        drop(SelectionLedger::open(&unsynced, 2).expect("V1 retries"));
+        drop(SelectionLedgerV2::open(&unsynced, 2).expect("V2 retries"));
+        assert_eq!(std::fs::read(&v1).expect("V1 bytes"), v1_header.to_vec());
+        assert_eq!(std::fs::read(&v2).expect("V2 bytes"), v2_header.to_vec());
+        std::fs::remove_dir_all(root).expect("kill-torn fixture cleanup");
     }
 
     #[test]

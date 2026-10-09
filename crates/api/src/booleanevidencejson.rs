@@ -1,4 +1,8 @@
 //! Bounded observation-only views of saved Boolean statistics and admission.
+//! An unpinned first page reuses a held model that is still current
+//! (`detail::must_admit`); every page checks currency through the one read
+//! that serves it (D-4442), each check walking every linked catalog.
+//! `docs/06-limits.md`, D-1444, states both costs and the measured proxy.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_evidence::{
     Admission, Qualification, Statistics, StatisticsRow, StatisticsSource, StatisticsSummary,
@@ -228,13 +232,38 @@ enum Reader {
     Admission(Box<Admission>),
     Qualification(Box<Qualification>),
 }
-struct Cached {
+/// What a held reader was opened for: root, model, identity and budget. A held
+/// reader answers only the identical key; any one differing field is a cold
+/// admission, never a reuse of another tree's reader.
+#[derive(Debug, PartialEq, Eq)]
+struct Key {
     root: PathBuf,
     model: Model,
     identity: [u8; 32],
     budget: crate::detail::BooleanObservationBudget,
-    reader: Reader,
 }
+impl Key {
+    fn of(root: &Path, asked: &Asked, budget: crate::detail::BooleanObservationBudget) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            model: asked.model,
+            identity: asked.identity,
+            budget,
+        }
+    }
+}
+/// One held reader beside the key it was opened for. Generic so the reuse
+/// decision is testable without opening saved evidence.
+struct Held<R> {
+    key: Key,
+    reader: R,
+}
+/// The held entry when, and only when, it was opened for exactly `key`. Constant in
+/// what is held: three fixed-width fields and the root path's bytes, one compare.
+fn held_for<'a, R>(slot: Option<&'a Held<R>>, key: &Key) -> Option<&'a Held<R>> {
+    slot.filter(|held| held.key == *key)
+}
+type Cached = Held<Reader>;
 fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     render_with_budget(
         root,
@@ -254,27 +283,30 @@ fn render_with_budget(
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "Boolean evidence cache poisoned")?;
-    if asked.completion.is_none()
-        || !cache.as_ref().is_some_and(|held| {
-            held.root == root
-                && held.identity == asked.identity
-                && held.model == asked.model
-                && held.budget == budget
+    let key = Key::of(root, asked, budget);
+    let held = held_for(cache.as_ref(), &key);
+    if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
+        // The held model's own currency check, which walks every linked
+        // catalog it authenticated (D-1444). Dispatched here rather than by a
+        // `Reader::require_current` method: that method's "replace with
+        // Ok(())" mutant needs a saved evidence tree changed under a held
+        // reader, which only `cli`'s private fixtures can build. G18-api-05.
+        held.is_some_and(|held| {
+            match &held.reader {
+                Reader::Statistics(reader) => reader.require_current(),
+                Reader::Admission(reader) => reader.require_current(),
+                Reader::Qualification(reader) => reader.require_current(),
+            }
+            .is_ok()
         })
-    {
+    }) {
         *cache = None;
         let reader=match asked.model {
             Model::Statistics=>Statistics::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Statistics),
             Model::Admission=>Admission::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Admission),
             Model::Qualification=>Qualification::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Qualification),
         }.map_err(|why|budget.context(&format!("Boolean {} evidence {} unavailable under configured root {}: {why}. Dashboard BRUTEX_STORE must match command OUTPUT_ROOT; no other folder searched.",asked.model.name(),crate::server::hex32(asked.identity),root.display())))?;
-        *cache = Some(Cached {
-            root: root.to_path_buf(),
-            model: asked.model,
-            identity: asked.identity,
-            budget,
-            reader,
-        });
+        *cache = Some(Cached { key, reader });
     }
     let reader = &cache
         .as_ref()
@@ -338,8 +370,13 @@ fn base(asked: &Asked, pin: [u8; 32], total: usize, rows: Vec<Value>) -> Result<
     put(&mut body, "rows", Value::Array(rows))?;
     Ok(body)
 }
+/// One statistics page. Its currency is proven by the one call that reads it:
+/// `rows` and `splits` each hold the observation lease and check every linked
+/// catalog before and after the page (`Statistics::with_current`), and the
+/// in-memory `sources` arm makes the one `require_current` that does the same.
+/// Since D-4442 there is no second check before and after that call: both
+/// re-proved what the bracketed read proves, at 2·C catalog checks each.
 fn statistics(reader: &Statistics, asked: &Asked) -> Result<Value, String> {
-    reader.require_current()?;
     let pin = reader.completion_digest();
     if asked.completion.is_some_and(|expected| expected != pin) {
         return Err("statistics completion pin differs".to_owned());
@@ -347,7 +384,7 @@ fn statistics(reader: &Statistics, asked: &Asked) -> Result<Value, String> {
     let (total,rows)=match asked.kind.as_str() {
         "candidates"=>(reader.summary().candidates,reader.rows(pin,asked.offset,asked.limit)?.iter().enumerate().map(|(n,row)|statistics_row(reader,asked.offset+n,row)).collect::<Result<Vec<_>,_>>()?),
         "splits"=>(reader.summary().splits,reader.splits(pin,asked.offset,asked.limit)?.iter().enumerate().map(|(n,row)|json!({"index":(asked.offset+n).to_string(),"train_mask":row.train_mask.to_string(),"test_mask":row.test_mask.to_string(),"bottom_half":row.bottom_half,"rankable":row.rankable,"scores_digest":crate::server::hex32(row.scores_digest)})).collect()),
-        "sources"=>{let sources=reader.sources();let end=asked.offset.checked_add(asked.limit).ok_or("source page overflow")?.min(sources.len());let page=sources.get(asked.offset..end).ok_or("source offset outside extent")?;(sources.len(),page.iter().enumerate().map(|(n,row)|source(asked.offset+n,row)).collect())},
+        "sources"=>{reader.require_current()?;let sources=reader.sources();let end=asked.offset.checked_add(asked.limit).ok_or("source page overflow")?.min(sources.len());let page=sources.get(asked.offset..end).ok_or("source offset outside extent")?;(sources.len(),page.iter().enumerate().map(|(n,row)|source(asked.offset+n,row)).collect())},
         _=>return Err("unknown statistics page kind".to_owned()),
     };
     let mut body = base(asked, pin, total, rows)?;
@@ -357,11 +394,14 @@ fn statistics(reader: &Statistics, asked: &Asked) -> Result<Value, String> {
         "admitted_bytes",
         json!(reader.admitted_bytes().to_string()),
     )?;
-    reader.require_current()?;
     Ok(body)
 }
+/// One admission page. `Admission::rows` holds the admission lease and the
+/// linked statistics' bracket around its read, and `Statistics::rows` brackets
+/// the observations it is compared with, so both halves of the page are proven
+/// current by the calls that read them. Since D-4442 there is no extra
+/// `require_current` before and after: each was 2·C more catalog checks.
 fn admission(reader: &Admission, asked: &Asked) -> Result<Value, String> {
-    reader.require_current()?;
     let pin = reader.completion_digest();
     if asked.completion.is_some_and(|expected| expected != pin) {
         return Err("admission completion pin differs".to_owned());
@@ -415,7 +455,6 @@ fn admission(reader: &Admission, asked: &Asked) -> Result<Value, String> {
                 .to_string()
         ),
     )?;
-    reader.require_current()?;
     Ok(body)
 }
 fn source(index: usize, row: &StatisticsSource) -> Value {

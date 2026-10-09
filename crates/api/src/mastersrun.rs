@@ -20,17 +20,22 @@
 //!
 //! # The staleness answer is the half that matters
 //!
-//! `Site::load` parses the masters **once, at startup**, and there is no reload
-//! path. So an operator who refreshes the masters while the server is running
-//! gets new bytes on disk and the same universe in memory — and every page keeps
-//! answering from the boot parse with nothing saying so. [`status_json`] is what
-//! says so: it compares each master's mtime against the moment the site was
-//! loaded and reports which are newer.
+//! `Site::load` parses the masters at startup, and a refresh re-parses them in
+//! place: [`refresh`] calls `reload`, which calls `Site::reparse` to swap a
+//! fresh parse into the site every route shares, with a new parse time and
+//! generation, and answers `"restart_required": false`. A restart is needed
+//! only when that reparse is refused (`"reloaded": false`, its reason named),
+//! or when a master changed on disk by some other hand, which [`status_json`]
+//! reports by comparing each master's mtime against the moment of the current
+//! parse. This module said "there is no reload path" for several commits after
+//! the reload landed (Z1-slice13-F1, D-1762).
 //!
-//! **That does not fix it, and this module does not claim to.** Hot-reloading
-//! needs the master set behind a swap inside `Site`, which every route shares;
-//! until that lands, the honest thing is a refresh that tells the operator a
-//! restart is required rather than one that silently does half the job.
+//! Since D-4438 (so1-5) `reload` calls `Site::reparse_if_moved`: a refresh
+//! whose masters all keep the stamps the held parse was taken under is
+//! answered without a parse, because `pull::masters::land` rewrites only a
+//! master whose bytes changed. A parse that does run runs on the blocking
+//! pool, not on a runtime worker. Measured in `docs/06-limits.md`'s D-4438
+//! row.
 
 use std::path::Path;
 
@@ -38,6 +43,46 @@ use pull::chain::Discovery;
 use pull::masters::{self, Fetched, Landed, Source, Transport};
 
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Refreshes admitted and not yet finished: the one running and the one
+/// queued behind it, never more than [`MAX_ADMITTED`].
+static ADMITTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The running refresh and ONE queued behind it.
+///
+/// Every press used to queue one more detached task on [`REFRESH`], each a
+/// full public and credentialed refresh including a Parameter Store read and
+/// the dump on the shared token, with nothing bounding the queue, while each
+/// abandoned page said nothing landed (conc6-3, D-2696). One queued refresh
+/// still serves a press made after the running one started; a third press
+/// would only repeat it, so it is refused by name at once.
+const MAX_ADMITTED: u8 = 2;
+
+/// One admitted refresh; released when its task ends, however it ends.
+struct Admitted;
+
+impl Admitted {
+    fn take() -> Option<Self> {
+        ADMITTED
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |held| (held < MAX_ADMITTED).then_some(held.saturating_add(1)),
+            )
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        let _ = ADMITTED.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |held| Some(held.saturating_sub(1)),
+        );
+    }
+}
 
 /// The JSON content type every route here answers with.
 type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
@@ -379,7 +424,11 @@ async fn credentialed_leg<P: masters::Pause>(
 ///
 /// Whatever `Site::reparse` refused with, already an operator-readable sentence.
 pub(crate) fn reload(site: &crate::server::Loaded, dir: &Path) -> Result<String, String> {
-    let reloaded = site.reparse(dir);
+    // SKIPPED WHEN NO MASTER MOVED (so1-5, D-4438): `land` rewrites only a
+    // master whose bytes changed, so unchanged stamps are unchanged input.
+    let before = site.universe().generation;
+    let reloaded = site.reparse_if_moved(dir);
+    let moved = site.universe().generation != before;
     let _ = telemetry::emit_if!(
         if reloaded.is_ok() {
             telemetry::Level::Info
@@ -387,9 +436,10 @@ pub(crate) fn reload(site: &crate::server::Loaded, dir: &Path) -> Result<String,
             telemetry::Level::Error
         },
         "api.masters.reload",
-        match reloaded {
-            Ok(_) => "the universe was re-parsed and every page now answers from it",
-            Err(_) => "the universe could NOT be re-parsed, so the previous one still stands",
+        match (&reloaded, moved) {
+            (Ok(_), true) => "the universe was re-parsed and every page now answers from it",
+            (Ok(_), false) => "no master moved, so the universe already answering was kept unparsed",
+            (Err(_), _) => "the universe could NOT be re-parsed, so the previous one still stands",
         },
         "detail" => telemetry::Value::Str(match reloaded {
             Ok(ref notes) | Err(ref notes) => notes,
@@ -469,6 +519,7 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
     crate::server::credentialed_source(feed, &spec)
         .await
         .map(|(source, _vendor)| source)
+        .map_err(|unread| unread.why)
 }
 
 /// `POST /masters/refresh` — download every master, public and credentialed.
@@ -500,13 +551,70 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
 /// Unlike a sweep, this is four files and seconds — there is no progress to
 /// poll and no slot to claim. A route that returned `202` here would invent a
 /// state machine for work that finishes before the response would have.
+///
+/// # But it does not die with the connection -- P3-01-04, D-1974
+///
+/// On a sick host the ladder outlasts the page's 90 s ceiling, and the abort
+/// closed the connection, which dropped this future: files already landed
+/// stayed replaced on disk, while the per-source records and the reload never
+/// ran. The work now runs on its own task, as `recovery::start`'s does, so
+/// every source is recorded and the universe re-parsed whether or not anyone
+/// is still waiting for the answer.
 pub async fn refresh(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let Some(admitted) = Admitted::take() else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            json_headers(),
+            format!(
+                r#"{{"landed":[],"refusal":{}}}"#,
+                crate::render::json_string(
+                    "a refresh is already running and another is queued behind it, so this \
+                     press was refused rather than queued a third: it would fetch the same \
+                     files again. Their outcome appears on /masters/status.json."
+                )
+            ),
+        );
+    };
+    detached(refresh_work(site, admitted)).await
+}
+
+/// Runs `work` on its own task and answers with what it returned.
+///
+/// Dropping the returned future drops only the wait: the task keeps running to
+/// its end. A task that did not return is a 500 that says where the outcome is.
+async fn detached(
+    work: impl std::future::Future<Output = (axum::http::StatusCode, JsonHeaders, String)>
+    + Send
+    + 'static,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    match tokio::spawn(work).await {
+        Ok(answer) => answer,
+        Err(why) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            json_headers(),
+            format!(
+                r#"{{"landed":[],"refusal":{}}}"#,
+                crate::render::json_string(&format!(
+                    "the refresh task did not return ({why}); /masters/status.json and /logs say what landed"
+                ))
+            ),
+        ),
+    }
+}
+
+/// [`refresh`]'s work, on the task [`detached`] gives it.
+async fn refresh_work(
     // THE SITE IS READ **AND WRITTEN** NOW, which reverses this parameter's
     // former comment. It used to say *"this route writes files and never
     // touches the parsed universe"*, and that was the whole defect: an
     // operator pressed Refresh, four files landed, and every page kept
     // answering from the boot parse. `Site::reparse` is what closes it.
-    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    site: crate::server::Loaded,
+    // HELD BY THE TASK, so an abandoned page still counts until its refresh
+    // has actually run.
+    _admitted: Admitted,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
     // FIFO async lock covers fetch -> landing -> reload, including credentials
     // and all sources. An older download cannot publish after a newer refresh.
@@ -623,7 +731,20 @@ pub async fn refresh(
         .map(|source| crate::render::json_string(source.file))
         .collect();
 
-    let reloaded = reload(&site, &dir);
+    // OFF THE ASYNC WORKERS (so1-5, D-4438): a parse reads every master whole
+    // and rebuilds the universe, which held a runtime worker for its length.
+    // The `REFRESH` lock above is still held, so refreshes stay one at a time.
+    let reloaded = {
+        let (site, dir) = (crate::server::Loaded::clone(&site), dir.clone());
+        tokio::task::spawn_blocking(move || reload(&site, &dir))
+            .await
+            .unwrap_or_else(|why| {
+                Err(format!(
+                    "the master reparse task could not be joined ({why}); whether the \
+                     universe was replaced is unknown, so read /masters/status.json"
+                ))
+            })
+    };
 
     let status = if attempted_landed && complete && reloaded.is_ok() {
         axum::http::StatusCode::OK
@@ -648,10 +769,10 @@ pub async fn refresh(
 /// `GET /masters/status.json` — what is on disk, and whether it is newer than
 /// the parse this process is answering from.
 ///
-/// **The staleness answer, which is the one an operator needs after a refresh.**
-/// `Site::load` parses the masters once at startup and there is no reload path,
-/// so a master refreshed while the server runs is new bytes behind an old
-/// universe. Nothing said so before this route; the page looked identical.
+/// **The staleness answer.** A refresh through this module re-parses in place
+/// (`Site::reparse`), so after one this answers "not newer". A master changed
+/// on disk any other way, or a refresh whose reparse was refused, is new bytes
+/// behind the parse still in memory, and this is what says so.
 pub async fn status_json(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
@@ -662,32 +783,127 @@ pub async fn status_json(
             r#"{"masters":[],"refusal":"neither BRUTEX_MASTERS nor HOME is set, so the masters directory cannot be found"}"#.to_owned(),
         );
     };
-    let parsed_at = site.universe().at;
+    let stamps = site.universe().stamps.clone();
 
-    let body = status_rows(&dir, parsed_at);
+    let body = status_rows(&dir, &stamps);
     (axum::http::StatusCode::OK, json_headers(), body)
 }
 
-/// The status answer over a directory and a parse time a caller names.
+/// What a master file looked like on disk: enough to tell a rewrite from no
+/// change WITHOUT ordering two clock readings.
 ///
-/// Split out for the reason every other split in this module has: the two
-/// inputs it depends on are a directory and a clock reading, and behind a
-/// handler both are the process's, so nothing could assert what an absent file
-/// or an old file actually renders as.
-fn status_rows(dir: &Path, parsed_at: std::time::SystemTime) -> String {
+/// # Why identity and not "newer" (clock-5, D-2580; CE-85, D-2757)
+///
+/// `newer_than_parse` compared the file's mtime against the wall-clock time of
+/// the parse. A clock stepped back between the parse and a later rewrite gave
+/// the new bytes an mtime BEFORE the parse, so a changed master read as "not
+/// newer", `restart_required` stayed false, and the process went on answering
+/// from the old bytes; and an mtime ahead of the clock demanded a restart that
+/// could not clear the flag (D-2757). An mtime can also be set by the writer
+/// (an archive extraction, a copy that preserves times). The stamp is the
+/// length, the mtime, the device, the inode and the inode-change time — the
+/// last of which no ordinary writer can set — and a master is CHANGED when any
+/// differs from the stamp taken just before the parse read it. Taken before,
+/// not after, so a write racing the read shows as changed (a needless restart)
+/// rather than as unchanged (stale bytes served as current).
+/// `cli::live::LiveStamp` is the same idea for the live feed.
+///
+/// D-2757 recorded (mtime, length) for the same finding on the PR #74 side;
+/// this stamp holds both and three more fields, so every change that one saw
+/// this one sees too (merged with zero/next).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    dev: u64,
+    ino: u64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl FileStamp {
+    /// The stamp of the file at `path`, or `None` when nothing can be read
+    /// there.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        let held = std::fs::metadata(path).ok()?;
+        Some(Self::from_metadata(&held))
+    }
+
+    fn from_metadata(held: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let (dev, ino, ctime, ctime_nsec) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (held.dev(), held.ino(), held.ctime(), held.ctime_nsec())
+        };
+        #[cfg(not(unix))]
+        let (dev, ino, ctime, ctime_nsec) = (0, 0, 0, 0);
+        Self {
+            len: held.len(),
+            modified: held.modified().ok(),
+            dev,
+            ino,
+            ctime,
+            ctime_nsec,
+        }
+    }
+}
+
+/// Every master's stamp, in [`masters::SOURCES`] order. Taken by
+/// `Site::load` and `Site::reparse` BEFORE they read the masters, so a file
+/// changed during the parse stays visibly changed (clock-5, D-2580; D-2757).
+/// One `stat` per source.
+#[must_use]
+pub fn stamps_of(dir: &Path) -> Vec<Option<FileStamp>> {
+    masters::SOURCES
+        .iter()
+        .map(|source| FileStamp::of(&masters::path_of(dir, source)))
+        .collect()
+}
+
+/// The status answer over a directory and the stamps the parse took, as a
+/// caller names them.
+///
+/// Split out for the reason every other split in this module has: the inputs
+/// it depends on are a directory and what the parse saw, and behind a handler
+/// both are the process's, so nothing could assert what an absent file or an
+/// old file actually renders as.
+///
+/// `stamps` is in [`masters::SOURCES`] order. A source the parse recorded no
+/// stamp slot for — a `Site` built by `Site::new` over a universe read
+/// elsewhere, which names no directory — answers `null` (D-2757); every served
+/// site records one.
+fn status_rows(dir: &Path, stamps: &[Option<FileStamp>]) -> String {
     let rows: Vec<String> = masters::SOURCES
         .iter()
-        .map(|source| {
+        .enumerate()
+        .map(|(at, source)| {
             let path = masters::path_of(dir, source);
-            let held = std::fs::metadata(&path).ok();
+            // ABSENT AND UNREADABLE ARE TWO ANSWERS. Only `NotFound` is
+            // absent; any other error (a denied directory, a symlink loop, an
+            // I/O fault) is a file this cannot see, named with the operating
+            // system's own reason rather than folded into "absent" and an
+            // instruction to fetch what is already there (OBSV-02, D-3201).
+            let (held, unreadable) = match std::fs::metadata(&path) {
+                Ok(meta) => (Some(meta), None),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => (None, None),
+                Err(why) => (None, Some(why.to_string())),
+            };
             let bytes = held.as_ref().map_or(0, std::fs::Metadata::len);
-            // NEWER THAN THE PARSE MEANS THE PROCESS IS ANSWERING FROM OLD
-            // BYTES. Equal is not newer: a file written in the same second the
-            // site loaded was read by that load.
-            let newer = held
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .is_some_and(|at| at > parsed_at);
+            // CHANGED SINCE THE PARSE MEANS THE PROCESS IS ANSWERING FROM OLD
+            // BYTES. The wire name stays `newer_than_parse`, which the page
+            // reads; the test is inequality with the stamp the parse took, by
+            // equality of identities, so no clock is compared with another
+            // (CE-85, D-2757; clock-5, D-2580). `null` where no stamp was taken
+            // -- a site built without reading a masters directory -- rather
+            // than a `false` nobody measured (D-2757). A master present at the
+            // parse and absent now differs from its stamp and reads as changed
+            // (D-2757); D-2580 read it as not changed, and the zero/next merge
+            // kept D-2757's answer (D-4607).
+            let newer = stamps.get(at).map_or_else(
+                || "null".to_owned(),
+                |parsed| (held.as_ref().map(FileStamp::from_metadata) != *parsed).to_string(),
+            );
             // WHEN, AND NOT ONLY WHETHER. "Present" says a file exists;
             // "present, written eleven months ago" is the answer an operator
             // acts on, and it is the whole reason this module exists — a stale
@@ -703,17 +919,36 @@ fn status_rows(dir: &Path, parsed_at: std::time::SystemTime) -> String {
                     |since| since.as_millis().to_string(),
                 );
             format!(
-                r#"{{"file":{},"present":{},"bytes":{bytes},"modified_unix_millis":{modified},"newer_than_parse":{newer},"needs_token":{}}}"#,
+                r#"{{"file":{},"present":{},"unreadable":{},"bytes":{bytes},"modified_unix_millis":{modified},"newer_than_parse":{newer},"needs_token":{}}}"#,
                 crate::render::json_string(source.file),
-                held.is_some(),
+                if unreadable.is_some() {
+                    "null"
+                } else if held.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+                unreadable
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), crate::render::json_string),
                 source.needs_token
             )
         })
         .collect();
 
-    let any_newer = rows
+    // A ROW THAT COULD NOT BE READ MAKES "RESTART REQUIRED" UNKNOWN. Its
+    // `newer_than_parse` is false only because nothing was seen, and `false`
+    // here would promise the parse is current.
+    let any_newer = if rows.iter().any(|row| row.contains(r#""present":null"#)) {
+        "null"
+    } else if rows
         .iter()
-        .any(|row| row.contains(r#""newer_than_parse":true"#));
+        .any(|row| row.contains(r#""newer_than_parse":true"#))
+    {
+        "true"
+    } else {
+        "false"
+    };
     format!(
         r#"{{"masters":[{}],"restart_required":{any_newer}}}"#,
         rows.join(",")
@@ -804,12 +1039,10 @@ fn page_html() -> String {
          <th>On disk</th><th>Last refresh</th></tr></thead><tbody>{rows}</tbody></table>\
          <div id=\"ledger\"></div>\
          <div id=\"xverify\" class=\"att\"></div>\
-         <p class=\"foot\">A refresh writes new bytes to disk and does <b>not</b> reload the \
-         parsed universe: <code>Site::load</code> parses the masters once, at startup. When a \
-         file changes under a running server this page says a restart is required. Restart the server \
-         after a refresh, because \
-         saying nothing would leave every other page answering from the boot parse with \
-         nothing to indicate it.</p>\
+         <p class=\"foot\">A refresh writes new bytes to disk and re-parses the universe in \
+         place, so every page answers from the new files without a restart. A restart is \
+         required only when that re-parse is refused, or when a file changed on disk some \
+         other way; this page says so on the row when either happens.</p>\
          <script src=\"/masters.js\" defer></script>",
         // THE REAL NAV, NOT A SECOND COPY OF IT. This page was self-contained
         // following `crate::logs`, and inherited its defect with it: a page
@@ -913,8 +1146,56 @@ mod tests {
             .block_on(future)
     }
 
+    /// The tests that drive `refresh` share its process-wide lock and queue,
+    /// so they take turns.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// **conc6-3: presses queue at most one refresh behind the running one; a
+    /// third is refused by name, at once.**
+    ///
+    /// Every press used to add one more detached task waiting FIFO on the
+    /// lock, each a full public and credentialed refresh, with nothing
+    /// bounding the queue, while every abandoned page said nothing landed.
+    #[test]
+    fn a_press_past_one_queued_refresh_is_refused_by_name() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        block_on(async {
+            let dir = scratch("refresh-bounded");
+            let site = std::sync::Arc::new(crate::server::Site::load(&dir, &dir));
+            let held = super::REFRESH.lock().await;
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            // THE RUNNING ONE AND THE ONE QUEUED BEHIND IT.
+            let mut first = Box::pin(super::refresh(axum::extract::State(std::sync::Arc::clone(
+                &site,
+            ))));
+            assert!(std::future::Future::poll(first.as_mut(), &mut cx).is_pending());
+            let mut second = Box::pin(super::refresh(axum::extract::State(std::sync::Arc::clone(
+                &site,
+            ))));
+            assert!(std::future::Future::poll(second.as_mut(), &mut cx).is_pending());
+            // THE THIRD IS ANSWERED NOW, and says why.
+            let mut third = Box::pin(super::refresh(axum::extract::State(site)));
+            let answered = std::future::Future::poll(third.as_mut(), &mut cx);
+            assert!(answered.is_ready(), "a third press was queued behind two");
+            let std::task::Poll::Ready((code, _, body)) = answered else {
+                return;
+            };
+            assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+            assert!(body.contains("already running"), "{body}");
+            assert!(body.contains("/masters/status.json"), "{body}");
+            drop((first, second, third));
+            drop(held);
+        });
+    }
+
     #[test]
     fn refresh_requests_wait_before_starting_the_next_fetch() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         block_on(async {
             let dir = scratch("refresh-serialization");
             let site = std::sync::Arc::new(crate::server::Site::load(&dir, &dir));
@@ -923,11 +1204,55 @@ mod tests {
             let waker = std::task::Waker::noop();
             let mut cx = std::task::Context::from_waker(waker);
             assert!(std::future::Future::poll(next.as_mut(), &mut cx).is_pending());
-            // Cancel while queued: no directory lookup, credential or fetch.
+            // Dropping the WAIT does not cancel the refresh (D-1974): it is
+            // queued on its own task behind the lock. Nothing here yields, so
+            // that task never runs before this runtime is dropped, and no
+            // directory lookup, credential or fetch happens in this test.
             drop(next);
             drop(first);
             assert!(super::REFRESH.try_lock().is_ok());
         });
+    }
+
+    /// P3-01-04, D-1974. The page aborts at 90 s and the abort drops the
+    /// handler's future; the refresh must still record every source and
+    /// reload. `refresh` hands its whole work to `detached`, and `detached`
+    /// keeps the work running after its caller is gone.
+    #[test]
+    fn a_refresh_whose_caller_goes_away_still_runs_to_its_end() {
+        block_on(async {
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            let opened = std::sync::Arc::clone(&gate);
+            let (done, finished) = tokio::sync::oneshot::channel();
+            let mut waiter = Box::pin(super::detached(async move {
+                opened.notified().await;
+                let _ = done.send(());
+                (
+                    axum::http::StatusCode::OK,
+                    super::json_headers(),
+                    String::new(),
+                )
+            }));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(std::future::Future::poll(waiter.as_mut(), &mut cx).is_pending());
+            // THE PAGE'S CEILING FIRES and the connection's future is dropped.
+            drop(waiter);
+            gate.notify_one();
+            finished
+                .await
+                .expect("the work ran to its end although nobody was waiting");
+        });
+        let source = include_str!("mastersrun.rs");
+        let handler = source
+            .split_once("pub async fn refresh(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the handler");
+        assert!(
+            handler.contains("detached(refresh_work(site, admitted)).await"),
+            "the handler runs its work detached: {handler}"
+        );
     }
 
     #[test]
@@ -1517,13 +1842,16 @@ mod tests {
     }
 
     #[test]
-    fn the_page_says_a_restart_is_required_rather_than_pretending_otherwise() {
-        // `Site::load` PARSES ONCE AT STARTUP. A page that refreshed the bytes
-        // and said nothing would leave every other page answering from the boot
-        // parse, which is the failure wearing a success's clothes §4 bans.
+    fn the_page_says_a_refresh_reloads_and_names_when_a_restart_is_required() {
+        // A refresh re-parses through `Site::reparse` (D-1762). The footer
+        // once told the operator to restart after every refresh, which sent
+        // them to restart a server that had already reloaded; it must name
+        // the two cases that do need a restart, and no others.
         let html = super::page_html();
-        assert!(html.contains("restart is required"), "on the row");
-        assert!(html.contains("Restart the server"), "and after a refresh");
+        assert!(html.contains("re-parses the universe in place"), "{html}");
+        assert!(html.contains("A restart is required only when"), "{html}");
+        assert!(!html.contains("Restart the server"), "{html}");
+        assert!(!html.contains("does <b>not</b> reload"), "{html}");
     }
 
     #[test]
@@ -1538,6 +1866,92 @@ mod tests {
         );
     }
 
+    /// clock-5, D-2580: a master rewritten after the parse, with an mtime an
+    /// hour BEFORE the parse (a clock stepped back, or a writer that preserves
+    /// times), still reads as changed and requires a restart. On the old
+    /// ordering test (`mtime > parsed_at`) it read as not newer, so
+    /// `restart_required` was false while the process served the old bytes.
+    /// The boundaries: an untouched file is not changed; one that appeared
+    /// after the parse is; and one present at the parse and absent now is
+    /// changed too (D-2757, kept over D-2580's "absent is not changed" on
+    /// merge, D-4607): the process is answering from bytes no longer on disk.
+    #[test]
+    fn a_master_rewritten_with_an_older_mtime_than_the_parse_still_requires_a_restart() {
+        let dir = scratch("status-stamp");
+        let first = &masters::SOURCES[0];
+        let path = masters::path_of(&dir, first);
+        std::fs::write(&path, a_master()).expect("a master on disk");
+        let stamps = super::stamps_of(&dir);
+        assert_eq!(stamps.len(), masters::SOURCES.len());
+        assert!(stamps.first().is_some_and(Option::is_some));
+        assert!(
+            stamps
+                .get(1..)
+                .is_some_and(|rest| rest.iter().all(Option::is_none))
+        );
+        let parsed_at = std::time::SystemTime::now();
+
+        let untouched = super::status_rows(&dir, &stamps);
+        assert!(
+            untouched.contains(r#""restart_required":false"#),
+            "{untouched}"
+        );
+        assert!(
+            !untouched.contains(r#""newer_than_parse":true"#),
+            "{untouched}"
+        );
+
+        // Rewritten, and its mtime set an hour before the parse.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, format!("{}\n", a_master())).expect("rewrite");
+        let back = parsed_at - std::time::Duration::from_hours(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(back)
+            .expect("set the mtime back");
+        let rewritten = super::status_rows(&dir, &stamps);
+        assert!(
+            rewritten.contains(r#""newer_than_parse":true"#),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(r#""restart_required":true"#),
+            "{rewritten}"
+        );
+        // With no stamp slot the old ordering is not applied: the answer is
+        // `null` (D-2757), never a claimed change. (On zero/next this read the
+        // old ordering, which said not newer: the defect.)
+        let ordered = super::status_rows(&dir, &[]);
+        assert!(ordered.contains(r#""restart_required":false"#), "{ordered}");
+
+        // A master that appears after the parse is a change too.
+        let second = &masters::SOURCES[1];
+        std::fs::write(masters::path_of(&dir, second), a_master()).expect("a second master");
+        let fresh = super::stamps_of(&dir);
+        std::fs::remove_file(&path).expect("remove the first");
+        let appeared = super::status_rows(&dir, &stamps);
+        assert!(
+            appeared.contains(r#""restart_required":true"#),
+            "{appeared}"
+        );
+        // A master the parse read and that is gone now is a change as well:
+        // the process still answers from its bytes (D-2757, D-4607). One the
+        // parse did not see and that is still absent is not.
+        let after_removal = super::status_rows(&dir, &fresh);
+        assert!(
+            after_removal.contains(r#""restart_required":true"#),
+            "{after_removal}"
+        );
+        assert_eq!(
+            after_removal.matches(r#""newer_than_parse":true"#).count(),
+            1,
+            "only the removed master reads as changed: {after_removal}"
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
     #[test]
     fn the_status_answer_carries_when_each_master_was_written() {
         // "PRESENT" IS NOT THE QUESTION. A master present and eleven months old
@@ -1548,7 +1962,7 @@ mod tests {
         let source = &masters::SOURCES[0];
         std::fs::write(masters::path_of(&dir, source), a_master()).expect("a master on disk");
 
-        let json = super::status_rows(&dir, std::time::SystemTime::UNIX_EPOCH);
+        let json = super::status_rows(&dir, &[]);
         assert!(json.contains(r#""modified_unix_millis":"#), "{json}");
         assert!(
             !json.contains(r#""modified_unix_millis":null,"newer_than_parse":true"#),
@@ -1559,6 +1973,80 @@ mod tests {
             "and the three absent ones must carry null rather than a zero \
              that reads as 1970: {json}"
         );
+    }
+
+    /// CE-85 / D-2757: "newer than the parse" is "changed since the parse",
+    /// compared by (mtime, length) and never against this host's clock. A
+    /// master whose mtime is an hour AHEAD of the clock is cleared by the
+    /// restart that re-stamps it, and a master changed after the parse with an
+    /// mtime in the PAST (a clock corrected since) is still reported.
+    #[test]
+    fn a_master_is_newer_only_when_it_changed_since_the_parse_whatever_its_clock() {
+        let dir = scratch("status-changed");
+        let path = masters::path_of(&dir, &masters::SOURCES[0]);
+        std::fs::write(&path, a_master()).expect("a master on disk");
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_hours(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(ahead))
+            .expect("an mtime ahead of this clock");
+        // THE RESTART: a parse stamps what it is about to read.
+        let parsed = super::stamps_of(&dir);
+        let json = super::status_rows(&dir, &parsed);
+        assert!(
+            json.contains(r#""restart_required":false"#),
+            "the restart it names clears it: {json}"
+        );
+
+        std::fs::write(&path, format!("{}\n", a_master())).expect("a changed master");
+        let behind = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(behind))
+            .expect("an mtime behind the parse");
+        let json = super::status_rows(&dir, &parsed);
+        assert!(
+            json.contains(r#""newer_than_parse":true"#)
+                && json.contains(r#""restart_required":true"#),
+            "a change after the parse is reported whatever its mtime says: {json}"
+        );
+    }
+
+    /// OBSV-02 (D-3201): a master that cannot be READ is not an absent one.
+    /// `metadata(..).ok()` folded every error into "absent", so a symlink loop,
+    /// a denied directory or an I/O error told the operator to fetch a file
+    /// that is on disk, with no reason anywhere -- the fallback §4 bans.
+    #[test]
+    fn an_unreadable_master_is_named_and_not_reported_absent() {
+        let dir = scratch("status-unreadable");
+        let looped = masters::path_of(&dir, &masters::SOURCES[0]);
+        let _ = std::fs::remove_file(&looped);
+        // ELOOP even for root, so the attack does not depend on who runs it.
+        std::os::unix::fs::symlink(&looped, &looped).expect("a symlink loop");
+
+        // The stamps a parse would take now: nothing reads as changed, so the
+        // `null` below is the unreadable row's doing alone (D-4614).
+        let json = super::status_rows(&dir, &super::stamps_of(&dir));
+        let first = json.split(r#"{"file":"#).nth(1).expect("the first row");
+        assert!(
+            first.contains(r#""present":null"#) && first.contains(r#""unreadable":""#),
+            "an unreadable master is neither present nor absent, and says why: {json}"
+        );
+        assert!(!first.contains(r#""present":false"#), "{json}");
+        assert!(
+            first.contains("symbolic links") || first.contains("os error 40"),
+            "the reason is the operating system's own: {json}"
+        );
+        // The three genuinely absent ones still say absent, with no reason.
+        assert_eq!(
+            json.matches(r#""present":false,"unreadable":null"#).count(),
+            masters::SOURCES.len() - 1,
+            "{json}"
+        );
+        // RESTART IS UNKNOWN, not "not required", while a row is unreadable.
+        assert!(json.contains(r#""restart_required":null"#), "{json}");
     }
 
     #[test]
@@ -1621,13 +2109,172 @@ mod tests {
             "/dashboard",
             "/instruments",
             "/pull",
-            "/audit",
+            "/audit/page",
             "/store",
             "/logs",
         ] {
             assert!(
                 html.contains(&format!("href=\"{href}\"")),
                 "{href} is not reachable from the masters page"
+            );
+        }
+    }
+
+    /// MR-15 (P12-02, D-1792): the credentialed leg runs the SAME ladder as
+    /// the public one. Both legs reach a source only through `obtain`, the one
+    /// function that retries, re-primes and falls back, and a credential that
+    /// could not be read asks nothing and records a refusal with no steps.
+    ///
+    /// Read off the source because the credentialed arm needs a Parameter
+    /// Store read this binary cannot make (`CLAUDE.md` §8); a behavioural
+    /// test of that arm is not possible without the credential, and that is
+    /// the stated limit of this one.
+    #[test]
+    fn the_credentialed_leg_reaches_a_source_only_through_the_public_ladder() {
+        let source = include_str!("mastersrun.rs");
+        let body = |name: &str| {
+            source
+                .split_once(&format!("async fn {name}"))
+                .and_then(|(_, rest)| rest.split_once("\n}\n"))
+                .map(|(body, _)| body)
+                .expect("the function is defined")
+        };
+        let public = body("refresh_with<");
+        let credentialed = body("credentialed_leg<");
+        assert!(public.contains("obtain(from, clock, dir, source).await"));
+        assert!(credentialed.contains("obtain(wire, clock, dir, source).await"));
+        assert_eq!(
+            credentialed.matches("obtain(").count(),
+            1,
+            "one ladder, called once"
+        );
+        assert!(
+            credentialed.contains("Landed::Refused(why.clone())")
+                && credentialed.contains("Fetched::default()"),
+            "an unreadable credential asks nothing and says so"
+        );
+    }
+
+    /// Every record the shared sink holds for `target` from sequence `from` on.
+    fn emitted_since(target: &str, from: u64) -> Vec<telemetry::Record> {
+        let sink = crate::emitted::sink();
+        let dir = sink
+            .path()
+            .parent()
+            .expect("the sink writes a file inside a directory")
+            .to_path_buf();
+        telemetry::tail(
+            &dir,
+            sink.keep_files(),
+            &telemetry::Query::last(telemetry::MAX_LIMIT).from_target(target),
+        )
+        .records
+        .into_iter()
+        .filter(|record| record.seq >= from)
+        .collect()
+    }
+
+    /// MR-22 (P12-02, D-1792): THE LOG LEVEL FOLLOWS THE OUTCOME, at both
+    /// granularities. Per attempt: a refused prime and a retryable refusal are
+    /// `Warn`, a body is `Info`, a settled refusal is `Error`. Per source: a
+    /// landing is `Info`, a skipped source is `Warn`, a refusal and an
+    /// unconfirmed durability are `Error`. Each record is told apart by a
+    /// field this test alone writes, so a concurrent emit cannot satisfy it.
+    #[test]
+    fn every_outcome_is_logged_at_the_level_its_consequence_earns() {
+        use masters::{Attempt, Fetched, Got, Verdict};
+        use telemetry::Level;
+
+        let source = &masters::SOURCES[0];
+        let url = "https://mr22.invalid/levels";
+        let step = |number: u32, got: Got| Attempt {
+            url: url.to_owned(),
+            number,
+            waited_ms: 0,
+            got,
+        };
+        let refused = |status: Option<u16>, verdict: Verdict| Got::Refused {
+            status,
+            detail: "mr22".to_owned(),
+            verdict,
+        };
+        let tried = Fetched {
+            body: None,
+            attempts: vec![
+                step(
+                    1,
+                    Got::PrimeRefused {
+                        detail: "mr22".to_owned(),
+                    },
+                ),
+                step(2, Got::Body { bytes: 7 }),
+                step(3, refused(Some(503), Verdict::Again)),
+                step(4, refused(None, Verdict::Reprime)),
+                step(5, refused(Some(404), Verdict::Never)),
+            ],
+        };
+        let from = crate::emitted::mark();
+        super::record(
+            source,
+            &Ok(Landed::Written {
+                bytes: 922_001,
+                changed: true,
+            }),
+            &tried,
+        );
+        let quiet = Fetched::default();
+        super::record(source, &Err("mr22 skipped".to_owned()), &quiet);
+        super::record(
+            source,
+            &Ok(Landed::Refused("mr22 refused".to_owned())),
+            &quiet,
+        );
+        super::record(
+            source,
+            &Ok(Landed::Uncertain {
+                bytes: 922_002,
+                changed: false,
+                why: "mr22 uncertain".to_owned(),
+            }),
+            &quiet,
+        );
+
+        let attempts = emitted_since("api.masters.attempt", from);
+        for (number, level) in [
+            (1, Level::Warn),
+            (2, Level::Info),
+            (3, Level::Warn),
+            (4, Level::Warn),
+            (5, Level::Error),
+        ] {
+            let found: Vec<_> = attempts
+                .iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "url", url)
+                        && crate::emitted::counts(record, "attempt", number)
+                })
+                .collect();
+            assert_eq!(found.len(), 1, "attempt {number}: {attempts:?}");
+            assert!(
+                found.iter().all(|record| record.level == level),
+                "attempt {number}: {found:?}"
+            );
+        }
+        let sources = emitted_since("api.masters.source", from);
+        for (needle, level) in [
+            ("922001 bytes", Level::Info),
+            ("mr22 skipped", Level::Warn),
+            ("mr22 refused", Level::Error),
+            ("mr22 uncertain", Level::Error),
+        ] {
+            let found: Vec<_> = sources
+                .iter()
+                .filter(|record| crate::emitted::says(record, "detail", needle))
+                .collect();
+            assert_eq!(found.len(), 1, "{needle}: {sources:?}");
+            assert!(
+                found.iter().all(|record| record.level == level),
+                "{needle}: {found:?}"
             );
         }
     }

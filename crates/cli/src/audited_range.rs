@@ -239,7 +239,11 @@ impl<'a> Loader<'a> {
             Some(span)
         };
         let daily = stored::daily_context_from_span(daily.finish()?, &signal.bars)?;
-        let exact_minute = stored::exact_minute_context_from_span(minute.finish()?, &signal.bars)?;
+        let exact_minute = stored::exact_minute_context_from_span(
+            minute.finish()?,
+            &signal.bars,
+            self.request.store_root,
+        )?;
         Ok(RangeData {
             signal,
             execution,
@@ -296,21 +300,28 @@ impl<'a> Loader<'a> {
     }
 }
 
+/// The span's first month, and every later non-empty month held apart until
+/// `finish` joins them once. Reserving each month on the growing span could
+/// relocate every bar already held, so M appends could copy
+/// Theta(M^2 x bars-per-month) bars. W2-cli1-1, D-0923.
 #[derive(Default)]
-struct Builder(Option<Span>);
+struct Builder(Option<Span>, Vec<Vec<indicators::Candle>>);
 
 impl Builder {
     fn from_loaded(loaded: Loaded) -> Self {
-        Self(Some(Span {
-            bars: loaded.bars,
-            vendor: loaded.vendor,
-            key: loaded.key,
-            timeframe: loaded.timeframe,
-            asked: 1,
-            found: 1,
-            missing: Vec::new(),
-            excluded: loaded.excluded,
-        }))
+        Self(
+            Some(Span {
+                bars: loaded.bars,
+                vendor: loaded.vendor,
+                key: loaded.key,
+                timeframe: loaded.timeframe,
+                asked: 1,
+                found: 1,
+                missing: Vec::new(),
+                excluded: loaded.excluded,
+            }),
+            Vec::new(),
+        )
     }
 
     fn append(&mut self, loaded: Loaded) -> Result<(), String> {
@@ -324,15 +335,22 @@ impl Builder {
         {
             return Err("audited range refuses a cross-source month join".to_owned());
         }
-        if let (Some(last), Some(first)) = (span.bars.last(), loaded.bars.first())
+        // Only non-empty months are held, so the newest held month's last bar
+        // is the span's last bar whenever one is held: one look, not a walk.
+        let last = self
+            .1
+            .last()
+            .and_then(|month| month.last())
+            .or(span.bars.last());
+        if let (Some(last), Some(first)) = (last, loaded.bars.first())
             && first.ts_micros <= last.ts_micros
         {
             return Err("audited range steps backward at its month boundary".to_owned());
         }
-        span.bars
-            .try_reserve_exact(loaded.bars.len())
-            .map_err(error)?;
-        span.bars.extend(loaded.bars);
+        if !loaded.bars.is_empty() {
+            self.1.try_reserve(1).map_err(error)?;
+            self.1.push(loaded.bars);
+        }
         span.excluded.absorb(loaded.excluded);
         span.asked = span
             .asked
@@ -343,8 +361,18 @@ impl Builder {
     }
 
     fn finish(self) -> Result<Span, String> {
-        self.0
-            .ok_or_else(|| "audited range requires at least one exact month".to_owned())
+        let Self(span, held) = self;
+        let mut span =
+            span.ok_or_else(|| "audited range requires at least one exact month".to_owned())?;
+        // Every held month is a live allocation of non-zero-sized bars, so
+        // their lengths sum to less than `isize::MAX` and the sum cannot wrap.
+        let more: usize = held.iter().map(Vec::len).sum();
+        // One exact reservation, then each held bar is copied once.
+        span.bars.try_reserve_exact(more).map_err(error)?;
+        for month in held {
+            span.bars.extend(month);
+        }
+        Ok(span)
     }
 }
 

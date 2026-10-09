@@ -14,7 +14,7 @@ use runner::admission::{
 use runner::bootstrap_zero_v2::{self as zero, Classification};
 
 #[path = "index_stop_qualification_metrics.rs"]
-mod metrics;
+pub(super) mod metrics;
 
 pub(super) fn validate_family<S: Snapshot>(
     training: &[S],
@@ -604,8 +604,8 @@ fn project<S: Snapshot>(
         values.pbo_unrankable_folds = ObservedU64V1::Measured(
             u64::try_from(statistics.splits.len()).map_err(display)? - contributing,
         );
-        if contributing > 0 {
-            values.pbo_ppm = ObservedU64V1::Measured(probability(bottom, contributing)?.ppm());
+        if let Some(ppm) = pbo_ppm(bottom, contributing)? {
+            values.pbo_ppm = ObservedU64V1::Measured(ppm);
         }
     }
     let adjusted = scaled(facts, romano[1], romano[2])?;
@@ -649,6 +649,17 @@ fn project<S: Snapshot>(
         values.calendar_complete = CompletenessV1::Refused;
     }
     Ok(values)
+}
+/// PBO over the rankable folds, as a ceiling in ppm. No contributing fold
+/// leaves it unmeasured rather than dividing by zero. A function of its own so
+/// the zero boundary is asserted directly (G18-cli-a-08, D-2005): the live
+/// fixtures always have contributing folds.
+fn pbo_ppm(bottom: u64, contributing: u64) -> Result<Option<u64>, String> {
+    if contributing > 0 {
+        Ok(Some(probability(bottom, contributing)?.ceiling_ppm()))
+    } else {
+        Ok(None)
+    }
 }
 fn probability(n: u64, d: u64) -> Result<AdmissionExactProbabilityV2, String> {
     AdmissionExactProbabilityV2::new(n, d)
@@ -834,4 +845,26 @@ pub(super) fn daily<S: Snapshot>(
         });
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pbo_ppm;
+
+    /// G18-cli-a-08, D-2005: no contributing fold is unmeasured; one or more
+    /// is the ceiling of `bottom / contributing` in ppm.
+    #[test]
+    fn pbo_is_unmeasured_without_a_contributing_fold_and_a_ceiling_with_one() {
+        assert_eq!(pbo_ppm(0, 0), Ok(None));
+        assert_eq!(pbo_ppm(0, 1), Ok(Some(0)));
+        assert_eq!(pbo_ppm(0, 35), Ok(Some(0)));
+        assert_eq!(pbo_ppm(1, 3), Ok(Some(333_334)));
+        assert_eq!(pbo_ppm(2, 2), Ok(Some(1_000_000)));
+        // The extremes: one in the largest count rounds UP to one ppm, all
+        // of the largest count is certainty, and a numerator above its
+        // denominator is refused rather than projected past a million.
+        assert_eq!(pbo_ppm(1, u64::MAX), Ok(Some(1)));
+        assert_eq!(pbo_ppm(u64::MAX, u64::MAX), Ok(Some(1_000_000)));
+        assert!(pbo_ppm(2, 1).is_err());
+    }
 }

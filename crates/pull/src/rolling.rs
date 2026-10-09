@@ -95,29 +95,7 @@ pub fn expiry_of(
     code: &str,
     on: crate::session::Day,
 ) -> Result<brutex_core::instrument::Expiry, RollingError> {
-    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
-    // comparisons against a fixed table — constant work, and a flag the row
-    // does not carry is refused here rather than inside the loop.
-    let cadence = spec
-        .expiry_flags
-        .iter()
-        .find(|(word, _)| *word == flag)
-        .map(|(_, cadence)| *cadence)
-        .ok_or(RollingError::NoExpiry {
-            why: "the expiry cadence is not one this vendor serves",
-        })?;
-    let symbol =
-        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
-            why: "the underlying is not a symbol this build knows",
-        })?;
-    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
-        why: "the underlying has no expiry regime recorded",
-    })?;
-    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
-        RollingError::NoExpiry {
-            why: "the bar's own day is not a real date",
-        }
-    })?;
+    let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
 
     // THE ORDINAL IS THE CODE'S POSITION IN THE ROW, NOT A SECOND SPELLING OF
     // IT.
@@ -173,11 +151,143 @@ pub fn expiry_of(
     let settled = found.ok_or(RollingError::NoExpiry {
         why: "no expiry was reached",
     })?;
+    // A CLOSED DAY IS NOT AN EXPIRY. `costs::expiry` returns the plain
+    // calendar weekday and leaves holidays to its caller, and this caller never
+    // asked, so a holiday week's contract got a closed day as its expiry, was
+    // filed under that key, and priced at a tenor ~4.8x too long (CE-14,
+    // D-1769). The exchange's holiday-shift rule is not recorded in
+    // `docs/00-charter.md`, so the closed day is REFUSED rather than stepped
+    // back (`CLAUDE.md` §3 rule 1). A day past the calendar's last measured
+    // day cannot be checked and is passed through; `docs/06-limits.md` names
+    // that limit.
+    //
+    // AND A DAY OPEN ONLY FOR A MUHURAT HOUR IS NOT AN EXPIRY EITHER (CE-53,
+    // D-2671). Refusing only `Closed` accepted 2021-11-04 (a Muhurat of
+    // unmeasured length) and 2025-10-21 (13:45-14:44) as weekly expiries, and
+    // bars filed under that key were priced to a 15:30 close the day never
+    // had. An expiry must be a FULL regular session; anything short of one is
+    // refused the same way, for the same reason.
+    match crate::calendar::kind_of(i64::from(settled.ordinal())) {
+        crate::calendar::DayKind::Closed => {
+            return Err(RollingError::NoExpiry {
+                why: "the computed expiry falls on a day the exchange calendar marks closed, and \
+                      the rule that moves an expiry off a holiday is not charter-sourced, so no \
+                      date is guessed",
+            });
+        }
+        crate::calendar::DayKind::Open(session) if session == crate::calendar::Session::full() => {}
+        crate::calendar::DayKind::Open(_) | crate::calendar::DayKind::OpenLengthUnmeasured => {
+            return Err(RollingError::NoExpiry {
+                why: "the computed expiry falls on a day the exchange calendar records as \
+                      something other than a full regular session (a Muhurat hour or an \
+                      irregular session), and the rule that moves an expiry off such a day is \
+                      not charter-sourced, so no date is guessed",
+            });
+        }
+        crate::calendar::DayKind::Unmeasured => {}
+    }
     brutex_core::instrument::Expiry::new(settled.year(), settled.month(), settled.day()).map_err(
         |_| RollingError::NoExpiry {
             why: "the calendar produced a date this store cannot name",
         },
     )
+}
+
+/// Whether an underlying lists contracts on a cadence on one day.
+///
+/// Distinct from [`expiry_of`], and the distinction is CE-43: `expiry_of`
+/// answers "which contract", and can refuse a contract that exists (its
+/// computed expiry is a closed day, CE-14). A caller asking "is this cadence
+/// worth a request at all" must not read that refusal as "no contracts", or a
+/// holiday week silently removes a whole cadence from a walk. Only
+/// [`Listing::Withdrawn`] means the exchange listed nothing. D-2650.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// The cadence's regime lists contracts on or after that day.
+    Listed,
+    /// The cadence was withdrawn for this underlying before that day
+    /// (`costs::expiry`'s `WeeklyRegime::Withdrawn`), so no contract exists.
+    Withdrawn,
+}
+
+/// Whether `underlying` lists contracts on cadence `flag` on `on`.
+///
+/// # Errors
+///
+/// The same named refusals as [`expiry_of`] for a cadence this vendor does not
+/// serve, an unknown underlying, an unreal day or a day before the regime was
+/// verified from. A closed-day expiry is NOT an error here: it is a property of
+/// one contract, not of the cadence.
+///
+/// # Cost
+///
+/// O(1): one slot lookup and one dated-table step, the first step of
+/// [`expiry_of`]'s walk. **UNVERIFIED as a measurement**, as there.
+pub fn listing_of(
+    underlying: &str,
+    spec: &RollingSpec,
+    flag: &str,
+    on: crate::session::Day,
+) -> Result<Listing, RollingError> {
+    let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
+    match cadence {
+        crate::vendor::ExpiryCadence::Weekly => {
+            match costs::expiry::next_weekly_expiry(slot, day) {
+                Ok(Some(_)) => Ok(Listing::Listed),
+                Ok(None) => Ok(Listing::Withdrawn),
+                Err(_) => Err(RollingError::NoExpiry {
+                    why: "the day is before this weekly regime was verified from",
+                }),
+            }
+        }
+        crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, day)
+            .map(|_| Listing::Listed)
+            .map_err(|_| RollingError::NoExpiry {
+                why: "the day is before this monthly regime was verified from",
+            }),
+    }
+}
+
+/// The cadence, the swept slot and the trade day one rolling question is
+/// asked on: the shared first half of [`expiry_of`] and [`listing_of`], so the
+/// two cannot drift on which flag, underlying or day they refuse.
+fn regime_of(
+    underlying: &str,
+    spec: &RollingSpec,
+    flag: &str,
+    on: crate::session::Day,
+) -> Result<
+    (
+        crate::vendor::ExpiryCadence,
+        costs::venue::SweptSlot,
+        costs::day::TradeDay,
+    ),
+    RollingError,
+> {
+    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
+    // comparisons against a fixed table — constant work, and a flag the row
+    // does not carry is refused here rather than inside the loop.
+    let cadence = spec
+        .expiry_flags
+        .iter()
+        .find(|(word, _)| *word == flag)
+        .map(|(_, cadence)| *cadence)
+        .ok_or(RollingError::NoExpiry {
+            why: "the expiry cadence is not one this vendor serves",
+        })?;
+    let symbol =
+        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
+            why: "the underlying is not a symbol this build knows",
+        })?;
+    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
+        why: "the underlying has no expiry regime recorded",
+    })?;
+    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
+        RollingError::NoExpiry {
+            why: "the bar's own day is not a real date",
+        }
+    })?;
+    Ok((cadence, slot, day))
 }
 
 /// One rolling-option request: a shape, not a contract.
@@ -223,6 +333,14 @@ pub struct Ask {
 pub enum RollingError {
     /// The body was not JSON.
     NotJson,
+    /// A key appears twice inside one object, so the body carries two values
+    /// for one field. `serde_json` keeps the last and says nothing; this is
+    /// refused by name instead, as `http::decode_body` refuses it (D-1531).
+    /// CE-56, D-2680.
+    RepeatedKey {
+        /// The repeated key, decoded.
+        key: String,
+    },
     /// The side's object was absent. `CALL` asked and no `ce` returned.
     NoSide {
         /// Which key was looked for — `ce` or `pe`.
@@ -264,12 +382,69 @@ pub enum RollingError {
         /// Which field.
         field: &'static str,
     },
+    /// A count cell that is not a non-negative whole number, or that is the
+    /// store's own null sentinel. GAP16-22, D-0952.
+    Uncountable {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+        /// Why it is not a count, in words: a fraction, out of range, not a
+        /// number, negative, or the null sentinel (audit r64-4, D-4508).
+        why: &'static str,
+    },
+    /// A decimal cell that is present and cannot be read exactly — not text
+    /// or a number, or a form the six-place shift does not read (an exponent,
+    /// an overflow, junk). It was stored as the null sentinel, which is the
+    /// record that the vendor SENT NONE, and pricing then solved its own value
+    /// and labelled it so (CE-16, D-1769).
+    Undecimal {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
+    /// A volatility cell below zero. No implied volatility is negative, so a
+    /// sign names a wrong field or a wrong scale; it was stored as read
+    /// (STO-2, D-2607).
+    NegativeVolatility {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
+    /// A price cell that is negative, or is not zero and snaps to zero.
+    /// GAP16-23, D-1492.
+    NotAPrice {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
+    /// A timestamp cell that is not a whole number of seconds whose
+    /// microseconds fit `i64`, or is `i64::MIN`. c4a-3, D-1491.
+    Unstampable {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+        /// Why it is not a stamp, in words: a fraction, out of range, not a
+        /// number, the null sentinel, or microseconds past `i64` (audit
+        /// r64-4, D-4508).
+        why: &'static str,
+    },
 }
 
 impl core::fmt::Display for RollingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotJson => f.write_str("the rolling answer is not JSON"),
+            Self::RepeatedKey { key } => write!(
+                f,
+                "the rolling answer repeats the key {key:?} inside one object, \
+                 so it carries two values for one field; refused rather than \
+                 silently keeping the last"
+            ),
             Self::UnknownSide => write!(
                 f,
                 "that is not a side this feed's descriptor names, so there is no \
@@ -308,6 +483,36 @@ impl core::fmt::Display for RollingError {
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
             }
+            Self::NegativeVolatility { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, and no implied volatility is \
+                 below zero. Refused rather than stored"
+            ),
+            Self::Undecimal { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a decimal this build \
+                 reads exactly. Refused rather than stored as the absence the \
+                 vendor did not state"
+            ),
+            Self::Uncountable { field, text, why } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a non-negative whole \
+                 count, or is i64::MIN, the store's open-interest null sentinel \
+                 (CLAUDE.md §7): {why}. Refused rather than stored as a zero, a \
+                 truncation or an absence the vendor did not state"
+            ),
+            Self::NotAPrice { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is below zero or is not zero \
+                 and smaller than half a paisa. Neither is a price: stored, it \
+                 would read as a negative or as a zero the vendor did not send"
+            ),
+            Self::Unstampable { field, text, why } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a whole number of \
+                 epoch seconds whose microseconds fit an i64: {why}. Refused \
+                 rather than filed at the epoch or saturated to the end of time"
+            ),
         }
     }
 }
@@ -405,8 +610,14 @@ pub fn body(spec: &RollingSpec, ask: &Ask) -> String {
     out
 }
 
-/// One `"key":"value"` pair, JSON-escaped.
+/// One `"key":"value"` pair, JSON-escaped as RFC 8259 requires.
+///
+/// Escaped only `"` and `\` until CE-68: a security id is vendor-file text
+/// and may hold a control character, which sent Dhan a body no parser accepts
+/// and an error that blamed the vendor. Below 0x20 is now `\u00XX`, the same
+/// rule as `api::pullrun::quote_for_json` (D-1772).
 fn push_pair(out: &mut String, key: &str, value: &str, first: bool) {
+    use core::fmt::Write as _;
     if !first {
         out.push(',');
     }
@@ -417,6 +628,13 @@ fn push_pair(out: &mut String, key: &str, value: &str, first: bool) {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                // Writing into a `String` cannot fail.
+                let _cannot_fail = write!(out, "\\u{:04x}", u32::from(c));
+            }
             other => out.push(other),
         }
     }
@@ -464,6 +682,11 @@ pub fn read(
     scale: PriceScale,
 ) -> Result<Vec<Row>, RollingError> {
     let root: serde_json::Value = serde_json::from_str(body).map_err(|_| RollingError::NotJson)?;
+    // A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS IN ONE BODY, refused
+    // here exactly as `http::decode_body` refuses it (CE-56, D-2680).
+    if let Some(key) = crate::http::repeated_key(body) {
+        return Err(RollingError::RepeatedKey { key });
+    }
     // THE ENVELOPE IS OPTIONAL, exactly as `fno::names` treats it, and for the
     // same reason: one reader for a vendor that wraps and one that does not.
     let held = root.get("data").unwrap_or(&root);
@@ -529,17 +752,31 @@ pub fn read(
 
     let mut rows = Vec::with_capacity(stamps.len());
     for at in 0..stamps.len() {
-        let ts_secs = number(stamps, at);
         let bar = Bar {
             // SECONDS ON THE WIRE, MICROSECONDS IN THE STORE. The same
             // conversion `TimestampEncoding::EpochSecondsUtc` names, done here
             // because this reader does not go through the CSV path that owns it.
-            ts_micros: ts_secs.saturating_mul(1_000_000),
+            //
+            // REFUSED, NEVER DEFAULTED OR SATURATED (c4a-3, W1-pull3-7,
+            // D-1491). This read `number`, which answered `0` for a `null` or
+            // text cell — a bar filed at the epoch — and `saturating_mul`
+            // turned a stamp past the microsecond range into `i64::MAX`.
+            ts_micros: stamp(stamps.get(at), f.timestamp)?,
             open: paisa(open, at, scale, "open")?,
             high: paisa(high, at, scale, "high")?,
             low: paisa(low, at, scale, "low")?,
             close: paisa(close, at, scale, "close")?,
-            volume: number(volume, at),
+            // A COUNT, READ THE WAY OPEN INTEREST IS (c4a-3, D-1491). `number`
+            // answered `0` for a text or `null` cell and passed a negative
+            // through. A `null` is refused too: the columnar intraday path for
+            // the same vendor refuses a null volume (`http::one_number`), and
+            // no vendor document says a null volume here means zero.
+            volume: count(
+                volume
+                    .get(at)
+                    .ok_or(RollingError::NotAnArray { field: f.volume })?,
+                f.volume,
+            )?,
             // A NULL OI **CELL** IS ABSENT, NOT ZERO.
             //
             // `map_or(OI_NULL, ..)` covers only the whole array being missing —
@@ -553,10 +790,16 @@ pub fn read(
             // sentinels it; open interest was the one of the three that
             // collapsed absence into a real number. `CLAUDE.md` §7 gives it a
             // sentinel precisely so the two can be told apart.
-            open_interest: oi.map_or(OI_NULL, |a| match a.get(at) {
+            //
+            // AND A CELL THAT IS PRESENT BUT NOT A COUNT IS REFUSED. `number`
+            // also answered `0` for `"4200"` or `true`, truncated `1234.5`, and
+            // passed `i64::MIN` straight through — which IS `OI_NULL`, so a
+            // number the vendor sent was filed as the absence it did not
+            // state. GAP16-22, D-0952.
+            open_interest: match oi.and_then(|a| a.get(at)) {
                 None | Some(serde_json::Value::Null) => OI_NULL,
-                Some(_) => number(a, at),
-            }),
+                Some(cell) => count(cell, f.open_interest)?,
+            },
         };
         let overlay = Overlay {
             ts_micros: bar.ts_micros,
@@ -567,7 +810,10 @@ pub fn read(
             // IV IN MILLIONTHS, and the multiply happens on the way in so the
             // store never holds a float. See `Overlay`'s header for why a
             // volatility is stored as an integer despite being a statistic.
-            iv_micros: iv.map_or(OI_NULL, |a| a.get(at).map_or(OI_NULL, micros_of)),
+            iv_micros: match iv.and_then(|a| a.get(at)) {
+                None | Some(serde_json::Value::Null) => OI_NULL,
+                Some(cell) => micros_of(cell, f.implied_volatility)?,
+            },
         };
         // THE STRIKE FOR THIS STAMP. A rolling series is ATM-relative, so the
         // resolved strike genuinely can differ between two bars of one answer
@@ -627,23 +873,74 @@ fn optional<'a>(
     }
 }
 
-/// One integer out of an array, or zero.
+/// One timestamp cell, in microseconds, or a refusal naming it.
 ///
-/// Zero rather than a refusal because these are counts — a volume or an open
-/// interest — where the vendor writing nothing and writing zero mean the same
-/// thing, and the NULL case is handled one level up by the array being absent.
-fn number(list: &[serde_json::Value], at: usize) -> i64 {
-    let Some(cell) = list.get(at) else {
-        return 0;
+/// Seconds on the wire: an integer, or a decimal that is a whole number. A
+/// `null`, text, a fraction, `i64::MIN`, or a value whose microseconds do not
+/// fit `i64` is refused. A negative is NOT refused: `session::IstMoment`
+/// accepts `-19_800..0` as 1970-01-01 IST, and the session filter is the one
+/// authority on which stamps are sessions (`http::one_number` keeps the same
+/// rule). It replaced `number`, which answered `0` — the epoch — for every cell
+/// it could not read (c4a-3, W1-pull3-7, D-1491).
+fn stamp(cell: Option<&serde_json::Value>, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = |why: &'static str| RollingError::Unstampable {
+        field,
+        text: cell.map_or_else(|| "an absent cell".to_owned(), serde_json::Value::to_string),
+        why,
     };
-    if let Some(whole) = cell.as_i64() {
-        return whole;
+    let cell = cell.ok_or_else(|| refuse("the cell is absent"))?;
+    // A WHOLE NUMBER WITH ANY NUMBER OF ZERO DECIMALS IS ACCEPTED (audit
+    // r64-4, D-4508). This read the text through `csv::paisa`, a two-decimal
+    // price reader, so `1700000000.000` was refused as unreadable while
+    // `1700000000.0` and `1.7e9` were accepted.
+    let seconds = if let Some(whole) = cell.as_i64() {
+        whole
+    } else {
+        let number = cell
+            .as_number()
+            .ok_or_else(|| refuse("it is not a number"))?;
+        crate::http::whole_number(number).map_err(|not| refuse(not.reason()))?
+    };
+    if seconds == i64::MIN {
+        return Err(refuse("it is i64::MIN, the store's null sentinel"));
     }
-    // A COUNT WRITTEN WITH A DECIMAL POINT IS STILL A COUNT — `1234.0`. Read
-    // through its TEXT rather than through an `f64`, because `float_arithmetic`
-    // is denied workspace-wide and because the text is what the vendor sent:
-    // `csv::paisa` shifts two places and the count is the whole part of that.
-    crate::csv::paisa(&cell.to_string()).map_or(0, |hundredths| hundredths / 100)
+    seconds
+        .checked_mul(1_000_000)
+        .ok_or_else(|| refuse("its microseconds do not fit an i64"))
+}
+
+/// One count cell — open interest or volume — as a count, or a refusal naming it.
+///
+/// The same rule `http::one_number` applies on the intraday path: an integer
+/// is the value, a decimal is accepted only when it is a whole number, and
+/// `i64::MIN` is refused because it is [`OI_NULL`]. A negative is refused too,
+/// because `store::format::Bar::counts_are_sane` would refuse it one crate
+/// later with no record of which cell it came from. GAP16-22, D-0952.
+///
+/// An open-interest `null` never reaches here: the caller reads it as the
+/// sentinel. A volume `null` does, and is refused (c4a-3, D-1491).
+fn count(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = |why: &'static str| RollingError::Uncountable {
+        field,
+        text: cell.to_string(),
+        why,
+    };
+    // Any number of zero decimals, as `stamp` reads them (audit r64-4, D-4508).
+    let whole = if let Some(whole) = cell.as_i64() {
+        whole
+    } else {
+        let number = cell
+            .as_number()
+            .ok_or_else(|| refuse("it is not a number"))?;
+        crate::http::whole_number(number).map_err(|not| refuse(not.reason()))?
+    };
+    if whole == i64::MIN {
+        return Err(refuse("it is i64::MIN, the store's null sentinel"));
+    }
+    if whole < 0 {
+        return Err(refuse("a count is never negative"));
+    }
+    Ok(whole)
 }
 
 /// One price out of an array, in paisa.
@@ -656,9 +953,15 @@ fn paisa(
     let cell = list
         .get(at)
         .ok_or(RollingError::Unrepresentable { field })?;
-    match scale {
+    let not_a_price = || RollingError::NotAPrice {
+        field,
+        text: cell.to_string(),
+    };
+    let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
-        PriceScale::Paisa => cell.as_i64().ok_or(RollingError::Unrepresentable { field }),
+        PriceScale::Paisa => cell
+            .as_i64()
+            .ok_or(RollingError::Unrepresentable { field })?,
         // THE TEXT IS THE TRUTH, and `core`'s half-up reader owns the rule —
         // the same sentence `http::one_price` writes over the same conversion.
         //
@@ -676,10 +979,36 @@ fn paisa(
         // as text has an exact decimal the vendor wrote, and routing it through
         // an f64 to shift two places introduces a representation error into a
         // value that had none. The reader below walks the text digit by digit.
-        PriceScale::Rupees => brutex_core::price::Paisa::from_rupee_text_half_up(&cell.to_string())
-            .map(brutex_core::price::Paisa::raw)
-            .map_err(|_| RollingError::Unrepresentable { field }),
+        // The text is the vendor's own digits, recovered by
+        // `http::number_text` (D-1570), not an f64's re-rendering.
+        PriceScale::Rupees => {
+            let text = cell
+                .as_number()
+                .and_then(crate::http::number_text)
+                .ok_or(RollingError::Unrepresentable { field })?;
+            let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
+                .map(brutex_core::price::Paisa::raw)
+                .map_err(|_| RollingError::Unrepresentable { field })?;
+            // A NON-ZERO VALUE THAT SNAPS TO ZERO IS REFUSED, the guard
+            // `http::one_price` has always had and this reader did not
+            // (GAP16-23, D-1492). `0.0001` and `-0.001` would otherwise be
+            // stored as a real zero price, and the negative one would pass the
+            // sign guard below because it is already zero. The test is on the
+            // text: a value written with a non-zero digit is not zero.
+            if snapped == 0 && text.bytes().any(|b| b.is_ascii_digit() && b != b'0') {
+                return Err(not_a_price());
+            }
+            snapped
+        }
+    };
+    // A NEGATIVE PRICE IS NOT A PRICE (GAP16-23, D-1492): the same refusal
+    // `http::one_price` makes, on both scales. Nothing this build reads trades
+    // below zero, so a negative names a wrong `PriceScale` or a field that is
+    // not a price. A spot or strike of zero is still accepted, as on that path.
+    if paisa < 0 {
+        return Err(not_a_price());
     }
+    Ok(paisa)
 }
 
 /// A volatility as millionths, or the null sentinel when it will not read.
@@ -700,18 +1029,42 @@ fn paisa(
 /// on every rerun. So the shift is done on the TEXT, in integers.
 ///
 /// Half-up at the seventh decimal, which is the same rule `CLAUDE.md` §7 gives
-/// for snapping a price — one rounding rule for the whole product.
+/// for snapping a price — one rounding rule for the whole product: a tie goes
+/// toward positive infinity, exactly as `core::price::Paisa::from_rupee_text_half_up`
+/// sends `-14.5` to `-14` (D-3505).
 ///
 /// # Cost
 ///
 /// One pass over at most a few dozen characters. No allocation.
-fn micros_of(cell: &serde_json::Value) -> i64 {
+///
+/// # Errors
+///
+/// [`RollingError::Undecimal`] for a present cell that is not text or a
+/// number, or that `shift_six` cannot read. A JSON `null` never reaches here:
+/// the caller files it as absent, which is what the vendor said.
+fn micros_of(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = || RollingError::Undecimal {
+        field,
+        text: cell.to_string(),
+    };
     let text = match cell {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Number(n) => n.to_string(),
-        _ => return OI_NULL,
+        _ => return Err(refuse()),
     };
-    shift_six(text.trim()).unwrap_or(OI_NULL)
+    let micros = shift_six(text.trim()).ok_or_else(refuse)?;
+    // A NEGATIVE VOLATILITY IS NOT A VOLATILITY (STO-2, D-2607). Checked on
+    // the text as well as the value, so `-0.0000004`, which rounds to zero,
+    // is refused for the sign the vendor wrote rather than filed as zero.
+    let signed =
+        text.trim().starts_with('-') && text.bytes().any(|b| b.is_ascii_digit() && b != b'0');
+    if micros < 0 || signed {
+        return Err(RollingError::NegativeVolatility {
+            field,
+            text: cell.to_string(),
+        });
+    }
+    Ok(micros)
 }
 
 /// A decimal string as millionths, half-up, or `None` when it will not read.
@@ -746,12 +1099,19 @@ fn shift_six(text: &str) -> Option<i64> {
         out = out.checked_add(digit)?;
     }
     // HALF-UP ON THE SEVENTH, and only when there is a seventh. A value with
-    // six or fewer decimals is exact and must not be nudged.
-    if fraction
-        .as_bytes()
-        .get(PLACES)
-        .is_some_and(|next| *next >= b'5')
-    {
+    // six or fewer decimals is exact and must not be nudged. Half-up is
+    // `core::price`'s rule (D-3505): a tie goes toward positive infinity, so a
+    // negative magnitude grows only past the tie, never on it.
+    let next = fraction.as_bytes().get(PLACES).copied();
+    let past_tie = fraction.bytes().skip(PLACES + 1).any(|b| b != b'0');
+    let round_up = next.is_some_and(|next| {
+        if negative {
+            next > b'5' || (next == b'5' && past_tie)
+        } else {
+            next >= b'5'
+        }
+    });
+    if round_up {
         out = out.checked_add(1)?;
     }
     if negative {
@@ -812,6 +1172,66 @@ mod tests {
         let call =
             read(body, &spec(), "CALL", PriceScale::Rupees).expect("the answered side reads");
         assert_eq!(call.len(), 1);
+    }
+
+    /// audit-20261003 hunt-pull-2 (D-1530). A rupee price that is not zero
+    /// and is smaller than half a paisa, or that is below zero, is refused
+    /// rather than snapped to a clean zero. `http::one_price` refuses exactly
+    /// this; the rolling decoder stored `0.004` and `-0.004` as a price of 0,
+    /// and the negative one thereby slipped past every below-zero check.
+    #[test]
+    fn a_sub_half_paisa_or_negative_rupee_price_is_refused_not_snapped_to_zero() {
+        for cell in ["0.004", "-0.004", "-0.01", "-354"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            // The refusal is D-1492's `NotAPrice`, which landed on the same
+            // guard from the other audit; this test pins that it names the cell.
+            assert_eq!(
+                read(&body, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+                Err(RollingError::NotAPrice {
+                    field: "open",
+                    text: cell.to_owned(),
+                }),
+                "{cell} is not a price this decoder may store"
+            );
+        }
+        // A real zero, however it is written, is still a price.
+        for cell in ["0", "0.0", "0.00", "-0.0"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
+                .unwrap_or_else(|why| panic!("{cell} is a real zero: {why}"));
+            assert_eq!(rows.len(), 1, "{cell}");
+        }
+    }
+
+    /// audit-20261003 attackdata-4 (D-1570). The rolling decoder snaps the
+    /// vendor's own digits, not an f64's rendering of them: each text here is
+    /// one an `f64` rounds across a half-paisa boundary first.
+    #[test]
+    fn a_rolling_price_is_snapped_from_the_vendors_own_text() {
+        for (cell, want) in [
+            ("354.12499999999999999", 35_412_i64), // f64: 354.125 -> 35413
+            ("0.0149999999999999999", 1),          // f64: 0.015 -> 2
+            ("3.5412499999999999999e2", 35_412),   // f64: 354.125 -> 35413
+        ] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[{cell}],
+                "low":[{cell}],"close":[{cell}],"volume":[1]}},"pe":null}}}}"#
+            );
+            let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
+                .unwrap_or_else(|why| panic!("{cell}: {why}"));
+            let bar = rows.first().expect("one row").bar;
+            assert_eq!(
+                (bar.open, bar.high, bar.low, bar.close),
+                (want, want, want, want),
+                "{cell} is {want} paisa by its own text"
+            );
+        }
     }
 
     /// An absent side keeps its refusal.
@@ -945,6 +1365,65 @@ mod tests {
         );
     }
 
+    /// CE-16, D-1769: an implied-volatility cell that is present and cannot
+    /// be read refuses the answer by name; only a `null` or a missing cell is
+    /// filed as "the vendor sent none".
+    #[test]
+    fn an_unreadable_volatility_cell_is_refused_not_filed_as_absent() {
+        let with = |iv: &str| {
+            format!(
+                r#"{{"data":{{"ce":{{
+                "timestamp":[1700000000],
+                "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+                "volume":[1],"iv":[{iv}]
+            }}}}}}"#
+            )
+        };
+        for bad in [
+            r#""junk""#,
+            "1e-7",
+            "true",
+            r#"{"v":1}"#,
+            "99999999999999999999",
+        ] {
+            let got = read(&with(bad), &spec(), "CALL", PriceScale::Rupees);
+            assert!(
+                matches!(got, Err(RollingError::Undecimal { field: "iv", .. })),
+                "{bad}: {got:?}"
+            );
+        }
+        let rows = read(&with("null"), &spec(), "CALL", PriceScale::Rupees).expect("null reads");
+        assert_eq!(rows[0].overlay.iv_micros, OI_NULL);
+        let rows = read(&with("0.125"), &spec(), "CALL", PriceScale::Rupees).expect("reads");
+        assert_eq!(rows[0].overlay.iv_micros, 125_000);
+    }
+
+    /// STO-2, D-2607: a negative volatility cell is refused by name, including
+    /// one that rounds to zero at six places; a signed zero is still zero.
+    #[test]
+    fn a_negative_volatility_cell_is_refused_by_name() {
+        let with = |iv: &str| {
+            format!(
+                r#"{{"data":{{"ce":{{
+                "timestamp":[1700000000],
+                "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+                "volume":[1],"iv":[{iv}]
+            }}}}}}"#
+            )
+        };
+        for bad in ["-0.25", r#""-0.0000005""#, r#""-0.0000004""#] {
+            let got = read(&with(bad), &spec(), "CALL", PriceScale::Rupees);
+            assert!(
+                matches!(got, Err(RollingError::NegativeVolatility { .. })),
+                "{bad}: {got:?}"
+            );
+        }
+        for zero in ["0", r#""-0.0""#] {
+            let rows = read(&with(zero), &spec(), "CALL", PriceScale::Rupees).expect("zero reads");
+            assert_eq!(rows[0].overlay.iv_micros, 0, "{zero}");
+        }
+    }
+
     /// **IV AND SPOT LAND IN THE OVERLAY, KEYED BY THE BAR'S OWN STAMP.**
     ///
     /// The stamp is the join. Position would be faster and wrong the first time
@@ -1050,6 +1529,75 @@ mod tests {
         assert_eq!(of("9223372036854775807"), None, "overflow is not a value");
     }
 
+    /// D-3505 (ONEAUTH-06). The doc above says `shift_six` rounds by the rule
+    /// `CLAUDE.md` §7 gives a price. `core::price::Paisa::from_rupee_text_half_up`
+    /// is that rule's one authority, and it sends a tie toward positive
+    /// infinity: `-14.5` is `-14`. `shift_six` sent a negative tie away from
+    /// zero. Moving the point four places right puts core's two-decimal rounding
+    /// on the sixth decimal, so every case below is compared with the authority.
+    #[test]
+    fn a_negative_tie_rounds_by_the_one_rule_core_gives_a_price() {
+        assert_eq!(
+            shift_six("-0.0000005"),
+            Some(0),
+            "a tie goes toward +infinity"
+        );
+        assert_eq!(shift_six("-1.2345675"), Some(-1_234_567));
+        assert_eq!(
+            shift_six("-1.23456750"),
+            Some(-1_234_567),
+            "zeros are no tail"
+        );
+        assert_eq!(shift_six("-1.23456751"), Some(-1_234_568), "past the tie");
+        assert_eq!(shift_six("-0.0000006"), Some(-1));
+        assert_eq!(
+            shift_six("0.0000005"),
+            Some(1),
+            "a positive tie still rounds up"
+        );
+        let authority = |text: &str| -> Option<i64> {
+            let negative = text.starts_with('-');
+            let rest = text.trim_start_matches('-');
+            let (whole, fraction) = rest.split_once('.').unwrap_or((rest, ""));
+            let padded = format!("{fraction:0<4}");
+            let (moved, tail) = padded.split_at(4);
+            let unsigned = format!("{whole}{moved}.{tail}");
+            let shifted = if negative {
+                ['-'].into_iter().chain(unsigned.chars()).collect()
+            } else {
+                unsigned
+            };
+            brutex_core::price::Paisa::from_rupee_text_half_up(&shifted)
+                .ok()
+                .map(brutex_core::price::Paisa::raw)
+        };
+        // Every sign, whole part 0 or 7, and every fraction of six to nine
+        // digits whose sixth to ninth places come from {0, 4, 5, 6, 9}.
+        let digits = [0_u8, 4, 5, 6, 9].map(|d| b'0' + d);
+        let mut compared = 0_u32;
+        for sign in [None, Some('-')] {
+            for whole in [0_u8, 7] {
+                for len in 7..=9 {
+                    let tails = digits.len().pow(u32::try_from(len - 5).expect("small"));
+                    for code in 0..tails {
+                        let mut fraction = b"12345".to_vec();
+                        let mut rest = code;
+                        for _ in 5..len {
+                            fraction.push(digits[rest % digits.len()]);
+                            rest /= digits.len();
+                        }
+                        let fraction = String::from_utf8(fraction).expect("decimal digits");
+                        let sign = sign.map(String::from).unwrap_or_default();
+                        let text = format!("{sign}{whole}.{fraction}");
+                        assert_eq!(shift_six(&text), authority(&text), "{text}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 4 * (25 + 125 + 625));
+    }
+
     /// **THE VENDOR'S `toDate` IS NON-INCLUSIVE, AND THE SAME CONVERTER OWNS IT.**
     ///
     /// `docs/14-expired-options-data.md` states it in the request table, and
@@ -1105,6 +1653,119 @@ mod tests {
         assert_ne!(
             monthly, near,
             "the monthly and the near weekly are not the same contract"
+        );
+    }
+
+    /// CE-43, D-2650: `listing_of` separates "no contract on this cadence"
+    /// from "this contract's expiry is refused". The closed-day weeks that
+    /// `expiry_of` refuses are `Listed`; BANKNIFTY weeklies after their
+    /// 2024-11-13 withdrawal are `Withdrawn`; a cadence the row does not serve
+    /// is refused by name.
+    #[test]
+    fn a_closed_day_contract_is_listed_and_only_a_withdrawal_is_not() {
+        use crate::session::Day;
+        for (on, flag) in [
+            (Day::new(2024, 8, 14).expect("a real day"), "WEEK"),
+            (Day::new(2023, 3, 29).expect("a real day"), "MONTH"),
+        ] {
+            assert!(expiry_of("NIFTY", &spec(), flag, "1", on).is_err());
+            assert_eq!(
+                listing_of("NIFTY", &spec(), flag, on),
+                Ok(Listing::Listed),
+                "{on:?} {flag}"
+            );
+        }
+        let after = Day::new(2026, 1, 5).expect("a real day");
+        assert_eq!(
+            listing_of("BANKNIFTY", &spec(), "WEEK", after),
+            Ok(Listing::Withdrawn)
+        );
+        assert_eq!(
+            listing_of("BANKNIFTY", &spec(), "MONTH", after),
+            Ok(Listing::Listed)
+        );
+        assert!(matches!(
+            listing_of("NIFTY", &spec(), "DAILY", after),
+            Err(RollingError::NoExpiry { why }) if why.contains("not one this vendor serves")
+        ));
+    }
+
+    /// CE-14, D-1769: a computed expiry the exchange calendar marks CLOSED is
+    /// refused, not filed. NIFTY's weekly from 2024-08-14 lands on 2024-08-15
+    /// (Independence Day) and its monthly from 2023-03-29 on 2023-03-30 (Ram
+    /// Navami); both are `Closed` in `pull::calendar`.
+    #[test]
+    fn a_computed_expiry_on_a_closed_day_is_refused() {
+        use crate::session::Day;
+        for (on, flag) in [
+            (Day::new(2024, 8, 14).expect("a real day"), "WEEK"),
+            (Day::new(2023, 3, 29).expect("a real day"), "MONTH"),
+        ] {
+            let got = expiry_of("NIFTY", &spec(), flag, "1", on);
+            assert!(
+                matches!(
+                    got,
+                    Err(RollingError::NoExpiry { why }) if why.contains("marks closed")
+                ),
+                "{on:?} {flag}: {got:?}"
+            );
+        }
+        // An ordinary week still resolves.
+        assert!(
+            expiry_of(
+                "NIFTY",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2024, 8, 21).expect("a day")
+            )
+            .is_ok()
+        );
+    }
+
+    /// CE-53, D-2671: an expiry must be a FULL regular session. A day that is
+    /// open only for a Muhurat hour is refused exactly as a closed day is,
+    /// never filed under that key and priced to a 15:30 close it never had.
+    /// NIFTY and BANKNIFTY weeklies from 2021-11-01 land on the 2021-11-04
+    /// Muhurat (`OpenLengthUnmeasured`); NIFTY's weekly from 2025-10-20 lands
+    /// on the 2025-10-21 Muhurat (`Open`, 13:45-14:44). The cadence stays
+    /// `Listed`: a refused contract is not a withdrawn cadence (CE-43).
+    #[test]
+    fn a_computed_expiry_on_a_muhurat_only_day_is_refused_like_a_closed_one() {
+        use crate::session::Day;
+        for (underlying, on) in [
+            ("NIFTY", Day::new(2021, 11, 1).expect("a real day")),
+            ("BANKNIFTY", Day::new(2021, 11, 1).expect("a real day")),
+            ("NIFTY", Day::new(2025, 10, 20).expect("a real day")),
+        ] {
+            let got = expiry_of(underlying, &spec(), "WEEK", "1", on);
+            assert!(
+                matches!(
+                    got,
+                    Err(RollingError::NoExpiry { why }) if why.contains("full regular session")
+                ),
+                "{underlying} {on:?}: {got:?}"
+            );
+            assert_eq!(
+                listing_of(underlying, &spec(), "WEEK", on),
+                Ok(Listing::Listed),
+                "{underlying} {on:?}"
+            );
+        }
+        // The closed-day refusal keeps its own words, and a full day resolves.
+        assert!(matches!(
+            expiry_of("NIFTY", &spec(), "WEEK", "1", Day::new(2024, 8, 14).expect("a day")),
+            Err(RollingError::NoExpiry { why }) if why.contains("marks closed")
+        ));
+        assert!(
+            expiry_of(
+                "NIFTY",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2021, 11, 8).expect("a day")
+            )
+            .is_ok()
         );
     }
 
@@ -1164,5 +1825,305 @@ mod tests {
             stock * s.sides.len() * s.expiry_flags.len() * s.expiry_codes.len(),
             84
         );
+    }
+
+    /// One rolling body whose single `oi` cell is `cell`, read as a CALL.
+    fn with_oi(cell: &str) -> Result<Vec<Row>, RollingError> {
+        let body = format!(
+            r#"{{"data":{{"ce":{{
+            "timestamp":[1700000000],
+            "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+            "volume":[1],"oi":[{cell}]
+        }}}}}}"#
+        );
+        read(&body, &spec(), "CALL", PriceScale::Rupees)
+    }
+
+    /// **AN OPEN-INTEREST CELL THAT IS NOT A COUNT IS REFUSED, NEVER STORED.**
+    ///
+    /// GAP16-22. `number` answered `0` for a cell it could not read, truncated
+    /// `1234.5` to `1234`, and passed the literal `i64::MIN` through — which is
+    /// `OI_NULL`, so a vendor's number was filed as the store's absence. Each
+    /// of those is a fabricated reading in a column `Bar::oi()` reports as
+    /// measured. The controls pin what must NOT change: `0` is a real zero,
+    /// `null` is the sentinel, and a whole count spelled `12345.0` is 12,345.
+    ///
+    /// `i64::MIN` and `u64::MAX` are spelled through `to_string`, and the
+    /// string and whole-count cells use `12345`, which Gate 1d already
+    /// declares: a quoted digit run under `crates/pull` that Gate 1d does not
+    /// declare fails it as a segment-shaped literal.
+    #[test]
+    fn an_open_interest_cell_that_is_not_a_count_is_refused() {
+        for (cell, why) in [
+            (r#""12345""#.to_owned(), "a string is not a count"),
+            ("1234.5".to_owned(), "a fraction is not a count"),
+            (i64::MIN.to_string(), "the store's own null sentinel"),
+            (u64::MAX.to_string(), "past i64"),
+            ("true".to_owned(), "a boolean is not a count"),
+            ("-5".to_owned(), "a count is never negative"),
+        ] {
+            let cell = cell.as_str();
+            let got = with_oi(cell);
+            assert!(
+                matches!(
+                    &got,
+                    Err(RollingError::Uncountable { field: "oi", text, .. }) if text == cell
+                ),
+                "{why}: {cell} gave {got:?}"
+            );
+        }
+        let said = with_oi("1234.5").expect_err("refused").to_string();
+        assert!(said.contains("`oi`") && said.contains("1234.5"), "{said}");
+        let sentinel = with_oi(&i64::MIN.to_string())
+            .expect_err("refused")
+            .to_string();
+        assert!(sentinel.contains("null sentinel"), "{sentinel}");
+
+        for (cell, want) in [
+            ("0", 0),
+            ("12345", 12345),
+            ("12345.0", 12345),
+            ("null", OI_NULL),
+        ] {
+            let rows = with_oi(cell).unwrap_or_else(|e| panic!("{cell}: {e}"));
+            assert_eq!(rows[0].bar.open_interest, want, "{cell}");
+        }
+    }
+
+    /// An ordinary epoch-seconds stamp for the cell tests below.
+    const STAMP: i64 = 1_700_000_000;
+
+    /// One rolling CALL body built from the given timestamp, volume and close
+    /// cells, one row.
+    fn with_cells(stamp: &str, volume: &str, close: &str) -> Result<Vec<Row>, RollingError> {
+        let body = format!(
+            r#"{{"data":{{"ce":{{
+            "timestamp":[{stamp}],
+            "open":[100.0],"high":[100.0],"low":[0.0],"close":[{close}],
+            "volume":[{volume}]
+        }}}}}}"#
+        );
+        read(&body, &spec(), "CALL", PriceScale::Rupees)
+    }
+
+    /// **AN UNREADABLE TIMESTAMP OR VOLUME IS REFUSED, NEVER FILED AS ZERO**
+    /// (c4a-3, W1-pull3-7, D-1491).
+    ///
+    /// `number` answered `0` for a `null` or text stamp — a bar at the epoch —
+    /// and `saturating_mul` turned a stamp past the microsecond range into
+    /// `i64::MAX`. A text volume became `0` and a negative one was accepted.
+    /// The extremes: the largest stamp that fits and the first that does not,
+    /// `i64::MIN`, `-19_800` (a real 1970 IST moment, still accepted), and a
+    /// whole-number decimal, still accepted as on the intraday path.
+    #[test]
+    fn an_unreadable_stamp_or_volume_is_refused_and_never_filed_as_zero() {
+        let last = i64::MAX / 1_000_000;
+        for (stamp, why) in [
+            ("null".to_owned(), "a null stamp"),
+            (r#""x""#.to_owned(), "a text stamp"),
+            (format!("{STAMP}.5"), "a fractional second"),
+            ((last + 1).to_string(), "microseconds past i64"),
+            (9_999_999_999_999_i64.to_string(), "the probe's stamp"),
+            (i64::MIN.to_string(), "the null sentinel"),
+            (u64::MAX.to_string(), "past i64"),
+        ] {
+            let got = with_cells(&stamp, "1", "100.0");
+            assert!(
+                matches!(&got, Err(RollingError::Unstampable { field: "timestamp", text, .. }) if *text == stamp),
+                "{why}: {stamp} gave {got:?}"
+            );
+        }
+        for (stamp, want) in [
+            (last.to_string(), last * 1_000_000),
+            ((-19_800_i64).to_string(), -19_800_000_000),
+            (format!("{STAMP}.0"), STAMP * 1_000_000),
+            ("0".to_owned(), 0),
+        ] {
+            let rows = with_cells(&stamp, "1", "100.0").unwrap_or_else(|e| panic!("{stamp}: {e}"));
+            assert_eq!(rows[0].bar.ts_micros, want, "{stamp}");
+        }
+        for (volume, why) in [
+            (r#""abc""#, "a text volume"),
+            ("-1", "a negative volume"),
+            ("null", "a null volume"),
+            ("2.5", "a fractional volume"),
+        ] {
+            let got = with_cells(&STAMP.to_string(), volume, "100.0");
+            assert!(
+                matches!(&got, Err(RollingError::Uncountable { field: "volume", text, .. }) if text == volume),
+                "{why}: {volume} gave {got:?}"
+            );
+        }
+        let neg = i64::MIN.to_string();
+        assert!(matches!(
+            with_cells(&STAMP.to_string(), &neg, "100.0"),
+            Err(RollingError::Uncountable {
+                field: "volume",
+                ..
+            })
+        ));
+        for (volume, want) in [("0", 0), ("7.0", 7), (&*i64::MAX.to_string(), i64::MAX)] {
+            let rows = with_cells(&STAMP.to_string(), volume, "100.0")
+                .unwrap_or_else(|e| panic!("{volume}: {e}"));
+            assert_eq!(rows[0].bar.volume, want, "{volume}");
+        }
+        let said = with_cells("null", "1", "100.0")
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            said.contains("`timestamp`") && said.contains("null"),
+            "{said}"
+        );
+    }
+
+    /// **A WHOLE NUMBER WRITTEN WITH ANY NUMBER OF ZERO DECIMALS IS READ, AND
+    /// EVERY REFUSAL SAYS WHY** (audit r64-4, D-4508).
+    ///
+    /// `7.000` and `1700000000.000` went through the two-decimal price reader
+    /// and were refused as unreadable while `7.0` and `1.7e9` were accepted.
+    #[test]
+    fn a_whole_number_with_three_or_more_zero_decimals_is_read_and_refusals_say_why() {
+        let zeros = format!("7.{}", "0".repeat(100_000));
+        let max = format!("{}.000", i64::MAX);
+        for (stamp, want) in [
+            (format!("{STAMP}.000"), STAMP * 1_000_000),
+            (format!("{STAMP}.0000000"), STAMP * 1_000_000),
+            ("-0.000".to_owned(), 0),
+            ("-19800.000".to_owned(), -19_800_000_000),
+        ] {
+            let rows = with_cells(&stamp, "1", "100.0").unwrap_or_else(|e| panic!("{stamp}: {e}"));
+            assert_eq!(rows[0].bar.ts_micros, want, "{stamp}");
+        }
+        for (volume, want) in [
+            ("7.000", 7),
+            ("7.0000000", 7),
+            (zeros.as_str(), 7),
+            ("-0.000", 0),
+            (max.as_str(), i64::MAX),
+        ] {
+            let rows =
+                with_cells(&STAMP.to_string(), volume, "100.0").unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(rows[0].bar.volume, want);
+        }
+        let rows = with_oi("12345.000").expect("a whole open interest");
+        assert_eq!(rows[0].bar.open_interest, 12_345);
+
+        let stamp_why = |stamp: &str| match with_cells(stamp, "1", "100.0") {
+            Err(RollingError::Unstampable { why, .. }) => why,
+            other => panic!("{stamp}: {other:?}"),
+        };
+        assert!(stamp_why(&format!("{STAMP}.5")).contains("fraction"));
+        assert!(stamp_why(&format!("{STAMP}.000001")).contains("fraction"));
+        assert!(stamp_why("9223372036854775808.000").contains("outside i64"));
+        assert!(stamp_why(r#""x""#).contains("not a number"));
+        assert!(stamp_why(&format!("{}.0", i64::MIN)).contains("null sentinel"));
+        assert!(stamp_why(&i64::MIN.to_string()).contains("null sentinel"));
+        assert!(stamp_why(&format!("{}.000", i64::MAX)).contains("microseconds"));
+
+        let volume_why = |volume: &str| match with_cells(&STAMP.to_string(), volume, "100.0") {
+            Err(RollingError::Uncountable { why, .. }) => why,
+            other => panic!("{volume}: {other:?}"),
+        };
+        assert!(volume_why("2.500").contains("fraction"));
+        assert!(volume_why("9223372036854775808.000").contains("outside i64"));
+        assert!(volume_why("null").contains("not a number"));
+        assert!(volume_why(&format!("{}.0", i64::MIN)).contains("null sentinel"));
+        assert!(volume_why(&i64::MIN.to_string()).contains("null sentinel"));
+        assert!(volume_why("-1.000").contains("never negative"));
+        assert!(volume_why("-1").contains("never negative"));
+
+        // The reason reaches the message an operator reads.
+        let said = with_cells(&STAMP.to_string(), "2.500", "100.0")
+            .expect_err("a fraction")
+            .to_string();
+        assert!(
+            said.contains("2.500") && said.contains("fraction"),
+            "{said}"
+        );
+        let said = with_cells(&format!("{STAMP}.5"), "1", "100.0")
+            .expect_err("a fraction")
+            .to_string();
+        assert!(
+            said.contains("fraction") && said.contains("timestamp"),
+            "{said}"
+        );
+    }
+
+    /// **A NEGATIVE PRICE, OR ONE THAT SNAPS TO A ZERO IT IS NOT, IS REFUSED**
+    /// (GAP16-23, D-1492), the two guards `http::one_price` has. `0`, `0.00`
+    /// and `-0.0` are a real zero and stay one; half a paisa rounds up to one.
+    #[test]
+    fn a_rolling_price_below_zero_or_snapping_to_a_false_zero_is_refused() {
+        for close in ["-5", "-0.001", "0.0001", "0.004", "-100.25"] {
+            let got = with_cells(&STAMP.to_string(), "1", close);
+            assert!(
+                matches!(&got, Err(RollingError::NotAPrice { field: "close", text }) if text == close),
+                "{close} gave {got:?}"
+            );
+        }
+        for (close, want) in [
+            ("0", 0),
+            ("0.00", 0),
+            ("-0.0", 0),
+            ("0.005", 1),
+            ("100.25", 10_025),
+        ] {
+            let rows = with_cells(&STAMP.to_string(), "1", close)
+                .unwrap_or_else(|e| panic!("{close}: {e}"));
+            assert_eq!(rows[0].bar.close, want, "{close}");
+        }
+        let said = with_cells(&STAMP.to_string(), "1", "-5")
+            .expect_err("refused")
+            .to_string();
+        assert!(said.contains("`close`") && said.contains("-5"), "{said}");
+    }
+
+    /// **CE-56. A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS FOR ONE FIELD.**
+    ///
+    /// `serde_json` keeps the last of a repeated key without saying so, so
+    /// `"close":[100.00],"close":[200.00]` read as a close of 200. D-1531
+    /// refused this in `http::decode_body`; this reader parses on its own and
+    /// never called that check.
+    #[test]
+    fn a_rolling_answer_repeating_a_key_in_one_object_is_refused_by_name() {
+        let body = r#"{"data":{"ce":{"timestamp":[1700000000],"open":[100.00],"high":[100.00],
+            "low":[100.00],"close":[100.00],"close":[200.00],"volume":[7]}}}"#;
+        let why = read(body, &spec(), "CALL", PriceScale::Rupees)
+            .map(|rows| rows.len())
+            .expect_err("two closes for one bar is two answers");
+        assert!(why.to_string().contains(r#""close""#), "{why}");
+
+        // THE SAME KEY IN TWO OBJECTS IS NOT A REPEAT: both sides carry every
+        // field name once each, and that is the vendor's ordinary answer.
+        let both = r#"{"data":{"ce":{"timestamp":[1700000000],"open":[1],"high":[1],"low":[1],
+            "close":[1],"volume":[1]},"pe":{"timestamp":[1700000000],"open":[1],"high":[1],
+            "low":[1],"close":[1],"volume":[1]}}}"#;
+        assert_eq!(
+            read(both, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+            Ok(1)
+        );
+    }
+
+    /// CE-68: a control character in a value is escaped, so the body parses.
+    /// Before the fix `\u{1}` and a newline went out raw and no JSON parser
+    /// accepted the request.
+    #[test]
+    fn a_control_character_in_a_value_still_makes_valid_json() {
+        let mut out = String::from("{");
+        push_pair(&mut out, "securityId", "13\u{1}\n\t\r\"\\x", true);
+        out.push('}');
+        assert_eq!(out, r#"{"securityId":"13\u0001\n\t\r\"\\x"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["securityId"], "13\u{1}\n\t\r\"\\x");
+    }
+
+    /// The escape ends BELOW 0x20: U+001F, the last control character, is
+    /// escaped, and the space at 0x20 goes out as itself. `<=` would send
+    /// `\u0020` for every space in a value (G18-rest-17, D-2076).
+    #[test]
+    fn the_control_escape_stops_below_the_space() {
+        let mut out = String::new();
+        push_pair(&mut out, "securityId", "a\u{1f} b", true);
+        assert_eq!(out, r#""securityId":"a\u001f b""#);
     }
 }

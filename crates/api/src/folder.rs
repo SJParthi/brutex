@@ -143,7 +143,18 @@ pub async fn folder_json(
             );
         }
     };
-    let (status, out) = answer(feed, shape, &root);
+    // OFF THE ASYNC WORKERS, AND ADMITTED: `read_census` walks the folder and
+    // decodes what it holds, which blocked a Tokio worker for the whole walk.
+    // W1-api2-11, D-1508.
+    let (status, out) =
+        match crate::detail::run_store_read(move || answer(feed, shape, &root)).await {
+            Ok(answered) => answered,
+            Err(why) => crate::detail::admission_refused(
+                "folder read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            ),
+        };
     (status, head, out)
 }
 
@@ -487,6 +498,15 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn an_unreadable_folder_halts_loudly_and_names_the_path() {
+        crate::isolated::where_permission_binds(
+            "folder::tests::an_unreadable_folder_halts_loudly_and_names_the_path",
+            an_unreadable_folder_halts_loudly_and_names_the_path_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    #[cfg(unix)]
+    fn an_unreadable_folder_halts_loudly_and_names_the_path_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let scratch = Scratch::new();
         scratch.feed_dir(Feed::TrueData, &[("NIFTY", TWO_DAYS)]);

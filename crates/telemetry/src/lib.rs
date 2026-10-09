@@ -55,7 +55,19 @@
 //!
 //! * A file rolls at [`DEFAULT_MAX_FILE_BYTES`] — 8 MiB, roughly 33,000 events.
 //! * [`DEFAULT_KEEP_FILES`] files are kept — 8, including the one being
-//!   written. **The whole crate therefore occupies at most 64 MiB, forever.**
+//!   written. **The whole set therefore occupies about 64 MiB while rotation
+//!   works** — each file at most its bound, or one line past it when a single
+//!   line is wider than the bound itself (a 1 KiB `MIN_FILE_BYTES` file and a
+//!   41 KB line).
+//! * **Not forever.** A failed roll pauses rotation (`Sink`'s
+//!   `rotation_broken`, which keeps the retained files from being emptied one
+//!   per event), and the current file grows past its bound. It is retried once
+//!   per further bound when a probe shows the directory accepts writes, at
+//!   most `keep_files` failed attempts, and never after an attempt that had
+//!   already moved a file (D-2509); past those the file grows until restart. That is counted in
+//!   [`Health::rotation_failures`], visible in [`Health::current_bytes`] and
+//!   makes [`Health::is_loud`] true. This line used to say "at most 64 MiB,
+//!   forever", which no path in `sink` enforces. D-1324.
 //! * One event carries at most [`MAX_FIELDS`] fields; text past its ceiling is
 //!   cut on a character boundary and the line says `"cut":true`.
 //! * A tail query returns at most [`MAX_LIMIT`] events and reads at most
@@ -116,7 +128,10 @@ mod encode;
 mod event;
 mod json;
 mod level;
+mod loss;
 mod record;
+mod say;
+mod scope;
 mod sink;
 mod tail;
 mod value;
@@ -127,7 +142,10 @@ pub use crate::event::{
 };
 pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
+pub use crate::loss::LEDGER_NAME;
 pub use crate::record::Record;
+pub use crate::say::{stderr_line, unprinted};
+pub use crate::scope::{Entered, InRun, current_run, enter, in_run, inherit};
 pub use crate::sink::{
     BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
     Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
@@ -284,6 +302,18 @@ pub fn emit_for_run(run: u64, event: &Event<'_>) -> Emitted {
     global().map_or(Emitted::NotInstalled, |sink| sink.emit_for_run(run, event))
 }
 
+/// Makes everything the process-wide sink has written durable: the current
+/// file, the loss ledger and the directory. The call a `main` makes at a clean
+/// exit, after its last event (sobs-13, D-4411).
+///
+/// [`None`] when nothing is installed; otherwise [`Sink::sync`]'s answer, whose
+/// failure is already in [`Sink::health`] and on stderr once — a caller that
+/// only wants the barrier may ignore it.
+#[must_use]
+pub fn sync() -> Option<Result<(), String>> {
+    global().map(Sink::sync)
+}
+
 /// Reserves a non-zero correlation id from the process-wide log sequence.
 ///
 /// [`None`] means either that logging is not installed or that the id space is
@@ -329,6 +359,99 @@ mod tests {
         ONCE.call_once(|| {
             sweep_stale_scratch_in(&std::env::temp_dir(), std::time::SystemTime::now());
         });
+    }
+
+    /// Runs `body` in a process whose permission bits are enforced, even when
+    /// this one runs as root.
+    ///
+    /// **Why.** A test that closes a file or a directory with `chmod` and
+    /// expects the host to refuse proves nothing as root: root bypasses the mode
+    /// bits (`CAP_DAC_OVERRIDE`), the call succeeds, the refusal under test never
+    /// runs, and the test fails on its own premise. CI and the operator's machine
+    /// run as an ordinary user; a cloud container runs as root. Skipping there
+    /// would leave the refusal unexercised on exactly that host, and `CLAUDE.md`
+    /// §4 bans a test that asserts nothing. D-0995.
+    ///
+    /// **How.** The named test is re-run, alone, in a child of this test binary.
+    /// As root the child gets uid 65534 (`nobody`): `setuid` away from root
+    /// drops every capability, so the mode bits decide again and the SAME
+    /// production refusal runs under the SAME assertions. As anyone else the
+    /// child keeps the parent's own uid. Either way the same lines run, so none
+    /// of this is reachable only as root and gate 20's non-root profile covers
+    /// it. The child sees the marker and runs the body; the parent asserts the
+    /// child passed AND ran exactly one test, because `--exact` with a name that
+    /// matches nothing exits zero having run nothing. The environment is
+    /// inherited, so a coverage run's `LLVM_PROFILE_FILE` reaches the child.
+    ///
+    /// `test` is the harness's name for the caller: its full module path.
+    /// Held for WRITING while `where_permission_binds` runs a child, and for
+    /// READING by every test that drops a sink and opens another on the same
+    /// directory.
+    ///
+    /// **Why.** The sink's one-writer lock (D-1537) is an `flock` on
+    /// `events.lock`, and an `flock` belongs to the open file description,
+    /// which `fork` shares with the child. `.uid(..)` makes `std` fork and then
+    /// exec, so a child forked while another test's sink is alive holds that
+    /// sink's lock from the fork until its exec closes the descriptor. A test
+    /// that drops its sink and reopens it inside that window is refused with
+    /// "another sink ... holds this telemetry directory". PR #74 run 1263 hit
+    /// exactly that. Readers never wait on each other; only a child's spawn
+    /// waits for them, and they for it. D-1462.
+    pub(crate) static FORK_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// A reader's hold on [`FORK_GATE`], for a test that reopens a sink.
+    pub(crate) fn no_fork_in_flight() -> std::sync::RwLockReadGuard<'static, ()> {
+        FORK_GATE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn where_permission_binds(test: &str, body: impl FnOnce()) {
+        use std::os::unix::process::CommandExt as _;
+        const CHILD: &str = "BRUTEX_PERMISSION_BINDS_CHILD";
+        const NOBODY: u32 = 65_534;
+        if std::env::var_os(CHILD).is_some() {
+            body();
+            return;
+        }
+        let uid = Some(effective_uid())
+            .filter(|&uid| uid != 0)
+            .unwrap_or(NOBODY);
+        let _no_sink_alive = FORK_GATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .uid(uid)
+            .output()
+            .expect("the child test process starts");
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let ran = output.status.success() && stdout.contains("1 passed");
+        // Formatted unconditionally, so no line is reached only when the child fails.
+        let said = format!("child {test} (uid {uid}) failed or ran no test:\n{stdout}\n{stderr}");
+        assert!(ran, "{said}");
+    }
+
+    /// This process's effective uid, read as the owner of a file it just made.
+    ///
+    /// `std` has no `geteuid` and every crate here denies `unsafe`, so the
+    /// kernel is asked the portable way: a new file belongs to its creator.
+    fn effective_uid() -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let probe =
+            std::env::temp_dir().join(format!("brutex-uid-probe-{}-{serial}", std::process::id()));
+        let file = std::fs::File::create_new(&probe).expect("a probe file");
+        let uid = file.metadata().expect("the probe's own status").uid();
+        drop(file);
+        let _removed = std::fs::remove_file(&probe);
+        uid
     }
 
     /// Sweeps test scratch with explicit directory and clock inputs, so fresh
@@ -465,6 +588,8 @@ mod tests {
         let found = tail(&dir, sink.keep_files(), &Query::last(10));
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.records[0].message, "through the global");
+        // THE CLEAN-EXIT BARRIER reaches the installed sink (sobs-13, D-4411).
+        assert_eq!(super::sync(), Some(Ok(())));
 
         let first = super::reserve_run_id().expect("installed sink reserves a run");
         let second = super::reserve_run_id().expect("next reservation is distinct");

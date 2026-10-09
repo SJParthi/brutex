@@ -540,3 +540,159 @@ fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not(
         assert!(note_of.contains(arm), "{arm}: each model's own sources");
     }
 }
+
+/// **A Boolean evidence page proves its currency through the read that serves
+/// it, once, and the count is stated.** W1-api1-6, D-1444, D-4442.
+///
+/// `statistics` and `admission` each made one `require_current` before their
+/// page and one after it, on top of the bracketed `rows`/`splits` reads that
+/// already check every linked catalog before and after. Since D-4442 the
+/// only `require_current` left in either is the in-memory `sources` arm's,
+/// which reads nothing else that could prove it. The source is read so that
+/// putting either outer call back fails here and the bullet is revisited.
+#[test]
+fn an_evidence_pages_currency_cost_per_linked_catalog_is_stated() {
+    let bullet = crate::booleanjson::tests::d0951_bullet("W1-api1-6");
+    for word in [
+        "booleanevidencejson::admission",
+        "`statistics`",
+        "two currency calls",
+        "one",
+        "C linked",
+        "`flock`",
+        "six `metadata` calls",
+        "O(C)",
+        "independent of its 1..=256 rows",
+        "Since D-4442",
+        "p99",
+        "a proxy",
+    ] {
+        assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+    }
+    let source = include_str!("booleanevidencejson.rs");
+    for (function, outer) in [("admission", 0), ("statistics", 1)] {
+        let found = source.split_once(&format!("\nfn {function}("));
+        assert!(found.is_some(), "{function} exists");
+        let body = found.unwrap_or_default().1;
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert_eq!(
+            body.matches("reader.require_current()").count(),
+            outer,
+            "{function} proves currency through its bracketed read only: {body}"
+        );
+    }
+    assert!(
+        source.contains(r#""sources"=>{reader.require_current()?;let sources=reader.sources();"#),
+        "the in-memory sources arm is the one that checks on its own"
+    );
+    for read in [
+        "reader.rows(pin,asked.offset,asked.limit)?",
+        "reader.splits(pin,asked.offset,asked.limit)?",
+        "let rows = reader.rows(pin, asked.offset, asked.limit)?;",
+        "let observations = stats.rows(stats.completion_digest(), asked.offset, asked.limit)?;",
+    ] {
+        assert!(source.contains(read), "the bracketed read stays: {read}");
+    }
+}
+
+/// What one linked-catalog currency check costs, by a proxy: the same system
+/// calls `Observation::with_current` makes around an empty projection, on a
+/// real owner/body/receipt trio. Saved evidence trees can be built only by
+/// `cli`'s private fixtures, so the route itself is not timed here; the
+/// number is a proxy and `docs/06-limits.md` says so. W1-api1-6, D-4442.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_one_catalog_currency_check_proxy() -> Result<(), String> {
+    let root = crate::scratch::path("evidence-currency-proxy");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|why| why.to_string())?;
+    let mut trio = Vec::with_capacity(3);
+    for (name, bytes) in [
+        ("owner.lock", 0_usize),
+        ("body.bin", 4_096),
+        ("complete.bin", 112),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, vec![7_u8; bytes]).map_err(|why| why.to_string())?;
+        let file = std::fs::File::open(&path).map_err(|why| why.to_string())?;
+        trio.push((file, path));
+    }
+    let owner = trio.first().ok_or("premise: an owner")?;
+    let generations = |trio: &[(std::fs::File, std::path::PathBuf)]| -> Result<u64, String> {
+        let mut len = 0;
+        for (file, path) in trio {
+            let held = file.metadata().map_err(|why| why.to_string())?;
+            let named = std::fs::metadata(path).map_err(|why| why.to_string())?;
+            if held.len() != named.len() {
+                return Err("premise: the trio did not move".to_owned());
+            }
+            len += held.len();
+        }
+        Ok(len)
+    };
+    let check = crate::latency::Timed::run(20_000, || {
+        let lease = store::flock::Flock::try_lock_shared(&owner.0, owner.1.as_path())
+            .map_err(|why| format!("{why:?}"))?;
+        generations(&trio)?;
+        generations(&trio)?;
+        lease.release().map_err(|why| format!("{why:?}"))
+    })?;
+    println!(
+        "{}",
+        check.line("one linked-catalog currency check (proxy: flock, 12 metadata, unlock)")
+    );
+    std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
+    Ok(())
+}
+
+/// **A held reader answers only the exact key it was opened for.** The cache
+/// slot is keyed by root, model, identity and budget; the identical key is a
+/// reuse, an empty slot is not, and changing any ONE of the four fields alone
+/// must make the slot answer nothing, so a reader opened for another tree,
+/// model or budget is never served for this one.
+#[test]
+fn a_held_reader_is_reused_only_for_the_identical_root_model_identity_and_budget()
+-> Result<(), String> {
+    const OTHER: &str = "3434343434343434343434343434343434343434343434343434343434343434";
+    let root = Path::new("/evidence/a");
+    let budget = crate::detail::BooleanObservationBudget::from_value(None)?;
+    let asked = Asked::parse(&format!("identity={ID}"), Model::Statistics)?;
+    let slot = Some(Held {
+        key: Key::of(root, &asked, budget),
+        reader: 7_u8,
+    });
+    let same = Key::of(root, &asked, budget);
+    assert_eq!(
+        held_for(slot.as_ref(), &same).map(|held| held.reader),
+        Some(7)
+    );
+    assert!(held_for(None::<&Held<u8>>, &same).is_none());
+    let other_budget =
+        crate::detail::BooleanObservationBudget::from_value(Some(std::ffi::OsStr::new("1")))?;
+    for (field, key) in [
+        ("root", Key::of(Path::new("/evidence/b"), &asked, budget)),
+        (
+            "model",
+            Key::of(
+                root,
+                &Asked::parse(&format!("identity={ID}"), Model::Admission)?,
+                budget,
+            ),
+        ),
+        (
+            "identity",
+            Key::of(
+                root,
+                &Asked::parse(&format!("identity={OTHER}"), Model::Statistics)?,
+                budget,
+            ),
+        ),
+        ("budget", Key::of(root, &asked, other_budget)),
+    ] {
+        assert!(
+            held_for(slot.as_ref(), &key).is_none(),
+            "a differing {field} alone must not reuse the held reader"
+        );
+    }
+    Ok(())
+}

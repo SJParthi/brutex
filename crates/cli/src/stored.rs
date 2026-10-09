@@ -504,6 +504,245 @@ fn hash_open_session_v1(
     Ok(expected)
 }
 
+/// The IST minute-of-day at which `day`'s FINAL one-minute bar opens, read from
+/// [`pull::calendar::kind_of`], or `None` when the calendar does not place one.
+///
+/// This is the session close `indicators::anchored`'s exact-minute overlay clamps a
+/// short day-final signal bucket onto (D-0943). It used to derive that close from the
+/// minute slice itself, which mapped a truncated session onto whatever minute it
+/// stopped at and let a LATER day's minute decide an EARLIER day's mapping. The
+/// calendar answers for one day from that day alone. On a two-window day it is the
+/// last window's close. `Closed`, `OpenLengthUnmeasured` and `Unmeasured` answer
+/// `None`, so the overlay keeps the formula's minute and refuses rather than invent
+/// a session end. O(1): one `kind_of` call, itself a bounded walk. **UNVERIFIED as a
+/// measured bound**, read off the source as `kind_of`'s own is.
+#[must_use]
+pub fn nse_session_close_minute(day: i64) -> Option<u16> {
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(session) => usize::from(session.count)
+            .checked_sub(1)
+            .and_then(|last| session.windows.get(last))
+            .map(|window| window.to),
+        DayKind::Closed | DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => None,
+    }
+}
+
+/// Dated NSE cash-session closes for ONE share across the days a stored read
+/// needs them (GAP12-6, D-2102).
+///
+/// From 2026-08-03 a cash share's continuous session ends at 15:15 when that
+/// day's NSE master marks it eligible for the closing auction and at 15:30 when
+/// it does not (`docs/00-charter.md` §9, NSE/CMTR/73845 and 74466). The index
+/// calendar [`nse_session_close_minute`] reads cannot say which, so on those
+/// days this answers from `pull::cash_auction::Schedule`, the same dated
+/// authority the pull fold uses, built from the receipted local masters under
+/// `<store>/session-masters`. Nothing is downloaded, and no flag is carried
+/// from one day or one share to another.
+///
+/// A day whose master is absent, corrupt, or does not name this exact share is
+/// held as UNVERIFIED with its reason and answers `None`, so the overlay keeps
+/// the bucket's own last minute and the minute-gap census withholds it rather
+/// than a close being invented. An exceptional (non-full) session on such a day
+/// answers `None` too: no source in the charter gives a share's close there.
+///
+/// `digest` binds every answer and every reason, and enters the stored run
+/// identity, so the same bars judged against a different master are a
+/// different run.
+#[derive(Debug, Clone)]
+pub struct CashCloses {
+    schedule: pull::cash_auction::Schedule,
+    unverified: std::collections::HashMap<i64, String>,
+    dated: u32,
+    digest: [u8; 32],
+}
+
+/// Two sets of closes are equal when their digests are: the digest binds the
+/// share, every dated day, flag and master hash, and every unverified reason,
+/// and `Schedule` itself offers no comparison.
+impl PartialEq for CashCloses {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+    }
+}
+
+impl Eq for CashCloses {}
+
+impl CashCloses {
+    /// The IST minute-of-day `day`'s final one-minute bar opens at for this
+    /// share. Days that need no dated flag answer exactly as
+    /// [`nse_session_close_minute`] does. O(1): one calendar call and one hash
+    /// probe; **UNVERIFIED as a measured bound**, read off the source.
+    #[must_use]
+    pub fn session_close_minute(&self, day: i64) -> Option<u16> {
+        let calendar = nse_session_close_minute(day);
+        let Some(dated) = cas_dated_day(day) else {
+            return calendar;
+        };
+        self.dated_close_on(pull::calendar::kind_of(day), dated)
+    }
+
+    /// The dated answer for a CAS-era day the calendar calls `kind`: the
+    /// master's close less one minute on a full session, and `None` on any
+    /// other. No irregular session falls in the CAS era yet, so `kind` is a
+    /// parameter: a test hands it one, and a future special session on a CAS
+    /// day is refused rather than given a full day's close.
+    fn dated_close_on(&self, kind: DayKind, dated: pull::session::Day) -> Option<u16> {
+        match kind {
+            DayKind::Open(session) if session == Session::full() => self
+                .schedule
+                .close(dated)
+                .ok()
+                .and_then(|close| close.checked_sub(1)),
+            _ => None,
+        }
+    }
+
+    /// Days whose dated close was read from a master.
+    #[must_use]
+    pub const fn dated_days(&self) -> u32 {
+        self.dated
+    }
+
+    /// How many days needed a dated close and could not get one.
+    #[must_use]
+    pub fn unverified_days(&self) -> usize {
+        self.unverified.len()
+    }
+
+    /// Why `day`'s dated close could not be read, when it could not. One hash
+    /// probe.
+    #[must_use]
+    pub fn unverified_reason(&self, day: i64) -> Option<&str> {
+        self.unverified.get(&day).map(String::as_str)
+    }
+
+    /// Identity term binding every dated answer and every refusal reason.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+/// The dated closes `key` needs over `signal`'s days, or `None` for any key
+/// that is not a cash share, whose closes the index calendar answers. Every
+/// stored key comes from `swept_index`, which builds NSE keys only (D-2102).
+///
+/// # Errors
+///
+/// Every [`load_cash_closes`] refusal.
+pub fn span_cash_closes(
+    store_root: &Path,
+    key: &InstrumentKey,
+    leading_day: Option<i64>,
+    signal: &[Candle],
+) -> Result<Option<CashCloses>, Refusal> {
+    (key.kind == Kind::Equity)
+        .then(|| {
+            load_cash_closes(
+                store_root,
+                key.underlying.as_str(),
+                leading_day
+                    .into_iter()
+                    .chain(signal.iter().map(|bar| indicators::ist_day(bar.ts_micros))),
+            )
+        })
+        .transpose()
+}
+
+/// The minute-of-day `day`'s final bar opens at: the share's dated close when
+/// `cash` is held, the index calendar's otherwise. The one session-close rule
+/// the minute-gap census and the exact-minute overlay both ask (D-2102).
+#[must_use]
+pub fn session_close_for(cash: Option<&CashCloses>, day: i64) -> Option<u16> {
+    cash.map_or_else(
+        || nse_session_close_minute(day),
+        |cash| cash.session_close_minute(day),
+    )
+}
+
+/// `day` as a `pull` civil day when it is one on which a cash share's close
+/// depends on its dated closing-auction flag; `None` otherwise.
+fn cas_dated_day(day: i64) -> Option<pull::session::Day> {
+    u32::try_from(day)
+        .ok()
+        .and_then(|days| pull::session::Day::from_days(days).ok())
+        .filter(|dated| pull::vendor::cash_auction_eligibility_required(*dated))
+}
+
+/// Read the dated closes `share` needs on `days` (ascending, possibly
+/// repeating) from the receipted local masters under `store_root`.
+///
+/// One master is read per distinct day that needs one, and each is parsed
+/// once; a missing or unusable master is recorded, not fatal. O(D) masters for
+/// D such days, each O(its CSV); **UNVERIFIED as a measured bound**.
+///
+/// # Errors
+///
+/// Only a contradictory insert into the schedule, which distinct days cannot
+/// produce; it is propagated rather than assumed away.
+pub fn load_cash_closes(
+    store_root: &Path,
+    share: &str,
+    days: impl IntoIterator<Item = i64>,
+) -> Result<CashCloses, Refusal> {
+    let masters = store_root.join("session-masters");
+    let isin = brutex_core::universe::nse_isin(share);
+    // The days that need a flag, each once, before any map is sized.
+    let mut required = Vec::new();
+    let mut last = None;
+    for day in days {
+        if last == Some(day) {
+            continue;
+        }
+        last = Some(day);
+        if let Some(civil) = cas_dated_day(day)
+            && pull::calendar::kind_of(day) == DayKind::Open(Session::full())
+        {
+            required.push((day, civil));
+        }
+    }
+    let mut schedule = pull::cash_auction::Schedule::default();
+    let mut unverified = std::collections::HashMap::with_capacity(required.len());
+    let mut dated = 0_u32;
+    let mut hash = brutex_core::blake3::Hasher::new();
+    hash.update(b"brutex-cash-session-closes-v1\0");
+    hash.update(&u64::try_from(share.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hash.update(share.as_bytes());
+    for (day, civil) in required {
+        let answer = isin
+            .as_ref()
+            .ok_or_else(|| format!("{share} has no exact NSE ISIN in the universe table"))
+            .and_then(|isin| {
+                pull::cash_session_cache::read_local_lifecycle(&masters, civil).and_then(|master| {
+                    master
+                        .eligibility(share, isin.as_str())
+                        .map(|eligible| (eligible, master.provenance().sha256))
+                })
+            });
+        hash.update(&day.to_le_bytes());
+        match answer {
+            Ok((eligible, sha256)) => {
+                schedule.insert(civil, eligible)?;
+                dated = dated.saturating_add(1);
+                hash.update(&[1, u8::from(eligible)]);
+                hash.update(&sha256);
+            }
+            Err(why) => {
+                hash.update(&[0]);
+                hash.update(&u64::try_from(why.len()).unwrap_or(u64::MAX).to_le_bytes());
+                hash.update(why.as_bytes());
+                unverified.insert(day, why);
+            }
+        }
+    }
+    Ok(CashCloses {
+        schedule,
+        unverified,
+        dated,
+        digest: hash.finalize(),
+    })
+}
+
 /// Hash one complete day-level calendar decision.
 fn hash_calendar_day_v1(
     day: i64,
@@ -1710,6 +1949,28 @@ pub struct ExactMinuteContext {
     /// present in one series and absent from the other would either refuse or,
     /// worse, resolve against a session the signal series never saw.
     pub excluded: CalendarExclusion,
+    /// Dated cash-session closes, held only for an NSE cash share; `None` for
+    /// every other key, whose closes the index calendar answers (D-2102).
+    pub cash: Option<CashCloses>,
+}
+
+impl ExactMinuteContext {
+    /// The minute-of-day `day`'s final one-minute bar opens at for THIS
+    /// context's instrument: the share's dated close when it holds one, the
+    /// index calendar's otherwise. Pass this, never the venue-blind
+    /// [`nse_session_close_minute`], to the exact-minute overlay and the
+    /// minute-gap census over a stored span.
+    #[must_use]
+    pub fn session_close_minute(&self, day: i64) -> Option<u16> {
+        session_close_for(self.cash.as_ref(), day)
+    }
+
+    /// Identity term for the dated closes, `None` when none were needed, so an
+    /// index run's identity is unchanged by D-2102.
+    #[must_use]
+    pub fn cash_digest(&self) -> Option<[u8; 32]> {
+        self.cash.as_ref().map(CashCloses::digest)
+    }
 }
 
 /// The only distinction a range loader is allowed to recover from.
@@ -2136,6 +2397,65 @@ pub(crate) fn equity_note(key: &InstrumentKey) -> String {
         .map_or_else(String::new, runner::audit::CostScope::report_note)
 }
 
+/// The largest overnight move in a stock's bars, named by its session, for
+/// the line under [`equity_note`]. D-1540 (audit-20261003 gaps-6).
+///
+/// [`runner::audit::largest_overnight_move`] measures it and applies no
+/// threshold, because D-0018 names none. A stock whose bars hold fewer than
+/// two sessions says so; an index or a contract gets nothing, as it gets no
+/// [`equity_note`].
+///
+/// # The overnight INTO the span is measured too (p16num-1, D-2546)
+///
+/// `daily` is the context the same door already loaded, warm-up month
+/// included, and the anchored previous-session families read the session
+/// before the span out of it. So the move from that session's close to the
+/// span's first open is the one a split effective on the first signal day
+/// shows up as, and it was never measured: the line named an in-span date
+/// while `gap_down_day` and every previous-day level moved on the first day.
+/// [`prior_session_record`] hands that session to
+/// [`runner::audit::largest_overnight_move_after`].
+pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle], daily: &DailyContext) -> String {
+    if key.kind != Kind::Equity {
+        return String::new();
+    }
+    let prior = prior_session_record(daily, bars);
+    runner::audit::largest_overnight_move_after(prior, bars).map_or_else(
+        || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
+        |found| {
+            let date = u32::try_from(found.day)
+                .ok()
+                .and_then(|days| pull::session::Day::from_days(days).ok())
+                .map_or_else(|| format!("IST day {}", found.day), |day| day.to_string());
+            runner::audit::overnight_line(&found, &date)
+        },
+    )
+}
+
+/// The last ELIGIBLE daily record strictly before the IST day of `bars`'
+/// first bar: the session whose close the span's first open is measured
+/// against. `None` when the span is empty or no eligible record precedes it.
+///
+/// An excluded record (eligibility byte `0`) is skipped, because the anchored
+/// families skip it too and the move they read is from the last eligible
+/// session. One pass over the daily records, which a month-plus context holds
+/// a few dozen of, once per report. p16num-1, D-2546.
+pub(crate) fn prior_session_record<'a>(
+    daily: &'a DailyContext,
+    bars: &[Candle],
+) -> Option<&'a Candle> {
+    let first_day = indicators::ist_day(bars.first()?.ts_micros);
+    // The LATEST such day, compared rather than assumed from the order.
+    let mut prior: Option<(i64, &Candle)> = None;
+    for (record, eligible) in daily.bars.iter().zip(daily.eligibility.iter()) {
+        let day = indicators::ist_day(record.ts_micros);
+        if *eligible == 1 && day < first_day && prior.is_none_or(|(kept, _)| day > kept) {
+            prior = Some((day, record));
+        }
+    }
+    prior.map(|(_, record)| record)
+}
+
 /// [`equity_note`] for a symbol as the operator typed it.
 ///
 /// A symbol [`swept_index`] refuses gets nothing: the run it would head
@@ -2232,6 +2552,12 @@ fn load_classified_with_ceiling(
     month: u8,
     remaining_records: Option<u64>,
 ) -> Result<Loaded, LoadFailure> {
+    // A STRUCTURAL BOUNDARY: one instrument-month. A stopping server is
+    // honoured here, before anything is opened (hunt-api-2, D-1551).
+    crate::cancel::check(|| {
+        format!("{underlying} {rung_name} {year}-{month:02}, before it was read")
+    })
+    .map_err(LoadFailure::Refused)?;
     let timeframe = rung(rung_name)?;
     let key = swept_index(underlying)?;
     let ym = YearMonth::new(year, month)
@@ -2893,6 +3219,42 @@ fn daily_eligibility_of(day: i64) -> Result<DailyEligibility, Refusal> {
     }
 }
 
+/// The first signal day's daily context must be anchored to the session it
+/// follows on the canonical calendar (CE-10, D-1769).
+fn anchored_to_prior_session(
+    references: &[DailyReference],
+    first_signal_day: i64,
+) -> Result<(), Refusal> {
+    // THE NEWEST ELIGIBLE RECORD BEFORE THE FIRST SIGNAL DAY MUST BE THE
+    // SESSION THAT DAY FOLLOWS. This asked only for ANY eligible record before
+    // it, and `daily_context_from_span`'s per-day walk covers a day only once a
+    // previous signal day exists, so a previous-month file that ended early
+    // anchored the first day's pivots, previous-day and gap bits to an older
+    // session while GapFib,
+    // which asks `prior_accepted_session`, anchored to the right one (CE-10,
+    // D-1769). Both sides now ask the canonical calendar the same question.
+    let newest_before = references
+        .iter()
+        .rev()
+        .find(|reference| {
+            reference.ist_day() < first_signal_day
+                && reference.eligibility() == DailyEligibility::Eligible
+        })
+        .map(DailyReference::ist_day);
+    let Some(newest_before) = newest_before else {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
+        ));
+    };
+    let (prior_session, _) = prior_accepted_session(first_signal_day)?;
+    if newest_before != prior_session {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} follows the accepted session {prior_session}, but the newest eligible stored 1day record before it is {newest_before}. The daily file ends early, and anchoring the first day's previous-day, pivot and gap context to an older session is refused rather than guessed; load the missing daily history"
+        ));
+    }
+    Ok(())
+}
+
 /// Turn a complete stored one-day span into explicit causal reference records.
 pub(crate) fn daily_context_from_span(
     daily: Span,
@@ -2933,10 +3295,15 @@ pub(crate) fn daily_context_from_span(
     })?;
     for bar in daily.bars {
         let day = indicators::ist_day(bar.ts_micros);
-        // A same-day record is not sealed at the instant an intraday signal is
-        // evaluated, and a future record is look-ahead.  They are omitted from
-        // the offered reference stream rather than relying on the evaluator to
-        // ignore bytes the run identity then misleadingly claims it consumed.
+        // BOUNDS THE OFFERED SET TO RECORDS SOME SIGNAL DAY CAN CONSUME, so the
+        // census's `remaining()` is zero after a full build and the identity
+        // claims no unread bytes. It drops only days at or after the LAST
+        // signal day: an earlier day's same-day record IS offered, and it is
+        // `AnchoredEvaluator::advance_before` that keeps each signal bar from
+        // reading its own day or later. Per-row causality is the evaluator's;
+        // this filter is bookkeeping. This comment said same-day records were
+        // omitted "rather than relying on the evaluator", which was true only
+        // of the last day (GAP4-48, D-1664).
         if day >= last_signal_day {
             continue;
         }
@@ -2952,14 +3319,7 @@ pub(crate) fn daily_context_from_span(
         eligibility.push(u8::from(decision == DailyEligibility::Eligible));
     }
 
-    if !references.iter().any(|reference| {
-        reference.ist_day() < first_signal_day
-            && reference.eligibility() == DailyEligibility::Eligible
-    }) {
-        return Err(format!(
-            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
-        ));
-    }
+    anchored_to_prior_session(&references, first_signal_day)?;
 
     // Every regular signal session that is followed by another observed signal
     // session must itself have a stored daily record.  The signal stream is the
@@ -3145,10 +3505,42 @@ pub fn load_daily_context_bounded(
     daily_context_from_span(daily, signal)
 }
 
+/// The minute the accepted prior session's final bar must open at (GAP12-6,
+/// D-1663, D-2102). `kind_of` is the index's venue-blind calendar, and from
+/// 2026-08-03 an NSE cash share's continuous session ends at 15:15 when that
+/// day's master marks it eligible for the closing auction and at 15:30 when it
+/// does not. A share's close therefore comes from its dated [`CashCloses`];
+/// when that day's flag could not be read, the session is refused by name as
+/// UNVERIFIED, never judged against 15:29 and called truncated.
+fn prior_session_last_minute(
+    cash: Option<&CashCloses>,
+    prior_session_day: i64,
+    calendar_last: u16,
+) -> Result<u16, Refusal> {
+    let Some(cash) = cash else {
+        return Ok(calendar_last);
+    };
+    if cas_dated_day(prior_session_day).is_none() {
+        return Ok(calendar_last);
+    }
+    cash.session_close_minute(prior_session_day).ok_or_else(|| {
+        let why = cash
+            .unverified_reason(prior_session_day)
+            .unwrap_or("its calendar session is not a full regular one");
+        format!(
+            "cash session close UNVERIFIED: dated CAS eligibility required. The prior session for GapFib is IST day {prior_session_day}, an NSE cash equity day on which the continuous session ends at 15:15 or 15:30 depending on the share's dated closing-auction eligibility, and that day's flag could not be read ({why}). Its terminal minutes were not judged against the index calendar and nothing was swept"
+        )
+    })
+}
+
 /// Validate a complete stored one-minute span as `GapFib` context.
+///
+/// `store_root` is read only for an NSE cash share, for the receipted
+/// session masters its dated closes come from ([`load_cash_closes`]).
 pub(crate) fn exact_minute_context_from_span(
     minute: Span,
     signal: &[Candle],
+    store_root: &Path,
 ) -> Result<ExactMinuteContext, Refusal> {
     let Some(first_signal) = signal.first() else {
         return Err(
@@ -3216,7 +3608,9 @@ pub(crate) fn exact_minute_context_from_span(
                 "canonical NSE calendar returned no window for accepted prior IST session {prior_session_day}"
             )
         })?;
-    let expected_second = final_window.to.checked_sub(1).ok_or_else(|| {
+    let cash = span_cash_closes(store_root, &minute.key, Some(prior_session_day), signal)?;
+    let last_minute = prior_session_last_minute(cash.as_ref(), prior_session_day, final_window.to)?;
+    let expected_second = last_minute.checked_sub(1).ok_or_else(|| {
         format!(
             "accepted prior IST session {prior_session_day} has no two terminal minutes for GapFib"
         )
@@ -3226,14 +3620,17 @@ pub(crate) fn exact_minute_context_from_span(
             "accepted prior IST session {prior_session_day} has no three terminal minutes for GapFib"
         )
     })?;
-    if expected_third < final_window.from
+    // THE THREE TERMINAL MINUTES LIE IN THE FINAL WINDOW: `holds` states that,
+    // where `expected_third < final_window.from` restated half of it with a
+    // comparison no session on the measured calendar can bring to its
+    // boundary (G18-cli-b-27, D-2034). `expected_third` never passes `to`.
+    if !final_window.holds(expected_third)
         || third_last != Some(expected_third)
         || second_last != Some(expected_second)
-        || last != Some(final_window.to)
+        || last != Some(last_minute)
     {
         return Err(format!(
-            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {}; observed final three were {third_last:?}, {second_last:?}, {last:?}. Early or truncated bars cannot seed GapFib",
-            final_window.to
+            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {last_minute}; observed final three were {third_last:?}, {second_last:?}, {last:?}. Early or truncated bars cannot seed GapFib"
         ));
     }
     let prior_session_bars = u32::try_from(prior_session_bars).map_err(|_| {
@@ -3247,6 +3644,7 @@ pub(crate) fn exact_minute_context_from_span(
         prior_session_day,
         prior_session_bars,
         excluded: minute.excluded,
+        cash,
     })
 }
 
@@ -3272,7 +3670,7 @@ pub fn load_exact_minute_context(
     let (from, to) = signal_months;
     let warm_from = previous_month(from)?;
     let minute = load_span(root, vendor, underlying, "1min", warm_from, to)?;
-    exact_minute_context_from_span(minute, signal)
+    exact_minute_context_from_span(minute, signal, root)
 }
 
 /// Load exact stored one-minute evidence under a pre-allocation record ceiling.
@@ -3308,7 +3706,7 @@ pub fn load_exact_minute_context_bounded(
     let (from, to) = signal_months;
     let warm_from = previous_month(from)?;
     let minute = load_span_bounded(root, vendor, underlying, "1min", warm_from, to, bound)?;
-    exact_minute_context_from_span(minute, signal)
+    exact_minute_context_from_span(minute, signal, root)
 }
 #[cfg(test)]
 #[allow(
@@ -3323,6 +3721,48 @@ pub fn load_exact_minute_context_bounded(
 mod tests {
     use super::*;
     use store::format::Bar;
+
+    /// A store root with no session masters: a share's CAS-day close is
+    /// UNVERIFIED under it, and every other key never reads it.
+    const NO_STORE: &str = "/nonexistent/brutex-test-store";
+
+    /// D-0943: the overlay's session close is the calendar's last window close per day.
+    ///
+    /// A regular day closes 15:29; the two-window disaster-recovery Saturday closes at
+    /// its SECOND window's 12:29; the 2021-02-24 outage at 16:59. A closed day, a
+    /// Muhurat whose length was never measured, and a day outside the calendar answer
+    /// `None`, so the overlay refuses rather than inventing a session end.
+    #[test]
+    fn the_overlay_session_close_is_the_calendars_last_window_close() {
+        let regular = pull::calendar::FIRST_DAY;
+        assert_eq!(
+            pull::calendar::kind_of(regular),
+            DayKind::Open(Session::full())
+        );
+        assert_eq!(nse_session_close_minute(regular), Some(15 * 60 + 29));
+        assert_eq!(nse_session_close_minute(19_784), Some(12 * 60 + 29));
+        assert_eq!(
+            nse_session_close_minute(pull::calendar::SYSTEMS_OUTAGE_DAY),
+            Some(16 * 60 + 59)
+        );
+        let closed = (pull::calendar::FIRST_DAY..=pull::calendar::LAST_DAY)
+            .find(|day| pull::calendar::kind_of(*day) == DayKind::Closed)
+            .expect("the calendar holds a weekend");
+        assert_eq!(nse_session_close_minute(closed), None);
+        assert_eq!(
+            pull::calendar::kind_of(18_935),
+            DayKind::OpenLengthUnmeasured
+        );
+        assert_eq!(nse_session_close_minute(18_935), None);
+        for outside in [
+            pull::calendar::FIRST_DAY - 1,
+            pull::calendar::LAST_DAY + 1,
+            i64::MIN,
+            i64::MAX,
+        ] {
+            assert_eq!(nse_session_close_minute(outside), None, "day {outside}");
+        }
+    }
 
     /// A store root of this test's own, so `cargo test`'s threads cannot collide.
     ///
@@ -3362,6 +3802,8 @@ mod tests {
         let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
             .expect("a path for a stored index");
         let id = brutex_core::universe::fnv1a(symbol) as u32;
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(&r).expect("the store root");
         let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
         // An empty batch is refused by the store as `EmptyBatch`, correctly — so
         // thezero -bar case is a file that was created and never appended to, which
@@ -3915,6 +4357,7 @@ mod tests {
                     .expect("a path for a stored key");
             let on_disk = path.to_path_buf(&r);
             let id = brutex_core::universe::fnv1a("FINNIFTY") as u32;
+            std::fs::create_dir_all(&r).expect("the store root");
             BarFile::open_or_create(&r, path, id)
                 .expect("a fresh month opens")
                 .append(&bars(3))
@@ -3988,6 +4431,67 @@ mod tests {
         assert!(!any_cash_equity(["NIFTY", "ZZQXNOTFNO", "FINNIFTY"]));
         assert!(any_cash_equity(["NIFTY", "RELIANCE"]));
         assert!(any_cash_equity(["TCS"]));
+    }
+
+    /// **The overnight INTO the first signal day is read from the daily
+    /// context the door already holds.** p16num-1, D-2546.
+    ///
+    /// A stock's span starts on the session a 1:2 split took effect; the
+    /// eligible daily record before it closed at 20,002.00 and the span opens
+    /// at 10,001.00. On the old `overnight_note`, which measured inside the
+    /// span only, the line named no -50.00% move (two flat sessions inside
+    /// the span measure 0). The prior record is the latest ELIGIBLE day before
+    /// the span, whatever the record order; an excluded record, one on the
+    /// first day itself, and an empty span each give no prior.
+    #[test]
+    fn the_overnight_note_measures_the_session_before_the_span() {
+        const DAY: i64 = 86_400_000_000;
+        const IST: i64 = 19_800_000_000;
+        let at = |day: i64, minute: i64| day * DAY + minute * 60_000_000 - IST;
+        let flat = |ts: i64, price: i64| {
+            Candle::new(ts, price, price, price, price, 1, indicators::OI_NULL)
+        };
+        let first_day = 20_003_i64;
+        let span = [
+            flat(at(first_day, 555), 1_000_100),
+            flat(at(first_day, 556), 1_000_100),
+            flat(at(first_day + 1, 555), 1_000_100),
+        ];
+        let context = |records: Vec<(i64, i64, u8)>| DailyContext {
+            bars: records
+                .iter()
+                .map(|&(day, close, _)| flat(at(day, 0), close))
+                .collect(),
+            references: Vec::new(),
+            eligibility: records.iter().map(|&(_, _, eligible)| eligible).collect(),
+            asked: 2,
+            found: 2,
+        };
+        // Out of order on purpose, with an EXCLUDED later record and one on
+        // the first day itself: the answer is day 20,002's close.
+        let daily = context(vec![
+            (first_day - 1, 2_000_200, 1),
+            (first_day - 3, 1_500_000, 1),
+            (first_day, 999, 1),
+            (first_day - 1, 7_777_777, 0),
+        ]);
+        let prior = prior_session_record(&daily, &span).expect("an eligible prior day");
+        assert_eq!(prior.close, 2_000_200);
+        assert!(prior_session_record(&daily, &[]).is_none(), "an empty span");
+        let none = context(vec![
+            (first_day, 2_000_200, 1),
+            (first_day - 1, 2_000_200, 0),
+        ]);
+        assert!(prior_session_record(&none, &span).is_none());
+
+        let cash = swept_index("RELIANCE").expect("an F&O cash equity");
+        let measured = overnight_note(&cash, &span, &daily);
+        assert!(measured.contains("-50.00% into the"), "{measured}");
+        let without = overnight_note(&cash, &span, &none);
+        assert!(!without.contains("-50.0"), "{without}");
+        // An index gets nothing, with or without a prior.
+        let index = swept_index("NIFTY").expect("a swept index");
+        assert_eq!(overnight_note(&index, &span, &daily), "");
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**
@@ -4155,6 +4659,8 @@ mod tests {
             let ym = YearMonth::new(y, m).expect("a real month");
             let path = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars)
                 .expect("a path for a swept index");
+            // The writer never creates a missing store root (D-1522).
+            std::fs::create_dir_all(&r).expect("the store root");
             let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
             file.append(&bars_in(i64::from(y), i64::from(m), n))
                 .expect("and takes its bars");
@@ -4592,6 +5098,73 @@ mod tests {
         assert_eq!(CHARTER_NON_REGULAR_IST_DAYS.len(), 9);
     }
 
+    /// GAP4-48, D-1664: the offered daily stream is exactly what the signal
+    /// days consume. Over a three-day daily span and two signal days, an
+    /// earlier day's same-day record IS offered (the filter drops only the last
+    /// signal day and later), the evaluator consumes every offered record by the
+    /// end of the build, and the first day's rows equal a build over that day
+    /// alone, whose own context offers one record fewer.
+    #[test]
+    fn the_offered_daily_stream_is_consumed_whole_and_a_prefix_build_agrees() {
+        use indicators::anchored::AnchoredEvaluator;
+        use indicators::evaluator::Widths;
+        use indicators::pattern::Thresholds;
+
+        let daily = || {
+            daily_span(vec![
+                candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+                candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_500_100),
+                candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_500_200),
+            ])
+        };
+        let signal: Vec<Candle> = [OPEN_TUESDAY_2026_08_04, OPEN_WEDNESDAY_2026_08_05]
+            .into_iter()
+            .flat_map(|day| {
+                (555..558).map(move |minute| minute_on_ist_day(day, minute, 2_600_000 + minute))
+            })
+            .collect();
+        let rows = |signal: &[Candle]| {
+            let context = daily_context_from_span(daily(), signal).expect("causal daily stream");
+            let mut evaluator = AnchoredEvaluator::new(
+                Widths::pinned().expect("pinned widths"),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+                &context.references,
+            )
+            .expect("ordered references");
+            let masks: Vec<_> = signal
+                .iter()
+                .map(|bar| evaluator.step(bar).expect("a sane bar"))
+                .collect();
+            (
+                context.references.len(),
+                evaluator.reference_census(),
+                masks,
+            )
+        };
+        let (offered, census, full) = rows(&signal);
+        assert_eq!(
+            offered, 2,
+            "Monday and Tuesday: Tuesday's same-day record is offered"
+        );
+        assert_eq!(census.offered, 2);
+        assert_eq!(census.remaining(), 0, "every offered record was consumed");
+        assert!(census.reconciles());
+
+        let prefix = signal.get(..3).expect("Tuesday's bars");
+        let (prefix_offered, prefix_census, alone) = rows(prefix);
+        assert_eq!(
+            prefix_offered, 1,
+            "a Tuesday-only build is offered Monday alone"
+        );
+        assert_eq!(prefix_census.remaining(), 0);
+        assert_eq!(
+            full.get(..3),
+            Some(alone.as_slice()),
+            "Tuesday's same-day record, offered to the full build, changed no Tuesday row"
+        );
+    }
+
     #[test]
     fn an_observed_regular_session_without_its_daily_record_refuses() {
         let daily = daily_span(vec![candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000)]);
@@ -4609,6 +5182,34 @@ mod tests {
             why.contains("older anchor was not silently reused"),
             "{why}"
         );
+    }
+
+    /// CE-10, D-1769: a daily file that ends before the session the first
+    /// signal day follows refuses, instead of anchoring that day to an older
+    /// session. Monday's record exists, Tuesday traded and has none, and the
+    /// first signal day is Wednesday.
+    #[test]
+    fn a_first_signal_day_whose_prior_session_has_no_daily_record_refuses() {
+        let daily = daily_span(vec![candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000)]);
+        let signal = [candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100)];
+        let why = daily_context_from_span(daily, &signal)
+            .expect_err("Wednesday follows Tuesday, not Monday");
+        assert!(
+            why.contains(&format!(
+                "follows the accepted session {OPEN_TUESDAY_2026_08_04}"
+            )),
+            "{why}"
+        );
+        assert!(
+            why.contains(&format!("is {OPEN_MONDAY_2026_08_03}")),
+            "{why}"
+        );
+        // And with Tuesday's record present the same first day is accepted.
+        let daily = daily_span(vec![
+            candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_550_000),
+        ]);
+        daily_context_from_span(daily, &signal).expect("the prior session is on file");
     }
 
     #[test]
@@ -4669,6 +5270,34 @@ mod tests {
         assert!(why.contains("cannot be called a holiday"), "{why}");
     }
 
+    /// D-0941. A stored all-zero (or any `low <= 0`) 1day record used to pass
+    /// `DailyReference::new` and become the next day's eligible anchor. It now
+    /// refuses the whole daily context by name, rather than being dropped
+    /// silently or substituted with an older anchor.
+    #[test]
+    fn a_nonpositive_stored_daily_record_refuses_the_daily_context_by_name() {
+        let signal = [
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000),
+            candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100),
+        ];
+        for (low, high) in [(0, 0), (0, 100), (-100, 100)] {
+            let mut bad = candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 0);
+            bad.open = low;
+            bad.close = low;
+            bad.low = low;
+            bad.high = high;
+            let daily = daily_span(vec![
+                candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+                bad,
+            ]);
+            let why = daily_context_from_span(daily, &signal)
+                .expect_err("a nonpositive daily record is not reference evidence");
+            assert!(why.contains("not usable reference evidence"), "{why}");
+            assert!(why.contains("PriceNotPositive"), "{why}");
+            assert!(why.contains(&bad.ts_micros.to_string()), "{why}");
+        }
+    }
+
     fn minute_on_ist_day(day: i64, minute: i64, close: i64) -> Candle {
         let mut bar = candle_on_ist_day(day, close);
         bar.ts_micros = bar
@@ -4699,7 +5328,7 @@ mod tests {
             minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
             minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
         ]);
-        let got = exact_minute_context_from_span(complete, &signal)
+        let got = exact_minute_context_from_span(complete, &signal, Path::new(NO_STORE))
             .expect("the exact canonical terminal three seed GapFib");
         assert_eq!(got.prior_session_day, OPEN_MONDAY_2026_08_03);
         assert_eq!(got.prior_session_bars, 3);
@@ -4713,7 +5342,7 @@ mod tests {
             minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
             minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
         ]);
-        let why = exact_minute_context_from_span(short, &signal)
+        let why = exact_minute_context_from_span(short, &signal, Path::new(NO_STORE))
             .expect_err("two prior minutes cannot prove a three-bar gap");
         assert!(why.contains("only 2 bar(s)"), "{why}");
         assert!(why.contains("final three"), "{why}");
@@ -4740,7 +5369,7 @@ mod tests {
                 minute_on_ist_day(closed_day, 929, 2_500_200),
                 minute_on_ist_day(signal_day, 555, 2_600_000),
             ]);
-            let why = exact_minute_context_from_span(minute, &signal)
+            let why = exact_minute_context_from_span(minute, &signal, Path::new(NO_STORE))
                 .expect_err("closed-day minutes cannot impersonate a prior session");
             assert!(why.contains("measured-closed"), "{why}");
             assert!(why.contains(&closed_day.to_string()), "{why}");
@@ -4756,10 +5385,218 @@ mod tests {
             minute_on_ist_day(OPEN_MONDAY_2026_08_03, 557, 2_500_200),
             minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
         ]);
-        let why = exact_minute_context_from_span(early, &signal)
+        let why = exact_minute_context_from_span(early, &signal, Path::new(NO_STORE))
             .expect_err("three opening bars are not the prior session's terminal three");
         assert!(why.contains("terminal-minute geometry"), "{why}");
         assert!(why.contains("Early or truncated bars"), "{why}");
+    }
+
+    /// GAP12-6, D-1663: an NSE cash equity whose prior session is a
+    /// CAS-eligible day (2026-08-03 on) ends its continuous session at 15:14.
+    /// That close was refused as "Early or truncated" against the venue-blind
+    /// 15:29; with no dated eligibility in hand it is now refused naming CAS, and
+    /// so is a 15:29 close on the same day, which this read cannot confirm
+    /// either. The index key and a pre-CAS cash day are unchanged.
+    #[test]
+    fn a_cas_equity_prior_session_ending_1514_seeds_gapfib() {
+        let cash = |bars| Span {
+            key: InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a cash key"),
+            ..minute_span(bars)
+        };
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        for last in [914_i64, 929] {
+            let span = cash(vec![
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last - 2, 2_500_000),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last - 1, 2_500_100),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last, 2_500_200),
+                minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+            ]);
+            let why = exact_minute_context_from_span(span, &signal, Path::new(NO_STORE))
+                .expect_err("no dated CAS eligibility is held here");
+            assert!(why.contains("dated CAS eligibility required"), "{why}");
+            assert!(!why.contains("truncated"), "{why}");
+        }
+        // The index on the same day is judged as before: 15:29 seeds.
+        let index = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 927, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        assert!(exact_minute_context_from_span(index, &signal, Path::new(NO_STORE)).is_ok());
+        // A cash day before 2026-08-03 is judged against the charter close.
+        let before = accepted_open_before(OPEN_MONDAY_2026_08_03);
+        let after = accepted_open_after(before);
+        let early_signal = [minute_on_ist_day(after, 555, 2_600_000)];
+        let pre_cas = cash(vec![
+            minute_on_ist_day(before, 927, 2_500_000),
+            minute_on_ist_day(before, 928, 2_500_100),
+            minute_on_ist_day(before, 929, 2_500_200),
+            minute_on_ist_day(after, 555, 2_600_000),
+        ]);
+        assert!(
+            exact_minute_context_from_span(pre_cas, &early_signal, Path::new(NO_STORE)).is_ok()
+        );
+    }
+
+    /// Install one receipted NSE session master naming RELIANCE with `flag`
+    /// for `day` under `store/session-masters`, exactly as the pull does.
+    fn install_master(store: &Path, day: i64, flag: u8) {
+        use std::io::Write as _;
+        let isin = brutex_core::universe::nse_isin("RELIANCE").expect("RELIANCE has an ISIN");
+        let csv = format!(
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{},{flag}\n",
+            isin.as_str()
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(csv.as_bytes()).expect("compress fixture");
+        let civil = pull::session::Day::from_days(u32::try_from(day).expect("a civil day"))
+            .expect("a civil day");
+        pull::cash_session_cache::install(
+            &store.join("session-masters"),
+            civil,
+            &gz.finish().expect("finish gzip"),
+        )
+        .expect("the fixture master installs");
+    }
+
+    fn reliance_prior_session(last: i64) -> Span {
+        Span {
+            key: InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a cash key"),
+            ..minute_span(vec![
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last - 2, 2_500_000),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last - 1, 2_500_100),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last, 2_500_200),
+                minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+            ])
+        }
+    }
+
+    /// GAP12-6 closed (D-2102): a share's CAS-day prior session is judged
+    /// against ITS dated close. Eligible ends at 15:14 and seeds; the same day
+    /// ending 15:29 is truncated against that close. Ineligible is the mirror.
+    /// The flag is read from the receipted master; nothing is downloaded.
+    #[test]
+    fn a_cas_prior_session_is_judged_against_the_shares_dated_close() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        for (flag, seeds, truncated) in [(1_u8, 914_i64, 929_i64), (0, 929, 914)] {
+            let store = root(&format!("cas-dated-{flag}"));
+            install_master(&store, OPEN_MONDAY_2026_08_03, flag);
+            let context =
+                exact_minute_context_from_span(reliance_prior_session(seeds), &signal, &store)
+                    .expect("the dated close seeds GapFib");
+            assert_eq!(context.prior_session_day, OPEN_MONDAY_2026_08_03);
+            let cash = context.cash.as_ref().expect("a share holds dated closes");
+            assert_eq!(cash.dated_days(), 1);
+            // The signal day's master is absent: held, named, not fatal.
+            assert_eq!(cash.unverified_days(), 1);
+            assert!(
+                cash.unverified_reason(OPEN_TUESDAY_2026_08_04)
+                    .is_some_and(|why| why.contains("UNVERIFIED"))
+            );
+            assert_eq!(cash.unverified_reason(OPEN_MONDAY_2026_08_03), None);
+            assert_eq!(
+                context.session_close_minute(OPEN_MONDAY_2026_08_03),
+                Some(u16::try_from(seeds).expect("a minute"))
+            );
+            assert_eq!(context.session_close_minute(OPEN_TUESDAY_2026_08_04), None);
+            assert_eq!(context.cash_digest(), Some(cash.digest()));
+            let why =
+                exact_minute_context_from_span(reliance_prior_session(truncated), &signal, &store)
+                    .expect_err("the other close is not this share's");
+            assert!(why.contains("truncated"), "{why}");
+            assert!(
+                why.contains(&format!("{}, {}, {seeds}", seeds - 2, seeds - 1)),
+                "{why}"
+            );
+            let _ignored = std::fs::remove_dir_all(&store);
+        }
+    }
+
+    /// Dated closes answer the calendar off CAS days, the master's close on
+    /// them, and `None` without a master; the digest moves with every answer
+    /// and every reason, and an index holds no closes at all (D-2102).
+    #[test]
+    fn dated_closes_answer_per_day_and_bind_every_answer() {
+        let sunday = OPEN_MONDAY_2026_08_03 - 1;
+        assert_eq!(pull::calendar::kind_of(sunday), DayKind::Closed);
+        let pre_cas = accepted_open_before(OPEN_MONDAY_2026_08_03);
+        let eligible = root("closes-eligible");
+        install_master(&eligible, OPEN_MONDAY_2026_08_03, 1);
+        let ineligible = root("closes-ineligible");
+        install_master(&ineligible, OPEN_MONDAY_2026_08_03, 0);
+        let days = [
+            pre_cas,
+            sunday,
+            OPEN_MONDAY_2026_08_03,
+            OPEN_MONDAY_2026_08_03,
+        ];
+        let yes = load_cash_closes(&eligible, "RELIANCE", days).expect("closes load");
+        let no = load_cash_closes(&ineligible, "RELIANCE", days).expect("closes load");
+        let none = load_cash_closes(Path::new(NO_STORE), "RELIANCE", days).expect("closes load");
+        // A repeated day is read once; a pre-CAS and a closed day need no master.
+        assert_eq!((yes.dated_days(), yes.unverified_days()), (1, 0));
+        assert_eq!((none.dated_days(), none.unverified_days()), (0, 1));
+        assert!(none.unverified_reason(OPEN_MONDAY_2026_08_03).is_some());
+        assert_eq!(yes.session_close_minute(OPEN_MONDAY_2026_08_03), Some(914));
+        // An irregular session on a CAS day is never given the dated close:
+        // the 2025-10-21 Muhurat hour stands in for one, since none falls in
+        // the CAS era yet.
+        let DayKind::Open(muhurat) = pull::calendar::kind_of(20_382) else {
+            panic!("2025-10-21 is the Muhurat session");
+        };
+        assert_ne!(muhurat, Session::full());
+        let cas_day = cas_dated_day(OPEN_MONDAY_2026_08_03).expect("a CAS-era day");
+        assert_eq!(yes.dated_close_on(DayKind::Open(muhurat), cas_day), None);
+        assert_eq!(
+            yes.dated_close_on(DayKind::Open(Session::full()), cas_day),
+            Some(914)
+        );
+        assert_eq!(no.session_close_minute(OPEN_MONDAY_2026_08_03), Some(929));
+        assert_eq!(none.session_close_minute(OPEN_MONDAY_2026_08_03), None);
+        for closes in [&yes, &no, &none] {
+            assert_eq!(closes.session_close_minute(pre_cas), Some(929));
+            assert_eq!(closes.session_close_minute(sunday), None);
+            assert_eq!(session_close_for(Some(closes), pre_cas), Some(929));
+        }
+        assert_eq!(
+            session_close_for(None, OPEN_MONDAY_2026_08_03),
+            nse_session_close_minute(OPEN_MONDAY_2026_08_03)
+        );
+        assert_ne!(yes.digest(), no.digest());
+        assert_ne!(yes.digest(), none.digest());
+        assert_ne!(no.digest(), none.digest());
+        assert!(yes != no && yes == yes.clone());
+        let again = load_cash_closes(&eligible, "RELIANCE", days).expect("closes reload");
+        assert_eq!(again.digest(), yes.digest(), "idempotent");
+        // A word with no ISIN is named, never borrowed from another share.
+        let unknown = load_cash_closes(&eligible, "NOSUCHSHARE", [OPEN_MONDAY_2026_08_03])
+            .expect("closes load");
+        assert!(
+            unknown
+                .unverified_reason(OPEN_MONDAY_2026_08_03)
+                .is_some_and(|why| why.contains("no exact NSE ISIN"))
+        );
+        // An index holds none, so its identity term is absent.
+        let index = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("an index");
+        let signal = [minute_on_ist_day(OPEN_MONDAY_2026_08_03, 555, 1)];
+        assert!(
+            span_cash_closes(&eligible, &index, None, &signal)
+                .expect("ok")
+                .is_none()
+        );
+        let share = InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a share");
+        let held = span_cash_closes(&eligible, &share, Some(pre_cas), &signal)
+            .expect("ok")
+            .expect("a share holds closes");
+        assert_eq!(
+            held.digest(),
+            load_cash_closes(&eligible, "RELIANCE", [pre_cas, OPEN_MONDAY_2026_08_03])
+                .expect("ok")
+                .digest()
+        );
+        let _ignored = std::fs::remove_dir_all(&eligible);
+        let _ignored = std::fs::remove_dir_all(&ineligible);
     }
 
     #[test]
@@ -4772,7 +5609,7 @@ mod tests {
         ]);
         hole.found = 1;
         hole.missing.push((2026, 7));
-        let why = exact_minute_context_from_span(hole, &signal)
+        let why = exact_minute_context_from_span(hole, &signal, Path::new(NO_STORE))
             .expect_err("a missing month is not a holiday");
         assert!(why.contains("missing 2026-07"), "{why}");
         assert!(why.contains("cannot be reconstructed"), "{why}");
@@ -4782,7 +5619,7 @@ mod tests {
             minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
             minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_200),
         ]);
-        let why = exact_minute_context_from_span(malformed, &signal)
+        let why = exact_minute_context_from_span(malformed, &signal, Path::new(NO_STORE))
             .expect_err("a duplicate exact minute is not an ordered path");
         assert!(why.contains("cadence is malformed"), "{why}");
     }
@@ -5860,5 +6697,61 @@ mod tests {
         }
         let why = swept_index("NIFTY\u{3000}X").expect_err("no instrument");
         assert!(why.starts_with("`NIFTY\\u{3000}X` is not"), "{why:?}");
+    }
+
+    /// A gap before the last two prior minutes is refused even though the
+    /// final two sit on the canonical close: each terminal minute is checked,
+    /// not just the last. G18-cli-b-24, D-2031.
+    #[test]
+    fn exact_minute_context_refuses_a_gap_before_the_last_two_prior_minutes() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let gapped = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 920, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        let why = exact_minute_context_from_span(gapped, &signal, Path::new(NO_STORE))
+            .expect_err("a third-last minute off the canonical geometry cannot seed GapFib");
+        assert!(
+            why.contains("terminal-minute geometry 927, 928, 929"),
+            "{why}"
+        );
+        assert!(
+            why.contains("observed final three were Some(920), Some(928), Some(929)"),
+            "{why}"
+        );
+    }
+
+    /// The LAST prior minute is checked on its own: an eligible share whose
+    /// dated close is 15:14 and whose final three minutes are 912, 913 and
+    /// 915 has the right third-last and second-last minutes and a wrong last
+    /// one, and is refused. The session window admits 915, so only this
+    /// check can refuse it. G18-cli-b-24, D-2031.
+    #[test]
+    fn exact_minute_context_refuses_a_last_prior_minute_past_the_dated_close() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let store = root("cas-last-past-close");
+        install_master(&store, OPEN_MONDAY_2026_08_03, 1);
+        let late = Span {
+            key: InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a cash key"),
+            ..minute_span(vec![
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, 912, 2_500_000),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, 913, 2_500_100),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, 915, 2_500_200),
+                minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+            ])
+        };
+        let why = exact_minute_context_from_span(late, &signal, &store)
+            .expect_err("a last minute past the dated close cannot seed GapFib");
+        assert!(
+            why.contains("terminal-minute geometry 912, 913, 914"),
+            "{why}"
+        );
+        assert!(
+            why.contains("observed final three were Some(912), Some(913), Some(915)"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

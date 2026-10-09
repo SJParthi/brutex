@@ -82,8 +82,12 @@ Sources are Indian exchange publications and the vendor documentation cited in
   recorded in `crates/pull/src/calendar.rs`. **A drill is not a market day**
   and its OHLC never becomes the previous-day anchor — it is in
   `CHARTER_NON_REGULAR_IST_DAYS` for exactly the reason the Muhurats are.
-  Unlike five of the six Muhurats, both land squarely inside the pull's
-  09:15–15:30 window, so nothing keeps them off disk by accident. What this
+  The pull keeps exactly the drill's two calendar windows (D-2670). A minute
+  bar on a Muhurat day whose session length was never measured is refused by
+  name (`SessionLengthUnmeasured`, D-2670) and not kept; the 43 bars dated
+  2021-11-04, 14:47–15:29, that cloud audit GAP12-10 reported in one vendor's
+  store (D-1442) landed before that, and the store is append-only (D-3404).
+  Only this list keeps them out of the anchor. What this
   cost while they were absent from that list, measured on the store's own
   bars: for Monday 2024-03-04 the anchor was the 105-bar Saturday rather than
   the 375-bar Friday, moving the pivot **144.5 index points** and the CPR width
@@ -209,6 +213,12 @@ It is therefore absent rather than guessed.
 
 Evidence lane is recorded per row and is never promoted while copying.
 
+**Corporate-action adjustment is UNVERIFIED for every feed.** Each feed's table
+below carries its own row; TrueData, which has a descriptor in `pull::vendor`
+and no section here, is UNVERIFIED on the same question. The store keeps the
+vendor's prices as served (`docs/02-store-format.md` §3) and records no
+adjustment basis. numeric-pass16 p16num-2, D-1969.
+
 ### Groww — primary
 
 | Fact | Value | Lane |
@@ -220,13 +230,14 @@ Evidence lane is recorded per row and is never promoted while copying.
 | History depth, 1-minute | **2020-01-01 — the same day as the daily rung, and this row was REVERSED on 12 Aug 2026.** It read "a rolling 3 months — NOT 2020", binding the vendor's published `1 min` row **"Last 3 months"** (`Groww Docs / 08-historical-data.md`) on the rule that the stricter claim wins. The operator restated the floor on **12 Aug 2026**, having watched this build refuse January 2020 through May 2026 on his own account: *"GROWW — data is available from JANUARY 2020. A fixed floor, not a rolling one."* That is a report of what his entitlement answers, not a competing reading of what Groww published, so it outranks rather than merely out-stricts — see `pull::vendor::ClaimStanding`. The vendor's quarter is carried beside it as the contested claim. **UNVERIFIED:** he stated the figure against the vendor, not against a rung, so it is applied to both rungs unchanged; whether this rung truly reaches 2020 is unmeasured, and no request was made to find out. D-0113, D-0131. | operator-stated 12 Aug 2026, contested by vendor docs; the per-rung split UNVERIFIED |
 | Window cap, 1-minute | 30 days per request at 1-minute granularity | documented |
 | Window cap, 1-minute — the vendor's own table says 7 | **UNRESOLVED, and both figures are written down.** The 30 above is what this repository has carried and is what `pull::vendor::HttpSpec::window_caps` encodes. `Groww Docs / 08-historical-data.md`'s interval table gives the `1 min` row a **"Max Duration per Request" of 7 days**, and its `1 day` row 1,080. Nothing was changed on the strength of this reading: the 30 is operator-facing history and a narrower cap only costs requests, while a wrong one loses bars. Named here so it is not discovered a third time. | conflicting sources |
-| Window cap, daily | **UNVERIFIED.** No day-level figure is published in any source this repository has read; the 30 above carries its own "at 1-minute granularity" qualifier and is not promoted. Encoded as **absent** in `pull::vendor::HttpSpec::window_caps`, which means "the vendor bounds nothing here" — the store's one-month-per-file boundary still splits every request. | unverified |
+| Window cap, daily | **180 days per request, read from the vendor's own backtesting limits table, and a second vendor table disagrees.** `Groww Docs / 11-backtesting.md`, "Backtesting Data Limits", gives `1 hour, 4 hours, 1 day, 1 week, ...` **180 days**; `pull::vendor::HttpSpec::window_caps` encodes `(Day1, 180)` and cites that table. `Groww Docs / 08-historical-data.md`'s interval table gives its `1 day` row 1,080 (row above). The narrower 180 is the one encoded: a narrower cap only costs requests, a wider wrong one loses bars. This row read "UNVERIFIED ... no day-level figure is published in any source this repository has read ... encoded as absent" while the descriptor already carried 180 (W1-pull4-2 left it for a charter edit); corrected by tests-docs-security-pass17 P17-05, D-1963. The vendor page was not re-read in that change; the citation is the descriptor's. | documented, two vendor tables disagreeing |
 | Daily interval word | **`1day`.** The vendor's own annexure, *Candle Interval*, gives `GrowwAPI.CANDLE_INTERVAL_DAY` the value **`1day`** — the same table that gives `CANDLE_INTERVAL_MIN_1` the value `1minute` this repository already used. The full table also carries `2minute`…`4hour`, `1week` and `1month`; none is recorded here, because `store::path::Timeframe` has a directory for two rungs and a token for a rung the store cannot file is a request whose answer has nowhere to go. Was UNVERIFIED until the docs were read; D-0076. | verified from vendor annexure |
 | Index segment word | **`CASH`** — the same word an equity takes. The vendor's live-data page states it: *"Use the segment value FNO for derivatives and CASH for stocks and index."* Before this was read, `Listing::Index` was absent from the descriptor and a live index pull refused by name with `FetchError::ListingNotSpellable`. D-0076. | verified from vendor docs |
 | Instrument-type word | **Not applicable to this request.** The annexure carries an instrument-type alphabet (`EQ`, `IDX`, `FUT`, `CE`, `PE`), but the historical-candles request schema is `exchange`, `segment`, `trading_symbol`, `start_time`, `end_time`, `interval_in_minutes` and nothing else — there is no field for a kind, so no word is written into one. Contrast Dhan, whose request carries `instrument`. | verified from vendor docs |
 | Response shape | row arrays: `[ts, o, h, l, c, v, oi]`, `oi` null off-derivatives | verified |
 | Timestamp | native IST string, or epoch seconds defensively | verified |
 | Price unit | rupees as float on the wire; converted to paisa at the boundary | verified |
+| Cash-equity candles adjusted for splits, bonuses or other corporate actions | **UNVERIFIED** for 1min and 1day alike. No page read states whether historical candles are back-adjusted after an action, and none was measured. If they are, months pulled before and after an action sit in the store on different bases, and nothing records the pull date's basis. numeric-pass16 p16num-2, D-1969. | unverified |
 | Rate limit | 500 requests per minute. **No daily quota.** | operator-confirmed, not published |
 | Per-second cap | **UNVERIFIED.** The published 10/s applies to a different endpoint group. Production ceiling is 8/s, chosen not measured. | unverified |
 | Auth | TOTP-derived daily token, reset 06:00 IST | verified |
@@ -250,6 +261,7 @@ Evidence lane is recorded per row and is never promoted while copying.
 | Credentials | `/<org>/<env>/<vendor>/<field>` — read-only. Fields: `client-id`, `access-token`. Real segments resolved at runtime; see D-0013. | verified |
 | Security ids | NIFTY = 13 (verified from the SDK's own example). BANKNIFTY 25, SENSEX 51, INDIA VIX 21 — **community sources only, unverified.** | mixed |
 | India VIX candle availability | **UNVERIFIED.** No documentation states it. Treat as a hard gate before relying on it. | unverified |
+| Cash-equity candles adjusted for corporate actions | **Not applicable to this build's use, and UNVERIFIED as a vendor fact.** This feed is used for spot indices only, so no cash equity is pulled from it; whether its equity candles are split- or bonus-adjusted is not stated in anything read. numeric-pass16 p16num-2, D-1969. | unverified |
 
 ### 4z. Zerodha — recorded, and carried nowhere
 
@@ -299,6 +311,7 @@ lane above applies only to the history depth, which that page still does not sta
 | Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
 | Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
 | Prices | decimal rupees (`1704.5`) | documented |
+| Cash-equity candles adjusted for splits, bonuses or other corporate actions | **UNVERIFIED** for `minute` and `day` alike. The historical page read for this table does not say whether candles are back-adjusted after an action, and none was measured. numeric-pass16 p16num-2, D-1969. | unverified |
 | Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
 | Window cap | **NOW STATED, AND NOT BY THE PAGE.** The historical page still states no span limit at any interval — that half of the old row was and remains true. The figures come from Zerodha's own Kite Connect developer forum, thread `kite.trade/forum/discussion/7756`, posted by staff member `rakeshr` in May 2020, which other forum threads and Zerodha staff cite as the canonical reference. Max days per single request: `minute` **60** · `3minute` **100** · `5minute` **100** · `10minute` **100** · `15minute` **200** · `30minute` **200** · `60minute` **400** · `day` **2000**. A request spanning more than the permitted days for its interval FAILS, so a backfill must chunk to them. Captured 19 Aug 2026. | forum-sourced, authoritative-but-unversioned |
 | Rate limit | **3 requests/second** on the historical candle endpoint | documented |
@@ -489,7 +502,7 @@ no timestamp and no expiry.**
 | **Dhan's carry is zero** | `greeks::vendor_anchor::the_carry_is_consistent_with_zero_and_the_sample_cannot_pin_it` | `q = 0` reproduces the chain, and a single volatility would need `q = −42.54%`, which is not a rate. But `q = 1%` and `q = 2%` reproduce **all eight** published fields too, gammas included, at `T = 4.085` and `3.428` calendar days. | **UNVERIFIED.** `q = 0` is *consistent*, not measured. Withdrawn from "measured" by D-0046 |
 | **Dhan publishes no rho; Groww publishes all five** | `crates/greeks` ships rho regardless | The captured response has no `rho` field. Groww documents a dedicated Greeks section at `groww.in/trade-api/docs/curl/live-data`. | read from the response and from the vendor documentation |
 | **Dhan's risk-free rate** | nowhere — nothing in this repository hardcodes one | Solved at **9.4619%** (call side) and **10.4618%** (put side), each ±0.55 at 95% from the printed precision of delta alone, with a 1.00-point side-to-side residual outside both intervals. | **UNVERIFIED.** A hardcoded 10.0% fits the sample and so does a market rate near 7%; this sample cannot separate them |
-| **NIFTY and BANKNIFTY strike intervals** | nowhere — `Moneyness::from_ladder` takes the interval as an argument | No source states them. | **UNVERIFIED.** Assumed nowhere in code |
+| **NIFTY and BANKNIFTY strike intervals** | nowhere — `Moneyness::from_ladder` takes the interval as an argument | No source states them. | **UNVERIFIED before 2021-01-01.** `costs::strike::strike_step_on` encodes 50 and 100 rupees from 2021-01-01, sourced to the predecessor's `STRIKE_STEP` over its 2021-2026 backfill window, and refuses every earlier day; `Moneyness::from_ladder` itself still assumes none. (This said "assumed nowhere in code". D-1779.) |
 
 The maturity is the best-conditioned parameter the sample carries:
 `T = 0.0141324716` years = **5.15835 calendar days**, ±0.079 at 95% over the
@@ -583,7 +596,7 @@ into a guarantee about this dataset.
 
 | Procedure fact | Primary source | What is and is not carried |
 |---|---|---|
-| CSCV begins with one synchronous `T × N` performance matrix, partitions its rows into an even number `S` of equal-sized disjoint blocks, visits every canonical half-block training set with its exact complement as test, chooses the in-sample maximum under one fixed performance measure, and estimates PBO from how often that winner ranks below the out-of-sample median | Bailey, Borwein, López de Prado and Zhu (2015/2017), *The Probability of Backtest Overfitting*, [author-hosted PDF](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf), Algorithm 2.3 and §3.1; [journal abstract](https://www.risk.net/journal-of-computational-finance/2471206/the-probability-of-backtest-overfitting) | The synchronous complete-family construction, equal-block complementary enumeration and rank event are carried. The paper says different trading frequencies must be aggregated to one common index, but it does **not** choose this repository's IST observation unit, empty-session treatment, segment count, tie policy, pessimistic-return score, bootstrap seed/draw count or block length. Those remain explicit versioned implementation decisions and cannot be smuggled in as facts from the paper. |
+| CSCV begins with one synchronous `T × N` performance matrix, partitions its rows into an even number `S` of equal-sized disjoint blocks, visits every canonical half-block training set with its exact complement as test, chooses the in-sample maximum under one fixed performance measure, and estimates PBO from how often that winner ranks below the out-of-sample median | Bailey, Borwein, López de Prado and Zhu (2015/2017), *The Probability of Backtest Overfitting*, [author-hosted PDF](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf), Algorithm 2.3 and §3.1; [journal abstract](https://www.risk.net/journal-of-computational-finance/2471206/the-probability-of-backtest-overfitting) | The synchronous complete-family construction, the equal-block partition and the rank event are carried. **The enumeration is not.** Algorithm 2.3 forms every one of the `C(S,S/2)` half-block training sets, so each complementary pair is visited in both orientations. This repository's CSCV (D-0476, `cli::population_statistics_v2::canonical_split_count`) keeps segment 0 on the test side and visits exactly `C(S-1,S/2)` = `C(S,S/2)/2` splits, one orientation per pair: the swapped orientation, whose in-sample winner can differ, is never scored. That is a deviation from the paper, not a reading of it, and it bites hardest at small `S` — at `S = 2` the paper scores two splits and this scores one, so the estimate can only be 0 or 1. D-1448. The paper says different trading frequencies must be aggregated to one common index, but it does **not** choose this repository's IST observation unit, empty-session treatment, segment count, tie policy, pessimistic-return score, bootstrap seed/draw count or block length. Those remain explicit versioned implementation decisions and cannot be smuggled in as facts from the paper. |
 | Romano--Wolf stepdown controls family-wise error by testing maxima over successively smaller surviving hypothesis sets; a fixed bootstrap distribution makes those critical values monotone | Romano and Wolf (2005), *Exact and Approximate Stepdown Methods for Multiple Hypothesis Testing*, JASA 100(469), 94--108, [publisher DOI](https://doi.org/10.1198/016214504000000539), [author-hosted PDF](https://www.econ.uzh.ch/dam/jcr:ffffffff-935a-b0d6-ffff-ffffd823d949/jasa.pdf), especially §4.2 and Theorem 6 | The construction and its stated asymptotic conditions are carried. It is **not** a distribution-free finite-sample promise for arbitrary strategy returns. The paper explicitly directs dependent data to block bootstrap methods; it does not select this repository's block length. |
 | Candidate adjusted p-values order observed statistics from largest to smallest, count strict exceedances of each surviving-suffix resample maximum with the finite-resample `(+1)/(M+1)` correction, then apply a cumulative maximum; that monotonicity step is essential | Romano and Wolf (2016), *Efficient Computation of Adjusted p-Values for Resampling-Based Stepdown Multiple Testing*, [University of Zurich Working Paper 219](https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf), Algorithms 3.1 and 4.1 and Remark 4.1 | `runner::bootstrap::romano_wolf_adjusted_p_values_v1` implements that exact-count algorithm over one shared stationary-bootstrap matrix. Exact observed-statistic ties use ascending caller position, and any zero-variance candidate refuses the complete adjusted receipt rather than receiving the strict-exceedance floor. Those two discrete-data rules are D-0460 implementation choices, not claims made by the paper. |
 
@@ -596,6 +609,68 @@ into a guarantee about this dataset.
 | Wilson intervals incorporate sample size when estimating a binomial proportion | [NIST confidence intervals](https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm) | Does not establish independent trading outcomes or choose a minimum sample size for this repository. |
 | White's Reality Check addresses data snooping; Hansen's SPA uses studentization and a sample-dependent null distribution | [White (2000)](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf), [Hansen (2005), primary publisher abstract](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063) | These methods motivate complete-population evidence. Their assumptions remain material; they do not select this repository's acceptance thresholds. |
 | P-values do not measure the probability a hypothesis is true; decisions should not rest solely on a threshold | [American Statistical Association statement](https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf) | The delegated37-field profile contains explicit research choices. No cited source prescribes its5%p-value cutoff,20%PBO limit, sample floors or loss caps. See [the explanation](22-research-policy.md). |
+
+## 4g. GDFL — what D-0802 depends on, and how little of it is recorded
+
+D-0802 (1 October 2026) records the operator's design that every entry, exit
+and exit combination, and the ranking that reads those fills, is to be priced
+from GDFL one-second data, at each second's worst-case high or low, on the
+underlying spot. Nothing of it is built. **This section records no GDFL fact
+from a vendor source.** It records one operator statement, one day measured
+from GDFL files outside this repository, and what must still be read from a
+source and written here, with its lane, before any code relies on it.
+
+**Operator statement.**
+
+| Fact | Value | Lane |
+|---|---|---|
+| GDFL coverage for this design | GDFL second-level snapshot data covers everything D-0802 needs. Excerpt of message 5, whose whole text D-0802 quotes: *"... for gdfl entilrey we have seconds level snapshot dude so you don't need to worry we have all the data ..."* | operator-stated 1 Oct 2026, no vendor page states it |
+
+**Measured on one day only.** Read on 1 October 2026 (IST) from an extracted
+GDFL copy outside this repository, a directory on the operator's own storage
+named `NSE_Tick_2018-09-01_to_2026-09-24` (where it is mounted is machine
+layout and is not recorded; its name ends at 24 September 2026, though its
+folder names run to 30 September 2026; why is not recorded), by `awk` over the
+files named. Anyone
+with that copy can repeat each figure. Each row is a
+measurement of those files on 26 May 2026 and no more; it is not a vendor
+statement and does not say what any other day holds.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Index file path | `INDICES/<yyyy>/<MON_yyyy>/GFDLCM_INDICES_TICK_<ddmmyyyy>/<NAME>.NSE_IDX.csv`; 141 files on 26 May 2026, among them `NIFTY 50.NSE_IDX.csv` and `NIFTY BANK.NSE_IDX.csv` | measured, one day |
+| Index columns | `Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest`, header present, date `dd/mm/yyyy`, time `hh:mm:ss` with no sub-second field, in every row | measured, one day, two files |
+| Index fields beyond the level | every column after `LTP` is zero in every row, so the volume columns carry nothing | measured, one day, two files |
+| Rows per session second (09:15:00 to 15:29:59) | NIFTY 50 about 4.0 (90,360 rows over 22,499 seconds, up to 10 in one); NIFTY BANK about 2.0 (45,272 over 22,498, up to 5); no tiebreaker among rows sharing a second | measured, one day |
+| Session seconds with no row | NIFTY 50 one (14:16:23); NIFTY BANK two (10:48:06, 14:16:23) | measured, one day |
+| Rows outside the session (26 May 2026 is a regular 09:15–15:29 session in `pull::calendar`) | present: first rows 09:07:03 and 09:07:04, last 16:09:13; 1,908 and 955 rows before 09:15:00, 9,418 and 4,709 from 15:30:00 on | measured, one day |
+| Row order | the time column steps **backward** 25 times in each index file, by one or two seconds, roughly every fifteen minutes; `pull::fold` refuses such a step rather than sorting (D-0802 consequence 5) | measured, one day; what a backward step means UNVERIFIED |
+| Range, minute against second | mean `LTP` high minus low over the session: NIFTY 50 8.68 points per minute, 1.03 per second; NIFTY BANK 29.74 per minute, 2.27 per second | measured, one day |
+| One cash-equity file | `STOCKS/2026/MAY_2026/GFDLCM_STOCK_TICK_26052026/RELIANCE.NSE.csv` (3,429 files in that folder): the same ten-name header, 17,626 rows, a nonzero `BuyPrice` or `SellPrice` on all but one row, a nonzero `LTQ` on 15,816 | measured, one day, one file |
+| Folder names present | 2,001 `GFDLCM_INDICES_TICK_<ddmmyyyy>` folders whose names run from 3 Sep 2018 to 30 Sep 2026, each with both index files, and 2,001 `GFDLCM_STOCK_TICK_<ddmmyyyy>` folders | counted by name only; contents of every other day unread |
+
+**Still UNVERIFIED.**
+
+| Needed fact | Lane |
+|---|---|
+| Whether the layout, density, gaps and backward steps above hold on every other day, for every needed series | UNVERIFIED — one day read |
+| Whether every needed day is present and non-empty across the tested history | operator-stated (above); per day UNVERIFIED, so a window with no GDFL seconds still refuses at run time |
+| Clock basis of the CSV `Time` column (exchange time, vendor receive time or other), and whether `hh:mm:ss` means `[ss, ss+1)` | UNVERIFIED — D-0015 records GDFL epoch-second fields `LastTradeTime` and `ServerTime` (documented); neither name is in the CSV |
+| Alignment of GDFL seconds with Zerodha minutes and folded rungs | UNVERIFIED — no day has been read from both |
+| GDFL's naming for every F&O underlying's cash series, and its mapping to `InstrumentKey` | UNVERIFIED — three tickers seen on one day: `NIFTY 50.NSE_IDX`, `NIFTY BANK.NSE_IDX`, `RELIANCE.NSE` |
+| Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | UNVERIFIED |
+| Whether GDFL's own cash-equity series is adjusted for splits, bonuses or other corporate actions | UNVERIFIED — nothing read states it (numeric-pass16 p16num-2, D-1969) |
+| The price of the data | not recorded; the operator states it is in hand |
+| Licence terms for this use | UNVERIFIED |
+
+Two untracked files in the main checkout, `GFDLNFO_TICK_06012019.zip` and
+`GFDLNFO_TICK_07012019.zip`, were seen on 1 October 2026 at 450 bytes each with
+one 18-byte two-column `ts,ltp` member. They are outside version control, so no
+reader of this repository can re-check them, and they may no longer exist.
+Nothing records where they came from, and they are not evidence for any row
+above. D-0045 first recorded that GDFL appears nowhere in this charter, and
+D-0118 named the same gap for GDFL's granularity floor; the operator statement
+and the one measured day above narrow that gap and do not close it.
 
 ## 5. Run identity
 

@@ -37,15 +37,48 @@
 //! # Three-minute candles, from one-minute bars
 //!
 //! The source specifies **3-minute** candles at both ends, and the engine's own rung
-//! is one minute. Rather than require a folded feed, this module folds three
-//! one-minute bars itself: a three-slot tail of the current session gives yesterday's
-//! last 3-minute candle at the day boundary, and the first three bars of the new
-//! session give today's first. Both are fixed-size, so the cost is O(1) per bar.
-//! Measured by `C-I-01`, in `crates/indicators/benches/ratio.rs`.
+//! is one minute. Rather than require a folded feed, this module folds the candle
+//! itself — and **a candle is a clock span, not a bar count** (D-1441). The span is
+//! the bar's bucket on the 3-minute grid anchored at IST midnight
+//! (`docs/09-design-sources.md` §4: the open, 555 minutes past midnight, sits on that
+//! grid, so 09:15-09:17 and 15:27-15:29 are each one bucket). A bar belongs to the
+//! candle its own `ts_micros` falls in, read the way [`crate::orb`] reads its windows:
+//! by the IST minute, never by how many bars have arrived.
 //!
-//! On a rung already 3 minutes or longer a single bar *is* the candle, and the fold
-//! degenerates correctly — the first bar seeds it and the next two, if the session
-//! has them, only widen the extremes.
+//! * yesterday's last candle is the bucket of the session's **last** bar, holding
+//!   every bar of that session stamped inside it;
+//! * today's first candle is the bucket of the session's **first** bar, and it is
+//!   final the moment a bar stamped in any LATER bucket arrives — before that bar is
+//!   emitted, exactly as [`crate::orb::Orb`] closes a window before the bar that
+//!   reaches its end is measured.
+//!
+//! Until D-1441 the fold counted three BARS and never read the timestamp. With a
+//! minute missing (about 1.32% of the store) a bar of the NEXT candle entered `X1` or
+//! `X2` — with 09:16 missing, 09:18's high became today's far end — and on a rung of
+//! three minutes or more the "candle" was three rung bars, 9 to 180 minutes wide. On a
+//! complete one-minute session both readings take the same three bars, and the
+//! emitted masks are byte-identical (`complete_sessions_emit_exactly_what_the_three_
+//! bar_fold_emitted`).
+//!
+//! **A partially missing candle is what traded inside its span**, the rule this module
+//! already applied to a short session's last candle: a hole is not filled, and no bar
+//! from a neighbouring span is borrowed to make up the count. **A wholly missing
+//! candle cannot be told apart from a late open** by this module, which sees no
+//! session timetable, so the first candle is the first span that traded; that limit is
+//! recorded in `docs/06-limits.md`.
+//!
+//! **On a coarser rung one bar is the candle.** Rungs of 3, 5, 10, 15, 30 and 60
+//! minutes stamp bars at least three minutes apart, so each bar starts in its own
+//! span: `X2` is the session's first rung bar and `X1` its last, which on rungs above
+//! three is wider than the source's candle. That is the closest object the rung holds,
+//! and it is the same answer [`crate::orb`] gives — the module does not know the rung,
+//! and abstaining for a rung belongs to the caller. A rung finer than three minutes
+//! that does not divide it (two minutes) places bars by their START minute, so its
+//! candle is every rung bar that starts inside the span.
+//!
+//! The state is fixed-size — one bucket key, one running candle, yesterday's edge and
+//! the leg — so the cost is O(1) per bar. Measured by `C-I-01`, in
+//! `crates/indicators/benches/ratio.rs`.
 //!
 //! # What it refuses, and why refusing is the answer
 //!
@@ -93,8 +126,27 @@ pub const GAP_LAST: u16 = {
 
 const _: () = assert!(GAP_LAST == 142, "the gap group is positions 132..=142");
 
-/// How many one-minute bars make the source's 3-minute candle.
-const CANDLE_MINUTES: usize = 3;
+/// The source's candle length, in clock minutes.
+const CANDLE_MINUTES: i64 = 3;
+const MICROS_PER_MINUTE: i64 = 60 * 1_000_000;
+
+/// A day is a whole number of candles, so the grid anchored at IST midnight is one
+/// grid across every day and a bucket key never needs the day beside it.
+const _: () = assert!((24 * 60) % CANDLE_MINUTES == 0);
+
+/// The 3-minute bucket a stamp falls in, on the grid anchored at IST midnight.
+///
+/// `div_euclid`, never `/`, for the reason `crate::orb::minutes_since_open` gives: a
+/// pre-epoch stamp would truncate into the wrong minute. `saturating_add` for the
+/// reason `crate::ist_day` gives: a stamp near `i64::MAX` lands far in the future
+/// rather than wrapping into a plausible past minute.
+#[must_use]
+pub fn candle_bucket(ts_micros: i64) -> i64 {
+    ts_micros
+        .saturating_add(crate::IST_OFFSET_MICROS)
+        .div_euclid(MICROS_PER_MINUTE)
+        .div_euclid(CANDLE_MINUTES)
+}
 
 /// Which way the market gapped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,9 +192,11 @@ impl GapLeg {
     /// Rung `p`'s price, in paisa. `None` if it leaves `i64`.
     ///
     /// One body for both directions — see the module documentation for the algebra.
-    /// `div_euclid` and not `/`: truncation toward zero would round a level on the
-    /// wrong side of the anchor for a negative product, and the two sheets differ
-    /// exactly in that sign.
+    /// `div_euclid` and not `/`: the level is FLOORED to a whole paisa in both
+    /// directions, the convention IF-23 and D-1861 pin. That is a choice, not a
+    /// necessity — truncation toward zero would also stay between `X1` and `X2` — and it
+    /// makes the two sheets not mirror images: an up gap's rungs round away from `X2`,
+    /// a down gap's toward it, by under one paisa (D-3404).
     ///
     /// `None` rather than a clamp: §7 reserves `i64::MIN` for the open-interest null,
     /// and pinning an out-of-range level onto it would put a sentinel where a price
@@ -168,29 +222,28 @@ impl GapLeg {
 
 /// The gap ladder for one session, and the bookkeeping that establishes it.
 ///
-/// Fixed size: a three-slot tail, a three-bar accumulator, and the leg. Nothing
-/// grows with the number of bars fed.
+/// Fixed size: one bucket key, one running candle, yesterday's edge and the leg.
+/// Nothing grows with the number of bars fed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GapFib {
     /// The IST day currently being folded. `i64::MIN` before the first bar.
     day: i64,
-    /// The current session's rolling last-three extremes, newest folded last.
-    tail: [Option<(i64, i64)>; CANDLE_MINUTES],
-    /// Where the next tail entry goes.
-    tail_next: usize,
+    /// The 3-minute bucket ([`candle_bucket`]) the running candle belongs to.
+    bucket: i64,
+    /// The current session's newest candle, `(high, low)`: every bar of this session
+    /// stamped inside `bucket`. `None` before the session's first bar.
+    candle: Option<(i64, i64)>,
     /// Yesterday's last 3-minute candle, `(high, low)`.
     yesterday: Option<(i64, i64)>,
-    /// Today's first 3-minute candle while it is still forming.
-    today_high: i64,
-    today_low: i64,
-    /// Bars folded into today's first candle, saturating at [`CANDLE_MINUTES`].
-    today_bars: usize,
-    /// The established leg. `None` until three bars of the new session have arrived
-    /// and a real gap was found.
+    /// True while the running candle is still the session's FIRST, so a bar of a
+    /// later bucket closes it into the leg rather than merely replacing it.
+    opening: bool,
+    /// The established leg. `None` until the session's first candle has closed and a
+    /// real gap was found.
     leg: Option<GapLeg>,
 }
 
-const _: () = assert!(core::mem::size_of::<GapFib>() <= 160);
+const _: () = assert!(core::mem::size_of::<GapFib>() <= 96);
 
 impl Default for GapFib {
     fn default() -> Self {
@@ -204,29 +257,27 @@ impl GapFib {
     pub const fn new() -> Self {
         Self {
             day: i64::MIN,
-            tail: [None; CANDLE_MINUTES],
-            tail_next: 0,
+            bucket: i64::MIN,
+            candle: None,
             yesterday: None,
-            today_high: 0,
-            today_low: 0,
-            today_bars: 0,
+            opening: true,
             leg: None,
         }
     }
 
-    /// The established leg, or `None` while the session has not gapped or has not
-    /// yet produced three bars.
+    /// The established leg, or `None` while the session has not gapped or its first
+    /// candle has not yet closed.
     #[must_use]
     pub const fn leg(&self) -> Option<GapLeg> {
         self.leg
     }
 
-    /// The full per-bar step: roll over, emit, then fold.
+    /// The full per-bar step: roll over, close the opening candle, emit, then fold.
     ///
     /// The leg is an **anchor** — a reference the current bar is measured against —
-    /// so it is fixed once early in the session and never moves. Once established it
-    /// cannot depend on the current bar, which is why the emit reads a leg built from
-    /// bars strictly before it.
+    /// so it is fixed once early in the session and never moves. It is built from the
+    /// opening candle alone, and the bar that closes that candle lies in a later
+    /// bucket, so the leg the emit reads never contains the bar being measured.
     ///
     /// # Errors
     ///
@@ -251,34 +302,45 @@ impl GapFib {
             //
             // Before the first bar `self.day` is `i64::MIN`, which appears in no
             // calendar, so the verdict is "regular" -- and the fold below then finds
-            // an empty tail and promotes nothing, so the answer does not matter.
+            // no candle and promotes nothing, so the answer does not matter.
             let ending_was_regular = !calendar.is_non_regular(self.day);
             self.close_the_session(ending_was_regular);
             self.day = today;
         }
 
+        // CLOSE BEFORE EMIT, ORB's `mark_closed` order. Whether the opening candle
+        // has ended DESCRIBES this bar: a bar stamped in a later bucket proves no
+        // further minute can join it. The leg it yields is an anchor built from
+        // earlier bars only, so the bar that closes the candle is the first one
+        // measured against it -- on a complete one-minute session that is 09:18,
+        // the bar the three-bar count also measured first.
+        let bucket = candle_bucket(bar.ts_micros);
+        if self.opening
+            && bucket != self.bucket
+            && let Some(candle) = self.candle
+        {
+            self.opening = false;
+            self.leg = self.establish(candle);
+        }
+
         let bits = self.bits(bar.close, tolerance);
-        self.fold(bar);
+        self.fold(bar, bucket);
         Ok(bits)
     }
 
-    /// Pair the emitted truth with availability from the same pre-fold leg.
-    /// A session rollover invalidates the old leg before the first emission;
-    /// the current session's third contribution establishes a leg only for the
-    /// following bar. The existing truth-only path stays unchanged.
+    /// Pair the emitted truth with availability from the same leg.
+    ///
+    /// The leg the emit read is the leg `self` holds afterwards: it is settled before
+    /// the emit and [`Self::fold`] never touches it. A session rollover clears it
+    /// before the first emission, so a new session's first bar knows nothing here.
     pub(crate) fn step_known(
         &mut self,
         bar: &Candle,
         tolerance: Tolerance,
         calendar: &Calendar,
     ) -> Result<(ConditionMask, ConditionMask), crate::Corrupt> {
-        let known = if self.day == crate::ist_day(bar.ts_micros) {
-            self.known(tolerance)
-        } else {
-            ConditionMask::ZERO
-        };
-        self.step(bar, tolerance, calendar)
-            .map(|truth| (truth, known.union(&truth)))
+        let truth = self.step(bar, tolerance, calendar)?;
+        Ok((truth, self.known(tolerance).union(&truth)))
     }
 
     /// Hand the finished session's last 3-minute candle forward and reset.
@@ -295,77 +357,46 @@ impl GapFib {
     ///
     /// `ending_was_regular` decides only whether the edge is HANDED FORWARD. Every
     /// reset below is unconditional, and deliberately: a Muhurat session is still a
-    /// session, and leaving its tail, its bar count or its leg in place would carry
+    /// session, and leaving its candle, its opening flag or its leg in place would carry
     /// it into the next day by a different route than the one this parameter shuts.
     fn close_the_session(&mut self, ending_was_regular: bool) {
-        // Fold whatever the tail holds. Fewer than three entries is a short session,
-        // and the source's "last 3-minute candle" is then whatever traded — refusing
-        // a half-day outright would drop a real gap.
-        let folded = self
-            .tail
-            .iter()
-            .flatten()
-            .copied()
-            .reduce(|(ah, al), (bh, bl)| {
-                (if bh > ah { bh } else { ah }, if bl < al { bl } else { al })
-            });
-        if ending_was_regular && folded.is_some() {
-            self.yesterday = folded;
+        // The running candle IS the session's last 3-minute candle: every bar of the
+        // session stamped in the bucket of its last bar. A hole inside that span, or
+        // a session that ended early, leaves it holding whatever traded -- refusing a
+        // half-candle outright would drop a real gap, and widening it backwards into
+        // the previous span would name a candle the source does not.
+        if ending_was_regular && self.candle.is_some() {
+            self.yesterday = self.candle;
         }
-        self.tail = [None; CANDLE_MINUTES];
-        self.tail_next = 0;
-        self.today_bars = 0;
+        // `bucket` is deliberately NOT reset: with `candle` cleared, both readers of
+        // it -- the close test in `step` and the arm in `fold` -- require a candle
+        // first, so a stale key is never read. Resetting it would be a write no
+        // test could miss, which is a mutant nothing can kill.
+        self.candle = None;
+        self.opening = true;
         self.leg = None;
     }
 
-    /// Fold one bar into the tail and, while it is forming, today's first candle.
+    /// Fold one bar into the running candle of its own bucket.
     ///
-    /// # The absent arm below cannot run, and removing it costs more than it saves
-    ///
-    /// `tail_next` is 0 in [`GapFib::new`] and in [`GapFib::close_the_session`], and
-    /// every fold re-derives it `% CANDLE_MINUTES`, so it is always a valid index into
-    /// the three-slot tail and `get_mut` is always `Some`. `cargo llvm-cov` therefore
-    /// records the `if let`'s absent arm as a region no passing test can execute — the
-    /// same objection the ladder in [`GapFib::bits`] answers by walking rather than
-    /// indexing.
-    ///
-    /// It is deliberately **not** answered the same way here. Dropping the cursor for a
-    /// total three-element shift — `let [_, b, c] = self.tail; self.tail = [b, c, new]`
-    /// — does remove the arm, and it carries exactly the same values, because
-    /// [`GapFib::close_the_session`] folds the slots with a max and a min and never
-    /// reads their order. It also shrinks this struct by 16 bytes, which moves
-    /// `size_of::<Evaluator>()` from 1664 to 1648 and makes the measurement recorded in
-    /// `docs/10-shared-core.md` — and quoted again in a row of `docs/05-decisions.md` —
-    /// a number nobody took. §3 rule 6 forbids reporting such a measurement and §3
-    /// rule 8 makes the ledger append-only, so the honest trade is one uncovered region
-    /// rather than one stale measurement. `only_the_last_three_bars_of_a_session_reach_
-    /// tomorrows_leg` pins the behaviour either way, so the choice stays open.
-    fn fold(&mut self, bar: &Candle) {
-        if let Some(slot) = self.tail.get_mut(self.tail_next) {
-            *slot = Some((bar.high, bar.low));
-        }
-        self.tail_next = self.tail_next.saturating_add(1) % CANDLE_MINUTES;
-
-        if self.today_bars < CANDLE_MINUTES {
-            if self.today_bars == 0 {
-                self.today_high = bar.high;
-                self.today_low = bar.low;
-            } else {
-                if bar.high > self.today_high {
-                    self.today_high = bar.high;
-                }
-                if bar.low < self.today_low {
-                    self.today_low = bar.low;
-                }
+    /// A bar of a new bucket STARTS a candle rather than widening the old one; that
+    /// is the whole difference from the three-bar count this replaced, and it is
+    /// what keeps a bar of the next span out of `X1` and `X2` when a minute is
+    /// missing.
+    fn fold(&mut self, bar: &Candle, bucket: i64) {
+        self.candle = match self.candle {
+            // `max` and `min` rather than two comparisons: on a tie either arm
+            // kept the same value, so `>`/`>=` and `<`/`<=` were one program
+            // and both mutants were equivalent (D-2071).
+            Some((high, low)) if bucket == self.bucket => {
+                Some((bar.high.max(high), bar.low.min(low)))
             }
-            self.today_bars = self.today_bars.saturating_add(1);
-            if self.today_bars == CANDLE_MINUTES {
-                self.leg = self.establish();
-            }
-        }
+            _ => Some((bar.high, bar.low)),
+        };
+        self.bucket = bucket;
     }
 
-    /// Build the leg, or refuse.
+    /// Build the leg from today's closed opening candle `(high, low)`, or refuse.
     ///
     /// The direction test is the sheet's own requirement that `X3` be positive, so it
     /// is derived from the source rather than chosen: an up gap needs today's first-3
@@ -391,24 +422,24 @@ impl GapFib {
     ///
     /// The bias this removes is directional: the tie always resolved `Up`, so
     /// the up ladder fired on sessions the down ladder never saw.
-    fn establish(&self) -> Option<GapLeg> {
+    fn establish(&self, (today_high, today_low): (i64, i64)) -> Option<GapLeg> {
         let (y_high, y_low) = self.yesterday?;
-        let above = self.today_high > y_high;
-        let below = y_low > self.today_low;
+        let above = today_high > y_high;
+        let below = y_low > today_low;
         if above && below {
             return None;
         }
         if above {
             return Some(GapLeg {
                 x1: y_high,
-                x2: self.today_high,
+                x2: today_high,
                 direction: Direction::Up,
             });
         }
         if below {
             return Some(GapLeg {
                 x1: y_low,
-                x2: self.today_low,
+                x2: today_low,
                 direction: Direction::Down,
             });
         }
@@ -531,6 +562,12 @@ mod tests {
             .expect("this fixture bar is sane")
     }
 
+    /// Step 09:18, the first bar of the NEXT candle, which is what closes today's
+    /// opening candle (D-1441): the leg is final only once a later span has traded.
+    fn close_opening(g: &mut GapFib, day: i64, high: i64, low: i64) {
+        let _ = ok(g, &at(day, 3, high, low, high.midpoint(low)));
+    }
+
     /// An engulfing open is not a gap in either direction, and used to be `Up`.
     ///
     /// The two direction tests are independent, so a session whose first three
@@ -548,11 +585,9 @@ mod tests {
         let leg_of = |y_high: i64, y_low: i64, today_high: i64, today_low: i64| {
             GapFib {
                 yesterday: Some((y_high, y_low)),
-                today_high,
-                today_low,
                 ..GapFib::default()
             }
-            .establish()
+            .establish((today_high, today_low))
             .map(|leg| leg.direction)
         };
 
@@ -707,6 +742,7 @@ mod tests {
             for m in 0..3 {
                 let _ = ok(g, &at(30_001, m, high, low, high.midpoint(low)));
             }
+            close_opening(g, 30_001, high, low);
         };
 
         // Exactly on both edges: neither test is satisfied by a touch.
@@ -769,6 +805,7 @@ mod tests {
         for (m, high) in [(0_i64, 2_600_000_i64), (1, 2_570_000), (2, 2_565_000)] {
             let _ = ok(&mut g, &at(30_001, m, high, 2_550_000, 2_560_000));
         }
+        close_opening(&mut g, 30_001, 2_560_000, 2_550_000);
         assert_eq!(
             g.leg(),
             Some(GapLeg {
@@ -793,6 +830,7 @@ mod tests {
         for (m, h) in [(0_i64, 2_515_000_i64), (1, 2_518_000), (2, 2_520_000)] {
             let _ = ok(&mut g, &at(30_101, m, h, h - 1_000, h - 200));
         }
+        close_opening(&mut g, 30_101, 2_519_000, 2_518_000);
         let leg = g.leg().expect("a gap up was established");
         assert_eq!(leg.direction, Direction::Up);
         assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 HIGH");
@@ -811,6 +849,7 @@ mod tests {
         for (m, l) in [(0_i64, 2_485_000_i64), (1, 2_482_000), (2, 2_480_000)] {
             let _ = ok(&mut g, &at(30_201, m, l + 1_000, l, l + 200));
         }
+        close_opening(&mut g, 30_201, 2_481_000, 2_480_000);
         let leg = g.leg().expect("a gap down was established");
         assert_eq!(leg.direction, Direction::Down);
         assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 LOW");
@@ -819,10 +858,11 @@ mod tests {
         assert_eq!(leg.midpoint(), Some(2_490_000));
     }
 
-    /// Nothing is emitted before three bars of the new session have arrived.
+    /// Nothing is emitted inside the opening candle's own span.
     ///
     /// The leg is an anchor: it cannot exist until the candle defining it is complete,
-    /// and a partial candle would make the level move under the bits.
+    /// and a partial candle would make the level move under the bits. Complete means a
+    /// bar of the NEXT span has traded (D-1441), not that three bars have arrived.
     #[test]
     fn no_bits_until_the_opening_candle_is_complete() {
         let mut g = GapFib::new();
@@ -839,11 +879,15 @@ mod tests {
                 ConditionMask::ZERO,
                 "bar {m} is inside the opening candle"
             );
-            if m < 2 {
-                assert_eq!(g.leg(), None, "the leg cannot exist yet");
-            }
+            assert_eq!(g.leg(), None, "the leg cannot exist inside its own candle");
         }
-        assert!(g.leg().is_some(), "the third bar completes the candle");
+        // 09:18 is the first bar of the next candle: it closes the opening one, so
+        // the leg exists before 09:18 is measured -- and not one bar earlier.
+        close_opening(&mut g, 30_301, 2_520_000, 2_519_000);
+        assert!(
+            g.leg().is_some(),
+            "the next candle's first bar closes the opening one"
+        );
     }
 
     /// A close sitting exactly on a rung sets that rung.
@@ -957,11 +1001,12 @@ mod tests {
 
     /// A one-bar session hands forward its own bar and nothing older.
     ///
-    /// `close_the_session` clears the tail unconditionally and nothing pinned that: a
-    /// mutation deleting `self.tail = [None; CANDLE_MINUTES];` survived the entire
-    /// suite, because every other fixture gives each session at least
-    /// `CANDLE_MINUTES` bars, which overwrites the whole ring and hides the staleness.
-    /// A single-bar session is the shortest input that can see it.
+    /// `close_the_session` clears the running candle unconditionally. When it was a
+    /// three-slot ring, a mutation deleting that reset survived the entire suite,
+    /// because every other fixture gave each session at least three bars, which
+    /// overwrote the whole ring and hid the staleness. A single-bar session is the
+    /// shortest input that can see it, and it still pins the reset of the clock-keyed
+    /// candle that replaced the ring (D-1441).
     #[test]
     fn a_one_bar_session_hands_forward_only_its_own_bar() {
         let mut g = GapFib::new();
@@ -984,7 +1029,7 @@ mod tests {
         assert_eq!(
             g.yesterday,
             Some((2_600_000, 2_599_000)),
-            "the anchor is the one-bar session's own edge; day 1's tail must have been \
+            "the anchor is the one-bar session's own edge; day 1's candle must have been \
              cleared when day 1 closed"
         );
     }
@@ -1074,12 +1119,12 @@ mod tests {
         for m in 0..3 {
             let _ = ok(&mut fits, &at(30_801, m, HI, HI, HI));
         }
+        let mask = ok(&mut fits, &at(30_801, 3, HI, HI, HI));
         assert_eq!(
             fits.leg().map(|leg| leg.length()),
             Some(Some(HI - 1)),
             "a representable 9.2e18 gap did not report its own length"
         );
-        let mask = ok(&mut fits, &at(30_801, 3, HI, HI, HI));
         assert!(
             mask.get(u32::from(GAP_FIRST)),
             "a representable gap did not fire rung 0 on a close sitting exactly on X2"
@@ -1088,24 +1133,25 @@ mod tests {
 
     /// `X1` is the last 3-minute candle, **not** the session's own extreme.
     ///
-    /// The tail is three slots and a real session is hundreds of bars, so the source's
-    /// "previous day's last 3-minute candle" is only what the tail still holds at the
-    /// bell. Nothing pinned which three bars those are: **every other test in this file
-    /// feeds a session exactly three bars**, and on a three-bar session "the last three"
-    /// and "the whole session" are the same candle, so a tail that never dropped a slot,
-    /// or kept only the newest bar, passed all of them. Either mistake anchors all
-    /// eleven rungs on a candle the source does not name, and [`GapFib::fold`]'s cursor
-    /// wraps `% CANDLE_MINUTES` to prevent exactly that.
+    /// A real session is hundreds of bars, so the source's "previous day's last 3-minute
+    /// candle" is only the span of the session's last bar. Nothing pinned which bars
+    /// those are: **every other test in this file fed a session exactly three bars**,
+    /// and on a three-bar session "the last candle" and "the whole session" are the
+    /// same, so a candle that never restarted at a new span, or kept only the newest
+    /// bar, passed all of them. Either mistake anchors all eleven rungs on a candle the
+    /// source does not name, and [`GapFib::fold`] restarts the candle at every new
+    /// 3-minute span to prevent exactly that (D-1441; it was a three-slot ring).
     ///
     /// Both fixtures below are chosen so the three answers differ. Yesterday's last
-    /// three bars are m3, m4 and m5: their high, 2,500,000, comes from the **oldest**
-    /// of the three and their low, 2,450,000, from the **middle** one. The session's own
-    /// extremes, 2,600,000 and 2,400,000, are m0's — outside the tail. So keeping the
-    /// whole session, or only the newest bar, fails on the value, not merely on a sign.
+    /// span, 09:18-09:20, is m3, m4 and m5: its high, 2,500,000, comes from the
+    /// **oldest** of the three and its low, 2,450,000, from the **middle** one. The
+    /// session's own extremes, 2,600,000 and 2,400,000, are m0's — outside that span.
+    /// So keeping the whole session, or only the newest bar, fails on the value, not
+    /// merely on a sign.
     #[test]
     fn only_the_last_three_bars_of_a_session_reach_tomorrows_leg() {
-        // (minute, high, low, close). m0 spikes, and the cursor must have overwritten
-        // its slot before the bell.
+        // (minute, high, low, close). m0 spikes, and the new span must have restarted
+        // the candle before the bell.
         let yesterday = [
             (0_i64, 2_600_000_i64, 2_400_000_i64, 2_450_000_i64),
             (1, 2_450_000, 2_440_000, 2_445_000),
@@ -1128,6 +1174,7 @@ mod tests {
         ] {
             let _ = ok(&mut up, &at(30_601, m, h, l, c));
         }
+        close_opening(&mut up, 30_601, 2_519_000, 2_517_000);
         let leg = up
             .leg()
             .expect("today's first-3 high cleared the last-3 high");
@@ -1154,6 +1201,7 @@ mod tests {
         ] {
             let _ = ok(&mut down, &at(30_601, m, h, l, c));
         }
+        close_opening(&mut down, 30_601, 2_430_000, 2_425_000);
         let leg = down
             .leg()
             .expect("today's first-3 low undercut the last-3 low");
@@ -1165,5 +1213,340 @@ mod tests {
         );
         assert_eq!(leg.x2, 2_425_000, "X2 is today's first-3 LOW");
         assert_eq!(leg.length(), Some(25_000));
+    }
+
+    // ── D-1441: the candle is a clock span on the 3-minute grid, not three bars ──
+
+    /// Feed `(day, minute-since-open, high, low)` bars, closes inside each bar.
+    fn feed(g: &mut GapFib, bars: &[(i64, i64, i64, i64)]) -> Vec<ConditionMask> {
+        bars.iter()
+            .map(|&(day, m, h, l)| ok(g, &at(day, m, h, l, l + (h - l) / 2)))
+            .collect()
+    }
+
+    /// A one-minute bar on a rung of `rung` minutes, stamped at its own start.
+    fn rung_bar(day: i64, minute: i64, high: i64, low: i64) -> (i64, i64, i64, i64) {
+        (day, minute, high, low)
+    }
+
+    /// attack07, reproduced: with 09:16 missing, 09:18 is the NEXT candle and must
+    /// not enter `X2`. Counting three bars took 09:15, 09:17 and 09:18, and the
+    /// 09:18 spike became the gap's far end — `x2 = 1,090,000` against the
+    /// `1,051,000` the 09:15-09:17 candle actually printed.
+    #[test]
+    fn a_missing_0916_does_not_let_0918_into_x2() {
+        let mut g = GapFib::new();
+        // Yesterday's last candle, 15:27-15:29, tops out at 1,000,000.
+        feed(
+            &mut g,
+            &[
+                (40_000, 372, 1_000_000, 990_000),
+                (40_000, 373, 999_000, 991_000),
+                (40_000, 374, 998_000, 992_000),
+            ],
+        );
+        // Today: 09:15 and 09:17 trade, 09:16 is missing, 09:18 spikes.
+        let masks = feed(
+            &mut g,
+            &[
+                (40_001, 0, 1_051_000, 1_040_000),
+                (40_001, 2, 1_050_000, 1_041_000),
+                (40_001, 3, 1_090_000, 1_045_000),
+            ],
+        );
+        let leg = g
+            .leg()
+            .expect("the 09:15-09:17 candle cleared yesterday's high");
+        assert_eq!(leg.direction, Direction::Up);
+        assert_eq!(leg.x1, 1_000_000, "X1 is yesterday's 15:27-15:29 HIGH");
+        assert_eq!(
+            leg.x2, 1_051_000,
+            "X2 is the 09:15-09:17 candle's HIGH; 09:18's 1,090,000 is the next candle"
+        );
+        // The leg is final once a bar of the NEXT candle arrives, and that bar is
+        // already measured against it — ORB's `mark_closed` discipline.
+        assert_eq!(masks.first().copied(), Some(ConditionMask::ZERO));
+        assert_eq!(masks.get(1).copied(), Some(ConditionMask::ZERO));
+    }
+
+    /// A missing 15:29 shrinks yesterday's last candle to 15:27-15:28; it does not
+    /// widen it backwards to 15:26, which belongs to the candle before.
+    #[test]
+    fn a_missing_last_minute_of_yesterday_does_not_pull_in_the_candle_before() {
+        let mut g = GapFib::new();
+        feed(
+            &mut g,
+            &[
+                (40_100, 369, 1_010_000, 1_000_000),
+                (40_100, 370, 1_011_000, 1_000_000),
+                // 15:26 spikes to 1,200,000 -- the 15:24-15:26 candle.
+                (40_100, 371, 1_200_000, 1_000_000),
+                (40_100, 372, 1_020_000, 1_001_000),
+                (40_100, 373, 1_021_000, 1_002_000),
+                // 15:29 is missing.
+            ],
+        );
+        feed(
+            &mut g,
+            &[
+                (40_101, 0, 1_100_000, 1_090_000),
+                (40_101, 1, 1_101_000, 1_090_000),
+                (40_101, 2, 1_102_000, 1_090_000),
+                (40_101, 3, 1_100_000, 1_095_000),
+            ],
+        );
+        let leg = g
+            .leg()
+            .expect("today's first candle cleared yesterday's 15:27-15:28 high");
+        assert_eq!(leg.direction, Direction::Up);
+        assert_eq!(
+            leg.x1, 1_021_000,
+            "X1 is the 15:27-15:28 HIGH; 15:26's 1,200,000 is a different candle"
+        );
+        assert_eq!(leg.x2, 1_102_000);
+    }
+
+    /// A session with fewer than three minutes: its candle is whatever traded inside
+    /// the clock span, and a bar of a later span still closes it. Two bars in two
+    /// different candles are two candles, not one forming three-bar candle.
+    #[test]
+    fn a_session_shorter_than_three_minutes_is_keyed_by_clock_not_count() {
+        let mut g = GapFib::new();
+        // Yesterday traded only 15:28 and 15:29.
+        feed(
+            &mut g,
+            &[
+                (40_200, 373, 1_000_000, 990_000),
+                (40_200, 374, 1_001_000, 991_000),
+            ],
+        );
+        // Today: 09:15, then nothing until 09:18.
+        let masks = feed(
+            &mut g,
+            &[
+                (40_201, 0, 1_050_000, 1_040_000),
+                (40_201, 3, 1_049_000, 1_025_000),
+            ],
+        );
+        let leg = g
+            .leg()
+            .expect("the one-minute 09:15-09:17 candle is closed by the 09:18 bar");
+        assert_eq!(
+            leg.x1, 1_001_000,
+            "X1 is the 15:27-15:29 candle: 15:28 and 15:29"
+        );
+        assert_eq!(
+            leg.x2, 1_050_000,
+            "X2 is 09:15 alone; 09:18 is the next candle"
+        );
+        assert_eq!(
+            masks.first().copied(),
+            Some(ConditionMask::ZERO),
+            "the forming candle emits nothing"
+        );
+
+        // Two bars inside ONE candle never establish a leg, however few they are.
+        let mut h = GapFib::new();
+        feed(&mut h, &[(40_300, 374, 1_000_000, 990_000)]);
+        feed(
+            &mut h,
+            &[
+                (40_301, 0, 1_050_000, 1_040_000),
+                (40_301, 1, 1_051_000, 1_040_000),
+            ],
+        );
+        assert_eq!(h.leg(), None, "the first candle has not closed yet");
+    }
+
+    /// Holes on both sides of the night at once: yesterday's 15:29 and today's 09:15
+    /// and 09:17 are missing. Each candle is what traded inside its own span.
+    #[test]
+    fn gaps_on_both_sides_of_the_night_keep_each_candle_inside_its_span() {
+        let mut g = GapFib::new();
+        feed(
+            &mut g,
+            &[
+                (40_400, 371, 900_000, 880_000),
+                (40_400, 372, 1_002_000, 1_000_000),
+                (40_400, 373, 1_003_000, 999_000),
+            ],
+        );
+        feed(
+            &mut g,
+            &[
+                (40_401, 1, 960_000, 950_000),
+                (40_401, 4, 940_000, 900_000),
+                (40_401, 5, 945_000, 905_000),
+            ],
+        );
+        let leg = g
+            .leg()
+            .expect("09:16 alone undercut yesterday's last-candle low");
+        assert_eq!(leg.direction, Direction::Down);
+        assert_eq!(
+            leg.x1, 999_000,
+            "X1 is the 15:27-15:28 LOW, not 15:26's 880,000"
+        );
+        assert_eq!(leg.x2, 950_000, "X2 is 09:16's LOW, not 09:19's 900,000");
+    }
+
+    /// On a rung of three minutes or more each bar starts in its own 3-minute span,
+    /// so the candle IS one rung bar: the session's first and last. Counting three
+    /// bars made it three rung bars -- 9 minutes at 3, 45 at 15, 180 at 60.
+    #[test]
+    fn on_a_coarser_rung_one_bar_is_the_candle() {
+        // (rung minutes, today's three opening-bar highs)
+        for rung in [3_i64, 5, 15, 60] {
+            let mut g = GapFib::new();
+            // Yesterday's last three rung bars; the LAST is the candle.
+            let last = 375 - rung;
+            feed(
+                &mut g,
+                &[
+                    rung_bar(40_500, last - 2 * rung, 1_300_000, 1_000_000),
+                    rung_bar(40_500, last - rung, 1_200_000, 1_000_000),
+                    rung_bar(40_500, last, 1_010_000, 1_000_000),
+                ],
+            );
+            let masks = feed(
+                &mut g,
+                &[
+                    rung_bar(40_501, 0, 1_050_000, 1_040_000),
+                    rung_bar(40_501, rung, 1_500_000, 1_040_000),
+                    rung_bar(40_501, 2 * rung, 1_600_000, 1_040_000),
+                ],
+            );
+            let leg = g.leg().expect("the first rung bar cleared the last one");
+            assert_eq!(
+                leg.x1, 1_010_000,
+                "rung {rung}: X1 is the last rung bar alone"
+            );
+            assert_eq!(
+                leg.x2, 1_050_000,
+                "rung {rung}: X2 is the first rung bar alone"
+            );
+            assert_eq!(
+                masks.first().copied(),
+                Some(ConditionMask::ZERO),
+                "rung {rung}"
+            );
+        }
+    }
+
+    /// Twelve complete one-minute sessions, 09:15-15:29 with no minute missing, whose
+    /// overnight jumps alternate up, down and none. Deterministic: a fixed LCG.
+    fn complete_sessions() -> Vec<Candle> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            i64::try_from(state >> 40).expect("24 bits fit i64")
+        };
+        let mut bars = Vec::with_capacity(12 * 375);
+        let mut base = 2_500_000_i64;
+        for day in 0..12_i64 {
+            base += match day % 3 {
+                0 => 40_000,
+                1 => -55_000,
+                _ => 0,
+            };
+            let mut price = base;
+            for m in 0..375_i64 {
+                price += next() % 2_001 - 1_000;
+                let high = price + next() % 1_500;
+                let low = price - next() % 1_500;
+                bars.push(at(41_000 + day, m, high, low, price));
+            }
+        }
+        bars
+    }
+
+    /// FNV-1a over mask words: a fixed digest with no dependency.
+    fn absorb(digest: &mut u64, masks: [ConditionMask; 2]) {
+        for word in masks.into_iter().flat_map(|m| m.words()) {
+            *digest = (*digest ^ word).wrapping_mul(0x0100_0000_01B3);
+        }
+    }
+
+    /// The regression guard: on complete sessions the clock-keyed candle is the same
+    /// three bars the count took, so every emitted truth and availability mask is
+    /// byte-identical to the pre-D-1441 fold. The digest was taken by running this
+    /// exact fixture on `origin/main` at `bc531631` before the change.
+    #[test]
+    fn complete_sessions_emit_exactly_what_the_three_bar_fold_emitted() {
+        let mut g = GapFib::new();
+        let mut digest: u64 = 0xCBF2_9CE4_8422_2325;
+        let mut fired = 0_u32;
+        let mut legs = 0_u32;
+        for bar in complete_sessions() {
+            let (truth, known) = g
+                .step_known(&bar, tol(), &Calendar::charter())
+                .expect("fixture bars are sane");
+            if !truth.is_empty() {
+                fired += 1;
+            }
+            if crate::orb::minutes_since_open(bar.ts_micros) == Some(3) && g.leg().is_some() {
+                legs += 1;
+            }
+            absorb(&mut digest, [truth, known]);
+        }
+        assert!(
+            fired > 0 && legs > 0,
+            "the fixture exercised nothing: {fired} {legs}"
+        );
+        assert_eq!(
+            (digest, fired, legs),
+            (7_122_193_626_657_481_925, 249, 11),
+            "complete sessions no longer emit what the three-bar fold emitted"
+        );
+    }
+
+    /// The same guard through the whole [`crate::evaluator::Evaluator`], all 384
+    /// positions, truth and availability: the evaluator now reads the gap family's
+    /// availability from the POST-step leg (D-1441), and on a complete session that
+    /// must be the same answer the pre-step read gave. Digest taken on `origin/main`
+    /// at `bc531631`.
+    #[test]
+    fn complete_sessions_through_the_evaluator_are_byte_identical() {
+        let mut e = crate::evaluator::Evaluator::new(
+            crate::evaluator::Widths::pinned().expect("pinned widths"),
+            crate::vwap::Availability::Absent,
+            crate::pattern::Thresholds::CLASSICAL,
+        );
+        let mut digest: u64 = 0xCBF2_9CE4_8422_2325;
+        let mut gap_known = 0_u32;
+        for bar in complete_sessions() {
+            let (truth, known) = e.step_known(&bar).expect("fixture bars are sane");
+            if GapFib::positions()
+                .into_iter()
+                .any(|p| known.get(u32::from(p)))
+            {
+                gap_known += 1;
+            }
+            absorb(&mut digest, [truth, known]);
+        }
+        assert!(gap_known > 0, "the gap family was never available");
+        // RE-TAKEN for D-1542 and D-1543, which change the trend averages'
+        // seed and five candlestick predicates on every bar; the digest covers
+        // all 384 positions, so it moved. The gap family's own count, 4,092,
+        // did not, and `complete_sessions_emit_exactly_what_the_three_bar_fold_emitted`
+        // above still pins the gap family alone. Was 8_217_985_476_958_011_973.
+        // RE-TAKEN again for D-3402 and D-3403: five candlestick midpoint predicates
+        // and the SuperTrend stop are now decided below a paisa, so the all-position
+        // digest moved and the gap count did not. Was 9_976_369_688_448_099_888.
+        // RE-TAKEN again for D-2613 (ind1-2): the trend EMA steps truncate and
+        // the EMA and gap-mid bits are decided exactly, on every bar; the gap
+        // family count, 4,092, is unchanged. Was 9_976_369_688_448_099_888.
+        // RE-TAKEN again for D-4610: D-3402/D-3403 and D-2613 each moved the
+        // digest from 9_976_369_688_448_099_888 on its own branch (to
+        // 3_321_827_449_681_235_504 and 1_794_190_917_626_450_722), and the
+        // integration carries both. Measured on the merged tree; the gap count,
+        // 4,092, is still unchanged.
+        assert_eq!(
+            (digest, gap_known),
+            (17_175_828_523_226_610_466, 4_092),
+            "complete sessions no longer emit what the three-bar fold emitted"
+        );
     }
 }
