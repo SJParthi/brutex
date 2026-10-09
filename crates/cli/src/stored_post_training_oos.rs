@@ -219,11 +219,18 @@ pub(crate) struct StoredOosFoldV1<'c> {
 }
 
 impl StoredOosFoldV1<'_> {
-    /// Mints one witness over this fold. Per witness: the cohort integrity
-    /// check twice (each re-derives the cohort identity, hashing the signal,
-    /// minute-context, daily and execution streams, Θ(S + Q + D + E)), the
+    /// Mints one witness over this fold. Per witness: the cohort currency
+    /// check twice (the held strict guards, the admitted root and the O(1)
+    /// audit fields; `StoredPostTrainingOosCohortV1::require_current`), the
     /// evaluator check, and the Runner replay over the OOS execution bars.
-    /// The fold's column evaluation and alignment are not repeated.
+    /// The fold's column evaluation, alignment and stream hashing are not
+    /// repeated: before W2-cli3-3's second fix (D-4782) each witness also
+    /// re-derived the cohort identity twice, re-hashed the source's data
+    /// identity and hashed all four streams to seal its run, Θ(S + Q + D + E)
+    /// in hashing. Those streams are owned by the cohort and borrowed
+    /// immutably by the fold, so the re-hash could not see a change; a
+    /// changed stored file is what the held strict guards refuse. Proof:
+    /// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed`.
     ///
     /// # Errors
     ///
@@ -243,7 +250,7 @@ impl StoredOosFoldV1<'_> {
         mut observer: Option<&mut StoredOosObserverV1<'_>>,
     ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
         let cohort = self.cohort;
-        cohort.require_integrity()?;
+        cohort.require_current()?;
         if self.specification.as_bytes() != &disposition.evaluation_spec_fingerprint() {
             return Err("stored OOS disposition evaluator differs before fold".to_owned());
         }
@@ -268,7 +275,7 @@ impl StoredOosFoldV1<'_> {
         cohort
             .root
             .require_same("after minting stored post-training OOS witness")?;
-        cohort.require_integrity()?;
+        cohort.require_current()?;
         let run_id = witness.run_id().bytes();
         let selected_exit_digest = witness.selected_exit_digest();
         let universe_digest = witness.universe_digest();
@@ -371,7 +378,24 @@ impl StoredPostTrainingOosCohortV1 {
         self.audit
     }
 
+    /// The full check: [`Self::require_current`], then the cohort identity
+    /// re-derived from every stream, Θ(S + Q + D + E) in hashing. Run at
+    /// construction and once per fold.
     fn require_integrity(&self) -> Result<(), StoredPostTrainingOosRefusal> {
+        self.require_current()?;
+        if self.audit.cohort_id != self.derive_cohort_id()? {
+            return Err("stored post-training OOS cohort identity changed".to_owned());
+        }
+        Ok(())
+    }
+
+    /// The per-witness check (W2-cli3-3, D-4782): the held strict guards
+    /// (O(M) metadata and receipt checks), the admitted root, and the audit
+    /// fields compared in O(1). It hashes no stream: the cohort owns them and
+    /// nothing can change them while it is borrowed, and a changed stored
+    /// file is what the guards refuse. Proof:
+    /// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed`.
+    fn require_current(&self) -> Result<(), StoredPostTrainingOosRefusal> {
         self.stored.require_current()?;
         self.root
             .require_same("while authenticating stored post-training OOS cohort")?;
@@ -388,7 +412,6 @@ impl StoredPostTrainingOosCohortV1 {
             || last.ts_micros != self.audit.oos_last_ts_micros
             || usize_to_u64(execution.len(), "execution bars")? != self.audit.execution_bars
             || first.ts_micros <= training_last
-            || self.audit.cohort_id != self.derive_cohort_id()?
         {
             return Err("stored post-training OOS cohort identity changed".to_owned());
         }
@@ -533,6 +556,7 @@ impl StoredPostTrainingOosCohortV1 {
     }
 
     fn derive_cohort_id(&self) -> Result<[u8; 32], StoredPostTrainingOosRefusal> {
+        crate::candidate_universe::note_oos_stream_hash();
         let execution = self.execution()?;
         let execution_calendar = crate::stored::calendar_receipt_v2_for_bars(
             execution,
@@ -635,4 +659,16 @@ fn hash_parts(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         hasher.update(part);
     }
     hasher.finalize()
+}
+
+#[cfg(test)]
+impl StoredPostTrainingOosCohortV1 {
+    /// Test-only: flips one byte of the cached cohort identity, so the full
+    /// check refuses while the per-witness check, which never re-derives it,
+    /// cannot see it.
+    pub(crate) fn flip_cohort_id_for_test(&mut self) {
+        if let Some(byte) = self.audit.cohort_id.first_mut() {
+            *byte ^= 1;
+        }
+    }
 }

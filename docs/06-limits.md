@@ -8689,15 +8689,25 @@ source a witness replays over (the anchored signal column, its exact-minute
 overlay, the checked execution column, alignment, calendars and stream
 digests) costs Θ(S + Q + D + E) to build. Since D-1684 Population V6 builds it
 once per family cohort and every witness of that cohort replays over it;
-before D-1684 it was rebuilt for every witness. Each witness still pays two
-cohort integrity checks, and each re-derives the cohort identity by hashing
-the signal, minute-context, daily and execution streams and re-checks the
-strict source guards, so a witness remains Θ(S + Q + D + E) in hashing; what
-D-1684 removes per witness is the column evaluation and alignment, not that
-term. Then the authenticated Runner replay over its OOS bars and exit paths. Until
-D-1636 (W2-cli16-1) this paragraph called minting "proportional to the replay";
-D-1636 stated the per-witness Θ(S + Q + D + E) recomputation, and D-1684 then
-moved the column fold and alignment out of it. Full future V4 preflight/scheduling is at least O(P + C) before
+before D-1684 it was rebuilt for every witness. Since D-4782 (W2-cli3-3's
+second fix) a witness hashes no stream. The fold hashes the cohort identity,
+the source's three-stream data term and execution-slice digest once, and each
+witness seals its run against those digests through Runner's
+`ExecutionRunV1::with_digests`, proved equal to hashing per run by
+`runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`.
+Each witness still pays two cohort currency checks: the held strict source
+guards (O(M) metadata and receipt checks), the admitted root and the cached
+audit fields in O(1). So a witness is O(M) plus the authenticated Runner replay
+over its OOS bars and exit paths. Before D-4782 each witness re-derived the
+cohort identity twice, re-hashed the source's data identity and hashed all
+four streams again to seal its run, so a witness remained Θ(S + Q + D + E) in
+hashing; those streams are owned by the cohort and borrowed immutably by the
+fold, so that re-hash could not see a change, and a changed stored file is
+what the held guards refuse. The full identity re-derivation still runs once
+per fold. Until D-1636 (W2-cli16-1) this paragraph called minting "proportional
+to the replay"; D-1636 stated the per-witness Θ(S + Q + D + E) recomputation,
+D-1684 moved the column fold and alignment out of it, and D-4782 moved the
+hashing out of it. Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 

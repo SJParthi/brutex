@@ -65063,3 +65063,51 @@ Tests:
   (fails at 2 against 1 scans per door on the two-open code).
 - `cli::pre_admission_data::tests::v1_reverify_refuses_every_disagreement_with_the_disk`.
 - `cli::pre_admission_data::tests::v2_reverify_refuses_every_disagreement_with_the_disk`.
+
+### D-4782 — A stored OOS witness hashes no stream — 2026-10-09
+
+**What was observed.** W2-cli3-3 was PARTIAL after D-1684. The fold was built
+once per cohort, but every witness still hashed all four streams four times:
+
+- it ran the cohort's `require_integrity` twice, and each run re-derived the
+  cohort identity by hashing the signal, minute-context, daily and execution
+  streams;
+- it ran the source's `require_integrity` once, which re-hashed the three-stream
+  data term;
+- it ran `ExecutionRunV1::new_with_daily_reference`, which hashed all four
+  streams again to seal the run.
+
+So a witness stayed Θ(S + Q + D + E) in hashing. With three witnesses a fold
+counted 15 stream-hash passes, where the fold alone needs 3. D-1684 kept the
+per-witness check because it "refuses a source that changed after the fold".
+That reason did not hold. The cohort owns those streams and the fold borrows
+them immutably for its whole life, so re-hashing them could not see a change.
+A changed stored file is caught by the held strict guards.
+
+**Decided.**
+- `CandidateGlobalReplayOosSourceV1` hashes `ExecutionDigestsV1::of_daily_reference`
+  once, at construction, and keeps the result. Its integrity check compares that
+  full digest pair.
+- Each witness seals its run with `ExecutionRunV1::with_digests`, D-0990's
+  Runner door. Its equality with hashing per run is proved by
+  `runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`.
+- The per-witness cohort check is now `require_current`: the held strict guards
+  (O(M) metadata and receipt checks), the admitted root, and the cached audit
+  fields in O(1).
+- The full `require_integrity`, which re-derives the cohort identity, runs at
+  construction and once per fold.
+
+No witness byte, run id, cohort id or witness id changes: the test compares each
+witness with the cohort's unfolded mint. A witness now costs O(M) plus the
+Runner replay.
+
+**Rejected.** G4's step 4, one more full re-check after the last witness. It
+would re-hash memory that cannot change, so no test could make it refuse: a
+check no input can provoke. The per-witness guards are what detects a change.
+A daily file corrupted after the fold still refuses the next witness.
+
+Tests:
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed`
+  (fails at 15 against 3 passes on the re-hashing code; it also refuses a
+  tampered cohort identity at the fold).
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`.

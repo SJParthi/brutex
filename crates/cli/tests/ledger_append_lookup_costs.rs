@@ -38,6 +38,7 @@ const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
 const LEDGER_V6: &str = include_str!("../src/ledger_v6.rs");
 const STRICT_INPUTS: &str = include_str!("../src/strict_v6_inputs.rs");
 const POPULATION_V6: &str = include_str!("../src/population_v6.rs");
+const OOS: &str = include_str!("../src/stored_post_training_oos.rs");
 
 /// The body of one `### §N —` section, up to the next `### ` heading.
 fn section(number: u32) -> &'static str {
@@ -299,10 +300,18 @@ fn section_169_prices_the_oos_fold_once_per_cohort() {
     let text = flat(section(169));
     for needed in [
         "Since D-1684 Population V6 builds it once per family cohort",
-        "so a witness remains Θ(S + Q + D + E) in hashing",
+        "Since D-4782 (W2-cli3-3's second fix) a witness hashes no stream",
+        "So a witness is O(M) plus the authenticated Runner replay",
     ] {
         assert!(text.contains(needed), "§169 no longer says `{needed}`");
     }
+    let mint = method(CANDIDATE, "    pub(crate) fn mint_witness_recorded(");
+    assert!(mint.contains("ExecutionRunV1::with_digests(&run, &self.run_digests)"));
+    assert!(!mint.contains("new_with_daily_reference"));
+    assert!(!mint.contains("self.require_integrity()"));
+    let witness = method(OOS, "    fn mint_inner(");
+    assert_eq!(witness.matches("cohort.require_current()?").count(), 2);
+    assert!(!witness.contains("require_integrity()?;"));
     assert!(
         !text.contains("Minting every witness is proportional to the authenticated Runner replay")
     );

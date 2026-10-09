@@ -401,6 +401,96 @@ mod strict_v6_fixture_tests {
     }
 
     #[test]
+    fn strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed() -> Result<(), String> {
+        // W2-cli3-3 / D-4782: after D-1684 built the OOS source once per
+        // cohort, every witness still re-derived the cohort identity twice,
+        // re-hashed the source's data identity and hashed all four streams
+        // again to seal its run: Θ(S + Q + D + E) per witness.
+        let fixture = StoredSuccessFixture::new()?;
+        seed_stored_family_month(
+            &fixture.source,
+            Vendor::Zerodha,
+            "NIFTY",
+            FIXTURE_OOS_MONTH,
+            2_000_000,
+        )?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let diagnostic = Sweeper::new(engine::Ladder::with_min_hits(1));
+        let support = maximum_fixture_singleton_support(&fixture_request(
+            &fixture.source,
+            "NIFTY",
+            &diagnostic,
+            &long,
+            &short,
+        )?)?;
+        let sweeper = Sweeper::new(engine::Ladder::with_min_hits(support));
+        let committed = commit_stored_with_inputs_v1(
+            fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+        )?;
+        let disposition = first_selected_disposition(&committed)?;
+        let cohort = committed.stored_post_training_oos_cohort(fixture_oos_request()?)?;
+        // The unfolded mint is the reference: it builds its own fold.
+        let unfolded = cohort.mint_witness(&disposition)?;
+
+        crate::candidate_universe::OOS_STREAM_HASHES.with(|count| count.set(0));
+        let fold = cohort.fold_recorded(&mut |_| Ok(()))?;
+        let per_fold = crate::candidate_universe::OOS_STREAM_HASHES.with(std::cell::Cell::get);
+        assert!(per_fold > 0, "the fold hashes the cohort's streams");
+        for _ in 0..3 {
+            let witness = fold.mint_witness_recorded(&disposition, &mut |_| Ok(()))?;
+            assert_eq!(witness.cohort_id(), unfolded.cohort_id());
+            assert_eq!(
+                witness.witness_id(),
+                unfolded.witness_id(),
+                "the witness binds the same run, exit and replay universe bytes"
+            );
+            assert_eq!(witness.candidate_count(), unfolded.candidate_count());
+        }
+        assert_eq!(
+            crate::candidate_universe::OOS_STREAM_HASHES.with(std::cell::Cell::get),
+            per_fold,
+            "three witnesses re-hash no stream the fold already hashed"
+        );
+
+        // The full check, run once per fold, still re-derives the cohort
+        // identity and refuses one that no longer matches it.
+        let mut tampered = committed.stored_post_training_oos_cohort(fixture_oos_request()?)?;
+        tampered.flip_cohort_id_for_test();
+        assert!(
+            tampered
+                .fold_recorded(&mut |_| Ok(()))
+                .err()
+                .is_some_and(|why| why.contains("cohort identity changed")),
+            "a fold re-proves the cohort identity"
+        );
+
+        // A source that changes after the fold is still refused per witness,
+        // by the held strict guards rather than by re-hashing owned memory.
+        let key = crate::stored::swept_index("NIFTY")?;
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            Timeframe::DAY_1,
+            YearMonth::new(2025, 10).map_err(|why| why.to_string())?,
+            FileKind::Bars,
+        )
+        .map_err(|why| why.to_string())?
+        .to_path_buf(&fixture.source);
+        corrupt_strict_fixture_byte(&path, 700)?;
+        assert!(
+            fold.mint_witness_recorded(&disposition, &mut |_| Ok(()))
+                .is_err(),
+            "a stale cohort refuses over a built fold"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn strict_v6_extinct_selection_keeps_both_family_sources_through_final_reauthentication()
     -> Result<(), String> {
         let fixture = StoredSuccessFixture::new()?;
