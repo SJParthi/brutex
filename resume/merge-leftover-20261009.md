@@ -28,8 +28,11 @@ the binding constraint; this thread goes quiet after the handover.
 - language-purity static gates: 29 pass, 0 fail, Gate 1e not run locally
   (heavy; CI run 1287 runs it).
 - web gates W1-W6: all pass (W2 911/911).
-- Full suite run 1 (before the fixes): 134 binaries pass, 9 fail; 6 were real
-  cross-branch conflicts, fixed in D-4609..D-4612; 3 were git-as-uid-65534.
+- Full suite run 1 (before the fixes): 134 binaries pass, 9 fail. 2 were
+  git-as-uid-65534; 2 ran pricing binaries built before the D-4609 test
+  edits; 5 held real cross-branch conflicts (6 tests: tix, attack_store, core
+  contract order, attack_r6 scratch race, api pause-gap and emit-site pin),
+  fixed in D-4610..D-4612.
 - Full suite run 2 on f97eb1f7: 141 pass as uid 65534; `store/cited_commits`
   (6/6) and `core/findings` (14/14) pass as root. cli lib 2068 pass, api lib
   1626 pass.
