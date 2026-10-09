@@ -7154,6 +7154,7 @@ mod tests {
     #[test]
     fn a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage() {
         use super::population_base_evidence_v2::reopen_probe;
+        type Attack = (&'static str, fn(&std::path::Path));
         let bounds = BaseEvidenceLedgerBoundsV2::new(64, 8).expect("nonzero Base bounds");
         let (first_candidate, first_base) = candidate_base_fixture(71, InstrumentFamilyV1::Nifty);
         let (candidate, base) = candidate_base_fixture(72, InstrumentFamilyV1::Nifty);
@@ -7189,7 +7190,7 @@ mod tests {
         );
         assert_ne!(full, first, "the second block, not the first");
 
-        let attacks: [(&str, fn(&std::path::Path)); 4] = [
+        let attacks: [Attack; 4] = [
             ("record seal does not match payload", |root| {
                 let mut file = OpenOptions::new()
                     .read(true)
