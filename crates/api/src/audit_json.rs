@@ -431,7 +431,7 @@ fn holds_sentence(feed: Vendor) -> String {
 /// feed's endpoint (`pull::vendor::DESCRIPTORS`, the one place an endpoint is
 /// written), or a Zerodha-only cash-identity policy, which
 /// `ingest::parse_cash_identity` refuses for any other vendor.
-fn vendor_of_source(source: &str) -> Option<Vendor> {
+pub(crate) fn vendor_of_source(source: &str) -> Option<Vendor> {
     if source.starts_with("zerodha_") {
         return Some(Vendor::Zerodha);
     }
