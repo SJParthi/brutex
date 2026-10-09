@@ -90,3 +90,34 @@ then the Artifact.
   validation, mutation pre-run on `git diff fbdabaec <head> -- crates`, kill survivors, push wip/audit-batch3-integ,
   send the sha to the PR 74 CI thread and to the Merge leftover workstreams thread (it merges this branch into its own
   and hands PR 74 one sha).
+
+## PAUSED 2026-10-09 ~10:25 UTC: GDFL is the top priority (coordinator, at Parthi's word); resume only when told
+Owner choices posted in the thread with defaults taken (Parthi may switch with one word):
+- JS helper actions in non-web CI jobs (srust-5 = workflow-js-actions): default **Allow** (keep the 7 pinned actions;
+  record the ruling in CLAUDE.md §2 + a D-entry). Alternative Replace.
+- Store admits off-session bars (ET-bars-candles-store-3): default **Inject** (core declares a session-check trait,
+  pull's calendar implements it, store refuses an off-hours bar at write, by name). Alternatives Move, Leave.
+Not started yet: both defaults still need doing.
+
+Owner rule restated by the coordinator: "documented only" is not done. The 87 DOCUMENTED ids (out/doc87.tsv) must each
+be fixed, or kept only if truly inherent WITH a committed measurement (p50/p99/max, n, load). Triage stopped at 36/87
+(6 FIX, 6 KEEP-MEASURE, 6 ALREADY-FIXED, 18 OVERLAP with defp/intl, 51 NOT-YET-TRIAGED); see out/doc87.md and
+TRIAGE-DOC87-BRIEF.md. Note: the D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700).
+
+Branches (all pushed as `wip/audit-fx/<name>`; pause notes in fixers/<name>-pause.md):
+| branch | head | done | left |
+|---|---|---|---|
+| audit/int-u | 4e1e6a08 | api clippy clean (D-4470); cli on cost model V3, V2 refused by name (D-4471) | telemetry::sync at exit (D-4472), tell -> stderr_line + Gate 23 (D-4473), ⟨a14_*⟩ placeholders (docs/06 12624-5), W2-cli10-0 + review 0e3eee9a, cli clippy, validation |
+| audit/int-l | af71bb1e | runner clippy; fxr WIP (D-4501..4506); so1-2/so1-6 (D-4420); fxd WIP + CLAUDE.md support_each (D-4487/8); rnew-2, r53-2/srust-6, sobs-17 (D-4489) | r64-2, sobs-19, W3-runner2-5; engine bench comments C-E-07/C-E-09 still say Column::support; full runner suite; validation |
+| audit/def-c | aa55d682 | AC-whp-o1-1 (D-4520) | W3-runner2-3 WIP (D-4521 not written); cli-14 & W2-cli12-3/4, W2-cli6-0, W2-cli2-5, W2-cli14-1/2/3 (D-4522..4525 planned; no O(1) fix found yet, plan: measure) |
+| audit/def-p | 386c4f07 | satk-3 (D-4550) | cli test resample_matches_fold edit not compiled; W1-pull3-4, W1-pull1-0, rnew-3, o1api-33 |
+`audit/integ` now merges int-u and int-l on top of a7a27dc3 (see the line below for its sha and check results).
+def-c and def-p are NOT merged into integ.
+
+Cross-branch notes from the merge-leftover thread (it is merging a7a27dc3 into claude/project-thread-lx6ptl as
+bff477f0 and will merge our final sha on top): api operation_audit_tests.rs keeps its test-only `poll` helper (D-4622);
+pull/benches/ratio.rs `session_member` needs `skipped: DecodeSkips::default()` after their D-3125 (their D-4620).
+
+Artifact: filled (Dashboard type) with interim numbers; refresh recipe ARTIFACT-REFRESH.md; after.tsv in out/.
+Helper scripts (build-data.py, build-after.py, build-proof.py, check-after.py, merge-fx.sh, union-tail.py,
+validate.sh, gates-doc.sh) are container-local and deliberately untracked; rewrite from these notes if lost.

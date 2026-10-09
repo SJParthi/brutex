@@ -1,0 +1,88 @@
+id	crate	verdict	why	plan	test	size	files	measure_ref
+BD-5	api	FIX	Rationing is bounded by FAILED_LINES_PER_WINDOW=50 / LOCAL=200 and kept; the gap is logs.rs:1296-1300 'a flood followed by silence until shutdown leaves its last window's count unsaid'	Say a closed window's pending suppressed count on the next api.request of any status and once at shutdown (before the exit sync intu adds); keep the ration	Flood 60 cross-site failures then one 200: exactly one Warn summary with suppressed=10; a pending count is written at shutdown	S	crates/api/src/logs.rs	-
+BD-6	api	FIX	Budget half closed by D-4447 (sweeprun.rs:2030 refused_for_this_server, 31c6fac1); still logs::note_request records a 5xx with method/path/status and no reason (docs/06-limits.md:10011-10017)	Refusing handlers attach their refusal sentence as a response extension; note_request copies at most 256 bytes of it into the api.request event as why	A 503 from a refusing route logs api.request with why equal to the body's sentence; a 10 KB reason is cut to 256 bytes	S	crates/api/src/logs.rs; crates/api/src/server.rs	-
+BD-11	api	FIX	server.rs:20578 telemetry::install failing leaves the server serving with no log (logs.rs:961 'No sink'); install leaves GLOBAL unset on failure so a later install can succeed	Retry telemetry::install at most once per named interval (e.g. 60 s) from the request path and write one Error naming the gap once it opens; refusing to start instead is an owner choice: UNVERIFIED which the owner wants	Unwritable log dir at start gives No sink; make it writable; after the interval the next request installs and /logs shows a sink and a gap event	S	crates/api/src/server.rs; crates/api/src/logs.rs	-
+api-assets	api	FIX	assets.rs:809 respond does canonicalize + fs::read (:836) per request; docs/06-limits.md:2992 section 39 says unmeasured	Hold content-addressed _app/immutable files in memory after the first read (bounded by the build's file count); memoise the shell and version.json under a stat stamp; only the response copy stays O(file)	Count reads over 1,000 GETs of one immutable asset = 1; a rewritten shell is re-read; then api::latency p50/p99/max/n/load	M	crates/api/src/assets.rs; docs/06-limits.md	-
+api-boolean-evidence-cold	api	FIX	D-1444 (docs/06-limits.md:12578-12590): each route keeps ONE reader slot, so two clients alternating identity/model/root/budget make every first page cold, O(saved body bytes)	Keep K readers per route (named constant, LRU, exact key), as D-4434 did for trade readers; the first cold hash per key stays and gets measured	Alternate two identities for 100 unpinned first pages: 2 cold opens, not 100; api::latency cold open at 3 body sizes	M	crates/api/src/booleanjson.rs; crates/api/src/booleanevidencejson.rs; crates/api/src/detail.rs	-
+api-index-stop-cold	api	FIX	docs/06-limits.md D-1444 bullet: 'booleanoosjson and indexstopjson keep the old shape (every unpinned first page is cold)'; indexstopjson render is cold unless completion is pinned	Route indexstopjson (and booleanoosjson) through detail::must_admit so an unpinned first page reuses a current held reader	10 unpinned first pages on unchanged evidence: 1 cold open; a moved generation forces a cold open	S	crates/api/src/indexstopjson.rs; crates/api/src/booleanoosjson.rs	-
+crate-spawns-production	api	ALREADY-FIXED	D-4430 (docs/05-decisions.md:67571, commit 40669ba3): opening is opt-in with BRUTEX_OPEN=1; default spawns nothing and prints the address	Only a doc fix left: the D-2290 'Not costs' paragraph (after docs/06-limits.md:16694) still says 'kept by D-1202 and off with BRUTEX_NO_OPEN'	open_if_asked tests in crates/api/src/server.rs (FXB1-01)	S	docs/06-limits.md	D-4430
+api-bars-json-past-end	api	ALREADY-FIXED	D-4432 (docs/05-decisions.md:67602, 2d38c60a): a from past the header's last stamp costs one record read in either month kind	-	api::server::tests::bars_json_past_the_headers_last_stamp_reads_one_record	-	crates/api/src/server.rs	docs/06-limits.md:12373 W1-api5-8 bullet; one read counted, not timed
+api-bars-window-sorted	api	ALREADY-FIXED	D-4439 (f2324b9c): ts+extremes use kept month folds; non-ts sort refused past MAX_SCAN_WINDOW_RECORDS=1,048,576 (named constant). Its test fix still needs a rerun (fxb1-pause; api validation is intu's)	-	a_ts_window_with_extremes_reads_each_month_once_until_it_moves; a_scan_past_its_ceiling_is_refused_by_name	-	crates/api/src/bars.rs	docs/06-limits.md:12264-12300 latency_window_extremes_and_scan: scan 822/925/925 ms n=10 load 11.14; kept folds 10.9/25.5/30.7 ms n=200
+api-verify-json	api	ALREADY-FIXED	D-4435 (7deb5b6f): one page of at most MAX_VERIFY_PAGE=1,024 opens; newest-entry list memoised per snapshot. Test fixes still need a rerun (fxb1-pause)	-	scrub_route_opens_no_more_than_a_page_of_a_larger_counter	-	crates/api/src/verify.rs; crates/api/src/server.rs	docs/06-limits.md:12353 bullet latency_scrub_page_at_the_ceiling: 44.5/73.5/76.6 ms n=200 load 9.72
+api-engine-top-refusal	api	ALREADY-FIXED	D-4433 (c41d1ad5): a persistent refusal costs one record read, not a cold walk; a repair is seen at once	Optional: time the one read with api::latency (limits says counted, not timed)	a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen	-	crates/api/src/topjson.rs	docs/06-limits.md:12662 (counted, not timed)
+api-candidate-trades	api	KEEP-MEASURE	A first read of a candidate or catalog must hash what it serves (bit-rot proof); D-4434 timed only the warm page and the cold open's fixed part ('The cold open's O(trades) part is not timed', docs/06-limits.md:12646-12660); summary_for's cold catalog read untimed	Extend the fixture with trading candidates and larger catalogs	api::latency: cold TradeReader::open at 10^2/10^4/10^5 trades and cold summary_for at 10^3/10^5 candidates, n>=200, p50/p99/max/load	S	crates/api/src/candidatejson.rs; docs/06-limits.md	candidatejson.rs:1222 latency_trade_reader_warm_page_and_cold_open (warm only)
+api-boolean-campaign	api	KEEP-MEASURE	D-3312 (docs/06-limits.md:16667): the second open is the freshness check and is kept; 'No timing was taken'	Time render at checkpoint counts up to MAX_CHECKPOINTS=1,024 (fixture may need cli's builder, as D-1444 notes for evidence trees)	api::latency latency_boolean_campaign_by_checkpoints at 1/100/1,023 checkpoints, n>=100	S	crates/api/src/booleancampaignjson_tests.rs; docs/06-limits.md	-
+api-logs	api	KEEP-MEASURE	D-2327 (docs/06-limits.md:16256): a cut changes what a successful answer contains; 'The time one /logs.json request takes is still UNVERIFIED'	Time one /logs.json request with both halves at the 4 MiB cap and a no-match filter	api::latency latency_logs_json_at_the_scan_cap, n=200	S	crates/api/src/logs.rs; docs/06-limits.md	telemetry bench one-walk figure only (D-3311)
+api-json-memos	api	KEEP-MEASURE	W1-api5-3/5/6/9 (docs/06-limits.md:12317-12400): answers memoised per census snapshot (D-2285..D-2289); the cold build per snapshot is untimed; the build reads what it answers	Time each cold build	api::latency cold instruments_json/calendar_json/store filter/indexmap_json at U about 2,780 and E 15,857 and 93,776, n>=50	S	crates/api/src/server.rs; docs/06-limits.md	-
+W1-api5-1	api	OVERLAP	defp rnew-3 (bench the D-2290 kept costs: Manifest::load). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp: commit a pull bench for Manifest::load at 15,857 and 93,776 entries	defp rnew-3	-	crates/pull/benches/ratio.rs	docs/06-limits.md:16711 (scratch)
+W1-api5-2	api	OVERLAP	defp rnew-3 (census miss = Manifest::load per manifest). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16712 (scratch)
+api-census-now	api	OVERLAP	defp rnew-3: a miss is Manifest::load, timed only by the scratch harness. D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16711-16712
+W1-api3-1	api	OVERLAP	defp rnew-3: the kept manifest re-read cites D-2290 Manifest::load figures. D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16711
+W1-api2-1	api	OVERLAP	defp rnew-3: calendar derivation cites 'same month walk' (docs/06-limits.md:16710). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED; rnew-3 must time calendar_of::derive itself, not reuse the committed_cash_days walk	defp	defp rnew-3	-	-	docs/06-limits.md:16710
+W1-pull2-0	pull	OVERLAP	defp rnew-3 (Manifest::load per window). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16711
+W1-pull2-6	pull	OVERLAP	defp rnew-3 (Manifest::load per rolling answer). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16711
+pull-read-census-per-body	pull	OVERLAP	defp rnew-3 (Manifest::load per body). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16711
+W1-pull2-5	pull	OVERLAP	defp rnew-3 (per-record committed_cash_days). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16709
+W1-pull2-3	pull	OVERLAP	defp rnew-3; row says 'same month walk as above' (docs/06-limits.md:16709-16710), a proxy: derive_all's rerun re-folds too and needs its own timing. D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16709
+pull-json-decode	pull	OVERLAP	defp o1api-33 (typed/streaming decode or NOT-FIXABLE with reason); memory multiple counted by a_json_decodes_peak_memory_is_measured_against_its_body (docs/06-limits.md after :16717)	defp	defp o1api-33	-	crates/pull/src/http.rs	-
+R9-csr-o1-0	store	OVERLAP	defp rnew-3 (tail-block-with-fstat cold read). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16707
+store-committed-cash-days	store	OVERLAP	defp rnew-3 (committed_cash_days walk). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp	defp rnew-3	-	-	docs/06-limits.md:16709
+store-time-lookup-bisection	store	OVERLAP	defp rnew-3 (legacy bisection p99) and intl rnew-2 (the D-2290 row still says 'an index file would be a new store format version', docs/06-limits.md:16706). D-2290 figures come from an uncommitted scratch harness (docs/06-limits.md:16700), so not KEEP-MEASURED	defp + intl	defp rnew-3; intl rnew-2	-	-	docs/06-limits.md:16706
+W3-engine1-2	engine	ALREADY-FIXED	D-4480 (368a103d): keep::Best removed; D-2290 row struck	-	engine/tests/production_callers.rs	-	crates/engine	docs/06-limits.md D-2290 table row W3-engine1-2
+engine-level-sort	engine	OVERLAP	intl (fxd WIP 2cfa70ae: W3-engine1-1, D-4483, FXD-08 measures the level sort)	intl	FXD-08	-	crates/engine/src/lib.rs	docs/06-limits.md D-2290 row W3-engine1-1 (FXD-08, WIP)
+rule4-mask-eval-width	engine	OVERLAP	intl (fxd WIP 2cfa70ae: so1-1, D-4481, O1P row for Column::support per bar)	intl	FXD-02/03	-	crates/engine	-
+vocab-expression-evaluate	vocab	OVERLAP	intl (fxd WIP 2cfa70ae: o1engine-22, D-4484)	intl	FXD-04/05	-	crates/vocab/src/expression.rs	-
+vocab-cursor-advance	vocab	OVERLAP	intl (fxd WIP 2cfa70ae: o1engine-23, D-4485)	intl	FXD-06	-	crates/vocab/src/expression_search.rs	-
+BD-1	telemetry	KEEP-MEASURE	Only an fsync per event survives a power cut; sink.rs:56-63 asserts 'a millisecond of disk latency' per event without a measurement. The clean-exit barrier is intu's telemetry::sync at exit	Commit a bench row: emit vs emit+sync_data per event	C-T bench row, n=10^4 events, p50/p99/max with load average	S	crates/telemetry/benches/ratio.rs; docs/06-limits.md	-
+BD-2	telemetry	KEEP-MEASURE	A bounded stream on a finite disk must drop its oldest; sink.rs:112-115 says the 64 MiB bound is 'UNVERIFIED as a measurement'	Test that writes 3x the bound and asserts the set never exceeds DEFAULT_MAX_FILE_BYTES x DEFAULT_KEEP_FILES plus one event; time a rotation	telemetry test the_retained_set_never_exceeds_its_bound; rotation p50/p99/max, n>=100	S	crates/telemetry/src/sink.rs; crates/telemetry/benches/ratio.rs	-
+BD-7	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-audit-page-fsync	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-autopilot-json	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-bounded-routes	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-dashboard	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-health	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-instruments-page	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-instruments-search	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-pull-posts	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-run-json-poll	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-trades-json	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+api-universe-resolve	api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+ET-bars-candles-store-1	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+ET-bars-candles-store-1/-8	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+ET-bars-candles-store-8	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+rederive	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+pull-held-series	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+pull-manifest-append	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+pull-manifest-entry	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+pull-vendor-pull	pull	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+BD-12	pull,api	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+store-append	store	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+store-checksum-block	store	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+store-tix-rebuild	store	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+lake-open-decode	lake	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+BD-10	lake,store	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+core-universe-membership	core	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+core-vendor-decode	core	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+ET-o1-proof-coverage-2	engine	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+W3-engine1-0	engine	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+engine-join-pair	engine	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+engine-subset-prune	engine	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+engine-sweep-total	engine	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+rule4-condition-lookup	vocab	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+vocab-name-index	vocab	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+BD-4	vocab,engine,indicators,runner	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+BD-3	telemetry	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+BD-8	telemetry	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+telemetry-emit	telemetry	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+telemetry-filtered-tail	telemetry	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+BD-9	cli	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+cli-research-replays	cli	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+cli-results-ledger	cli	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+cli-results-top	cli	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+cli-screen-select	cli	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+cli-span-reloads	cli	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+p99-absent-benches	workspace	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+deps-build-scripts-spawn-rustc	deps	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+deps-inline-asm	deps	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+deps-native-code-other-targets	deps	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-
+workflow-interpreters-web-job	ci	NOT-YET-TRIAGED	paused before triage	-	-	-	-	-

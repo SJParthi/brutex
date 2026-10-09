@@ -1,0 +1,112 @@
+id	after	after_plain	fix
+sobs-2	FIXED	Events the tool loses on a full disk are now kept in a lasting record that a restart shows.	D-4410, a9066b92
+sobs-3	FIXED	A torn last line left by a full disk is now closed by the next write, so no event vanishes.	D-4412, b0e992af
+r53-1	FIXED	A closed error stream no longer crashes the server, the command tool or a download; the lost line is counted.	D-4413 + D-4463, 94983010 + 168f7021
+sobs-11	FIXED	The saved copy of an unreadable vendor reply is now named in the log and kept safely on disk.	D-4414, 37ed211d
+satk-9	FIXED	A corrupt data page is now refused with a reason instead of crashing the reader.	D-4415, d8547a8e
+satk-2	FIXED	A time index is now tied to the exact bar file it belongs to, so a swapped index is refused.	D-4416, 8bcf95cf
+satk-5	FIXED	Not-a-number and infinite values in the log now read back as numbers.	D-4417, 5cc12525
+satk-6	FIXED	A log line that repeats a field is now refused by name, and the writer never repeats one.	D-4418, 5cc12525
+rustonly-4	FIXED	The server opens a browser only when asked; otherwise it just prints the address.	D-4430, 40669ba3
+r64-6	FIXED	An oversized catalogue is now refused for its size, which is the true reason.	D-4431, 916083a5
+W1-api5-8	FIXED	Asking for bars past the end of a month now reads one record, not the whole month.	D-4432, 2d38c60a
+W1-api6-3	FIXED	A lasting top-results refusal now costs one record read per request, not a full walk.	D-4433, c41d1ad5
+W1-api2-3	FIXED	The trade readers are kept on purpose and their cost is now timed with one shared tool.	D-4434, 15c2dd2f
+W1-api5-7	FIXED	The verify page now checks one page of at most 1,024 months per request.	D-4435, 7deb5b6f
+W1-api6-0	FIXED	The verify page now checks one page of at most 1,024 months per request.	D-4435, 7deb5b6f
+o1api-4	FIXED	A request's query text is now split once, not once for every field.	D-4436, e344bb6f
+so1-4	FIXED	The live sweep status page is now tested and timed at its largest allowed sizes.	D-4437, 63318ac9
+so1-5	FIXED	Refreshing masters when nothing changed no longer rebuilds the whole universe.	D-4438, 486f338a
+W1-api5-4	FIXED	Highs and lows over a time window now come from kept monthly summaries; other sorts stop at a stated ceiling.	D-4439, f2324b9c
+W1-api3-0	FIXED	The audit journal's cost is now measured as it grows; whether to rotate old files is your call.	D-4441, 871bdf2a
+W1-api1-6	FIXED	An evidence page now proves it is current through the same read that serves it.	D-4442, 43ef4971
+W1-api2-8	FIXED	A qualification page now shows at most 16,384 folds.	D-4443, d5cd85d9
+sobs-15	FIXED	An unreadable server lock note is now named as unreadable, not called missing.	D-4445, 31c6fac1
+sobs-12	FIXED	The first record of a journal or new results file now makes its folder entry safe on disk.	D-4446 + D-4461, ceb5b0c5 + 168f7021
+sobs-9	FIXED	Every sweep launch route now logs when it refuses an unstamped build.	D-4447, 31c6fac1
+sobs-8	FIXED	A blocked recovery now logs its stage and reason.	D-4448, 31c6fac1
+sobs-7	FIXED	Every contract download that fails is now logged with its reason.	D-4449, 31c6fac1
+L1-R3-2	FIXED	A pull run refused before it starts is now logged with its reason.	D-4450, 31c6fac1
+sobs-14	FIXED	A run's log now shows only the events that belong to that run.	D-4451, 27c39bb8 + 31c6fac1
+sobs-5	FIXED	The multi-feed pull now logs each step and how it ended.	D-4452, 31c6fac1
+sobs-6	FIXED	The autopilot now logs when it halts, stalls or stops.	D-4453, 31c6fac1
+sobs-10	FIXED	Every store check is now logged, and the database page can run one.	D-4454, 31c6fac1 + 36091640
+L1-R3-5	FIXED	Every network retry is now logged once with its reason.	D-4455, 31c6fac1
+rnew-1	FIXED	A crash mid-save no longer blocks nine ledgers; the torn end is cut and logged.	D-4460, 168f7021
+sobs-4	FIXED	A sweep refused by its required audit is now logged, and the finish line carries the real exit code.	D-4462, 168f7021
+sobs-1	FIXED	A crash now leaves one event in the log before the program stops.	D-4464, 168f7021
+r3-1	FIXED	Very large ranked result files can now still be read page by page.	D-4465, 168f7021
+AC-gates-o1-4	FIXED	The build file no longer claims the command tool has no loops.	D-4466, 168f7021
+W2-cli16-1	FIXED	Each out-of-sample check no longer re-derives its group's identity.	D-4468, 60a78c40
+r64-1	FIXED	The record now says plainly that a held writer does not re-read old rows, and a test proves it.	D-4469, 168f7021 + 60a78c40
+o1engine-20	FIXED	The unused best-results keeper was removed, so its cost no longer exists.	D-4480, 368a103d
+srust-1	FIXED	Scripts hidden in data links or embedded frames are now refused by the checks.	D-4490, 0cf6978a
+srust-2	FIXED	A workflow step can no longer hand a ready-made action a program to run.	D-4491, dd49f656
+srust-3	FIXED	The run settings file is now read by a check and may hold only the two allowed settings.	D-4492, 56c99de4
+launch-json-content	FIXED	The run settings file is now read by a check and may hold only the two allowed settings.	D-4492 (as srust-3), 56c99de4
+srust-4	FIXED	The last text-editing script in the checks is now Rust, and that tool is refused everywhere.	D-4493, 8945b088
+workflow-interpreters-non-web	FIXED	The last text-editing script in the checks is now Rust, and that tool is refused everywhere.	D-4493 (as srust-4), 8945b088
+satk-1	FIXED	Exchange test listings are now caught whatever their spacing or letter case.	D-4507, 4fae799b
+D-3152	FIXED	Lower-case exchange test listings are now caught too.	D-4507, 4fae799b
+r64-4	FIXED	Whole numbers with any number of zero decimals read again; a real fraction is refused by name.	D-4508, da568b3e
+OBSV-01	FIXED	The merged log page no longer claims it reached the oldest event when it cut results.	D-3200, 21443a2a
+OBSV-02	FIXED	An unreadable master file is now shown as unreadable, not missing.	D-3201, 21443a2a
+OBSV-03	FIXED	A session cache entry is now saved to disk before it is called safe.	D-3202, 21443a2a
+OBSV-04	FIXED	A failed index append now says how many entries actually landed.	D-3203, 21443a2a
+OBSV-05	FIXED	Live sweep progress now reads only its own run, so old log damage no longer blocks it.	D-3204, 21443a2a
+OBSV-06	FIXED	Each month refused during a sweep-all run now leaves a log line with its reason.	D-3205, 21443a2a
+OBSV-07	FIXED	A refused stored-month sweep now logs its reason.	D-3206, 21443a2a
+OBSV-08	FIXED	The command-finished log line now says why a command was refused.	D-3207, 21443a2a
+OBSV-09	FIXED	The ingest page now reads a stop that was taken but not saved, and shows its warning.	D-3208, 21443a2a
+OBSV-10	FIXED	The audit page now names an older page it could not read instead of counting it.	D-3209, 21443a2a
+OBSV-11	FIXED	One refused index row no longer drops the rest of the batch.	D-3210, 21443a2a
+L1-R3-W5	FIXED	The saved-evidence panel now shows the server's reason for a refusal.	D-3215 (lens L1 round 3, W5), 1290586a
+L1-R3-W1W2W3W4W6W7	FIXED	Six web pages now show the server's refusal reason and keep an unknown as unknown, not zero.	D-3211..D-3214 + D-3216 + D-3217 (lens L1 round 3, W1-W4, W6, W7), 55075d2e + 24a877bb + 5d58116b + 0b50e7c8 + 301fc233 + e8c86d88
+sobs-13	PARTIAL	A save-to-disk step for the log now exists, but the server and command tool do not call it at exit yet.	D-4411, a9066b92
+lookahead	PARTIAL	The engine no longer lets a later bar erase an earlier exit; the command tool still names the old cost version and refuses until switched.	D-4500, ee165879
+r64-5	PARTIAL	The engine no longer lets a later bar erase an earlier exit; the command tool still names the old cost version and refuses until switched.	D-4500, ee165879
+srust-5	OWNER	Only seven pinned helper actions may run now; whether five may run JavaScript outside the web job is your decision.	D-4494, dd49f656
+workflow-js-actions	OWNER	Only seven pinned helper actions may run now; whether five may run JavaScript outside the web job is your decision.	D-4494 (as srust-5), dd49f656
+ET-bars-candles-store-3	OWNER	Not changed: checking session hours inside the store depends on market and venue rules only you can set.	none (fixer assessed it as needing your decision)
+so1-2	OPEN	A new speed test and its measurement are written; the final checks are not finished.	D-4419 (WIP), 8ec02b03 + ff39f4c3 + a7a27dc3
+so1-6	OPEN	Cleanup for the store speed test is written but has not been run yet.	WIP 8ec02b03, no decision yet
+W1-api1-4	OPEN	The campaign page's full read is kept and a timing test is written, but its numbers are not filled in.	D-4440 (WIP), 32896202
+W2-cli10-0	OPEN	Saving base evidence now scans once, but the final checks are not finished.	D-4467 (WIP), 60a78c40 + 0e3eee9a + 5cd98c62
+so1-1	OPEN	The hottest check now counts in batches, but the final checks are not finished.	D-4481 (WIP), 2cfa70ae
+so1-3	OPEN	The speed gate was reworked to resist machine load, but the final checks are not finished.	D-4482 (WIP), 2cfa70ae
+W3-engine1-1	OPEN	Each level's sorting is now measured and kept, but the final checks are not finished.	D-4483 (WIP), 2cfa70ae
+o1engine-22	OPEN	Expression scratch space is now sized to what it needs, but the final checks are not finished.	D-4484 (WIP), 2cfa70ae
+o1engine-23	OPEN	The search's sibling comparison is now measured and bounded, but the final checks are not finished.	D-4485 (WIP), 2cfa70ae
+GAP16-26	OPEN	A money total that may have been rounded is now refused, but the full tests are not finished.	D-4486 (WIP), 2cfa70ae
+satk-8	OPEN	A fix that refuses a zero block length is written but not yet compiled or tested.	WIP ce2090fd, no decision yet
+satk-7	OPEN	A cap on the significance bar is written and measured, but its test and record are not finished.	WIP ce2090fd, no decision yet
+W3-runner1-3	OPEN	A label for unproved closure is written but not yet compiled or tested.	WIP ce2090fd, no decision yet
+c4a-7	OPEN	A label for unproved closure is written but not yet compiled or tested.	WIP ce2090fd, no decision yet
+AC-whp-cx-2	OPEN	The closure text fix is written but not yet compiled or recorded.	WIP ce2090fd, no decision yet
+c4a-6	OPEN	A speed test row for the closure check is written but not yet run.	WIP ce2090fd, no decision yet
+r64-3	OPEN	The wrong comments are corrected, but the decision record is not written yet.	WIP ce2090fd, no decision yet
+satk-4	OPEN	The wrong session comment is corrected, but the decision record is not written yet.	WIP ce2090fd, no decision yet
+rnew-2	OPEN	Not started yet: a cost table row still says time lookup is a bisection.	none
+rnew-3	OPEN	Not started yet: no committed speed test re-measures the kept costs.	none
+W1-pull1-0	OPEN	Not started yet: the per-day receipt re-check is still not timed.	none
+sobs-16	OPEN	Not started yet: the log still cannot be searched by instrument, feed or text.	none
+sobs-17	OPEN	Not started yet: the limits document still understates the widest log line.	none
+sobs-19	OPEN	Not started yet: vendor answers to list and post calls are still not logged.	none
+r53-2	OPEN	Not started yet: the limits document still says slow request bodies have no time limit.	none
+srust-6	OPEN	Not started yet: the limits document still says 71 text programs remain in the checks.	none
+o1api-33	OPEN	Not started yet: vendor replies are still decoded whole; a streaming decoder was judged likely out of scope.	none
+sobs-18	OPEN	Set aside to save time: most research ledgers still have no page.	none
+AC-whp-o1-1	OPEN	Not started yet: resuming a stored sweep still reads the whole history.	none
+cli-14	OPEN	Not started yet: some ledger hashing still reads whole files and is not timed.	none
+W2-cli12-3/-4	OPEN	Not started yet: whole-file hashing behind ledger reads is still not timed.	none
+W2-cli6-0	OPEN	Not started yet: each launch still replays the child history, not timed.	none
+W2-cli2-5	OPEN	Not started yet: a search page still rechecks its journals on every read, not timed.	none
+W2-cli14-1	OPEN	Not started yet: Selection reads still replay their sources, not timed.	none
+W2-cli14-2	OPEN	Not started yet: Selection reads still replay their sources, not timed.	none
+W2-cli14-3	OPEN	Not started yet: Selection reads still replay their sources, not timed.	none
+W2-cli14-1/2/3	OPEN	Not started yet: Selection reads still replay their sources, not timed.	none
+W3-runner2-3	OPEN	Not started yet: the global replay still re-hashes for every witness, not timed.	none
+W3-runner2-5	OPEN	Not started yet: the position search is still linear outside the fast path.	none
+satk-3	OPEN	Not started yet: bar widths that do not divide a day can still stamp a bar before the open.	none
+r64-2	OPEN	Not started yet: price documents are still stale and long prices get the wrong refusal reason.	none
+W1-pull3-4	OPEN	Not started yet: the minute-coverage audit output still has no cap and is not timed.	none
