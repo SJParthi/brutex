@@ -16420,3 +16420,19 @@ system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.
 address, and only `BRUTEX_OPEN=1` starts the handler (`BRUTEX_NO_OPEN` still
 refuses even an ask).
 
+## Two api routes whose ceilings no section named, measured — D-4437 and D-4438, 9 October 2026
+
+Measured by `api::latency` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each), p50 / p99 / max.
+
+- **`/live.json` lists the live folder and copies rows per request, within
+  three ceilings (so1-4, D-4437).** `livejson::respond` serves
+  `cli::live::CensusCache`, whose refresh lists the live folder (at most
+  `LIVE_ENTRY_LIMIT` = 4,096 entries), stats each run and clones each run it
+  keeps (at most `LIVE_RUN_LIMIT` = 128 runs of `LIVE_ROW_LIMIT` = 256 rows).
+  Every one of the three is a constant, so a request is bounded; one run or one
+  row past either of the last two is refused by name, which
+  `api::livejson::tests::the_live_route_answers_at_its_ceilings_and_refuses_past_them`
+  proves at 128 runs of 256 rows. At those ceilings
+  (`latency_live_json_at_its_ceilings`): a warm answer {so4_warm}; a cold
+  `CensusCache::refresh` {so4_cold}. The per-request folder listing and clone
+  are `cli`'s and are unchanged here.

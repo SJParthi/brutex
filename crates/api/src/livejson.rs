@@ -590,4 +590,108 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **At its three named ceilings the route still answers, and a run past
+    /// either the run or the row ceiling refuses by name.** so1-4, D-4437.
+    #[test]
+    fn the_live_route_answers_at_its_ceilings_and_refuses_past_them() {
+        let root = crate::scratch::path("livejson-ceilings");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+        full_live_store(&root, 3, cli::live::LIVE_ROW_LIMIT);
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body.contains(r#""count":3"#), "{body}");
+        assert!(body.contains(r#""kept":256"#), "{body}");
+
+        // One row past the per-run ceiling is refused, never cut.
+        full_live_store(&root, 1, cli::live::LIVE_ROW_LIMIT + 1);
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("live snapshot limit of 256 rows"), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+
+        std::fs::create_dir_all(&root).expect("a temp root");
+        full_live_store(&root, cli::live::LIVE_RUN_LIMIT + 1, 1);
+        let (status, _, body) = respond(Ok(root.clone()));
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("exceeds 128 runs"), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `runs` live files under `root`, each with `rows` ranked rows.
+    fn full_live_store(root: &std::path::Path, runs: usize, rows: usize) {
+        for nth in 0..runs {
+            let mut identity = [0_u8; 32];
+            identity[..8].copy_from_slice(&(nth as u64 + 1).to_le_bytes());
+            let mut live = cli::live::Live::open(root, &identity).expect("a live file opens");
+            let ranked: Vec<_> = (0..rows)
+                .map(|rank| cli::frontier::Row {
+                    identity,
+                    rank: u16::try_from(rank + 1).expect("a rank within u16"),
+                    mask_words: [9, 0, 0, 0, 0, 0],
+                    hits: 4_395,
+                    n: 4_070,
+                    mean_milli_paisa: 12_300,
+                    t_milli: 1_802,
+                    payoff_bp: 140,
+                    wins: 2_100,
+                    trades: 0,
+                    cell_wins: 0,
+                    pessimistic: 0,
+                    worst_trade: 0,
+                    max_drawdown: 0,
+                    min_win: 0,
+                    gross_win: 0,
+                    gross_loss: 0,
+                    direction: cli::frontier::Direction::Short,
+                    rules: cli::Rules::elite(400, 25),
+                })
+                .collect();
+            live.publish(
+                &ranked,
+                cli::live::Summary {
+                    trials: 3_572_851,
+                    bar_milli: 5_673,
+                    priced: 0,
+                },
+            )
+            .expect("the rows publish");
+        }
+    }
+
+    /// What `/live.json` costs at its ceilings: `LIVE_RUN_LIMIT` runs of
+    /// `LIVE_ROW_LIMIT` rows, warm (every file unchanged, rows reused) and
+    /// cold (a fresh index decoding every file). A measurement, run on
+    /// purpose; the numbers are in `docs/06-limits.md`'s D-4437 row. so1-4.
+    #[test]
+    #[ignore = "a latency measurement, run on purpose: see crate::latency"]
+    fn latency_live_json_at_its_ceilings() {
+        let root = crate::scratch::path("livejson-latency");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+        full_live_store(&root, cli::live::LIVE_RUN_LIMIT, cli::live::LIVE_ROW_LIMIT);
+        let mut bytes = 0;
+        let warm = crate::latency::Timed::run(100, || {
+            let (status, _, body) = respond(Ok(root.clone()));
+            bytes = body.len();
+            (status == axum::http::StatusCode::OK)
+                .then_some(())
+                .ok_or(body)
+        })
+        .expect("warm");
+        let cold = crate::latency::Timed::run(30, || {
+            cli::live::CensusCache::default()
+                .refresh(&root)
+                .map(|census| assert_eq!(census.runs.len(), cli::live::LIVE_RUN_LIMIT))
+        })
+        .expect("cold");
+        println!("/live.json body at the ceilings: {bytes} bytes");
+        println!("{}", warm.line("/live.json, 128 runs x 256 rows, warm"));
+        println!(
+            "{}",
+            cold.line("CensusCache::refresh, 128 runs x 256 rows, cold")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

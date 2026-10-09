@@ -66570,3 +66570,16 @@ the ingest forms and `/logs.json` use it. Repeated keys keep the FIRST value,
 as `param` did. Proved by `a_split_query_answers_every_field_as_param_does`.
 FXB1-08.
 
+### D-4437 — `/live.json`'s ceilings are tested at their limits and measured — 2026-10-09
+
+**What was observed.** so1-4: `livejson::respond` serves
+`cli::live::CensusCache`, whose refresh lists the live folder and copies rows
+per request, bounded by `LIVE_ENTRY_LIMIT` (4,096), `LIVE_RUN_LIMIT` (128)
+and `LIVE_ROW_LIMIT` (256), none of which `docs/06-limits.md` named.
+
+**Decided.** No code change in `cli` (out of this fix's scope). The route is
+tested at 128 runs of 256 rows, and one run or one row past either ceiling is
+refused by name; the warm answer and the cold refresh are measured at the
+ceilings and recorded. Proved by
+`the_live_route_answers_at_its_ceilings_and_refuses_past_them`. FXB1-09.
+
