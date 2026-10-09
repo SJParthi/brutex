@@ -52,7 +52,16 @@
 //! [`audit::MAX_PAGE_RECORDS`] records read off disk, one manifest header per
 //! vendor, one `metadata` call for the manifest mtime, and one pass over the
 //! entry region — the same pass `/store.json` already makes. Nothing here walks
-//! a directory, and nothing here grows with the journal.
+//! a directory.
+//!
+//! **One cost does grow with the journal, once** (WP-33a, D-3341 item 4).
+//! Scoping the runs by feed needs each run record's vendor, and the journal
+//! keeps no index of its runs, so [`Attribution`] decodes every record the
+//! first time and only the appended ones after that: measured on a shadow of
+//! the operator's store, 9 Oct 2026, 4,217,027 records (1,079,558,912 bytes)
+//! took 1.33 s on the first request; 200 later requests took p50 0.75 ms and
+//! p99 0.84 ms for `feed=zerodha`. The GDFL answer adds the import journal's
+//! summary (`crate::server::imports::summary`): p50 8.6 ms, p99 9.3 ms.
 
 use crate::server::{Loaded, Site, census_now, journal_trouble, param, window_text};
 use crate::{audit, ingest, render};
@@ -117,17 +126,32 @@ pub async fn audit_json(
         );
     };
     note_page_ignored(query);
-    (
-        axum::http::StatusCode::OK,
-        json(),
+    let page = crate::server::page_number(query);
+    // OFF THE ASYNC WORKERS. The feed's journal attribution reads the pull
+    // journal's new records and the GDFL import journal's new bytes
+    // ([`Attribution`], `crate::server::import_journal`); neither belongs on a Tokio
+    // worker, and a full pool is a named 429, never a queue.
+    match crate::detail::run_store_read(move || {
         body(
             &site,
             feed,
-            crate::server::page_number(query),
+            page,
             std::time::SystemTime::now(),
             ingest::today_ist(),
-        ),
-    )
+        )
+    })
+    .await
+    {
+        Ok(body) => (axum::http::StatusCode::OK, json(), body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "audit read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (status, json(), body)
+        }
+    }
 }
 
 /// A request this route turned away, on the machine rather than only on the
@@ -269,22 +293,54 @@ pub fn body(
             );
         }
     }
-    journal_block(site, page, &mut out);
+    journal_block(site, feed, page, &mut out);
     store_block(site, feed, &mut out);
+    // GDFL'S OWN AUDIT TRAIL. The pull journal holds broker pulls; a GDFL
+    // import is journalled in `imports/gdfl.journal`, which no route read
+    // until this one did (DB-054, DB-G07, DB-G30; D-3341 item 4).
+    if feed == Vendor::Gdfl {
+        out.push_str(r#","imports":"#);
+        out.push_str(&crate::server::imports::summary(&site.store_root).to_string());
+    }
     out.push('}');
     out
 }
 
-/// The journal: what the file is, and one bounded page of what it holds.
-fn journal_block(site: &Site, page: usize, out: &mut String) {
+/// The journal: what the file is, and one bounded page of the records that
+/// belong to `feed`.
+///
+/// # Scoped by each record's vendor (DB-054, DB-G30; D-3341 item 4)
+///
+/// This block took no feed, so `/audit.json?feed=gdfl` and `?feed=zerodha`
+/// answered the same 200 records, byte for byte: Zerodha's member failures,
+/// under GDFL's name. An audit record carries no vendor field (its 256-byte
+/// image has no byte to spare, `audit::Record`), so the vendor is read from
+/// the evidence each RUN record does carry: its `source`, which names the
+/// endpoint it was fetched from (`https://api.kite.trade/...`) or the
+/// Zerodha-only cash-identity policy it ran under (`zerodha_nse_checked ...`).
+/// A member-failure record belongs to the run record before it, because a run
+/// appends its own record and then one per member that did not land. A run
+/// whose source names neither (a refusal before any vendor was asked, such as
+/// `Reference indices`) is UNATTRIBUTED: counted under `feed_scope`, and never
+/// shown under a feed it might not be.
+fn journal_block(site: &Site, feed: Vendor, page: usize, out: &mut String) {
     let journal = site.journal();
     let log = journal.look();
     let trouble = journal_trouble(&log);
     let total = log.records();
     let per_page = audit::MAX_PAGE_RECORDS;
-    // `total - 1` and not `total`, so 200 records is one page and not two.
-    // Saturating, so an empty journal is page 0 of 1 rather than an underflow.
-    let last_page = usize::try_from(total.saturating_sub(1) / per_page).unwrap_or(0);
+    let scoped = attribution(&journal, total);
+    let (held, unattributed, runs_held, unattributed_runs, faults, scan_error) = match scoped {
+        Ok(ref runs) => {
+            let (held, runs_held) = runs.held(feed, total);
+            let (none, runs_none) = runs.unattributed(total);
+            (held, none, runs_held, runs_none, runs.faults, None)
+        }
+        Err(ref why) => (0, 0, 0, 0, 0, Some(why.clone())),
+    };
+    // `held - 1` and not `held`, so 200 records is one page and not two.
+    // Saturating, so an empty scope is page 0 of 1 rather than an underflow.
+    let last_page = usize::try_from(held.saturating_sub(1) / per_page).unwrap_or(0);
     // CLAMPED, NOT REFUSED. `?page=99` over a 135-record journal is a stale
     // bookmark, not an attack; it answers with the last page, exactly as the
     // HTML pager does.
@@ -293,7 +349,7 @@ fn journal_block(site: &Site, page: usize, out: &mut String) {
 
     let _ = write!(
         out,
-        r#","journal":{{"path":{},"present":{},"records":{total},"bytes":{},"trouble":{},"page":{page},"pages":{},"page_rows":{per_page}}}"#,
+        r#","journal":{{"path":{},"present":{},"records":{total},"bytes":{},"trouble":{},"page":{page},"pages":{},"page_rows":{per_page},"feed_scope":{{"feed":{},"records":{held},"runs":{runs_held},"unattributed_records":{unattributed},"unattributed_runs":{unattributed_runs},"undecodable":{faults},"error":{},"holds":{}}}}}"#,
         render::json_string(&journal.path.display().to_string()),
         !matches!(log, audit::Log::Absent),
         match log {
@@ -306,9 +362,18 @@ fn journal_block(site: &Site, page: usize, out: &mut String) {
             render::json_string(&trouble)
         },
         last_page.saturating_add(1),
+        render::json_string(feed.as_str()),
+        scan_error
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        render::json_string(&holds_sentence(feed)),
     );
 
-    match journal.page(total, skip, per_page) {
+    let entries = match scoped {
+        Ok(ref runs) => runs.page(&journal, feed, total, skip, per_page),
+        Err(why) => Err(why),
+    };
+    match entries {
         Ok(entries) => {
             out.push_str(r#","runs":["#);
             for (n, entry) in entries.iter().enumerate() {
@@ -330,6 +395,237 @@ fn journal_block(site: &Site, page: usize, out: &mut String) {
             );
         }
     }
+}
+
+/// What the pull journal holds for `feed`, in one sentence: a feed with no
+/// HTTP transport is never pulled, so its runs are elsewhere or nowhere.
+fn holds_sentence(feed: Vendor) -> String {
+    let http = pull::vendor::DESCRIPTORS.iter().any(|row| {
+        row.feed.store_vendor() == Some(feed)
+            && matches!(row.transport, pull::vendor::Transport::Http(_))
+    });
+    if feed == Vendor::Gdfl {
+        format!(
+            "The pull journal records broker pulls over HTTP; {} is never pulled. Its imports \
+             are journalled in imports/gdfl.journal, summarised under `imports` and served by \
+             /imports.json?feed={}.",
+            feed.as_str(),
+            feed.as_str()
+        )
+    } else if http {
+        format!(
+            "The pull journal's records whose run names {} by its endpoint or its cash-identity \
+             policy, and the member failures each such run appended after it.",
+            feed.as_str()
+        )
+    } else {
+        format!(
+            "{} has no HTTP transport and is never pulled; a record here would be an archive \
+             import whose source names its endpoint, and none does.",
+            feed.as_str()
+        )
+    }
+}
+
+/// The vendor a run record's `source` names, when it names one: an HTTP
+/// feed's endpoint (`pull::vendor::DESCRIPTORS`, the one place an endpoint is
+/// written), or a Zerodha-only cash-identity policy, which
+/// `ingest::parse_cash_identity` refuses for any other vendor.
+fn vendor_of_source(source: &str) -> Option<Vendor> {
+    if source.starts_with("zerodha_") {
+        return Some(Vendor::Zerodha);
+    }
+    pull::vendor::DESCRIPTORS
+        .iter()
+        .find_map(|row| match row.transport {
+            pull::vendor::Transport::Http(ref spec) if source.contains(spec.base_url) => {
+                row.feed.store_vendor()
+            }
+            _ => None,
+        })
+}
+
+/// Every run record of one pull journal, with the vendor its source names.
+///
+/// # Cost, stated
+///
+/// The journal holds no index of its runs: on the operator's store, 9 Oct
+/// 2026, 12 run records among 4,217,027 (1,079,558,912 bytes), the rest
+/// member failures. So the first request reads the whole file once, in 4 MiB
+/// reads, decoding each 256-byte record; after that a request decodes only
+/// the records appended since (one `metadata` call when there are none). A
+/// file that shrank or was replaced is read again. Paging is then arithmetic
+/// over the run boundaries: O(runs), plus one bounded `Journal::page` read per
+/// run a page spans.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Attribution {
+    /// Records decoded.
+    scanned: u64,
+    /// The file's identity when scanned.
+    identity: Option<(u64, u64)>,
+    /// Each run record's ordinal and vendor, in file order.
+    runs: Vec<(u64, Option<Vendor>)>,
+    /// Records that would not decode, kept in the run before them.
+    faults: u64,
+}
+
+impl Attribution {
+    /// Each run's records as `(first, end, vendor)`, newest run first, over a
+    /// journal of `total` records. Records before the first run are a span of
+    /// their own with no vendor.
+    fn spans(&self, total: u64) -> Vec<(u64, u64, Option<Vendor>)> {
+        let mut out = Vec::with_capacity(self.runs.len().saturating_add(1));
+        let mut end = total.min(self.scanned);
+        for &(first, vendor) in self.runs.iter().rev() {
+            if first < end {
+                out.push((first, end, vendor));
+            }
+            end = end.min(first);
+        }
+        if end > 0 {
+            out.push((0, end, None));
+        }
+        out
+    }
+
+    /// Records and runs that belong to `feed`.
+    fn held(&self, feed: Vendor, total: u64) -> (u64, u64) {
+        self.count(total, Some(feed))
+    }
+
+    /// Records and runs that belong to no vendor.
+    fn unattributed(&self, total: u64) -> (u64, u64) {
+        self.count(total, None)
+    }
+
+    /// Records and runs whose vendor is `vendor`.
+    fn count(&self, total: u64, vendor: Option<Vendor>) -> (u64, u64) {
+        let spans = self.spans(total);
+        let records = spans
+            .iter()
+            .filter(|span| span.2 == vendor)
+            .map(|span| span.1.saturating_sub(span.0))
+            .sum();
+        let runs = self.runs.iter().filter(|run| run.1 == vendor).count();
+        (records, u64::try_from(runs).unwrap_or(u64::MAX))
+    }
+
+    /// The newest records of `feed` after skipping `skip`, at most `take`,
+    /// newest first.
+    fn page(
+        &self,
+        journal: &audit::Journal,
+        feed: Vendor,
+        total: u64,
+        skip: u64,
+        take: u64,
+    ) -> Result<Vec<audit::Entry>, String> {
+        let mut skip = skip;
+        let mut left = take.min(audit::MAX_PAGE_RECORDS);
+        let mut out = Vec::new();
+        for (first, end, vendor) in self.spans(total) {
+            if left == 0 {
+                break;
+            }
+            if vendor != Some(feed) {
+                continue;
+            }
+            let len = end.saturating_sub(first);
+            if skip >= len {
+                skip = skip.saturating_sub(len);
+                continue;
+            }
+            let newest = end.saturating_sub(skip);
+            let wanted = left.min(newest.saturating_sub(first));
+            skip = 0;
+            out.extend(journal.page(newest, 0, wanted)?);
+            left = left.saturating_sub(wanted);
+        }
+        Ok(out)
+    }
+
+    /// Decodes the records `[scanned, total)` of the file at `path`.
+    fn advance(&mut self, path: &std::path::Path, total: u64) -> Result<(), String> {
+        use std::io::{Read as _, Seek as _};
+        const CHUNK: u64 = 16_384;
+        if total <= self.scanned {
+            return Ok(());
+        }
+        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        file.seek(std::io::SeekFrom::Start(
+            self.scanned.saturating_mul(audit::RECORD_LEN_U64),
+        ))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut buf = Vec::new();
+        while self.scanned < total {
+            let count = (total.saturating_sub(self.scanned)).min(CHUNK);
+            buf.clear();
+            (&mut file)
+                .take(count.saturating_mul(audit::RECORD_LEN_U64))
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut image = [0u8; audit::RECORD_LEN];
+            for (n, chunk) in buf.chunks_exact(audit::RECORD_LEN).enumerate() {
+                for (dst, src) in image.iter_mut().zip(chunk) {
+                    *dst = *src;
+                }
+                let ordinal = self
+                    .scanned
+                    .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                match audit::Record::decode(&image) {
+                    Ok(record) if record.kind == audit::Kind::Run => {
+                        self.runs.push((ordinal, vendor_of_source(&record.source)));
+                    }
+                    Ok(_) => {}
+                    Err(_) => self.faults = self.faults.saturating_add(1),
+                }
+            }
+            let whole = u64::try_from(buf.len()).unwrap_or(0) / audit::RECORD_LEN_U64;
+            if whole == 0 {
+                return Err(format!(
+                    "{}: the file ended before record {} of {total}",
+                    path.display(),
+                    self.scanned
+                ));
+            }
+            self.scanned = self.scanned.saturating_add(whole);
+        }
+        Ok(())
+    }
+}
+
+/// Every pull journal attributed so far, by path.
+fn attributions()
+-> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Attribution>> {
+    static HELD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Attribution>>,
+    > = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The journal's run attribution through its first `total` records, read
+/// through the tail. See [`Attribution`] for the cost.
+///
+/// # Errors
+///
+/// A file that cannot be read, in its own words.
+fn attribution(journal: &audit::Journal, total: u64) -> Result<Attribution, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let identity = std::fs::metadata(&journal.path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    let mut held = attributions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = held.entry(journal.path.clone()).or_default();
+    if entry.identity != identity || total < entry.scanned {
+        *entry = Attribution {
+            identity,
+            ..Attribution::default()
+        };
+    }
+    entry.advance(&journal.path, total)?;
+    Ok(entry.clone())
 }
 
 /// One journal entry, as the console reads it.
@@ -549,7 +845,7 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
 
     let _ = write!(
         out,
-        r#","store":{{"feed":{},"state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
+        r#","store":{{"feed":{},"state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"capacity":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
         render::json_string(feed.as_str()),
         render::json_string(census.map_or("absent", |c| c.state.name())),
         render::json_string(&census.map_or_else(
@@ -572,6 +868,7 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
         census
             .and_then(committed_at)
             .map_or_else(|| "null".to_owned(), |secs| secs.to_string()),
+        capacity(census),
     );
     for (n, (month, (held, rows))) in months.iter().enumerate() {
         if n > 0 {
@@ -584,6 +881,30 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
         );
     }
     out.push_str("]}");
+}
+
+/// The census's room: the entries this build lets one census hold
+/// (`pull::manifest::MAX_ENTRIES`), the entries committed, and what is left.
+/// `null` when the census did not load, never a zero that reads as "empty".
+///
+/// # Why it is here (DB-G07)
+///
+/// The GDFL census filled at 2,097,152 entries on 6 Oct 2026 and every
+/// surface said `held`: the import went on writing bars no census counted for
+/// eleven months of option days, and the only trace was an `error` line in the
+/// `cli` log. `free` is the number that would have said so first, and `full`
+/// says it in one word. Two field reads; no walk.
+fn capacity(census: Option<&crate::census::VendorCensus>) -> String {
+    let Some(committed) = census.and_then(census_commits) else {
+        return "null".to_owned();
+    };
+    let limit = pull::manifest::MAX_ENTRIES;
+    format!(
+        r#"{{"limit":{limit},"committed":{committed},"free":{},"over":{},"full":{}}}"#,
+        limit.saturating_sub(committed),
+        committed.saturating_sub(limit),
+        committed >= limit,
+    )
 }
 
 /// How many entries the manifest has committed, when it loaded.
@@ -720,11 +1041,14 @@ mod tests {
     fn a_recorded_run_survives_the_round_trip_field_for_field() {
         let site = site("run");
         let journal = site.journal();
+        // THE SOURCE NAMES GROWW'S ENDPOINT, as a real run's does, so the run
+        // is Groww's: a record naming no vendor is not shown under any feed
+        // (D-3341 item 4).
         let mut record = audit::Record::refused(
             audit::Scope::Spot,
             audit::Outcome::Failed,
             moment(),
-            "swept",
+            "https://api.groww.in/v1/historical",
             // An ampersand and a quote, because a symbol legally holds one and
             // a note legally holds the other. Both must arrive as text.
             r#"M&M — "no such folder""#,
@@ -1094,5 +1418,180 @@ mod tests {
             json.contains(r#""instrument_months":2,"bars":7,"months":["#),
             "{json}"
         );
+    }
+
+    /// A run record whose source names `source`, with `failures` member
+    /// failures appended after it, as a pull appends them.
+    fn pulled(journal: &audit::Journal, source: &str, failures: usize) {
+        let mut run = audit::Record::refused(
+            audit::Scope::Spot,
+            audit::Outcome::Failed,
+            moment(),
+            source,
+            "fixture",
+        );
+        run.failures = u64::try_from(failures).unwrap();
+        journal.append(&run).expect("append a run");
+        for n in 0..failures {
+            journal
+                .append(&audit::Record::member_failure(
+                    audit::Scope::Spot,
+                    moment(),
+                    &format!("SYM{n}"),
+                    pull::session::Window::new(day(), day()).expect("a window"),
+                    "did not land",
+                ))
+                .expect("append a failure");
+        }
+    }
+
+    /// The `source` of every run and failure in one answer, in order.
+    fn sources(json: &str) -> Vec<String> {
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("JSON");
+        parsed["runs"]
+            .as_array()
+            .expect("runs")
+            .iter()
+            .map(|run| run["source"].as_str().unwrap_or("").to_owned())
+            .collect()
+    }
+
+    /// **EACH FEED SEES ITS OWN RUNS AND THE FAILURES THEY APPENDED, AND NO
+    /// OTHER FEED'S** (DB-054, DB-G30): a Zerodha run by its policy, a Zerodha
+    /// run by its endpoint, a Groww run by its endpoint, and a refusal that
+    /// names no vendor, which no feed shows and every answer counts.
+    #[test]
+    fn the_journal_is_scoped_by_each_runs_vendor_and_gdfl_holds_none() {
+        let site = site("scoped");
+        let journal = site.journal();
+        pulled(&journal, "Reference indices", 0);
+        pulled(
+            &journal,
+            "zerodha_nse_checked NOT vendor-ISIN; NSE file same day; Swept surface",
+            2,
+        );
+        pulled(&journal, "https://api.groww.in/v1/historical/candle", 1);
+        pulled(
+            &journal,
+            "https://api.kite.trade/instruments/historical/:instrument_token/:interval",
+            3,
+        );
+
+        let zerodha = body(&site, Vendor::Zerodha, 0, moment(), Ok(day()));
+        let got = sources(&zerodha);
+        assert_eq!(got.len(), 7, "{zerodha}");
+        assert!(got[0].starts_with("SYM"), "newest first: {got:?}");
+        assert!(got[3].contains("api.kite.trade"), "{got:?}");
+        assert!(got[6].starts_with("zerodha_nse_checked"), "{got:?}");
+        assert!(
+            !got.iter()
+                .any(|s| s.contains("groww") || s == "Reference indices")
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&zerodha).unwrap();
+        let scope = &parsed["journal"]["feed_scope"];
+        assert_eq!(scope["records"], 7);
+        assert_eq!(scope["runs"], 2);
+        assert_eq!(scope["unattributed_records"], 1);
+        assert_eq!(scope["unattributed_runs"], 1);
+        assert_eq!(
+            parsed["journal"]["records"], 10,
+            "the file's own count is unchanged"
+        );
+
+        let groww = sources(&body(&site, Vendor::Groww, 0, moment(), Ok(day())));
+        assert_eq!(groww.len(), 2);
+        assert!(groww[1].contains("api.groww.in"));
+
+        let gdfl = body(&site, Vendor::Gdfl, 0, moment(), Ok(day()));
+        assert!(sources(&gdfl).is_empty(), "{gdfl}");
+        assert!(!gdfl.contains("zerodha_nse_checked"), "{gdfl}");
+        let parsed: serde_json::Value = serde_json::from_str(&gdfl).unwrap();
+        assert!(
+            parsed["journal"]["feed_scope"]["holds"]
+                .as_str()
+                .unwrap()
+                .contains("imports/gdfl.journal")
+        );
+        assert_eq!(parsed["imports"]["route"], "/imports.json?feed=gdfl");
+        assert_eq!(parsed["imports"]["journal"]["present"], false);
+        assert!(serde_json::from_str::<serde_json::Value>(&zerodha).unwrap()["imports"].is_null());
+    }
+
+    /// **A PAGE OF ONE FEED SPANS ITS RUNS AND SKIPS THE OTHERS'**: the newest
+    /// records first, across a run boundary, and the second page continues
+    /// where the first stopped. Pinned with a page of three over the spans.
+    #[test]
+    fn a_feed_page_crosses_run_boundaries_and_skips_other_feeds() {
+        let site = site("scoped-pages");
+        let journal = site.journal();
+        pulled(&journal, "https://api.kite.trade/a", 2);
+        pulled(&journal, "https://api.groww.in/b", 2);
+        pulled(&journal, "https://api.kite.trade/c", 1);
+        let total = journal.look().records();
+        let runs = attribution(&journal, total).expect("attributed");
+        let ordinals = |skip: u64, take: u64| -> Vec<u64> {
+            runs.page(&journal, Vendor::Zerodha, total, skip, take)
+                .expect("a page")
+                .iter()
+                .map(|entry| entry.ordinal)
+                .collect()
+        };
+        // Ordinals: 0-2 kite a, 3-5 groww b, 6-7 kite c.
+        assert_eq!(ordinals(0, 3), [7, 6, 2]);
+        assert_eq!(ordinals(3, 3), [1, 0]);
+        assert_eq!(ordinals(9, 3), Vec::<u64>::new());
+        assert_eq!(runs.held(Vendor::Zerodha, total), (5, 2));
+        assert_eq!(runs.held(Vendor::Groww, total), (3, 1));
+        // THE TAIL: a record appended later is attributed without a rescan.
+        pulled(&journal, "https://api.groww.in/d", 0);
+        let grown = attribution(&journal, journal.look().records()).expect("attributed");
+        assert_eq!(grown.scanned, total + 1);
+        assert_eq!(grown.held(Vendor::Groww, total + 1), (4, 2));
+    }
+
+    /// The vendor a source names: an endpoint of an HTTP feed, or a
+    /// Zerodha-only policy; nothing else.
+    #[test]
+    fn a_source_names_its_vendor_by_endpoint_or_policy_only() {
+        assert_eq!(
+            vendor_of_source("https://api.kite.trade/x"),
+            Some(Vendor::Zerodha)
+        );
+        assert_eq!(
+            vendor_of_source("zerodha_symbol NOT ISIN-verified; y"),
+            Some(Vendor::Zerodha)
+        );
+        assert_eq!(
+            vendor_of_source("https://api.dhan.co/v2"),
+            Some(Vendor::Dhan)
+        );
+        assert_eq!(vendor_of_source("Swept surface"), None);
+        assert_eq!(vendor_of_source("NIFTY"), None);
+    }
+
+    /// **THE CENSUS'S ROOM IS IN THE ANSWER** (DB-G07): the limit, what is
+    /// committed and what is left; `null` when no census loaded.
+    #[test]
+    fn the_store_block_carries_the_census_capacity() {
+        let root = store_root("capacity");
+        install(
+            &root,
+            Vendor::Dhan,
+            &manifest_image(
+                Vendor::Dhan,
+                &[("NIFTY", 2025, 1, 3), ("NIFTY", 2025, 2, 7)],
+            ),
+        );
+        let site = Site::load(&masters("capacity"), &root);
+        let json = body(&site, Vendor::Dhan, 0, moment(), Ok(day()));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let capacity = &parsed["store"]["capacity"];
+        assert_eq!(capacity["limit"], pull::manifest::MAX_ENTRIES);
+        assert_eq!(capacity["committed"], 2);
+        assert_eq!(capacity["free"], pull::manifest::MAX_ENTRIES - 2);
+        assert_eq!(capacity["full"], false);
+        let absent = body(&site, Vendor::Groww, 0, moment(), Ok(day()));
+        let parsed: serde_json::Value = serde_json::from_str(&absent).unwrap();
+        assert!(parsed["store"]["capacity"].is_null());
     }
 }
