@@ -65219,3 +65219,21 @@ requires both the real name there and `fn walk_forward_rungs(` in
 name.
 
 Invariant L1FC-12.
+
+### D-4740 — The browser reads a zero stop ceiling as no ceiling, as the route does — 2026-10-09
+
+**Finding.** D-1732, left open there. On `web/src/routes/backtest/+page.svelte`,
+`wholeNumber` (n > 0) read the descent's stop ceiling, so the page refused
+`0`. The route and `cli` read `0` as no ceiling. The function's comment also
+still quoted the server refusal that D-1732 removed.
+
+**The decision.** The ceiling has its own reading, `stopCeiling`. Like
+`wholeNumber`, it matches the digits first, but it accepts `0`. It feeds both
+`startDescent` (`max_points: 0`) and the derived control state. The list
+length keeps `wholeNumber`, so `0` is still refused there, as the route does.
+The summary line says "no stop ceiling" for `0`. The refusal and hint texts
+say that 0 means no ceiling. `web/tests/descent-ceiling.test.js` evaluates
+both functions from the page source and pins the call sites. It failed first
+with "the page defines stopCeiling".
+
+Invariant L1FC-13.
