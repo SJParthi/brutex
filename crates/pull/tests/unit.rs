@@ -6052,7 +6052,8 @@ fn snapshots_sharing_a_second_fold_into_one_bar() {
 ///
 /// A live 1day pull refused 10 of 16 members with "bars span 2025-12 to
 /// 2026-01" and stored 86 bars, 20 of them stamped on a **Sunday** and none on
-/// a Friday, on an exchange that trades Monday to Friday.
+/// a Friday, on an exchange that ordinarily trades Monday to Friday
+/// (`docs/00-charter.md` §3 records six weekend sessions).
 ///
 /// The cause was the bucket's origin. `fold` floored to a grid anchored at the
 /// Unix epoch — UTC midnight — while `crate::ingest` derives the month in IST.

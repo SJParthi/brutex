@@ -65102,3 +65102,21 @@ marker"). The old check passed it.
 `complete.writing`. D-1770 stays as written; this entry is the correction.
 
 Invariant L1FC-04.
+
+### D-4734 — No `.rs` file in `crates/` says NSE trades only Monday to Friday — 2026-10-09
+
+**Finding.** G5-3. D-1667 removed the weekday-only sentence from two files and
+pinned those two. `pull::fold` and `pull`'s unit test still said "an exchange
+that trades Monday to Friday", and `docs/00-charter.md` §3 records six weekend
+sessions.
+
+**The decision.** Both now read "ordinarily trades Monday to Friday", with the
+charter's count. `no_weekday_comment_says_nse_never_trades_on_a_weekend` now
+walks every `.rs` file under `crates/` and reads the files as prose, with
+comment markers removed. The `fold.rs` sentence was wrapped across two `//`
+lines, and whitespace collapsing alone could not see it. With the `pull`
+edits reverted, the test failed: "…/crates/pull/src/fold.rs still says "an
+exchange that trades Monday to Friday"". Only comments changed in `pull`, and
+no string literal was added there (gates 1c and 1d).
+
+Invariant L1FC-05.

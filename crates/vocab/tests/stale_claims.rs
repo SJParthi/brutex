@@ -51,6 +51,24 @@ fn flat(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// `text` with each line's leading comment marker (`//`, `///` or `//!`) dropped
+/// and its whitespace collapsed, so a sentence a comment wraps across lines
+/// reads as the one sentence it is. `pull::fold` wrapped "trades Monday // to
+/// Friday", and collapsing whitespace alone could not see it (G5-3, D-4734).
+fn prose(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|line| {
+            let line = line.trim_start();
+            line.strip_prefix("///")
+                .or_else(|| line.strip_prefix("//!"))
+                .or_else(|| line.strip_prefix("//"))
+                .unwrap_or(line)
+        })
+        .collect();
+    flat(&lines.join("\n"))
+}
+
 /// The text from the line starting `start` up to the next line starting
 /// `end`, or to the end of the document.
 fn section<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
@@ -410,10 +428,29 @@ fn the_corrected_sentences_do_not_return() {
 /// record six weekend sessions and 1,710 bars. The behaviour (a weekend bar sets
 /// no weekday bit) is right and stays; the sentences that called the exchange
 /// weekday-only are refused here so they cannot return. D-1667.
+///
+/// G5-3 (D-4734): the list held only the two files the finding named, and
+/// `pull::fold` and its unit test still said "an exchange that trades Monday to
+/// Friday". Every `.rs` file under `crates/` is read now, so a sibling cannot
+/// keep the sentence by not being listed.
 #[test]
 fn no_weekday_comment_says_nse_never_trades_on_a_weekend() {
-    for file in ["crates/indicators/src/lib.rs", "crates/vocab/src/table.rs"] {
-        let text = flat(&read(file));
+    let mut files = Vec::new();
+    rust_sources(&root().join("crates"), &mut files);
+    assert!(
+        files
+            .iter()
+            .any(|path| path.ends_with("crates/pull/src/fold.rs"))
+            && files.len() > 300,
+        "premise: the walk reached every crate ({} files)",
+        files.len()
+    );
+    let this_file = root().join("crates/vocab/tests/stale_claims.rs");
+    for path in files.iter().filter(|path| **path != this_file) {
+        let text = prose(
+            &std::fs::read_to_string(path)
+                .unwrap_or_else(|why| panic!("{} must be readable: {why}", path.display())),
+        );
         for stale in [
             "NSE trades Monday to Friday",
             "NSE does not trade them",
@@ -421,7 +458,11 @@ fn no_weekday_comment_says_nse_never_trades_on_a_weekend() {
             "an exchange that trades Monday to Friday",
             "A weekend bar in an equity series is a store defect",
         ] {
-            assert!(!text.contains(stale), "{file} still says {stale:?}");
+            assert!(
+                !text.contains(stale),
+                "{} still says {stale:?}",
+                path.display()
+            );
         }
     }
     let lib = flat(&read("crates/indicators/src/lib.rs"));
@@ -581,3 +622,4 @@ fn every_count_and_kind_the_documents_state_is_the_tables() {
     }
     assert_eq!(next, COUNT, "the group table stops at {next} of {COUNT}");
 }
+

@@ -314,8 +314,9 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
         // day BEFORE. Floored to the UTC grid it was re-stamped at 00:00 UTC of
         // that earlier day, so EVERY DAILY BAR MOVED BACK ONE CALENDAR DAY.
         // Measured on the store this produced: 86 records, 20 of them stamped
-        // on a SUNDAY and none on a Friday, on an exchange that trades Monday
-        // to Friday. `crate::ingest`'s month guard caught it only where the
+        // on a SUNDAY and none on a Friday, on an exchange that ordinarily trades
+        // Monday to Friday (`docs/00-charter.md` §3 records six weekend
+        // sessions). `crate::ingest`'s month guard caught it only where the
         // shift crossed a month boundary — "bars span 2025-12 to 2026-01" — and
         // stored a wrong answer SILENTLY everywhere else, which is exactly the
         // W1 class `crate::fetch` names and says is undetectable once written.
