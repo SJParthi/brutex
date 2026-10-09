@@ -50,6 +50,11 @@ fn emitting_with_no_sink_installed_is_reported_and_is_not_a_panic() {
         telemetry::emit_for_run(1, &Event::info("t", "no correlation sink")),
         Emitted::NotInstalled
     );
+    assert_eq!(
+        telemetry::sync(),
+        None,
+        "a clean-exit barrier with no sink is a state, not a failure"
+    );
     assert!(telemetry::global().is_none());
     assert!(!Emitted::NotInstalled.is_written());
 }

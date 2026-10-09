@@ -66268,3 +66268,88 @@ cost is unchanged. `the_screens_selections_give_exactly_what_its_two_full_sorts_
 still compares the result against both full sorts and the gate, and now runs
 four calendar floors (0, 3,000, -1 and 10,000) instead of two, so a key
 change that broke the ordering argument fails it.
+
+### D-4410 — A sink's dropped events outlive its process: the loss ledger, and a restart that never re-issues a burnt number — 2026-10-09
+
+**Finding (sobs-2, observability audit at 9b0614be, probe P8).** A sink
+numbers an event before it writes it, so a drop burns its number and
+`Tail::missing` reads the hole as the drop's receipt. That receipt exists only
+while a later event lands in the same file. A process whose disk stayed full
+until it exited left no line above the hole: the next `Sink::open` resumed from
+the last line it could read and handed the burnt numbers out again. Measured:
+185 drops, a restart at `next_seq` 21 re-issuing 21..=205, `missing =
+Some(0)`, and the dropping process's `Health::dropped` gone with it. The cli
+has no production caller of `Sink::health`, so nothing anywhere said so.
+
+**Decision.** `crates/telemetry/src/loss.rs` keeps a loss ledger,
+`<dir>/events.loss` (`telemetry::LEDGER_NAME`), beside the set. It is one
+fixed-length record of 127 bytes — `issued`, `lost` and `first` as twenty
+decimal digits each and an FNV-1a checksum — made by `Sink::open` while the
+disk has room and afterwards only overwritten in place with one positioned
+write at offset 0, so an overwrite needs no new block on a filesystem that
+rewrites a file's blocks in place.
+
+- Each DROPPED event records its number there (`Ledger::note_drop`), inside
+  the emit lock, on the drop path only. Nothing is added to an event that
+  lands.
+- `Sink::open` resumes at `max(last line read, issued)` and reserves run ids
+  above that too. When `lost > 0` it writes one `Error` event (no floor
+  filters `Error`) — `telemetry.sink` "events were lost before this sink
+  opened", with `lost`, `first_seq`, `last_seq` and `ledger` — names the same
+  in `Health::last_error`, and clears the count only once that event landed.
+  A notice the disk still refuses is a drop like any other and is counted into
+  the record the next sink reports.
+- A ledger write that fails is appended to the drop's own notice ("the loss
+  could not be recorded for the next sink ... a restart will not know of
+  it"); a clearing write that fails is reported and the next sink says the
+  same loss again — over-reported, never hidden. A ledger whose bytes are not
+  a record is replaced, named in `last_error` and written into the log as an
+  `Error` event, saying that what an earlier sink lost is unknown. A read that
+  fails is named and is not taken for an empty ledger, which would overwrite
+  the fact the file exists to keep.
+- `Health` gains no field: `crates/api/src/logs.rs` builds one by exhaustive
+  literal and this fix does not edit `api`.
+
+**Evidence, on a real full disk.** A scratch probe (not committed) opened a
+sink on a 64 KiB tmpfs, wrote 20 events, filled the rest of the volume with a
+file, and emitted 185 more: the page cache took four, 181 were refused with
+`No space left on device (os error 28)`, and the ledger still landed:
+`issued=205 lost=181 first=25`. With the filler removed, a reopened sink
+reported `next_seq=207`, its newest line was seq 206 "events were lost before
+this sink opened" with `lost=181 first_seq=25 last_seq=205`, and the
+unfiltered tail read `missing=Some(181) malformed=1` (the one fragment the
+full disk tore). Before this change the same shape read `missing=Some(0)`.
+
+**Limits, stated in `docs/06-limits.md`.** A copy-on-write filesystem (btrfs,
+ZFS, APFS) may need a new block for an overwrite, so there the ledger write can
+fail with the append; that is said in the drop's own notice. The ledger is not
+`fsync`ed per drop, matching the log's own durability (a kill keeps it, a
+power cut may not); `Sink::sync` syncs it (D-4411). A writer KILLED mid-line
+still hands its torn record's number to the next sink, because no live writer
+counted it. Proof: FXA-01.
+
+### D-4411 — A clean exit can make the event log durable: `telemetry::sync` syncs the file, the loss ledger and the directory — 2026-10-09
+
+**Finding (sobs-13).** `Sink::sync` existed with no production caller, so the
+log was never flushed to disk, not even at a clean shutdown: a power cut after
+the `api.main` "exited cleanly" line could lose it. It also synced the current
+file alone, so the directory entry of a file this process created — at open or
+by a roll — was left to the page cache, and the loss ledger of D-4410 had no
+barrier at all.
+
+**Decision.** `Sink::sync` now syncs, in order, the current file, the loss
+ledger and, for a sink that holds its directory (one made by `Sink::open`), the
+directory itself; the first failure is returned, named by step, and reported
+like every other failure. `telemetry::sync()` is the one call a `main` makes
+at a clean exit: `None` with no sink installed, else `Sink::sync`'s answer.
+This change does not edit `api` or `cli`; the calls they must add are, in
+`crates/api/src/main.rs` after `note_exit(code, count)` and in
+`crates/cli/src/main.rs` after `cli::run_durable_os` returns,
+`let _synced = telemetry::sync();` (the failure is already in
+`Sink::health` and on stderr once).
+
+**Cost, measured on this tree** (scratch probe, not committed, ext4 on the
+build VM's virtual disk, 300 calls each): after one event p50 10.4 ms, p99
+20.0 ms, max 72.2 ms; after 100 events p50 11.9 ms, p99 19.0 ms, max 21.3 ms.
+Three `fsync`s and one `open`, once per process exit — never per event, so the
+emit path is unchanged. Proof: FXA-02.

@@ -126,6 +126,7 @@ mod encode;
 mod event;
 mod json;
 mod level;
+mod loss;
 mod record;
 mod sink;
 mod tail;
@@ -137,6 +138,7 @@ pub use crate::event::{
 };
 pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
+pub use crate::loss::LEDGER_NAME;
 pub use crate::record::Record;
 pub use crate::sink::{
     BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
@@ -292,6 +294,18 @@ pub fn emit(event: &Event<'_>) -> Emitted {
 #[must_use]
 pub fn emit_for_run(run: u64, event: &Event<'_>) -> Emitted {
     global().map_or(Emitted::NotInstalled, |sink| sink.emit_for_run(run, event))
+}
+
+/// Makes everything the process-wide sink has written durable: the current
+/// file, the loss ledger and the directory. The call a `main` makes at a clean
+/// exit, after its last event (sobs-13, D-4411).
+///
+/// [`None`] when nothing is installed; otherwise [`Sink::sync`]'s answer, whose
+/// failure is already in [`Sink::health`] and on stderr once — a caller that
+/// only wants the barrier may ignore it.
+#[must_use]
+pub fn sync() -> Option<Result<(), String>> {
+    global().map(Sink::sync)
 }
 
 /// Reserves a non-zero correlation id from the process-wide log sequence.
@@ -568,6 +582,8 @@ mod tests {
         let found = tail(&dir, sink.keep_files(), &Query::last(10));
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.records[0].message, "through the global");
+        // THE CLEAN-EXIT BARRIER reaches the installed sink (sobs-13, D-4411).
+        assert_eq!(super::sync(), Some(Ok(())));
 
         let first = super::reserve_run_id().expect("installed sink reserves a run");
         let second = super::reserve_run_id().expect("next reservation is distinct");

@@ -16383,3 +16383,39 @@ states it). GAP16-26 is closed by D-1173 (money accumulated in `i64`/`i128`,
 one conversion to `f64` at the edge). ET-strategies-trades-ranking-costs-9 is
 the §72 text corrected by D-1448. rustonly-4 is `xdg-open` as the operating
 system's URL handler, kept by D-1202 and off with `BRUTEX_NO_OPEN`.
+
+## Fixer fxa: telemetry loss, captures, store session hours and stated costs — D-4410 onward, 9 October 2026
+
+### The loss ledger outlives a full disk, within three stated limits (D-4410)
+
+A sink records each dropped event's number in `<dir>/events.loss`, and the next
+sink resumes above it and writes one `Error` line naming the loss. The record
+is fixed-length and only overwritten in place, which is what lets it land on a
+disk that refuses every append: measured on a real 64 KiB tmpfs at ENOSPC,
+181 drops recorded, the restart skipped 25..=205 and the unfiltered tail read
+`missing=Some(181)`. Three limits remain, each named rather than assumed away:
+
+1. **Copy-on-write filesystems.** btrfs, ZFS and APFS may allocate a new block
+   for an overwrite, so on a full volume the ledger write can fail with the
+   append. Not measured on those filesystems. The drop's own notice then says
+   "the loss could not be recorded for the next sink", so the failure is
+   visible in `Health::last_error` while the process lives.
+2. **Durability.** The ledger is written, not `fsync`ed, per drop — the log's
+   own durability: it survives a kill and a panic, not necessarily a power cut.
+   `Sink::sync` makes it durable (D-4411).
+3. **A killed writer.** A record torn by `SIGKILL` mid-line was never counted
+   by a live writer, so its number is still handed to the next event; the
+   reader counts the fragment in `Tail::malformed`.
+
+Cost: one positioned write of 127 bytes per DROPPED event, inside the emit lock
+whose append already failed; one bounded read (at most 128 bytes) and at most
+one write at open. An event that lands pays nothing.
+
+### A clean-exit `sync` costs three `fsync`s, measured at p99 20 ms on the build VM (D-4411)
+
+`telemetry::sync` syncs the current file, the 127-byte loss ledger and the
+directory. Measured with a scratch probe on ext4 on this VM's virtual disk,
+300 calls each: after one event p50 10.4 ms, p99 20.0 ms, max 72.2 ms; after
+100 events p50 11.9 ms, p99 19.0 ms, max 21.3 ms. It is device-bound, not
+O(1) in any sense the bench gate measures, and it is paid once per process
+exit, never per event. No other disk was measured.

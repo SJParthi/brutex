@@ -278,7 +278,11 @@ pub struct Tail {
     /// burns one on an event it then drops. So a hole in the sequence is the
     /// drop's own receipt, written by the fact of the numbering rather than by
     /// any bookkeeping — and it survives a restart, because
-    /// [`crate::Sink::open`] resumes the count from the file.
+    /// [`crate::Sink::open`] resumes the count from the file AND from the loss
+    /// ledger beside it ([`crate::LEDGER_NAME`]). The file alone was not enough:
+    /// a process whose disk stayed full until it exited left no line above the
+    /// hole, so the next one re-issued the burnt numbers and this read
+    /// `Some(0)` over 185 lost events (sobs-2, D-4410).
     ///
     /// **This is the first question a reader who did not run the job must
     /// ask.** A log handed to somebody else is evidence, and evidence with
