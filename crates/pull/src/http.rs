@@ -1361,7 +1361,7 @@ fn decode_objects(
     // a full answer either. Emitted once per window rather than once per bar,
     // because 375 lines of "skipped" is noise and one count is information.
     if null_bars > 0 {
-        // BOTH, and the event is the load-bearing one. `eprintln!` reaches the
+        // BOTH, and the event is the load-bearing one. The stderr line reaches the
         // operator watching a terminal; the event reaches the log FILE, which is
         // the thing handed to somebody diagnosing a run that already finished.
         // A diagnostic that exists only on a terminal nobody kept is a fact this
@@ -1375,11 +1375,11 @@ fn decode_objects(
             .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
             .with("bars", u64::try_from(items.len()).unwrap_or(u64::MAX)),
         );
-        eprintln!(
+        let _printed = telemetry::stderr_line(format_args!(
             "brutex: {null_bars} of {} bars carried a null price and were \
              skipped — the vendor reported no trade in those minutes",
             items.len()
-        );
+        ));
     }
 
     note_negative_volume_bars(negative, items.len());
@@ -1696,7 +1696,7 @@ fn volumes(
 /// fallback that hides a failure; a bar dropped and counted is the loud degrade
 /// the same rule allows.
 ///
-/// **BOTH, and the event is the load-bearing one.** `eprintln!` reaches an
+/// **BOTH, and the event is the load-bearing one.** The stderr line reaches an
 /// operator watching a terminal; the event reaches the log FILE, which is what
 /// is handed to somebody diagnosing a run that already finished.
 fn note_null_bars(null_bars: usize, bars: usize) {
@@ -1718,10 +1718,10 @@ fn note_null_bars(null_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {null_bars} of {bars} bars carried a null price and were \
          skipped — the vendor reported no trade in those minutes"
-    );
+    ));
 }
 
 /// One event per WINDOW for rows dropped over an impossible volume.
@@ -1753,12 +1753,12 @@ fn note_negative_volume_bars(negative_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {negative_bars} of {bars} bars carried a NEGATIVE volume and \
          were skipped — a volume counts shares traded, so those rows carry no \
          quantity. The rest of the window is kept: this used to refuse all of \
          it, which cost one instrument every intraday rung it had."
-    );
+    ));
 }
 
 /// One event per WINDOW for rows whose open interest cannot be a count.
@@ -1787,12 +1787,12 @@ fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {negative_bars} of {bars} bars carried a NEGATIVE open \
          interest and were skipped — open interest is contracts outstanding \
          and is never below zero. `i64::MIN` is NOT counted here: that is the \
          null sentinel and is refused by name."
-    );
+    ));
 }
 
 /// One event per WINDOW for rows whose four prices cannot be a bar.
@@ -1818,12 +1818,12 @@ fn note_impossible_bars(dropped: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {dropped} of {bars} bars carried an impossible OHLC and were \
          skipped — a high below its low, or a negative price. Caught here, \
          where the vendor's own row is still in hand, rather than at the store \
          append where the index names nothing an operator can open."
-    );
+    ));
 }
 
 /// Which rows of a columnar body are bars at all, and how many are not.
@@ -3544,13 +3544,13 @@ fn decode_positional(
             .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
             .with("bars", u64::try_from(rows.len()).unwrap_or(u64::MAX)),
         );
-        eprintln!(
+        let _printed = telemetry::stderr_line(format_args!(
             // "in those intervals", not "in those minutes": this decoder is
             // rung-blind by design and a daily pull comes through it too.
             "brutex: {null_bars} of {} bars carried a null price and were skipped \
              — the vendor reported no trade in those intervals",
             rows.len()
-        );
+        ));
     }
 
     note_negative_volume_bars(negative, rows.len());

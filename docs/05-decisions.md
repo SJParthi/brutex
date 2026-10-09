@@ -67223,3 +67223,348 @@ refused request" with the feed, the call, the attempt, the status (null when
 nothing answered), the wait, whether the vendor named a throttle, and the
 vendor's words. At most `THROTTLE_ATTEMPTS - 1` per request; every other
 verdict ends the request and stays the caller's event.
+
+### D-4410 — A sink's dropped events outlive its process: the loss ledger, and a restart that never re-issues a burnt number — 2026-10-09
+
+**Finding (sobs-2, observability audit at 9b0614be, probe P8).** A sink
+numbers an event before it writes it, so a drop burns its number and
+`Tail::missing` reads the hole as the drop's receipt. That receipt exists only
+while a later event lands in the same file. A process whose disk stayed full
+until it exited left no line above the hole: the next `Sink::open` resumed from
+the last line it could read and handed the burnt numbers out again. Measured:
+185 drops, a restart at `next_seq` 21 re-issuing 21..=205, `missing =
+Some(0)`, and the dropping process's `Health::dropped` gone with it. The cli
+has no production caller of `Sink::health`, so nothing anywhere said so.
+
+**Decision.** `crates/telemetry/src/loss.rs` keeps a loss ledger,
+`<dir>/events.loss` (`telemetry::LEDGER_NAME`), beside the set. It is one
+fixed-length record of 127 bytes — `issued`, `lost` and `first` as twenty
+decimal digits each and an FNV-1a checksum — made by `Sink::open` while the
+disk has room and afterwards only overwritten in place with one positioned
+write at offset 0, so an overwrite needs no new block on a filesystem that
+rewrites a file's blocks in place.
+
+- Each DROPPED event records its number there (`Ledger::note_drop`), inside
+  the emit lock, on the drop path only. Nothing is added to an event that
+  lands.
+- `Sink::open` resumes at `max(last line read, issued)` and reserves run ids
+  above that too. When `lost > 0` it writes one `Error` event (no floor
+  filters `Error`) — `telemetry.sink` "events were lost before this sink
+  opened", with `lost`, `first_seq`, `last_seq` and `ledger` — names the same
+  in `Health::last_error`, and clears the count only once that event landed.
+  A notice the disk still refuses is a drop like any other and is counted into
+  the record the next sink reports.
+- A ledger write that fails is appended to the drop's own notice ("the loss
+  could not be recorded for the next sink ... a restart will not know of
+  it"); a clearing write that fails is reported and the next sink says the
+  same loss again — over-reported, never hidden. A ledger whose bytes are not
+  a record is replaced, named in `last_error` and written into the log as an
+  `Error` event, saying that what an earlier sink lost is unknown. A read that
+  fails is named and is not taken for an empty ledger, which would overwrite
+  the fact the file exists to keep.
+- `Health` gains no field: `crates/api/src/logs.rs` builds one by exhaustive
+  literal and this fix does not edit `api`.
+
+**Evidence, on a real full disk.** A scratch probe (not committed) opened a
+sink on a 64 KiB tmpfs, wrote 20 events, filled the rest of the volume with a
+file, and emitted 185 more: the page cache took four, 181 were refused with
+`No space left on device (os error 28)`, and the ledger still landed:
+`issued=205 lost=181 first=25`. With the filler removed, a reopened sink
+reported `next_seq=207`, its newest line was seq 206 "events were lost before
+this sink opened" with `lost=181 first_seq=25 last_seq=205`, and the
+unfiltered tail read `missing=Some(181) malformed=1` (the one fragment the
+full disk tore). Before this change the same shape read `missing=Some(0)`.
+
+**Limits, stated in `docs/06-limits.md`.** A copy-on-write filesystem (btrfs,
+ZFS, APFS) may need a new block for an overwrite, so there the ledger write can
+fail with the append; that is said in the drop's own notice. The ledger is not
+`fsync`ed per drop, matching the log's own durability (a kill keeps it, a
+power cut may not); `Sink::sync` syncs it (D-4411). A writer KILLED mid-line
+still hands its torn record's number to the next sink, because no live writer
+counted it. Proof: FXA-01.
+
+### D-4411 — A clean exit can make the event log durable: `telemetry::sync` syncs the file, the loss ledger and the directory — 2026-10-09
+
+**Finding (sobs-13).** `Sink::sync` existed with no production caller, so the
+log was never flushed to disk, not even at a clean shutdown: a power cut after
+the `api.main` "exited cleanly" line could lose it. It also synced the current
+file alone, so the directory entry of a file this process created — at open or
+by a roll — was left to the page cache, and the loss ledger of D-4410 had no
+barrier at all.
+
+**Decision.** `Sink::sync` now syncs, in order, the current file, the loss
+ledger and, for a sink that holds its directory (one made by `Sink::open`), the
+directory itself; the first failure is returned, named by step, and reported
+like every other failure. `telemetry::sync()` is the one call a `main` makes
+at a clean exit: `None` with no sink installed, else `Sink::sync`'s answer.
+This change does not edit `api` or `cli`; the calls they must add are, in
+`crates/api/src/main.rs` after `note_exit(code, count)` and in
+`crates/cli/src/main.rs` after `cli::run_durable_os` returns,
+`let _synced = telemetry::sync();` (the failure is already in
+`Sink::health` and on stderr once).
+
+**Cost, measured on this tree** (scratch probe, not committed, ext4 on the
+build VM's virtual disk, 300 calls each): after one event p50 10.4 ms, p99
+20.0 ms, max 72.2 ms; after 100 events p50 11.9 ms, p99 19.0 ms, max 21.3 ms.
+Three `fsync`s and one `open`, once per process exit — never per event, so the
+emit path is unchanged. Proof: FXA-02.
+
+### D-4412 — A torn tail the full disk would not close at open is closed by the first append — 2026-10-09
+
+**Finding (sobs-3, probe P6).** `Sink::open` terminates a torn last line
+before the first append. When the disk was full at that moment the
+terminating byte was refused, `terminate_torn_tail` named it, and `around`
+then built the sink with `Inner::torn = false`. The first event after space
+returned was appended straight onto the fragment: `emit` returned `Written`,
+`written=1 dropped=0`, and the event was unreadable inside one malformed line.
+`emit` already carried exactly this state forward for a tear it made itself
+(D-1539); the open path dropped it.
+
+**Decision.** `terminate_torn_tail` returns whether the tear is still open,
+and `Sink::resumed` sets `Inner::torn` from it, so the first append leads with
+the newline and is a line of its own. The notice now says that instead of
+"the next event will fuse". A whole file still gains no byte at open, and the
+newline is led with once. Proof: FXA-03, which fails with the flag forced to
+`false` (checked on this tree).
+
+### D-4413 — Production stderr lines in `pull` and `telemetry` cannot panic, and a refused line is counted and logged — 2026-10-09
+
+**Finding (r53-1, telemetry and pull sites).** `eprintln!` panics when stderr
+is a closed pipe ("failed printing to stderr: Broken pipe (os error 32)"), and
+`[profile.release]` sets `panic = "abort"`. The r53 audit ran
+`pull::csv::decode` with stderr on a closed pipe and it panicked; with abort,
+a long backfill whose operator's terminal went away dies with signal 6 on a
+line that only described a degraded decode. The same shape was at six
+`pull::http` decode notices, `pull::csv::note_decoded`,
+`pull::masters::note_index_skips` and the sink's own last-resort notice
+`telemetry::sink::Sink::report`.
+
+**Decision.** `telemetry::stderr_line(format_args!(..))` (`crates/telemetry/src/say.rs`)
+writes one line and flushes through the locked stream and never panics. A
+refused line is counted in `telemetry::unprinted()`, and the first refused
+line that a sink records is written to the installed sink as a
+`telemetry.stderr` `Warn` naming the error — once, because a stream that is
+gone stays gone; a failure before any sink exists leaves the next one to try.
+Every production stderr line in `pull` and `telemetry` goes through it; each
+of those pull lines already sits beside an event carrying the same fact, so a
+closed stderr loses only the terminal copy, and that loss is recorded. The
+sink's own notice, when refused, is also named in `Health::last_error`.
+Gate 23's declarations move with the code: the four `eprintln!` entries leave
+clause A and `telemetry/src/say.rs` declares its one `stderr()` handle in
+clause A2, so a new `eprintln!` in either crate is refused by the gate.
+
+The `api` and `cli` sites the audit also named are not edited here (other
+fixers own those crates); they can call the same `telemetry::stderr_line`.
+
+**Evidence.** `crates/pull/tests/closed_stderr.rs` re-runs its binary with
+stderr on a pipe whose read end is closed and decodes the audit's degraded
+body: with the old `eprintln!` restored in `csv.rs` the child exited 101
+(panic) and the test failed; with this change it passes, the rows decode and
+`unprinted()` rose by one. `crates/telemetry/tests/closed_stderr.rs` does the
+same for the writer, the first-failure event and a refusing sink's notice.
+Proof: FXA-04.
+
+### D-4414 — A kept vendor body is named in the log, and its name is made durable — 2026-10-09
+
+**Finding (sobs-11).** `pull::capture::record` and `record_unreadable` wrote a
+vendor body with `create_new`, `write_all` and `sync_all`, returned the path,
+and both callers in `pull::http` dropped it. A kept copy of an unreadable
+answer could not be found from the refusal that kept it, and nothing synced
+the `captures/` directory, so the file's name could be lost by a power cut
+even though its bytes were synced.
+
+**Decision.** After the file's `sync_all`, the capture syncs `captures/`, and
+also its parent when this call made `captures/`, because a new directory is
+itself an entry in its parent. Every capture that lands emits one
+`pull.capture` event naming `path`, `feed` and `kind` (`GET`, `POST` or
+`unreadable`): `Info` "vendor body kept" when both syncs held, and `Warn`
+"vendor body kept, and its name may not survive a power cut" with the failing
+directory and the reason in `why` when one did not. A directory sync that
+fails is not a refusal: the bytes landed, the path is still returned, and
+`capture::refused()` does not count it. The event carries no URL, body or
+header, the same rule as `note_refused`. Captures stay bounded per process, so
+the extra fsyncs are bounded too. On this ext4 VM, 300 runs of 4 KiB measured
+the directory open and fsync at p50 4.0 ms, p99 10.1 ms and max 26.2 ms. No
+other filesystem was measured.
+
+The `FetchError::BodyNotUnderstood` sentence does not carry the path. Only a
+source whose base URL names a real vendor has a feed and captures at all, so
+no offline test could drive that branch. The event is what links the two.
+`/logs` shows it; a page that lists `captures/` would be an `api` change, which
+is out of this fixer's scope.
+
+**Evidence.** A directory with mode `0o300` lets a file be created and refuses
+to be opened, so its fsync fails for real, where the mode bits bind (D-0995).
+`a_kept_capture_syncs_its_name_and_a_name_that_cannot_be_is_said_not_refused`
+covers four cases: an unopenable `captures/`, a new `captures/` under an
+unopenable root, an existing `captures/` under the same root (nothing is
+said), and a clean pass with nothing counted as refused. Two new rows in
+`emit_sites` drive the shipped recorders and read both events back from a
+file. With the emit removed, that test fails. Proof: FXA-05.
+
+### D-4415 — The lake reader refuses a dictionary-encoded page that has no dictionary before it — 2026-10-09
+
+**Finding (satk-9, medium).** A chunk starts at `dictionary_page_offset`, or
+at `data_page_offset` when the footer has none. If a footer loses its
+dictionary offset, the chunk starts past the dictionary. `parquet`'s value
+decoder then `expect`s a dictionary it was never given ("Decoder for dict
+should have been set", `parquet` 59.2 `decoder.rs:213`), and
+`[profile.release]` turns that panic into an abort. The audit reached it with
+one flipped footer byte: 8 of the single-byte flips of a 1,923-byte
+dictionary file panicked.
+
+**Decision.** `LakePageReader` records whether its chunk has handed out a
+dictionary page. A `PLAIN_DICTIONARY` or `RLE_DICTIONARY` data page with no
+dictionary before it is refused as a `ParquetError::General` naming the
+encoding and the missing dictionary, and the caller surfaces it as
+`LakeError::PageDecode` naming the column. The check is one boolean per page.
+
+The suggested footer-level check is not added. It would refuse a chunk whose
+`encodings` list a dictionary encoding while `dictionary_page_offset` is
+absent. But a writer may legally leave that offset unset and put the
+dictionary page at `data_page_offset`. The page walk reads that file
+correctly, and a footer rule would refuse it.
+
+**Evidence.**
+`a_dictionary_chunk_whose_footer_lost_its_dictionary_offset_is_refused_not_panicked`
+drops the offset through `patch_footer` on `volume` and on `open_interest`,
+and gets a named refusal for each.
+`no_single_flipped_byte_in_a_dictionary_file_panics_the_reader` keeps the
+audit's probe. It flips every byte of a 7,907-byte dictionary file with masks
+0x01, 0x80 and 0xff, which is 23,721 reads. Without the check 9 of them
+panicked and both tests failed; with it none panics. Proof: FXA-06.
+
+### D-4416 — A reader's time index is bound to the bars it holds, by device and inode — 2026-10-09
+
+**Finding (satk-2).** A reader opens its `.tix` lazily, by path, at its first
+lookup, and `confirm_index` compares only the header and the two entries
+holding the first and last committed bars. The audit replaced a month under an
+open reader by renaming in a new `.bin`, `.crc` and `.tix`. The old month held
+minutes 0–2 and 4–10; the new one held 0–7, 9 and 10. Both had ten bars with
+the same first and last stamps, so the reader accepted the new index against
+its old bars. `first_at_or_after(minute 4)` returned row 4, which in the held
+bars is minute 5, and `time_lookup` reported `Indexed`. No error was raised.
+
+**Decision.** Once its `.tix` is open, a reader's first lookup checks that the
+month's `.bin` path still names the file the handle holds: the same `dev` and
+`ino` from an `fstat` of the held handle and a `stat` of the path. If not, or
+if either `stat` is refused, the handle bisects its own bars under a new
+`time_index::Why::Replaced`. That reason is written as the usual `store.tix`
+warning and reported by `time_lookup`. The check runs after the `.tix` opens.
+So a swap that renames the `.bin` before the `.tix` cannot pair a new index
+with an unchanged `.bin` path. The reverse order puts a new `.tix` beside the
+old `.bin` for an instant, which is the stale-index case `docs/06-limits.md`
+already states, and the limits text now says which order is safe. The format
+is unchanged, so there is no new version. The cost is two `stat`s per handle,
+measured at p50 1.13 µs and p99 1.94 µs.
+
+**Evidence.**
+`a_reader_opened_before_its_month_was_replaced_never_pairs_old_bars_with_the_new_index`
+replays the audit's probe P07. With the check disabled it fails on
+`Indexed` ≠ `Bisection(Replaced)`. With the check, minute 4 is row 3 and
+every probe answers against the held bars. A reader opened after the swap
+uses the new index. A `.bin` path that names nothing makes the handle bisect.
+Proof: FXA-07.
+
+### D-4417 — A non-finite float in the event log reads back as a float, not as text — 2026-10-09
+
+**Finding (satk-5).** `encode::push_float` wrote NaN and the infinities as the
+JSON strings `"NaN"`, `"Infinity"` and `"-Infinity"`, and `record::scalar`
+read them back as `OwnedValue::Str`. A statistic that went non-finite could
+not be told apart from a text field that said so. `Record::matches` reported
+the round trip failed, against the crate's own comments in `record.rs` and
+`value.rs`.
+
+**Decision.** A non-finite float is written as the one-member object
+`{"float":"NaN"}`, with `"-NaN"`, `"Infinity"` or `"-Infinity"` in its place.
+That is legal JSON and greppable. A field's value is otherwise always a
+scalar, so the shape cannot be mistaken for text. The reader maps exactly this
+shape back to `OwnedValue::Float`; a NaN keeps its sign but not its payload.
+Any other object in a field's place is still refused where it opens, as
+before. The key is `encode::NONFINITE_KEY`, shared by the writer and the
+reader.
+
+Lines written before this change carry the bare strings and still read as
+text. That ambiguity is in their bytes, and no reader can remove it. A reader
+built before this change, given a new line that carries a non-finite float,
+refuses the line and counts it in `Tail::malformed`, so the failure is loud
+rather than silent. The api's `/logs.json` already renders a non-finite
+`Float` as `null`.
+
+**Evidence.**
+`a_non_finite_float_round_trips_as_a_float_and_text_saying_nan_stays_text`
+round-trips NaN, -NaN, +inf and -inf bit for bit, with `matches` true. A
+text field `"NaN"` beside them stays text, and an old line reads as text.
+Five other object shapes are refused. Proof: FXA-08.
+
+### D-4418 — An event log line that repeats a key is refused by name, and the writer never repeats one — 2026-10-09
+
+**Finding (satk-6).** `Record::decode` matched each key and let the last copy
+win. An `"level":"error"` followed by `"level":"trace"` read as trace and fell
+under a level filter. A repeated `fields` replaced the first object, and a
+repeated field key was kept twice with `Record::field` answering the first.
+`1e-400` read as `0.0` while `1e400` was refused.
+
+**Decision.** The ten line keys the decoder reads are tracked in a `u16` mask,
+and a second occurrence of any of them is `LineFault::RepeatedKey { key }`.
+A key a later build added is still stepped over, copies included, because
+nothing reads it. Inside `fields`, a key equal to one already kept is
+`RepeatedKey` too. That costs at most `MAX_FIELDS` comparisons, since the
+comma guard admits no thirteenth member. A decimal with a non-zero digit that
+parses to zero is `BadNumber`, the same as one that parses to infinity.
+
+The writer never produces either. Its line keys are fixed, and the smallest
+finite float it writes is `5e-324`. `Event::with` now counts a field in
+`dropped` instead of keeping it when the line would spell its key the same as
+one already kept. That covers the same key again, or a longer key that
+`MAX_KEY_BYTES` cuts to the same prefix. The first value is kept, as the first
+`MAX_FIELDS` are, and the line's `"dropped"` says a field was not.
+
+Measured on this VM in release, building a 12-field event 200,000 times: p50
+375–377 ns and p99 416–507 ns before, p50 442 ns and p99 524–543 ns after,
+which is about 66 ns per full event. No production caller builds an event
+with a repeated key. That was checked by a scan of every `Event::…`
+builder chain and of every event built in a loop in `api` and `cli`. Old logs
+from this workspace's writers therefore stay readable. A log written by
+another program that repeats a key is refused line by line and counted in
+`Tail::malformed`.
+
+**Evidence.** `a_repeated_key_is_refused_by_name_and_the_writer_never_repeats_one`
+covers all ten line keys repeated, a repeated unknown key that is accepted,
+a repeated field key, the writer's first-value-kept rule for the same key and
+for a cut-to-the-same-spelling key, three underflowing literals refused, and
+`0.0`, `-0.0`, `0e-999` and `5e-324` kept. Four existing tests built their
+ceiling cases from one repeated key; they now use distinct keys of the same
+width. Proof: FXA-09.
+
+### D-4419 — `Batch::row` gets a random-index p99 row, gated against the memory it must touch — 2026-10-09
+
+**Finding (so1-2).** `docs/06-limits.md` said `Batch::row` "is an index into a
+decoded batch, which C-L-01 measures". C-L-01 re-reads index 0 and the last
+index: two rows that stay in the cache, as a minimum of means. That is the
+blind spot D-3307 found in C-12. The audit's probe at random rows measured p99
+3.0x to 6.0x at 248,000 rows and 13x to 37x at 2,480,000, against 2,480.
+
+**Re-verified.** On this box, the row's random-index p99 against 2,480 rows:
+1.6x to 4.0x at 24,800 (twelve runs, two over 3.0x), 6.0x to 10.0x at 248,000
+and 13x to 36x at 2,480,000. Nothing in `row` grows with the batch. It reads
+seven columns at one index. The growth is seven cache misses.
+
+**Decision.** A size-against-size p99 gate on this operation would gate the
+cache, and at 24,800 rows it went red on unchanged code two runs in twelve. So
+FXA-10 gates the row against its own floor instead: seven bounds-checked reads
+of seven plain `Vec<i64>` columns of the same length, at the same kind of
+random index, timed sample by sample in alternation with the row's samples so
+a burst of load lands on both. Every round visits all four sizes after an
+untimed walk that reads every value. The walk goes through `black_box`
+because `iter().count()` elided the loads and left the medium batch cold. The
+row's p99 against the floor's p99 is gated under the shared 3.0x ceiling at
+2,480, 24,800, 248,000 and 2,480,000 rows. Each size's p99 against 2,480 rows
+is printed and not gated, and `docs/06-limits.md` states it with p50, p99 and
+max. The limits line that credited C-L-01 is corrected.
+
+**Evidence.** Six runs at a load average of 11 to 13: gated ratio 0.95x to
+1.46x at every size. An O(n) fold planted in `row` on one call in fifty took it
+to 5.1x, 10.2x and 18.1x at the first three sizes, while C-L-01's two
+`row(last)` comparisons read 1.04x and 0.82x and passed. Proof: FXA-10.
+

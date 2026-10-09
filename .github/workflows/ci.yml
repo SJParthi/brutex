@@ -1605,6 +1605,7 @@ jobs:
           #       the only channel in existence at that instant, which is the same
           #       argument telemetry/src/sink.rs carries below.
           #   pull/src/http.rs   eprintln! 6
+          #       r53-1 (D-4413): now 0, written through `telemetry::stderr_line`.
           #       Bar-refusal notices, every one of which ALSO emits a
           #       `pull.decode` event immediately above the print -- verified
           #       site by site, not assumed. 2 -> 6 on 2026-08-29 because the
@@ -1623,6 +1624,8 @@ jobs:
           #   telemetry/src/sink.rs  eprintln! 1
           #       The sink's own last-resort notice. It is the thing that failed,
           #       so it is the one place stderr is the only channel left.
+          #       r53-1 (D-4413): it now goes through `telemetry::stderr_line`, so a
+          #       closed stderr cannot abort the process; the count is 0 here.
           #   telemetry/src/record.rs eprintln! 1 -- REMOVED (D-1109). The one
           #       "eprintln!" in that file is inside a test's assertion message,
           #       a string literal; it prints nothing. The line count read it as a
@@ -1758,9 +1761,12 @@ jobs:
           cli/src/lib.rs:eprintln!:3
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
-          greeks/src/solver.rs:println!:7
-          pull/src/http.rs:eprintln!:6
-          telemetry/src/sink.rs:eprintln!:1'
+          greeks/src/solver.rs:println!:7'
+          # pull/src/http.rs (6), pull/src/csv.rs (1), pull/src/masters.rs (1)
+          # and telemetry/src/sink.rs (1) LEFT THIS LIST (r53-1, D-4413):
+          # `eprintln!` panics on a closed stderr and the release profile aborts,
+          # so each now writes through `telemetry::stderr_line`, which counts a
+          # refused line and logs the first. Its one handle is in clause A2.
           # Test-only measurements; production audit/recovery notices also emit.
           #
           # THREE MORE, one kind (D-0695): the STDOUT PROOF LINE of a test's
@@ -1795,8 +1801,8 @@ jobs:
           # `pull/src/masters.rs` names NSE index categories and elements the
           # conversion skipped (CE-58, D-2682). Both print only when something
           # was degraded, so a clean run prints nothing.
-          declared="$declared pull/src/csv.rs:eprintln!:1
-          pull/src/masters.rs:eprintln!:1"
+          # BOTH LEFT THE LIST with r53-1 (D-4413): each now writes through
+          # `telemetry::stderr_line`, declared once in clause A2.
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -1812,8 +1818,12 @@ jobs:
           # cli/src/main.rs names `stdout()` and `stderr()` once each (v53-2,
           # D-1484): its three prints became one `cli::deliver` write, which
           # says a failed stdout on stderr and emits `cli.output`.
+          # telemetry/src/say.rs names `stderr()` once: `stderr_line`, the
+          # writer that cannot panic, through which pull's decode notices and
+          # the sink's own last-resort notice go (r53-1, D-4413).
           declared_handles='api/src/server.rs:handle:3
-          cli/src/main.rs:handle:2'
+          cli/src/main.rs:handle:2
+          telemetry/src/say.rs:handle:1'
           # Both sides are compared as sorted lists of non-empty words, so an
           # empty declaration and an empty measurement are equal on the healthy
           # case (the shell had to normalise a blank `printf` line by hand).

@@ -1698,7 +1698,13 @@ const TELEMETRY_FIELD: &str = "
     unreadable_volume unreadable_oi
     timeframe
     agreed differed day_absent minute_absent
+    path
 ";
+
+// `path` — `capture.rs`'s `pull.capture` "vendor body kept" line
+// (sobs-11, D-4414): the KEY under which the kept file's local path is
+// written. The right side is a path this process made under the vendor
+// data root; the key names no Parameter Store segment.
 
 // `agreed differed day_absent minute_absent` — `ingest.rs`'s
 // `pull.daycheck` line (D-3001): four COUNTS of days, the pulled day bar

@@ -370,6 +370,11 @@ pub enum Why {
         /// Its stamp.
         ts_micros: i64,
     },
+    /// The month's `.bin` path no longer names the file this handle holds:
+    /// the month was replaced after the handle opened it, so the `.tix` beside
+    /// it may describe other bars. The handle's own bars still answer, by the
+    /// bisection. satk-2, D-4416.
+    Replaced,
     /// Reading or writing the index, or a bar it is built from, was refused.
     Unreadable(StoreError),
     /// A file of another record kind; only bars are indexed.
@@ -396,6 +401,10 @@ impl fmt::Display for Why {
             Self::SharedSlot { index, ts_micros } => write!(
                 f,
                 "bar {index} is stamped {ts_micros}, in the slot of the bar before it"
+            ),
+            Self::Replaced => f.write_str(
+                "the month's .bin path no longer names the file this handle holds, so its \
+                 .tix may describe other bars",
             ),
             Self::Unreadable(why) => write!(f, "the .tix time index could not be used: {why}"),
             Self::NotBars => f.write_str("only bar files carry a time index"),
@@ -1270,6 +1279,11 @@ mod tests {
                 "bar 3 is stamped 8, in the slot of the bar before it",
             ),
             (Why::NotBars, "only bar files carry a time index"),
+            (
+                Why::Replaced,
+                "the month's .bin path no longer names the file this handle holds, so its \
+                 .tix may describe other bars",
+            ),
         ];
         for (why, text) in cases {
             assert_eq!(why.to_string(), text);

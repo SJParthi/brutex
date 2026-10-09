@@ -1361,7 +1361,7 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/lake/src/reader.rs", 3),
     ("crates/telemetry/src/value.rs", 5),
     ("crates/telemetry/src/encode.rs", 1),
-    ("crates/telemetry/src/record.rs", 1),
+    ("crates/telemetry/src/record.rs", 5),
     ("crates/cli/src/live.rs", 1),
     ("crates/cli/src/institutional_evidence.rs", 8),
     ("crates/cli/src/institutional_statistics.rs", 19),
@@ -1504,7 +1504,7 @@ const ALLOW_PANIC: Allow = &[
     ("crates/pull/src/ssm.rs", 1),
     ("crates/runner/src/rank.rs", 1),
     ("crates/telemetry/src/json.rs", 5),
-    ("crates/telemetry/src/record.rs", 4),
+    ("crates/telemetry/src/record.rs", 7),
 ];
 
 /// Rule 5c. Nothing disarms those lints outside a test module. Two entries,

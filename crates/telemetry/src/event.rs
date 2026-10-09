@@ -155,11 +155,29 @@ impl<'a> Event<'a> {
     ///
     /// Past [`MAX_FIELDS`] the field is counted rather than kept; see
     /// [`Event::dropped_fields`].
+    ///
+    /// So is a field whose key the line would spell the same as one already
+    /// kept — the same key again, or a longer one that [`MAX_KEY_BYTES`] cuts
+    /// to the same prefix. The reader refuses a line that carries one field key
+    /// twice (satk-6, D-4418), so this writer never writes one; the FIRST
+    /// value is kept, as the first [`MAX_FIELDS`] are, and the line's
+    /// `"dropped"` says one was not. At most [`MAX_FIELDS`] key comparisons.
     #[must_use]
     pub fn with(mut self, key: &'a str, value: impl Into<Value<'a>>) -> Self {
+        let value = value.into();
+        let spelled = crate::encode::capped(key, MAX_KEY_BYTES).0;
+        let repeated = self
+            .items
+            .iter()
+            .take(self.len)
+            .any(|&(name, _)| crate::encode::capped(name, MAX_KEY_BYTES).0 == spelled);
+        if repeated {
+            self.dropped = self.dropped.saturating_add(1);
+            return self;
+        }
         match self.items.get_mut(self.len) {
             Some(slot) => {
-                *slot = (key, value.into());
+                *slot = (key, value);
                 self.len = self.len.saturating_add(1);
             }
             None => self.dropped = self.dropped.saturating_add(1),
@@ -258,9 +276,12 @@ mod tests {
     /// page saying so. `CLAUDE.md` §4: degrade loudly and name the reason.
     #[test]
     fn a_field_past_the_ceiling_is_counted_and_the_kept_ones_are_the_first_ones() {
+        let keys = [
+            "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "ka", "kb",
+        ];
         let mut event = Event::info("t", "m");
-        for i in 0..MAX_FIELDS {
-            event = event.with("k", u64::try_from(i).unwrap());
+        for (i, key) in keys.into_iter().enumerate() {
+            event = event.with(key, u64::try_from(i).unwrap());
         }
         assert_eq!(event.fields().len(), MAX_FIELDS);
         assert_eq!(event.dropped_fields(), 0, "exactly at the ceiling is fine");
@@ -270,7 +291,7 @@ mod tests {
         assert_eq!(over.dropped_fields(), 2, "and both are counted");
         assert_eq!(
             over.fields().last(),
-            Some(&("k", Value::Uint(u64::try_from(MAX_FIELDS - 1).unwrap()))),
+            Some(&("kb", Value::Uint(u64::try_from(MAX_FIELDS - 1).unwrap()))),
             "the ones kept are the FIRST twelve, not the last twelve"
         );
     }
