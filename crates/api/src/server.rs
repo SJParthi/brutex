@@ -29496,6 +29496,37 @@ mod tests {
         assert_eq!(credit(), before, "nothing was charged");
     }
 
+    /// **A PERMIT FREE NOW IS ISSUED WITHOUT A TIMER.** R1286-api-03, D-4132.
+    ///
+    /// `reserve` answers `now` exactly when no window is short, so the wait is
+    /// zero and `await_budget` returns on its FIRST poll. A zero-length
+    /// `tokio::time::sleep` is not free: the timer wheel rounds its deadline up
+    /// to the next millisecond tick, so every admitted request would wait for a
+    /// tick it was never asked to wait for, and yield its task to get there.
+    ///
+    /// Polled with no Tokio runtime at all, which is what makes the absence
+    /// provable: a timer created outside a runtime panics ("there is no
+    /// reactor running"), so a `Ready` here means none was created.
+    #[test]
+    fn a_free_permit_completes_on_its_first_poll_without_a_timer() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "premise: no runtime, so any timer would panic"
+        );
+        let dir = agreeing("budgetfirstpoll");
+        let site = site("budgetfirstpoll", &dir);
+        let feed = pull::vendor::Feed::Dhan;
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for n in 1..=2 {
+            let mut pending = std::pin::pin!(await_budget(feed, &site));
+            assert_eq!(
+                pending.as_mut().poll(&mut context),
+                std::task::Poll::Ready(Ok(())),
+                "permit {n} of Dhan's five per second is free now"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_burst_past_the_ceiling_is_throttled_and_still_admitted_in_full() {
         const BURST: u32 = 12;

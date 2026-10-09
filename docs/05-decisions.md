@@ -65067,3 +65067,20 @@ ten rows, so the test also requires ten named faults and the clean month's ten
 rows, whole (R1286-api-02).
 
 **Rejected.** Nothing else was needed: the code was right.
+
+### D-4132 — A permit free now is issued without a timer — 2026-10-08
+
+**What was observed.** Run 1286 reported `server::await_budget` with
+`wait > 0` changed to `wait >= 0` as MISSED. `wait` is unsigned, so the mutant
+sleeps on every call, a zero-length sleep when the governor grants now. The
+result is the same `Ok(())`, but not the same cost: Tokio's timer rounds a
+deadline up to its next millisecond tick, so every admitted request would
+yield and wait for a tick nobody asked for.
+
+**Decided.** A test polls `await_budget` once, with a no-op waker and no Tokio
+runtime, for each of two free Dhan permits, and requires `Ready(Ok(()))`.
+Outside a runtime, creating a timer panics, so `Ready` proves none was made
+(R1286-api-03).
+
+**Rejected.** Timing the call. A wall-clock bound under a millisecond is
+noise on a shared machine.
