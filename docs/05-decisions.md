@@ -66486,3 +66486,25 @@ as before. OBSV-12, `web/tests/swept-surface.test.js`.
 **Rejected.** Rendering `coverNote` in the template. It was never rendered on
 this base, and placing a new line on the backtest form is a layout decision
 outside this finding.
+
+### D-3212 — A census- or master-stamped refusal names the half that failed — 2026-10-09
+
+**What was observed.** `/instruments.json` answers 503 when the selected
+feed's census will not load or its master will not decode, and `/store.json`
+answers 503 for an unreadable census; both keep a JSON array body and stamp
+the reason in `x-brutex-census-state`/`-note` and `x-brutex-master-state`/`-note`
+(D-0124). Three readers dropped it. `catalogue-loader.js` printed the master's
+sentence whatever had failed, so an unreadable census read "read — groww:
+master read; 812 instrument(s) in the merged universe" — a master that was
+fine, blamed — and an unknown feed's 400 printed "HTTP 400" though its body
+names the feed in `refused`. `feed-summary.js` (the census HEAD survey) and
+the `/ingest` roster measurement (`measureRoster`) printed the status alone.
+
+**Decided.** `web/src/lib/refusal.js` gains `headerRefusal(headers)`: the
+master half when the master state is present and not `read`, and the census
+half when the census state is `unreadable`, each with its note or a sentence
+saying none was sent; `null` when neither names a failure.
+`headerRefusalFrom(route, response)` puts it in the CE-83 sentence, falling
+back to the body's reason (`reasonOf`). The loader and the roster use
+`headerRefusalFrom('/instruments.json', …)`; the HEAD survey, which has no
+body, uses `headerRefusal` in `refusalSentence('census HEAD', …)`. OBSV-13.

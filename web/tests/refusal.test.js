@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
+import { headerRefusal, headerRefusalFrom, reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
 import { readCalendar } from '../src/lib/calendar-owed.js';
 import { censusFailure, createCensusLoader } from '../src/lib/store-census.js';
 
@@ -74,4 +74,23 @@ test('each of the four readers goes through the named-reason helper', () => {
   const mapping = source('../src/routes/mapping/+page.svelte');
   assert.match(mapping, /refusalFrom\('\/indexmap\.json', response\)/);
   assert.doesNotMatch(mapping, /body\?\.error/);
+});
+
+test('a stamped refusal names the failed half only: an unreadable census, a master that did not read (W2)', async () => {
+  const headers = (/** @type {Record<string, string>} */ h) => new Headers(h);
+  assert.equal(headerRefusal(null), null);
+  assert.equal(headerRefusal(headers({})), null);
+  assert.equal(headerRefusal(headers({ 'x-brutex-master-state': 'read', 'x-brutex-master-note': 'dhan: master read; 5 instrument(s)',
+    'x-brutex-census-state': 'held', 'x-brutex-census-note': 'dhan: 1 month(s), 2 row(s), generation 3' })), null);
+  assert.equal(headerRefusal(headers({ 'x-brutex-census-state': 'absent', 'x-brutex-census-note': 'dhan: UNAVAILABLE ? no manifest' })), null);
+  assert.equal(headerRefusal(headers({ 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': '  dhan: UNREADABLE  ' })),
+    'the store census is unreadable: dhan: UNREADABLE');
+  assert.equal(headerRefusal(headers({ 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': '   ' })),
+    'the store census is unreadable and the response carried no census note');
+  assert.equal(headerRefusal(headers({ 'x-brutex-master-state': 'UNAVAILABLE' })),
+    'the instrument master is UNAVAILABLE and the response carried no master note');
+  assert.equal(await headerRefusalFrom('/instruments.json', Response.json({ refused: 'no feed called x', feed: 'x' }, { status: 400 })),
+    '/instruments.json answered HTTP 400: no feed called x');
+  assert.equal(await headerRefusalFrom('/instruments.json', Response.json([], { status: 503, headers: { 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': 'n' } })),
+    '/instruments.json answered HTTP 503: the store census is unreadable: n');
 });

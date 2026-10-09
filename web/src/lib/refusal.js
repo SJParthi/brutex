@@ -82,3 +82,52 @@ export function refusalSentence(route, status, reason) {
 export async function refusalFrom(route, response) {
   return refusalSentence(route, response.status, await reasonOf(response));
 }
+
+// THE STAMPED HALF: `/instruments.json` and `/store.json` put their reason in
+// HEADERS, because their body is a JSON array in every state (D-0124).
+//
+// `/instruments.json` answers 503 when the census will not load OR the feed's
+// master will not decode, and stamps both (`crates/api/src/server.rs`,
+// `instruments_json`); `/store.json` answers 503 for an unreadable census, and
+// a HEAD of it has no body at all. Three readers printed the status alone, and
+// the catalogue loader printed the MASTER's sentence whatever had failed, so an
+// unreadable census read "read — <feed>: master read; …": a master that was
+// fine, blamed, and the census note that named the failure dropped (W2,
+// D-3212). The master half is named only when the master did not read.
+
+const CENSUS_STATE = 'x-brutex-census-state';
+const CENSUS_NOTE = 'x-brutex-census-note';
+const MASTER_STATE = 'x-brutex-master-state';
+const MASTER_NOTE = 'x-brutex-master-note';
+
+/**
+ * Why a census- or master-stamped answer is not a measurement, read from its
+ * headers, or null when neither stamp names a failure.
+ * @param {Headers | null | undefined} headers
+ * @returns {string | null}
+ */
+export function headerRefusal(headers) {
+  const read = (/** @type {string} */ name) => (headers?.get?.(name) ?? '').trim();
+  const parts = [];
+  const master = read(MASTER_STATE);
+  if (master !== '' && master !== 'read') {
+    const note = read(MASTER_NOTE);
+    parts.push(note ? `${master} — ${note}` : `the instrument master is ${master} and the response carried no master note`);
+  }
+  if (read(CENSUS_STATE) === 'unreadable') {
+    const note = read(CENSUS_NOTE);
+    parts.push(note ? `the store census is unreadable: ${note}` : 'the store census is unreadable and the response carried no census note');
+  }
+  return parts.length > 0 ? parts.join('; ') : null;
+}
+
+/**
+ * The sentence for a refused stamped read: the headers' reason first, then the
+ * body's (an unknown feed's 400 names itself in `refused`), else none named.
+ * @param {string} route
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+export async function headerRefusalFrom(route, response) {
+  return refusalSentence(route, response.status, headerRefusal(response.headers) ?? (await reasonOf(response)));
+}

@@ -81,6 +81,7 @@
   import { ask as request } from '$lib/ask.js';
   import { createPageRequests, watchVisible } from '$lib/page-requests.js';
   import { exact } from '$lib/money.js';
+  import { headerRefusalFrom } from '$lib/refusal.js';
   // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
@@ -4021,8 +4022,11 @@
       const answers = await Promise.all(
         list.map((f) =>
           request(`/instruments.json?feed=${encodeURIComponent(f.wire)}`)
-            .then((r) => {
-              if (!r.ok) throw new Error(`${f.display}: /instruments.json answered HTTP ${r.status}`);
+            .then(async (r) => {
+              // THE SERVER'S REASON, NOT ITS STATUS ALONE (W2, D-3212): an
+              // unreadable census is stamped in the headers, an unknown feed
+              // names itself in the body.
+              if (!r.ok) throw new Error(`${f.display}: ${await headerRefusalFrom('/instruments.json', r)}`);
               return r.json();
             })
             .then((rows) => ({ feed: f, rows }))
