@@ -2819,15 +2819,34 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
 ///
 /// A non-number, zero, or 1,000,000 and anything above it.
 fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
-    match text.parse::<u64>() {
-        Err(_) => Err("SUPPORT_PPM is not a whole number"),
-        Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
-        Ok(ppm) if ppm >= 1_000_000 => Err(
+    text.parse::<u64>()
+        .map_err(|_| "SUPPORT_PPM is not a whole number")
+        .and_then(support_ppm_in_domain)
+}
+
+/// `ppm` itself when it is a support [`parse_support_ppm`] admits, or the
+/// sentence that refuses it: the ONE support domain, `1..1_000_000`.
+///
+/// # Every entry asks this (W2-cli8-11, D-4718)
+///
+/// [`parse_support_ppm`] is this after the parse, so argv and
+/// `BRUTEX_SUPPORT_PPM` ask it; [`screen_range`], [`screen_range_in_points`]
+/// and the api's `screen` command take a number already parsed and ask it
+/// directly. Those three refused only zero, so 100% or more loaded a span and
+/// recorded a screen that could find nothing.
+///
+/// # Errors
+///
+/// Zero, or 1,000,000 and anything above it.
+pub const fn support_ppm_in_domain(ppm: u64) -> Result<u64, &'static str> {
+    match ppm {
+        0 => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
+        1_000_000.. => Err(
             "SUPPORT_PPM is parts per million, so 1000000 is 100%: a pattern on \
                  every bar, which D-0080 excludes, so at or above it nothing can \
                  be frequent",
         ),
-        Ok(ppm) => Ok(ppm),
+        ppm => Ok(ppm),
     }
 }
 
@@ -16698,11 +16717,9 @@ pub fn screen_range_in_points(
     top: usize,
 ) -> String {
     let (from, to) = span;
-    if support_ppm == 0 {
-        return "refused: a support of zero makes every combination frequent, \
-                so the frequent frontier never empties and the walk has no \
-                end.\n"
-            .to_owned();
+    // THE ONE SUPPORT DOMAIN, BEFORE ANYTHING IS READ (W2-cli8-11, D-4718).
+    if let Err(why) = support_ppm_in_domain(support_ppm) {
+        return format!("refused: {why}\n");
     }
     // ZERO IS "NO CEILING BEYOND THE SWEPT LADDER". See `elite_arm` for the
     // full argument; in short, `Rules::admits` already reads `max_mae_ppm == 0`
@@ -16739,8 +16756,12 @@ pub fn screen_range_in_points(
             );
         }
     };
-    let reference = reference_price(&span.bars);
-    let max_mae_ppm = match ceiling_in_ppm(max_points, reference) {
+    // ZERO IS NO CEILING HERE TOO (W2-cli8-10, D-4717). This converted zero
+    // with `ceiling_in_ppm`, which refused it as "0 ppm, which admits
+    // nothing" after the span had been loaded, so the api's `screen` command
+    // passed zero through (D-1732) to a refusal. `elite_ceiling_ppm` is the
+    // one zero rule `elite` already uses.
+    let max_mae_ppm = match elite_ceiling_ppm(max_points, || Ok(reference_price(&span.bars))) {
         Ok(ppm) => ppm,
         Err(why) => {
             drop(span);
@@ -17862,6 +17883,11 @@ pub fn screen_range(
     support_ppm: u64,
     policy: Policy,
 ) -> String {
+    // THE ONE SUPPORT DOMAIN (W2-cli8-11, D-4718): this refused nothing, and
+    // the kernel turned zero into a one-hit threshold.
+    if let Err(why) = support_ppm_in_domain(support_ppm) {
+        return format!("refused: {why}\n");
+    }
     match screen_range_inner(
         vendor_word,
         underlying,

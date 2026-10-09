@@ -3641,3 +3641,131 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
     );
     let _ignored = std::fs::remove_dir_all(&store);
 }
+
+/// Re-runs one test of this binary in a child whose `BRUTEX_STORE` names
+/// `root`, and requires the child's own proof line.
+fn rerun_over_store(test: &str, child: &str, root: &std::path::Path, proof: &str) {
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env(child, "1")
+        .env("BRUTEX_STORE", root)
+        .env("BRUTEX_LOG_DIR", root.join("logs"))
+        .output()
+        .expect("the child starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(stdout.contains(proof), "{stdout}");
+}
+
+/// W2-cli8-10 (D-4717) and W2-cli8-11 (D-4718), over a SWEPT index, so each
+/// call reaches the code under test. G18-cli-a-33 asked these doors about
+/// `NOT-A-SWEPT-INDEX`, whose span refuses before either the ceiling or the
+/// support is ever looked at, so it passed whatever they did.
+///
+/// * A support outside `1..1_000_000` is refused by the one validator argv and
+///   `BRUTEX_SUPPORT_PPM` use, at both entries a caller names a support
+///   through, before anything is read or recorded. The points door refused
+///   only zero and `screen_range` nothing. A descent's own steps take the
+///   supports its walk derives and are not entries.
+/// * `MAX_POINTS = 0` is no ceiling (D-1732). `screen_range_in_points` loaded
+///   the span and refused it as a ceiling that "converts to 0 ppm, which
+///   admits nothing". The elite door, fixed by D-1721, is held to the same
+///   assertion here rather than to the absence of an old sentence.
+#[test]
+fn the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain() {
+    const CHILD: &str = "BRUTEX_TEST_POINTS_SCREEN_DOORS";
+    if std::env::var_os(CHILD).is_some() {
+        points_screen_doors_child();
+        return;
+    }
+    let fixture = Fixture::warmed();
+    rerun_over_store(
+        "audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain",
+        CHILD,
+        &fixture.root,
+        "POINTS SCREEN DOORS CHECKED",
+    );
+}
+
+/// The child half, over the warmed NIFTY store `BRUTEX_STORE` names.
+fn points_screen_doors_child() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018).
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
+    let root = crate::store_root().expect("the fixture store");
+    let span = ((2025, 5), (2025, 5));
+    let policy = crate::Policy {
+        rules: crate::Rules::BASELINE,
+        lens: runner::rank::Lens::Detectability,
+        validate: false,
+    };
+    for (support, why) in [
+        (0_u64, "0 would disable extinction"),
+        (1_000_000, "1000000 is 100%"),
+        (u64::MAX, "1000000 is 100%"),
+    ] {
+        let points =
+            crate::screen_range_in_points("zerodha", "NIFTY", "1min", span, support, 20, 1);
+        let plain =
+            crate::screen_range("zerodha", "NIFTY", "1min", span.0, span.1, support, policy);
+        for (door, page) in [("points", &points), ("screen_range", &plain)] {
+            assert!(
+                page.starts_with("refused: ") && page.contains(why),
+                "{door} {support}: {page}"
+            );
+        }
+    }
+    assert!(
+        !crate::results::Results::path(&root).exists(),
+        "a refused support recorded nothing"
+    );
+    assert_eq!(
+        crate::sweep_evidence::latest(&root, 1_048_576).expect("readable evidence"),
+        None,
+        "and began no attempt"
+    );
+
+    let zero = crate::screen_range_in_points("zerodha", "NIFTY", "1min", span, 999_999, 0, 1);
+    assert!(
+        !zero.contains("admits nothing"),
+        "zero was read as a ceiling: {zero}"
+    );
+    if crate::commit_stamp().is_none() {
+        assert!(zero.contains("no verified commit stamp"), "{zero}");
+    } else {
+        assert!(zero.starts_with(crate::STORED_PROVENANCE), "{zero}");
+        assert!(zero.contains("RESULT RECORDED"), "{zero}");
+    }
+
+    // The elite door over the same swept span. See `elite_ranks_by_the_lens_it_is_given`
+    // for why these two knobs.
+    crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "0");
+    crate::knobs::set("BRUTEX_CEILING", "1048576");
+    let elite = crate::elite_descend_in_points_inner(
+        "zerodha",
+        "NIFTY",
+        "1min",
+        span,
+        (0, 1),
+        runner::rank::Lens::Payoff,
+        None,
+    );
+    assert!(
+        !elite.contains("admits nothing"),
+        "zero was read as a ceiling: {elite}"
+    );
+    assert!(elite.contains("ELITE, SELF-TUNING"), "{elite}");
+    crate::knobs::clear_all();
+    println!("POINTS SCREEN DOORS CHECKED");
+}

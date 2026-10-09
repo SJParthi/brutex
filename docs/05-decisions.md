@@ -65070,3 +65070,60 @@ before the fix: `left: 2521, right: 2` and `left: 3, right: 1`.
 **Rejected.** Keeping one capture per judged tier and refusing up front when
 `T × 2C × 33` bytes would exceed the budget: the run would still refuse, only
 sooner, for evidence about tiers the page never shows.
+
+### D-4717 — `screen_range_in_points` reads a zero stop ceiling as no ceiling — 2026-10-09
+
+**Finding.** W2-cli8-10. D-1732 let the api's `screen` command pass
+`max_points = 0` through to `cli::screen_range_in_points` on the claim that
+`cli` reads zero as no ceiling. That function loaded the span and then
+converted zero with `ceiling_in_ppm`, which refused it as "0 ppm, which
+admits nothing". So the browser's zero-point screen was a refusal after a
+span load. G18-cli-a-33 had asked the door about an unswept instrument,
+which refuses before the ceiling is read, so nothing saw it.
+
+**Decision.** The conversion is `elite_ceiling_ppm`, the one zero rule
+`elite` already uses (D-1721): zero is `max_mae_ppm = 0`, which
+`Rules::admits` and `Levels::forced` read as no ceiling; a positive ceiling
+converts as before, now with `elite_ceiling_ppm`'s refusal sentence. The
+span is still loaded, because the policy's floors are measured off it.
+`cli screen`'s argv arm, which takes `MIN_RR` and builds its own rules, still
+refuses zero at its door by name before reading anything; that verb never
+offered zero and is unchanged.
+
+**What changes in stored results.** A zero-point api screen now runs and
+records a screen where it refused; nothing already recorded changes.
+
+**Proof.** `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`
+sends the body through `command_from` and `conduct_command` over a stored
+NIFTY May in a child; before the fix it read "converts to 0 ppm, which admits
+nothing". `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
+asks the cli door and the elite door the same over a swept index. Each
+child's proof line is declared to gate 23 beside D-0695's.
+
+### D-4718 — Every screen support entry asks the one support domain — 2026-10-09
+
+**Finding.** W2-cli8-11. D-1722 gave argv and `BRUTEX_SUPPORT_PPM` one domain,
+`1..1_000_000`, in `parse_support_ppm`. Three entries take a number already
+parsed and did not ask it: the api's `screen` command and
+`cli::screen_range_in_points` refused only zero, and `cli::screen_range`
+refused nothing, so 100% or more loaded a span and recorded a screen that
+could find nothing, and `screen_range` turned zero into a one-hit threshold.
+
+**Decision.** The domain is `cli::support_ppm_in_domain`, a public `const fn`;
+`parse_support_ppm` is the parse followed by it, so argv and the knob are
+unchanged. `screen_range`, `screen_range_in_points` and the api's `screen`
+parser ask it before anything is read, and refuse with its sentence (the api
+prefixes the field name). The descent's internal steps
+(`screen_range_for_attempt`) take supports the walk derives, not entries, and
+are not routed through it.
+
+**What changes in stored results.** A screen at 0 or at 1,000,000 ppm or more
+through those three doors is refused instead of run; nothing recorded
+changes.
+
+**Proof.** `the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
+(0, 1,000,000 and `u64::MAX` refused at the points door and `screen_range`,
+with no ledger and no attempt written; before the fix the points door's zero
+refusal lacked the domain's sentence) and
+`api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses`
+(0, 1,000,000, 1,000,001 and `u64::MAX` refused, 1 and 999,999 parsed).
