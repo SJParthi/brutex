@@ -1,28 +1,567 @@
-From a87cbb508399beecdb566e6855b1d611aee6dade Mon Sep 17 00:00:00 2001
+From 7f7adb96767ee1c3b86578a6f5b2dce2259df848 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Thu, 8 Oct 2026 23:57:10 +0000
-Subject: [PATCH 1/2] WIP tests (fail-before)
+Date: Fri, 9 Oct 2026 05:29:23 +0000
+Subject: [PATCH 1/8] cli: a recorded tier walk captures the screens it shows
+ (G2-5, D-4716)
 
+Before: walk_tiers handed the candidate capture to tier_rows for every
+tier it judged, so a recorded walk that admitted nothing captured all
+1 + T screens: (1 + T) x (2 + 8C) + 2 fsyncs against a 64 MiB
+acknowledgement budget that refuses the whole run on long ladders.
+Measured on the 8-session fixture: 2,521 captured tiers for a
+2,520-tier ladder.
+
+After: every tier is judged with no capture; only the tier the walk
+ends on (the met tier, or the last) is judged again with it. A cascade
+captures at most two screens, the operator's policy and that tier, and
+its answer is byte-identical. The capture format and its version are
+unchanged; docs/19 records which passes are captured. docs/06 states
+the bound next to D-1734.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
 ---
- crates/api/src/sweeprun.rs             | 167 +++++++++
- crates/cli/src/audited_stored_tests.rs | 360 +++++++++++++++++++
- crates/cli/src/candidate_trades.rs     |   2 +-
- crates/cli/src/lib.rs                  |  22 ++
- crates/cli/src/results_report_tests.rs |  72 ++++
- crates/cli/src/screen_policy_tests.rs  | 479 +++++++++++++++++++++++++
- crates/cli/src/stored.rs               |  11 +
- 7 files changed, 1112 insertions(+), 1 deletion(-)
+ crates/cli/src/candidate_trades.rs    |   8 +-
+ crates/cli/src/lib.rs                 |  42 +++++-
+ crates/cli/src/screen_policy_tests.rs | 209 ++++++++++++++++++++++++++
+ docs/04-invariants.md                 |   7 +
+ docs/05-decisions.md                  |  45 ++++++
+ docs/06-limits.md                     |  19 +++
+ docs/19-candidate-trades.md           |  17 +++
+ 7 files changed, 337 insertions(+), 10 deletions(-)
 
+diff --git a/crates/cli/src/candidate_trades.rs b/crates/cli/src/candidate_trades.rs
+index 3d824eef..5e96f24a 100644
+--- a/crates/cli/src/candidate_trades.rs
++++ b/crates/cli/src/candidate_trades.rs
+@@ -1,6 +1,7 @@
+ //! Exact selected-cell trades for every evaluated screen candidate and side.
+ //!
+-//! Each visited policy tier retains its actual cap and inputs. Immutable child
++//! Each captured screen pass retains its actual cap and inputs. A recorded
++//! tier walk captures only the tier it ends on (D-4716). Immutable child
+ //! files are sealed before a catalog can publish the captured set. The catalog
+ //! is prepared evidence, not an institutional admission or parent-run success.
+ //!
+@@ -241,7 +242,7 @@ thread_local! {
+ #[cfg(test)]
+ thread_local! {
+     /// Test-only count of `fsync` calls issued by `write_exact` on this thread.
+-    static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
++    pub(crate) static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+ }
+ 
+ impl<'a> Capture<'a> {
+@@ -690,7 +691,8 @@ pub struct Summary {
+     pub attempt: u64,
+     /// Digest of the actual execution slice.
+     pub execution_digest: [u8; 32],
+-    /// Number of visited screen invocations, not generated policy tiers.
++    /// Number of captured screen passes, not generated policy tiers: the
++    /// operator's own policy and the tier a recorded walk ended on (D-4716).
+     pub tiers: u64,
+     /// Captured candidate-side outcomes, including no-cell outcomes.
+     pub candidates: u64,
+diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
+index 4ae07321..3589af06 100644
+--- a/crates/cli/src/lib.rs
++++ b/crates/cli/src/lib.rs
+@@ -13131,6 +13131,11 @@ where
+ /// The answer is the reference walk's, `walk_ladder` with `screen` per tier,
+ /// byte for byte: proven by
+ /// `cli::screen_policy_tests::the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
++///
++/// A capture records only the tier the walk ENDS on: the met tier, or the last
++/// tier when none admits. Every other tier is judged with no capture, so a
++/// recorded walk writes one captured screen whatever `T` is (G2-5, D-4716):
++/// proven by `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on`.
+ #[expect(
+     clippy::too_many_arguments,
+     reason = "the six slice inputs every screen takes, the ladder, and the unmet sink"
+@@ -13153,11 +13158,33 @@ fn walk_tiers<'t, 'a>(
+             price_grids(bars, column, by_evidence, horizon, envelope, pricing, facts)
+         },
+         |grids, (_, rules)| {
+-            let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
+-            Ok(rows
+-                .iter()
+-                .any(|row| row.admitted)
+-                .then(|| finish_screen(rows, bars, column, horizon, *rules, facts)))
++            // JUDGED UNRECORDED; CAPTURED ONLY WHEN SHOWN (G2-5, D-4716). A
++            // tier that admits nothing is not the answer and its rows are never
++            // shown, so capturing it bought a tier file and four `fsync`s per
++            // candidate side for every one of up to 18,480 tiers, against a
++            // 64 MiB budget that then refused the whole recorded run.
++            let rows = tier_rows(
++                grids,
++                by_evidence,
++                horizon,
++                *rules,
++                Pricing {
++                    capture: None,
++                    ..pricing
++                },
++            )?;
++            if !rows.iter().any(|row| row.admitted) {
++                return Ok(None);
++            }
++            // The met tier is the answer: judged again WITH the capture. The
++            // capture only records, so these rows equal the ones above.
++            let rows = match pricing.capture {
++                Some(_) => tier_rows(grids, by_evidence, horizon, *rules, pricing)?,
++                None => rows,
++            };
++            Ok(Some(finish_screen(
++                rows, bars, column, horizon, *rules, facts,
++            )))
+         },
+         |grids, (_, rules)| {
+             let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
+@@ -13792,8 +13819,9 @@ fn tier_rows<'a>(
+     rules: Rules,
+     pricing: Pricing<'_>,
+ ) -> Result<Vec<Screened<'a>>, String> {
+-    // ONE CAPTURE TIER PER POLICY JUDGED, as when every policy priced its own
+-    // grids: the capture's tier ordinals follow the walk, not the grid passes.
++    // ONE CAPTURE TIER PER CALL THAT CARRIES A CAPTURE. `walk_tiers` passes
++    // one only for the tier it ends on, so the capture's tier ordinals are the
++    // SHOWN screens, not every tier judged (G2-5, D-4716).
+     let captured_tier = pricing
+         .capture
+         .map(|capture| {
+diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
+index 276bd640..f899908b 100644
+--- a/crates/cli/src/screen_policy_tests.rs
++++ b/crates/cli/src/screen_policy_tests.rs
+@@ -1595,3 +1595,212 @@ fn the_envelope_is_each_floors_minimum_over_its_own_key() {
+         (i64::MAX, i64::MAX)
+     );
+ }
++
++// ---------------------------------------------------------------------------
++// G2-5 (D-4716): a recorded tier walk captures the screens its page shows, not
++// every tier it judged.
++// ---------------------------------------------------------------------------
++
++/// A fresh capture root under the temporary directory, removed on drop.
++struct CaptureRoot(std::path::PathBuf);
++
++impl CaptureRoot {
++    fn new(tag: &str) -> Self {
++        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        let path = std::env::temp_dir().join(format!(
++            "brutex-l1fb-capture-{tag}-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++        ));
++        std::fs::create_dir_all(&path).expect("a private capture root");
++        Self(path)
++    }
++
++    fn attempt(&self, tag: u8) -> crate::sweep_evidence::Attempt {
++        crate::sweep_evidence::begin(&self.0, [tag; 32], crate::sweep_evidence::Operation::Audit)
++            .expect("a durable audit attempt")
++    }
++}
++
++impl Drop for CaptureRoot {
++    fn drop(&mut self) {
++        let _ = std::fs::remove_dir_all(&self.0);
++    }
++}
++
++/// Runs `work` on a one-thread pool and returns its answer with every capture
++/// `fsync` it issued: on one worker thread the thread-local counter sees the
++/// parallel recording too.
++fn counting_syncs<T: Send>(work: impl FnOnce() -> T + Send) -> (T, u64) {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(1)
++        .build()
++        .expect("a one-thread pool");
++    pool.install(|| {
++        candidate_trades::DURABLE_SYNCS.with(|count| count.set(0));
++        let answer = work();
++        (
++            answer,
++            candidate_trades::DURABLE_SYNCS.with(std::cell::Cell::get),
++        )
++    })
++}
++
++/// G2-5, D-4716. A RECORDED cascade whose stated rules admit nothing walks
++/// every generated tier (D-1731), and the candidate capture recorded every
++/// tier it judged: one fsynced tier file and, per candidate side, a trade
++/// replay and two fsynced files. On this fixture's 2,520-tier ladder that was
++/// 2,521 captured screens and `2 × 2,521 + 4 × 2 × 2 × 2,521` fsyncs; on an
++/// operator rung the 64 MiB acknowledgement budget refused the whole run
++/// part-way down the ladder.
++///
++/// The capture now records the two screens the page is made of: the
++/// operator's own, and the mildest tier's, whose table the page prints. Its
++/// cost is two screens whatever the ladder's length, and the answer is the
++/// unrecorded cascade's, byte for byte.
++#[test]
++fn a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder() {
++    let fixture = Ranked::of(8);
++    let by_evidence = fixture.by_evidence(2);
++    let bars = &fixture.bars;
++    let column = &fixture.run.column;
++    let facts = runner::trade::SliceFacts::of(bars, column);
++    let mut rules = Rules::elite(400, 25);
++    rules.min_trades = u64::MAX;
++    let ladder = tiers(bars, by_evidence[0].hits);
++    let mildest = ladder
++        .last()
++        .expect("a generated ladder is never empty here")
++        .rules(rules.top, reference_price(bars));
++    assert!(ladder.len() > 2, "fixture: a ladder longer than two tiers");
++
++    let root = CaptureRoot::new("nothing-admits");
++    let attempt = root.attempt(0x45);
++    let capture =
++        candidate_trades::Capture::begin(&root.0, &attempt, bars, column).expect("capture starts");
++    let ((recorded, summary), syncs) = counting_syncs(|| {
++        let recorded = screen_cascade(
++            bars,
++            column,
++            &by_evidence,
++            Horizon::DEFAULT,
++            rules,
++            Pricing {
++                recording: None,
++                capture: Some(&capture),
++            },
++            true,
++            &facts,
++        )
++        .expect("the recorded cascade runs");
++        (recorded, capture.finish().expect("the capture seals"))
++    });
++    let unrecorded = screen_cascade(
++        bars,
++        column,
++        &by_evidence,
++        Horizon::DEFAULT,
++        rules,
++        NO_PRICING,
++        true,
++        &facts,
++    )
++    .expect("the unrecorded cascade runs");
++
++    // THE ANSWER IS THE UNRECORDED ONE: recording changes no byte of it.
++    assert!(
++        recorded.text.contains("NO TIER MET, INCLUDING THE MILDEST"),
++        "fixture: nothing admits\n{}",
++        recorded.text
++    );
++    assert_eq!(recorded.text, unrecorded.text);
++    assert!(!recorded.admitted_any && !unrecorded.admitted_any);
++    assert_eq!(
++        recorded.selected.map(|chosen| chosen.cell),
++        unrecorded.selected.map(|chosen| chosen.cell)
++    );
++
++    // THE CAPTURE IS THE PAGE'S TWO SCREENS, NOT THE LADDER.
++    assert_eq!(
++        summary.tiers,
++        2,
++        "captured screens on a {}-tier ladder",
++        ladder.len()
++    );
++    let yours = candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
++        .expect("the operator's screen");
++    let shown = candidate_trades::tier(&root.0, &summary, 1, candidate_trades::DEFAULT_MAX_BYTES)
++        .expect("the shown tier's screen");
++    assert_eq!(yours.rules, rules, "tier 0 is the operator's own policy");
++    assert_eq!(
++        shown.rules, mildest,
++        "tier 1 is the mildest tier, whose table the page prints"
++    );
++    assert_eq!(
++        summary.candidates,
++        2 * (yours.evaluated + shown.evaluated),
++        "every evaluated candidate side of both screens"
++    );
++    // TWO FSYNCS PER FILE: a tier file per screen, two files per candidate
++    // side, and the catalog.
++    assert_eq!(
++        syncs,
++        2 * summary.tiers + 4 * summary.candidates + 2,
++        "the capture's whole durable cost"
++    );
++}
++
++/// G2-5, D-4716. A recorded walk that MEETS a later tier captures that tier
++/// alone: the strictest unmet tiers before it are judged and named UNMET, and
++/// none of them is recorded. Before, every tier the walk judged was captured.
++#[test]
++fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
++    let slice = Slice::of(8);
++    let none_at_39 = crafted(39, 0, 0);
++    let ladder = vec![
++        none_at_39,
++        crafted(2_000, 5_000, 0),
++        crafted(500, 0, 0),
++        crafted(2_000, 0, 0),
++    ];
++    let by_evidence = slice.fixture.by_evidence(2);
++    let root = CaptureRoot::new("met-later");
++    let attempt = root.attempt(0x46);
++    let capture = candidate_trades::Capture::begin(
++        &root.0,
++        &attempt,
++        &slice.fixture.bars,
++        &slice.fixture.run.column,
++    )
++    .expect("capture starts");
++    let mut unmet = Vec::new();
++    let recorded = walk_tiers(
++        &slice.fixture.bars,
++        &slice.fixture.run.column,
++        &by_evidence,
++        Horizon::DEFAULT,
++        Pricing {
++            recording: None,
++            capture: Some(&capture),
++        },
++        &slice.facts,
++        &ladder,
++        |rank| unmet.push(rank),
++    )
++    .map(|walk| walk_shape(&walk))
++    .expect("the recorded walk runs");
++    let summary = capture.finish().expect("the capture seals");
++    let (unrecorded, unrecorded_unmet, _) = slice.cached(&ladder, 2);
++    assert!(recorded.starts_with("met 2"), "fixture: tier 2 meets");
++    assert_eq!(recorded, unrecorded, "recording changes no answer");
++    assert_eq!(unmet, unrecorded_unmet);
++    assert_eq!(unmet, [0, 1]);
++    assert_eq!(summary.tiers, 1, "only the tier the walk ended on");
++    let captured =
++        candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
++            .expect("the met tier's screen");
++    assert_eq!(captured.rules, ladder[2].1, "the met tier's policy");
++    assert_eq!(summary.candidates, 2 * captured.evaluated);
++}
++
++// ---------------------------------------------------------------------------
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index 31e467ea..f26b8a1e 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7052,3 +7052,10 @@ old line regex the same input and watched it pass.
+ | G18-api-27 | The seek path's `records unreadable` line names the first file that refused a record, not the first file read (D-2046) | `api::bars::window_tests::the_unreadable_line_names_the_first_damaged_file_not_the_first_file` | ✓ |
+ | G18-api-28 | The route test's HTTP exchange is bounded at 30 s per read and write, so a server that admits or answers nothing fails it rather than hanging (D-2047) | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end` | ✓ |
+ | G18-api-29 | A dropped calendar `Landing` marks its flight `Abandoned` (or answered), removes it from the flight table, and wakes every follower (D-2047) | `api::calendar_of::tests::a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped` | ✓ |
++
++### Lane 1-b finishing fixes, fixer B (D-4716 onward)
++
++| Id | Invariant | Proof | |
++|---|---|---|---|
++| L1FB-01 | A recorded cascade whose stated policy and whole tier ladder admit nothing captures exactly two screens, the operator's policy and the mildest tier, answers byte for byte as the unrecorded cascade, and costs exactly `2 × tiers + 4 × candidates + 2` `fsync`s, whatever the ladder's length (D-4716; supersedes D-1734's "one tier per policy judged") | `cli::screen_policy_tests::a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder` | ✓ |
++| L1FB-02 | A recorded tier walk that meets a tier captures that tier alone, with its own rules, and answers as the uncaptured cached walk (D-4716) | `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index 552ce57a..a43faa2e 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65025,3 +65025,48 @@ on a live leader would derive a second time and lose the single-flight
+ guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
+ test order. A rename that sorted a single-flight test ahead of it would
+ restore the timeout, so the ordering is pinned in the test's own doc.
++
++### D-4716 — A recorded tier walk captures the screens it shows, not every tier it judges — 2026-10-09
++
++**Finding.** G2-5, medium. D-1731 made the tier walk judge every tier, and
++D-1734 kept the candidate capture recording "one tier per policy judged". So
++a recorded walk that admits nothing wrote a tier file and two files per
++candidate side for every tier of the ladder: `(1 + T) × (2 + 8C) + 2` `fsync`s and
++`T × 2C` replays, against an acknowledgement budget of 64 MiB that refuses
++the whole recorded run once it is spent. D-1734's bound did not name it, and
++its 3.2 s measurement was the unrecorded path.
++`a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
++measured it on the 8-session fixture before the fix: 2,521 captured tiers
++for a 2,520-tier ladder, where the page shows two screens.
++
++**Decision.** `walk_tiers` judges every tier with no capture (`Pricing {
++capture: None, .. }`). The tier the walk ENDS on is judged again with the
++capture: the met tier inside `judge`, or the last tier in `screen_at`. The
++capture only records, so the re-judged rows equal the unrecorded ones and the
++page, selection and priced map are unchanged byte for byte. A recorded
++cascade therefore captures at most two screens, the operator's own policy and
++the tier the walk ended on: at most `6 + 16C` `fsync`s and `4C` acknowledgement
++slots, whatever `T` is. The met tier pays one extra `tier_rows` over its
++cached grids, `O(C × 2 × K)`.
++
++**What changes in stored results.** Only candidate captures of recorded
++audits and screens whose stated policy admitted nothing and whose ladder was
++walked: their catalog now holds two tiers, not `1 + rank + 1` or `1 + T`, and
++`candidate_side_count` falls with it. Tier ordinals now count SHOWN screens.
++The bytes of every file, the catalog layout and version 1 of
++`docs/19-candidate-trades.md` are unchanged, and every reader pages by the
++tier index it is given, so no format version is cut: a capture made before
++this decision reads exactly as it did. No parent identity, ledger row,
++frontier, report or digest changes. D-1734's sentence that the capture "still
++records one tier per policy judged" is superseded by this entry.
++
++**Proof.** `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
++(recorded text equals unrecorded text; `tiers == 2`, tier 0 the operator's
++rules, tier 1 the mildest tier; `fsync`s `== 2 × tiers + 4 × candidates + 2`)
++and `a_recorded_walk_captures_only_the_tier_it_ends_on` (a met walk captures
++exactly the met tier and answers as the uncaptured cached walk). Both failed
++before the fix: `left: 2521, right: 2` and `left: 3, right: 1`.
++
++**Rejected.** Keeping one capture per judged tier and refusing up front when
++`T × 2C × 33` bytes would exceed the budget: the run would still refuse, only
++sooner, for evidence about tiers the page never shows.
+diff --git a/docs/06-limits.md b/docs/06-limits.md
+index 12e9bf09..7bb7a1c7 100644
+--- a/docs/06-limits.md
++++ b/docs/06-limits.md
+@@ -15560,6 +15560,25 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
+   anyone should expect to reach, because a key whose envelope admits cells is
+   a key whose mildest tier is likely to end the walk.
+ 
++- **A recorded cascade's capture: at most two screens, whatever `T` is**
++  (G2-5, D-4716, next to D-1734). The bound above is the walk's pricing; a
++  RECORDED walk also writes candidate evidence. Each captured screen is one
++  tier file and two files per candidate side, two `fsync`s each, plus
++  `2 × evaluated` acknowledgement slots of 33 bytes against the capture's
++  64 MiB budget. Until D-4716 every judged tier was captured, so a walk where
++  nothing admits paid `(1 + T) × (2 + 8C) + 2` `fsync`s and `(1 + T) × 2C`
++  replays, and the budget refused the run near `T = 64 MiB / (66 × C)`:
++  about 10,000 tiers at `C = 98` and about 100 at the default
++  `screen_cap()` (derived from the slot size, not measured). Now `walk_tiers`
++  judges every tier with no capture and captures only the tier it ends on,
++  so a cascade captures the operator's own policy and that tier: at most
++  `6 + 16C` `fsync`s, `4C` replays and `4C` slots (`C <= screen_cap()`). The
++  met tier pays one extra `tier_rows` over its cached grids,
++  `O(C × 2 × K)`. COUNTED, not timed:
++  `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
++  measures two captured screens and exactly `2 × tiers + 4 × candidates + 2`
++  `fsync`s on a 2,520-tier ladder (2,521 tiers before the fix).
++
+ - **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
+   number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
+   `grid_rungs`, `max_stop_points`, each once), one
+diff --git a/docs/19-candidate-trades.md b/docs/19-candidate-trades.md
+index 03f8e6e8..9766d4ea 100644
+--- a/docs/19-candidate-trades.md
++++ b/docs/19-candidate-trades.md
+@@ -37,6 +37,23 @@ publication. A callback error is latched: not-yet-started candidates and sides
+ check it and skip work; a grid already executing finishes its current engine
+ call. No immediate interruption inside that grid is claimed.
+ 
++## Which screen passes are captured (D-4716)
++
++A capture holds the screen passes the page shows, not every tier the walk
++judged. `screen_cascade` screens the operator's own policy first, and that
++pass is captured. When the walk runs, every tier is judged with no capture,
++and only the tier the walk ends on is captured: the strictest tier that
++admitted a row, or the last tier when none did. So a capture holds one or two
++tiers. Before D-4716 every judged tier was captured, `1 + T` tiers on a walk
++that admitted nothing, which spent the 64 MiB acknowledgement budget and
++refused the run on long ladders.
++
++The bytes of every file and the catalog are unchanged, and this stays
++version 1. Tier ordinals count captured passes in the order they ran, as
++before; each tier states its own policy words, so a reader never infers a
++tier's policy from its ordinal. A capture written before D-4716 reads as it
++always did.
++
+ ## Paths and byte layout
+ 
+ All files live under:
+-- 
+2.43.0
+
+
+From f39848a82e64118623e1f725e24c253ae37fc510 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:24 +0000
+Subject: [PATCH 2/8] cli, api: zero points is no ceiling; one support domain
+ at every screen entry (W2-cli8-10, W2-cli8-11, D-4717, D-4718)
+
+Before: screen_range_in_points loaded the span and then refused a zero
+stop ceiling as "0 ppm, which admits nothing", though D-1732 sends the
+api's zero there as no ceiling. It and the api's screen command refused
+only a zero support, and screen_range refused none, so 100% or more
+loaded a span and recorded a screen that could find nothing.
+
+After: screen_range_in_points converts with elite_ceiling_ppm, so zero
+is no ceiling. support_ppm_in_domain is the one 1..1_000_000 domain;
+parse_support_ppm is the parse followed by it, and screen_range,
+screen_range_in_points and the api's screen parser ask it before
+anything is read. Tested over a swept index, and the api test drives
+the screen command end to end. Gate 23 declares the two new
+stdout proof lines (sweeprun.rs to 2, audited_stored_tests.rs 1).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ .github/workflows/ci.yml               |   8 +-
+ crates/api/src/sweeprun.rs             | 179 ++++++++++++++++++++++++-
+ crates/cli/src/audited_stored_tests.rs | 128 ++++++++++++++++++
+ crates/cli/src/lib.rs                  |  50 +++++--
+ docs/04-invariants.md                  |   2 +
+ docs/05-decisions.md                   |  57 ++++++++
+ 6 files changed, 404 insertions(+), 20 deletions(-)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 32e24fbb..7088ccca 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1742,7 +1742,7 @@ jobs:
+           # is not a diagnostic: nothing is wrong when it prints.
+           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
+           api/src/frontierjson.rs:println!:1
+-          api/src/sweeprun.rs:println!:1
++          api/src/sweeprun.rs:println!:2
+           api/src/trades.rs:println!:2
+           api/src/recovery.rs:println!:1
+           cli/src/boolean_candidate_tests.rs:eprintln!:2
+@@ -1760,6 +1760,12 @@ jobs:
+           # was degraded, so a clean run prints nothing.
+           declared="$declared pull/src/csv.rs:eprintln!:1
+           pull/src/masters.rs:eprintln!:1"
++          # TWO MORE STDOUT PROOF LINES, D-0695's kind (D-4717, D-4718): api
++          # sweeprun's second child prints `ZERO-POINT SCREEN RAN` (counted in
++          # its line above), and a cli child prints `POINTS SCREEN DOORS
++          # CHECKED`. Each sits in a `#[cfg(test)]` module and prints only
++          # after its child passed.
++          declared="$declared cli/src/audited_stored_tests.rs:println!:1"
+ 
+           # CLAUSE A2 — the same question, asked of the handle spellings.
+           #
 diff --git a/crates/api/src/sweeprun.rs b/crates/api/src/sweeprun.rs
-index 8554cc0f..4e1a1a55 100644
+index 8554cc0f..1bf6c90e 100644
 --- a/crates/api/src/sweeprun.rs
 +++ b/crates/api/src/sweeprun.rs
-@@ -7169,4 +7169,171 @@ mod tests {
+@@ -3196,13 +3196,11 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
+                 "support_ppm",
+                 "a whole number of parts per million of this rung's own bars",
+             )?;
+-            if support_ppm == 0 {
+-                return Err(Refusal::Malformed(
+-                    "`support_ppm` is 0. Every combination is then frequent, \
+-                     the frontier never empties and the walk has no end."
+-                        .to_owned(),
+-                ));
+-            }
++            // `cli`'s ONE SUPPORT DOMAIN, not a copy of half of it: this
++            // refused only 0, so 100% or more ran (W2-cli8-11, D-4718).
++            cli::support_ppm_in_domain(support_ppm).map_err(|why| {
++                Refusal::Malformed(format!("`support_ppm` {support_ppm} is refused: {why}."))
++            })?;
+             let max_points: i64 = whole(body, "max_points", "a whole number of index points")?;
+             let top: usize = whole(body, "top", "a whole number of rows to list")?;
+             // Zero is no ceiling, as at the descent door and in `cli` (D-1732).
+@@ -7169,4 +7167,171 @@ mod tests {
          assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
          let _ = std::fs::remove_dir_all(dir);
      }
 +
-+    /// W2-cli8-10, D-4517. A ZERO STOP CEILING IS NO CEILING, END TO END.
++    /// W2-cli8-10, D-4717. A ZERO STOP CEILING IS NO CEILING, END TO END.
 +    ///
 +    /// `a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it` proved the
 +    /// parse only. The command it parsed reached `cli::screen_range_in_points`,
@@ -138,11 +677,11 @@ index 8554cc0f..4e1a1a55 100644
 +            .chain((5..=13).map(|day| (5, day)));
 +        for (month, day) in days {
 +            let rows = generated_session(month, day);
-+            if rows.is_empty() {
++            let Some(first) = rows.first().copied() else {
 +                continue;
-+            }
++            };
 +            write(month, Timeframe::MINUTE_1, &rows);
-+            write(month, Timeframe::DAY_1, &rows[..1]);
++            write(month, Timeframe::DAY_1, &[first]);
 +            if month == 5 {
 +                let five: Vec<_> = rows.iter().step_by(5).copied().collect();
 +                write(month, Timeframe::MINUTE_5, &five);
@@ -150,7 +689,7 @@ index 8554cc0f..4e1a1a55 100644
 +        }
 +    }
 +
-+    /// W2-cli8-11, D-4518. THE `screen` COMMAND'S SUPPORT DOMAIN IS `cli`'s.
++    /// W2-cli8-11, D-4718. THE `screen` COMMAND'S SUPPORT DOMAIN IS `cli`'s.
 +    ///
 +    /// This door refused only 0, so 1,000,000 ppm (100%) or more ran and
 +    /// recorded a screen that could find nothing, while argv and
@@ -190,10 +729,10 @@ index 8554cc0f..4e1a1a55 100644
 +    }
  }
 diff --git a/crates/cli/src/audited_stored_tests.rs b/crates/cli/src/audited_stored_tests.rs
-index 7f1a83d2..96c58c70 100644
+index 7f1a83d2..d7aad23e 100644
 --- a/crates/cli/src/audited_stored_tests.rs
 +++ b/crates/cli/src/audited_stored_tests.rs
-@@ -3641,3 +3641,363 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
+@@ -3641,3 +3641,131 @@ fn the_minute_gap_census_asks_the_shares_dated_close() {
      );
      let _ignored = std::fs::remove_dir_all(&store);
  }
@@ -218,14 +757,16 @@ index 7f1a83d2..96c58c70 100644
 +    assert!(stdout.contains(proof), "{stdout}");
 +}
 +
-+/// W2-cli8-10 (D-4517) and W2-cli8-11 (D-4518), over a SWEPT index, so each
++/// W2-cli8-10 (D-4717) and W2-cli8-11 (D-4718), over a SWEPT index, so each
 +/// call reaches the code under test. G18-cli-a-33 asked these doors about
 +/// `NOT-A-SWEPT-INDEX`, whose span refuses before either the ceiling or the
 +/// support is ever looked at, so it passed whatever they did.
 +///
 +/// * A support outside `1..1_000_000` is refused by the one validator argv and
-+///   `BRUTEX_SUPPORT_PPM` use, at every screen door, before anything is read
-+///   or recorded. The points door and `screen_range` refused only zero.
++///   `BRUTEX_SUPPORT_PPM` use, at both entries a caller names a support
++///   through, before anything is read or recorded. The points door refused
++///   only zero and `screen_range` nothing. A descent's own steps take the
++///   supports its walk derives and are not entries.
 +/// * `MAX_POINTS = 0` is no ceiling (D-1732). `screen_range_in_points` loaded
 +///   the span and refused it as a ceiling that "converts to 0 ppm, which
 +///   admits nothing". The elite door, fixed by D-1721, is held to the same
@@ -273,21 +814,7 @@ index 7f1a83d2..96c58c70 100644
 +            crate::screen_range_in_points("zerodha", "NIFTY", "1min", span, support, 20, 1);
 +        let plain =
 +            crate::screen_range("zerodha", "NIFTY", "1min", span.0, span.1, support, policy);
-+        let descent = crate::screen_range_for_attempt(
-+            "zerodha",
-+            "NIFTY",
-+            "1min",
-+            span,
-+            support,
-+            policy,
-+            Some(21),
-+            &mut crate::ScreenCache::default(),
-+        );
-+        for (door, page) in [
-+            ("points", &points),
-+            ("screen_range", &plain),
-+            ("descent", &descent),
-+        ] {
++        for (door, page) in [("points", &points), ("screen_range", &plain)] {
 +            assert!(
 +                page.starts_with("refused: ") && page.contains(why),
 +                "{door} {support}: {page}"
@@ -337,6 +864,212 @@ index 7f1a83d2..96c58c70 100644
 +    crate::knobs::clear_all();
 +    println!("POINTS SCREEN DOORS CHECKED");
 +}
+diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
+index 3589af06..16ff35ee 100644
+--- a/crates/cli/src/lib.rs
++++ b/crates/cli/src/lib.rs
+@@ -2819,15 +2819,34 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
+ ///
+ /// A non-number, zero, or 1,000,000 and anything above it.
+ fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
+-    match text.parse::<u64>() {
+-        Err(_) => Err("SUPPORT_PPM is not a whole number"),
+-        Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
+-        Ok(ppm) if ppm >= 1_000_000 => Err(
++    text.parse::<u64>()
++        .map_err(|_| "SUPPORT_PPM is not a whole number")
++        .and_then(support_ppm_in_domain)
++}
++
++/// `ppm` itself when it is a support [`parse_support_ppm`] admits, or the
++/// sentence that refuses it: the ONE support domain, `1..1_000_000`.
++///
++/// # Every entry asks this (W2-cli8-11, D-4718)
++///
++/// [`parse_support_ppm`] is this after the parse, so argv and
++/// `BRUTEX_SUPPORT_PPM` ask it; [`screen_range`], [`screen_range_in_points`]
++/// and the api's `screen` command take a number already parsed and ask it
++/// directly. Those three refused only zero, so 100% or more loaded a span and
++/// recorded a screen that could find nothing.
++///
++/// # Errors
++///
++/// Zero, or 1,000,000 and anything above it.
++pub const fn support_ppm_in_domain(ppm: u64) -> Result<u64, &'static str> {
++    match ppm {
++        0 => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
++        1_000_000.. => Err(
+             "SUPPORT_PPM is parts per million, so 1000000 is 100%: a pattern on \
+                  every bar, which D-0080 excludes, so at or above it nothing can \
+                  be frequent",
+         ),
+-        Ok(ppm) => Ok(ppm),
++        ppm => Ok(ppm),
+     }
+ }
+ 
+@@ -16698,11 +16717,9 @@ pub fn screen_range_in_points(
+     top: usize,
+ ) -> String {
+     let (from, to) = span;
+-    if support_ppm == 0 {
+-        return "refused: a support of zero makes every combination frequent, \
+-                so the frequent frontier never empties and the walk has no \
+-                end.\n"
+-            .to_owned();
++    // THE ONE SUPPORT DOMAIN, BEFORE ANYTHING IS READ (W2-cli8-11, D-4718).
++    if let Err(why) = support_ppm_in_domain(support_ppm) {
++        return format!("refused: {why}\n");
+     }
+     // ZERO IS "NO CEILING BEYOND THE SWEPT LADDER". See `elite_arm` for the
+     // full argument; in short, `Rules::admits` already reads `max_mae_ppm == 0`
+@@ -16739,8 +16756,12 @@ pub fn screen_range_in_points(
+             );
+         }
+     };
+-    let reference = reference_price(&span.bars);
+-    let max_mae_ppm = match ceiling_in_ppm(max_points, reference) {
++    // ZERO IS NO CEILING HERE TOO (W2-cli8-10, D-4717). This converted zero
++    // with `ceiling_in_ppm`, which refused it as "0 ppm, which admits
++    // nothing" after the span had been loaded, so the api's `screen` command
++    // passed zero through (D-1732) to a refusal. `elite_ceiling_ppm` is the
++    // one zero rule `elite` already uses.
++    let max_mae_ppm = match elite_ceiling_ppm(max_points, || Ok(reference_price(&span.bars))) {
+         Ok(ppm) => ppm,
+         Err(why) => {
+             drop(span);
+@@ -17862,6 +17883,11 @@ pub fn screen_range(
+     support_ppm: u64,
+     policy: Policy,
+ ) -> String {
++    // THE ONE SUPPORT DOMAIN (W2-cli8-11, D-4718): this refused nothing, and
++    // the kernel turned zero into a one-hit threshold.
++    if let Err(why) = support_ppm_in_domain(support_ppm) {
++        return format!("refused: {why}\n");
++    }
+     match screen_range_inner(
+         vendor_word,
+         underlying,
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index f26b8a1e..817c04ed 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7059,3 +7059,5 @@ old line regex the same input and watched it pass.
+ |---|---|---|---|
+ | L1FB-01 | A recorded cascade whose stated policy and whole tier ladder admit nothing captures exactly two screens, the operator's policy and the mildest tier, answers byte for byte as the unrecorded cascade, and costs exactly `2 × tiers + 4 × candidates + 2` `fsync`s, whatever the ladder's length (D-4716; supersedes D-1734's "one tier per policy judged") | `cli::screen_policy_tests::a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder` | ✓ |
+ | L1FB-02 | A recorded tier walk that meets a tier captures that tier alone, with its own rules, and answers as the uncaptured cached walk (D-4716) | `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on` | ✓ |
++| L1FB-03 | A zero-point `screen` reaches `cli::screen_range_in_points` as no ceiling and runs over a swept index, from the api command end to end and from the cli door; the elite door agrees (D-4717) | `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`, `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain` | ✓ |
++| L1FB-04 | `screen_range`, `screen_range_in_points` and the api's `screen` command admit exactly the support domain `1..1_000_000` that argv and `BRUTEX_SUPPORT_PPM` admit, refusing with its sentence before any ledger row or attempt is written (D-4718) | `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`, `api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index a43faa2e..e88c8180 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65070,3 +65070,60 @@ before the fix: `left: 2521, right: 2` and `left: 3, right: 1`.
+ **Rejected.** Keeping one capture per judged tier and refusing up front when
+ `T × 2C × 33` bytes would exceed the budget: the run would still refuse, only
+ sooner, for evidence about tiers the page never shows.
++
++### D-4717 — `screen_range_in_points` reads a zero stop ceiling as no ceiling — 2026-10-09
++
++**Finding.** W2-cli8-10. D-1732 let the api's `screen` command pass
++`max_points = 0` through to `cli::screen_range_in_points` on the claim that
++`cli` reads zero as no ceiling. That function loaded the span and then
++converted zero with `ceiling_in_ppm`, which refused it as "0 ppm, which
++admits nothing". So the browser's zero-point screen was a refusal after a
++span load. G18-cli-a-33 had asked the door about an unswept instrument,
++which refuses before the ceiling is read, so nothing saw it.
++
++**Decision.** The conversion is `elite_ceiling_ppm`, the one zero rule
++`elite` already uses (D-1721): zero is `max_mae_ppm = 0`, which
++`Rules::admits` and `Levels::forced` read as no ceiling; a positive ceiling
++converts as before, now with `elite_ceiling_ppm`'s refusal sentence. The
++span is still loaded, because the policy's floors are measured off it.
++`cli screen`'s argv arm, which takes `MIN_RR` and builds its own rules, still
++refuses zero at its door by name before reading anything; that verb never
++offered zero and is unchanged.
++
++**What changes in stored results.** A zero-point api screen now runs and
++records a screen where it refused; nothing already recorded changes.
++
++**Proof.** `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`
++sends the body through `command_from` and `conduct_command` over a stored
++NIFTY May in a child; before the fix it read "converts to 0 ppm, which admits
++nothing". `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
++asks the cli door and the elite door the same over a swept index. Each
++child's proof line is declared to gate 23 beside D-0695's.
++
++### D-4718 — Every screen support entry asks the one support domain — 2026-10-09
++
++**Finding.** W2-cli8-11. D-1722 gave argv and `BRUTEX_SUPPORT_PPM` one domain,
++`1..1_000_000`, in `parse_support_ppm`. Three entries take a number already
++parsed and did not ask it: the api's `screen` command and
++`cli::screen_range_in_points` refused only zero, and `cli::screen_range`
++refused nothing, so 100% or more loaded a span and recorded a screen that
++could find nothing, and `screen_range` turned zero into a one-hit threshold.
++
++**Decision.** The domain is `cli::support_ppm_in_domain`, a public `const fn`;
++`parse_support_ppm` is the parse followed by it, so argv and the knob are
++unchanged. `screen_range`, `screen_range_in_points` and the api's `screen`
++parser ask it before anything is read, and refuse with its sentence (the api
++prefixes the field name). The descent's internal steps
++(`screen_range_for_attempt`) take supports the walk derives, not entries, and
++are not routed through it.
++
++**What changes in stored results.** A screen at 0 or at 1,000,000 ppm or more
++through those three doors is refused instead of run; nothing recorded
++changes.
++
++**Proof.** `the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
++(0, 1,000,000 and `u64::MAX` refused at the points door and `screen_range`,
++with no ledger and no attempt written; before the fix the points door's zero
++refusal lacked the domain's sentence) and
++`api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses`
++(0, 1,000,000, 1,000,001 and `u64::MAX` refused, 1 and 999,999 parsed).
+-- 
+2.43.0
+
+
+From d470cf19f11cc0eac5620e4e0f49dee4bf50ed9c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:25 +0000
+Subject: [PATCH 3/8] cli: the derived-support rung prepares through the
+ audit's inputs; one daily read per build (W2-cli8-6, G2-3, D-4719)
+
+Before: one_rung_cached's derived-support branch built its own column
+from an empty withheld set with no minute-hole census: three edge-holed
+days cost four builds (five with the audit's), each refused pass wrote
+a preparation attempt, an interior-gap day stayed in its column while
+the audit withheld it, and an unstamped rung built and recorded first.
+column_withholding_at_build reloaded the daily context on every pass.
+
+After: the branch reads the audit's AuditCache entry (census, one
+column, one preparation digest) and refuses unstamped before any load;
+the wrapper it alone called is removed and G18-cli-a-24 asks the build
+directly. The daily context is read once above the retry loop. The
+o1cli-2 and o1cli-3 limits and their tests now state one build per rung.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ crates/cli/src/audited_stored_tests.rs | 220 +++++++++++++++++++++++++
+ crates/cli/src/g18_cli_a_tests.rs      |  25 ++-
+ crates/cli/src/lib.rs                  | 209 ++++++++++-------------
+ crates/cli/src/stored.rs               |  11 ++
+ crates/cli/tests/limits_o1cli_2.rs     |  36 ++--
+ crates/cli/tests/limits_o1cli_3.rs     |  11 +-
+ docs/04-invariants.md                  |   4 +
+ docs/05-decisions.md                   |  51 ++++++
+ docs/06-limits.md                      |  53 +++---
+ 9 files changed, 451 insertions(+), 169 deletions(-)
+
+diff --git a/crates/cli/src/audited_stored_tests.rs b/crates/cli/src/audited_stored_tests.rs
+index d7aad23e..e16487be 100644
+--- a/crates/cli/src/audited_stored_tests.rs
++++ b/crates/cli/src/audited_stored_tests.rs
+@@ -3769,3 +3769,223 @@ fn points_screen_doors_child() {
+     crate::knobs::clear_all();
+     println!("POINTS SCREEN DOORS CHECKED");
+ }
 +
 +/// A warmed NIFTY May whose sessions of the 6th, 8th and 12th stop at 15:24,
 +/// as in `sessions_missing_their_closing_minutes_are_withheld_up_front`, and,
@@ -395,7 +1128,7 @@ index 7f1a83d2..96c58c70 100644
 +
 +/// **A derived-support rung runs the minute-hole census, builds one column,
 +/// and sizes its support on the swept population the audit then sweeps.**
-+/// W2-cli8-6 and G2-3, D-4519.
++/// W2-cli8-6 and G2-3, D-4719.
 +///
 +/// `one_rung_cached`'s `auto` branch built its own column from an EMPTY
 +/// withheld set: three edge-holed days cost three refused passes, each under
@@ -463,7 +1196,7 @@ index 7f1a83d2..96c58c70 100644
 +}
 +
 +/// **A derived-support rung with no commit stamp prepares nothing.** W2-cli8-6,
-+/// D-4519.
++/// D-4719.
 +///
 +/// The named-support branch already kept an unstamped rung from writing a
 +/// preparation attempt the audit would not have written. The derived branch
@@ -489,7 +1222,7 @@ index 7f1a83d2..96c58c70 100644
 +}
 +
 +/// **A column build's retry loop reads the daily context once, and answers
-+/// exactly as the census path does.** W2-cli8-6, D-4519.
++/// exactly as the census path does.** W2-cli8-6, D-4719.
 +///
 +/// The daily context is derived from the WHOLE folded series (D-1781), which
 +/// no pass changes, yet every pass of the 64 reloaded it from disk.
@@ -557,877 +1290,6 @@ index 7f1a83d2..96c58c70 100644
 +        )
 +    );
 +}
-diff --git a/crates/cli/src/candidate_trades.rs b/crates/cli/src/candidate_trades.rs
-index 3d824eef..abd19888 100644
---- a/crates/cli/src/candidate_trades.rs
-+++ b/crates/cli/src/candidate_trades.rs
-@@ -241,7 +241,7 @@ thread_local! {
- #[cfg(test)]
- thread_local! {
-     /// Test-only count of `fsync` calls issued by `write_exact` on this thread.
--    static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-+    pub(crate) static DURABLE_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
- }
- 
- impl<'a> Capture<'a> {
-diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
-index 4ae07321..9be5269f 100644
---- a/crates/cli/src/lib.rs
-+++ b/crates/cli/src/lib.rs
-@@ -7581,6 +7581,9 @@ std::thread_local! {
-     static AUDIT_INPUT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-     /// Test-only: how many times this thread loaded `one_rung`'s raw span. D-1557.
-     static RUNG_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-+    /// Test-only: the swept count `one_rung`'s derived support was sized on,
-+    /// so a test can compare it with the audit's column. W2-cli8-6, D-4519.
-+    static AUTO_SUPPORT_SWEPT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
- }
- 
- /// [`audit_range_kernel_cached`] with a fresh cache: one audit, one load.
-@@ -14511,9 +14514,15 @@ fn measure_top(
-     // one the sequential loop computed, whatever the core count. The cost is
-     // `O(band x (G + 7 x trades))` -- `G` one exit grid -- divided across cores,
-     // and `band` is at most `8 x TOP_CEILING`.
-+    #[cfg(test)]
-+    let hook = MEASURE_ROW_HOOK.with(|hook| hook.borrow().clone());
-     rows.par_iter_mut()
-         .take(measured_band(rules.top))
-         .for_each(|row| {
-+            #[cfg(test)]
-+            if let Some(hook) = &hook {
-+                hook();
-+            }
-             // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
-             // was worse than opposite — it was cross-wired.
-             //
-@@ -14552,6 +14561,17 @@ fn measure_top(
-         });
- }
- 
-+#[cfg(test)]
-+std::thread_local! {
-+    /// Test-only: called once per measured row of [`measure_top`]'s band, so a
-+    /// test can prove two rows are measured at once (W2-cli8-7, D-4522). Read
-+    /// on the thread that calls `measure_top`, so no other test's measurement
-+    /// sees it.
-+    pub(crate) static MEASURE_ROW_HOOK: std::cell::RefCell<
-+        Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-+    > = const { std::cell::RefCell::new(None) };
-+}
-+
- /// The screen's ranked table: one row per printed combination, its side, its
- /// chosen exit's figures and the rule that refused it, then its conditions.
- fn screen_table(out: &mut String, rows: &[Screened<'_>], rules: Rules, reference: i64) {
-@@ -15505,6 +15525,8 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
-             }
-         };
-         let can_hit = column.census().swept;
-+        #[cfg(test)]
-+        AUTO_SUPPORT_SWEPT.with(|swept| swept.set(Some(can_hit)));
-         let statistical = min_hits_for_swept(can_hit, statistical_support_floor(can_hit));
-         match affordable_min_hits(&column, &root, &span, digest) {
-             Ok(affordable) => (affordable.max(statistical), can_hit),
-diff --git a/crates/cli/src/results_report_tests.rs b/crates/cli/src/results_report_tests.rs
-index 42d60b37..c1cd82b9 100644
---- a/crates/cli/src/results_report_tests.rs
-+++ b/crates/cli/src/results_report_tests.rs
-@@ -583,3 +583,75 @@ fn the_omitted_row_line_starts_one_row_past_the_listing() -> Result<(), Box<dyn
-     }
-     Ok(())
- }
-+
-+/// **A range rung reads its row back through one held ledger handle.**
-+/// W2-cli8-4, D-4520.
-+///
-+/// `recorded_row` replaced `latest_for` (D-1700): one identity probe of the
-+/// process's shared ledger handle, opened once per root. Its two tests prove
-+/// it reads the RIGHT row, and both pass on a `recorded_row` that opened the
-+/// ledger afresh for every rung, an O(runs) identity pass per rung, which is
-+/// the cost D-1700 removed. Three rungs over one root now open the ledger
-+/// once. In a child process: the handle is process-wide, and any other test
-+/// using another root between two calls here would evict it.
-+#[test]
-+fn a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung()
-+-> Result<(), Box<dyn std::error::Error>> {
-+    const CHILD: &str = "BRUTEX_TEST_RUNG_READBACK_OPENS";
-+    if std::env::var_os(CHILD).is_some() {
-+        return readback_opens_child();
-+    }
-+    let output = std::process::Command::new(std::env::current_exe()?)
-+        .args([
-+            "--exact",
-+            "results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung",
-+            "--nocapture",
-+            "--test-threads=1",
-+        ])
-+        .env(CHILD, "1")
-+        .output()?;
-+    let stdout = String::from_utf8_lossy(&output.stdout);
-+    assert!(
-+        output.status.success(),
-+        "{stdout}{}",
-+        String::from_utf8_lossy(&output.stderr)
-+    );
-+    assert!(stdout.contains("1 passed"), "{stdout}");
-+    assert!(stdout.contains("READBACK OPENS 1 FOR 3 RUNGS"), "{stdout}");
-+    Ok(())
-+}
-+
-+/// The child half: three rows written through a private handle, then read
-+/// back one rung at a time by identity, counting ledger opens.
-+fn readback_opens_child() -> Result<(), Box<dyn std::error::Error>> {
-+    let rows: Vec<Record> = (1..=3).map(|id| row(id, 100, 2)).collect();
-+    let fixture = Fixture::new(&rows)?;
-+    let (found, opens, _) = counted(|| {
-+        rows.iter()
-+            .map(|record| {
-+                let page = format!(
-+                    "{}\n  row 0 in x\n  {}{}\n",
-+                    crate::RECORDED_HEAD,
-+                    crate::RECORDED_IDENTITY,
-+                    record.identity_hex()
-+                );
-+                crate::recorded_row(
-+                    &fixture.0,
-+                    &page,
-+                    crate::RungKey {
-+                        feed: "zerodha",
-+                        underlying: "NIFTY",
-+                        rung: "15min",
-+                        from: (2026, 1),
-+                        to: (2026, 1),
-+                        min_hits: record.min_hits,
-+                    },
-+                )
-+            })
-+            .collect::<Result<Vec<_>, String>>()
-+    });
-+    assert_eq!(found?, rows, "each rung reads its own row");
-+    assert_eq!(opens, 1, "one ledger open for every rung of the root");
-+    println!("READBACK OPENS {opens} FOR {} RUNGS", rows.len());
-+    Ok(())
-+}
-diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
-index 276bd640..06a8f044 100644
---- a/crates/cli/src/screen_policy_tests.rs
-+++ b/crates/cli/src/screen_policy_tests.rs
-@@ -739,6 +739,14 @@ fn the_frontier_prefix_equals_the_full_sort_with_each_key_once() {
-     assert!(first_accepted_in_order(&items, 2, |item| item.0, |_| false).is_empty());
- }
- /// W2-cli8-5. The listing retains a bounded window, not every matching row.
-+///
-+/// D-4521: this asserted only that `results_at` lacks the text
-+/// `rows.push(record)`, so deleting the window's `pop_front` passed it, and
-+/// passed every other test too, because the table prints only `LIST_ROWS`
-+/// rows whatever is held. It now drives the fold: over 500 rows, 400 of them
-+/// matching, `ListingFold` holds exactly `LIST_ROWS` records, the newest
-+/// matching ones in append order, in the capacity it started with; a row the
-+/// filter refuses is counted and never held.
- #[test]
- fn the_results_listing_retains_a_bounded_window() {
-     let listing = code_of("\nfn results_at(");
-@@ -746,6 +754,36 @@ fn the_results_listing_retains_a_bounded_window() {
-         !listing.contains("rows.push(record)"),
-         "every matching record is retained: {listing}"
-     );
-+    let ordinal = |record: &crate::results::Record| {
-+        u32::from_le_bytes([
-+            record.identity[0],
-+            record.identity[1],
-+            record.identity[2],
-+            record.identity[3],
-+        ])
-+    };
-+    let mut fold = ListingFold::new(Some("zerodha"), None);
-+    let capacity = fold.newest.capacity();
-+    assert!(capacity >= LIST_ROWS, "pre-sized to the window");
-+    for at in 0..500_u32 {
-+        let mut record = crate::tests::record_for_naming();
-+        record.identity = [0; 32];
-+        record.identity[..4].copy_from_slice(&at.to_le_bytes());
-+        if at % 5 == 4 {
-+            record.feed = crate::results::field("dhan");
-+        }
-+        fold.visit(Ok(record));
-+        assert!(fold.newest.len() <= LIST_ROWS, "row {at}: the window grew");
-+    }
-+    assert_eq!((fold.rows, fold.matching), (500, 400));
-+    assert_eq!(fold.newest.len(), LIST_ROWS, "exactly the window is held");
-+    assert_eq!(fold.newest.capacity(), capacity, "and it never reallocated");
-+    let held: Vec<u32> = fold.newest.iter().map(ordinal).collect();
-+    let newest: Vec<u32> = (0..500_u32)
-+        .filter(|at| at % 5 != 4)
-+        .skip(400 - LIST_ROWS)
-+        .collect();
-+    assert_eq!(held, newest, "the newest matching rows, in append order");
- }
- 
- /// AC-whp-o1-2. The bootstrap family builds its slice facts once, not once
-@@ -1595,3 +1633,444 @@ fn the_envelope_is_each_floors_minimum_over_its_own_key() {
-         (i64::MAX, i64::MAX)
-     );
- }
-+
-+// ---------------------------------------------------------------------------
-+// G2-5 (D-4516): a recorded tier walk captures the screens its page shows, not
-+// every tier it judged.
-+// ---------------------------------------------------------------------------
-+
-+/// A fresh capture root under the temporary directory, removed on drop.
-+struct CaptureRoot(std::path::PathBuf);
-+
-+impl CaptureRoot {
-+    fn new(tag: &str) -> Self {
-+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-+        let path = std::env::temp_dir().join(format!(
-+            "brutex-l1fb-capture-{tag}-{}-{}",
-+            std::process::id(),
-+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-+        ));
-+        std::fs::create_dir_all(&path).expect("a private capture root");
-+        Self(path)
-+    }
-+
-+    fn attempt(&self, tag: u8) -> crate::sweep_evidence::Attempt {
-+        crate::sweep_evidence::begin(&self.0, [tag; 32], crate::sweep_evidence::Operation::Audit)
-+            .expect("a durable audit attempt")
-+    }
-+}
-+
-+impl Drop for CaptureRoot {
-+    fn drop(&mut self) {
-+        let _ = std::fs::remove_dir_all(&self.0);
-+    }
-+}
-+
-+/// Runs `work` on a one-thread pool and returns its answer with every capture
-+/// `fsync` it issued: on one worker thread the thread-local counter sees the
-+/// parallel recording too.
-+fn counting_syncs<T: Send>(work: impl FnOnce() -> T + Send) -> (T, u64) {
-+    let pool = rayon::ThreadPoolBuilder::new()
-+        .num_threads(1)
-+        .build()
-+        .expect("a one-thread pool");
-+    pool.install(|| {
-+        candidate_trades::DURABLE_SYNCS.with(|count| count.set(0));
-+        let answer = work();
-+        (
-+            answer,
-+            candidate_trades::DURABLE_SYNCS.with(std::cell::Cell::get),
-+        )
-+    })
-+}
-+
-+/// G2-5, D-4516. A RECORDED cascade whose stated rules admit nothing walks
-+/// every generated tier (D-1731), and the candidate capture recorded every
-+/// tier it judged: one fsynced tier file and, per candidate side, a trade
-+/// replay and two fsynced files. On this fixture's 2,520-tier ladder that was
-+/// 2,521 captured screens and `2 × 2,521 + 4 × 2 × 2 × 2,521` fsyncs; on an
-+/// operator rung the 64 MiB acknowledgement budget refused the whole run
-+/// part-way down the ladder.
-+///
-+/// The capture now records the two screens the page is made of: the
-+/// operator's own, and the mildest tier's, whose table the page prints. Its
-+/// cost is two screens whatever the ladder's length, and the answer is the
-+/// unrecorded cascade's, byte for byte.
-+#[test]
-+fn a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder() {
-+    let fixture = Ranked::of(8);
-+    let by_evidence = fixture.by_evidence(2);
-+    let bars = &fixture.bars;
-+    let column = &fixture.run.column;
-+    let facts = runner::trade::SliceFacts::of(bars, column);
-+    let mut rules = Rules::elite(400, 25);
-+    rules.min_trades = u64::MAX;
-+    let ladder = tiers(bars, by_evidence[0].hits);
-+    let mildest = ladder
-+        .last()
-+        .expect("a generated ladder is never empty here")
-+        .rules(rules.top, reference_price(bars));
-+    assert!(ladder.len() > 2, "fixture: a ladder longer than two tiers");
-+
-+    let root = CaptureRoot::new("nothing-admits");
-+    let attempt = root.attempt(0x45);
-+    let capture =
-+        candidate_trades::Capture::begin(&root.0, &attempt, bars, column).expect("capture starts");
-+    let ((recorded, summary), syncs) = counting_syncs(|| {
-+        let recorded = screen_cascade(
-+            bars,
-+            column,
-+            &by_evidence,
-+            Horizon::DEFAULT,
-+            rules,
-+            Pricing {
-+                recording: None,
-+                capture: Some(&capture),
-+            },
-+            true,
-+            &facts,
-+        )
-+        .expect("the recorded cascade runs");
-+        (recorded, capture.finish().expect("the capture seals"))
-+    });
-+    let unrecorded = screen_cascade(
-+        bars,
-+        column,
-+        &by_evidence,
-+        Horizon::DEFAULT,
-+        rules,
-+        NO_PRICING,
-+        true,
-+        &facts,
-+    )
-+    .expect("the unrecorded cascade runs");
-+
-+    // THE ANSWER IS THE UNRECORDED ONE: recording changes no byte of it.
-+    assert!(
-+        recorded.text.contains("NO TIER MET, INCLUDING THE MILDEST"),
-+        "fixture: nothing admits\n{}",
-+        recorded.text
-+    );
-+    assert_eq!(recorded.text, unrecorded.text);
-+    assert!(!recorded.admitted_any && !unrecorded.admitted_any);
-+    assert_eq!(
-+        recorded.selected.map(|chosen| chosen.cell),
-+        unrecorded.selected.map(|chosen| chosen.cell)
-+    );
-+
-+    // THE CAPTURE IS THE PAGE'S TWO SCREENS, NOT THE LADDER.
-+    assert_eq!(
-+        summary.tiers,
-+        2,
-+        "captured screens on a {}-tier ladder",
-+        ladder.len()
-+    );
-+    let yours = candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
-+        .expect("the operator's screen");
-+    let shown = candidate_trades::tier(&root.0, &summary, 1, candidate_trades::DEFAULT_MAX_BYTES)
-+        .expect("the shown tier's screen");
-+    assert_eq!(yours.rules, rules, "tier 0 is the operator's own policy");
-+    assert_eq!(
-+        shown.rules, mildest,
-+        "tier 1 is the mildest tier, whose table the page prints"
-+    );
-+    assert_eq!(
-+        summary.candidates,
-+        2 * (yours.evaluated + shown.evaluated),
-+        "every evaluated candidate side of both screens"
-+    );
-+    // TWO FSYNCS PER FILE: a tier file per screen, two files per candidate
-+    // side, and the catalog.
-+    assert_eq!(
-+        syncs,
-+        2 * summary.tiers + 4 * summary.candidates + 2,
-+        "the capture's whole durable cost"
-+    );
-+}
-+
-+/// G2-5, D-4516. A recorded walk that MEETS a later tier captures that tier
-+/// alone: the strictest unmet tiers before it are judged and named UNMET, and
-+/// none of them is recorded. Before, every tier the walk judged was captured.
-+#[test]
-+fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
-+    let slice = Slice::of(8);
-+    let none_at_39 = crafted(39, 0, 0);
-+    let ladder = vec![
-+        none_at_39,
-+        crafted(2_000, 5_000, 0),
-+        crafted(500, 0, 0),
-+        crafted(2_000, 0, 0),
-+    ];
-+    let by_evidence = slice.fixture.by_evidence(2);
-+    let root = CaptureRoot::new("met-later");
-+    let attempt = root.attempt(0x46);
-+    let capture = candidate_trades::Capture::begin(
-+        &root.0,
-+        &attempt,
-+        &slice.fixture.bars,
-+        &slice.fixture.run.column,
-+    )
-+    .expect("capture starts");
-+    let mut unmet = Vec::new();
-+    let recorded = walk_tiers(
-+        &slice.fixture.bars,
-+        &slice.fixture.run.column,
-+        &by_evidence,
-+        Horizon::DEFAULT,
-+        Pricing {
-+            recording: None,
-+            capture: Some(&capture),
-+        },
-+        &slice.facts,
-+        &ladder,
-+        |rank| unmet.push(rank),
-+    )
-+    .map(|walk| walk_shape(&walk))
-+    .expect("the recorded walk runs");
-+    let summary = capture.finish().expect("the capture seals");
-+    let (unrecorded, unrecorded_unmet, _) = slice.cached(&ladder, 2);
-+    assert!(recorded.starts_with("met 2"), "fixture: tier 2 meets");
-+    assert_eq!(recorded, unrecorded, "recording changes no answer");
-+    assert_eq!(unmet, unrecorded_unmet);
-+    assert_eq!(unmet, [0, 1]);
-+    assert_eq!(summary.tiers, 1, "only the tier the walk ended on");
-+    let captured =
-+        candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
-+            .expect("the met tier's screen");
-+    assert_eq!(captured.rules, ladder[2].1, "the met tier's policy");
-+    assert_eq!(summary.candidates, 2 * captured.evaluated);
-+}
-+
-+// ---------------------------------------------------------------------------
-+// W2-cli8-7 (D-4522): the measured band runs on more than one core at once.
-+// ---------------------------------------------------------------------------
-+
-+/// Where two measured rows meet: the first to arrive waits, bounded, for a
-+/// second; a second arriving while the first waits is the overlap.
-+#[derive(Default)]
-+struct Meeting {
-+    state: std::sync::Mutex<(u32, bool, bool)>,
-+    met: std::sync::Condvar,
-+}
-+
-+impl Meeting {
-+    /// One row arrives. `(waiting, overlapped, gave_up)`.
-+    fn arrive(&self) {
-+        let mut state = self.state.lock().expect("meeting lock");
-+        if state.0 > 0 {
-+            state.1 = true;
-+            self.met.notify_all();
-+            return;
-+        }
-+        if state.1 || state.2 {
-+            return;
-+        }
-+        state.0 += 1;
-+        let (mut state, waited) = self
-+            .met
-+            .wait_timeout_while(state, std::time::Duration::from_secs(20), |state| !state.1)
-+            .expect("meeting wait");
-+        state.0 -= 1;
-+        if waited.timed_out() {
-+            state.2 = true;
-+        }
-+    }
-+
-+    fn overlapped(&self) -> bool {
-+        self.state.lock().expect("meeting lock").1
-+    }
-+}
-+
-+/// The band fixture `the_parallel_band_matches_a_sequential_measurement` uses:
-+/// up to forty priced rows of the eight-session slice, Long side.
-+fn band_rows<'a>(fixture: &'a Ranked, facts: &runner::trade::SliceFacts) -> Vec<Screened<'a>> {
-+    let bars = &fixture.bars;
-+    let column = &fixture.run.column;
-+    let horizon = Horizon::DEFAULT;
-+    let stops = stop_ladder_ppm(bars, horizon.as_bars() as usize);
-+    let levels = grid::Levels {
-+        rungs: grid_rungs(bars),
-+        step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
-+        forced: None,
-+        ratios: true,
-+        stops_ppm: &stops,
-+    };
-+    fixture
-+        .run
-+        .ranked
-+        .top
-+        .iter()
-+        .take(40)
-+        .enumerate()
-+        .filter_map(|(rank, scored)| {
-+            let g = grid::evaluate_over(
-+                bars,
-+                column,
-+                &scored.mask,
-+                horizon,
-+                side_of_direction(Direction::Long),
-+                levels,
-+                facts,
-+            );
-+            let cell = g.best().copied()?;
-+            Some(Screened {
-+                side: Direction::Long,
-+                scored,
-+                rank,
-+                cell,
-+                tightest: None,
-+                admitted: false,
-+                consistency: None,
-+                steady: true,
-+                calendar_unmeasured: false,
-+            })
-+        })
-+        .collect()
-+}
-+
-+/// W2-cli8-7, D-4522. THE BAND IS MEASURED IN PARALLEL, observed rather than
-+/// read off the source. On a two-thread pool each measured row checks in at a
-+/// meeting point; the first waits (bounded, 20 s) for a second, and a second
-+/// arriving while the first still waits proves two rows were being measured
-+/// at the same moment. A sequential loop cannot produce that: its first row
-+/// waits alone, gives up, and every later row arrives with nobody waiting.
-+/// The figures are still the sequential ones, row for row.
-+#[test]
-+fn the_measured_band_measures_two_rows_at_once() {
-+    let fixture = Ranked::of(8);
-+    let facts = runner::trade::SliceFacts::of(&fixture.bars, &fixture.run.column);
-+    let mut rules = Rules::elite(0, 25);
-+    rules.top = 1;
-+    let mut parallel = band_rows(&fixture, &facts);
-+    let mut sequential = band_rows(&fixture, &facts);
-+    assert!(parallel.len() > 2, "fixture: rows to measure");
-+    let meeting = std::sync::Arc::new(Meeting::default());
-+    let pool = rayon::ThreadPoolBuilder::new()
-+        .num_threads(2)
-+        .build()
-+        .expect("a two-thread pool");
-+    pool.install(|| {
-+        let arrive = std::sync::Arc::clone(&meeting);
-+        MEASURE_ROW_HOOK.with(|hook| {
-+            *hook.borrow_mut() = Some(std::sync::Arc::new(move || arrive.arrive()));
-+        });
-+        measure_top(
-+            &mut parallel,
-+            &fixture.bars,
-+            &fixture.run.column,
-+            Horizon::DEFAULT,
-+            rules,
-+            &facts,
-+        );
-+        MEASURE_ROW_HOOK.with(|hook| *hook.borrow_mut() = None);
-+    });
-+    assert!(
-+        meeting.overlapped(),
-+        "two rows of the band were never measured at the same moment"
-+    );
-+    let one = rayon::ThreadPoolBuilder::new()
-+        .num_threads(1)
-+        .build()
-+        .expect("a one-thread pool");
-+    one.install(|| {
-+        measure_top(
-+            &mut sequential,
-+            &fixture.bars,
-+            &fixture.run.column,
-+            Horizon::DEFAULT,
-+            rules,
-+            &facts,
-+        );
-+    });
-+    assert_eq!(
-+        parallel
-+            .iter()
-+            .map(|row| row.consistency.clone())
-+            .collect::<Vec<_>>(),
-+        sequential
-+            .iter()
-+            .map(|row| row.consistency.clone())
-+            .collect::<Vec<_>>(),
-+        "the parallel band is the sequential band, row for row"
-+    );
-+}
-+
-+// ---------------------------------------------------------------------------
-+// G2-1 (D-4523) and G2-2 (D-4524): documentation attached to its own item, and
-+// no limit describing a removed function as current.
-+// ---------------------------------------------------------------------------
-+
-+/// The `///` lines directly above the item that starts at `head` in `lib.rs`.
-+fn doc_above(head: &str) -> String {
-+    let source = include_str!("lib.rs");
-+    let (before, _) = source
-+        .split_once(head)
-+        .unwrap_or_else(|| panic!("{head} is no longer in lib.rs"));
-+    let mut doc: Vec<&str> = before
-+        .lines()
-+        .rev()
-+        .take_while(|line| line.trim_start().starts_with("///"))
-+        .collect();
-+    doc.reverse();
-+    doc.join("\n")
-+}
-+
-+/// G2-1, D-4523. Commit b489169 (D-1727) inserted `TOP_CEILING` between three
-+/// doc blocks and their items, so `measure_top`'s and `measured_band`'s docs
-+/// both attached to the constant and the two functions carried none. Each doc
-+/// now sits on its own item.
-+#[test]
-+fn each_screen_band_doc_sits_on_its_own_item() {
-+    const MEASURE: &str = "Measure consistency for the rows that will actually be printed";
-+    const BAND: &str = "How many rows get their seven-grain calendar measured";
-+    const CEILING: &str = "The most rows one listing may ask to print";
-+    let measure = doc_above("\nfn measure_top(");
-+    let band = doc_above("\nconst fn measured_band(");
-+    let ceiling = doc_above("\npub(crate) const TOP_CEILING");
-+    assert!(measure.contains(MEASURE), "measure_top's doc:\n{measure}");
-+    assert!(
-+        !measure.contains(BAND) && !measure.contains(CEILING),
-+        "{measure}"
-+    );
-+    assert!(band.contains(BAND), "measured_band's doc:\n{band}");
-+    assert!(!band.contains(MEASURE) && !band.contains(CEILING), "{band}");
-+    assert!(
-+        ceiling.trim_start().starts_with(&format!("/// {CEILING}")),
-+        "TOP_CEILING's doc:\n{ceiling}"
-+    );
-+    assert!(
-+        !ceiling.contains(MEASURE) && !ceiling.contains(BAND),
-+        "{ceiling}"
-+    );
-+}
-+
-+/// G2-2, D-4524. `latest_for` was removed by D-1700. Two bullets of
-+/// `docs/06-limits.md` still stated its O(runs) cost as current beside the
-+/// corrected copies; every bullet naming it must say it is gone.
-+#[test]
-+fn no_limit_states_the_removed_latest_for_as_current() {
-+    let limits = include_str!("../../../docs/06-limits.md");
-+    let bullets: Vec<&str> = limits
-+        .split("\n- ")
-+        .skip(1)
-+        .map(|bullet| {
-+            let paragraph = bullet.split_once("\n\n").map_or(bullet, |(head, _)| head);
-+            paragraph
-+                .split_once("\n#")
-+                .map_or(paragraph, |(head, _)| head)
-+        })
-+        .filter(|bullet| {
-+            bullet
-+                .lines()
-+                .next()
-+                .is_some_and(|head| head.contains("latest_for`"))
-+        })
-+        .collect();
-+    assert!(bullets.len() >= 2, "the corrected bullets remain");
-+    for bullet in bullets {
-+        assert!(
-+            bullet.contains("D-1700"),
-+            "a bullet still states `latest_for` as current:\n{bullet}"
-+        );
-+    }
-+}
-diff --git a/crates/cli/src/stored.rs b/crates/cli/src/stored.rs
-index 06143830..df02e441 100644
---- a/crates/cli/src/stored.rs
-+++ b/crates/cli/src/stored.rs
-@@ -3427,12 +3427,23 @@ pub fn load_daily_context(
-     signal_months: ((u16, u8), (u16, u8)),
-     signal: &[Candle],
- ) -> Result<DailyContext, Refusal> {
-+    #[cfg(test)]
-+    DAILY_CONTEXT_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
-     let (from, to) = signal_months;
-     let warm_from = previous_month(from)?;
-     let daily = load_span(root, vendor, underlying, "1day", warm_from, to)?;
-     daily_context_from_span(daily, signal)
- }
- 
-+#[cfg(test)]
-+std::thread_local! {
-+    /// Test-only: calls of [`load_daily_context`] on this thread, so a test can
-+    /// prove a column build's retry loop reads the daily context once
-+    /// (W2-cli8-6, D-4519).
-+    pub(crate) static DAILY_CONTEXT_LOADS: std::cell::Cell<u64> =
-+        const { std::cell::Cell::new(0) };
-+}
-+
- /// Load stored one-day reference evidence under a pre-allocation record ceiling.
- ///
- /// This is the bounded production counterpart to [`load_daily_context`].  It
--- 
-2.43.0
-
-
-From 48af6b95b909ebbbd77d04925a1f34a9774ad555 Mon Sep 17 00:00:00 2001
-From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 01:00:08 +0000
-Subject: [PATCH 2/2] WIP fixes
-
----
- .github/workflows/ci.yml               |   9 +-
- crates/api/src/sweeprun.rs             |  16 +-
- crates/cli/src/audited_stored_tests.rs |  30 +-
- crates/cli/src/candidate_trades.rs     |   6 +-
- crates/cli/src/g18_cli_a_tests.rs      |  25 +-
- crates/cli/src/lib.rs                  | 396 +++++++++++++------------
- crates/cli/src/results_report_tests.rs |   2 +-
- crates/cli/src/screen_policy_tests.rs  |  18 +-
- crates/cli/src/stored.rs               |   2 +-
- crates/cli/tests/limits_o1cli_2.rs     |  36 ++-
- crates/cli/tests/limits_o1cli_3.rs     |  11 +-
- docs/04-invariants.md                  |  18 ++
- docs/05-decisions.md                   | 210 +++++++++++++
- docs/06-limits.md                      | 101 ++++---
- docs/19-candidate-trades.md            |  17 ++
- 15 files changed, 604 insertions(+), 293 deletions(-)
-
-diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 32e24fbb..2009f92a 100644
---- a/.github/workflows/ci.yml
-+++ b/.github/workflows/ci.yml
-@@ -1742,7 +1742,7 @@ jobs:
-           # is not a diagnostic: nothing is wrong when it prints.
-           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
-           api/src/frontierjson.rs:println!:1
--          api/src/sweeprun.rs:println!:1
-+          api/src/sweeprun.rs:println!:2
-           api/src/trades.rs:println!:2
-           api/src/recovery.rs:println!:1
-           cli/src/boolean_candidate_tests.rs:eprintln!:2
-@@ -1760,6 +1760,13 @@ jobs:
-           # was degraded, so a clean run prints nothing.
-           declared="$declared pull/src/csv.rs:eprintln!:1
-           pull/src/masters.rs:eprintln!:1"
-+          # THREE MORE STDOUT PROOF LINES, D-0695's kind (D-4717, D-4718,
-+          # D-4720): api sweeprun's second child prints `ZERO-POINT SCREEN
-+          # RAN` (counted in its line above), and two cli children print
-+          # `POINTS SCREEN DOORS CHECKED` and `READBACK OPENS`. Each sits in a
-+          # `#[cfg(test)]` module and prints only after its child passed.
-+          declared="$declared cli/src/audited_stored_tests.rs:println!:1
-+          cli/src/results_report_tests.rs:println!:1"
- 
-           # CLAUSE A2 — the same question, asked of the handle spellings.
-           #
-diff --git a/crates/api/src/sweeprun.rs b/crates/api/src/sweeprun.rs
-index 4e1a1a55..0ba6aedc 100644
---- a/crates/api/src/sweeprun.rs
-+++ b/crates/api/src/sweeprun.rs
-@@ -3196,13 +3196,11 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
-                 "support_ppm",
-                 "a whole number of parts per million of this rung's own bars",
-             )?;
--            if support_ppm == 0 {
--                return Err(Refusal::Malformed(
--                    "`support_ppm` is 0. Every combination is then frequent, \
--                     the frontier never empties and the walk has no end."
--                        .to_owned(),
--                ));
--            }
-+            // `cli`'s ONE SUPPORT DOMAIN, not a copy of half of it: this
-+            // refused only 0, so 100% or more ran (W2-cli8-11, D-4718).
-+            cli::support_ppm_in_domain(support_ppm).map_err(|why| {
-+                Refusal::Malformed(format!("`support_ppm` {support_ppm} is refused: {why}."))
-+            })?;
-             let max_points: i64 = whole(body, "max_points", "a whole number of index points")?;
-             let top: usize = whole(body, "top", "a whole number of rows to list")?;
-             // Zero is no ceiling, as at the descent door and in `cli` (D-1732).
-@@ -7170,7 +7168,7 @@ mod tests {
-         let _ = std::fs::remove_dir_all(dir);
-     }
- 
--    /// W2-cli8-10, D-4517. A ZERO STOP CEILING IS NO CEILING, END TO END.
-+    /// W2-cli8-10, D-4717. A ZERO STOP CEILING IS NO CEILING, END TO END.
-     ///
-     /// `a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it` proved the
-     /// parse only. The command it parsed reached `cli::screen_range_in_points`,
-@@ -7298,7 +7296,7 @@ mod tests {
-         }
-     }
- 
--    /// W2-cli8-11, D-4518. THE `screen` COMMAND'S SUPPORT DOMAIN IS `cli`'s.
-+    /// W2-cli8-11, D-4718. THE `screen` COMMAND'S SUPPORT DOMAIN IS `cli`'s.
-     ///
-     /// This door refused only 0, so 1,000,000 ppm (100%) or more ran and
-     /// recorded a screen that could find nothing, while argv and
-diff --git a/crates/cli/src/audited_stored_tests.rs b/crates/cli/src/audited_stored_tests.rs
-index 96c58c70..e16487be 100644
---- a/crates/cli/src/audited_stored_tests.rs
-+++ b/crates/cli/src/audited_stored_tests.rs
-@@ -3662,14 +3662,16 @@ fn rerun_over_store(test: &str, child: &str, root: &std::path::Path, proof: &str
-     assert!(stdout.contains(proof), "{stdout}");
- }
- 
--/// W2-cli8-10 (D-4517) and W2-cli8-11 (D-4518), over a SWEPT index, so each
-+/// W2-cli8-10 (D-4717) and W2-cli8-11 (D-4718), over a SWEPT index, so each
- /// call reaches the code under test. G18-cli-a-33 asked these doors about
- /// `NOT-A-SWEPT-INDEX`, whose span refuses before either the ceiling or the
- /// support is ever looked at, so it passed whatever they did.
- ///
- /// * A support outside `1..1_000_000` is refused by the one validator argv and
--///   `BRUTEX_SUPPORT_PPM` use, at every screen door, before anything is read
--///   or recorded. The points door and `screen_range` refused only zero.
-+///   `BRUTEX_SUPPORT_PPM` use, at both entries a caller names a support
-+///   through, before anything is read or recorded. The points door refused
-+///   only zero and `screen_range` nothing. A descent's own steps take the
-+///   supports its walk derives and are not entries.
- /// * `MAX_POINTS = 0` is no ceiling (D-1732). `screen_range_in_points` loaded
- ///   the span and refused it as a ceiling that "converts to 0 ppm, which
- ///   admits nothing". The elite door, fixed by D-1721, is held to the same
-@@ -3717,21 +3719,7 @@ fn points_screen_doors_child() {
-             crate::screen_range_in_points("zerodha", "NIFTY", "1min", span, support, 20, 1);
-         let plain =
-             crate::screen_range("zerodha", "NIFTY", "1min", span.0, span.1, support, policy);
--        let descent = crate::screen_range_for_attempt(
--            "zerodha",
--            "NIFTY",
--            "1min",
--            span,
--            support,
--            policy,
--            Some(21),
--            &mut crate::ScreenCache::default(),
--        );
--        for (door, page) in [
--            ("points", &points),
--            ("screen_range", &plain),
--            ("descent", &descent),
--        ] {
-+        for (door, page) in [("points", &points), ("screen_range", &plain)] {
-             assert!(
-                 page.starts_with("refused: ") && page.contains(why),
-                 "{door} {support}: {page}"
-@@ -3839,7 +3827,7 @@ fn derived_support_rung(holed: &Fixture, commit: Option<&'static str>) -> crate:
- 
- /// **A derived-support rung runs the minute-hole census, builds one column,
- /// and sizes its support on the swept population the audit then sweeps.**
--/// W2-cli8-6 and G2-3, D-4519.
-+/// W2-cli8-6 and G2-3, D-4719.
- ///
- /// `one_rung_cached`'s `auto` branch built its own column from an EMPTY
- /// withheld set: three edge-holed days cost three refused passes, each under
-@@ -3907,7 +3895,7 @@ fn a_derived_support_rung_sizes_on_the_audits_census_and_builds_once() {
- }
- 
- /// **A derived-support rung with no commit stamp prepares nothing.** W2-cli8-6,
--/// D-4519.
-+/// D-4719.
- ///
- /// The named-support branch already kept an unstamped rung from writing a
- /// preparation attempt the audit would not have written. The derived branch
-@@ -3933,7 +3921,7 @@ fn an_unstamped_derived_support_rung_prepares_nothing() {
- }
- 
- /// **A column build's retry loop reads the daily context once, and answers
--/// exactly as the census path does.** W2-cli8-6, D-4519.
-+/// exactly as the census path does.** W2-cli8-6, D-4719.
- ///
- /// The daily context is derived from the WHOLE folded series (D-1781), which
- /// no pass changes, yet every pass of the 64 reloaded it from disk.
-diff --git a/crates/cli/src/candidate_trades.rs b/crates/cli/src/candidate_trades.rs
-index abd19888..5e96f24a 100644
---- a/crates/cli/src/candidate_trades.rs
-+++ b/crates/cli/src/candidate_trades.rs
-@@ -1,6 +1,7 @@
- //! Exact selected-cell trades for every evaluated screen candidate and side.
- //!
--//! Each visited policy tier retains its actual cap and inputs. Immutable child
-+//! Each captured screen pass retains its actual cap and inputs. A recorded
-+//! tier walk captures only the tier it ends on (D-4716). Immutable child
- //! files are sealed before a catalog can publish the captured set. The catalog
- //! is prepared evidence, not an institutional admission or parent-run success.
- //!
-@@ -690,7 +691,8 @@ pub struct Summary {
-     pub attempt: u64,
-     /// Digest of the actual execution slice.
-     pub execution_digest: [u8; 32],
--    /// Number of visited screen invocations, not generated policy tiers.
-+    /// Number of captured screen passes, not generated policy tiers: the
-+    /// operator's own policy and the tier a recorded walk ended on (D-4716).
-     pub tiers: u64,
-     /// Captured candidate-side outcomes, including no-cell outcomes.
-     pub candidates: u64,
 diff --git a/crates/cli/src/g18_cli_a_tests.rs b/crates/cli/src/g18_cli_a_tests.rs
 index 6a1073b7..e81c4304 100644
 --- a/crates/cli/src/g18_cli_a_tests.rs
@@ -1479,7 +1341,7 @@ index 6a1073b7..e81c4304 100644
  
  /// G18-cli-a-25: the anchored digest is a function of the signal: equal
 diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
-index 9be5269f..b4582efa 100644
+index 16ff35ee..3d463cd0 100644
 --- a/crates/cli/src/lib.rs
 +++ b/crates/cli/src/lib.rs
 @@ -972,58 +972,6 @@ fn exact_minute_withholding_unsourceable_days(
@@ -1592,47 +1454,7 @@ index 9be5269f..b4582efa 100644
          let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
          let digest = crate::minute_gaps::bind_withheld(
              stored_anchored_digest(whole, &exact, &daily)?,
-@@ -2819,15 +2793,34 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
- ///
- /// A non-number, zero, or 1,000,000 and anything above it.
- fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
--    match text.parse::<u64>() {
--        Err(_) => Err("SUPPORT_PPM is not a whole number"),
--        Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
--        Ok(ppm) if ppm >= 1_000_000 => Err(
-+    text.parse::<u64>()
-+        .map_err(|_| "SUPPORT_PPM is not a whole number")
-+        .and_then(support_ppm_in_domain)
-+}
-+
-+/// `ppm` itself when it is a support [`parse_support_ppm`] admits, or the
-+/// sentence that refuses it: the ONE support domain, `1..1_000_000`.
-+///
-+/// # Every entry asks this (W2-cli8-11, D-4718)
-+///
-+/// [`parse_support_ppm`] is this after the parse, so argv and
-+/// `BRUTEX_SUPPORT_PPM` ask it; [`screen_range`], [`screen_range_in_points`]
-+/// and the api's `screen` command take a number already parsed and ask it
-+/// directly. Those three refused only zero, so 100% or more loaded a span and
-+/// recorded a screen that could find nothing.
-+///
-+/// # Errors
-+///
-+/// Zero, or 1,000,000 and anything above it.
-+pub const fn support_ppm_in_domain(ppm: u64) -> Result<u64, &'static str> {
-+    match ppm {
-+        0 => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
-+        1_000_000.. => Err(
-             "SUPPORT_PPM is parts per million, so 1000000 is 100%: a pattern on \
-                  every bar, which D-0080 excludes, so at or above it nothing can \
-                  be frequent",
-         ),
--        Ok(ppm) => Ok(ppm),
-+        ppm => Ok(ppm),
-     }
- }
- 
-@@ -7528,6 +7521,9 @@ struct AuditInputs {
+@@ -7547,6 +7521,9 @@ struct AuditInputs {
      /// Every day withheld from the sweep: the holed days, then any day the
      /// overlay could not source.
      withheld_days: Vec<i64>,
@@ -1642,16 +1464,17 @@ index 9be5269f..b4582efa 100644
  }
  
  /// The inputs of the last stored range audit, or its refusal, and the raw
-@@ -7582,7 +7578,7 @@ std::thread_local! {
+@@ -7600,6 +7577,9 @@ std::thread_local! {
+     static AUDIT_INPUT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
      /// Test-only: how many times this thread loaded `one_rung`'s raw span. D-1557.
      static RUNG_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-     /// Test-only: the swept count `one_rung`'s derived support was sized on,
--    /// so a test can compare it with the audit's column. W2-cli8-6, D-4519.
++    /// Test-only: the swept count `one_rung`'s derived support was sized on,
 +    /// so a test can compare it with the audit's column. W2-cli8-6, D-4719.
-     static AUTO_SUPPORT_SWEPT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
++    static AUTO_SUPPORT_SWEPT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
  }
  
-@@ -7708,11 +7704,11 @@ fn load_audit_inputs(
+ /// [`audit_range_kernel_cached`] with a fresh cache: one audit, one load.
+@@ -7724,11 +7704,11 @@ fn load_audit_inputs(
      let mut withheld_days = holed_days;
      // THE COLUMN BUILD IS WHAT REFUSES, so the withholding wraps THAT.
      //
@@ -1668,7 +1491,7 @@ index 9be5269f..b4582efa 100644
      let (column, preparation_digest) = column_withholding_at_build(
          root,
          vendor,
-@@ -7780,6 +7776,7 @@ fn load_audit_inputs(
+@@ -7796,6 +7776,7 @@ fn load_audit_inputs(
          executed_digest,
          folded,
          withheld_days,
@@ -1676,7 +1499,7 @@ index 9be5269f..b4582efa 100644
      })
  }
  
-@@ -7819,6 +7816,7 @@ fn audit_range_kernel_cached(
+@@ -7835,6 +7816,7 @@ fn audit_range_kernel_cached(
          executed_digest,
          folded,
          withheld_days,
@@ -1684,197 +1507,7 @@ index 9be5269f..b4582efa 100644
      } = cache.inputs(
          AuditKey {
              root: root.clone(),
-@@ -13134,6 +13132,11 @@ where
- /// The answer is the reference walk's, `walk_ladder` with `screen` per tier,
- /// byte for byte: proven by
- /// `cli::screen_policy_tests::the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
-+///
-+/// A capture records only the tier the walk ENDS on: the met tier, or the last
-+/// tier when none admits. Every other tier is judged with no capture, so a
-+/// recorded walk writes one captured screen whatever `T` is (G2-5, D-4716):
-+/// proven by `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on`.
- #[expect(
-     clippy::too_many_arguments,
-     reason = "the six slice inputs every screen takes, the ladder, and the unmet sink"
-@@ -13156,11 +13159,33 @@ fn walk_tiers<'t, 'a>(
-             price_grids(bars, column, by_evidence, horizon, envelope, pricing, facts)
-         },
-         |grids, (_, rules)| {
--            let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
--            Ok(rows
--                .iter()
--                .any(|row| row.admitted)
--                .then(|| finish_screen(rows, bars, column, horizon, *rules, facts)))
-+            // JUDGED UNRECORDED; CAPTURED ONLY WHEN SHOWN (G2-5, D-4716). A
-+            // tier that admits nothing is not the answer and its rows are never
-+            // shown, so capturing it bought a tier file and four `fsync`s per
-+            // candidate side for every one of up to 18,480 tiers, against a
-+            // 64 MiB budget that then refused the whole recorded run.
-+            let rows = tier_rows(
-+                grids,
-+                by_evidence,
-+                horizon,
-+                *rules,
-+                Pricing {
-+                    capture: None,
-+                    ..pricing
-+                },
-+            )?;
-+            if !rows.iter().any(|row| row.admitted) {
-+                return Ok(None);
-+            }
-+            // The met tier is the answer: judged again WITH the capture. The
-+            // capture only records, so these rows equal the ones above.
-+            let rows = match pricing.capture {
-+                Some(_) => tier_rows(grids, by_evidence, horizon, *rules, pricing)?,
-+                None => rows,
-+            };
-+            Ok(Some(finish_screen(
-+                rows, bars, column, horizon, *rules, facts,
-+            )))
-         },
-         |grids, (_, rules)| {
-             let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
-@@ -13795,8 +13820,9 @@ fn tier_rows<'a>(
-     rules: Rules,
-     pricing: Pricing<'_>,
- ) -> Result<Vec<Screened<'a>>, String> {
--    // ONE CAPTURE TIER PER POLICY JUDGED, as when every policy priced its own
--    // grids: the capture's tier ordinals follow the walk, not the grid passes.
-+    // ONE CAPTURE TIER PER CALL THAT CARRIES A CAPTURE. `walk_tiers` passes
-+    // one only for the tier it ends on, so the capture's tier ordinals are the
-+    // SHOWN screens, not every tier judged (G2-5, D-4716).
-     let captured_tier = pricing
-         .capture
-         .map(|capture| {
-@@ -14310,18 +14336,43 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
-     (c.weakest_bp(), c.worst_day)
- }
- 
--/// Measure consistency for the rows that will actually be printed.
--///
--/// # Why the caller does not do this inline
--///
--/// Two reasons, and the first is a bug that was measured. Inline, this ran
--/// inside the screening loop -- over `screen_cap()` combinations, ten
--/// thousand by default -- and every one paid for a full trade-by-trade
--/// re-walk when only `top` are ever rendered. A single-month screen that
--/// had taken seconds stopped finishing inside 280.
-+/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
-+/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
- ///
--/// The second is that [`screen`] was 113 lines with it, past the hundred
--/// clippy enforces.
-+/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
-+/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
-+/// unbounded per-request cost. A thousand printed rows is a page nobody reads
-+/// whole; past it the cost grows and the answer does not.
-+pub(crate) const TOP_CEILING: usize = 1_000;
-+
-+/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
-+/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
-+/// unusable: zero lists nothing, and past the ceiling the measured band is an
-+/// unbounded per-request cost (D-1727).
-+fn top_from_knob() -> usize {
-+    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
-+        return 25;
-+    };
-+    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
-+        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
-+        25
-+    })
-+}
-+
-+// Every TOP the door admits is one the frontier can serve (D-1981).
-+const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
-+
-+/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
-+pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
-+    if top == 0 {
-+        Some("TOP must be 1 or more")
-+    } else if top > TOP_CEILING {
-+        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
-+    } else {
-+        None
-+    }
-+}
-+
- /// How many rows get their seven-grain calendar measured, given a wanted top N.
- ///
- /// # The circularity this exists to break
-@@ -14362,43 +14413,6 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
- /// what is printed, which is enough for the calendar gate to demote a measured
- /// row and still have a measured replacement, and independent of how wide the
- /// search was.
--/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
--/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
--///
--/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
--/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
--/// unbounded per-request cost. A thousand printed rows is a page nobody reads
--/// whole; past it the cost grows and the answer does not.
--pub(crate) const TOP_CEILING: usize = 1_000;
--
--/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
--/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
--/// unusable: zero lists nothing, and past the ceiling the measured band is an
--/// unbounded per-request cost (D-1727).
--fn top_from_knob() -> usize {
--    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
--        return 25;
--    };
--    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
--        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
--        25
--    })
--}
--
--// Every TOP the door admits is one the frontier can serve (D-1981).
--const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
--
--/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
--pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
--    if top == 0 {
--        Some("TOP must be 1 or more")
--    } else if top > TOP_CEILING {
--        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
--    } else {
--        None
--    }
--}
--
- const fn measured_band(top: usize) -> usize {
-     const WIDEN: usize = 8;
-     const FLOOR: usize = 32;
-@@ -14406,6 +14420,18 @@ const fn measured_band(top: usize) -> usize {
-     if widened < FLOOR { FLOOR } else { widened }
- }
- 
-+/// Measure consistency for the rows that will actually be printed.
-+///
-+/// # Why the caller does not do this inline
-+///
-+/// Two reasons, and the first is a bug that was measured. Inline, this ran
-+/// inside the screening loop -- over `screen_cap()` combinations, ten
-+/// thousand by default -- and every one paid for a full trade-by-trade
-+/// re-walk when only `top` are ever rendered. A single-month screen that
-+/// had taken seconds stopped finishing inside 280.
-+///
-+/// The second is that [`screen`] was 113 lines with it, past the hundred
-+/// clippy enforces.
- fn measure_top(
-     rows: &mut [Screened<'_>],
-     bars: &[indicators::Candle],
-@@ -14564,7 +14590,7 @@ fn measure_top(
- #[cfg(test)]
- std::thread_local! {
-     /// Test-only: called once per measured row of [`measure_top`]'s band, so a
--    /// test can prove two rows are measured at once (W2-cli8-7, D-4522). Read
-+    /// test can prove two rows are measured at once (W2-cli8-7, D-4722). Read
-     /// on the thread that calls `measure_top`, so no other test's measurement
-     /// sees it.
-     pub(crate) static MEASURE_ROW_HOOK: std::cell::RefCell<
-@@ -15454,65 +15480,48 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
+@@ -15481,65 +15463,48 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
          };
          (min_hits_for_swept(can_hit, ppm), can_hit)
      } else {
@@ -1884,10 +1517,7 @@ index 9be5269f..b4582efa 100644
 -        let mut span = span.clone();
 -        // THE DAILY CONTEXT AND THE OVERLAY ARE LOADED INSIDE
 -        // `column_withholding_unsourceable_days`, not here.
-+        // THE AUDIT'S OWN PREPARATION, read through the cache
-+        // `audit_range_cached` consults next, exactly as the named branch above
-+        // reads it (W2-cli8-6, G2-3, D-4719).
-         //
+-        //
 -        // Both are keyed to the SURVIVING bars, so a day withheld between
 -        // attempts changes both. Loading them once out here and reusing them
 -        // across rebuilds would describe a span the column no longer has — and
@@ -1913,7 +1543,10 @@ index 9be5269f..b4582efa 100644
 -        // column build is what cannot source a signal bar's close. Withholding
 -        // around `load_exact_minute_context` therefore changed nothing: that
 -        // call had already succeeded.
--        //
++        // THE AUDIT'S OWN PREPARATION, read through the cache
++        // `audit_range_cached` consults next, exactly as the named branch above
++        // reads it (W2-cli8-6, G2-3, D-4719).
+         //
 -        // MEASURED: one absent minute refused 15min, 10min, 5min, 3min, 2min and
 -        // 1min in under half a second each, on every run today. 60min survived
 -        // only because no 60-minute bar happened to close on that minute.
@@ -1978,14 +1611,14 @@ index 9be5269f..b4582efa 100644
              Err(why) => {
                  return RungRow {
                      rung,
-@@ -15524,11 +15533,16 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
+@@ -15551,9 +15516,16 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
                  };
              }
          };
 -        let can_hit = column.census().swept;
 +        let can_hit = inputs.column.census().swept;
-         #[cfg(test)]
-         AUTO_SUPPORT_SWEPT.with(|swept| swept.set(Some(can_hit)));
++        #[cfg(test)]
++        AUTO_SUPPORT_SWEPT.with(|swept| swept.set(Some(can_hit)));
          let statistical = min_hits_for_swept(can_hit, statistical_support_floor(can_hit));
 -        match affordable_min_hits(&column, &root, &span, digest) {
 +        match affordable_min_hits(
@@ -1997,7 +1630,7 @@ index 9be5269f..b4582efa 100644
              Ok(affordable) => (affordable.max(statistical), can_hit),
              Err(why) => {
                  return RungRow {
-@@ -15542,7 +15556,6 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
+@@ -15567,7 +15539,6 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
              }
          }
      };
@@ -2005,159 +1638,34 @@ index 9be5269f..b4582efa 100644
      // ENTERING THE SWEEP IS ALSO AN EVENT, AND THE SILENCE BELOW IT IS THE LONG
      // ONE.
      //
-@@ -16692,11 +16705,9 @@ pub fn screen_range_in_points(
-     top: usize,
- ) -> String {
-     let (from, to) = span;
--    if support_ppm == 0 {
--        return "refused: a support of zero makes every combination frequent, \
--                so the frequent frontier never empties and the walk has no \
--                end.\n"
--            .to_owned();
-+    // THE ONE SUPPORT DOMAIN, BEFORE ANYTHING IS READ (W2-cli8-11, D-4718).
-+    if let Err(why) = support_ppm_in_domain(support_ppm) {
-+        return format!("refused: {why}\n");
-     }
-     // ZERO IS "NO CEILING BEYOND THE SWEPT LADDER". See `elite_arm` for the
-     // full argument; in short, `Rules::admits` already reads `max_mae_ppm == 0`
-@@ -16733,8 +16744,12 @@ pub fn screen_range_in_points(
-             );
-         }
-     };
--    let reference = reference_price(&span.bars);
--    let max_mae_ppm = match ceiling_in_ppm(max_points, reference) {
-+    // ZERO IS NO CEILING HERE TOO (W2-cli8-10, D-4717). This converted zero
-+    // with `ceiling_in_ppm`, which refused it as "0 ppm, which admits
-+    // nothing" after the span had been loaded, so the api's `screen` command
-+    // passed zero through (D-1732) to a refusal. `elite_ceiling_ppm` is the
-+    // one zero rule `elite` already uses.
-+    let max_mae_ppm = match elite_ceiling_ppm(max_points, || Ok(reference_price(&span.bars))) {
-         Ok(ppm) => ppm,
-         Err(why) => {
-             drop(span);
-@@ -17856,6 +17871,11 @@ pub fn screen_range(
-     support_ppm: u64,
-     policy: Policy,
- ) -> String {
-+    // THE ONE SUPPORT DOMAIN (W2-cli8-11, D-4718): this refused nothing, and
-+    // the kernel turned zero into a one-hit threshold.
-+    if let Err(why) = support_ppm_in_domain(support_ppm) {
-+        return format!("refused: {why}\n");
-+    }
-     match screen_range_inner(
-         vendor_word,
-         underlying,
-diff --git a/crates/cli/src/results_report_tests.rs b/crates/cli/src/results_report_tests.rs
-index c1cd82b9..96507fd4 100644
---- a/crates/cli/src/results_report_tests.rs
-+++ b/crates/cli/src/results_report_tests.rs
-@@ -585,7 +585,7 @@ fn the_omitted_row_line_starts_one_row_past_the_listing() -> Result<(), Box<dyn
- }
- 
- /// **A range rung reads its row back through one held ledger handle.**
--/// W2-cli8-4, D-4520.
-+/// W2-cli8-4, D-4720.
- ///
- /// `recorded_row` replaced `latest_for` (D-1700): one identity probe of the
- /// process's shared ledger handle, opened once per root. Its two tests prove
-diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
-index 06a8f044..bd95b55c 100644
---- a/crates/cli/src/screen_policy_tests.rs
-+++ b/crates/cli/src/screen_policy_tests.rs
-@@ -740,7 +740,7 @@ fn the_frontier_prefix_equals_the_full_sort_with_each_key_once() {
- }
- /// W2-cli8-5. The listing retains a bounded window, not every matching row.
- ///
--/// D-4521: this asserted only that `results_at` lacks the text
-+/// D-4721: this asserted only that `results_at` lacks the text
- /// `rows.push(record)`, so deleting the window's `pop_front` passed it, and
- /// passed every other test too, because the table prints only `LIST_ROWS`
- /// rows whatever is held. It now drives the fold: over 500 rows, 400 of them
-@@ -1635,7 +1635,7 @@ fn the_envelope_is_each_floors_minimum_over_its_own_key() {
- }
- 
- // ---------------------------------------------------------------------------
--// G2-5 (D-4516): a recorded tier walk captures the screens its page shows, not
-+// G2-5 (D-4716): a recorded tier walk captures the screens its page shows, not
- // every tier it judged.
- // ---------------------------------------------------------------------------
- 
-@@ -1684,7 +1684,7 @@ fn counting_syncs<T: Send>(work: impl FnOnce() -> T + Send) -> (T, u64) {
-     })
- }
- 
--/// G2-5, D-4516. A RECORDED cascade whose stated rules admit nothing walks
-+/// G2-5, D-4716. A RECORDED cascade whose stated rules admit nothing walks
- /// every generated tier (D-1731), and the candidate capture recorded every
- /// tier it judged: one fsynced tier file and, per candidate side, a trade
- /// replay and two fsynced files. On this fixture's 2,520-tier ladder that was
-@@ -1788,7 +1788,7 @@ fn a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder() {
-     );
- }
- 
--/// G2-5, D-4516. A recorded walk that MEETS a later tier captures that tier
-+/// G2-5, D-4716. A recorded walk that MEETS a later tier captures that tier
- /// alone: the strictest unmet tiers before it are judged and named UNMET, and
- /// none of them is recorded. Before, every tier the walk judged was captured.
- #[test]
-@@ -1842,7 +1842,7 @@ fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
- }
- 
- // ---------------------------------------------------------------------------
--// W2-cli8-7 (D-4522): the measured band runs on more than one core at once.
-+// W2-cli8-7 (D-4722): the measured band runs on more than one core at once.
- // ---------------------------------------------------------------------------
- 
- /// Where two measured rows meet: the first to arrive waits, bounded, for a
-@@ -1928,7 +1928,7 @@ fn band_rows<'a>(fixture: &'a Ranked, facts: &runner::trade::SliceFacts) -> Vec<
-         .collect()
- }
- 
--/// W2-cli8-7, D-4522. THE BAND IS MEASURED IN PARALLEL, observed rather than
-+/// W2-cli8-7, D-4722. THE BAND IS MEASURED IN PARALLEL, observed rather than
- /// read off the source. On a two-thread pool each measured row checks in at a
- /// meeting point; the first waits (bounded, 20 s) for a second, and a second
- /// arriving while the first still waits proves two rows were being measured
-@@ -1996,7 +1996,7 @@ fn the_measured_band_measures_two_rows_at_once() {
- }
- 
- // ---------------------------------------------------------------------------
--// G2-1 (D-4523) and G2-2 (D-4524): documentation attached to its own item, and
-+// G2-1 (D-4723) and G2-2 (D-4724): documentation attached to its own item, and
- // no limit describing a removed function as current.
- // ---------------------------------------------------------------------------
- 
-@@ -2015,7 +2015,7 @@ fn doc_above(head: &str) -> String {
-     doc.join("\n")
- }
- 
--/// G2-1, D-4523. Commit b489169 (D-1727) inserted `TOP_CEILING` between three
-+/// G2-1, D-4723. Commit b489169 (D-1727) inserted `TOP_CEILING` between three
- /// doc blocks and their items, so `measure_top`'s and `measured_band`'s docs
- /// both attached to the constant and the two functions carried none. Each doc
- /// now sits on its own item.
-@@ -2044,7 +2044,7 @@ fn each_screen_band_doc_sits_on_its_own_item() {
-     );
- }
- 
--/// G2-2, D-4524. `latest_for` was removed by D-1700. Two bullets of
-+/// G2-2, D-4724. `latest_for` was removed by D-1700. Two bullets of
- /// `docs/06-limits.md` still stated its O(runs) cost as current beside the
- /// corrected copies; every bullet naming it must say it is gone.
- #[test]
 diff --git a/crates/cli/src/stored.rs b/crates/cli/src/stored.rs
-index df02e441..ccd0a2da 100644
+index 06143830..ccd0a2da 100644
 --- a/crates/cli/src/stored.rs
 +++ b/crates/cli/src/stored.rs
-@@ -3439,7 +3439,7 @@ pub fn load_daily_context(
- std::thread_local! {
-     /// Test-only: calls of [`load_daily_context`] on this thread, so a test can
-     /// prove a column build's retry loop reads the daily context once
--    /// (W2-cli8-6, D-4519).
-+    /// (W2-cli8-6, D-4719).
-     pub(crate) static DAILY_CONTEXT_LOADS: std::cell::Cell<u64> =
-         const { std::cell::Cell::new(0) };
+@@ -3427,12 +3427,23 @@ pub fn load_daily_context(
+     signal_months: ((u16, u8), (u16, u8)),
+     signal: &[Candle],
+ ) -> Result<DailyContext, Refusal> {
++    #[cfg(test)]
++    DAILY_CONTEXT_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
+     let (from, to) = signal_months;
+     let warm_from = previous_month(from)?;
+     let daily = load_span(root, vendor, underlying, "1day", warm_from, to)?;
+     daily_context_from_span(daily, signal)
  }
+ 
++#[cfg(test)]
++std::thread_local! {
++    /// Test-only: calls of [`load_daily_context`] on this thread, so a test can
++    /// prove a column build's retry loop reads the daily context once
++    /// (W2-cli8-6, D-4719).
++    pub(crate) static DAILY_CONTEXT_LOADS: std::cell::Cell<u64> =
++        const { std::cell::Cell::new(0) };
++}
++
+ /// Load stored one-day reference evidence under a pre-allocation record ceiling.
+ ///
+ /// This is the bounded production counterpart to [`load_daily_context`].  It
 diff --git a/crates/cli/tests/limits_o1cli_2.rs b/crates/cli/tests/limits_o1cli_2.rs
 index e898e229..e9cfb96f 100644
 --- a/crates/cli/tests/limits_o1cli_2.rs
@@ -2260,141 +1768,25 @@ index 27afc401..1a6165ef 100644
 +    assert!(!LIB.contains("fn column_withholding_unsourceable_days("));
  }
 diff --git a/docs/04-invariants.md b/docs/04-invariants.md
-index 31e467ea..7e596414 100644
+index 817c04ed..59e23332 100644
 --- a/docs/04-invariants.md
 +++ b/docs/04-invariants.md
-@@ -7052,3 +7052,21 @@ old line regex the same input and watched it pass.
- | G18-api-27 | The seek path's `records unreadable` line names the first file that refused a record, not the first file read (D-2046) | `api::bars::window_tests::the_unreadable_line_names_the_first_damaged_file_not_the_first_file` | ✓ |
- | G18-api-28 | The route test's HTTP exchange is bounded at 30 s per read and write, so a server that admits or answers nothing fails it rather than hanging (D-2047) | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end` | ✓ |
- | G18-api-29 | A dropped calendar `Landing` marks its flight `Abandoned` (or answered), removes it from the flight table, and wakes every follower (D-2047) | `api::calendar_of::tests::a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped` | ✓ |
-+
-+### Lane 1-b finishing fixes, fixer B (D-4716 onward)
-+
-+| Id | Invariant | Proof | |
-+|---|---|---|---|
-+| L1FB-01 | A recorded cascade whose stated policy and whole tier ladder admit nothing captures exactly two screens, the operator's policy and the mildest tier, answers byte for byte as the unrecorded cascade, and costs exactly `2 × tiers + 4 × candidates + 2` `fsync`s, whatever the ladder's length (D-4716; supersedes D-1734's "one tier per policy judged") | `cli::screen_policy_tests::a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder` | ✓ |
-+| L1FB-02 | A recorded tier walk that meets a tier captures that tier alone, with its own rules, and answers as the uncaptured cached walk (D-4716) | `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on` | ✓ |
-+| L1FB-03 | A zero-point `screen` reaches `cli::screen_range_in_points` as no ceiling and runs over a swept index, from the api command end to end and from the cli door; the elite door agrees (D-4717) | `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`, `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain` | ✓ |
-+| L1FB-04 | `screen_range`, `screen_range_in_points` and the api's `screen` command admit exactly the support domain `1..1_000_000` that argv and `BRUTEX_SUPPORT_PPM` admit, refusing with its sentence before any ledger row or attempt is written (D-4718) | `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`, `api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses` | ✓ |
+@@ -7061,3 +7061,7 @@ old line regex the same input and watched it pass.
+ | L1FB-02 | A recorded tier walk that meets a tier captures that tier alone, with its own rules, and answers as the uncaptured cached walk (D-4716) | `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on` | ✓ |
+ | L1FB-03 | A zero-point `screen` reaches `cli::screen_range_in_points` as no ceiling and runs over a swept index, from the api command end to end and from the cli door; the elite door agrees (D-4717) | `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`, `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain` | ✓ |
+ | L1FB-04 | `screen_range`, `screen_range_in_points` and the api's `screen` command admit exactly the support domain `1..1_000_000` that argv and `BRUTEX_SUPPORT_PPM` admit, refusing with its sentence before any ledger row or attempt is written (D-4718) | `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`, `api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses` | ✓ |
 +| L1FB-05 | A derived-support rung over a span with edge-holed and interior-gap days builds one column through the audit's own inputs, sizes its support on the audit's swept count, and records `min_hits` equal to the larger of the two floors on the audit's column (D-4719) | `cli::audited_stored::tests::a_derived_support_rung_sizes_on_the_audits_census_and_builds_once` | ✓ |
 +| L1FB-06 | A derived-support rung with no commit stamp builds nothing, loads no audit inputs and begins no attempt (D-4719) | `cli::audited_stored::tests::an_unstamped_derived_support_rung_prepares_nothing` | ✓ |
 +| L1FB-07 | `column_withholding_at_build` reads the daily context once however many passes it retries, and its withholding, census and digest equal the census path's (D-4719) | `cli::audited_stored::tests::a_column_builds_retry_loop_reads_the_daily_context_once` | ✓ |
 +| L1FB-08 | `docs/06-limits.md` states one column build per rung, derived support or named, and three minute reads per rung; AU-O1CLI-2's and AU-O1CLI-3's tests now hold that statement and fail if a second build returns (D-4719) | `a_rungs_second_load_and_build_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_2.rs`, `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_3.rs` | ✓ |
-+| L1FB-09 | Reading three rungs' rows back by identity over one root opens the results ledger once (D-4720) | `cli::results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung` | ✓ |
-+| L1FB-10 | The results listing holds at most `LIST_ROWS` rows at every step of its fold, and exactly the newest 40 matching rows at the end, at unchanged capacity (D-4721) | `cli::screen_policy_tests::the_results_listing_retains_a_bounded_window` | ✓ |
-+| L1FB-11 | `measure_top` measures two rows of its band at the same moment on a two-thread pool, and the figures equal a one-thread pool's (D-4722) | `cli::screen_policy_tests::the_measured_band_measures_two_rows_at_once` | ✓ |
-+| L1FB-12 | `measure_top`, `measured_band` and `TOP_CEILING` each carry their own doc and no other's (D-4723) | `cli::screen_policy_tests::each_screen_band_doc_sits_on_its_own_item` | ✓ |
-+| L1FB-13 | No `docs/06-limits.md` bullet headed by `latest_for` states it without D-1700, which removed it (D-4724) | `cli::screen_policy_tests::no_limit_states_the_removed_latest_for_as_current` | ✓ |
 diff --git a/docs/05-decisions.md b/docs/05-decisions.md
-index 552ce57a..a8028a1a 100644
+index e88c8180..cb4719e6 100644
 --- a/docs/05-decisions.md
 +++ b/docs/05-decisions.md
-@@ -65025,3 +65025,213 @@ on a live leader would derive a second time and lose the single-flight
- guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
- test order. A rename that sorted a single-flight test ahead of it would
- restore the timeout, so the ordering is pinned in the test's own doc.
-+
-+### D-4716 — A recorded tier walk captures the screens it shows, not every tier it judges — 2026-10-09
-+
-+**Finding.** G2-5, medium. D-1731 made the tier walk judge every tier, and
-+D-1734 kept the candidate capture recording "one tier per policy judged". So
-+a recorded walk that admits nothing wrote a tier file and two files per
-+candidate side for every tier of the ladder: `(1 + T) × (2 + 8C) + 2` `fsync`s and
-+`T × 2C` replays, against an acknowledgement budget of 64 MiB that refuses
-+the whole recorded run once it is spent. D-1734's bound did not name it, and
-+its 3.2 s measurement was the unrecorded path.
-+`a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
-+measured it on the 8-session fixture before the fix: 2,521 captured tiers
-+for a 2,520-tier ladder, where the page shows two screens.
-+
-+**Decision.** `walk_tiers` judges every tier with no capture (`Pricing {
-+capture: None, .. }`). The tier the walk ENDS on is judged again with the
-+capture: the met tier inside `judge`, or the last tier in `screen_at`. The
-+capture only records, so the re-judged rows equal the unrecorded ones and the
-+page, selection and priced map are unchanged byte for byte. A recorded
-+cascade therefore captures at most two screens, the operator's own policy and
-+the tier the walk ended on: at most `6 + 16C` `fsync`s and `4C` acknowledgement
-+slots, whatever `T` is. The met tier pays one extra `tier_rows` over its
-+cached grids, `O(C × 2 × K)`.
-+
-+**What changes in stored results.** Only candidate captures of recorded
-+audits and screens whose stated policy admitted nothing and whose ladder was
-+walked: their catalog now holds two tiers, not `1 + rank + 1` or `1 + T`, and
-+`candidate_side_count` falls with it. Tier ordinals now count SHOWN screens.
-+The bytes of every file, the catalog layout and version 1 of
-+`docs/19-candidate-trades.md` are unchanged, and every reader pages by the
-+tier index it is given, so no format version is cut: a capture made before
-+this decision reads exactly as it did. No parent identity, ledger row,
-+frontier, report or digest changes. D-1734's sentence that the capture "still
-+records one tier per policy judged" is superseded by this entry.
-+
-+**Proof.** `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
-+(recorded text equals unrecorded text; `tiers == 2`, tier 0 the operator's
-+rules, tier 1 the mildest tier; `fsync`s `== 2 × tiers + 4 × candidates + 2`)
-+and `a_recorded_walk_captures_only_the_tier_it_ends_on` (a met walk captures
-+exactly the met tier and answers as the uncaptured cached walk). Both failed
-+before the fix: `left: 2521, right: 2` and `left: 3, right: 1`.
-+
-+**Rejected.** Keeping one capture per judged tier and refusing up front when
-+`T × 2C × 33` bytes would exceed the budget: the run would still refuse, only
-+sooner, for evidence about tiers the page never shows.
-+
-+### D-4717 — `screen_range_in_points` reads a zero stop ceiling as no ceiling — 2026-10-09
-+
-+**Finding.** W2-cli8-10. D-1732 let the api's `screen` command pass
-+`max_points = 0` through to `cli::screen_range_in_points` on the claim that
-+`cli` reads zero as no ceiling. That function loaded the span and then
-+converted zero with `ceiling_in_ppm`, which refused it as "0 ppm, which
-+admits nothing". So the browser's zero-point screen was a refusal after a
-+span load. G18-cli-a-33 had asked the door about an unswept instrument,
-+which refuses before the ceiling is read, so nothing saw it.
-+
-+**Decision.** The conversion is `elite_ceiling_ppm`, the one zero rule
-+`elite` already uses (D-1721): zero is `max_mae_ppm = 0`, which
-+`Rules::admits` and `Levels::forced` read as no ceiling; a positive ceiling
-+converts as before, now with `elite_ceiling_ppm`'s refusal sentence. The
-+span is still loaded, because the policy's floors are measured off it.
-+`cli screen`'s argv arm, which takes `MIN_RR` and builds its own rules, still
-+refuses zero at its door by name before reading anything; that verb never
-+offered zero and is unchanged.
-+
-+**What changes in stored results.** A zero-point api screen now runs and
-+records a screen where it refused; nothing already recorded changes.
-+
-+**Proof.** `api::sweeprun::tests::a_zero_point_screen_command_runs_as_no_ceiling_end_to_end`
-+sends the body through `command_from` and `conduct_command` over a stored
-+NIFTY May in a child; before the fix it read "converts to 0 ppm, which admits
-+nothing". `cli::audited_stored::tests::the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
-+asks the cli door and the elite door the same over a swept index. Each
-+child's proof line is declared to gate 23 beside D-0695's.
-+
-+### D-4718 — Every screen support entry asks the one support domain — 2026-10-09
-+
-+**Finding.** W2-cli8-11. D-1722 gave argv and `BRUTEX_SUPPORT_PPM` one domain,
-+`1..1_000_000`, in `parse_support_ppm`. Three entries take a number already
-+parsed and did not ask it: the api's `screen` command and
-+`cli::screen_range_in_points` refused only zero, and `cli::screen_range`
-+refused nothing, so 100% or more loaded a span and recorded a screen that
-+could find nothing, and `screen_range` turned zero into a one-hit threshold.
-+
-+**Decision.** The domain is `cli::support_ppm_in_domain`, a public `const fn`;
-+`parse_support_ppm` is the parse followed by it, so argv and the knob are
-+unchanged. `screen_range`, `screen_range_in_points` and the api's `screen`
-+parser ask it before anything is read, and refuse with its sentence (the api
-+prefixes the field name). The descent's internal steps
-+(`screen_range_for_attempt`) take supports the walk derives, not entries, and
-+are not routed through it.
-+
-+**What changes in stored results.** A screen at 0 or at 1,000,000 ppm or more
-+through those three doors is refused instead of run; nothing recorded
-+changes.
-+
-+**Proof.** `the_points_screen_reads_zero_as_no_ceiling_and_shares_the_support_domain`
-+(0, 1,000,000 and `u64::MAX` refused at the points door and `screen_range`,
-+with no ledger and no attempt written; before the fix the points door's zero
-+refusal lacked the domain's sentence) and
-+`api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses`
-+(0, 1,000,000, 1,000,001 and `u64::MAX` refused, 1 and 999,999 parsed).
+@@ -65127,3 +65127,54 @@ with no ledger and no attempt written; before the fix the points door's zero
+ refusal lacked the domain's sentence) and
+ `api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses`
+ (0, 1,000,000, 1,000,001 and `u64::MAX` refused, 1 and 999,999 parsed).
 +
 +### D-4719 — A derived-support rung prepares through the audit's own inputs, and a build reads its daily context once — 2026-10-09
 +
@@ -2446,65 +1838,8 @@ index 552ce57a..a8028a1a 100644
 +`a_column_builds_retry_loop_reads_the_daily_context_once` (four passes, one
 +daily load where there were four, and the same withholding, census and
 +digest as the census path).
-+
-+### D-4720 — A rung's readback opens the ledger once per root — 2026-10-09
-+
-+**Finding.** W2-cli8-4, test gap. D-1700's `recorded_row` reads a rung's row
-+through the shared ledger handle, but no test counted opens, so a fresh
-+`Results::open(root)?.of_identity(..)` per rung passed every test.
-+
-+**Decision.** `a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung`
-+reads three rungs' rows by identity in a child process (the shared handle is
-+process-global) and requires `results::OPENS == 1`. With the fresh open it
-+failed `left: 3, right: 1`. No production code changes; the child's proof
-+line is declared to gate 23 beside D-0695's.
-+
-+### D-4721 — The results listing's forty-row retention is pinned — 2026-10-09
-+
-+**Finding.** W2-cli8-5, test gap. Deleting `ListingFold::visit`'s `pop_front`
-+passed every test: `results_table` prints only `take(LIST_ROWS)`. SCB-10's
-+test asserted only that `results_at` lacks the text `rows.push(record)`.
-+
-+**Decision.** SCB-10's test, `the_results_listing_retains_a_bounded_window`,
-+now folds 500 rows (100 filtered out) and checks at every step that at most
-+`LIST_ROWS` are held, then that exactly the newest 40 matching rows are held
-+in order at an unchanged capacity. With `pop_front` deleted it failed "row
-+50: the window grew". No production code changes.
-+
-+### D-4722 — The measured band's parallelism is pinned — 2026-10-09
-+
-+**Finding.** W2-cli8-7, test gap. `measure_top` measures its band with
-+`par_iter_mut`, but a sequential loop gives the same answer, so reverting it
-+passed every test.
-+
-+**Decision.** A test-only hook, `MEASURE_ROW_HOOK`, runs once per measured
-+row. `the_measured_band_measures_two_rows_at_once` installs a rendezvous on a
-+two-thread pool: it passes only when two rows are inside the hook at once
-+(bounded wait of 20 s), and the band's figures equal a one-thread pool's.
-+With `iter_mut` it failed "two rows of the band were never measured at the
-+same moment".
-+
-+### D-4723 — The band docs sit on `measure_top` and `measured_band` — 2026-10-09
-+
-+**Finding.** G2-1. Three doc blocks ran on with no item between them, so
-+`measure_top`'s and `measured_band`'s docs both attached to `TOP_CEILING`.
-+
-+**Decision.** Each block moved onto its own item; `TOP_CEILING` keeps only
-+its own. `each_screen_band_doc_sits_on_its_own_item` reads the doc directly
-+above each of the three items; it failed on `measure_top`'s empty doc.
-+
-+### D-4724 — Two `latest_for` limits no longer state a removed function as current — 2026-10-09
-+
-+**Finding.** G2-2. Two `docs/06-limits.md` bullets stated `latest_for`'s
-+O(runs) per call as a current cost, while D-1700 removed the function and
-+other bullets already said so.
-+
-+**Decision.** Both bullets now name D-1700 and `recorded_row`.
-+`no_limit_states_the_removed_latest_for_as_current` requires every limit
-+bullet headed by `latest_for` to name D-1700; it failed on the first stale
-+bullet.
 diff --git a/docs/06-limits.md b/docs/06-limits.md
-index 12e9bf09..4388392b 100644
+index 7bb7a1c7..8374bb74 100644
 --- a/docs/06-limits.md
 +++ b/docs/06-limits.md
 @@ -11638,14 +11638,16 @@ the counts the tests assert: no bench times the fold.
@@ -2576,7 +1911,880 @@ index 12e9bf09..4388392b 100644
  
  ## Condition names resolve through a compile-time index (audit o1engine-24)
  
-@@ -13031,10 +13034,12 @@ not:
+-- 
+2.43.0
+
+
+From c8691a3c08d89f21dd3b03c52cf4e2297f0ab215 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:26 +0000
+Subject: [PATCH 4/8] cli: pin one results-ledger open per root for rung
+ readback (W2-cli8-4, D-4720)
+
+Before: no test counted recorded_row's ledger opens, so a fresh
+Results::open per rung passed every test.
+
+After: a child-process test reads three rungs back by identity and
+requires results::OPENS == 1; with a fresh open per rung it fails 3 != 1.
+No production code changes. Gate 23 declares the child's stdout
+proof line (results_report_tests.rs 1).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ .github/workflows/ci.yml               | 13 ++---
+ crates/cli/src/results_report_tests.rs | 72 ++++++++++++++++++++++++++
+ docs/04-invariants.md                  |  1 +
+ docs/05-decisions.md                   | 12 +++++
+ 4 files changed, 92 insertions(+), 6 deletions(-)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 7088ccca..2009f92a 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1760,12 +1760,13 @@ jobs:
+           # was degraded, so a clean run prints nothing.
+           declared="$declared pull/src/csv.rs:eprintln!:1
+           pull/src/masters.rs:eprintln!:1"
+-          # TWO MORE STDOUT PROOF LINES, D-0695's kind (D-4717, D-4718): api
+-          # sweeprun's second child prints `ZERO-POINT SCREEN RAN` (counted in
+-          # its line above), and a cli child prints `POINTS SCREEN DOORS
+-          # CHECKED`. Each sits in a `#[cfg(test)]` module and prints only
+-          # after its child passed.
+-          declared="$declared cli/src/audited_stored_tests.rs:println!:1"
++          # THREE MORE STDOUT PROOF LINES, D-0695's kind (D-4717, D-4718,
++          # D-4720): api sweeprun's second child prints `ZERO-POINT SCREEN
++          # RAN` (counted in its line above), and two cli children print
++          # `POINTS SCREEN DOORS CHECKED` and `READBACK OPENS`. Each sits in a
++          # `#[cfg(test)]` module and prints only after its child passed.
++          declared="$declared cli/src/audited_stored_tests.rs:println!:1
++          cli/src/results_report_tests.rs:println!:1"
+ 
+           # CLAUSE A2 — the same question, asked of the handle spellings.
+           #
+diff --git a/crates/cli/src/results_report_tests.rs b/crates/cli/src/results_report_tests.rs
+index 42d60b37..96507fd4 100644
+--- a/crates/cli/src/results_report_tests.rs
++++ b/crates/cli/src/results_report_tests.rs
+@@ -583,3 +583,75 @@ fn the_omitted_row_line_starts_one_row_past_the_listing() -> Result<(), Box<dyn
+     }
+     Ok(())
+ }
++
++/// **A range rung reads its row back through one held ledger handle.**
++/// W2-cli8-4, D-4720.
++///
++/// `recorded_row` replaced `latest_for` (D-1700): one identity probe of the
++/// process's shared ledger handle, opened once per root. Its two tests prove
++/// it reads the RIGHT row, and both pass on a `recorded_row` that opened the
++/// ledger afresh for every rung, an O(runs) identity pass per rung, which is
++/// the cost D-1700 removed. Three rungs over one root now open the ledger
++/// once. In a child process: the handle is process-wide, and any other test
++/// using another root between two calls here would evict it.
++#[test]
++fn a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung()
++-> Result<(), Box<dyn std::error::Error>> {
++    const CHILD: &str = "BRUTEX_TEST_RUNG_READBACK_OPENS";
++    if std::env::var_os(CHILD).is_some() {
++        return readback_opens_child();
++    }
++    let output = std::process::Command::new(std::env::current_exe()?)
++        .args([
++            "--exact",
++            "results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung",
++            "--nocapture",
++            "--test-threads=1",
++        ])
++        .env(CHILD, "1")
++        .output()?;
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    assert!(
++        output.status.success(),
++        "{stdout}{}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    assert!(stdout.contains("1 passed"), "{stdout}");
++    assert!(stdout.contains("READBACK OPENS 1 FOR 3 RUNGS"), "{stdout}");
++    Ok(())
++}
++
++/// The child half: three rows written through a private handle, then read
++/// back one rung at a time by identity, counting ledger opens.
++fn readback_opens_child() -> Result<(), Box<dyn std::error::Error>> {
++    let rows: Vec<Record> = (1..=3).map(|id| row(id, 100, 2)).collect();
++    let fixture = Fixture::new(&rows)?;
++    let (found, opens, _) = counted(|| {
++        rows.iter()
++            .map(|record| {
++                let page = format!(
++                    "{}\n  row 0 in x\n  {}{}\n",
++                    crate::RECORDED_HEAD,
++                    crate::RECORDED_IDENTITY,
++                    record.identity_hex()
++                );
++                crate::recorded_row(
++                    &fixture.0,
++                    &page,
++                    crate::RungKey {
++                        feed: "zerodha",
++                        underlying: "NIFTY",
++                        rung: "15min",
++                        from: (2026, 1),
++                        to: (2026, 1),
++                        min_hits: record.min_hits,
++                    },
++                )
++            })
++            .collect::<Result<Vec<_>, String>>()
++    });
++    assert_eq!(found?, rows, "each rung reads its own row");
++    assert_eq!(opens, 1, "one ledger open for every rung of the root");
++    println!("READBACK OPENS {opens} FOR {} RUNGS", rows.len());
++    Ok(())
++}
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index 59e23332..a21dad60 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7065,3 +7065,4 @@ old line regex the same input and watched it pass.
+ | L1FB-06 | A derived-support rung with no commit stamp builds nothing, loads no audit inputs and begins no attempt (D-4719) | `cli::audited_stored::tests::an_unstamped_derived_support_rung_prepares_nothing` | ✓ |
+ | L1FB-07 | `column_withholding_at_build` reads the daily context once however many passes it retries, and its withholding, census and digest equal the census path's (D-4719) | `cli::audited_stored::tests::a_column_builds_retry_loop_reads_the_daily_context_once` | ✓ |
+ | L1FB-08 | `docs/06-limits.md` states one column build per rung, derived support or named, and three minute reads per rung; AU-O1CLI-2's and AU-O1CLI-3's tests now hold that statement and fail if a second build returns (D-4719) | `a_rungs_second_load_and_build_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_2.rs`, `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_3.rs` | ✓ |
++| L1FB-09 | Reading three rungs' rows back by identity over one root opens the results ledger once (D-4720) | `cli::results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index cb4719e6..8ce7a915 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65178,3 +65178,15 @@ attempt; before, four builds) and
+ `a_column_builds_retry_loop_reads_the_daily_context_once` (four passes, one
+ daily load where there were four, and the same withholding, census and
+ digest as the census path).
++
++### D-4720 — A rung's readback opens the ledger once per root — 2026-10-09
++
++**Finding.** W2-cli8-4, test gap. D-1700's `recorded_row` reads a rung's row
++through the shared ledger handle, but no test counted opens, so a fresh
++`Results::open(root)?.of_identity(..)` per rung passed every test.
++
++**Decision.** `a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung`
++reads three rungs' rows by identity in a child process (the shared handle is
++process-global) and requires `results::OPENS == 1`. With the fresh open it
++failed `left: 3, right: 1`. No production code changes; the child's proof
++line is declared to gate 23 beside D-0695's.
+-- 
+2.43.0
+
+
+From aadcc8a4811ea1c5e4f0b1dcbe75978e66f06fe8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:27 +0000
+Subject: [PATCH 5/8] cli: pin the results listing's forty-row retention
+ (W2-cli8-5, D-4721)
+
+Before: SCB-10's test only checked that results_at lacked a string, so
+deleting ListingFold's pop_front passed everything.
+
+After: the test folds 500 rows and checks the window never exceeds
+LIST_ROWS and ends holding exactly the newest 40 matching rows at its
+starting capacity; without pop_front it fails at row 50. docs/06 now
+says the pass is in append order since D-2310.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ crates/cli/src/screen_policy_tests.rs | 38 +++++++++++++++++++++++++++
+ docs/04-invariants.md                 |  1 +
+ docs/05-decisions.md                  | 12 +++++++++
+ docs/06-limits.md                     |  9 ++++---
+ 4 files changed, 57 insertions(+), 3 deletions(-)
+
+diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
+index f899908b..f908e95a 100644
+--- a/crates/cli/src/screen_policy_tests.rs
++++ b/crates/cli/src/screen_policy_tests.rs
+@@ -739,6 +739,14 @@ fn the_frontier_prefix_equals_the_full_sort_with_each_key_once() {
+     assert!(first_accepted_in_order(&items, 2, |item| item.0, |_| false).is_empty());
+ }
+ /// W2-cli8-5. The listing retains a bounded window, not every matching row.
++///
++/// D-4721: this asserted only that `results_at` lacks the text
++/// `rows.push(record)`, so deleting the window's `pop_front` passed it, and
++/// passed every other test too, because the table prints only `LIST_ROWS`
++/// rows whatever is held. It now drives the fold: over 500 rows, 400 of them
++/// matching, `ListingFold` holds exactly `LIST_ROWS` records, the newest
++/// matching ones in append order, in the capacity it started with; a row the
++/// filter refuses is counted and never held.
+ #[test]
+ fn the_results_listing_retains_a_bounded_window() {
+     let listing = code_of("\nfn results_at(");
+@@ -746,6 +754,36 @@ fn the_results_listing_retains_a_bounded_window() {
+         !listing.contains("rows.push(record)"),
+         "every matching record is retained: {listing}"
+     );
++    let ordinal = |record: &crate::results::Record| {
++        u32::from_le_bytes([
++            record.identity[0],
++            record.identity[1],
++            record.identity[2],
++            record.identity[3],
++        ])
++    };
++    let mut fold = ListingFold::new(Some("zerodha"), None);
++    let capacity = fold.newest.capacity();
++    assert!(capacity >= LIST_ROWS, "pre-sized to the window");
++    for at in 0..500_u32 {
++        let mut record = crate::tests::record_for_naming();
++        record.identity = [0; 32];
++        record.identity[..4].copy_from_slice(&at.to_le_bytes());
++        if at % 5 == 4 {
++            record.feed = crate::results::field("dhan");
++        }
++        fold.visit(Ok(record));
++        assert!(fold.newest.len() <= LIST_ROWS, "row {at}: the window grew");
++    }
++    assert_eq!((fold.rows, fold.matching), (500, 400));
++    assert_eq!(fold.newest.len(), LIST_ROWS, "exactly the window is held");
++    assert_eq!(fold.newest.capacity(), capacity, "and it never reallocated");
++    let held: Vec<u32> = fold.newest.iter().map(ordinal).collect();
++    let newest: Vec<u32> = (0..500_u32)
++        .filter(|at| at % 5 != 4)
++        .skip(400 - LIST_ROWS)
++        .collect();
++    assert_eq!(held, newest, "the newest matching rows, in append order");
+ }
+ 
+ /// AC-whp-o1-2. The bootstrap family builds its slice facts once, not once
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index a21dad60..4dfe6ced 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7066,3 +7066,4 @@ old line regex the same input and watched it pass.
+ | L1FB-07 | `column_withholding_at_build` reads the daily context once however many passes it retries, and its withholding, census and digest equal the census path's (D-4719) | `cli::audited_stored::tests::a_column_builds_retry_loop_reads_the_daily_context_once` | ✓ |
+ | L1FB-08 | `docs/06-limits.md` states one column build per rung, derived support or named, and three minute reads per rung; AU-O1CLI-2's and AU-O1CLI-3's tests now hold that statement and fail if a second build returns (D-4719) | `a_rungs_second_load_and_build_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_2.rs`, `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_3.rs` | ✓ |
+ | L1FB-09 | Reading three rungs' rows back by identity over one root opens the results ledger once (D-4720) | `cli::results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung` | ✓ |
++| L1FB-10 | The results listing holds at most `LIST_ROWS` rows at every step of its fold, and exactly the newest 40 matching rows at the end, at unchanged capacity (D-4721) | `cli::screen_policy_tests::the_results_listing_retains_a_bounded_window` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index 8ce7a915..fe135561 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65190,3 +65190,15 @@ reads three rungs' rows by identity in a child process (the shared handle is
+ process-global) and requires `results::OPENS == 1`. With the fresh open it
+ failed `left: 3, right: 1`. No production code changes; the child's proof
+ line is declared to gate 23 beside D-0695's.
++
++### D-4721 — The results listing's forty-row retention is pinned — 2026-10-09
++
++**Finding.** W2-cli8-5, test gap. Deleting `ListingFold::visit`'s `pop_front`
++passed every test: `results_table` prints only `take(LIST_ROWS)`. SCB-10's
++test asserted only that `results_at` lacks the text `rows.push(record)`.
++
++**Decision.** SCB-10's test, `the_results_listing_retains_a_bounded_window`,
++now folds 500 rows (100 filtered out) and checks at every step that at most
++`LIST_ROWS` are held, then that exactly the newest 40 matching rows are held
++in order at an unchanged capacity. With `pop_front` deleted it failed "row
++50: the window grew". No production code changes.
+diff --git a/docs/06-limits.md b/docs/06-limits.md
+index 8374bb74..937b4825 100644
+--- a/docs/06-limits.md
++++ b/docs/06-limits.md
+@@ -15609,9 +15609,12 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
+   map probe plus a Wilson bound.
+ 
+ - **`cli results` and `cli top`, per request: `O(ledger rows)` reads, `O(1)`
+-  retained** (W2-cli8-5, D-1729). `results_at` makes one newest-first pass
+-  over every recorded run and keeps at most `LIST_ROWS` (40) records plus a
+-  running best. `newest_complete` makes one pass and keeps one record. Neither
++  retained** (W2-cli8-5, D-1729). `results_at` makes one pass over every
++  recorded run, in the append order of the ledger open's own visit since
++  D-2310 (not newest first), and keeps at most `LIST_ROWS` (40) records, by
++  dropping the oldest held row before each push, plus a running best; the
++  retention is pinned by `the_results_listing_retains_a_bounded_window`
++  (D-4721). `newest_complete` makes one pass and keeps one record. Neither
+   can stop early: the best complete run can be anywhere in the ledger. A
+   per-request bound below the ledger would need a secondary index, which this
+   append-only, path-is-the-index file does not keep. UNVERIFIED as a
+-- 
+2.43.0
+
+
+From d3968d90ae457a455944faa417f546e22b59ea0a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:28 +0000
+Subject: [PATCH 6/8] cli: pin the measured band's parallelism (W2-cli8-7,
+ D-4722)
+
+Before: a sequential loop in measure_top gave the same answer as
+par_iter_mut, so reverting the parallelism passed every test.
+
+After: a test-only per-row hook and a two-thread rendezvous require two
+rows to be measured at once, and the figures to equal a one-thread
+pool's; with iter_mut the test fails.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ crates/cli/src/lib.rs                 |  17 +++
+ crates/cli/src/screen_policy_tests.rs | 154 ++++++++++++++++++++++++++
+ docs/04-invariants.md                 |   1 +
+ docs/05-decisions.md                  |  13 +++
+ 4 files changed, 185 insertions(+)
+
+diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
+index 3d463cd0..c00573fc 100644
+--- a/crates/cli/src/lib.rs
++++ b/crates/cli/src/lib.rs
+@@ -14540,9 +14540,15 @@ fn measure_top(
+     // one the sequential loop computed, whatever the core count. The cost is
+     // `O(band x (G + 7 x trades))` -- `G` one exit grid -- divided across cores,
+     // and `band` is at most `8 x TOP_CEILING`.
++    #[cfg(test)]
++    let hook = MEASURE_ROW_HOOK.with(|hook| hook.borrow().clone());
+     rows.par_iter_mut()
+         .take(measured_band(rules.top))
+         .for_each(|row| {
++            #[cfg(test)]
++            if let Some(hook) = &hook {
++                hook();
++            }
+             // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
+             // was worse than opposite — it was cross-wired.
+             //
+@@ -14581,6 +14587,17 @@ fn measure_top(
+         });
+ }
+ 
++#[cfg(test)]
++std::thread_local! {
++    /// Test-only: called once per measured row of [`measure_top`]'s band, so a
++    /// test can prove two rows are measured at once (W2-cli8-7, D-4722). Read
++    /// on the thread that calls `measure_top`, so no other test's measurement
++    /// sees it.
++    pub(crate) static MEASURE_ROW_HOOK: std::cell::RefCell<
++        Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
++    > = const { std::cell::RefCell::new(None) };
++}
++
+ /// The screen's ranked table: one row per printed combination, its side, its
+ /// chosen exit's figures and the rule that refused it, then its conditions.
+ fn screen_table(out: &mut String, rows: &[Screened<'_>], rules: Rules, reference: i64) {
+diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
+index f908e95a..41606705 100644
+--- a/crates/cli/src/screen_policy_tests.rs
++++ b/crates/cli/src/screen_policy_tests.rs
+@@ -1842,3 +1842,157 @@ fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
+ }
+ 
+ // ---------------------------------------------------------------------------
++// W2-cli8-7 (D-4722): the measured band runs on more than one core at once.
++// ---------------------------------------------------------------------------
++
++/// Where two measured rows meet: the first to arrive waits, bounded, for a
++/// second; a second arriving while the first waits is the overlap.
++#[derive(Default)]
++struct Meeting {
++    state: std::sync::Mutex<(u32, bool, bool)>,
++    met: std::sync::Condvar,
++}
++
++impl Meeting {
++    /// One row arrives. `(waiting, overlapped, gave_up)`.
++    fn arrive(&self) {
++        let mut state = self.state.lock().expect("meeting lock");
++        if state.0 > 0 {
++            state.1 = true;
++            self.met.notify_all();
++            return;
++        }
++        if state.1 || state.2 {
++            return;
++        }
++        state.0 += 1;
++        let (mut state, waited) = self
++            .met
++            .wait_timeout_while(state, std::time::Duration::from_secs(20), |state| !state.1)
++            .expect("meeting wait");
++        state.0 -= 1;
++        if waited.timed_out() {
++            state.2 = true;
++        }
++    }
++
++    fn overlapped(&self) -> bool {
++        self.state.lock().expect("meeting lock").1
++    }
++}
++
++/// The band fixture `the_parallel_band_matches_a_sequential_measurement` uses:
++/// up to forty priced rows of the eight-session slice, Long side.
++fn band_rows<'a>(fixture: &'a Ranked, facts: &runner::trade::SliceFacts) -> Vec<Screened<'a>> {
++    let bars = &fixture.bars;
++    let column = &fixture.run.column;
++    let horizon = Horizon::DEFAULT;
++    let stops = stop_ladder_ppm(bars, horizon.as_bars() as usize);
++    let levels = grid::Levels {
++        rungs: grid_rungs(bars),
++        step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
++        forced: None,
++        ratios: true,
++        stops_ppm: &stops,
++    };
++    fixture
++        .run
++        .ranked
++        .top
++        .iter()
++        .take(40)
++        .enumerate()
++        .filter_map(|(rank, scored)| {
++            let g = grid::evaluate_over(
++                bars,
++                column,
++                &scored.mask,
++                horizon,
++                side_of_direction(Direction::Long),
++                levels,
++                facts,
++            );
++            let cell = g.best().copied()?;
++            Some(Screened {
++                side: Direction::Long,
++                scored,
++                rank,
++                cell,
++                tightest: None,
++                admitted: false,
++                consistency: None,
++                steady: true,
++                calendar_unmeasured: false,
++            })
++        })
++        .collect()
++}
++
++/// W2-cli8-7, D-4722. THE BAND IS MEASURED IN PARALLEL, observed rather than
++/// read off the source. On a two-thread pool each measured row checks in at a
++/// meeting point; the first waits (bounded, 20 s) for a second, and a second
++/// arriving while the first still waits proves two rows were being measured
++/// at the same moment. A sequential loop cannot produce that: its first row
++/// waits alone, gives up, and every later row arrives with nobody waiting.
++/// The figures are still the sequential ones, row for row.
++#[test]
++fn the_measured_band_measures_two_rows_at_once() {
++    let fixture = Ranked::of(8);
++    let facts = runner::trade::SliceFacts::of(&fixture.bars, &fixture.run.column);
++    let mut rules = Rules::elite(0, 25);
++    rules.top = 1;
++    let mut parallel = band_rows(&fixture, &facts);
++    let mut sequential = band_rows(&fixture, &facts);
++    assert!(parallel.len() > 2, "fixture: rows to measure");
++    let meeting = std::sync::Arc::new(Meeting::default());
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(2)
++        .build()
++        .expect("a two-thread pool");
++    pool.install(|| {
++        let arrive = std::sync::Arc::clone(&meeting);
++        MEASURE_ROW_HOOK.with(|hook| {
++            *hook.borrow_mut() = Some(std::sync::Arc::new(move || arrive.arrive()));
++        });
++        measure_top(
++            &mut parallel,
++            &fixture.bars,
++            &fixture.run.column,
++            Horizon::DEFAULT,
++            rules,
++            &facts,
++        );
++        MEASURE_ROW_HOOK.with(|hook| *hook.borrow_mut() = None);
++    });
++    assert!(
++        meeting.overlapped(),
++        "two rows of the band were never measured at the same moment"
++    );
++    let one = rayon::ThreadPoolBuilder::new()
++        .num_threads(1)
++        .build()
++        .expect("a one-thread pool");
++    one.install(|| {
++        measure_top(
++            &mut sequential,
++            &fixture.bars,
++            &fixture.run.column,
++            Horizon::DEFAULT,
++            rules,
++            &facts,
++        );
++    });
++    assert_eq!(
++        parallel
++            .iter()
++            .map(|row| row.consistency.clone())
++            .collect::<Vec<_>>(),
++        sequential
++            .iter()
++            .map(|row| row.consistency.clone())
++            .collect::<Vec<_>>(),
++        "the parallel band is the sequential band, row for row"
++    );
++}
++
++// ---------------------------------------------------------------------------
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index 4dfe6ced..c80490b1 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7067,3 +7067,4 @@ old line regex the same input and watched it pass.
+ | L1FB-08 | `docs/06-limits.md` states one column build per rung, derived support or named, and three minute reads per rung; AU-O1CLI-2's and AU-O1CLI-3's tests now hold that statement and fail if a second build returns (D-4719) | `a_rungs_second_load_and_build_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_2.rs`, `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_3.rs` | ✓ |
+ | L1FB-09 | Reading three rungs' rows back by identity over one root opens the results ledger once (D-4720) | `cli::results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung` | ✓ |
+ | L1FB-10 | The results listing holds at most `LIST_ROWS` rows at every step of its fold, and exactly the newest 40 matching rows at the end, at unchanged capacity (D-4721) | `cli::screen_policy_tests::the_results_listing_retains_a_bounded_window` | ✓ |
++| L1FB-11 | `measure_top` measures two rows of its band at the same moment on a two-thread pool, and the figures equal a one-thread pool's (D-4722) | `cli::screen_policy_tests::the_measured_band_measures_two_rows_at_once` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index fe135561..17983664 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65202,3 +65202,16 @@ now folds 500 rows (100 filtered out) and checks at every step that at most
+ `LIST_ROWS` are held, then that exactly the newest 40 matching rows are held
+ in order at an unchanged capacity. With `pop_front` deleted it failed "row
+ 50: the window grew". No production code changes.
++
++### D-4722 — The measured band's parallelism is pinned — 2026-10-09
++
++**Finding.** W2-cli8-7, test gap. `measure_top` measures its band with
++`par_iter_mut`, but a sequential loop gives the same answer, so reverting it
++passed every test.
++
++**Decision.** A test-only hook, `MEASURE_ROW_HOOK`, runs once per measured
++row. `the_measured_band_measures_two_rows_at_once` installs a rendezvous on a
++two-thread pool: it passes only when two rows are inside the hook at once
++(bounded wait of 20 s), and the band's figures equal a one-thread pool's.
++With `iter_mut` it failed "two rows of the band were never measured at the
++same moment".
+-- 
+2.43.0
+
+
+From ce01b96090d4a7f0e845fdf831f5a43926f297fa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:29 +0000
+Subject: [PATCH 7/8] cli: move the band docs off TOP_CEILING onto their items
+ (G2-1, D-4723)
+
+Before: measure_top's and measured_band's doc blocks ran on into
+TOP_CEILING's, so all three attached to the constant and the two
+functions had none.
+
+After: each block sits on its own item; a test reads the doc directly
+above each of the three.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ crates/cli/src/lib.rs                 | 96 +++++++++++++--------------
+ crates/cli/src/screen_policy_tests.rs | 47 +++++++++++++
+ docs/04-invariants.md                 |  1 +
+ docs/05-decisions.md                  |  9 +++
+ 4 files changed, 105 insertions(+), 48 deletions(-)
+
+diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs
+index c00573fc..b4582efa 100644
+--- a/crates/cli/src/lib.rs
++++ b/crates/cli/src/lib.rs
+@@ -14336,18 +14336,43 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
+     (c.weakest_bp(), c.worst_day)
+ }
+ 
+-/// Measure consistency for the rows that will actually be printed.
+-///
+-/// # Why the caller does not do this inline
+-///
+-/// Two reasons, and the first is a bug that was measured. Inline, this ran
+-/// inside the screening loop -- over `screen_cap()` combinations, ten
+-/// thousand by default -- and every one paid for a full trade-by-trade
+-/// re-walk when only `top` are ever rendered. A single-month screen that
+-/// had taken seconds stopped finishing inside 280.
++/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
++/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
+ ///
+-/// The second is that [`screen`] was 113 lines with it, past the hundred
+-/// clippy enforces.
++/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
++/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
++/// unbounded per-request cost. A thousand printed rows is a page nobody reads
++/// whole; past it the cost grows and the answer does not.
++pub(crate) const TOP_CEILING: usize = 1_000;
++
++/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
++/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
++/// unusable: zero lists nothing, and past the ceiling the measured band is an
++/// unbounded per-request cost (D-1727).
++fn top_from_knob() -> usize {
++    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
++        return 25;
++    };
++    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
++        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
++        25
++    })
++}
++
++// Every TOP the door admits is one the frontier can serve (D-1981).
++const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
++
++/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
++pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
++    if top == 0 {
++        Some("TOP must be 1 or more")
++    } else if top > TOP_CEILING {
++        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
++    } else {
++        None
++    }
++}
++
+ /// How many rows get their seven-grain calendar measured, given a wanted top N.
+ ///
+ /// # The circularity this exists to break
+@@ -14388,43 +14413,6 @@ fn calendar_terms(c: &Consistency) -> (i64, i128) {
+ /// what is printed, which is enough for the calendar gate to demote a measured
+ /// row and still have a measured replacement, and independent of how wide the
+ /// search was.
+-/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
+-/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
+-///
+-/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
+-/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
+-/// unbounded per-request cost. A thousand printed rows is a page nobody reads
+-/// whole; past it the cost grows and the answer does not.
+-pub(crate) const TOP_CEILING: usize = 1_000;
+-
+-/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
+-/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
+-/// unusable: zero lists nothing, and past the ceiling the measured band is an
+-/// unbounded per-request cost (D-1727).
+-fn top_from_knob() -> usize {
+-    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
+-        return 25;
+-    };
+-    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
+-        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
+-        25
+-    })
+-}
+-
+-// Every TOP the door admits is one the frontier can serve (D-1981).
+-const _: () = assert!(TOP_CEILING <= frontier::MAX_ROWS);
+-
+-/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
+-pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
+-    if top == 0 {
+-        Some("TOP must be 1 or more")
+-    } else if top > TOP_CEILING {
+-        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
+-    } else {
+-        None
+-    }
+-}
+-
+ const fn measured_band(top: usize) -> usize {
+     const WIDEN: usize = 8;
+     const FLOOR: usize = 32;
+@@ -14432,6 +14420,18 @@ const fn measured_band(top: usize) -> usize {
+     if widened < FLOOR { FLOOR } else { widened }
+ }
+ 
++/// Measure consistency for the rows that will actually be printed.
++///
++/// # Why the caller does not do this inline
++///
++/// Two reasons, and the first is a bug that was measured. Inline, this ran
++/// inside the screening loop -- over `screen_cap()` combinations, ten
++/// thousand by default -- and every one paid for a full trade-by-trade
++/// re-walk when only `top` are ever rendered. A single-month screen that
++/// had taken seconds stopped finishing inside 280.
++///
++/// The second is that [`screen`] was 113 lines with it, past the hundred
++/// clippy enforces.
+ fn measure_top(
+     rows: &mut [Screened<'_>],
+     bars: &[indicators::Candle],
+diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
+index 41606705..ed51689d 100644
+--- a/crates/cli/src/screen_policy_tests.rs
++++ b/crates/cli/src/screen_policy_tests.rs
+@@ -1996,3 +1996,50 @@ fn the_measured_band_measures_two_rows_at_once() {
+ }
+ 
+ // ---------------------------------------------------------------------------
++// G2-1 (D-4723) and G2-2 (D-4724): documentation attached to its own item, and
++// no limit describing a removed function as current.
++// ---------------------------------------------------------------------------
++
++/// The `///` lines directly above the item that starts at `head` in `lib.rs`.
++fn doc_above(head: &str) -> String {
++    let source = include_str!("lib.rs");
++    let (before, _) = source
++        .split_once(head)
++        .unwrap_or_else(|| panic!("{head} is no longer in lib.rs"));
++    let mut doc: Vec<&str> = before
++        .lines()
++        .rev()
++        .take_while(|line| line.trim_start().starts_with("///"))
++        .collect();
++    doc.reverse();
++    doc.join("\n")
++}
++
++/// G2-1, D-4723. Commit b489169 (D-1727) inserted `TOP_CEILING` between three
++/// doc blocks and their items, so `measure_top`'s and `measured_band`'s docs
++/// both attached to the constant and the two functions carried none. Each doc
++/// now sits on its own item.
++#[test]
++fn each_screen_band_doc_sits_on_its_own_item() {
++    const MEASURE: &str = "Measure consistency for the rows that will actually be printed";
++    const BAND: &str = "How many rows get their seven-grain calendar measured";
++    const CEILING: &str = "The most rows one listing may ask to print";
++    let measure = doc_above("\nfn measure_top(");
++    let band = doc_above("\nconst fn measured_band(");
++    let ceiling = doc_above("\npub(crate) const TOP_CEILING");
++    assert!(measure.contains(MEASURE), "measure_top's doc:\n{measure}");
++    assert!(
++        !measure.contains(BAND) && !measure.contains(CEILING),
++        "{measure}"
++    );
++    assert!(band.contains(BAND), "measured_band's doc:\n{band}");
++    assert!(!band.contains(MEASURE) && !band.contains(CEILING), "{band}");
++    assert!(
++        ceiling.trim_start().starts_with(&format!("/// {CEILING}")),
++        "TOP_CEILING's doc:\n{ceiling}"
++    );
++    assert!(
++        !ceiling.contains(MEASURE) && !ceiling.contains(BAND),
++        "{ceiling}"
++    );
++}
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index c80490b1..8cd04caa 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7068,3 +7068,4 @@ old line regex the same input and watched it pass.
+ | L1FB-09 | Reading three rungs' rows back by identity over one root opens the results ledger once (D-4720) | `cli::results_report_tests::a_rungs_readback_opens_the_ledger_once_per_root_not_once_per_rung` | ✓ |
+ | L1FB-10 | The results listing holds at most `LIST_ROWS` rows at every step of its fold, and exactly the newest 40 matching rows at the end, at unchanged capacity (D-4721) | `cli::screen_policy_tests::the_results_listing_retains_a_bounded_window` | ✓ |
+ | L1FB-11 | `measure_top` measures two rows of its band at the same moment on a two-thread pool, and the figures equal a one-thread pool's (D-4722) | `cli::screen_policy_tests::the_measured_band_measures_two_rows_at_once` | ✓ |
++| L1FB-12 | `measure_top`, `measured_band` and `TOP_CEILING` each carry their own doc and no other's (D-4723) | `cli::screen_policy_tests::each_screen_band_doc_sits_on_its_own_item` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index 17983664..f997906f 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65215,3 +65215,12 @@ two-thread pool: it passes only when two rows are inside the hook at once
+ (bounded wait of 20 s), and the band's figures equal a one-thread pool's.
+ With `iter_mut` it failed "two rows of the band were never measured at the
+ same moment".
++
++### D-4723 — The band docs sit on `measure_top` and `measured_band` — 2026-10-09
++
++**Finding.** G2-1. Three doc blocks ran on with no item between them, so
++`measure_top`'s and `measured_band`'s docs both attached to `TOP_CEILING`.
++
++**Decision.** Each block moved onto its own item; `TOP_CEILING` keeps only
++its own. `each_screen_band_doc_sits_on_its_own_item` reads the doc directly
++above each of the three items; it failed on `measure_top`'s empty doc.
+-- 
+2.43.0
+
+
+From fc5291b65f82bf50d2b4d9af0c6f790231effe70 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 05:29:30 +0000
+Subject: [PATCH 8/8] docs: two latest_for limits no longer state a removed
+ function as current (G2-2, D-4724)
+
+Before: two docs/06-limits.md bullets stated latest_for's O(runs) per
+call as a current cost, though D-1700 removed it.
+
+After: both name D-1700 and recorded_row; a test requires every bullet
+headed by latest_for to name D-1700.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
+---
+ crates/cli/src/screen_policy_tests.rs | 31 +++++++++++++++++++++++++++
+ docs/04-invariants.md                 |  1 +
+ docs/05-decisions.md                  | 11 ++++++++++
+ docs/06-limits.md                     | 20 ++++++++++-------
+ 4 files changed, 55 insertions(+), 8 deletions(-)
+
+diff --git a/crates/cli/src/screen_policy_tests.rs b/crates/cli/src/screen_policy_tests.rs
+index ed51689d..bd95b55c 100644
+--- a/crates/cli/src/screen_policy_tests.rs
++++ b/crates/cli/src/screen_policy_tests.rs
+@@ -2043,3 +2043,34 @@ fn each_screen_band_doc_sits_on_its_own_item() {
+         "{ceiling}"
+     );
+ }
++
++/// G2-2, D-4724. `latest_for` was removed by D-1700. Two bullets of
++/// `docs/06-limits.md` still stated its O(runs) cost as current beside the
++/// corrected copies; every bullet naming it must say it is gone.
++#[test]
++fn no_limit_states_the_removed_latest_for_as_current() {
++    let limits = include_str!("../../../docs/06-limits.md");
++    let bullets: Vec<&str> = limits
++        .split("\n- ")
++        .skip(1)
++        .map(|bullet| {
++            let paragraph = bullet.split_once("\n\n").map_or(bullet, |(head, _)| head);
++            paragraph
++                .split_once("\n#")
++                .map_or(paragraph, |(head, _)| head)
++        })
++        .filter(|bullet| {
++            bullet
++                .lines()
++                .next()
++                .is_some_and(|head| head.contains("latest_for`"))
++        })
++        .collect();
++    assert!(bullets.len() >= 2, "the corrected bullets remain");
++    for bullet in bullets {
++        assert!(
++            bullet.contains("D-1700"),
++            "a bullet still states `latest_for` as current:\n{bullet}"
++        );
++    }
++}
+diff --git a/docs/04-invariants.md b/docs/04-invariants.md
+index 8cd04caa..7e596414 100644
+--- a/docs/04-invariants.md
++++ b/docs/04-invariants.md
+@@ -7069,3 +7069,4 @@ old line regex the same input and watched it pass.
+ | L1FB-10 | The results listing holds at most `LIST_ROWS` rows at every step of its fold, and exactly the newest 40 matching rows at the end, at unchanged capacity (D-4721) | `cli::screen_policy_tests::the_results_listing_retains_a_bounded_window` | ✓ |
+ | L1FB-11 | `measure_top` measures two rows of its band at the same moment on a two-thread pool, and the figures equal a one-thread pool's (D-4722) | `cli::screen_policy_tests::the_measured_band_measures_two_rows_at_once` | ✓ |
+ | L1FB-12 | `measure_top`, `measured_band` and `TOP_CEILING` each carry their own doc and no other's (D-4723) | `cli::screen_policy_tests::each_screen_band_doc_sits_on_its_own_item` | ✓ |
++| L1FB-13 | No `docs/06-limits.md` bullet headed by `latest_for` states it without D-1700, which removed it (D-4724) | `cli::screen_policy_tests::no_limit_states_the_removed_latest_for_as_current` | ✓ |
+diff --git a/docs/05-decisions.md b/docs/05-decisions.md
+index f997906f..a8028a1a 100644
+--- a/docs/05-decisions.md
++++ b/docs/05-decisions.md
+@@ -65224,3 +65224,14 @@ same moment".
+ **Decision.** Each block moved onto its own item; `TOP_CEILING` keeps only
+ its own. `each_screen_band_doc_sits_on_its_own_item` reads the doc directly
+ above each of the three items; it failed on `measure_top`'s empty doc.
++
++### D-4724 — Two `latest_for` limits no longer state a removed function as current — 2026-10-09
++
++**Finding.** G2-2. Two `docs/06-limits.md` bullets stated `latest_for`'s
++O(runs) per call as a current cost, while D-1700 removed the function and
++other bullets already said so.
++
++**Decision.** Both bullets now name D-1700 and `recorded_row`.
++`no_limit_states_the_removed_latest_for_as_current` requires every limit
++bullet headed by `latest_for` to name D-1700; it failed on the first stale
++bullet.
+diff --git a/docs/06-limits.md b/docs/06-limits.md
+index 937b4825..4388392b 100644
+--- a/docs/06-limits.md
++++ b/docs/06-limits.md
+@@ -13034,10 +13034,12 @@ not:
    audit, which consumes them), the O(bars) scans that derive its horizon,
    grid rungs, floors and policy from the held bars, and its own sweep. NOT
    MEASURED.
@@ -2593,7 +2801,7 @@ index 12e9bf09..4388392b 100644
  ## Audit fixes — D-1480 onward, 3 October 2026
  
  **A credential watch's dead-value check is O(d), not O(1) (v3a-1, D-1482).**
-@@ -15042,10 +15047,12 @@ UNVERIFIED for the rest:
+@@ -15045,10 +15047,12 @@ UNVERIFIED for the rest:
  - **`api::server::form_read_bound` (D-1592).** "O(1)": four comparisons since D-1770 (two before)
    against literal paths. `api::server::form_read_bound_is_wide_only_on_the_member_routes`
    proves which route gets which bound; nothing times the call.
@@ -2610,76 +2818,6 @@ index 12e9bf09..4388392b 100644
  ## A rate span published slower than one permit a second keeps the old floor — D-1769, 3 October 2026
  
  `pull::rate::Window::floor_of` floors every span at one permit a second in its
-@@ -15560,6 +15567,25 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
-   anyone should expect to reach, because a key whose envelope admits cells is
-   a key whose mildest tier is likely to end the walk.
- 
-+- **A recorded cascade's capture: at most two screens, whatever `T` is**
-+  (G2-5, D-4716, next to D-1734). The bound above is the walk's pricing; a
-+  RECORDED walk also writes candidate evidence. Each captured screen is one
-+  tier file and two files per candidate side, two `fsync`s each, plus
-+  `2 × evaluated` acknowledgement slots of 33 bytes against the capture's
-+  64 MiB budget. Until D-4716 every judged tier was captured, so a walk where
-+  nothing admits paid `(1 + T) × (2 + 8C) + 2` `fsync`s and `(1 + T) × 2C`
-+  replays, and the budget refused the run near `T = 64 MiB / (66 × C)`:
-+  about 10,000 tiers at `C = 98` and about 100 at the default
-+  `screen_cap()` (derived from the slot size, not measured). Now `walk_tiers`
-+  judges every tier with no capture and captures only the tier it ends on,
-+  so a cascade captures the operator's own policy and that tier: at most
-+  `6 + 16C` `fsync`s, `4C` replays and `4C` slots (`C <= screen_cap()`). The
-+  met tier pays one extra `tier_rows` over its cached grids,
-+  `O(C × 2 × K)`. COUNTED, not timed:
-+  `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
-+  measures two captured screens and exactly `2 × tiers + 4 × candidates + 2`
-+  `fsync`s on a 2,520-tier ladder (2,521 tiers before the fix).
-+
- - **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
-   number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
-   `grid_rungs`, `max_stop_points`, each once), one
-@@ -15587,9 +15613,12 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
-   map probe plus a Wilson bound.
- 
- - **`cli results` and `cli top`, per request: `O(ledger rows)` reads, `O(1)`
--  retained** (W2-cli8-5, D-1729). `results_at` makes one newest-first pass
--  over every recorded run and keeps at most `LIST_ROWS` (40) records plus a
--  running best. `newest_complete` makes one pass and keeps one record. Neither
-+  retained** (W2-cli8-5, D-1729). `results_at` makes one pass over every
-+  recorded run, in the append order of the ledger open's own visit since
-+  D-2310 (not newest first), and keeps at most `LIST_ROWS` (40) records, by
-+  dropping the oldest held row before each push, plus a running best; the
-+  retention is pinned by `the_results_listing_retains_a_bounded_window`
-+  (D-4721). `newest_complete` makes one pass and keeps one record. Neither
-   can stop early: the best complete run can be anywhere in the ledger. A
-   per-request bound below the ledger would need a secondary index, which this
-   append-only, path-is-the-index file does not keep. UNVERIFIED as a
-diff --git a/docs/19-candidate-trades.md b/docs/19-candidate-trades.md
-index 03f8e6e8..9766d4ea 100644
---- a/docs/19-candidate-trades.md
-+++ b/docs/19-candidate-trades.md
-@@ -37,6 +37,23 @@ publication. A callback error is latched: not-yet-started candidates and sides
- check it and skip work; a grid already executing finishes its current engine
- call. No immediate interruption inside that grid is claimed.
- 
-+## Which screen passes are captured (D-4716)
-+
-+A capture holds the screen passes the page shows, not every tier the walk
-+judged. `screen_cascade` screens the operator's own policy first, and that
-+pass is captured. When the walk runs, every tier is judged with no capture,
-+and only the tier the walk ends on is captured: the strictest tier that
-+admitted a row, or the last tier when none did. So a capture holds one or two
-+tiers. Before D-4716 every judged tier was captured, `1 + T` tiers on a walk
-+that admitted nothing, which spent the 64 MiB acknowledgement budget and
-+refused the run on long ladders.
-+
-+The bytes of every file and the catalog are unchanged, and this stays
-+version 1. Tier ordinals count captured passes in the order they ran, as
-+before; each tier states its own policy words, so a reader never infers a
-+tier's policy from its ordinal. A capture written before D-4716 reads as it
-+always did.
-+
- ## Paths and byte layout
- 
- All files live under:
 -- 
 2.43.0
 

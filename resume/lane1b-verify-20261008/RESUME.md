@@ -42,3 +42,12 @@ each fixer's item list (table above), then merge into `final/all-fixes-xp04wq`, 
 the PR 74 CI thread.
 
 - 05:05 UTC re-save: a=93489016/5 b=48af6b95/2 c=63b2beba/9 d=2e2aadd1/8 e=fa3100b9/5 f=fbdabaec/0 (head/commits). Fixer D DONE (8/8 fixed, D-4748..D-4756; gates incl. 11 pass; touched cli modules 526 pass). Check-in armed for 09:05 UTC (trig_016mComA6rA1qmTfyX3xop6W).
+
+## PAUSE 2026-10-09 05:36 UTC (usage: 5-hour window ~90%; resume at the 09:05 UTC check-in, trig_016mComA6rA1qmTfyX3xop6W)
+Heads (head/commits/dirty files): a=93489016/5/dirty7 b=fc5291b6/8/dirty0 c=1010370e/9/dirty0 d=2e2aadd1/8/dirty0 e=fa3100b9/5/dirty0 f=3d1d7552/4/dirty0
+- B DONE: 8 commits, D-4716..D-4724. G2-5 capture bound 6+16C fsyncs (was (1+T)(2+8C)+2); W2-cli8-10/-11 zero ceiling + one support validator in api+cli; census at the auto-support door; test gaps closed. All gates incl. 11 pass. Left open: cli argv `screen` still refuses a zero point ceiling at its own entry (api accepts); elite descent floor >= 1,000,000 ppm not checked by the shared validator; web label "Visited policy passes".
+- D DONE: 8 commits, D-4748..D-4756. Identity changes: Boolean source identity for NSE cash shares (receipt policy 4); stored runs over a share with an unreadable CAS-day close. F-CEC7A0 read-side fix; docs/11 row stays OPEN with an IN PROGRESS bullet.
+- E DONE: 5 commits, D-4764..D-4768. Bounded limit: a same-length rewrite with equal metadata is caught by the next open, not by a read of an unreturned record.
+- A STOPPED mid-work: 5 commits (G1-1, G1-2, G2-4, A-B-A/pass-1 tests, G1-3 docs); uncommitted WIP (7 files, likely the R9-cli-o1-1 stretch) in fx-a.uncommitted.patch.md. Not yet reported: re-run its checks before merging.
+- C STOPPED during final checks: 9 commits (G5-2, G5-1, G5-3, G5-4, G1-4, G3-3, G3-5, G3-8, web zero ceiling). Re-run its checks.
+- F STOPPED during final checks: 4 commits (W2-cli3-3 D-4782; W2-cli3-4+G4-3+G4-2 D-4780/4783/4784; W2-cli7-2 full re-proof kept, duplicated validation removed D-4785; + 1). G4-4 status unknown: check. Re-run its checks.

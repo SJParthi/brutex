@@ -1,6 +1,6 @@
-From 3e6bed2d70fbe934e31db8cb56c853e6b5a774b8 Mon Sep 17 00:00:00 2001
+From c222993a440aeb11a56248a338d8edc9d451046a Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:52 +0000
+Date: Fri, 9 Oct 2026 05:03:51 +0000
 Subject: [PATCH 1/9] cli, api: route every open that could wait on a FIFO peer
  through a non-blocking door (G5-2)
 
@@ -34,7 +34,7 @@ Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
 ---
  crates/api/src/audit.rs                       |  18 +-
  crates/api/src/autopilot.rs                   |   8 +-
- crates/api/src/backtest.rs                    |  41 +-
+ crates/api/src/backtest.rs                    |  49 +-
  crates/api/src/indexmap.rs                    |   3 +-
  crates/api/src/recovery.rs                    |   6 +-
  crates/api/src/recovery_control.rs            |   4 +-
@@ -93,7 +93,7 @@ Claude-Session: https://claude.ai/code/session_01R6fBjvEpAjr5PZ8rpwQhV8
  docs/04-invariants.md                         |   4 +
  docs/05-decisions.md                          |  50 ++
  docs/06-limits.md                             |  28 ++
- 61 files changed, 1049 insertions(+), 418 deletions(-)
+ 61 files changed, 1053 insertions(+), 422 deletions(-)
 
 diff --git a/crates/api/src/audit.rs b/crates/api/src/audit.rs
 index 4783e7fd..42984875 100644
@@ -151,9 +151,31 @@ index 626768ce..fc70f9b4 100644
      // THE BYTES HAVE TO REACH THE DEVICE. A write that only reached the page
      // cache answers "the disk is fine" on a disk that is full, which is the one
 diff --git a/crates/api/src/backtest.rs b/crates/api/src/backtest.rs
-index 755106b5..d8a9f24f 100644
+index 755106b5..7a4dce4e 100644
 --- a/crates/api/src/backtest.rs
 +++ b/crates/api/src/backtest.rs
+@@ -24,9 +24,10 @@
+ //! statements of itself is a format that can diverge. Three things hold it
+ //! together:
+ //!
+-//! 1. **Nothing here writes.** [`File::open`] is read-only and there is no
+-//!    append path in this module. A reader that drifts renders wrong; a writer
+-//!    that drifts corrupts. Only one crate may write, and it is `cli`.
++//! 1. **Nothing here writes.** [`cli::readonly_file::read`] is read-only and
++//!    there is no append path in this module. A reader that drifts renders
++//!    wrong; a writer that drifts corrupts. Only one crate may write, and it is
++//!    `cli`.
+ //! 2. **The stride is asserted against the field sum at compile time** —
+ //!    [`FIELD_SUM`] below — which is the same check
+ //!    `the_stride_is_exactly_what_the_writer_writes` makes on the writer's
+@@ -73,7 +74,6 @@
+ //! measurement, however sound it is.
+ 
+ use std::fmt::Write as _;
+-use std::fs::File;
+ use std::io::SeekFrom;
+ use std::path::{Path, PathBuf};
+ 
 @@ -1023,7 +1023,7 @@ pub fn path_in(root: &Path) -> PathBuf {
  #[must_use]
  pub fn read(root: &Path, limit: usize) -> Ledger {
@@ -3086,9 +3108,9 @@ index 12e9bf09..8b2c0d86 100644
 2.43.0
 
 
-From 25c1d979c201c789aa24e5fdaaba578e77f7182e Mon Sep 17 00:00:00 2001
+From dc897b756b83ab13ebc755dbe8fd98b301faccf9 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:53 +0000
+Date: Fri, 9 Oct 2026 05:03:51 +0000
 Subject: [PATCH 2/9] cli: check the search-checkpoint staged marker by the
  name it is written under (G5-1)
 
@@ -3145,7 +3167,7 @@ index 68eb75c4..5de1b11a 100644
          let mut marker = File::create_new(&temporary)?;
          #[cfg(test)]
 diff --git a/crates/cli/src/search_checkpoint_tests.rs b/crates/cli/src/search_checkpoint_tests.rs
-index 78ca7b97..b6bd9287 100644
+index 78ca7b97..6d822038 100644
 --- a/crates/cli/src/search_checkpoint_tests.rs
 +++ b/crates/cli/src/search_checkpoint_tests.rs
 @@ -309,6 +309,13 @@ fn os_litter_is_passed_over_and_a_stranger_is_named() -> Result<(), String> {
@@ -3173,7 +3195,7 @@ index 78ca7b97..b6bd9287 100644
 +                let mut names: Vec<String> = fs::read_dir(namespace.join("0000000000000002"))
 +                    .map(|entries| {
 +                        entries
-+                            .filter_map(|entry| entry.ok())
++                            .filter_map(Result::ok)
 +                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
 +                            .collect()
 +                    })
@@ -3285,9 +3307,9 @@ index c9bc3cd0..cdbae60e 100644
 2.43.0
 
 
-From d29454898fa08f5ed8b000e6cda930ecc2ca71be Mon Sep 17 00:00:00 2001
+From 0b587b7ecc6893e4144ee0c4be2f6194d2725591 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:53 +0000
+Date: Fri, 9 Oct 2026 05:03:52 +0000
 Subject: [PATCH 3/9] pull, vocab: stop pull saying NSE trades only Monday to
  Friday, and scan every crate (G5-3)
 
@@ -3463,9 +3485,9 @@ index cdbae60e..23392a82 100644
 2.43.0
 
 
-From accb12e87dca76a926fe935c80d0d65fc74fdd58 Mon Sep 17 00:00:00 2001
+From 3dd648a16d345bb723218f486d082f4dba067a1a Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:54 +0000
+Date: Fri, 9 Oct 2026 05:03:52 +0000
 Subject: [PATCH 4/9] cli: delete minute_gaps::withhold_holed_days and state
  the census bound as O(d) (G5-4)
 
@@ -3744,9 +3766,9 @@ index 8b2c0d86..ff7a34df 100644
 2.43.0
 
 
-From 7b4ab91af931be07d4477ed70d77756ec37f8f65 Mon Sep 17 00:00:00 2001
+From 08185c40d32a715fa6834ef031676caa805ed693 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:54 +0000
+Date: Fri, 9 Oct 2026 05:03:53 +0000
 Subject: [PATCH 5/9] cli, runner: correct comments that denied cli an arrow it
  has, and scan all crates for them (G1-4)
 
@@ -4281,9 +4303,9 @@ index b7786567..3239ed82 100644
 2.43.0
 
 
-From e2874954881b62ccb45871752e78b3825137e506 Mon Sep 17 00:00:00 2001
+From e7edaf5f209b4f90cdf547978d2710eeecba1c14 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:55 +0000
+Date: Fri, 9 Oct 2026 05:03:53 +0000
 Subject: [PATCH 6/9] runner: read caller files past their first test module,
  and name the bottom-half rate's caller (G3-3)
 
@@ -4519,9 +4541,9 @@ index 3239ed82..b538a000 100644
 2.43.0
 
 
-From e17462af0743611caf4c9a7d164bfeb86a12c208 Mon Sep 17 00:00:00 2001
+From e5d77cb9b74cb6b77b6da5097491fd0e70894657 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:56 +0000
+Date: Fri, 9 Oct 2026 05:03:54 +0000
 Subject: [PATCH 7/9] cli: make the GAP4-48 assertion message say what the
  daily filter does (G3-8)
 
@@ -4620,9 +4642,9 @@ index b538a000..b2b58d2f 100644
 2.43.0
 
 
-From 4efed2f728a5d56893ab64e501636fa094a08b6b Mon Sep 17 00:00:00 2001
+From f15f17bf8fa62c5a6a55178568f6e36385489b16 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:56 +0000
+Date: Fri, 9 Oct 2026 05:03:54 +0000
 Subject: [PATCH 8/9] docs: name the per-fold rung resolver
  cli::walk_forward_rungs, correcting D-1660 (G3-5)
 
@@ -4727,9 +4749,9 @@ index ff7a34df..124ebb0f 100644
 2.43.0
 
 
-From 63b2beba351e9ea5f90cdf4265e0313a84ff42c1 Mon Sep 17 00:00:00 2001
+From 1010370ebed1dccaf091ae7e90f40af8d9250e17 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Fri, 9 Oct 2026 04:30:57 +0000
+Date: Fri, 9 Oct 2026 05:03:55 +0000
 Subject: [PATCH 9/9] web: accept a zero stop ceiling on the backtest descent
  as no ceiling (D-1732 follow-up)
 
