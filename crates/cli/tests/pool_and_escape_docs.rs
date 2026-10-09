@@ -703,8 +703,10 @@ fn the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts() {
 
 /// **No text says `pool` pass 1 lifts a section out of a report.** D-0696.
 ///
-/// Pass 1 keeps each instrument's `one_rung(..).outcome`, a ledger record,
-/// and prints a table of its fields; no FINDINGS block reaches a pool page.
+/// Pass 1 keeps each instrument's `one_rung_cached(..).outcome`, a ledger
+/// record, and prints a table of its fields; no FINDINGS block reaches a pool
+/// page. Since D-4700 that loop is `pool::screen_pass_one`, which `run_under`
+/// calls; until then it was inline in `run_under` and called `one_rung`.
 /// `range-all` and `range-rung` are what print sections lifted through
 /// `validation_note`. Five texts said `range-all` and `pool` pass 1 keep
 /// lifted sections (found by a review): a reader who believed them could
@@ -713,12 +715,26 @@ fn the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts() {
 fn no_text_says_pool_pass_1_lifts_a_section() {
     let run_under = body(POOL, "\nfn run_under(", "");
     assert!(
-        run_under.contains(
-            "outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None).outcome,"
-        ),
-        "premise: pass 1 keeps each rung's outcome alone:\n{run_under}"
+        run_under.contains("let screened = screen_pass_one("),
+        "premise: `pool` pass 1 is `screen_pass_one`:\n{run_under}"
     );
-    let production = POOL.split("\n#[cfg(test)]").next().expect("the module");
+    let pass_one = body(POOL, "\npub(crate) fn screen_pass_one(", "");
+    assert!(
+        pass_one.contains("outcome: crate::one_rung_cached(")
+            && pass_one.contains("\n            .outcome,\n        }\n"),
+        "premise: pass 1 keeps each rung's outcome alone:\n{pass_one}"
+    );
+    // Cut at the tests module, not at the first `#[cfg(test)]`: since D-4700
+    // pass 1's hold-back seam sits under `#[cfg(test)]` near the top of the
+    // file, and a cut there scanned a sixth of the module.
+    let production = POOL
+        .split_once("\nmod tests {")
+        .map(|(production, _)| production)
+        .expect("the module keeps its tests below it");
+    assert!(
+        production.contains("\nfn price_all(") && production.contains("\npub(crate) fn mask_hex("),
+        "premise: the scan reaches the end of the production module"
+    );
     for lift in [
         "section_note(",
         "validation_note(",
