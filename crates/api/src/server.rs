@@ -18772,12 +18772,16 @@ mod head_deadline_tests {
 /// exists, so an empty `build/`, a half-written one, and a bundle older than
 /// the sources beside it all printed `serving` while every page answered 503.
 /// See [`assets::Build`].
-fn announce_front_end(front: &assets::Assets) {
-    say!(
+///
+/// Returned rather than printed, for [`log_announcement`]'s reason: printed,
+/// no test could read the line, and a mutant that printed nothing survived
+/// (R1286-api-04, D-4133).
+fn announce_front_end(front: &assets::Assets) -> String {
+    format!(
         "  web:     {} ({})",
         front.named().display(),
         front.build().note()
-    );
+    )
 }
 
 /// The serve lock, or the exit code a refused second instance earns.
@@ -18833,19 +18837,26 @@ fn sole_server(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLoc
 ///
 /// The word is [`Read::status`]'s own, so the banner, `/health`, `/audit.json`
 /// and the exit code cannot drift into four opinions about one read.
-fn announce_universe(read: &Read) -> bool {
-    say!("  universe: {}", read.status());
+///
+/// The lines are returned beside the verdict rather than printed, for
+/// [`log_announcement`]'s reason: printed, no test could read them, and a
+/// mutant answering `true` for a degraded read survived (R1286-api-05,
+/// D-4133). One line per note, joined by `\n`, so the one [`say!`] that prints
+/// them writes the same bytes the per-line calls did.
+fn announce_universe(read: &Read) -> (String, bool) {
+    let mut said = format!("  universe: {}", read.status());
     let clean = read.is_clean();
     if !clean {
         for note in &read.notes {
-            say!("            {note}");
+            let _ = write!(said, "\n            {note}");
         }
-        say!(
-            "            this process will exit {DEGRADED} when it stops, because it \
+        let _ = write!(
+            said,
+            "\n            this process will exit {DEGRADED} when it stops, because it \
              served this whole session over a universe it could not fully read."
         );
     }
-    clean
+    (said, clean)
 }
 
 /// The file that proves this process is the only one serving this store.
@@ -19929,7 +19940,7 @@ async fn run_in_over(
                     }
                 };
                 let front = std::sync::Arc::new(assets::Assets::new(&web));
-                announce_front_end(&front);
+                say!("{}", announce_front_end(&front));
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
                 let site = Loaded::new(Site::serving(dir, &store_root));
@@ -19946,7 +19957,8 @@ async fn run_in_over(
                 // the other half of it. The word is `Read::status`'s own, so
                 // the banner, `/health` and the exit code cannot disagree.
                 let universe = site.universe().read.status();
-                let clean = announce_universe(&site.universe().read);
+                let (said, clean) = announce_universe(&site.universe().read);
+                say!("{said}");
                 // THE BANNER NAMES THE STATE IT IS IN, NOT THE ONE IT WOULD BE
                 // IN IF THE OPERATOR HAD OPTED IN.
                 //
@@ -30213,6 +30225,83 @@ mod tests {
             opening_line(bound, |_| Err("no launcher".to_owned())),
             "  opening: NOT OPENED (no launcher) — go to http://127.0.0.1:8123/"
         );
+    }
+
+    /// **THE FRONT END'S LINE NAMES ITS DIRECTORY AND ITS STATE; THE
+    /// UNIVERSE'S NAMES THE READ'S OWN WORD AND, ONLY WHEN DEGRADED, EVERY NOTE
+    /// AND THE EXIT CODE THE PROCESS WILL EARN, BESIDE A VERDICT THAT AGREES.**
+    /// R1286-api-04, R1286-api-05, D-4133.
+    #[test]
+    fn the_front_end_and_universe_banner_lines_say_what_was_found() {
+        let web = crate::scratch::path("banner-front-end");
+        let _ = std::fs::remove_dir_all(&web);
+        std::fs::create_dir_all(&web).expect("a web directory");
+        let build = web.join("build");
+        assert_eq!(
+            announce_front_end(&assets::Assets::new(&web)),
+            format!(
+                "  web:     {} (NOT BUILT — / says so and names the command)",
+                build.display()
+            )
+        );
+        std::fs::create_dir_all(&build).expect("a build directory");
+        std::fs::write(build.join("index.html"), "<!doctype html>").expect("a shell");
+        assert_eq!(
+            announce_front_end(&assets::Assets::new(&web)),
+            format!("  web:     {} (serving)", build.display())
+        );
+        let _ = std::fs::remove_dir_all(&web);
+
+        // A CLEAN READ: the word alone, whatever notes the load wrote.
+        let clean = Read::new(
+            merge::Merged::default(),
+            vec!["groww: 2 rows kept".to_owned()],
+            Vec::new(),
+            0,
+            0,
+            0,
+        );
+        assert!(
+            clean.is_clean(),
+            "premise: nothing unread, nothing disagrees"
+        );
+        assert_eq!(
+            clean.notes,
+            ["groww: 2 rows kept"],
+            "premise: a note a clean banner must not print"
+        );
+        assert_eq!(
+            announce_universe(&clean),
+            ("  universe: ok".to_owned(), true)
+        );
+
+        // A DEGRADED READ: the word, every note, and the exit code, and `false`.
+        let degraded = Read::new(
+            merge::Merged::default(),
+            vec!["dhan: UNAVAILABLE — fixture master missing".to_owned()],
+            vec![(Vendor::Dhan, "fixture master missing".to_owned())],
+            0,
+            0,
+            0,
+        );
+        assert!(!degraded.is_clean(), "premise: one master was never read");
+        let mut expected = "  universe: DEGRADED".to_owned();
+        for note in &degraded.notes {
+            expected.push_str("\n            ");
+            expected.push_str(note);
+        }
+        expected.push_str(
+            "\n            this process will exit 3 when it stops, because it \
+             served this whole session over a universe it could not fully read.",
+        );
+        let (said, verdict) = announce_universe(&degraded);
+        assert_eq!(said, expected);
+        assert!(
+            said.contains("\n            dhan: UNAVAILABLE — fixture master missing\n"),
+            "{said}"
+        );
+        assert!(!verdict, "a degraded read is not announced clean");
+        assert_eq!(DEGRADED, 3, "the banner's exit code is the constant's");
     }
 
     /// The wire says every universe a row is in, and the old field never moves.

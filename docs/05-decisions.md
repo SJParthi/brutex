@@ -65084,3 +65084,23 @@ Outside a runtime, creating a timer panics, so `Ready` proves none was made
 
 **Rejected.** Timing the call. A wall-clock bound under a millisecond is
 noise on a shared machine.
+
+### D-4133 — The front-end and universe banner lines are returned, not printed — 2026-10-08
+
+**What was observed.** Run 1286 reported `server::announce_front_end` replaced
+with `()`, and `server::announce_universe` replaced with `true` and with
+`false`, as MISSED. Both printed straight to stdout, which no test can read,
+and nothing checked `announce_universe`'s verdict.
+
+**Decided.** The G18-api-16 pattern (`log_announcement`): `announce_front_end`
+returns its line and `announce_universe` returns its lines beside the verdict,
+joined by `\n`, and the serve arm prints each with one `say!`. The bytes on
+stdout are unchanged. A test pins the front-end line for a missing build and a
+serving one, the clean universe line (`universe: ok`, `true`, none of the
+load's notes), and the degraded one (`DEGRADED`, every note, the exit-3
+sentence, `false`) (R1286-api-04, R1286-api-05). The startup banner's cost is
+unchanged: once per process, linear in the note bytes, as `docs/06-limits.md`
+already states.
+
+**Rejected.** Capturing stdout in a test. libtest's capture is not a public
+API and nextest runs each test in its own process.
