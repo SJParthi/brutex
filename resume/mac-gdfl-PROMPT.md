@@ -57,6 +57,15 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    to the store's audit as one record per instrument-day (O(1) to look up), and shown on /verify and as a per-day
    verified/failed badge on /db. Then any pull or import is captured, stored, checked and visible with no agent in
    the loop. Record it as a decision; Rust only; tests that fail when the check is broken.
+   ALSO GDFL FROM THE INGEST PAGE (operator, 9 Oct): today Zerodha pulls start from /ingest (POST /pull/run), but a GDFL
+   import starts only from the command line (cli gdfl-import via state/import-scratch/run-real-store.sh) and /ingest
+   only shows its journal (/imports.json). Add a GDFL import form to /ingest that runs the same Rust import: source
+   (CM zip archive with nested per-day zips, tick store, options yearly zips), kind (indices, stocks, options), date
+   range, resume from the last finished day; seconds from each file's own date and the row times (D-2802 late rows),
+   option names mapped to expiry/strike/side by the one decoder (1,218,362 archive names already decode one way);
+   live progress, refusals listed by name, the automated per-day checks above, all O(1) per day/file with measured
+   p99, one authority shared with the cli. Attack it adversarially (corrupt and missing zips, duplicate days, renamed
+   files, holidays, special sessions, expiry days, restarts mid-day) and prove it on :8080 before calling it done.
 7. Only then: GDFL engine parts (work-20260925/state/resume-kit/scripts/gdfl-parts-r4.js) and the import attack
    (work-20260925/state/attack/gdfl-attack-r5.js).
 
