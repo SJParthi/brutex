@@ -97,6 +97,8 @@ mod readonly_file;
 mod results_report_tests;
 #[cfg(test)]
 mod screen_policy_tests;
+#[cfg(test)]
+mod verify_daily_tests;
 
 #[cfg_attr(
     not(test),
@@ -3301,6 +3303,15 @@ pub(crate) fn stored_provenance(underlying: &str) -> String {
     out
 }
 
+/// [`stored_provenance`] for a page over many runs of one symbol: the pooled
+/// banner, which promises no single run, then the same note a stock's page
+/// carries (GAP15-21, G3-2, D-4752).
+pub(crate) fn stored_pooled_provenance(underlying: &str) -> String {
+    let mut out = String::from(STORED_POOLED_PROVENANCE);
+    out.push_str(&stored::equity_note_for(underlying));
+    out
+}
+
 /// What a report over `underlying` states before any figure, for a reader
 /// outside this crate. D-0694, AF-19.
 ///
@@ -4339,12 +4350,18 @@ fn stored_month_kernel(
     // `withheld > 0`. A holed minute day the signal rung holds no bar of
     // removes nothing, and "0 signal bar(s)" would name a withholding that
     // did not happen.
+    //
+    // THE SWEPT COUNT, BESIDE THE RETAINED ONE (AC-whp-law-2, D-4751). The
+    // sweep's support is counted over the column's swept rows, which the
+    // ledger records as this run's bars; the retained slice also holds the
+    // warm-up. The span audit's line has said so since D-2101.
     if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| gaps.signal_bars() > 0) {
         let _ = writeln!(
             out,
-            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. The sweep uses the remaining {} signal bars.",
+            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. Support uses the {} swept bar(s) of the remaining {} signal bars.",
             gaps.signal_bars(),
             gaps.day_names().join(" "),
+            outcome.census.swept,
             loaded.bars.len(),
         );
     }
@@ -6126,6 +6143,15 @@ fn walk_forward_rungs() -> runner::validate::FoldRungs<'static> {
         runner::validate::FoldRungs::PerTraining(&grid_rungs),
         runner::validate::FoldRungs::Fixed,
     )
+}
+
+// Each anchored walk-forward fold's training length and resolved rung count,
+// as the last audit on this thread received them from `both_shapes`, so a test
+// can pin the policy the audit really passed (G3-6, D-4753). Test builds only.
+#[cfg(test)]
+thread_local! {
+    static WALK_FORWARD_FOLD_RUNGS: std::cell::RefCell<Vec<(usize, Option<usize>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The identity word for [`walk_forward_rungs`]' policy, appended to [`policy_of`] as
@@ -8527,10 +8553,53 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
     out
 }
 
+/// The first `limit` bars of `span` exactly as `cli verify` folds them.
+///
+/// ON THE DAILY RUNG EACH BAR IS RESTAMPED AT ITS IST DAY'S MIDNIGHT, the
+/// stamp `pull::fold` writes for that rung, before the evaluator sees it
+/// (F-CEC7A0, D-4756). The store admits a daily bar at any whole second and
+/// vendors stamp one at midnight, the open or the close (D-0915); folded as
+/// stored, a 09:15 daily bar landed inside the session and set `early_morning`
+/// (position 44), so V-04 held only for the midnight stamp. Read-side only:
+/// no stored byte changes, and prices, volume and the IST day are kept. Two
+/// daily bars on one IST day are refused by name, never folded as two sessions
+/// or merged into one. Two Euclidean divisions and one comparison per bar,
+/// O(`limit`).
+fn verify_series(span: &stored::Span, limit: usize) -> Result<Vec<indicators::Candle>, String> {
+    const DAY_MICROS: i64 = 86_400_000_000;
+    if span.timeframe != "1day" {
+        return Ok(span.bars.iter().take(limit).copied().collect());
+    }
+    let mut previous = None;
+    span.bars
+        .iter()
+        .take(limit)
+        .map(|bar| {
+            let day = indicators::ist_day(bar.ts_micros);
+            if previous == Some(day) {
+                return Err(format!(
+                    "the stored daily series holds two daily bars on IST day {day}; `cli verify` folds one bar per IST session and refuses rather than choose one"
+                ));
+            }
+            previous = Some(day);
+            // The time into its IST day, removed: `ist_day`'s own arithmetic,
+            // so the restamped bar keeps exactly the day it was stored on.
+            let into_day = bar
+                .ts_micros
+                .saturating_add(indicators::IST_OFFSET_MICROS)
+                .rem_euclid(DAY_MICROS);
+            Ok(indicators::Candle {
+                ts_micros: bar.ts_micros.saturating_sub(into_day),
+                ..*bar
+            })
+        })
+        .collect()
+}
+
 /// Matching refusals or empty columns cannot establish measured properties.
 fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
     let determinism = {
-        let short: Vec<indicators::Candle> = span.bars.iter().take(600).copied().collect();
+        let short = verify_series(span, 600)?;
         // THIS IS THE SWEEP, NOT A TRADE AUDIT. The loaded series is daily and
         // therefore cannot legally enter `audit_bars` without a separately
         // stored one-minute execution path. Sending it through that door would
@@ -8571,7 +8640,7 @@ fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
     // conditions must not change because LATER bars exist, so a column built on
     // a prefix must agree with the same rows of a column built on the whole.
     let causality = {
-        let whole: Vec<indicators::Candle> = span.bars.iter().take(900).copied().collect();
+        let whole = verify_series(span, 900)?;
         let prefix: Vec<indicators::Candle> = whole
             .iter()
             .take(whole.len().saturating_sub(1).min(600))
@@ -17354,6 +17423,9 @@ pub(crate) fn in_input_order<T, R>(items: &[T], each: impl FnMut(&T) -> R) -> Ve
 }
 
 /// The comparable-run provenance and support explanation above a range table.
+///
+/// The table is one run per rung over a span of months, so it opens with the
+/// pooled banner and never the single-run one (GAP15-21, D-4752).
 fn range_opening(
     vendor_word: &str,
     underlying: &str,
@@ -17362,7 +17434,7 @@ fn range_opening(
     support_ppm: Option<u64>,
 ) -> String {
     let (from, to) = span;
-    let mut out = stored_provenance(underlying);
+    let mut out = stored_pooled_provenance(underlying);
     let _ = writeln!(
         out,
         "feed {vendor_word} · {underlying} · {} · {}-{:02}..{}-{:02} · support {}",
@@ -22469,6 +22541,14 @@ fn audit_bars_work(
             )
         })
     });
+    #[cfg(test)]
+    WALK_FORWARD_FOLD_RUNGS.with(|seen| {
+        *seen.borrow_mut() = folds
+            .folds
+            .iter()
+            .map(|fold| (fold.train_bars, fold.resolved_rungs))
+            .collect();
+    });
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
     //
     // `pbo::place` ranks a fold's candidates in-sample, finds where the winner
@@ -25765,6 +25845,79 @@ mod tests {
         }
     }
 
+    /// **Every page that reports more than one run opens with the pooled
+    /// banner, and none of them with the single-run one.** GAP15-21, G3-2,
+    /// D-1705, D-4752.
+    ///
+    /// D-1705 moved five pages to [`STORED_POOLED_PROVENANCE`] and three more
+    /// kept [`STORED_PROVENANCE`] over many runs: `range-all` (eight rungs over
+    /// a span of months), the single-stop search (several rungs over training
+    /// and later months) and `sweep-all` (every instrument and month). Each
+    /// page's opening function is listed here by file and name; its body must
+    /// name the pooled banner, directly or through
+    /// [`stored_pooled_provenance`] or
+    /// `ledger_all::lead_with_pooled_banner`, and must name neither the
+    /// single-run constant nor the single-run helpers. A new multi-run page is
+    /// added to this list when it is written; each page is also pinned by
+    /// rendering it, beside its own tests.
+    #[test]
+    fn every_multi_run_page_opens_with_the_pooled_banner() {
+        const PAGES: [(&str, &str, &str); 8] = [
+            ("pool.rs", include_str!("pool.rs"), "opening"),
+            ("ledger_v6.rs", include_str!("ledger_v6.rs"), "ledger_v6"),
+            (
+                "ledger_v6.rs",
+                include_str!("ledger_v6.rs"),
+                "ledger_v6_replay",
+            ),
+            ("ledger_all.rs", include_str!("ledger_all.rs"), "ledger_all"),
+            (
+                "boolean_catalog_prepared.rs",
+                include_str!("boolean_catalog_prepared.rs"),
+                "research_heading",
+            ),
+            ("lib.rs", include_str!("lib.rs"), "range_opening"),
+            (
+                "index_stop_search.rs",
+                include_str!("index_stop_search.rs"),
+                "execute_observed_with",
+            ),
+            ("batch.rs", include_str!("batch.rs"), "render"),
+        ];
+        for (file, source, name) in PAGES {
+            let start = ["\nfn ", "\npub(crate) fn ", "\npub fn "]
+                .iter()
+                .find_map(|prefix| source.find(&format!("{prefix}{name}(")))
+                .unwrap_or_else(|| panic!("{file} has no top-level fn {name}"));
+            let body = source
+                .get(start + 1..)
+                .and_then(|rest| rest.find("\n}\n").and_then(|end| rest.get(..end)))
+                .unwrap_or_else(|| panic!("{file}::{name} has no closing brace"));
+            assert!(
+                [
+                    "STORED_POOLED_PROVENANCE",
+                    "stored_pooled_provenance(",
+                    "lead_with_pooled_banner("
+                ]
+                .iter()
+                .any(|pooled| body.contains(pooled)),
+                "{file}::{name} reports many runs and must open with the pooled banner"
+            );
+            for single in [
+                "STORED_PROVENANCE)",
+                "STORED_PROVENANCE,",
+                "STORED_PROVENANCE;",
+                "stored_provenance(",
+                "stored_provenance_of(",
+            ] {
+                assert!(
+                    !body.contains(single),
+                    "{file}::{name} reports many runs and names the single-run banner: {single}"
+                );
+            }
+        }
+    }
+
     /// THE STORED AUDIT SAYS WHICH RUNG ITS TRADES FILLED ON.
     ///
     /// # The same class of defect the two provenance banners exist to refuse
@@ -26661,6 +26814,62 @@ mod tests {
         assert_ne!(
             derived[20], pinned[20],
             "the two policies are different computations and must key apart"
+        );
+    }
+
+    /// G3-6, D-4753: the AUDIT hands `both_shapes` the per-training policy,
+    /// so each anchored fold prices with the rung count of exactly its own
+    /// training bars. The test above pins `walk_forward_rungs` itself; nothing
+    /// pinned its call site, and reverting that argument to the whole-span
+    /// count (`FoldRungs::Fixed(grid_rungs(&bars))`) passed every cli test
+    /// while identity term 21 still claimed per-fold sizing. The final third
+    /// is widened so the whole span's count differs from each fold's.
+    #[test]
+    fn the_audit_prices_each_walk_forward_fold_with_its_own_training_rung_count() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let mut bars = synthetic::sessions(12);
+        let late = bars.len() / 3 * 2;
+        for bar in bars.get_mut(late..).expect("the final third") {
+            bar.high = bar.high.saturating_add(bar.high / 50);
+        }
+        let whole = grid_rungs(&bars);
+        super::WALK_FORWARD_FOLD_RUNGS.with(|seen| seen.borrow_mut().clear());
+        let report = super::audit_bars(
+            &evaluator(),
+            bars.clone(),
+            "GENERATED TEST FIXTURE",
+            1_400,
+            None,
+            super::AuditOptions {
+                prepared_column: None,
+                replay: None,
+                execution: None,
+                native_minute_execution: true,
+                recording: None,
+                rules: crate::Rules::BASELINE,
+                lens: runner::rank::Lens::Detectability,
+                ceiling: Some(50_000),
+                validate: true,
+                cost: runner::audit::CostScope::IndexSpot,
+            },
+        );
+        let seen = super::WALK_FORWARD_FOLD_RUNGS.with(std::cell::RefCell::take);
+        assert!(!seen.is_empty(), "the audit walked no fold:\n{report}");
+        for (train, resolved) in &seen {
+            let training = bars
+                .get(..*train)
+                .expect("an anchored fold trains on a prefix of the span");
+            assert_eq!(
+                *resolved,
+                Some(grid_rungs(training)),
+                "the fold of {train} training bars, whole span {whole}"
+            );
+        }
+        assert!(
+            seen.iter().any(|(_, resolved)| *resolved != Some(whole)),
+            "premise: some fold's own count must differ from the whole span's {whole}, \
+             or a revert to the whole-span count would pass: {seen:?}"
         );
     }
 

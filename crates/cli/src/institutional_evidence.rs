@@ -67,7 +67,7 @@ use runner::admission::{
 };
 use runner::bootstrap::{RomanoWolfReceipt, Verdict};
 use runner::grid::{Cell, TradeRow};
-use runner::pbo::{Pbo, Placement, place, probability_of_overfitting};
+use runner::pbo::Pbo;
 use runner::validate::Validated;
 
 use crate::institutional_statistics::InstitutionalStatisticsAuthorityV1;
@@ -563,7 +563,7 @@ impl ValidationEvidenceV1 {
             }
         }
 
-        let legacy_diagnostic = derive_anchored_fold_legacy_diagnostic(validated)?;
+        let legacy_diagnostic = derive_anchored_fold_diagnostic(validated)?;
         if supplied_legacy_diagnostic.is_some_and(|supplied| *supplied != legacy_diagnostic) {
             return Err(
                 "supplied anchored-fold legacy diagnostic does not equal the fold-derived diagnostic"
@@ -612,28 +612,20 @@ impl ValidationEvidenceV1 {
     }
 }
 
-fn derive_anchored_fold_legacy_diagnostic(validated: &Validated) -> Result<Pbo, String> {
-    let mut placements = Vec::new();
-    placements
-        .try_reserve_exact(validated.folds.len())
-        .map_err(|why| format!("could not reserve anchored-fold legacy placements: {why}"))?;
-    for fold in &validated.folds {
-        let placement = if fold.in_sample_all.is_empty() {
-            Placement {
-                candidates: 0,
-                winner_rank: 0,
-            }
-        } else {
-            place(&fold.in_sample_all, &fold.out_of_sample_all).ok_or_else(|| {
-                format!(
-                    "walk-forward fold {} could not produce an aligned legacy placement",
-                    fold.index
-                )
-            })?
-        };
-        placements.push(placement);
-    }
-    Ok(probability_of_overfitting(&placements))
+/// The fold-derived diagnostic: the audit's own exact placement, through
+/// [`crate::overfitting_of`], so the evidence and the audit page compute one
+/// figure from one function (G3-9, D-4755). This was the legacy adapter
+/// (`runner::pbo::place` and `probability_of_overfitting`), which rounds an
+/// exact half-rank toward the better half; D-1724 moved the audit off it, and
+/// a supplied audit figure would then have been refused on any such fold.
+/// `from_runner` has already returned for no folds and refused misaligned
+/// ones, so the absent arm is unreachable here; it refuses by name rather than
+/// defaulting.
+fn derive_anchored_fold_diagnostic(validated: &Validated) -> Result<Pbo, String> {
+    crate::overfitting_of(validated).ok_or_else(|| {
+        "walk-forward folds have no exact placement: absent, or carrying unaligned candidate families"
+            .to_owned()
+    })
 }
 
 /// Identity-bound family-test projections available from current runner APIs.
@@ -3012,6 +3004,59 @@ mod tests {
         let why = ValidationEvidenceV1::from_runner(digest(1), digest(2), &validated, None)
             .expect_err("misaligned candidate arrays cannot become admission evidence");
         assert!(why.contains("misaligned in/out-of-sample candidate families"));
+    }
+
+    /// G3-9, D-4755: the diagnostic this constructor derives is the audit's
+    /// own exact placement (`crate::overfitting_of`, D-1724), so the figure a
+    /// live audit prints is accepted when supplied, and the legacy adapter's
+    /// rounder figure is refused. The fold's winner ties one rival out of
+    /// sample below a third: midrank 1.5 of 2, strictly in the bottom half.
+    /// The legacy adapter halves the doubled rank to 1, the median, and counts
+    /// no overfit fold; the exact placement counts one.
+    #[test]
+    fn the_supplied_diagnostic_is_the_audits_exact_placement_not_the_legacy_adapter() {
+        let fold = FoldResult {
+            index: 0,
+            considered: 3,
+            priced: 3,
+            chosen: Some(
+                runner::replay_mask::from_stored_words([1, 0, 0, 0, 0, 0])
+                    .expect("bit zero is a live canonical condition"),
+            ),
+            out_of_sample_exit: Some(10),
+            in_sample_all: vec![10, 1, 1],
+            out_of_sample_all: vec![5, 9, 5],
+            ..FoldResult::default()
+        };
+        let validated = Validated {
+            folds: vec![fold],
+            refused: None,
+        };
+        let exact = crate::overfitting_of(&validated).expect("one rankable fold");
+        assert_eq!(
+            (exact.folds, exact.overfit_folds, exact.median_placement),
+            (1, 1, 750_000),
+            "premise: the audit's exact figure counts the half-rank"
+        );
+        let legacy = probability_of_overfitting(&[
+            place(&[10, 1, 1], &[5, 9, 5]).expect("aligned legacy placement")
+        ]);
+        assert_ne!(
+            legacy, exact,
+            "premise: the two placements disagree on this fold, or this proves nothing"
+        );
+        assert!(
+            ValidationEvidenceV1::from_runner(digest(1), digest(2), &validated, Some(&exact))
+                .is_ok_and(|evidence| matches!(evidence, EvidenceSourceV1::Measured(_))),
+            "the audit's exact diagnostic must reconcile"
+        );
+        let why =
+            ValidationEvidenceV1::from_runner(digest(1), digest(2), &validated, Some(&legacy))
+                .expect_err("the legacy adapter's figure is not this fold set's");
+        assert!(
+            why.contains("does not equal the fold-derived diagnostic"),
+            "{why}"
+        );
     }
 
     fn generated_validation_fold() -> FoldResult {

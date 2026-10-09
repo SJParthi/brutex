@@ -2236,12 +2236,20 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
         }
 
         let report = fixture.sweep(rung).expect("the holed month sweeps");
+        // THE SWEPT COUNT BESIDE THE RETAINED ONE (AC-whp-law-2, D-4751). This
+        // pinned "The sweep uses the remaining {retained} signal bars", which
+        // counted warming bars the column never swept while the ledger below
+        // held `swept`. The line now says what `screen`'s does (D-2101).
         assert!(
             report.contains(&format!(
                 "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: 2025-05-05. \
-                 The sweep uses the remaining {retained} signal bars."
+                 Support uses the {swept} swept bar(s) of the remaining {retained} signal bars."
             )),
             "{report}"
+        );
+        assert!(
+            !report.contains("The sweep uses the remaining"),
+            "the old sentence named the retained slice as swept: {report}"
         );
         assert!(report.contains(&format!("· {retained} bars ·")), "{report}");
         assert!(report.contains("RESULT RECORDED"), "{report}");

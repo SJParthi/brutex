@@ -1072,3 +1072,10 @@ stays IN PROGRESS naming its branch commit until the squash merge to `main`.
 - **`F-8D5073`** (`gap`) — The vocabulary documents stated counts and kinds the table does not hold: void Near rows marked untoleranced, sixteen void names for thirteen, 70 free positions for 14, and a group table stopping at 273. Where: `docs/03-vocabulary.md` (rows 235–271, crossings section); `docs/04-invariants.md` CX-04, CX-05; `crates/vocab/src/table.rs:14-29`; `crates/vocab/src/lib.rs`. Disposition: IN PROGRESS — fixed on `attack/permutations` 3c5c237d (D-3406, XPERM-06); lands with the squash merge to `main`.
 - **`F-0486DA`** (`wrong`) — worst_reward_risk_bp scored a single observation i64::MAX, above payoff_bp, so one lucky move topped the asymmetry ranking. Where: `crates/runner/src/outcome.rs` (`Edge::worst_reward_risk_bp`); `crates/runner/src/rank.rs` (`ByAsymmetry`). Disposition: IN PROGRESS — fixed on `attack/permutations` 24c7e3a (D-3407, XPERM-07); lands with the squash merge to `main`.
 - **`F-1D5275`** (`wrong`) — trades_needed_for documented measured values its ceiling-rounded record does not return, and a monotone threshold it does not have. Where: `crates/runner/src/grid.rs` (`trades_needed_for` doc, `Cell::at_rate`). Disposition: IN PROGRESS — fixed on `attack/permutations` bc1e1f45 (D-3408, XPERM-08); lands with the squash merge to `main`.
+
+### Lane 1-b fixer D — 2026-10-09
+
+Narrative only, as above. No row is added or removed. The `F-CEC7A0` row above
+stays OPEN until the squash merge reaches `main`.
+
+- **`F-CEC7A0`** (`gap`) — V-04 was proved only for daily bars stamped at IST midnight, while the store admits any whole-second stamp and `cli verify` folded the stored stamp as it was: a 09:15 daily bar set `early_morning` (position 44). Where: `crates/cli/src/lib.rs` (`verify_series`, `measured_series_checks`); `crates/cli/src/verify_daily_tests.rs`; `docs/04-invariants.md` V-04, L1FD-08. Disposition: IN PROGRESS — fixed on `final/all-fixes` (D-4756); lands with the squash merge to `main`.

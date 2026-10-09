@@ -65235,3 +65235,307 @@ other bullets already said so.
 `no_limit_states_the_removed_latest_for_as_current` requires every limit
 bullet headed by `latest_for` to name D-1700; it failed on the first stale
 bullet.
+
+### D-4748 — The Boolean research path judges a cash share's calendar against its dated close — 2026-10-09
+
+**Finding.** G3-1, the Boolean sibling of GAP12-6 (medium). Boolean research
+admits a cash share (`ResearchFamilyV1::new` takes tag 3), and its
+`prepare_column` built both calendar receipts with
+`stored::calendar_receipt_v2_for_bars`, whose expected buckets come from
+`pull::calendar::kind_of` alone: the index session, last minute 15:29. From
+2026-08-03 an eligible share's stored minutes end at 15:14 on every
+closing-auction day, so any span holding one was refused as "calendar receipt
+V2 ... is not complete". Past that check, `build_candidate_signal_column`
+overlaid ORB and `GapFib` with `stored::nse_session_close_minute`.
+
+**Decision.**
+
+- `stored::calendar_receipt_v2_for_venue_bars(bars, rung, first, last, cash)`
+  takes the share's `CashCloses`, the dated authority the stored path already
+  reads (D-2102). It is the only receipt implementation:
+  `calendar_receipt_v2_for_bars` is it with `None`, byte for byte.
+- On a CAS-dated day the last window of the expected session ends at the
+  share's dated close. The day hashes tag 6, not 1, and the dated windows
+  are hashed in place of the calendar's.
+- A day whose close cannot be read refuses as "cash session close UNVERIFIED",
+  naming the reason, never as an incomplete store. A bar past the dated close
+  refuses as the store contradicting its session master.
+- A dated day whose close was not read, with no bar offered on it, hashes
+  tag 7 and leaves the receipt `Unmeasured`: completeness is never claimed
+  against a close the run does not hold.
+- A receipt built with closes carries **policy 4**,
+  `CALENDAR_RECEIPT_POLICY_V2_DATED_CASH`, so it never shares a version with
+  a policy-3 receipt (§3 rule 8). An index receipt is unchanged: policy 3, the
+  same bytes.
+- The Boolean path passes `data.exact_minute.cash` to both receipts, to
+  `require_exact_calendar_for_venue` and to `build_candidate_columns_for_venue`.
+  The overlay then asks `stored::session_close_for`, the one rule the stored
+  path's overlay and census ask.
+- The Boolean source identity binds the closes' digest, so the same bars
+  judged against a different master are a different source.
+
+**What changes.**
+
+- Boolean research over an NSE cash share: its receipts are policy 4 and its
+  source identity binds the closes, so every such family, coordinate and
+  catalogue identity changes, pre-CAS spans included.
+- Spans holding a CAS day now complete instead of refusing.
+- Index runs and every other receipt caller are unchanged. Candidate V4,
+  Global Replay, Search V4, `index_stop` and the Step 3 sizing census are
+  index-only, and they keep `None`.
+
+Tests (L1FD-01):
+
+- `a_cas_share_and_an_index_on_the_same_days_are_each_judged_against_their_own_close`.
+  It covers an eligible share ending at 15:14, an index on the same days, an
+  ineligible share, one absent master, and a store running past the dated
+  close.
+- `a_share_receipt_is_policy_four_and_expects_its_dated_close`. On one CAS
+  day the index receipt expects 375 minutes and misses 15, while the share's
+  expects 360 and is complete. It also checks that a pre-CAS day expects the
+  same count under both policies with different digests, that an unread close
+  is `Unmeasured` with no bar and refused with one, and that a bar past 15:14
+  is refused.
+
+**Rejected.** A per-day closure parameter on the receipt. A closure could
+answer differently from the overlay. Passing the closes value lets both ask
+one function.
+
+### D-4749 — Correction to D-2102: a share does reach the Candidate universe's overlay — 2026-10-09
+
+**Corrects.** D-2102, "Unchanged on purpose", says: "The Candidate universe's
+overlay still asks the index calendar. Its families are NIFTY and BANKNIFTY
+only (`candidate_universe::require_series_family`), so no share reaches it."
+
+That holds for the Candidate V4 grid. It was false for
+`candidate_universe::boolean_candidate_v1`, a submodule of the same file. It
+admits cash families and called the same `build_candidate_columns`, so an
+eligible share reached the index calendar there (G3-1).
+
+**Now.** D-4748 threads the share's closes through that builder. The index-only
+callers still pass none, and that is the statement D-2102 should have made.
+
+### D-4750 — The cash-closes digest binds a reason class, not the reason's text — 2026-10-09
+
+**Finding.** G3-4 (low). `stored::load_cash_closes` hashed each unverified
+day's free-text reason, and `bind_cash_closes` folds that digest into the
+stored anchored identity. Some reasons embed the absolute path of
+`<store>/session-masters/...` or OS and lock text. One example is "UNVERIFIED
+local lifecycle lock {path} unavailable: {why}". So the same bars and the same
+missing master gave different run identities depending on where the store was
+mounted and on transient lock state. That breaks §3 rule 5.
+
+**Corrects.** D-2102's sentence "The closes' digest binds every day, flag,
+master hash and unverified reason". It now binds every day, flag and master
+hash, and each unverified day's reason **class**.
+
+**Decision.** An unverified day hashes marker byte `2` and one class byte.
+The class says which step failed:
+
+- **1:** no exact NSE ISIN in the universe table.
+- **2:** the receipted master could not be used. It was absent, locked,
+  unreadable or corrupt.
+- **3:** the master was read and does not name this exact symbol and ISIN.
+  This class also binds that master's SHA-256, which is its content and not
+  its location.
+
+The free text is kept for display, and `unverified_reason` still returns it.
+The old encoding (`0`, length, text) is never written again. The new marker
+differs from it, so no digest of one encoding can equal one of the other.
+
+**What changes.** Only the identity of a stored run over an NSE cash share
+whose span holds at least one CAS full-session day whose close could not be
+read: the signal days plus the `GapFib` prior session. A span whose every CAS
+day was dated hashes exactly as before. So does every index run, and every
+share span before 2026-08-03.
+
+Test: `an_unreadable_master_binds_its_reason_class_and_not_its_path` (L1FD-02).
+Two store roots at different paths, each with a master made unusable two ways,
+give equal digests, equal to the absent master's. The three classes stay
+distinct for one share.
+
+**Rejected.** Classifying by matching the reason's text. That would make the
+identity depend on the wording of a message in another crate.
+
+### D-4751 — `sweep-stored` names the swept bars beside the retained ones — 2026-10-09
+
+**Finding.** AC-whp-law-2. When minute-gap sessions are withheld, the
+`sweep-stored` page said "The sweep uses the remaining {retained} signal
+bars". The retained count is `loaded.bars.len()`. The sweep's support is
+counted over the column's swept rows, which exclude the warm-up and the
+unknown-only rows. So the sentence stated a denominator the sweep did not
+use. The span audit's page already says "Support uses the {can_hit} swept
+bar(s) of the remaining {retained} signal bars".
+
+**Decision.** The `sweep-stored` line now reads "Support uses the {swept} swept
+bar(s) of the remaining {retained} signal bars". `swept` is
+`outcome.census.swept`, the figure the run's own ledger records as its bars.
+
+The other bar-count lines were checked:
+
+- `sweep-all`'s tally already sums `census.swept`.
+- The descent states `can_hit`.
+- The execution notes count signal bars, and say so.
+
+Test: `the_ordinary_stored_sweep_withholds_and_names_a_holed_session`
+(L1FD-03), re-pinned on the new sentence. It also asserts that the old
+sentence is gone.
+
+### D-4752 — Every multi-run page opens with the pooled banner, and a ledger refusal carries none — 2026-10-09
+
+**Findings.** GAP15-21 and G3-2 (low). D-1705 moved five pages to
+`STORED_POOLED_PROVENANCE`. Three more pages are also over many runs, and they
+kept `STORED_PROVENANCE`, which promises one identity and "that instrument and
+that month":
+
+- `range-all` (`range_opening`): eight rungs over a span of months.
+- The single-stop search (`index_stop_search::execute_observed_with`): rungs
+  by two month windows.
+- `sweep-all` (`batch::render`): every instrument by every month.
+
+Separately, `ledger-all`, `ledger-v6` and `ledger-v6-replay` pushed the pooled
+banner as their first text. A feed word refused before any store read
+therefore still opened with "the bars below were read from files". D-1705
+says "Refusal pages still carry no banner".
+
+**Decision.**
+
+- The three pages open with the pooled banner. `range-all` uses the new
+  `stored_pooled_provenance(underlying)`: the pooled banner, then the same
+  equity note `stored_provenance` appends for a stock.
+- The ledger pages no longer start with the banner. `ledger_all::lead_with_pooled_banner`
+  puts it at the head of the page, once, immediately before the first
+  store-derived figure:
+  - in `ledger-all`'s chain, before `BLOCKS WRITTEN`;
+  - in `ledger-v6`'s route, before each rung's Selection rendering;
+  - in each page's success arm.
+- A success page is byte-identical to before. A page refused before any store
+  figure carries no banner.
+
+Tests (L1FD-04):
+
+- `every_multi_run_page_opens_with_the_pooled_banner`, a source-shape guard
+  over all eight multi-run page builders;
+- `range_all_opens_with_the_pooled_banner_and_a_stocks_note`;
+- `the_ledger_pages_take_the_pooled_banner_before_their_first_store_figure`;
+- `the_ledger_pages_promise_no_single_instrument_month_or_identity`, now
+  asserting no banner on a refusal;
+- the `sweep-all` and single-stop page tests, re-pinned.
+
+### D-4753 — The audit's walk-forward is pinned to price each fold on its own training rungs — 2026-10-09
+
+**Finding.** G3-6 (test gap), GAP4-46's cli wiring. `both_shapes` passes
+`walk_forward_rungs()` to the anchored walk-forward. That is
+`FoldRungs::PerTraining(&grid_rungs)`, so each fold resolves its exit rungs
+from its own training slice. No test failed if the argument went back to
+`FoldRungs::Fixed(grid_rungs(&bars))`, the whole-span count. Under that count
+every fold reads rungs sized by bars it may not see.
+
+**Decision.** A test-only recorder, `WALK_FORWARD_FOLD_RUNGS`, keeps each
+anchored fold's `(train_bars, resolved_rungs)` from `audit_bars_work`. The new
+test drives `audit_bars` over generated sessions whose later third is wider,
+so the whole-span rung count differs from at least one fold's training count.
+It asserts every fold resolved `grid_rungs` of exactly its own training
+prefix. Production behaviour is unchanged.
+
+Test: `the_audit_prices_each_walk_forward_fold_with_its_own_training_rung_count`
+(L1FD-05). It passes on the current code. Proof by mutation: with the call
+reverted to `Fixed(grid_rungs(&bars))` it fails, and the recorded failure is
+in the commit body.
+
+### D-4754 — A CAS prior session that runs past its dated close is named so, not "truncated" — 2026-10-09
+
+**Finding.** G3-7 (low, wording). Suppose an eligible share's CAS-day prior
+session ends at 15:29. Its last bars lie past the dated 15:14 close, which
+contradicts its own master. `exact_minute_context_from_span` refused it as
+"Early or truncated bars cannot seed GapFib", and DCC-01 pinned that word.
+GAP12-6's original complaint was this same misnamed cause.
+
+**Decision.** The terminal-geometry refusal keeps its one message and names
+the fault from the observed last minute (`prior_session_terminal_fault`):
+
+- **Past the session's last minute:** "Its final bar runs past its dated
+  session close, so the store holds bars that close says cannot exist, and
+  they cannot seed GapFib".
+- **At or short of it:** "Early or truncated bars cannot seed GapFib",
+  byte-identical to before.
+
+Both still state the canonical terminal geometry and the observed final three
+minutes. Only the named cause changes. Every input that refused still
+refuses, and every input that passed still passes.
+
+Test: DCC-01, `a_cas_prior_session_is_judged_against_the_shares_dated_close`
+(L1FD-06). It is re-pinned: the eligible share ending at 15:29 names
+"runs past its dated session close" and not "truncated", and the ineligible
+share ending at 15:14 names "Early or truncated" and not "runs past".
+
+### D-4755 — Validation evidence reconciles against the audit's exact placement — 2026-10-09
+
+**Finding.** G3-9 (low, latent). `ValidationEvidenceV1::from_runner` derived
+its fold diagnostic with the legacy adapter: `runner::pbo::place` and
+`probability_of_overfitting`. It refused a supplied `Pbo` that differed. The
+live audit's `Pbo` has been exact since D-1724 (`cli::overfitting_of`, through
+`place_v1` and `anchored_walk_forward_bottom_half_rate_v1`). So wiring this
+constructor with the audit's own figure would refuse on any exact half-rank
+fold.
+
+**Decision.** `derive_anchored_fold_diagnostic` is `crate::overfitting_of`. The
+evidence and the audit page now compute one figure from one function. Its
+absent case is unreachable here, because `from_runner` returns `Unmeasured`
+for no folds and refuses misaligned ones first. It still refuses by name
+rather than defaulting. The PBO admission fields stay `Unmeasured`, as
+before.
+
+**What changes.** No stored output changes, because there is no production
+caller. A test that supplied the legacy figure for a fold where the two
+differ now gets the refusal.
+
+Test: `the_supplied_diagnostic_is_the_audits_exact_placement_not_the_legacy_adapter`
+(L1FD-07). In its one fold the two figures differ.
+
+### D-4756 — `cli verify` folds each daily bar at its IST midnight, so V-04 holds for every daily stamp the store admits — 2026-10-09
+
+**Finding.** F-CEC7A0 (gap). V-04 says time-of-day and VWAP bits are clear on
+a daily timeframe. D-1790 proved it in `indicators` for bars stamped at IST
+midnight, the daily rung's anchor (`pull/tests/anchor.rs`). The store admits
+a daily bar at any whole second: vendors stamp one at midnight, at the open or
+at the close (D-0915). `cli verify` folds the stored daily series through the
+production evaluator as stored.
+
+MEASURED before this change, by the new test: NIFTY daily bars over fifteen
+months, written through `store` and folded as `cli verify` folds them, gave a
+108-row column. With the midnight stamp no V-04 position was set. With the
+09:15 stamp, `early_morning` (position 44) was set, and the test stopped
+there. The share and the 15:30 stamp were not reached before the change, so
+nothing is claimed about them from that run. After it, all six folds (two
+instruments, three stamps) give one column per instrument, bit for bit, with
+no V-04 position set.
+
+**Decision.** `cli::verify_series` restamps each bar of a `1day` span at its
+IST day's midnight before it reaches the evaluator. That is the stamp
+`pull::fold` writes for the daily rung. Two daily bars on one IST day are
+refused by name ("two daily bars") rather than folded as two sessions or
+merged into one. The prices, volume and IST day of every bar are unchanged.
+
+This is read-side only. **No stored byte changes**, no store format version
+moves, and no ingest path changes. `cli verify` is the only production fold of
+a daily series: `swept_rung` refuses `1day`, and the daily reference context
+reads OHLC values, never stamps.
+
+**Rejected.**
+
+- Refusing a non-midnight daily bar at the store's write boundary. That
+  would leave every daily file already written at 09:15 or 15:30 refused on
+  read, or require rewriting it. Both break append-only history (§3 rule 8).
+- Refusing it in `cli verify`. That would make verify unusable on a feed that
+  stamps at the open, and the bar's IST day is the only fact a daily stamp
+  carries.
+
+Tests (L1FD-08):
+
+- `every_daily_stamp_the_store_admits_folds_with_no_time_of_day_or_vwap_bit`.
+  It also asserts that the three stamps fold to one column, bit for bit,
+  known mask included.
+- `two_daily_bars_on_one_ist_day_are_refused_by_name`.
+- `only_the_daily_rung_is_restamped_and_the_limit_bounds_the_fold`: an
+  intraday span is never restamped.

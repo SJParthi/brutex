@@ -3773,12 +3773,17 @@ mod tests {
         assert!(refused.contains("REFUSED: TCS refused"), "{refused}");
     }
 
-    /// **`ledger-v6`, `ledger-v6-replay` and `ledger-all` open with the pooled
-    /// banner.** GAP15-21, D-1705.
+    /// **`ledger-v6`, `ledger-v6-replay` and `ledger-all` promise no single
+    /// run, and a page refused before any store figure carries no banner at
+    /// all.** GAP15-21, D-1705, G3-2 (D-4752).
     ///
     /// Each covers eight rungs over a span of months, and each printed the
     /// single-run banner. A feed word no vendor has refuses before any store is
-    /// read, so the page is the banner, its own heading and the refusal.
+    /// read, so the page is its own heading and the refusal. It used to open
+    /// with the pooled banner, "the bars below were read from files", over no
+    /// bars at all, which D-1705's "refusal pages still carry no banner"
+    /// denied. The pooled banner leads only once a store figure is written:
+    /// `the_ledger_pages_take_the_pooled_banner_before_their_first_store_figure`.
     #[test]
     fn the_ledger_pages_promise_no_single_instrument_month_or_identity() {
         let _knobs = crate::knobs::serially();
@@ -3806,15 +3811,75 @@ mod tests {
         ];
         for (verb, page) in pages {
             assert!(
-                page.starts_with(crate::STORED_POOLED_PROVENANCE),
-                "{verb}:\n{page}"
+                !page.contains(crate::STORED_POOLED_PROVENANCE),
+                "{verb}: a refusal before any store read carries no banner:\n{page}"
             );
+            assert!(!page.contains(crate::STORED_PROVENANCE), "{verb}:\n{page}");
             for promise in SINGLE_RUN_PROMISES {
                 assert!(!page.contains(promise), "{verb} {promise}:\n{page}");
             }
             assert!(page.contains("refused:"), "premise, {verb}:\n{page}");
         }
         assert!(!root.exists(), "a refused feed creates no tree");
+    }
+
+    /// **The ledger pages take the pooled banner before their first store
+    /// figure, once, and a success page is byte-identical to what it was.**
+    /// G3-2, D-4752, D-1705.
+    ///
+    /// The helper puts the banner at the head of the page and is idempotent,
+    /// so a page that writes several rungs carries it once. The source shape
+    /// pins where it is called: `ledger-all`'s chain before `BLOCKS WRITTEN`,
+    /// `ledger-v6`'s route before each rung's Selection rendering, and each
+    /// page's success arm; and none of the three pages starts its text with
+    /// the banner any more, which is what put it on refusal pages.
+    #[test]
+    fn the_ledger_pages_take_the_pooled_banner_before_their_first_store_figure() {
+        let mut page = String::from("\nLEDGER-ALL  zerodha\n");
+        crate::ledger_all::lead_with_pooled_banner(&mut page);
+        assert_eq!(
+            page,
+            format!("{}\nLEDGER-ALL  zerodha\n", crate::STORED_POOLED_PROVENANCE)
+        );
+        page.push_str("Selection 1min\n");
+        crate::ledger_all::lead_with_pooled_banner(&mut page);
+        assert_eq!(page.matches(crate::STORED_POOLED_PROVENANCE).count(), 1);
+        assert!(page.ends_with("Selection 1min\n"), "{page}");
+
+        let body = |source: &'static str, name: &str| -> &'static str {
+            let at = source.find(&format!("fn {name}(")).unwrap_or_default();
+            let rest = source.get(at..).unwrap_or_default();
+            rest.get(..rest.find("\n}\n").unwrap_or(rest.len()))
+                .unwrap_or_default()
+        };
+        let all = include_str!("ledger_all.rs");
+        let v6 = include_str!("ledger_v6.rs");
+        for (name, page) in [
+            ("ledger_all", body(all, "ledger_all")),
+            ("ledger_v6", body(v6, "ledger_v6")),
+            ("ledger_v6_replay", body(v6, "ledger_v6_replay")),
+        ] {
+            assert!(!page.is_empty(), "{name} must exist");
+            assert!(
+                !page.contains("STORED_POOLED_PROVENANCE"),
+                "{name} must not open every page, refusals included, with the banner"
+            );
+            let ok = page.find("Ok(").unwrap_or(usize::MAX);
+            let lead = page.find("lead_with_pooled_banner(").unwrap_or(usize::MAX);
+            let refused = page.find("Err(why)").unwrap_or_default();
+            assert!(
+                ok < lead && lead < refused,
+                "{name}: the success arm leads with it"
+            );
+        }
+        let chain = body(all, "run_chain");
+        let lead = chain.find("lead_with_pooled_banner(out)");
+        let blocks = chain.find("BLOCKS WRITTEN");
+        assert!(lead.is_some() && lead < blocks, "{chain}");
+        let route = body(v6, "run_route");
+        let lead = route.find("lead_with_pooled_banner(out)");
+        let selection = route.find("render_selection(rung");
+        assert!(lead.is_some() && lead < selection, "{route}");
     }
 
     /// **`in_input_order` runs one call at a time, in input order, even when

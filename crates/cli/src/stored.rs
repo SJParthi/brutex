@@ -545,9 +545,10 @@ pub fn nse_session_close_minute(day: i64) -> Option<u16> {
 /// than a close being invented. An exceptional (non-full) session on such a day
 /// answers `None` too: no source in the charter gives a share's close there.
 ///
-/// `digest` binds every answer and every reason, and enters the stored run
-/// identity, so the same bars judged against a different master are a
-/// different run.
+/// `digest` binds every answer and every unverified reason's CLASS, never its
+/// text (D-4750), and enters the stored run identity, so the same bars judged
+/// against a different master are a different run, and the same bars beside
+/// the same unusable master are one run wherever the store is mounted.
 #[derive(Debug, Clone)]
 pub struct CashCloses {
     schedule: pull::cash_auction::Schedule,
@@ -557,8 +558,8 @@ pub struct CashCloses {
 }
 
 /// Two sets of closes are equal when their digests are: the digest binds the
-/// share, every dated day, flag and master hash, and every unverified reason,
-/// and `Schedule` itself offers no comparison.
+/// share, every dated day, flag and master hash, and every unverified reason
+/// class, and `Schedule` itself offers no comparison.
 impl PartialEq for CashCloses {
     fn eq(&self, other: &Self) -> bool {
         self.digest == other.digest
@@ -616,7 +617,7 @@ impl CashCloses {
         self.unverified.get(&day).map(String::as_str)
     }
 
-    /// Identity term binding every dated answer and every refusal reason.
+    /// Identity term binding every dated answer and every refusal reason class.
     #[must_use]
     pub const fn digest(&self) -> [u8; 32] {
         self.digest
@@ -709,15 +710,30 @@ pub fn load_cash_closes(
     hash.update(&u64::try_from(share.len()).unwrap_or(u64::MAX).to_le_bytes());
     hash.update(share.as_bytes());
     for (day, civil) in required {
+        // THE REASON'S CLASS ENTERS THE DIGEST, ITS TEXT DOES NOT (G3-4,
+        // D-4750). The text can carry the store's absolute path or a lock's OS
+        // error, so hashing it made one span's identity depend on where the
+        // store was mounted. The class names which step failed: 1 no ISIN, 2
+        // the receipted master could not be used, 3 it was read and does not
+        // name this share, bound with its content hash. Marker 2 never equals
+        // the old marker 0, so no digest of either encoding equals the other's.
         let answer = isin
             .as_ref()
-            .ok_or_else(|| format!("{share} has no exact NSE ISIN in the universe table"))
+            .ok_or_else(|| {
+                (
+                    1_u8,
+                    None,
+                    format!("{share} has no exact NSE ISIN in the universe table"),
+                )
+            })
             .and_then(|isin| {
-                pull::cash_session_cache::read_local_lifecycle(&masters, civil).and_then(|master| {
-                    master
-                        .eligibility(share, isin.as_str())
-                        .map(|eligible| (eligible, master.provenance().sha256))
-                })
+                let master = pull::cash_session_cache::read_local_lifecycle(&masters, civil)
+                    .map_err(|why| (2, None, why))?;
+                let sha256 = master.provenance().sha256;
+                master
+                    .eligibility(share, isin.as_str())
+                    .map(|eligible| (eligible, sha256))
+                    .map_err(|why| (3, Some(sha256), why))
             });
         hash.update(&day.to_le_bytes());
         match answer {
@@ -727,10 +743,11 @@ pub fn load_cash_closes(
                 hash.update(&[1, u8::from(eligible)]);
                 hash.update(&sha256);
             }
-            Err(why) => {
-                hash.update(&[0]);
-                hash.update(&u64::try_from(why.len()).unwrap_or(u64::MAX).to_le_bytes());
-                hash.update(why.as_bytes());
+            Err((class, master, why)) => {
+                hash.update(&[2, class]);
+                if let Some(sha256) = master {
+                    hash.update(&sha256);
+                }
                 unverified.insert(day, why);
             }
         }
@@ -930,6 +947,20 @@ pub const CALENDAR_RECEIPT_SCHEMA_V2: u32 = 2;
 /// exchange, and collapsing them would let two different calendars produce one
 /// digest — the defect the whole receipt exists to prevent.
 pub const CALENDAR_RECEIPT_POLICY_V2: u32 = 3;
+
+/// Policy version of a V2 receipt built against a cash share's dated closes
+/// (G3-1, D-4748).
+///
+/// Policy 3, plus one rule: on a day [`CashCloses`] dates (a closing-auction
+/// full session from 2026-08-03), the expected session's last window ends at
+/// the share's dated close, the day hashes tag 6 instead of 1, and its dated
+/// windows are hashed in place of the calendar's. A dated day whose close was
+/// not read refuses when a bar is offered on it and is `Unmeasured` (tag 7)
+/// when none is. Every receipt built from [`calendar_receipt_v2_for_venue_bars`]
+/// with closes carries this version, pre-CAS spans included, so a receipt
+/// judged against a share's master never shares a version with one judged
+/// against the index calendar (§3 rule 8). An index receipt is policy 3.
+pub const CALENDAR_RECEIPT_POLICY_V2_DATED_CASH: u32 = 4;
 
 const NSE_OPEN_MINUTE_V2: i64 = 555;
 const CALENDAR_POLICY_DIGEST_DOMAIN_V2: &[u8] = b"brutex.calendar-policy.v2\0";
@@ -1492,12 +1523,69 @@ fn expected_buckets_v2(
     Ok(expected)
 }
 
+/// The session a V2 receipt expects on one open day for one venue (G3-1,
+/// D-4748).
+#[derive(Clone, Copy)]
+enum ReceiptSessionV2 {
+    /// The calendar's own session: an index, or a share off a dated day.
+    Calendar(Session),
+    /// A share's dated session: the calendar's, its final window ending at
+    /// the dated close carried beside it.
+    Dated(Session, u16),
+    /// A dated day whose close the share's closes do not hold.
+    Unread,
+}
+
+/// What a receipt over `closes`' venue expects on open `day`, from the one
+/// dated authority the stored read asks ([`CashCloses::session_close_minute`]),
+/// so the receipt, the overlay and the minute-gap census cannot disagree about
+/// a share's close. `None` is the index calendar, unchanged. O(1): one civil
+/// conversion, and on a dated day one close lookup. **UNVERIFIED as a measured
+/// bound**, read off the source and recorded in `docs/06-limits.md` (D-4748).
+fn receipt_session_v2(
+    day: i64,
+    session: Session,
+    closes: Option<&CashCloses>,
+) -> Result<ReceiptSessionV2, Refusal> {
+    let Some(closes) = closes.filter(|_| cas_dated_day(day).is_some()) else {
+        return Ok(ReceiptSessionV2::Calendar(session));
+    };
+    let Some(close) = closes.session_close_minute(day) else {
+        return Ok(ReceiptSessionV2::Unread);
+    };
+    let mut dated = session;
+    let window = usize::from(dated.count)
+        .checked_sub(1)
+        .and_then(|last| dated.windows.get_mut(last))
+        .filter(|window| window.from <= close && close <= window.to)
+        .ok_or_else(|| {
+            format!(
+                "calendar receipt V2: the dated session close at IST minute {close} on IST day {day} lies outside the calendar's final window"
+            )
+        })?;
+    window.to = close;
+    Ok(ReceiptSessionV2::Dated(dated, close))
+}
+
+/// The refusal for a bar offered on a dated day whose close was not read.
+fn unread_close_v2(day: i64, closes: Option<&CashCloses>) -> Refusal {
+    format!(
+        "cash session close UNVERIFIED: dated CAS eligibility required for IST day {day} ({}); the calendar receipt cannot expect a session close it does not hold, and a share's day is never judged against the index's",
+        closes
+            .and_then(|closes| closes.unverified_reason(day))
+            .unwrap_or(
+                "no master was read for it, and no charter source gives a share's close on a session that is not full"
+            )
+    )
+}
+
 /// Validate and hash every offered rung timestamp without a membership set.
 fn hash_offered_calendar_v2<I>(
     timestamps: I,
     rung_minutes: i64,
     first_day: i64,
     last_day: i64,
+    closes: Option<&CashCloses>,
     hasher: &mut brutex_core::blake3::Hasher,
 ) -> Result<OfferedCalendarFactsV2, Refusal>
 where
@@ -1551,7 +1639,17 @@ where
         }
         let decision = match pull::calendar::kind_of(day) {
             DayKind::Open(session) => {
+                let (session, dated_close) = match receipt_session_v2(day, session, closes)? {
+                    ReceiptSessionV2::Calendar(session) => (session, None),
+                    ReceiptSessionV2::Dated(session, close) => (session, Some(close)),
+                    ReceiptSessionV2::Unread => return Err(unread_close_v2(day, closes)),
+                };
                 let expected = expected_buckets_v2(day, session, rung_minutes)?;
+                if let Some(close) = dated_close.filter(|_| !expected.contains(bucket)) {
+                    return Err(format!(
+                        "calendar receipt V2 timestamp {timestamp} is bucket {bucket} on IST day {day}, past this share's dated session close at IST minute {close} read from its NSE session master: the store contradicts its session master"
+                    ));
+                }
                 if !expected.contains(bucket) {
                     return Err(format!(
                         "calendar receipt V2 timestamp {timestamp} is bucket {bucket} on measured open IST day {day}, but that bucket intersects no measured session window"
@@ -1637,6 +1735,7 @@ fn hash_open_session_v2(
 fn hash_calendar_day_v2(
     day: i64,
     rung_minutes: i64,
+    closes: Option<&CashCloses>,
     hasher: &mut brutex_core::blake3::Hasher,
 ) -> Result<CalendarDayFactsV2, Refusal> {
     hasher.update(b"D");
@@ -1661,14 +1760,37 @@ fn hash_calendar_day_v2(
         });
     }
     match pull::calendar::kind_of(day) {
-        DayKind::Open(session) => {
-            hasher.update(&[1]);
-            Ok(CalendarDayFactsV2 {
-                expected: hash_open_session_v2(day, session, rung_minutes, hasher)?,
-                unmeasured: false,
-                withheld: 0,
-            })
-        }
+        // A SHARE'S DATED DAY HAS ITS OWN TAG (G3-1, D-4748). Its windows are
+        // the dated ones, so tag 1 over them would let a share's 15:14 day and
+        // a hypothetical calendar 15:14 day hash alike. A dated day with no
+        // close read and no bar offered (the offered walk refuses one with a
+        // bar) cannot be measured: tag 7, never the index's 15:29.
+        DayKind::Open(session) => match receipt_session_v2(day, session, closes)? {
+            ReceiptSessionV2::Calendar(session) => {
+                hasher.update(&[1]);
+                Ok(CalendarDayFactsV2 {
+                    expected: hash_open_session_v2(day, session, rung_minutes, hasher)?,
+                    unmeasured: false,
+                    withheld: 0,
+                })
+            }
+            ReceiptSessionV2::Dated(session, _) => {
+                hasher.update(&[6]);
+                Ok(CalendarDayFactsV2 {
+                    expected: hash_open_session_v2(day, session, rung_minutes, hasher)?,
+                    unmeasured: false,
+                    withheld: 0,
+                })
+            }
+            ReceiptSessionV2::Unread => {
+                hasher.update(&[7]);
+                Ok(CalendarDayFactsV2 {
+                    expected: 0,
+                    unmeasured: true,
+                    withheld: 0,
+                })
+            }
+        },
         DayKind::Closed => {
             hasher.update(&[2]);
             Ok(CalendarDayFactsV2 {
@@ -1732,6 +1854,7 @@ pub fn calendar_receipt_v2(
         rung_seconds,
         first_day,
         last_day,
+        None,
     )
 }
 
@@ -1755,12 +1878,54 @@ pub fn calendar_receipt_v2_for_bars(
     first_day: i64,
     last_day: i64,
 ) -> Result<CalendarReceiptV2, Refusal> {
+    calendar_receipt_v2_for_venue_bars(bars, rung_seconds, first_day, last_day, None)
+}
+
+/// [`calendar_receipt_v2_for_bars`] for one venue: `cash` is a cash share's
+/// dated closes, `None` the index calendar (G3-1, D-4748).
+///
+/// With `None` the receipt is byte-identical to
+/// [`calendar_receipt_v2_for_bars`], which is this function. With a share's
+/// closes it is policy [`CALENDAR_RECEIPT_POLICY_V2_DATED_CASH`]: each
+/// closing-auction full session from 2026-08-03 expects the share's dated
+/// close, read from the one authority the stored overlay and minute-gap census
+/// ask, never the index's 15:29. A bar on a dated day whose close was not read
+/// refuses as "cash session close UNVERIFIED", and a bar past the dated close
+/// refuses as the store contradicting its session master.
+///
+/// # Cost
+///
+/// O(B + D), as [`calendar_receipt_v2`], plus one O(1) close lookup per
+/// offered bar and per day on a dated day. **UNVERIFIED as a measured bound**,
+/// read off the source.
+///
+/// # Errors
+///
+/// Every refusal of [`calendar_receipt_v2`], and the two above.
+pub fn calendar_receipt_v2_for_venue_bars(
+    bars: &[Candle],
+    rung_seconds: u32,
+    first_day: i64,
+    last_day: i64,
+    cash: Option<&CashCloses>,
+) -> Result<CalendarReceiptV2, Refusal> {
     calendar_receipt_v2_from_iter(
         bars.iter().map(|bar| bar.ts_micros),
         rung_seconds,
         first_day,
         last_day,
+        cash,
     )
+}
+
+/// The receipt policy a venue's closes select: policy 4 for a cash share's
+/// dated closes, policy 3 for the index calendar (G3-1, D-4748).
+const fn receipt_policy_v2(closes: Option<&CashCloses>) -> u32 {
+    if closes.is_some() {
+        CALENDAR_RECEIPT_POLICY_V2_DATED_CASH
+    } else {
+        CALENDAR_RECEIPT_POLICY_V2
+    }
 }
 
 fn calendar_receipt_v2_from_iter<I>(
@@ -1768,6 +1933,7 @@ fn calendar_receipt_v2_from_iter<I>(
     rung_seconds: u32,
     first_day: i64,
     last_day: i64,
+    closes: Option<&CashCloses>,
 ) -> Result<CalendarReceiptV2, Refusal>
 where
     I: IntoIterator<Item = i64>,
@@ -1791,23 +1957,30 @@ where
     }
 
     let mut hasher = brutex_core::blake3::Hasher::new();
+    let policy = receipt_policy_v2(closes);
     hasher.update(b"brutex.calendar-receipt.v2\0");
     hasher.update(&CALENDAR_RECEIPT_SCHEMA_V2.to_le_bytes());
-    hasher.update(&CALENDAR_RECEIPT_POLICY_V2.to_le_bytes());
+    hasher.update(&policy.to_le_bytes());
     hasher.update(&rung_seconds.to_le_bytes());
     hasher.update(&first_day.to_le_bytes());
     hasher.update(&last_day.to_le_bytes());
     hasher.update(&day_span.to_le_bytes());
 
-    let offered =
-        hash_offered_calendar_v2(timestamps, rung_minutes, first_day, last_day, &mut hasher)?;
+    let offered = hash_offered_calendar_v2(
+        timestamps,
+        rung_minutes,
+        first_day,
+        last_day,
+        closes,
+        &mut hasher,
+    )?;
     let mut expected = 0_u64;
     let mut unmeasured = false;
     let mut withheld_buckets = 0_u64;
     let mut withheld_days = 0_u32;
     let mut day = first_day;
     loop {
-        let facts = hash_calendar_day_v2(day, rung_minutes, &mut hasher)?;
+        let facts = hash_calendar_day_v2(day, rung_minutes, closes, &mut hasher)?;
         expected = expected
             .checked_add(facts.expected)
             .ok_or_else(|| "calendar receipt V2 expected bucket count overflowed u64".to_owned())?;
@@ -1857,7 +2030,7 @@ where
 
     Ok(CalendarReceiptV2 {
         schema_version: CALENDAR_RECEIPT_SCHEMA_V2,
-        policy_version: CALENDAR_RECEIPT_POLICY_V2,
+        policy_version: policy,
         rung_seconds,
         first_day,
         last_day,
@@ -3480,6 +3653,22 @@ pub fn load_daily_context_bounded(
     daily_context_from_span(daily, signal)
 }
 
+/// Why a prior session whose terminal geometry is wrong cannot seed `GapFib`,
+/// by which side of its close the final bar fell (G3-7, D-4754).
+///
+/// PAST THE CLOSE IS NOT SHORT OF IT. An eligible share's CAS day ending 15:29
+/// holds bars after its dated 15:14 close: the store contradicts the close it
+/// was judged against, a different fault from a session that stopped early,
+/// and it was refused as "truncated". A final bar at or before the close keeps
+/// the old words, byte for byte.
+fn prior_session_terminal_fault(last: Option<u16>, close: u16) -> &'static str {
+    if last > Some(close) {
+        "Its final bar runs past its dated session close, so the store holds bars that close says cannot exist, and they"
+    } else {
+        "Early or truncated bars"
+    }
+}
+
 /// The minute the accepted prior session's final bar must open at (GAP12-6,
 /// D-1663, D-2102). `kind_of` is the index's venue-blind calendar, and from
 /// 2026-08-03 an NSE cash share's continuous session ends at 15:15 when that
@@ -3605,7 +3794,8 @@ pub(crate) fn exact_minute_context_from_span(
         || last != Some(last_minute)
     {
         return Err(format!(
-            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {last_minute}; observed final three were {third_last:?}, {second_last:?}, {last:?}. Early or truncated bars cannot seed GapFib"
+            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {last_minute}; observed final three were {third_last:?}, {second_last:?}, {last:?}. {} cannot seed GapFib",
+            prior_session_terminal_fault(last, last_minute)
         ));
     }
     let prior_session_bars = u32::try_from(prior_session_bars).map_err(|_| {
@@ -5356,10 +5546,15 @@ mod tests {
     /// Install one receipted NSE session master naming RELIANCE with `flag`
     /// for `day` under `store/session-masters`, exactly as the pull does.
     fn install_master(store: &Path, day: i64, flag: u8) {
+        install_master_naming(store, day, "RELIANCE", flag);
+    }
+
+    /// [`install_master`] for a master that names `symbol` and nothing else.
+    fn install_master_naming(store: &Path, day: i64, symbol: &str, flag: u8) {
         use std::io::Write as _;
-        let isin = brutex_core::universe::nse_isin("RELIANCE").expect("RELIANCE has an ISIN");
+        let isin = brutex_core::universe::nse_isin(symbol).expect("the symbol has an ISIN");
         let csv = format!(
-            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{},{flag}\n",
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,{symbol},EQ,{},{flag}\n",
             isin.as_str()
         );
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -5388,12 +5583,23 @@ mod tests {
 
     /// GAP12-6 closed (D-2102): a share's CAS-day prior session is judged
     /// against ITS dated close. Eligible ends at 15:14 and seeds; the same day
-    /// ending 15:29 is truncated against that close. Ineligible is the mirror.
-    /// The flag is read from the receipted master; nothing is downloaded.
+    /// ending 15:29 runs PAST that close, which contradicts the master and is
+    /// named so, never "truncated" (G3-7, D-4754). Ineligible ending 15:14 is
+    /// short of its 15:29 close: that is the truncated case. The flag is read
+    /// from the receipted master; nothing is downloaded.
     #[test]
     fn a_cas_prior_session_is_judged_against_the_shares_dated_close() {
         let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
-        for (flag, seeds, truncated) in [(1_u8, 914_i64, 929_i64), (0, 929, 914)] {
+        for (flag, seeds, other, cause, not_cause) in [
+            (
+                1_u8,
+                914_i64,
+                929_i64,
+                "runs past its dated session close",
+                "truncated",
+            ),
+            (0, 929, 914, "Early or truncated", "runs past"),
+        ] {
             let store = root(&format!("cas-dated-{flag}"));
             install_master(&store, OPEN_MONDAY_2026_08_03, flag);
             let context =
@@ -5416,15 +5622,80 @@ mod tests {
             assert_eq!(context.session_close_minute(OPEN_TUESDAY_2026_08_04), None);
             assert_eq!(context.cash_digest(), Some(cash.digest()));
             let why =
-                exact_minute_context_from_span(reliance_prior_session(truncated), &signal, &store)
+                exact_minute_context_from_span(reliance_prior_session(other), &signal, &store)
                     .expect_err("the other close is not this share's");
-            assert!(why.contains("truncated"), "{why}");
+            assert!(why.contains(cause), "{why}");
+            assert!(!why.contains(not_cause), "{why}");
             assert!(
                 why.contains(&format!("{}, {}, {seeds}", seeds - 2, seeds - 1)),
                 "{why}"
             );
             let _ignored = std::fs::remove_dir_all(&store);
         }
+    }
+
+    /// G3-1, D-4748: a share's V2 receipt is policy 4 and judges a CAS day
+    /// against the share's dated close, never the index's 15:29. Without
+    /// closes the same bars give the index receipt, policy 3, byte-identical
+    /// to `calendar_receipt_v2_for_bars`. A pre-CAS day expects the calendar
+    /// under either policy, yet is not one piece of evidence under both.
+    #[test]
+    fn a_share_receipt_is_policy_four_and_expects_its_dated_close() {
+        let day = OPEN_MONDAY_2026_08_03;
+        let session = |on: i64, last: i64| {
+            (555..=last)
+                .map(|minute| minute_on_ist_day(on, minute, 2_500_000))
+                .collect::<Vec<_>>()
+        };
+        let store = root("receipt-dated");
+        install_master(&store, day, 1);
+        let dated = load_cash_closes(&store, "RELIANCE", [day]).expect("closes load");
+        let unread = load_cash_closes(Path::new(NO_STORE), "RELIANCE", [day]).expect("closes load");
+        let bars = session(day, 914);
+        let receipt = |bars: &[Candle], on: i64, cash: Option<&CashCloses>| {
+            calendar_receipt_v2_for_venue_bars(bars, 60, on, on, cash)
+        };
+        let index = receipt(&bars, day, None).expect("the index receipt");
+        assert_eq!(Ok(index), calendar_receipt_v2_for_bars(&bars, 60, day, day));
+        assert_eq!(index.policy_version(), CALENDAR_RECEIPT_POLICY_V2);
+        assert_eq!(
+            (index.expected(), index.missing(), index.status()),
+            (375, 15, CalendarStatusV1::Incomplete)
+        );
+        let share = receipt(&bars, day, Some(&dated)).expect("the share receipt");
+        assert_eq!(
+            share.policy_version(),
+            CALENDAR_RECEIPT_POLICY_V2_DATED_CASH
+        );
+        assert_eq!(
+            (
+                share.offered(),
+                share.expected(),
+                share.missing(),
+                share.status()
+            ),
+            (360, 360, 0, CalendarStatusV1::Complete)
+        );
+        let pre_cas = accepted_open_before(day);
+        let full = session(pre_cas, 929);
+        let pre_index = receipt(&full, pre_cas, None).expect("a pre-CAS index receipt");
+        let pre_share = receipt(&full, pre_cas, Some(&dated)).expect("a pre-CAS share receipt");
+        assert_eq!(
+            (pre_share.expected(), pre_share.status()),
+            (pre_index.expected(), CalendarStatusV1::Complete)
+        );
+        assert_ne!(pre_share.digest(), pre_index.digest());
+        let empty = receipt(&[], day, Some(&unread)).expect("no bar is offered");
+        assert_eq!(empty.status(), CalendarStatusV1::Unmeasured);
+        let why = receipt(&bars, day, Some(&unread)).expect_err("an unread close refuses");
+        assert!(why.contains("cash session close UNVERIFIED"), "{why}");
+        let why = receipt(&session(day, 929), day, Some(&dated))
+            .expect_err("bars past the dated close contradict the master");
+        assert!(
+            why.contains("past this share's dated session close at IST minute 914"),
+            "{why}"
+        );
+        let _ignored = std::fs::remove_dir_all(&store);
     }
 
     /// Dated closes answer the calendar off CAS days, the master's close on
@@ -5511,6 +5782,109 @@ mod tests {
         );
         let _ignored = std::fs::remove_dir_all(&eligible);
         let _ignored = std::fs::remove_dir_all(&ineligible);
+    }
+
+    /// G3-4, D-4750: the closes' digest binds WHY a date went unverified as a
+    /// stable class, never the free text, which carries the store's absolute
+    /// path and OS or lock-contention wording. Two stores at different paths
+    /// holding the same unreadable master (its lock path a directory, or its
+    /// receipt damaged) produced different digests, and so different run
+    /// identities for the same bars (§3 rule 5). The text stays for display.
+    #[test]
+    fn an_unreadable_master_binds_its_reason_class_and_not_its_path() {
+        let civil = cas_dated_day(OPEN_MONDAY_2026_08_03).expect("a CAS-era day");
+        let lock = format!(
+            ".NSE_CM_security_{:02}{:02}{:04}.csv.gz.lock",
+            civil.day(),
+            civil.month(),
+            civil.year()
+        );
+        let receipt = format!(
+            "NSE_CM_security_{:02}{:02}{:04}.csv.gz.receipt",
+            civil.day(),
+            civil.month(),
+            civil.year()
+        );
+        let days = [OPEN_MONDAY_2026_08_03];
+        let absent = load_cash_closes(Path::new(NO_STORE), "RELIANCE", days).expect("loads");
+        for (case, damage) in [
+            (
+                "lock-dir",
+                (|store: &Path, lock: &str, _: &str| {
+                    std::fs::create_dir_all(store.join("session-masters").join(lock))
+                        .expect("a directory where the lock belongs");
+                }) as fn(&Path, &str, &str),
+            ),
+            ("receipt", |store: &Path, _: &str, receipt: &str| {
+                install_master(store, OPEN_MONDAY_2026_08_03, 1);
+                std::fs::write(store.join("session-masters").join(receipt), b"damaged")
+                    .expect("the receipt is rewritten");
+            }),
+        ] {
+            let near = root(&format!("class-{case}"));
+            let far = root(&format!(
+                "class-{case}-at-another-much-longer-absolute-path"
+            ));
+            for store in [&near, &far] {
+                damage(store, &lock, &receipt);
+            }
+            let one = load_cash_closes(&near, "RELIANCE", days).expect("loads");
+            let two = load_cash_closes(&far, "RELIANCE", days).expect("loads");
+            let (why_one, why_two) = (
+                one.unverified_reason(OPEN_MONDAY_2026_08_03)
+                    .expect("held unverified"),
+                two.unverified_reason(OPEN_MONDAY_2026_08_03)
+                    .expect("held unverified"),
+            );
+            assert_ne!(
+                why_one, why_two,
+                "premise {case}: the free text names each store's own path"
+            );
+            assert!(
+                why_one.contains(near.to_string_lossy().as_ref()),
+                "{case}: {why_one}"
+            );
+            assert_eq!(
+                one.digest(),
+                two.digest(),
+                "{case}: the same unreadable master at two paths is one identity"
+            );
+            assert_eq!(
+                one.digest(),
+                absent.digest(),
+                "{case}: absent and unreadable answer the same None and bind one class"
+            );
+            assert_eq!(one.session_close_minute(OPEN_MONDAY_2026_08_03), None);
+            let _ignored = std::fs::remove_dir_all(&near);
+            let _ignored = std::fs::remove_dir_all(&far);
+        }
+        // For one share, a dated answer, an unreadable master and a master
+        // that does not name it are three facts and three digests.
+        let named = root("class-named");
+        install_master(&named, OPEN_MONDAY_2026_08_03, 1);
+        let other = root("class-other");
+        install_master_naming(&other, OPEN_MONDAY_2026_08_03, "TCS", 1);
+        let dated = load_cash_closes(&named, "RELIANCE", days).expect("loads");
+        let not_named = load_cash_closes(&other, "RELIANCE", days).expect("loads");
+        assert!(
+            not_named
+                .unverified_reason(OPEN_MONDAY_2026_08_03)
+                .is_some()
+        );
+        let digests = [dated.digest(), absent.digest(), not_named.digest()];
+        for (i, a) in digests.iter().enumerate() {
+            for b in digests.iter().skip(i + 1) {
+                assert_ne!(a, b, "dated, unreadable and not named are three facts");
+            }
+        }
+        // A word with no ISIN binds its class wherever the store is.
+        let no_isin = load_cash_closes(&named, "NOSUCHSHARE", days).expect("loads");
+        let no_isin_absent =
+            load_cash_closes(Path::new(NO_STORE), "NOSUCHSHARE", days).expect("loads");
+        assert!(no_isin.unverified_reason(OPEN_MONDAY_2026_08_03).is_some());
+        assert_eq!(no_isin.digest(), no_isin_absent.digest());
+        let _ignored = std::fs::remove_dir_all(&named);
+        let _ignored = std::fs::remove_dir_all(&other);
     }
 
     #[test]

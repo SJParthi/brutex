@@ -37,11 +37,14 @@ fn span(underlying: &str) -> crate::stored::Span {
     }
 }
 
-/// Every one-instrument banner a stored report opens with, for `underlying`.
+/// Every one-run banner a stored report opens with, for `underlying`.
 ///
 /// `audit-range` stands for the span banner, which `screen` and the strict
-/// audited range open with too.
-fn banners(underlying: &str) -> [(&'static str, String); 6] {
+/// audited range open with too. `range-all` is not here: it reports eight
+/// rungs, each its own run, and opens with the pooled banner
+/// (GAP15-21, D-4752), pinned by
+/// `range_all_opens_with_the_pooled_banner_and_a_stocks_note`.
+fn banners(underlying: &str) -> [(&'static str, String); 5] {
     [
         (
             "audit-range",
@@ -51,16 +54,6 @@ fn banners(underlying: &str) -> [(&'static str, String); 6] {
                 (2025, 1),
                 (2025, 6),
                 "abc123",
-            ),
-        ),
-        (
-            "range-all",
-            range_opening(
-                "zerodha",
-                underlying,
-                &["5min", "1min"],
-                ((2025, 1), (2025, 6)),
-                None,
             ),
         ),
         (
@@ -156,8 +149,8 @@ const SET_OFF: [&str; 2] = ["elite descent", "top"];
 /// with a blank line of their own, and a stock's page carried one more blank
 /// line there than its index page did: three before `TOP COMBINATIONS` where
 /// an index had two. On those two the note's closing blank line takes the
-/// place of the index page's, and is not a second one. `range-all`,
-/// `descend`, `audit-stored` and the span banner run from the provenance
+/// place of the index page's, and is not a second one. `descend`,
+/// `audit-stored` and the span banner run from the provenance
 /// straight into their feed line, so there the note's closing blank line is
 /// one the stock's page has and the index page does not. It sets the note
 /// off from the report, and the index page has no note to set off.
@@ -215,6 +208,42 @@ fn a_stock_banner_is_its_index_banner_with_the_note_put_in_and_nothing_else() {
                 "{surface}: {stock}'s banner past its note against {index}'s past its provenance"
             );
         }
+    }
+}
+
+/// **`range-all` opens with the pooled banner, a stock's with its note after
+/// it, and never with the single-run banner.** GAP15-21, D-4752.
+///
+/// The page spans eight rungs, each its own run and identity, over a span of
+/// months, so "the run identity beneath names the exact column" and "a figure
+/// here describes that instrument and that month" were both false of it.
+#[test]
+fn range_all_opens_with_the_pooled_banner_and_a_stocks_note() {
+    let page = |underlying: &str| {
+        range_opening(
+            "zerodha",
+            underlying,
+            &["5min", "1min"],
+            ((2025, 1), (2025, 6)),
+            None,
+        )
+    };
+    let note = CostScope::CashEquity.report_note();
+    for (stock, index) in [("RELIANCE", "NIFTY"), ("TCS", "BANKNIFTY")] {
+        let stock_text = page(stock);
+        let index_text = page(index);
+        for text in [&stock_text, &index_text] {
+            assert!(!text.contains(STORED_PROVENANCE), "{text}");
+        }
+        let stock_rest = stock_text
+            .strip_prefix(&format!("{}{note}", super::STORED_POOLED_PROVENANCE))
+            .expect("a stock's range page leads with the pooled banner and its note");
+        let index_rest = index_text
+            .strip_prefix(super::STORED_POOLED_PROVENANCE)
+            .expect("an index's range page leads with the pooled banner");
+        assert!(index_rest.starts_with("feed zerodha"), "{index_text}");
+        assert!(!index_text.contains("CORPORATE ACTIONS"), "{index_text}");
+        assert_eq!(stock_rest.replace(stock, index), index_rest);
     }
 }
 

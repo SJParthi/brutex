@@ -423,6 +423,13 @@ fn load_source(request: &Request<'_>) -> Result<Source, String> {
     binding.update(b"brutex-boolean-strict-input-policy-v1\0");
     binding.update(&request.inputs.max_bytes().to_le_bytes());
     binding.update(&request.inputs.max_records().to_le_bytes());
+    // A SHARE'S DATED CLOSES ARE A SOURCE (G3-1, D-4748): its receipts and
+    // overlay are judged against them, so the same bars beside a different
+    // master are a different source. An index holds none and is unchanged.
+    if let Some(cash) = data.exact_minute.cash_digest() {
+        binding.update(b"brutex-boolean-cash-session-closes-v1\0");
+        binding.update(&cash);
+    }
     let identity = guard.bind_digest(binding.finalize());
     guard.require_current()?;
     Ok(Source {
@@ -563,11 +570,21 @@ fn prepare_column(request: &Request<'_>, source: &Source) -> Result<(Column, Ses
     let (first, last) = super::requested_span_days(span)?;
     let rung = u32::try_from(crate::stored::rung_length_micros(request.rung)? / 1_000_000)
         .map_err(display)?;
-    let signal_calendar =
-        crate::stored::calendar_receipt_v2_for_bars(&data.signal.bars, rung, first, last)?
-            .require_complete()?;
+    // EACH VENUE AGAINST ITS OWN CLOSE (G3-1, D-4748). A cash share's minutes
+    // end at its dated close on a closing-auction day, so both receipts, their
+    // exact rebuilds and the overlay ask the closes `RangeInputs` already
+    // loaded, never the index's 15:29. An index holds none: `None`, unchanged.
+    let cash = data.exact_minute.cash.as_ref();
+    let signal_calendar = crate::stored::calendar_receipt_v2_for_venue_bars(
+        &data.signal.bars,
+        rung,
+        first,
+        last,
+        cash,
+    )?
+    .require_complete()?;
     let execution_calendar =
-        crate::stored::calendar_receipt_v2_for_bars(execution, 60, first, last)?
+        crate::stored::calendar_receipt_v2_for_venue_bars(execution, 60, first, last, cash)?
             .require_complete()?;
     let coverage = super::CandidateCalendarCoverageV1::from_complete(
         rung,
@@ -575,32 +592,35 @@ fn prepare_column(request: &Request<'_>, source: &Source) -> Result<(Column, Ses
         signal_calendar,
         execution_calendar,
     )?;
-    super::require_exact_calendar(
+    super::require_exact_calendar_for_venue(
         "Boolean signal",
         &data.signal.bars,
         rung,
         coverage,
         signal_calendar,
+        cash,
     )?;
-    super::require_exact_calendar(
+    super::require_exact_calendar_for_venue(
         "Boolean execution",
         execution,
         60,
         coverage,
         execution_calendar,
+        cash,
     )?;
     let evaluation = super::CandidateEvaluationInputsV1 {
         widths: request.widths,
         availability: crate::stored::vwap_availability(&data.signal.key),
         thresholds: request.thresholds,
     };
-    let (_, column) = super::build_candidate_columns(
+    let (_, column) = super::build_candidate_columns_for_venue(
         &data.signal.bars,
         &data.daily.references,
         &data.exact_minute.bars,
         execution,
         rung,
         &evaluation,
+        cash,
     )?;
     let session_index = Sessions::new(execution, &column, first, last)?;
     Ok((column, session_index))

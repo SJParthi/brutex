@@ -1604,6 +1604,7 @@ impl CandidateSearchColumnBuilderV1<'_> {
                 })?,
             self.rung_seconds,
             &self.evaluation,
+            None,
         )
     }
 }
@@ -1616,12 +1617,38 @@ pub(crate) fn build_candidate_columns(
     rung_seconds: u32,
     evaluation: &CandidateEvaluationInputsV1,
 ) -> Result<(Column, Column), CandidateUniverseRefusal> {
+    build_candidate_columns_for_venue(
+        signal_bars,
+        daily_references,
+        reference_minute_context,
+        execution_bars,
+        rung_seconds,
+        evaluation,
+        None,
+    )
+}
+
+/// [`build_candidate_columns`] for one venue: `cash` is a cash share's dated
+/// closes, which the exact-minute overlay asks through
+/// [`crate::stored::session_close_for`], and `None` is the index calendar
+/// (G3-1, D-4748). Only Boolean research reaches it with a share; every
+/// index-only caller keeps [`build_candidate_columns`].
+pub(crate) fn build_candidate_columns_for_venue(
+    signal_bars: &[Candle],
+    daily_references: &[DailyReference],
+    reference_minute_context: &[Candle],
+    execution_bars: &[Candle],
+    rung_seconds: u32,
+    evaluation: &CandidateEvaluationInputsV1,
+    cash: Option<&crate::stored::CashCloses>,
+) -> Result<(Column, Column), CandidateUniverseRefusal> {
     let signal_column = build_candidate_signal_column(
         signal_bars,
         daily_references,
         reference_minute_context,
         rung_seconds,
         evaluation,
+        cash,
     )?;
     let signal_length_micros = signal_length_micros(rung_seconds)?;
     let alignment = runner::align::onto_execution(
@@ -1670,6 +1697,7 @@ pub(crate) fn candidate_signal_swept_v1(
         reference_minute_context,
         rung_seconds,
         evaluation,
+        None,
     )
     .map(|column| column.census().swept)
 }
@@ -1681,12 +1709,17 @@ pub(crate) fn candidate_signal_swept_v1(
 /// Search V4 successor: every causal prefix must use the same evaluator and
 /// overlay semantics as the complete Candidate column, not a second closure
 /// that merely happens to emit compatible masks.
+///
+/// `cash` is a cash share's dated closes, or `None` for the index calendar.
+/// The overlay asks [`crate::stored::session_close_for`], the one close rule
+/// the stored overlay and minute-gap census ask (G3-1, D-4748).
 fn build_candidate_signal_column(
     signal_bars: &[Candle],
     daily_references: &[DailyReference],
     reference_minute_context: &[Candle],
     rung_seconds: u32,
     evaluation: &CandidateEvaluationInputsV1,
+    cash: Option<&crate::stored::CashCloses>,
 ) -> Result<Column, CandidateUniverseRefusal> {
     let mut evaluator = AnchoredEvaluator::new(
         evaluation.widths,
@@ -1716,7 +1749,7 @@ fn build_candidate_signal_column(
         signal_length_micros,
         evaluation.widths,
         Calendar::charter(),
-        crate::stored::nse_session_close_minute,
+        |day| crate::stored::session_close_for(cash, day),
         &mut signal_column,
     )
     .map_err(|why| {
@@ -4234,11 +4267,25 @@ pub(crate) fn require_exact_calendar(
     coverage: CandidateCalendarCoverageV1,
     offered: CompleteCalendarReceiptV2,
 ) -> Result<(), CandidateUniverseRefusal> {
-    let exact = crate::stored::calendar_receipt_v2_for_bars(
+    require_exact_calendar_for_venue(name, bars, rung_seconds, coverage, offered, None)
+}
+
+/// [`require_exact_calendar`] for one venue, rebuilding the receipt with the
+/// same closes the offered receipt was built with (G3-1, D-4748).
+pub(crate) fn require_exact_calendar_for_venue(
+    name: &str,
+    bars: &[Candle],
+    rung_seconds: u32,
+    coverage: CandidateCalendarCoverageV1,
+    offered: CompleteCalendarReceiptV2,
+    cash: Option<&crate::stored::CashCloses>,
+) -> Result<(), CandidateUniverseRefusal> {
+    let exact = crate::stored::calendar_receipt_v2_for_venue_bars(
         bars,
         rung_seconds,
         coverage.first_day,
         coverage.last_day,
+        cash,
     )
     .and_then(crate::stored::CalendarReceiptV2::require_complete)
     .map_err(|why| format!("candidate {name} exact complete calendar refused: {why}"))?;
