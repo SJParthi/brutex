@@ -15433,14 +15433,18 @@ or average O(1).
   open refuse it. Each append door is one open and one scan where it was two,
   plus one streaming hash pass after the write that must reproduce the bytes
   the open validated.
-- **Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data
-  file through `require_unchanged`, O(file bytes) per lookup, before an
-  average-O(1) probe; its rustdoc already said so and this section is its
-  first statement here. Its append is dormant outside tests
-  (`expect(dead_code)`) and calls `require_unchanged`, a whole-file hash, at
-  several steps, so one append is a constant multiple of O(file bytes). The
-  finding counted at least eight passes; that count is not re-measured here
-  and is UNVERIFIED.
+- **Finalization V2 `reopen_structural_receipt`** is average O(1) since
+  D-4767: the root, lock and data generations are compared by metadata only,
+  and the found receipt's Data and Completion records, two fixed 2,048-byte
+  reads, must re-digest to the receipt's digests. It is independent of the file
+  size and of the block's Rekey count. Until D-4767 it re-hashed the bounded
+  data file through `require_unchanged`, O(file bytes) per lookup. Not seen per
+  lookup: an equal-metadata same-length rewrite of another block or of this
+  block's Rekey rows; `authenticate_structural_receipt` and the next open
+  refuse it. Its append is dormant outside tests (`expect(dead_code)`) and
+  still calls `require_unchanged`, a whole-file hash, at several steps, so one
+  append is a constant multiple of O(file bytes). The finding counted at least
+  eight passes; that count is not re-measured here and is UNVERIFIED.
 
 ### Ledger V6 route: one load per family per rung, and replay recomputes the route — D-1683
 

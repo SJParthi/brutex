@@ -23,6 +23,8 @@
 //!   four times while §154 said a lookup is average O(1) and a page O(rows).
 //! * W2-cli11-3 (D-4766): the Observation lookups no longer hash the whole
 //!   file; the test LBE-06 names for that keeps its name and pins the new shape.
+//! * W2-cli11-2 (D-4767): the Finalization V2 lookup no longer hashes the
+//!   data file.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -42,6 +44,7 @@ const CANDIDATE: &str = include_str!("../src/candidate_universe.rs");
 const PRE_ADMISSION: &str = include_str!("../src/pre_admission_data.rs");
 const OBSERVATIONS: &str = include_str!("../src/population_observations_v1.rs");
 const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
+const FINALIZATION: &str = include_str!("../src/population_finalization_v2.rs");
 const STEP3: &str = include_str!("../src/step3_orchestrator.rs");
 const LEDGER_V6: &str = include_str!("../src/ledger_v6.rs");
 const STRICT_INPUTS: &str = include_str!("../src/strict_v6_inputs.rs");
@@ -210,13 +213,40 @@ fn observation_lookups_still_hash_the_whole_file_and_say_so() {
     for needed in [
         "Pre-Admission Data V1 `page`** (§153) is now O(P)",
         "Observation V1 and V2 `reopen_audit`** (§157, §161) are average O(1) since D-4766",
-        "Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data file",
+        "Finalization V2 `reopen_structural_receipt`** is average O(1) since D-4767",
     ] {
         assert!(
             chapter.contains(needed),
             "the chapter no longer says `{needed}`"
         );
     }
+}
+
+#[test]
+fn the_finalization_lookup_reads_two_records_and_says_so() {
+    let lookup = method(FINALIZATION, "    pub fn reopen_structural_receipt(");
+    assert!(lookup.contains("self.require_platform_unchanged()"));
+    assert!(lookup.contains("self.redigest_receipt_records(receipt)?"));
+    assert!(
+        !lookup.contains("self.require_unchanged()"),
+        "the lookup content-hashes the ledger again; re-measure the chapter"
+    );
+    let platform = method(FINALIZATION, "    fn require_platform_unchanged(&self)");
+    assert!(!platform.contains("require_file_generation(") && !platform.contains("hash_file"));
+    let metadata = function(FINALIZATION, "fn require_file_metadata(");
+    assert!(!metadata.contains("hash_file") && !metadata.contains("file_generation("));
+    let redigest = method(FINALIZATION, "    fn redigest_receipt_records(");
+    assert_eq!(redigest.matches("read_record_shared(").count(), 2);
+    let start = FINALIZATION
+        .find("    pub fn reopen_structural_receipt(")
+        .expect("the lookup");
+    let doc_start = FINALIZATION
+        .get(..start)
+        .expect("a prefix")
+        .rfind("\n\n")
+        .expect("a gap");
+    let doc = flat(FINALIZATION.get(doc_start..start).expect("the rustdoc"));
+    assert!(doc.contains("Average O(1) in file bytes and in the block's Rekey count"));
 }
 
 #[test]

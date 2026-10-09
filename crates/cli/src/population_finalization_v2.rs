@@ -1170,10 +1170,12 @@ struct LedgerGenerationWitnessV2 {
 /// Open bounded Finalization V2 ledger.
 ///
 /// Opening scans and validates at most the configured file ceiling, O(file
-/// bytes + Rekey rows) time and O(completed blocks + largest block) memory.
-/// The in-memory identity probe is average O(1) only after that scan.  Public
-/// lookup first re-hashes the bounded file to reject same-length mutation, so
-/// the complete lookup operation is O(file bytes), not universally O(1).
+/// bytes + Rekey rows) time and O(completed blocks + largest block) memory,
+/// and content-hashes the lock and data files.  Public lookup is average O(1)
+/// after that: it compares the root, lock and data generations by metadata
+/// only and re-digests the two fixed records the found receipt names, so it is
+/// independent of file size and of the block's Rekey count (W2-cli11-2,
+/// D-4767).
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -1423,22 +1425,30 @@ impl PopulationFinalizationV2Ledger {
         self.physical_records = physical_records;
     }
 
-    /// Revalidates the bounded file generation, then performs one average-O(1)
-    /// in-memory identity probe.  Absence is `Ok(None)`.
+    /// Revalidates the root, lock and data generations by metadata, performs
+    /// one average-O(1) in-memory identity probe and re-digests the found
+    /// receipt's Data and Completion records.  Absence is `Ok(None)`.
     ///
     /// # Complexity
     ///
-    /// Content-generation validation is O(file bytes); only the subsequent
-    /// hash-table probe is average O(1).
+    /// Average O(1) in file bytes and in the block's Rekey count: a constant
+    /// number of `stat` calls (and one root canonicalization), one hash-table
+    /// probe, and two fixed 2,048-byte record reads whose raw digests must
+    /// equal the receipt's.  No file is hashed (W2-cli11-2, D-4767); before
+    /// D-4767 each lookup content-hashed the whole data file.  Not seen per
+    /// lookup: a same-length rewrite, under unchanged metadata, of a record
+    /// this lookup does not return (another block, or this block's Rekey rows);
+    /// `authenticate_structural_receipt` and the next open refuse it.
     ///
-    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// **UNVERIFIED as a measured time.** No bench in this workspace
     /// times this, so the shape above is read from the source rather
     /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
-    /// Refuses lock failure, same-length mutation, append, path replacement or
-    /// any generation change since open.
+    /// Refuses lock failure, a metadata-visible mutation or append, path
+    /// replacement, a changed Data or Completion record of the found block, or
+    /// a read failure.
     pub fn reopen_structural_receipt(
         &self,
         finalization_id: &[u8; 32],
@@ -1447,9 +1457,13 @@ impl PopulationFinalizationV2Ledger {
         self.lock_file
             .lock_shared()
             .map_err(|why| format!("cannot take shared Finalization V2 lookup lock: {why}"))?;
-        let result = self
-            .require_unchanged()
-            .map(|()| self.receipts.get(finalization_id).copied());
+        let result = self.require_platform_unchanged().and_then(|()| {
+            let Some(receipt) = self.receipts.get(finalization_id).copied() else {
+                return Ok(None);
+            };
+            self.redigest_receipt_records(receipt)?;
+            Ok(Some(receipt))
+        });
         let released = self
             .lock_file
             .unlock()
@@ -1856,6 +1870,46 @@ impl PopulationFinalizationV2Ledger {
             &self.data_path,
             self.bounds.max_file_bytes,
         )
+    }
+
+    /// [`Self::require_unchanged`] without the content hashes: the root's
+    /// directory generation, then the length and platform generation of the
+    /// held and named lock and data files. O(1) in file bytes (D-4767), proven by
+    /// `cli::population_finalization_v2::tests::lookups_hash_no_file_and_redigest_only_the_two_records_they_name`.
+    fn require_platform_unchanged(&self) -> Result<(), PopulationFinalizationV2Refusal> {
+        require_directory_generation(&self.root_generation, &self.root_file, &self.root_path)?;
+        require_file_metadata(self.lock_generation, &self.lock_file, &self.lock_path)?;
+        require_file_metadata(self.data_generation, &self.data_file, &self.data_path)
+    }
+
+    /// Re-reads the Data record at `first_physical_record` and the Completion
+    /// record `rekey_count + 1` after it, and requires their raw digests to be
+    /// the receipt's: exactly the bytes the open's scan reproduced (D-4767).
+    fn redigest_receipt_records(
+        &self,
+        receipt: PopulationFinalizationV2StructuralReceipt,
+    ) -> Result<(), PopulationFinalizationV2Refusal> {
+        let completion_physical = receipt
+            .rekey_count
+            .checked_add(1)
+            .and_then(|offset| receipt.first_physical_record.checked_add(offset))
+            .ok_or_else(|| "Finalization V2 receipt Completion index overflowed".to_owned())?;
+        let data_raw = read_record_shared(&self.data_file, receipt.first_physical_record)?;
+        if raw_record_digest(&data_raw) != receipt.data_record_digest {
+            return Err(format!(
+                "Finalization V2 Data record {} of {} changed after bounded open",
+                receipt.first_physical_record,
+                hex32(receipt.finalization_id)
+            ));
+        }
+        let completion_raw = read_record_shared(&self.data_file, completion_physical)?;
+        if raw_record_digest(&completion_raw) != receipt.completion_record_digest {
+            return Err(format!(
+                "Finalization V2 Completion record {completion_physical} of {} changed after bounded open",
+                hex32(receipt.finalization_id)
+            ));
+        }
+        Ok(())
     }
 
     fn require_root_and_lock_unchanged(&self) -> Result<(), PopulationFinalizationV2Refusal> {
@@ -2640,6 +2694,20 @@ fn read_record_at(
     Ok(raw)
 }
 
+/// [`read_record_at`] through a shared descriptor, for the `&self` lookup.
+fn read_record_shared(
+    file: &File,
+    index: u64,
+) -> Result<[u8; POPULATION_FINALIZATION_V2_RECORD_BYTES], PopulationFinalizationV2Refusal> {
+    let mut raw = [0_u8; POPULATION_FINALIZATION_V2_RECORD_BYTES];
+    let mut reader = file;
+    reader
+        .seek(SeekFrom::Start(record_offset(index)?))
+        .and_then(|_| reader.read_exact(&mut raw))
+        .map_err(|why| format!("cannot read Finalization V2 record {index}: {why}"))?;
+    Ok(raw)
+}
+
 fn read_record_range(
     file: &mut File,
     first: u64,
@@ -2910,6 +2978,54 @@ fn file_generation(
     })
 }
 
+/// The metadata half of [`require_file_generation`]: the held file and the
+/// file the path names, not followed through a link, must carry the cached
+/// length and platform generation (device/inode and nanosecond times on Unix).
+/// Reads no content (D-4767).
+fn require_file_metadata(
+    expected: FileGenerationV2,
+    held: &File,
+    path: &Path,
+) -> Result<(), PopulationFinalizationV2Refusal> {
+    let held_metadata = held.metadata().map_err(|why| {
+        format!(
+            "cannot stat held Finalization V2 file {}: {why}",
+            path.display()
+        )
+    })?;
+    let named_metadata = std::fs::symlink_metadata(path).map_err(|why| {
+        format!(
+            "cannot stat named Finalization V2 file {}: {why}",
+            path.display()
+        )
+    })?;
+    let held_platform = platform_generation(&held_metadata, path)?;
+    let named_platform = platform_generation(&named_metadata, path)?;
+    if !held_platform.same_file_object(named_platform) {
+        return Err(format!(
+            "held Finalization V2 file no longer names {}; path replacement refused",
+            path.display()
+        ));
+    }
+    if (
+        held_metadata.len(),
+        named_metadata.len(),
+        held_platform,
+        named_platform,
+    ) != (
+        expected.len,
+        expected.len,
+        expected.platform,
+        expected.platform,
+    ) {
+        return Err(format!(
+            "Finalization V2 file {} changed after bounded open",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn require_file_generation(
     expected: FileGenerationV2,
     held: &File,
@@ -2926,11 +3042,19 @@ fn require_file_generation(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of whole-file generation hashes on this thread.
+    static FINALIZATION_FILE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn hash_file_bounded(
     file: &mut File,
     path: &Path,
     max_bytes: u64,
 ) -> Result<[u8; 32], PopulationFinalizationV2Refusal> {
+    #[cfg(test)]
+    FINALIZATION_FILE_HASHES.with(|count| count.set(count.get().saturating_add(1)));
     file.seek(SeekFrom::Start(0)).map_err(|why| {
         format!(
             "cannot seek Finalization V2 file {} for generation hash: {why}",
@@ -3994,6 +4118,123 @@ mod tests {
         assert_refuses(
             opened.reopen_structural_receipt(&value.finalization_id()),
             "changed or was path-replaced",
+        );
+    }
+
+    #[test]
+    fn lookups_hash_no_file_and_redigest_only_the_two_records_they_name() {
+        // W2-cli11-2: each lookup content-hashed the lock and the data file.
+        let limits = bounds(32);
+        let root = TestPath::directory("lookup-cost");
+        let value = prepared();
+        persist_population_finalization_v2(root.path(), limits, &value)
+            .expect("seed lookup-cost ledger");
+        let hashes = || FINALIZATION_FILE_HASHES.with(std::cell::Cell::get);
+        FINALIZATION_FILE_HASHES.with(|count| count.set(0));
+        let opened = PopulationFinalizationV2Ledger::open_read(root.path(), limits)
+            .expect("open lookup-cost ledger");
+        assert_eq!(
+            hashes(),
+            4,
+            "an open hashes lock and data when it measures and again when its scan closes"
+        );
+        FINALIZATION_FILE_HASHES.with(|count| count.set(0));
+        for _ in 0..10 {
+            let found = opened
+                .reopen_structural_receipt(&value.finalization_id())
+                .expect("lookup reads")
+                .expect("receipt is indexed");
+            assert_eq!(found.finalization_id(), value.finalization_id());
+            assert!(
+                opened
+                    .reopen_structural_receipt(&digest(9_999))
+                    .expect("absent lookup reads")
+                    .is_none()
+            );
+        }
+        assert_eq!(hashes(), 0, "twenty lookups hash no file");
+    }
+
+    #[test]
+    fn a_lookup_redigests_its_data_and_completion_and_not_the_rekey_rows() {
+        // D-4767: metadata generations plus the two records the receipt names.
+        // A rewrite inside one timestamp tick is modelled by re-measuring the
+        // cached data generation's metadata after it. The fixture's one block
+        // is Data at record 0, three Rekey rows at 1..=3, Completion at 4.
+        let limits = bounds(32);
+        let root = TestPath::directory("lookup-redigest");
+        let value = prepared();
+        persist_population_finalization_v2(root.path(), limits, &value)
+            .expect("seed lookup-redigest ledger");
+        let path = root.path().join(LEDGER_FILE);
+        let flip = |record: u64| {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open mutator");
+            let offset = record * POPULATION_FINALIZATION_V2_RECORD_BYTES as u64 + 80;
+            let mut byte = [0_u8; 1];
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read_exact(&mut byte))
+                .expect("read the byte");
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(&[byte[0] ^ 1]))
+                .and_then(|()| file.sync_data())
+                .expect("write the byte");
+        };
+        let same_tick = |ledger: &mut PopulationFinalizationV2Ledger| {
+            let metadata = std::fs::metadata(&path).expect("stat the ledger");
+            ledger.data_generation = FileGenerationV2 {
+                len: metadata.len(),
+                content_digest: ledger.data_generation.content_digest,
+                platform: platform_generation(&metadata, &path).expect("platform generation"),
+            };
+        };
+        for (record, needed) in [(0, "Data record 0 of"), (4, "Completion record 4 of")] {
+            let mut opened = PopulationFinalizationV2Ledger::open_read(root.path(), limits)
+                .expect("open lookup-redigest ledger");
+            flip(record);
+            same_tick(&mut opened);
+            assert_refuses(
+                opened.reopen_structural_receipt(&value.finalization_id()),
+                needed,
+            );
+            assert!(
+                opened
+                    .reopen_structural_receipt(&digest(9_999))
+                    .expect("an absent id reads no record")
+                    .is_none()
+            );
+            flip(record);
+        }
+        let mut opened = PopulationFinalizationV2Ledger::open_read(root.path(), limits)
+            .expect("open lookup-redigest ledger");
+        flip(2);
+        same_tick(&mut opened);
+        assert!(
+            opened
+                .reopen_structural_receipt(&value.finalization_id())
+                .expect("the limit: a Rekey row is not a record the lookup returns")
+                .is_some()
+        );
+        drop(opened);
+        assert!(
+            PopulationFinalizationV2Ledger::open_read(root.path(), limits).is_err(),
+            "the next open refuses it"
+        );
+        flip(2);
+        let opened = PopulationFinalizationV2Ledger::open_read(root.path(), limits)
+            .expect("open lookup-redigest ledger");
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open mtime pin")
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .expect("pin the modification time");
+        assert_refuses(
+            opened.reopen_structural_receipt(&digest(9_999)),
+            "changed after bounded open",
         );
     }
 

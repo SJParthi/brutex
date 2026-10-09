@@ -65186,3 +65186,43 @@ left (5, 2, 0), right (1, 1, 1)),
 `cli::population_observations_v1::tests::a_v2_lookup_reverify_and_refresh_reread_only_their_own_pair`,
 `cli::ledger_append_lookup_costs::observation_lookups_still_hash_the_whole_file_and_say_so`,
 `cli::ledger_append_lookup_costs::a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes`.
+
+### D-4767 — A Finalization V2 lookup re-digests the two records it names — 2026-10-09
+
+**What was wrong.** W2-cli11-2: `reopen_structural_receipt` ran
+`require_unchanged` on every lookup. That checks the root directory generation
+and content-hashes the lock file and the whole data file, O(file bytes) per
+lookup, before an average-O(1) probe. The counting test measured 40 hashes for
+20 lookups. D-1681 stated the cost and kept the hash.
+
+**Decided.** The plan G4 §B named, checked against the code. The ledger has no
+caller outside its module, and its receipt carries `first_physical_record`,
+`rekey_count` and the raw-record digests of its Data and Completion.
+
+- `require_platform_unchanged` checks the root's directory generation. It then
+  compares the length and platform generation (device/inode and nanosecond
+  modification/change times) of the held and the named lock and data files
+  against the cached ones, without reading content.
+- A found receipt's Data record, at `first_physical_record`, and its
+  Completion, at `first_physical_record + rekey_count + 1`, are re-read with
+  two fixed-offset reads. Their raw digests must equal the receipt's: the same
+  `raw_record_digest` the scan used.
+- An absent id is `Ok(None)` after the metadata check.
+- The open keeps its content hashes, and the dormant append is unchanged.
+
+No byte, format or identity changes.
+
+**What is no longer seen per lookup.** An equal-metadata, same-length rewrite
+of another block, or of this block's Rekey rows. `authenticate_structural_receipt`
+and the next open refuse it, the residual D-1681 accepted for the
+Pre-Admission page.
+
+**Rejected.** Re-reading the whole block per lookup: that is O(Rekey rows),
+and the receipt does not return those rows.
+
+Tests: `cli::population_finalization_v2::tests::lookups_hash_no_file_and_redigest_only_the_two_records_they_name`
+(failed first on the unfixed lookup: "twenty lookups hash no file", left 40,
+right 0),
+`cli::population_finalization_v2::tests::a_lookup_redigests_its_data_and_completion_and_not_the_rekey_rows`,
+`cli::population_finalization_v2::tests::stale_same_length_mutation_and_path_replacement_invalidate_lookup`,
+`cli::ledger_append_lookup_costs::the_finalization_lookup_reads_two_records_and_says_so`.
