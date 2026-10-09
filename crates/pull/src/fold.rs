@@ -111,6 +111,14 @@ impl Bucket {
     /// bar, no store rung is wider than a day, and a `u32::MAX` width stamped a
     /// 2024 snapshot at 1969-12-31. Every width from one second to one day is
     /// still accepted, which is what folding from snapshots promises.
+    ///
+    /// **A width that does not divide a day is accepted AND opens every
+    /// session at 09:15** (satk-3, D-4550). Until D-4550 such a width (7 s,
+    /// 7 minutes, 75 minutes, 3,607 s) walked one grid continuously from the
+    /// anchor, so its edges moved to a different clock offset every day and
+    /// the session's first bar could be stamped before 09:15 while holding
+    /// 09:15 data. Every intraday grid now restarts at each 09:15 IST; see
+    /// [`fold`].
     #[must_use]
     pub const fn of_secs(secs: u32) -> Option<Self> {
         if secs == 0 || secs > Self::DAY.0 {
@@ -125,6 +133,101 @@ impl Bucket {
     pub const fn secs(self) -> u32 {
         self.0
     }
+
+    /// The width in microseconds. Exact: a `u32` of seconds times 10^6 fits
+    /// an `i64` with room to spare.
+    fn micros(self) -> i64 {
+        i64::from(self.0) * 1_000_000
+    }
+
+    /// Whether this is the daily rung, which keeps the IST-midnight grid.
+    const fn is_daily(self) -> bool {
+        self.0 >= Self::DAY.0
+    }
+}
+
+/// Microseconds in one day: the cycle every intraday grid restarts on.
+const DAY_MICROS: i64 = 86_400_000_000;
+
+/// THE GRID'S ORIGIN IS THE IST DAY, NOT THE UTC DAY: `t + this ≡ 0 (mod day)`
+/// exactly at IST midnight. See [`fold`] for why it is a constant.
+const IST_ANCHOR_MICROS: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
+
+/// The intraday anchor: `t + this ≡ 0 (mod day)` exactly at 09:15 IST, the
+/// NSE open. Negative, so every use floors. See [`fold`] for the sign and its
+/// history.
+const OPEN_ANCHOR_MICROS: i64 = IST_ANCHOR_MICROS
+    - (store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT as i64) * 60 * 1_000_000;
+
+/// How far past the latest 09:15 IST at or before `ts` the stamp lies, in
+/// microseconds, `0..DAY_MICROS`. Wide arithmetic, so no `i64` stamp
+/// overflows it.
+fn past_the_open(ts: i64) -> i64 {
+    let past = (i128::from(ts) + i128::from(OPEN_ANCHOR_MICROS)).rem_euclid(i128::from(DAY_MICROS));
+    // `rem_euclid` by a day lands in `0..DAY_MICROS`, which an `i64` holds,
+    // so the fallback is unreachable.
+    i64::try_from(past).unwrap_or(0)
+}
+
+/// The UTC microsecond at which the `bucket`-wide bar holding `ts` starts, or
+/// `None` when the anchored stamp or the start leaves `i64`.
+///
+/// **An intraday grid restarts at every 09:15 IST** (satk-3, D-4550): the
+/// offset into the bucket is `((t + A) mod day) mod width`, `A` the open
+/// anchor. For a width that divides a day — every rung the store files — that
+/// is the continuous grid edge for edge, because 09:15 is an edge of it every
+/// day, so nothing already written moves. For a width that does not, the grid
+/// no longer drifts: the session's first bar starts at 09:15 every day, and
+/// the bucket cut short is the one ending at the next 09:15, overnight.
+/// `runner::resample::bucket_start` cuts the same grid.
+///
+/// The daily rung keeps the continuous IST-midnight grid, as it always did.
+///
+/// The `i64` refusals are the ones the fold always made: an instant within
+/// the anchor of `i64::MIN` has no anchored value, and a start below
+/// `i64::MIN` does not exist.
+fn bucket_start(ts: i64, bucket: Bucket) -> Option<i64> {
+    let width = bucket.micros();
+    if bucket.is_daily() {
+        let shifted = ts.checked_add(IST_ANCHOR_MICROS)?;
+        return shifted
+            .div_euclid(width)
+            .checked_mul(width)?
+            .checked_sub(IST_ANCHOR_MICROS);
+    }
+    ts.checked_add(OPEN_ANCHOR_MICROS)?;
+    ts.checked_sub(past_the_open(ts) % width)
+}
+
+/// Where the bar starting at `start` ends, exclusive: one width later, or the
+/// next 09:15 IST if that comes first. Only a width that does not divide a day
+/// is ever cut by the open (D-4550); on every other rung this is `start + w`.
+/// `None` when `start + w` leaves `i64`, the refusal the fold always made.
+fn bucket_end(start: i64, bucket: Bucket) -> Option<i64> {
+    let full = start.checked_add(bucket.micros())?;
+    if bucket.is_daily() {
+        return Some(full);
+    }
+    let next_open = i128::from(start) - i128::from(past_the_open(start)) + i128::from(DAY_MICROS);
+    // At most `full`, which is an `i64`, so the conversion cannot fail.
+    i64::try_from(i128::from(full).min(next_open)).ok()
+}
+
+/// A bucket's ordinal on its grid: the grid days before it times the buckets
+/// in one grid day, plus its index in its own. Consecutive buckets differ by
+/// one ACROSS days too, so two ordinals subtract to the number of buckets
+/// between them, the overnight stub included. Wide, so it cannot overflow.
+fn bucket_ordinal(ts: i64, bucket: Bucket) -> i128 {
+    let width = i128::from(bucket.micros());
+    if bucket.is_daily() {
+        return (i128::from(ts) + i128::from(IST_ANCHOR_MICROS)).div_euclid(width);
+    }
+    let grid_day =
+        (i128::from(ts) + i128::from(OPEN_ANCHOR_MICROS)).div_euclid(i128::from(DAY_MICROS));
+    let per_day = DAY_MICROS
+        .unsigned_abs()
+        .div_ceil(bucket.micros().unsigned_abs());
+    grid_day * i128::from(per_day) + i128::from(past_the_open(ts)) / width
 }
 
 /// Folds bars into buckets, one output bar per bucket that held anything.
@@ -166,8 +269,8 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     // A CONSTANT AND NOT A PARAMETER, for the reason `CLAUDE.md` §6 gives for
     // the absent depth parameter: a value that can be set can be set wrongly,
     // and silently. §1 fixes the engine surface at NSE, so there is exactly one
-    // trading day this store addresses and it is the IST one.
-    const IST_ANCHOR_MICROS: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
+    // trading day this store addresses and it is the IST one. It is the
+    // module's `IST_ANCHOR_MICROS`.
 
     // ══ AND FOR AN INTRADAY RUNG THE GRID STARTS AT THE OPEN, NOT AT MIDNIGHT ══
     //
@@ -183,7 +286,8 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     // existing at all.
     //
     // THE FAULT IS THE ANCHOR, NOT THE RUNG. Anchored at the OPEN, every rung's
-    // first bar of the day begins exactly at 09:15. What is left over is a
+    // first bar of the day begins exactly at 09:15 — EVERY width, since the
+    // grid restarts at each 09:15 (satk-3, D-4550, below). What is left over is a
     // SHORT LAST BAR wherever the VENUE's session length does not divide by the
     // rung — and that is a property of the venue row, not of the rung. The
     // 375-minute index session leaves one at 2, 10, 30 and 60; the 385-minute
@@ -233,23 +337,32 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     // A sign error that is invisible on seven rungs out of eight is the reason
     // this is asserted against a real session rather than reasoned about.
     //
-    // Negative is fine: `div_euclid` floors, so a negative anchor shifts the
-    // grid without ever rounding toward zero. Every width in `Timeframe::KNOWN`
-    // divides 86,400, so adding a day to the anchor would be equivalent — the
-    // negative form is written because it is the arithmetic, not a workaround.
-    const OPEN_ANCHOR_MICROS: i64 = IST_ANCHOR_MICROS
-        - (store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT as i64) * 60 * 1_000_000;
-    let anchor = if bucket.secs() >= 86_400 {
-        IST_ANCHOR_MICROS
-    } else {
-        OPEN_ANCHOR_MICROS
-    };
-    let width = i64::from(bucket.secs()) * 1_000_000;
+    // Negative is fine: `div_euclid` and `rem_euclid` floor, so a negative
+    // anchor shifts the grid without ever rounding toward zero. Every width in
+    // `Timeframe::KNOWN` divides 86,400, so adding a day to the anchor would be
+    // equivalent — the negative form is written because it is the arithmetic,
+    // not a workaround. It is the module's `OPEN_ANCHOR_MICROS`.
+    //
+    // ══ AND THE INTRADAY GRID RESTARTS AT EVERY 09:15 (satk-3, D-4550) ══
+    //
+    // A width that does not divide a day — 7 s, 7 or 75 minutes, 3,607 s, all
+    // admitted since D-1532 — used to walk ONE grid continuously from the
+    // anchor, so its edges sat at a different clock offset every day: 7 s
+    // stamped the bar holding the 09:15:00 snapshot at 09:14:57 on 2024-06-03
+    // and 09:14:58 on 2024-06-04, and 50,000 s at 02:55. That is the leading
+    // stub the paragraph above calls a lie, back for exactly the widths the
+    // store files no rung for. `bucket_start` now takes the offset into the
+    // bucket as `((t + A) mod day) mod w`: 09:15 is an edge of every grid every
+    // day, and the bucket cut short is the one ending at the next 09:15,
+    // overnight. For a width that divides a day the two grids are the same
+    // edge for edge, so the table above still holds. `runner::resample`
+    // already cut its grid this way (D-1430); now the fold agrees with it at
+    // every width, not only the dividing ones.
 
     // THE EXACT BUCKET COUNT, RESERVED ONCE — this was a bare `Vec::new()`.
     //
-    // The output is one bar per BUCKET, and the bucket a snapshot falls in is
-    // `(ts - anchor).div_euclid(width)`. So the number of buckets the batch can
+    // The output is one bar per BUCKET, and the bucket a snapshot falls in has
+    // one ordinal on its grid. So the number of buckets the batch can
     // possibly touch is the first and last snapshot's bucket indices,
     // subtracted — O(1) arithmetic on two values already in hand, because the
     // loop below refuses anything out of order and the extremes are therefore
@@ -270,12 +383,16 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     // straddles a long gap would reserve for every empty bucket between. The
     // output can never exceed one bar per snapshot, so the smaller of the two
     // is the true bound and neither over-allocates.
+    //
+    // The count is the two ends' ORDINALS subtracted (`bucket_ordinal`), which
+    // counts the overnight stub a width that does not divide a day leaves
+    // before each 09:15 (D-4550); on every other width it is the bucket span
+    // of the continuous grid.
     let span_buckets = match (snapshots.first(), snapshots.last()) {
-        (Some(first), Some(last)) if width > 0 => {
-            let from = first.ts_micros.saturating_sub(anchor).div_euclid(width);
-            let to = last.ts_micros.saturating_sub(anchor).div_euclid(width);
-            usize::try_from(to.saturating_sub(from).saturating_add(1)).unwrap_or(usize::MAX)
-        }
+        (Some(first), Some(last)) => usize::try_from(
+            bucket_ordinal(last.ts_micros, bucket) - bucket_ordinal(first.ts_micros, bucket) + 1,
+        )
+        .unwrap_or(usize::MAX),
         _ => 0,
     };
     let mut out: Vec<Bar> = Vec::with_capacity(span_buckets.min(snapshots.len()));
@@ -327,19 +444,9 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
         //
         // Checked at both ends. Saturating here would silently file a bar in
         // the wrong bucket rather than refuse, which `CLAUDE.md` §4 bans.
-        let shifted = snap
-            .ts_micros
-            .checked_add(anchor)
-            .ok_or(FoldError::AnchorOverflow {
-                ts_micros: snap.ts_micros,
-            })?;
-        let start = shifted
-            .div_euclid(width)
-            .checked_mul(width)
-            .and_then(|edge| edge.checked_sub(anchor))
-            .ok_or(FoldError::AnchorOverflow {
-                ts_micros: snap.ts_micros,
-            })?;
+        let start = bucket_start(snap.ts_micros, bucket).ok_or(FoldError::AnchorOverflow {
+            ts_micros: snap.ts_micros,
+        })?;
 
         if open_at == Some(start) {
             let Some(bar) = out.last_mut() else {
@@ -879,9 +986,12 @@ pub fn complete_minutes_with_calendar(
     );
     for bar in candidates {
         let start = bar.ts_micros;
-        let end = start
-            .checked_add(i64::from(bucket.secs()) * 1_000_000)
-            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
+        // CUT AT THE NEXT 09:15 where the grid restarts (D-4550): the bucket a
+        // width that does not divide a day leaves before the open ends there,
+        // and reading on to `start + w` would count the session's own minutes
+        // into it. On a dividing width this is `start + w`.
+        let end =
+            bucket_end(start, bucket).ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
         let (day, midnight) = ist_day_of(start)?;
         let new_day = previous_day != Some(day);
         if new_day {
@@ -1403,5 +1513,166 @@ mod guard {
             "3 minutes is not a whole multiple of 5 minutes — a bucket edge \
              would fall inside a source bar"
         );
+    }
+}
+
+/// The grid arithmetic itself (satk-3, D-4550): the restart at every 09:15
+/// changes nothing for a width that divides a day, and every width's buckets
+/// stay inside one 09:15-to-09:15 grid day.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod grid {
+    use super::{
+        Bucket, DAY_MICROS, IST_ANCHOR_MICROS, OPEN_ANCHOR_MICROS, bucket_end, bucket_ordinal,
+        bucket_start,
+    };
+
+    /// 2024-06-03 09:15:00 IST as UTC microseconds, the audit probe's day.
+    const OPEN: i64 = 1_717_386_300_000_000;
+
+    /// Stamps spread across years, both signs, every phase of a day, and the
+    /// two minutes either side of the open and the close.
+    fn stamps() -> Vec<i64> {
+        let mut out = Vec::new();
+        for day in [-40_000_i64, -1, 0, 1, 2, 19_877, 30_000] {
+            for second in (0..86_400_i64).step_by(1_303) {
+                out.push(OPEN + day * DAY_MICROS + second * 1_000_000);
+            }
+        }
+        for at in [-60, -1, 0, 1, 59, 60, 22_440, 22_500, 22_501] {
+            out.push(OPEN + at * 1_000_000);
+        }
+        out
+    }
+
+    /// The grid this module walked before D-4550: one continuous grid from
+    /// the anchor, `floor((t + A) / w) * w - A`.
+    fn continuous(ts: i64, bucket: Bucket) -> i64 {
+        let width = i64::from(bucket.secs()) * 1_000_000;
+        let anchor = if bucket.secs() >= 86_400 {
+            IST_ANCHOR_MICROS
+        } else {
+            OPEN_ANCHOR_MICROS
+        };
+        (ts + anchor).div_euclid(width) * width - anchor
+    }
+
+    /// EVERY WIDTH THAT DIVIDES A DAY KEEPS ITS EDGES, ITS ENDS AND ITS SPANS.
+    /// All 96 divisors of 86,400 — every store rung among them — so nothing
+    /// already written moves.
+    #[test]
+    fn a_width_that_divides_a_day_keeps_the_continuous_grid() {
+        let divisors: Vec<u32> = (1..=86_400_u32).filter(|w| 86_400 % w == 0).collect();
+        assert_eq!(divisors.len(), 96, "the premise: 86,400 has 96 divisors");
+        let stamps = stamps();
+        let first = stamps.first().copied().expect("stamps");
+        for secs in divisors {
+            let bucket = Bucket::of_secs(secs).expect("a real width");
+            let width = i64::from(secs) * 1_000_000;
+            for &ts in &stamps {
+                let start = bucket_start(ts, bucket).expect("in range");
+                assert_eq!(start, continuous(ts, bucket), "{secs}s at {ts}");
+                assert_eq!(bucket_end(start, bucket), Some(start + width), "{secs}s");
+                assert_eq!(
+                    bucket_ordinal(ts, bucket) - bucket_ordinal(first, bucket),
+                    i128::from((continuous(ts, bucket) - continuous(first, bucket)) / width),
+                    "{secs}s: ordinals count the continuous grid's buckets"
+                );
+            }
+        }
+    }
+
+    /// EVERY OTHER WIDTH RESTARTS AT 09:15: a bucket never holds both sides
+    /// of an open, and the one cut short ends exactly at the next open.
+    #[test]
+    fn a_width_that_does_not_divide_a_day_restarts_at_every_open() {
+        let stamps = stamps();
+        for secs in [7_u32, 420, 4_500, 3_607, 50_000, 86_399] {
+            let bucket = Bucket::of_secs(secs).expect("a real width");
+            let width = i64::from(secs) * 1_000_000;
+            for &ts in &stamps {
+                let start = bucket_start(ts, bucket).expect("in range");
+                let end = bucket_end(start, bucket).expect("in range");
+                assert!(start <= ts && ts < end, "{secs}s: {start} <= {ts} < {end}");
+                let latest_open = OPEN + (ts - OPEN).div_euclid(DAY_MICROS) * DAY_MICROS;
+                assert!(
+                    start >= latest_open,
+                    "{secs}s: the bucket starts after its open"
+                );
+                assert!(
+                    end <= latest_open + DAY_MICROS,
+                    "{secs}s: and ends by the next"
+                );
+                assert!(
+                    end == start + width || end == latest_open + DAY_MICROS,
+                    "{secs}s: only the overnight bucket is cut"
+                );
+                assert_eq!(bucket_start(start, bucket), Some(start), "{secs}s: an edge");
+            }
+            for day in [-1_i64, 0, 1, 7] {
+                let open = OPEN + day * DAY_MICROS;
+                assert_eq!(
+                    bucket_start(open, bucket),
+                    Some(open),
+                    "{secs}s opens at 09:15"
+                );
+                let before = bucket_start(open - 1, bucket).expect("in range");
+                assert_eq!(
+                    bucket_end(before, bucket),
+                    Some(open),
+                    "{secs}s: the bucket before 09:15 ends at it"
+                );
+                assert_eq!(
+                    bucket_ordinal(open, bucket) - bucket_ordinal(open - 1, bucket),
+                    1,
+                    "{secs}s: the overnight stub and the open are neighbours"
+                );
+            }
+        }
+    }
+
+    /// THE DAILY RUNG IS UNTOUCHED: midnight to midnight, never cut at 09:15.
+    #[test]
+    fn the_daily_rung_keeps_midnight_and_a_whole_day() {
+        let midnight = OPEN - 555 * 60 * 1_000_000;
+        for ts in [
+            midnight,
+            OPEN - 1,
+            OPEN,
+            OPEN + 1,
+            midnight + DAY_MICROS - 1,
+        ] {
+            assert_eq!(bucket_start(ts, Bucket::DAY), Some(midnight), "{ts}");
+        }
+        assert_eq!(
+            bucket_end(midnight, Bucket::DAY),
+            Some(midnight + DAY_MICROS)
+        );
+        assert_eq!(
+            bucket_ordinal(midnight + DAY_MICROS, Bucket::DAY)
+                - bucket_ordinal(midnight, Bucket::DAY),
+            1
+        );
+    }
+
+    /// THE i64 EDGES REFUSE WHERE THEY ALWAYS DID. `i64::MIN` has no anchored
+    /// value on either grid, `i64::MAX` none on the daily one, and an end past
+    /// `i64::MAX` is refused rather than wrapped.
+    #[test]
+    fn the_i64_edges_refuse_and_never_wrap() {
+        for secs in [60_u32, 420, 3_607, 86_399, 86_400] {
+            let bucket = Bucket::of_secs(secs).expect("a real width");
+            assert_eq!(bucket_start(i64::MIN, bucket), None, "{secs}s");
+            assert_eq!(bucket_end(i64::MAX, bucket), None, "{secs}s");
+            let _ = bucket_ordinal(i64::MIN, bucket);
+            let _ = bucket_ordinal(i64::MAX, bucket);
+        }
+        assert_eq!(bucket_start(i64::MAX, Bucket::DAY), None);
+        let near = bucket_start(i64::MAX, Bucket::MINUTE).expect("an intraday start fits");
+        assert!(i64::MAX - near < 60_000_000, "within a minute of the end");
+        // The last instant the open anchor can shift is still bucketed.
+        let lowest = i64::MIN - OPEN_ANCHOR_MICROS;
+        assert_eq!(bucket_start(lowest - 1, Bucket::MINUTE), None);
+        assert!(bucket_start(lowest + 60_000_000, Bucket::MINUTE).is_some());
     }
 }

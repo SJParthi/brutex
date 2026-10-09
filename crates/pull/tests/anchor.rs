@@ -882,3 +882,187 @@ fn a_day_the_venue_refuses_is_named_once_not_once_per_bucket() {
         }
     }
 }
+
+/// One minute bar at `ts_secs` priced `price`, volume one, so a folded bar's
+/// open and close name the minutes it holds and its volume counts them.
+fn priced(ts_secs: i64, price: i64) -> Bar {
+    Bar {
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        ..minute(ts_secs)
+    }
+}
+
+/// **EVERY WIDTH FROM ONE TO 375 MINUTES OPENS EACH SESSION AT 09:15** —
+/// satk-3, D-4550.
+///
+/// Two consecutive sessions, a stray 15:30 minute after the first close and a
+/// stray 09:14 minute before the second open, folded at every whole-minute
+/// width up to a session, from snapshots and from minute bars. A width that
+/// does not divide a day (7, 11, 25, 75, 125, 375 minutes and 336 others)
+/// walked one continuous grid before D-4550, so on the second day its first
+/// bar could start before 09:15 and hold the open. For every width now:
+/// stamps strictly increase; each session's first bar is stamped exactly at
+/// its 09:15, opens at that session's first price and holds exactly `width`
+/// minutes; the bar before it holds no minute of that session; and the
+/// 15:30 minute stays on its own day's grid.
+#[test]
+fn every_width_up_to_a_session_opens_each_day_at_the_open() {
+    const DAY: i64 = 86_400;
+    let price = |day: i64, minute: i64| 10_000 + day * 1_000 + minute;
+    let mut bars = Vec::new();
+    for day in 0..2 {
+        let open = OPEN_UTC + day * DAY;
+        if day == 1 {
+            bars.push(priced(open - 60, 5));
+        }
+        bars.extend((0..SESSION_MINUTES).map(|m| priced(open + m * 60, price(day, m))));
+        if day == 0 {
+            bars.push(priced(open + SESSION_MINUTES * 60, 7));
+        }
+    }
+    for minutes in 1..=SESSION_MINUTES {
+        let secs = u32::try_from(minutes * 60).unwrap();
+        let bucket = Bucket::of_secs(secs).unwrap();
+        let from_bars = pull::fold::fold_from_bars(&bars, bucket, Bucket::MINUTE).unwrap();
+        let out = fold(&bars, bucket).unwrap();
+        assert_eq!(out, from_bars, "{minutes}min: one grid on both paths");
+        assert!(
+            out.windows(2).all(|p| p[0].ts_micros < p[1].ts_micros),
+            "{minutes}min: stamps strictly increase"
+        );
+        assert_eq!(
+            out.iter().map(|b| b.volume).sum::<i64>(),
+            2 * SESSION_MINUTES + 2,
+            "{minutes}min: every minute lands once"
+        );
+        for day in 0..2 {
+            let open = (OPEN_UTC + day * DAY) * 1_000_000;
+            let at = out.partition_point(|b| b.ts_micros < open);
+            let first = out[at];
+            assert_eq!(
+                first.ts_micros, open,
+                "{minutes}min day {day}: stamped 09:15"
+            );
+            assert_eq!(
+                first.open,
+                price(day, 0),
+                "{minutes}min day {day}: the open"
+            );
+            assert_eq!(first.volume, minutes, "{minutes}min day {day}: a whole bar");
+            if let Some(before) = at.checked_sub(1).map(|i| out[i]) {
+                assert!(
+                    before.close < price(day, 0),
+                    "{minutes}min day {day}: the bar before 09:15 holds no minute \
+                     of the session (close {})",
+                    before.close
+                );
+            }
+        }
+        // 15:30 on day one: in a bar stamped on day one's grid, before day two.
+        let close = (OPEN_UTC + SESSION_MINUTES * 60) * 1_000_000;
+        let holder = out[out.partition_point(|b| b.ts_micros <= close) - 1];
+        assert!(
+            holder.ts_micros >= OPEN_UTC * 1_000_000 && holder.close == 7,
+            "{minutes}min: the 15:30 minute is the last of its own day's bar"
+        );
+    }
+}
+
+/// **THE AUDIT'S OWN PROBE, NOW STAMPED AT 09:15** — satk-3, D-4550.
+///
+/// Snapshots at 09:15:00 IST on 2024-06-03 and 2024-06-04 stamped 09:14:57
+/// and 09:14:58 at 7 s, 02:55 at 50,000 s and 03:43:43 at 86,399 s before
+/// D-4550. Each now lands in a bar stamped at its own 09:15:00, and the
+/// 09:14:59 snapshot before it never shares that bar.
+#[test]
+fn the_probe_widths_stamp_each_09_15_snapshot_at_09_15() {
+    // 2024-06-03 09:15:00 IST as a UTC epoch second.
+    const PROBE_OPEN: i64 = 1_717_386_300;
+    for secs in [7_u32, 3_607, 50_000, 86_399] {
+        let bucket = Bucket::of_secs(secs).unwrap();
+        for day in 0..2_i64 {
+            let open = PROBE_OPEN + day * 86_400;
+            let snaps = [priced(open - 1, 1), priced(open, 2), priced(open + 1, 3)];
+            let out = fold(&snaps, bucket).unwrap();
+            assert_eq!(out.len(), 2, "{secs}s day {day}: 09:14:59 apart from 09:15");
+            assert!(out[0].ts_micros <= (open - 1) * 1_000_000);
+            assert_eq!(out[0].close, 1, "{secs}s day {day}: pre-open alone");
+            assert_eq!(
+                out[1].ts_micros,
+                open * 1_000_000,
+                "{secs}s day {day}: the 09:15:00 snapshot's bar starts at 09:15:00"
+            );
+            assert_eq!((out[1].open, out[1].close), (2, 3), "{secs}s day {day}");
+        }
+    }
+}
+
+/// **DERIVATION AT EVERY WIDTH UP TO A SESSION: TWO DAYS, TWICE ONE DAY** —
+/// satk-3, D-4550.
+///
+/// `complete_minutes` folds through the same grid and then reads each
+/// bucket's minutes up to its end. Two full sessions certify exactly twice
+/// one session's bars at every width, each day's first at 09:15, with no
+/// diagnostic. And a stray 09:14 minute before the second open sits in the
+/// overnight bucket, which ends AT 09:15: reading on to `start + width`, as
+/// the end was before D-4550, would count the session's own minutes into it
+/// and withhold the session's first bar.
+#[test]
+fn derivation_at_every_width_certifies_each_session_from_its_open() {
+    const DAY: i64 = 86_400;
+    let mut two = session();
+    two.extend((0..SESSION_MINUTES).map(|m| minute(OPEN_UTC + DAY + m * 60)));
+    let mut stray = session();
+    stray.push(minute(OPEN_UTC + DAY - 60));
+    stray.extend((0..SESSION_MINUTES).map(|m| minute(OPEN_UTC + DAY + m * 60)));
+    for minutes in 1..=SESSION_MINUTES {
+        let bucket = Bucket::of_secs(u32::try_from(minutes * 60).unwrap()).unwrap();
+        let (one_day, _) = pull::fold::complete_minutes(&session(), bucket).unwrap();
+        let (complete, diagnostics) = pull::fold::complete_minutes(&two, bucket).unwrap();
+        assert!(diagnostics.is_empty(), "{minutes}min: {diagnostics:?}");
+        assert_eq!(complete.len(), 2 * one_day.len(), "{minutes}min");
+        assert_eq!(
+            complete.iter().map(|b| b.volume).sum::<i64>(),
+            2 * SESSION_MINUTES,
+            "{minutes}min"
+        );
+        let second = (OPEN_UTC + DAY) * 1_000_000;
+        assert_eq!(complete[0].ts_micros, OPEN_UTC * 1_000_000, "{minutes}min");
+        assert_eq!(complete[one_day.len()].ts_micros, second, "{minutes}min");
+
+        let (kept, diagnostics) = pull::fold::complete_minutes(&stray, bucket).unwrap();
+        assert_eq!(
+            kept, complete,
+            "{minutes}min: the stray minute certifies nothing"
+        );
+        assert_eq!(diagnostics.len(), 1, "{minutes}min: {diagnostics:?}");
+        assert!(
+            diagnostics[0].contains("observed 1, scheduled 0"),
+            "{minutes}min: only the overnight bucket is named: {diagnostics:?}"
+        );
+    }
+}
+
+/// **ONE RESERVATION, COUNTED ACROSS THE NIGHT** — satk-3, D-4550.
+///
+/// The fold reserves its output from the two ends' bucket ordinals, capped at
+/// the input. At seven minutes one grid day holds 206 buckets (86,400 / 420
+/// rounded up: 205 whole ones and the overnight stub), so two sessions span
+/// the 206 from the first 09:15 to the second plus the 54 the second session
+/// reaches, 260; one session spans exactly the 54 bars it fills. The hour
+/// rung divides a day and reserves its continuous span, 24 + 7 = 31.
+#[test]
+fn the_fold_reserves_the_buckets_between_its_ends_across_the_night() {
+    let seven = Bucket::of_secs(420).unwrap();
+    let one = fold(&session(), seven).unwrap();
+    assert_eq!((one.len(), one.capacity()), (54, 54));
+    let mut two = session();
+    two.extend((0..SESSION_MINUTES).map(|m| minute(OPEN_UTC + 86_400 + m * 60)));
+    let both = fold(&two, seven).unwrap();
+    assert_eq!((both.len(), both.capacity()), (108, 260));
+    let hour = fold(&two, Bucket::of_secs(3_600).unwrap()).unwrap();
+    assert_eq!((hour.len(), hour.capacity()), (14, 31));
+}

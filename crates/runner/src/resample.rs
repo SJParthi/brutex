@@ -50,10 +50,11 @@
 //! 10, 30 and 60 minutes the first bar of each session was stamped BEFORE the
 //! open (09:14, 09:10, 09:00, 09:00) and held only part of a period, and a
 //! period that does not divide a day (7, 75 minutes) drifted to a different
-//! clock offset every day, as it still would on `pull::fold`'s continuous grid
-//! (the store files no such rung). `runner` cannot depend on `pull`, so the rule is
-//! restated here rather than imported; `crates/cli/tests/resample_matches_fold.rs`
-//! holds the two to the same answer for every period that divides a day.
+//! clock offset every day. `pull::fold` walked that continuous grid too until
+//! D-4550 (satk-3) made it restart at every 09:15 as this one does. `runner`
+//! cannot depend on `pull`, so the rule is restated here rather than imported;
+//! `crates/cli/tests/resample_matches_fold.rs` holds the two to the same answer
+//! for the store's periods and for 7 and 75 minutes.
 //!
 //! What anchoring at the open leaves is a SHORT LAST bar when the period does
 //! not divide the session: 375 minutes at 60 ends with 15:15-15:30. That bar is
@@ -221,12 +222,13 @@ impl std::error::Error for ResampleError {}
 /// An intraday period walks a grid that RESTARTS at every 09:15 IST: the
 /// offset into the bucket is `((t + A) mod day) mod period`, with `A` the open
 /// anchor. For every period that divides a day — every rung the store files —
-/// restarting at each open is the same grid `pull::fold` walks continuously
-/// from its anchor, edge for edge. For one that does not (7, 75 minutes) a
+/// restarting at each open is the same grid as one walked continuously from
+/// the anchor, edge for edge. For one that does not (7, 75 minutes) a
 /// continuous grid moves to a different clock offset each day; restarting
 /// keeps the first bar of every session at 09:15, and the bucket cut short is
-/// the one ending at the next 09:15, overnight. A period of a day or more keeps
-/// `pull::fold`'s continuous IST-midnight grid.
+/// the one ending at the next 09:15, overnight. `pull::fold` restarts the same
+/// way since D-4550. A period of a day or more keeps `pull::fold`'s continuous
+/// IST-midnight grid.
 ///
 /// `rem_euclid`, never `%`: the intraday anchor is negative, so the anchored
 /// value is negative for any instant before 09:15 IST on 1 Jan 1970, and a

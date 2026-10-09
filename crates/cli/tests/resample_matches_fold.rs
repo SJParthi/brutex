@@ -67,7 +67,9 @@ fn minutes() -> Vec<Candle> {
 fn runner_resample_and_pull_fold_agree_on_every_period() {
     let candles = minutes();
     let bars: Vec<Bar> = candles.iter().map(as_bar).collect();
-    for minutes in [2_u32, 3, 5, 10, 15, 30, 60, 1_440] {
+    // 7 and 75 do not divide a day: both grids restart at every 09:15 since
+    // D-4550 (satk-3), and before it `pull::fold` drifted where this did not.
+    for minutes in [2_u32, 3, 5, 7, 10, 15, 30, 60, 75, 1_440] {
         let period = Period::minutes(minutes).expect("at least two minutes");
         let bucket = Bucket::of_secs(minutes * 60).expect("non-zero");
         let resampled: Vec<Bar> = resample(&candles, period)

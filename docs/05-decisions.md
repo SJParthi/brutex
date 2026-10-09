@@ -68996,3 +68996,48 @@ ending where the next starts) to `pull`'s answer. The copies stay; the
 
 **Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
 join the auto-merge workflow's sensitive paths (D-3510) is not decided here.
+
+### D-4550 — Every intraday fold grid restarts at 09:15, so a width that does not divide a day opens each session at the open — 2026-10-09
+
+**What was observed (satk-3).** `pull::fold::Bucket::of_secs` admits every
+width from one second to one day; D-1532 kept widths such as 7 s and 3,607 s
+deliberately. `fold` then cut every intraday width on ONE continuous grid
+from the open anchor, which lands on 09:15 every day only when the width
+divides 86,400 s. Any other width drifted: snapshots at 09:15:00 on
+2024-06-03 and 2024-06-04 were stamped 09:14:57 and 09:14:58 at 7 s, 02:55 at
+50,000 s and 03:43:43 at 86,399 s, each bar holding the open while stamped
+before it — the leading stub the fold's own comment calls a lie, and that
+comment said every rung's first bar begins at 09:15. Production folds only
+store rungs, all of which divide a day, so no stored bar was affected.
+
+**Decision.** The widths stay admitted (D-1532's admission stands; a
+divides-a-day refusal would also refuse 25, 75 and 125 minutes, which tile
+the 375-minute session exactly). What changes is the grid: an intraday bucket
+is cut from the latest 09:15 IST at or before its stamp, offset
+`((t + A) mod day) mod w`, `A` the open anchor — the rule
+`runner::resample::bucket_start` has used since D-1430. For a width that
+divides a day this is the continuous grid edge for edge (09:15 is an edge of
+it every day), so no stored rung moves; `pull::fold::grid` checks all 96
+divisors of 86,400. For any other width the bucket cut short is the one
+ending at the next 09:15, overnight, and `complete_minutes` ends that bucket
+at the open instead of at `start + w`, so it never counts the session's own
+minutes. The daily rung keeps the IST-midnight grid. The output reservation
+counts the buckets between the two ends' ordinals, overnight stub included.
+The `i64` refusals are where they were (`i64::MIN` has no anchored value; an
+end past `i64::MAX` is refused).
+
+**What it changes.** Bars folded at a width that does not divide a day — no
+store rung, no production caller — now start each session at 09:15. Nothing
+stored, no run identity, no digest and no evidence version moves.
+`crates/cli/tests/resample_matches_fold.rs` (RSM-02) now also holds
+`runner::resample` and `pull::fold` to one answer at 7 and 75 minutes; it was
+edited, not run, here (`cli` is not built by this fixer).
+
+**Proof.** `pull::anchor::every_width_up_to_a_session_opens_each_day_at_the_open`
+(every width 1..=375 minutes, two sessions, a 09:14 and a 15:30 stray minute),
+`pull::anchor::the_probe_widths_stamp_each_09_15_snapshot_at_09_15`,
+`pull::anchor::derivation_at_every_width_certifies_each_session_from_its_open`,
+`pull::anchor::the_fold_reserves_the_buckets_between_its_ends_across_the_night`
+and `pull::fold::grid::*` (DEFP-01, DEFP-02). The four `anchor` tests fail on
+the code before this change; the derivation one also fails when the
+overnight bucket's end is put back to `start + w`.
