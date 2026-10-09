@@ -65120,3 +65120,23 @@ exchange that trades Monday to Friday"". Only comments changed in `pull`, and
 no string literal was added there (gates 1c and 1d).
 
 Invariant L1FC-05.
+
+### D-4735 — `withhold_holed_days` is deleted; the census bound is O(d), not d log d — 2026-10-09
+
+**Finding.** G5-4. `minute_gaps::withhold_holed_days` took its day set from
+`days_with_interior_gaps` alone. W2-cli9-3 (D-1662) replaced that census
+because it cannot see a session that stops early. The function was still
+`pub`, and nothing called it. A new test found two release callers of the
+interior census, `days_with_minute_holes` and `withhold_holed_days`, where
+there should be one. `docs/06-limits.md` priced the census at "O(signal +
+minutes + d log d)", but D-1662 replaced the sort with an O(d) merge.
+
+**The decision.** The function is deleted, so the edge-blind census has one
+caller, inside `days_with_minute_holes`, and a test pins that. Its three tests
+now drive the doors' real path: `days_with_minute_holes`, `withhold` on each
+slice, and `GapExclusion::signal_only` or `one_series`. A new case,
+`a_session_that_stops_early_is_withheld`, shows that the interior census finds
+nothing where the overlay census withholds the day. `docs/06-limits.md` now
+says O(signal + minutes + d).
+
+Invariants L1FC-06, L1FC-07.

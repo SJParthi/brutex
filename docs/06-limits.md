@@ -15487,8 +15487,10 @@ measured bound**: read off the source, no bench times it. With
 `minute_gaps::days_with_minute_holes` (W2-cli9-3) withholds, before any column
 is built, every day with an interior minute gap and every day holding a
 signal bar whose demanded closing minute is absent. **O(signal + minutes +
-d log d)** for d flagged days, one `kind_of` lookup per signal bar, off every
-per-bar sweep path. **UNVERIFIED as a measured bound**: read off the source.
+d)** for d flagged days: the two ascending day lists are merged in O(d).
+This said `d log d` until G5-4 (D-4735), after D-1662 had removed the sort.
+One `kind_of` lookup per signal bar, off every per-bar sweep path.
+**UNVERIFIED as a measured bound**: read off the source.
 
 `column_withholding_at_build` and `exact_minute_withholding_unsourceable_days`
 keep their 64-pass loops (W2-cli8-6). Each pass still reloads the daily and

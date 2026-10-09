@@ -431,37 +431,48 @@ pub fn withhold(bars: &[Candle], days: &[i64]) -> (Vec<Candle>, u64) {
     (kept, removed)
 }
 
-/// Withhold the holed days from a signal series and its exact-minute stream.
-///
-/// **Both slices are filtered by ONE measured day set, and that is the whole
-/// correctness argument.** The set is derived from the minute stream, because
-/// the minute stream is what the overlay indexes; filtering the signal by a
-/// different set would leave a signal bar whose closing minute had been removed,
-/// which is the refusal this exists to prevent, arriving by a new route.
-#[must_use]
-pub fn withhold_holed_days(
-    signal: &[Candle],
-    minutes: &[Candle],
-) -> (Vec<Candle>, Vec<Candle>, GapExclusion) {
-    let days = days_with_interior_gaps(minutes);
-    if days.is_empty() {
-        return (signal.to_vec(), minutes.to_vec(), GapExclusion::none());
-    }
-    let (kept_signal, signal_bars) = withhold(signal, &days);
-    let (kept_minutes, minute_bars) = withhold(minutes, &days);
-    (
-        kept_signal,
-        kept_minutes,
-        GapExclusion {
-            days,
-            signal_bars,
-            minute_bars,
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
+
+    /// G5-4 (D-4735): no release-build function withholds by the edge-blind
+    /// interior census alone. `withhold_holed_days` derived its day set from
+    /// [`days_with_interior_gaps`] only -- the census W2-cli9-3 (D-1662)
+    /// replaced because it cannot see a session that stops early -- and stayed
+    /// `pub` with no caller, so the first door to reach for it would have
+    /// brought that defect back. The one release call of the interior census
+    /// must be the one inside [`days_with_minute_holes`].
+    #[test]
+    fn only_the_overlay_census_calls_the_interior_census() {
+        let mut sources = Vec::new();
+        crate::readonly_file::tests::release_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut sources,
+        );
+        assert!(sources.len() > 100, "premise: crates/cli/src was walked");
+        let mut callers = Vec::new();
+        for (path, text) in &sources {
+            for (at, _) in text.match_indices("days_with_interior_gaps(") {
+                let head = text.get(..at).unwrap_or("");
+                let line = head.rsplit('\n').next().unwrap_or("");
+                if line.trim_start().starts_with("//") || head.ends_with("fn ") {
+                    continue;
+                }
+                let caller = head
+                    .rfind("fn ")
+                    .and_then(|fn_at| text.get(fn_at + 3..))
+                    .and_then(|name| name.split(['(', '<']).next())
+                    .unwrap_or("?");
+                callers.push(format!("{}: {caller}", path.display()));
+            }
+        }
+        assert_eq!(callers.len(), 1, "{callers:#?}");
+        assert!(
+            callers
+                .iter()
+                .all(|c| c.ends_with("minute_gaps.rs: days_with_minute_holes")),
+            "{callers:#?}"
+        );
+    }
 
     /// `days_with_minute_holes` unions its two ascending lists by a merge, not
     /// a sort (gate 11 rule 4, D-1662): ascending, each day once, nothing
@@ -560,7 +571,17 @@ mod tests {
         assert_eq!(days_with_interior_gaps(&bars), vec![18_501, 19_058]);
     }
 
-    /// Both slices lose the SAME days, which is the property the overlay needs.
+    /// Five minutes, the signal length the tests below use.
+    const FIVE_MINUTES: i64 = 5 * MINUTE_MICROS;
+
+    /// The census every door uses, with no session close known, so each signal
+    /// bar demands its own last minute.
+    fn holes(signal: &[Candle], minutes: &[Candle]) -> Vec<i64> {
+        days_with_minute_holes(signal, minutes, FIVE_MINUTES, |_| None)
+    }
+
+    /// Both slices lose the SAME days, which is the property the overlay needs:
+    /// one census, then [`withhold`] on each slice with that one day set.
     #[test]
     fn the_signal_and_the_minute_stream_lose_the_same_days() {
         let mut minutes: Vec<Candle> = Vec::new();
@@ -574,17 +595,12 @@ mod tests {
             signal.extend((0..4).map(|b| bar_on(day, b * 5)));
         }
 
-        let (kept_signal, kept_minutes, excluded) = withhold_holed_days(&signal, &minutes);
-        assert_eq!(excluded.day_numbers(), &[19_001]);
-        assert_eq!(excluded.days(), 1);
-        assert_eq!(excluded.signal_bars(), 4, "the holed day's signal bars go");
-        assert_eq!(
-            excluded.minute_bars(),
-            4,
-            "and its minute bars go with them"
-        );
-        assert!(!excluded.is_empty());
-
+        let days = holes(&signal, &minutes);
+        assert_eq!(days, vec![19_001]);
+        let (kept_signal, signal_bars) = withhold(&signal, &days);
+        let (kept_minutes, minute_bars) = withhold(&minutes, &days);
+        assert_eq!(signal_bars, 4, "the holed day's signal bars go");
+        assert_eq!(minute_bars, 4, "and its minute bars go with them");
         for bar in kept_signal.iter().chain(kept_minutes.iter()) {
             assert_ne!(
                 indicators::ist_day(bar.ts_micros),
@@ -592,6 +608,31 @@ mod tests {
                 "no bar of a withheld day may survive in either slice"
             );
         }
+        let excluded = GapExclusion::signal_only(days, signal_bars);
+        assert_eq!(excluded.day_numbers(), &[19_001]);
+        assert_eq!(excluded.days(), 1);
+        assert_eq!(excluded.signal_bars(), 4);
+        assert_eq!(excluded.minute_bars(), 0, "a coarse door keeps its minutes");
+        assert!(!excluded.is_empty());
+    }
+
+    /// G5-4 (D-4735): a session that stops early is withheld. The interior
+    /// census alone -- all the deleted `withhold_holed_days` asked -- sees no
+    /// hole, because the step from the last minute crosses the night; the
+    /// overlay census sees the closing minute the last signal bar demands.
+    #[test]
+    fn a_session_that_stops_early_is_withheld() {
+        let minutes: Vec<Candle> = (0..19).map(|m| bar_on(19_000, m)).collect();
+        let signal: Vec<Candle> = (0..4).map(|b| bar_on(19_000, b * 5)).collect();
+        assert!(
+            days_with_interior_gaps(&minutes).is_empty(),
+            "premise: the interior census cannot see an early stop"
+        );
+        let days = holes(&signal, &minutes);
+        assert_eq!(days, vec![19_000], "the 09:34 closing minute is missing");
+        let (kept, removed) = withhold(&signal, &days);
+        assert!(kept.is_empty());
+        assert_eq!(removed, 4);
     }
 
     /// A gap-free span withholds nothing and copies both slices unchanged.
@@ -599,14 +640,18 @@ mod tests {
     fn a_gap_free_span_withholds_nothing() {
         let minutes: Vec<Candle> = (0..40).map(|m| bar_on(19_000, m)).collect();
         let signal: Vec<Candle> = (0..8).map(|b| bar_on(19_000, b * 5)).collect();
-        let (kept_signal, kept_minutes, excluded) = withhold_holed_days(&signal, &minutes);
-        assert!(excluded.is_empty());
-        assert_eq!(excluded.days(), 0);
-        assert_eq!(excluded.signal_bars(), 0);
-        assert_eq!(excluded.minute_bars(), 0);
+        let days = holes(&signal, &minutes);
+        assert!(days.is_empty());
+        let (kept_signal, signal_bars) = withhold(&signal, &days);
+        let (kept_minutes, minute_bars) = withhold(&minutes, &days);
+        assert_eq!((signal_bars, minute_bars), (0, 0));
         assert_eq!(kept_signal, signal);
         assert_eq!(kept_minutes, minutes);
+        let excluded = GapExclusion::signal_only(days, signal_bars);
+        assert!(excluded.is_empty());
+        assert_eq!(excluded.days(), 0);
         assert!(excluded.day_names().is_empty());
+        assert_eq!(excluded, GapExclusion::none());
     }
 
     /// The days are named as dates, which is what an operator can check.
@@ -616,7 +661,10 @@ mod tests {
             .iter()
             .map(|m| bar_on(19_522, *m))
             .collect();
-        let (_, _, excluded) = withhold_holed_days(&[], &minutes);
+        let days = holes(&[], &minutes);
+        let (_, removed) = withhold(&minutes, &days);
+        let excluded = GapExclusion::one_series(days, removed);
         assert_eq!(excluded.day_names(), vec!["2023-06-14".to_owned()]);
+        assert_eq!((excluded.signal_bars(), excluded.minute_bars()), (4, 4));
     }
 }
