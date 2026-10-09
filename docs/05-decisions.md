@@ -66478,3 +66478,35 @@ and gets a named refusal for each.
 audit's probe. It flips every byte of a 7,907-byte dictionary file with masks
 0x01, 0x80 and 0xff, which is 23,721 reads. Without the check 9 of them
 panicked and both tests failed; with it none panics. Proof: FXA-06.
+
+### D-4416 — A reader's time index is bound to the bars it holds, by device and inode — 2026-10-09
+
+**Finding (satk-2).** A reader opens its `.tix` lazily, by path, at its first
+lookup, and `confirm_index` compares only the header and the two entries
+holding the first and last committed bars. The audit replaced a month under an
+open reader by renaming in a new `.bin`, `.crc` and `.tix`. The old month held
+minutes 0–2 and 4–10; the new one held 0–7, 9 and 10. Both had ten bars with
+the same first and last stamps, so the reader accepted the new index against
+its old bars. `first_at_or_after(minute 4)` returned row 4, which in the held
+bars is minute 5, and `time_lookup` reported `Indexed`. No error was raised.
+
+**Decision.** Once its `.tix` is open, a reader's first lookup checks that the
+month's `.bin` path still names the file the handle holds: the same `dev` and
+`ino` from an `fstat` of the held handle and a `stat` of the path. If not, or
+if either `stat` is refused, the handle bisects its own bars under a new
+`time_index::Why::Replaced`. That reason is written as the usual `store.tix`
+warning and reported by `time_lookup`. The check runs after the `.tix` opens.
+So a swap that renames the `.bin` before the `.tix` cannot pair a new index
+with an unchanged `.bin` path. The reverse order puts a new `.tix` beside the
+old `.bin` for an instant, which is the stale-index case `docs/06-limits.md`
+already states, and the limits text now says which order is safe. The format
+is unchanged, so there is no new version. The cost is two `stat`s per handle,
+measured at p50 1.13 µs and p99 1.94 µs.
+
+**Evidence.**
+`a_reader_opened_before_its_month_was_replaced_never_pairs_old_bars_with_the_new_index`
+replays the audit's probe P07. With the check disabled it fails on
+`Indexed` ≠ `Bisection(Replaced)`. With the check, minute 4 is row 3 and
+every probe answers against the held bars. A reader opened after the swap
+uses the new index. A `.bin` path that names nothing makes the handle bisect.
+Proof: FXA-07.

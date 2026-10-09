@@ -12837,6 +12837,12 @@ and ending in the same slots at the same rows, passes it and answers wrong.
 Each entry's checksum catches rot in the entry a lookup reads, and a failing
 entry sends that one lookup to the bisection with a warning. A writer that
 changes a `.bin` other than through `BarFile::append` must delete its `.tix`.
+A reader opened before its month was REPLACED (a new `.bin` renamed over the
+path) no longer pairs its held bars with the new `.tix`: at its first lookup
+it checks that the `.bin` path still names the file it holds, by device and
+inode, and bisects with `Why::Replaced` when not (D-4416). A swap must rename
+the `.bin` before the `.tix`; the reverse order leaves an instant where the
+new `.tix` sits beside the old `.bin`, which is the stale case above.
 
 **One bar per slot (D-2330).** The index holds at most one bar per slot. The
 daily rung admits any whole second, and it still does. A daily month with a
@@ -16431,3 +16437,13 @@ fsync is bound by the device. Measured on this VM's ext4, 300 runs of 4 KiB:
 the directory open and fsync took p50 4.0 ms, p99 10.1 ms, max 26.2 ms. The
 file's create, write and `sync_all` took p50 4.0 ms, p99 13.9 ms, max 19.5 ms.
 No other filesystem was measured.
+
+### A reader's index is bound to its held bars for two `stat`s per handle (D-4416)
+
+A reader checks, once, at the first lookup that decides its index, that the
+`.bin` path still names the file it holds. That is one `fstat` of the held
+handle and one `stat` of the path, compared by device and inode. Measured on
+this VM's ext4, 100,000 checks against a six-deep store path: p50 1.13 µs,
+p99 1.94 µs, max 12.1 ms. The maximum is scheduler noise from concurrent
+builds, not a bound. It is paid once per handle, never per lookup. A writer
+pays nothing new: it holds the month's lock, and its index is decided at open.
