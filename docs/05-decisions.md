@@ -66625,3 +66625,18 @@ sharding; the cost of `begin` and the terminal was never timed.
 version under D-1445 and `docs/02-store-format.md`) in `cli`, and is left to
 the owner. FXB1-14.
 
+### D-4442 — A Boolean evidence page proves currency through the read that serves it — 2026-10-09
+
+**What was observed.** W1-api1-6: `statistics` and `admission` each called
+`require_current` before and after their page, around `rows`/`splits` reads
+that already hold the lease and check every linked catalog before and after.
+A warm unpinned statistics page made 8·C catalog checks, an admission page
+10·C.
+
+**Decided.** The two outer calls are removed from both. The only one left is
+the in-memory `sources` arm's, which has no bracketed read of its own. A warm
+unpinned statistics page is now 4·C (the reuse check and the page read), an
+admission page 6·C. A changed tree still refuses, from the read. One catalog
+check is measured by a proxy of its system calls. Proved by
+`an_evidence_pages_currency_cost_per_linked_catalog_is_stated`. FXB1-15.
+

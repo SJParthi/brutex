@@ -12512,14 +12512,24 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   the slot's mutex, so a concurrent request to the same route waits for it.
   `booleanoosjson` and `indexstopjson` keep the old shape (every unpinned first
   page is cold); they were not in the finding and are unchanged.
-- **The Boolean evidence pages check currency once per linked catalog, several
-  times a page (W1-api1-6).** `booleanevidencejson::admission` makes four
-  currency calls per page and `statistics` three; each walks the statistics
-  artifact's C linked source catalogs, and each check is a shared `flock`,
-  an unlock and six `metadata` calls, before and after the work. So a warm
-  page costs O(C) system calls, independent of its 1..=256 rows: the audit's
-  reading is about 112·C for an admission page. It is bounded by C, which the
-  statistics artifact fixes when it is written; nothing in the request widens it.
+- **The Boolean evidence pages check currency once per linked catalog, a
+  fixed number of times a page (W1-api1-6).** `booleanevidencejson::admission`
+  made four currency calls per page and `statistics` three, plus the reuse
+  check `detail::must_admit` makes on an unpinned page. **Since D-4442 the
+  outer pair is gone from both:** `admission` makes two currency calls (the
+  admission rows and the linked statistics rows, each bracketed by the read
+  that serves it) and `statistics` one (its `rows` or `splits`, or the in-memory
+  `sources` arm's own check). Each call walks the statistics artifact's C
+  linked source catalogs before and after its work, and each catalog check is
+  a shared `flock`, an unlock and six `metadata` calls on each side. So a warm
+  unpinned page is 4·C catalog checks for statistics and 6·C for admission,
+  was 8·C and 10·C: O(C) system calls, independent of its 1..=256 rows,
+  bounded by C, which the statistics artifact fixes when it is written. One
+  catalog check is timed by a proxy of exactly those system calls on a real
+  owner/body/receipt trio (5.5 µs / 18.6 µs / 16.3 ms (n = 20,000, load 11.49), p50 / p99 / max,
+  `latency_one_catalog_currency_check_proxy`); a saved evidence tree can be
+  built only by `cli`'s private fixtures, so the route is not timed, and the
+  page's figure is that proxy times 4·C or 6·C, an extrapolation.
 - **`/boolean-qualified-campaign.json` has no cache (W1-api1-4).**
   `booleancampaignjson::render_qualified` opens
   `QualifiedCampaign` on every GET: O(H) snapshot reads and 2H decodes over the
@@ -16418,7 +16428,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W1-api5-1, W1-pull2-0, W1-pull2-6 | `read_census` per body and per rolling answer: the whole census read, decoded and checksummed under the lock | D-0036: every committed entry is re-verified before the census is appended to. No metadata test tells an append from a rewrite plus an append (both move length and clocks), so a decoded census held across calls would append to a census that rotted in place as if it were sound | `Manifest::load` 15,857 entries (2.06 MB): 5.64 ms / 15.4 ms; 93,776 entries (12.0 MB, §34's projection): 70.7 ms / 95.6 ms |
 | W1-api5-2 | `census_now` on a miss reads every manifest | A miss is caused by a moved stamp, and for the reason above a moved stamp cannot be served by re-reading only the tail; a hit stays five `stat` calls | per manifest as the row above |
 | W1-pull1-0 | `prepare_observed_with` revalidates each day's receipt per body, O(D x B) | Per-day receipt revalidation is D-0519's guarantee; a body is accepted only against receipts proven for that body | not timed here |
-| W1-api1-6 | O(C) currency checks per page, C linked catalogs | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | not timed here |
+| W1-api1-6 | O(C) currency checks per page, C linked catalogs; since D-4442 4·C (statistics) and 6·C (admission), was 8·C and 10·C | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | one catalog check, by a proxy of its system calls: 5.5 µs / 18.6 µs / 16.3 ms (n = 20,000, load 11.49) (D-4442) |
 | W1-api2-3 | eight trade-reader slots since D-4434; a ninth candidate in rotation re-reads its trades | Any bounded cache can be made to miss by rotating keys; warm pages are O(page) | warm page 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); cold open, fixed part 70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49) (D-4434) |
 | W1-api6-3 | since D-4433 a persisting `/engine/top.json` refusal costs one record read, not its cold walk | A cached refusal would keep refusing after a repair; re-reading the one damaged record is the proof, and a repair moves the generation | one record read, the class the rows above time; counted, not timed (D-4433) |
 | W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | `begin` + terminal at 10^4 held 28 ms / 44 ms / 45.6 ms (n = 200, load 11.28); proxy 10^5 entries 28 ms / 44 ms / 49.5 ms (n = 200, load 11.15) (D-4441) |

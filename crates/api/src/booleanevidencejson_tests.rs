@@ -541,42 +541,108 @@ fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not(
     }
 }
 
-/// **A Boolean evidence page's currency checks grow with its linked catalogs,
-/// and that is stated.** W1-api1-6, D-1444.
+/// **A Boolean evidence page proves its currency through the read that serves
+/// it, once, and the count is stated.** W1-api1-6, D-1444, D-4442.
 ///
-/// The bullet must give the count the source pays: four `require_current`
-/// style calls on an admission page, three on a statistics page, each over
-/// the C linked catalogs. The source is read for the two outer calls each
-/// projection makes, so a projection that adds or drops one fails here and
-/// the bullet is revisited.
+/// `statistics` and `admission` each made one `require_current` before their
+/// page and one after it, on top of the bracketed `rows`/`splits` reads that
+/// already check every linked catalog before and after. Since D-4442 the
+/// only `require_current` left in either is the in-memory `sources` arm's,
+/// which reads nothing else that could prove it. The source is read so that
+/// putting either outer call back fails here and the bullet is revisited.
 #[test]
 fn an_evidence_pages_currency_cost_per_linked_catalog_is_stated() {
     let bullet = crate::booleanjson::tests::d0951_bullet("W1-api1-6");
     for word in [
         "booleanevidencejson::admission",
         "`statistics`",
-        "four currency calls",
-        "three",
+        "two currency calls",
+        "one",
         "C linked",
         "`flock`",
         "six `metadata` calls",
         "O(C)",
         "independent of its 1..=256 rows",
+        "Since D-4442",
+        "p99",
+        "a proxy",
     ] {
         assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
     }
     let source = include_str!("booleanevidencejson.rs");
-    for function in ["admission", "statistics"] {
+    for (function, outer) in [("admission", 0), ("statistics", 1)] {
         let found = source.split_once(&format!("\nfn {function}("));
         assert!(found.is_some(), "{function} exists");
         let body = found.unwrap_or_default().1;
         let body = &body[..body.find("\n}\n").unwrap()];
         assert_eq!(
-            body.matches("reader.require_current()?").count(),
-            2,
-            "{function} checks currency before and after its page: {body}"
+            body.matches("reader.require_current()").count(),
+            outer,
+            "{function} proves currency through its bracketed read only: {body}"
         );
     }
+    assert!(
+        source.contains(r#""sources"=>{reader.require_current()?;let sources=reader.sources();"#),
+        "the in-memory sources arm is the one that checks on its own"
+    );
+    for read in [
+        "reader.rows(pin,asked.offset,asked.limit)?",
+        "reader.splits(pin,asked.offset,asked.limit)?",
+        "let rows = reader.rows(pin, asked.offset, asked.limit)?;",
+        "let observations = stats.rows(stats.completion_digest(), asked.offset, asked.limit)?;",
+    ] {
+        assert!(source.contains(read), "the bracketed read stays: {read}");
+    }
+}
+
+/// What one linked-catalog currency check costs, by a proxy: the same system
+/// calls `Observation::with_current` makes around an empty projection, on a
+/// real owner/body/receipt trio. Saved evidence trees can be built only by
+/// `cli`'s private fixtures, so the route itself is not timed here; the
+/// number is a proxy and `docs/06-limits.md` says so. W1-api1-6, D-4442.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_one_catalog_currency_check_proxy() -> Result<(), String> {
+    let root = crate::scratch::path("evidence-currency-proxy");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|why| why.to_string())?;
+    let mut trio = Vec::with_capacity(3);
+    for (name, bytes) in [
+        ("owner.lock", 0_usize),
+        ("body.bin", 4_096),
+        ("complete.bin", 112),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, vec![7_u8; bytes]).map_err(|why| why.to_string())?;
+        let file = std::fs::File::open(&path).map_err(|why| why.to_string())?;
+        trio.push((file, path));
+    }
+    let owner = trio.first().ok_or("premise: an owner")?;
+    let generations = |trio: &[(std::fs::File, std::path::PathBuf)]| -> Result<u64, String> {
+        let mut len = 0;
+        for (file, path) in trio {
+            let held = file.metadata().map_err(|why| why.to_string())?;
+            let named = std::fs::metadata(path).map_err(|why| why.to_string())?;
+            if held.len() != named.len() {
+                return Err("premise: the trio did not move".to_owned());
+            }
+            len += held.len();
+        }
+        Ok(len)
+    };
+    let check = crate::latency::Timed::run(20_000, || {
+        let lease = store::flock::Flock::try_lock_shared(&owner.0, owner.1.as_path())
+            .map_err(|why| format!("{why:?}"))?;
+        generations(&trio)?;
+        generations(&trio)?;
+        lease.release().map_err(|why| format!("{why:?}"))
+    })?;
+    println!(
+        "{}",
+        check.line("one linked-catalog currency check (proxy: flock, 12 metadata, unlock)")
+    );
+    std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
+    Ok(())
 }
 
 /// **A held reader answers only the exact key it was opened for.** The cache
