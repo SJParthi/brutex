@@ -4,7 +4,7 @@ Refreshed by the Mac GDFL thread. Paste everything between the two lines as the 
 that runs a Remote Control session on the operator's Mac, folder /Volumes/WD_BLACK/brutex/fresh-20260919/project.
 
 ---
-You continue the Brutex GDFL work on my Mac, taking over from another Claude account whose weekly limit ran out.
+You continue the Brutex work on my Mac, GDFL first, taking over from another Claude account whose weekly limit ran out.
 Repo SJParthi/brutex. Everything is local on this Mac; nothing you need is only in the other account.
 
 GOAL (my one aim now): the /db web page in my real app (http://127.0.0.1:8080) must work fully and correctly for
@@ -75,6 +75,16 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    files, holidays, special sessions, expiry days, restarts mid-day) and prove it on :8080 before calling it done.
 7. Only then: GDFL engine parts (work-20260925/state/resume-kit/scripts/gdfl-parts-r4.js) and the import attack
    (work-20260925/state/attack/gdfl-attack-r5.js).
+
+OTHER WORKSTREAMS (GDFL above stays the priority; start these only after GDFL NIFTY on /db is done or I ask). Their
+state is on fix-queue:
+- PR 74 (the one PR, head final/all-fixes): at the hand-off final/all-fixes = fe8aefc1 with a fresh CI and Gate 18 run
+  going; next steps at the end of resume/pr74-ci-thread.md. Merge commits only, never force-push, never merge PR 74
+  yourself.
+- Merge-leftover: done, merged into fe8aefc1; see resume/merge-leftover-20261009.md.
+- Attack audit: paused; its final batch merges on top of fe8aefc1 when resumed.
+- Lane 1 fixes: paused.
+These run in the cloud repo, not on the Mac; the Mac work (feat/db-fix and the GDFL branches) is local and never pushed.
 
 BOARD: the old board belongs to the other account, so publish a NEW one: Artifact quickstart (dashboard), then the
 Dashboard type; datasets from work-20260925/state/gdfl-board/gen.py output (upload each out/*.json as an asset, a
