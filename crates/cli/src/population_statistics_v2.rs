@@ -2234,25 +2234,18 @@ impl PopulationStatisticsV2Ledger {
             }
             let lock_generation = file_generation(&held_lock, &lock_path, LOCK_FILE_MAX_BYTES)?;
             let data_generation = file_generation(&data_file, &data_path, bounds.file_bytes)?;
-            // Every stored audit occupies at least one record, so the records
-            // the file holds bound the audits it can hold. Reserving the
-            // configured ceiling instead allocated O(bounds.audits) slots on
-            // every open, before anything was counted (W2-cli12-2, D-1682).
-            let stored_records = data_generation
-                .len
-                .saturating_sub(POPULATION_STATISTICS_V2_HEADER_BYTES)
-                / POPULATION_STATISTICS_V2_RECORD_STRIDE;
-            let mut audits = HashMap::new();
-            audits
-                .try_reserve(usize_of(bounds.audits.min(stored_records), "audit bound")?)
-                .map_err(|why| format!("cannot reserve population-statistics index: {why}"))?;
+            // The index starts empty and grows one admitted audit at a time in
+            // `scan`, so it holds O(A) slots for A audits. Before D-4768 the
+            // open reserved one slot per stored RECORD, and one audit spans
+            // 2 + C x (1 + P + S) records; before D-1682 it reserved the
+            // configured ceiling (W2-cli12-2).
             let mut ledger = Self {
                 lock_path: lock_path.clone(),
                 data_path,
                 lock_file: held_lock,
                 data_file,
                 bounds,
-                audits,
+                audits: HashMap::new(),
                 completed_audits: 0,
                 orphan: None,
                 lock_generation,
@@ -2333,6 +2326,14 @@ impl PopulationStatisticsV2Ledger {
                 continue;
             }
             let audit = validate_complete_block(&mut self.data_file, cursor, &manifest)?;
+            // Room for this one audit, so a failed allocation is a named
+            // refusal, not an abort. The map grows geometrically: A inserts
+            // cost amortised O(1) each, O(A) in total, and its capacity stays
+            // below twice the audits it holds plus a constant (W2-cli12-2,
+            // D-4768).
+            self.audits
+                .try_reserve(1)
+                .map_err(|why| format!("cannot reserve population-statistics index: {why}"))?;
             if self.audits.insert(manifest.audit_id, audit).is_some() {
                 return Err(format!(
                     "population-statistics audit {} appears more than once",
@@ -6992,17 +6993,18 @@ mod tests {
         assert_eq!(reader.completed_audits(), 1);
         assert!(reader.audits.capacity() >= 1);
         assert!(reader.audits.capacity() < 1_024);
-        // THE STORED RECORDS ARE THE RESERVATION, measured off the file: a
-        // quotient, not a remainder (G18-cli-b-17, D-2026).
+        // The stored records were the reservation until D-4768 (D-2026 pinned
+        // it). The index now grows with the audits the scan admits, so one
+        // audit's 14 records no longer size it.
         let stored = (std::fs::metadata(root.path().join(DATA_FILE))
             .expect("ledger measures")
             .len()
             - POPULATION_STATISTICS_V2_HEADER_BYTES)
             / POPULATION_STATISTICS_V2_RECORD_STRIDE;
-        assert!(stored >= 4, "one audit spans {stored} records");
+        assert_eq!(stored, 14, "one audit spans 2 + C x (1 + P + S) records");
         assert!(
-            reader.audits.capacity() >= usize::try_from(stored).expect("small record count"),
-            "the open reserves for the stored records (D-1682)"
+            reader.audits.capacity() < usize::try_from(stored).expect("small record count"),
+            "the open sizes its index by audits, not by stored records (D-4768)"
         );
     }
 
@@ -7110,6 +7112,32 @@ mod tests {
             assert!(reader.trailing_prefix_audit().expect("no orphan").is_none());
         }
         assert_eq!(hashes(), 0, "81 cached reads hash no file");
+    }
+
+    #[test]
+    fn an_open_sizes_its_index_by_audits_not_records() {
+        // W2-cli12-2: the index was reserved for every stored record, and one
+        // audit spans 2 + C x (1 + P + S) records (14 here).
+        let root = TempRoot::new("audit-index");
+        append_population_statistics_v2(root.path(), bounds(), &fixture(4))
+            .expect("the first audit writes");
+        append_population_statistics_v2(root.path(), bounds(), &fixture(5))
+            .expect("the second audit writes");
+        let reader = PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+            .expect("two audits reopen");
+        assert_eq!(reader.completed_audits(), 2);
+        let stored = (std::fs::metadata(root.path().join(DATA_FILE))
+            .expect("ledger measures")
+            .len()
+            - POPULATION_STATISTICS_V2_HEADER_BYTES)
+            / POPULATION_STATISTICS_V2_RECORD_STRIDE;
+        assert_eq!(stored, 28, "two audits of 14 records each");
+        assert!(reader.audits.capacity() >= 2);
+        assert!(
+            reader.audits.capacity() < 8,
+            "the index holds {} slots for 2 audits; it is sized by audits, not by the {stored} records",
+            reader.audits.capacity()
+        );
     }
 
     #[test]

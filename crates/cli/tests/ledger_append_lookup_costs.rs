@@ -25,6 +25,8 @@
 //!   file; the test LBE-06 names for that keeps its name and pins the new shape.
 //! * W2-cli11-2 (D-4767): the Finalization V2 lookup no longer hashes the
 //!   data file.
+//! * W2-cli12-2 (D-4768): the Statistics V2 index was reserved for every
+//!   stored record; it now grows with the audits the scan admits.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -260,8 +262,13 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
     let column = function(STATISTICS, "fn candidate_column<");
     assert!(column.contains(".skip(sequence).step_by(width)"));
     let open = method(STATISTICS, "    fn open_inner(");
-    assert!(open.contains("bounds.audits.min(stored_records)"));
-    assert!(!open.contains("try_reserve(usize_of(bounds.audits,"));
+    assert!(
+        !open.contains("stored_records") && !open.contains("try_reserve("),
+        "the open pre-reserves its index again; re-measure §154"
+    );
+    assert!(open.contains("audits: HashMap::new(),"));
+    let scan = method(STATISTICS, "    fn scan(&mut self)");
+    assert_eq!(scan.matches(".try_reserve(1)").count(), 1);
     // One open per append and per step since D-4764: the door re-reads its
     // block through the writer's handle and hands that handle to the step.
     let door = function(STATISTICS, "pub fn append_population_statistics_v2(");
@@ -282,7 +289,8 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
     let text = flat(section(154));
     for needed in [
         "so the per-candidate summaries cost O(C·(P+S)) in total",
-        "never the configured `max_audits` ceiling",
+        "never by the stored records and never the configured `max_audits` ceiling",
+        "so A audits cost amortised O(1) each and O(A) in total",
         "One append through `append_population_statistics_v2` runs one full open",
         "A appends to one root cost O(A²) block validations in total, with constant 1",
         "a step scans its Statistics root once where it scanned three times",

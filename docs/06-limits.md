@@ -8160,10 +8160,15 @@ not sample rows, cap Apriori depth or turn an admitted input into a smaller one.
 Preparing one block reads each candidate's P periods and S splits by index
 arithmetic (`outer x C + candidate`) out of the period-major and split-major
 vectors, so the per-candidate summaries cost O(C·(P+S)) in total. Before D-1682
-each candidate filtered both whole vectors, O(C²·(P+S)). An open reserves its
-audit index for at most the records the file holds, never the configured
-`max_audits` ceiling: before D-1682 every open, empty or not, reserved
-`max_audits` slots (production passes 1<<24) before anything was counted.
+each candidate filtered both whole vectors, O(C²·(P+S)). An open sizes its
+audit index by the audits it admits, never by the stored records and never the
+configured `max_audits` ceiling: the map starts empty and makes room for one
+audit before each insert, a named refusal if that fails, so A audits cost
+amortised O(1) each and O(A) in total, with a capacity below twice A plus a
+constant (W2-cli12-2, D-4768). Before D-4768 the open reserved one slot per
+stored record, and one audit spans 2 + C·(1 + P + S) records; before D-1682
+every open, empty or not, reserved `max_audits` slots (production passes
+1<<24) before anything was counted.
 
 One append through `append_population_statistics_v2` runs one full open, the
 writer's. After the receipt-last write it re-reads only the committed block

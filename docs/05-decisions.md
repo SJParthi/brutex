@@ -65226,3 +65226,32 @@ right 0),
 `cli::population_finalization_v2::tests::a_lookup_redigests_its_data_and_completion_and_not_the_rekey_rows`,
 `cli::population_finalization_v2::tests::stale_same_length_mutation_and_path_replacement_invalidate_lookup`,
 `cli::ledger_append_lookup_costs::the_finalization_lookup_reads_two_records_and_says_so`.
+
+### D-4768 — The Statistics V2 index grows with the audits it admits — 2026-10-09
+
+**What was wrong.** W2-cli12-2: after D-1682 an open reserved one index slot per
+stored record, `min(max_audits, records)`, and D-2026 pinned that. One audit
+spans 2 + C·(1 + P + S) records, so the reservation exceeded the audits by that
+factor: 14 slots for 2 audits in the counting test.
+
+**Decided.** The open starts with an empty map. `scan` makes room for exactly
+one audit before each insert with `try_reserve(1)`, so a failed allocation is
+a named refusal, never an abort. The map grows geometrically. A audits cost
+amortised O(1) each and O(A) in total, and the capacity stays below twice A
+plus a constant. Nothing on disk changes.
+
+**Supersedes** D-1682's rejection of growing on demand ("repeated rehashing
+during the scan"). Geometric growth rehashes O(A) entries in total, the same
+class as the scan itself. It also supersedes D-2026's "the open must reserve at
+least the stored record count". The test D-2026 tightened,
+`an_open_reserves_for_stored_records_not_the_audit_ceiling`, keeps its name for
+LBE-08 and now pins a capacity below the stored record count.
+
+**Rejected.** Reserving by a count of audits read ahead of the scan: that would
+read every block's Data record twice to save an amortised constant.
+
+Tests: `cli::population_statistics_v2::tests::an_open_sizes_its_index_by_audits_not_records`
+(failed first on the record-sized reservation: "the index holds 14 slots for 2
+audits; it is sized by audits, not by the 28 records"),
+`cli::population_statistics_v2::tests::an_open_reserves_for_stored_records_not_the_audit_ceiling`,
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
