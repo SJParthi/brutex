@@ -81,7 +81,7 @@
   import { ask as request } from '$lib/ask.js';
   import { createPageRequests, watchVisible } from '$lib/page-requests.js';
   import { exact } from '$lib/money.js';
-  import { headerRefusalFrom } from '$lib/refusal.js';
+  import { headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
   // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
@@ -1598,14 +1598,14 @@
     // route can parse and keeps whichever answer; a feed that has neither says
     // so in the server's words, and a third segment is a row on this list.
     readFolder(wire)
-      .then(({ ok, data, segment }) => {
+      .then(({ ok, data, segment, why }) => {
         if (!live) return;
         // A HALT IS KEPT AS A HALT. `ok` is false for every refusal the server
         // makes, and the body carries `path` on the ones that have one — so
         // the page can name the folder rather than saying "nothing found".
         folderReach = ok
           ? { wire, state: 'read', body: data, why: null, segment }
-          : { wire, state: 'halted', body: data, why: data?.refused ?? 'refused', segment };
+          : { wire, state: 'halted', body: data, why, segment };
       })
       .catch((why) => {
         if (!live) return;
@@ -1662,10 +1662,24 @@
   /** @param {string} wire */
   async function readFolder(wire) {
     /** @param {string | null} segment */
+    // A REFUSAL IS READ AS TEXT AND NAMED (F4, D-3221). `r.json()` on a
+    // plain-text request-bounds or cross-site refusal threw a parse error that
+    // replaced the reason; a JSON one was shown as its bare `refused`. `why`
+    // carries route, status and reason; `data` stays the parsed body (or null)
+    // so a halt can still name its folder. A 200 that is not JSON still throws.
     const ask = async (segment) => {
       const at = segment ? `&segment=${segment}` : '';
       const r = await request(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
-      return { ok: r.ok, data: await r.json(), segment };
+      if (r.ok) return { ok: true, data: await r.json(), segment, why: null };
+      const text = await r.text();
+      /** @type {any} */
+      let data = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // Not JSON: the reason is the text itself, quoted by `reasonOfText`.
+      }
+      return { ok: false, data, segment, why: refusalSentence('/folder.json', r.status, reasonOfText(text)) };
     };
     const first = await ask(null);
     if (first.ok || !AMBIGUOUS.test(String(first.data?.refused ?? ''))) return first;
@@ -6570,14 +6584,19 @@
     try {
       const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!r.ok) return;
+      if (!r.ok) throw new Error(await refusalFrom('/pull/run.json', r));
       doc = await r.json();
       if (!ticket.current()) return;
-    } catch {
+    } catch (why) {
       /* A status this page could not read is not a run this page may claim.
          The Pull button stays offered; the server refuses it by name if a run
          really is going, which is a better answer than a page that locked
-         itself out on one failed read. */
+         itself out on one failed read.
+         BUT IT IS SAID (F4, D-3221). This returned silently on a non-2xx and
+         on a throw alike, so a page that could not tell whether a run was
+         going looked exactly like one that had checked and found none. */
+      if (!ticket.current()) return;
+      pollError = `Whether a pull run is already going could not be read: ${why instanceof Error ? why.message : String(why)}. Pull stays offered; the server refuses a second run by name.`;
       return;
     }
     if (doc?.running !== true) return;
@@ -6751,7 +6770,8 @@
       try {
         const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
         if (!ticket.current()) return;
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        // The body's reason, not the status alone (F4, D-3221).
+        if (!r.ok) throw new Error(await refusalFrom('/pull/run.json', r));
         doc = await r.json();
         if (!ticket.current()) return;
         if (!doc || typeof doc.running !== 'boolean' || !Array.isArray(doc.feeds) ||

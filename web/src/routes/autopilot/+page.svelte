@@ -87,6 +87,7 @@
   import { ask } from '$lib/ask.js';
   import { journalBanner, journalIsRecord, readJournalError } from '$lib/autopilot-journal.js';
   import { watchVisible } from '$lib/page-requests.js';
+  import { refusalFrom } from '$lib/refusal.js';
   import { untrack } from 'svelte';
 
   /* ======================================================================
@@ -766,7 +767,8 @@
         ap = null;
         return;
       }
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      // The body's reason, not the status alone (F4, D-3221).
+      if (!r.ok) throw new Error(await refusalFrom('GET /autopilot.json', r));
       // THE CONTENT-TYPE CHECK IS NOT PEDANTRY. In development the Vite proxy
       // forwards a fixed list of routes; a route missing from that list is
       // answered by the dev server's own HTML fallback with a 200. `r.ok`
@@ -1297,6 +1299,11 @@
         throw new Error(`POST ${CONTROL} answered 404 — this binary has no autopilot control`);
       }
       const ct = r.headers.get('content-type') ?? '';
+      // A NON-2XX THAT IS NOT JSON IS THE API REFUSING, NOT A MISSING PROXY
+      // ROUTE (F4, D-3221). The request-bounds and cross-site layers answer in
+      // plain text before the control runs; this blamed the dev proxy for
+      // them. Only a 2xx that is not JSON is the dev server's HTML fallback.
+      if (!r.ok && !ct.includes('json')) throw new Error(await refusalFrom(`POST ${CONTROL}`, r));
       if (!ct.includes('json')) {
         throw new Error(
           `POST ${CONTROL} answered ${ct || 'no content-type'}, not JSON — the API is not behind this route (in development, add ${CONTROL} to the proxy list in web/vite.config.js)`

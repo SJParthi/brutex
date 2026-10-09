@@ -66683,3 +66683,44 @@ status and the body's reason through `refusal.js`.
   it would have been.
 
 Every new await is followed by the reader's existing staleness check. OBSV-22.
+
+### D-3221 — A plain-text refusal is named by every reader that can receive one — 2026-10-09
+
+**What was observed.** Any route can be refused before its handler runs, in
+plain text. `crates/api/src/server.rs` `request_bounds_refusal` answers 414,
+431 and a repeated-field 400 with "REFUSED — … Nothing was read or run.", and
+the cross-site admission layer answers 403 with its reason. Thirteen readers
+outside the backtest page lost that sentence:
+
+- **Status alone.** `feed-startup.js` and the console probe in
+  `+layout.svelte` (`/feeds.json`), `runtime-inspection.js`
+  (`/inspection.json`), Autopilot `tick` (`/autopilot.json`) and ingest
+  `pollRunCurrent` (`/pull/run.json`) printed only "HTTP N".
+- **JSON parsed first.** `database-pages.js` and the database page's
+  `readWindow` (`/bars/window.json`) and `refreshMasters` on `/mapping`
+  (`/masters/refresh`) parsed the body before checking the status, so the
+  sentence became a JSON parse error. `refreshMasters` then said "The refresh
+  keeps running on the server" about a refresh that was never dispatched.
+- **Not JSON.** The terminal's `quote` and `monthBars` (`/bars/window.json`),
+  Markets `readMonth` and the database page's `fetchBarFile` (`/bars.json`)
+  said "no reason recorded" or "the body was not JSON".
+- **Wrong cause.** Autopilot `send` called a non-JSON refusal "the API is not
+  behind this route" and pointed at the dev proxy.
+- **Dropped.** Ingest `resumeRunCurrent` returned silently on a non-2xx or a
+  throw. Ingest `readFolder` (`/folder.json`) threw a parse error.
+
+**Decided.** Each reader checks the status before parsing and names the
+route, the status and the reason through `refusal.js`. Plain text is quoted
+up to 500 characters, and a JSON body's `error`, `refused` or `refusal` key
+is read.
+- `readFolder` carries a `why` beside its parsed body, so a halt can still
+  name its folder.
+- `resumeRunCurrent` writes the reason to `pollError` and leaves Pull offered,
+  as before.
+- `refreshMasters` reads every JSON answer as before and names a non-JSON
+  refusal without claiming the refresh ran.
+- Autopilot `send` keeps the dev-proxy message for a 2xx HTML answer only.
+- A 404 to `/inspection.json` is still a legacy server, and a 2xx that is not
+  JSON still fails loudly.
+
+OBSV-23.

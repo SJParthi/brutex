@@ -122,6 +122,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { refusalFrom } from '$lib/refusal.js';
   import {
     store,
     syncStore,
@@ -1026,16 +1027,17 @@
       month
     });
     const r = await ask(`/bars.json?${q}`, { signal });
+    // THE SERVER'S OWN SENTENCE, not a status code. It names the file, which
+    // is worth ten "HTTP 400"s -- and a plain-text request-bounds refusal is a
+    // sentence too, which "the body was not JSON" dropped (F4, D-3221).
+    if (!r.ok) throw new Error(`${month}: ${await refusalFrom('/bars.json', r)}`);
     let body = null;
     try {
       body = await r.json();
     } catch {
       throw new Error(`${month}: HTTP ${r.status}, and the body was not JSON`);
     }
-    // THE SERVER'S OWN SENTENCE, not a status code. It names the file, which
-    // is worth ten "HTTP 400"s.
     if (body && typeof body === 'object' && !Array.isArray(body) && body.error) throw new Error(`${month}: ${body.error}`);
-    if (!r.ok && r.status !== 206) throw new Error(`${month}: HTTP ${r.status}`);
     const bars = Array.isArray(body) ? body : (body?.bars ?? []);
     return { bars, faults: Array.isArray(body) ? null : (body?.faults ?? null) };
   }

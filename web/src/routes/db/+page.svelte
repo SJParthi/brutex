@@ -96,6 +96,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { refusalFrom } from '$lib/refusal.js';
 
   /* ======================================================================
      THE SHAPES, NAMED ONCE — imported where they already exist
@@ -4532,6 +4533,11 @@
     try {
       signal.throwIfAborted();
       const res = await ask(`/bars.json?${q}`, { signal });
+      // THE STATUS BEFORE THE BODY (F4, D-3221): the route's `error` and a
+      // plain-text request-bounds refusal are both named, with the status.
+      if (!res.ok) {
+        return { key: r.key, row: r, bars: [], faults: null, error: await refusalFrom('/bars.json', res) };
+      }
       let body = null;
       try {
         body = await res.json();
@@ -4550,9 +4556,6 @@
          the logs. */
       if (body && typeof body === 'object' && !Array.isArray(body) && body.error) {
         return { key: r.key, row: r, bars: [], faults: null, error: String(body.error) };
-      }
-      if (!res.ok && res.status !== 206) {
-        return { key: r.key, row: r, bars: [], faults: null, error: `HTTP ${res.status}` };
       }
       /* A PARTIAL read answers 206 with `{bars, faults}`. Both shapes are
          handled and a faulty record is surfaced, never silently dropped - a
@@ -4650,11 +4653,12 @@
       });
       try {
         const res = await ask(`/bars/window.json?${q}`, { signal });
-        const body = await res.json();
-        if (!res.ok && !body?.bars) {
+        // The status before the body (F4, D-3221).
+        if (!res.ok) {
           return { key: `${first.key}|window`, row: first, bars: [], faults: null,
-                   error: body?.error ?? `HTTP ${res.status}` };
+                   error: await refusalFrom('/bars/window.json', res) };
         }
+        const body = await res.json();
         return {
           key: `${first.key}|window`,
           row: first,
