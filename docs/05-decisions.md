@@ -66757,3 +66757,25 @@ No phase or resend rule moved. Every unconfirmed answer stays `unknown`, and
 nothing is resent, including an audit refusal that says the handler was not
 dispatched. Treating that answer as a refusal would allow a resend, which is a
 decision for the owner and is not made here. OBSV-24.
+
+### D-3223 — A pull run with no before-reading shows no progress figure — 2026-10-09
+
+**What was observed.** `/ingest` `resumeRunCurrent` picks up a pull run
+already in flight when the page loads, and keeps watching it when its
+before-reading of the store fails. The comment there says the card "cannot
+show a difference". The card showed one anyway:
+
+- `share` and `unitsLeft` read `baseline?.units ?? 0`, so the card drew
+  "0% · 0/N".
+- `everGrew` was false, so the foot said "nothing landed yet".
+- `unitsLeft` counted every unit as still to go, and `etaSecs` extrapolated
+  over that count.
+
+None of these was measured. The headline comment on the card says the
+opposite: "EVERY NUMBER HERE IS MEASURED, AND THE ONES THAT ARE NOT ARE
+ABSENT".
+
+**Decided.** Without a baseline, `share` and `unitsLeft` are null, and so is
+`etaSecs`. The card shows "progress not measured" with one sentence saying
+why, in place of the fraction, the meter and the foot. A run pressed from this
+page is unchanged: it still refuses to start without a before-reading. OBSV-25.

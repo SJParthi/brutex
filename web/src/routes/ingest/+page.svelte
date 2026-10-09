@@ -5484,9 +5484,13 @@
   const rowsGained = $derived(
     baseline && live ? Math.max(0, live.rows - baseline.rows) : 0
   );
-  const unitsLeft = $derived(Math.max(0, expectedUnits - (baseline?.units ?? 0) - unitsDone));
+  // NULL WITHOUT A BASELINE, NOT 0 (F6, D-3223). A run picked up on load
+  // whose "before" reading failed has nothing to subtract from: this read
+  // `baseline?.units ?? 0`, so the card drew "0% · 0/N", said nothing had
+  // landed, and extrapolated an ETA over every unit as if none were done.
+  const unitsLeft = $derived(baseline ? Math.max(0, expectedUnits - baseline.units - unitsDone) : null);
   const share = $derived(
-    expectedUnits > 0 ? Math.min(1, (baseline ? baseline.units + unitsDone : 0) / expectedUnits) : 0
+    expectedUnits > 0 ? (baseline ? Math.min(1, (baseline.units + unitsDone) / expectedUnits) : null) : 0
   );
 
   /**
@@ -5504,7 +5508,7 @@
     return gained / secs;
   });
 
-  const etaSecs = $derived(rate && unitsLeft > 0 ? Math.round(unitsLeft / rate) : null);
+  const etaSecs = $derived(rate && unitsLeft !== null && unitsLeft > 0 ? Math.round(unitsLeft / rate) : null);
 
   /**
    * THE GOVERNOR IS NOT VISIBLE FROM HERE, and this is the closest honest thing
@@ -8703,14 +8707,28 @@
                        LENGTH. The bar is read at a glance and the figures are
                        read when the glance raises a question; neither is
                        sufficient alone, and they are the same division. -->
-                  <span
-                    class="prog-n mono"
-                    title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
-                  >
-                    <b>{n(Math.round(share * 100))}%</b>
-                    · {n((baseline?.units ?? 0) + unitsDone)}/{n(expectedUnits)}
-                  </span>
+                  {#if share === null}
+                    <span class="prog-n mono warn">progress not measured</span>
+                  {:else}
+                    <span
+                      class="prog-n mono"
+                      title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
+                    >
+                      <b>{n(Math.round(share * 100))}%</b>
+                      · {n((baseline?.units ?? Number.NaN) + unitsDone)}/{n(expectedUnits)}
+                    </span>
+                  {/if}
                 </div>
+                {#if share === null}
+                  <!-- F6, D-3223: no baseline, so no fraction, no meter and no
+                       "nothing landed yet" -- each would be a difference
+                       against a reading that was never taken. -->
+                  <p class="prog-f warn" role="status">
+                    Progress is not measured: the store could not be read when this page picked the run
+                    up, so there is no before-reading to subtract from. The run's own status above is
+                    still the server's.
+                  </p>
+                {:else}
                 <div
                   class="meter tall"
                   role="progressbar"
@@ -8761,6 +8779,7 @@
                     >
                   {/if}
                 </div>
+                {/if}
               </div>
             {/if}
             <!-- WHAT THE MULTI-PASS RUN DID, AND WHY IT STOPPED.
