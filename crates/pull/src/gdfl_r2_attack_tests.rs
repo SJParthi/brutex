@@ -1226,7 +1226,10 @@ fn r2_04_random_stocks_worlds_match_the_reference_through_both_sources() {
                         if count[sym] > 1 {
                             totals.files_refused += 1;
                             late.push((format!("{on} {name}"), "two names for one ticker"));
-                        } else if *bent {
+                        } else if *bent && rows.is_empty() {
+                            // D-3318: a bent row is refused by name and the
+                            // file read on; only a file of nothing else
+                            // names it as the file's refusal.
                             totals.files_refused += 1;
                             late.push((format!("{on} {name}"), "line 2"));
                         } else if !rows

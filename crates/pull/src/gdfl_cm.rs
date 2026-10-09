@@ -84,12 +84,86 @@
 //! ticker-slot array (design §3.3, revision 8).
 //! Those two are UNVERIFIED as measured times: no bench times them, and
 //! `docs/06-limits.md` records both as limits, not constant-time claims.
+//!
+//! # A bad row is refused by name, and the rest of its file is read (D-3318)
+//!
+//! Until D-3318 one zero LTP refused its whole file: `NIFTY 50` of
+//! 2022-03-07 (44,168 lines) was lost over four zero-LTP rows and `NIFTY
+//! BANK` over two, and with them every NIFTY and BANKNIFTY option bar's spot
+//! that day (DB-024). Now a row whose LTP is zero, off the two-decimal grid
+//! or below one tick, or whose fields are not ten well-formed ones, is
+//! refused BY NAME ([`RowFault`]), counted in [`CmFile::refused`] by fault
+//! (`rows_refused_zero_ltp`, `rows_refused_off_grid`,
+//! `rows_refused_malformed`, D-3318's names), its first [`NAMED_ROWS`] named
+//! with their line, never kept and never repaired; the file's other rows are
+//! read. What a zero LTP means is UNVERIFIED and is not guessed. Three things
+//! still refuse the whole file: a Ticker or Date that is not the file's (a
+//! row of another file is not a bad row of this one), a malformed LAST line
+//! with no newline after it (that is where a cut file shows, CM-07), and
+//! more refused rows than [`MAX_BAD_ROWS`] AND one in every [`BAD_ROWS_PER`]
+//! of the file's rows ([`CmRefusal::TooManyBadRows`]: a file that is mostly
+//! bad is not a file; the bound is chosen, not sourced, and the measured
+//! worst case is 4 of 44,168). A file whose every row was refused names its
+//! first ([`CmRefusal::PriceRefused`] or [`CmRefusal::MalformedRow`]).
+//! [`read_listed`] logs each file with refused rows once, at `warn`, with
+//! the counts and the named lines.
+//!
+//! # A special session is read inside its windows (D-3319)
+//!
+//! [`session_of`] admits a day [`crate::calendar::exchange_kind_of`] records
+//! as `Open(session)` — a regular day, the Muhurat sessions 2018-11-07 to
+//! 2025-10-21, the disaster-recovery drills 2024-03-02 and 2024-05-18, the
+//! 2021-02-24 outage day — and [`decode`] judges "in session" against that
+//! day's own windows ([`Rules::session`]), never against 09:15–15:30. The
+//! bars a window keeps are the store's one session authority's,
+//! [`crate::session::Window::verdict`], which `ingest::from_rows` applies;
+//! so a day is admitted only where that authority keeps the window's first
+//! minute, else it is refused by name
+//! ([`CmRefusal::CalendarWindowNotLanded`]) rather than admitted to land
+//! nothing and close `done`. A day of unmeasured length stays refused.
+//!
+//! # Stored, never swept: the other indices, INDIA VIX and old names (D-3333)
+//!
+//! [`CmScope::stored`] files, beside the swept surface, every other applied
+//! index row of `core::alias` (FINNIFTY's `NIFTY FIN SERVICE` under
+//! `NIFTYFINSERVICE`, and the rest; `INDIA VIX` under `INDIAVIX`, reference
+//! only, its four-decimal LTP snapped half-up once, here, `CLAUDE.md` §7),
+//! every share symbol of an applied symbol change, and every share the
+//! options store holds contracts on; a share stem is filed under the key
+//! `alias::LINEAGE.filed_under` names for the day. None of it enters the
+//! sweep: `InstrumentKey::is_sweepable` is unchanged, and so is run identity.
+//! [`CmScope::swept`], every source's default, is the swept surface alone.
+//!
+//! # The closing auction's print is kept apart from trades (D-3320)
+//!
+//! From 2026-08-03, for a share the day's NSE security master flags
+//! closing-auction eligible, a row in `[15:15:00, 15:30:00)` whose bid and
+//! ask are both zero and whose LTQ is positive is an auction observation: it
+//! is diverted to [`CmFile::auction`], never a row the fold sees, and the
+//! import files it in the month's `.auc` sidecar ([`auction`]). An eligible
+//! file with such a row whose eligibility is unknown is refused by name
+//! ([`CmRefusal::AuctionEligibilityUnknown`]), never guessed either way.
+//!
+//! # Same-second dual values are counted, never altered (D-3335, DB-G96)
+//!
+//! An index file's consecutive rows stamped with one in-session second whose
+//! values span at least [`DUAL_SPREAD_BPS`] basis points of the lower one are
+//! counted in [`CmFile::dual_spread`] (seconds, the widest spread and its
+//! second) for the day ledger; the rows are folded exactly as before.
 
-use brutex_core::instrument::{Exchange, InstrumentKey, Kind};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+
+use brutex_core::alias::{self, IndexRow, Stale, Ymd};
+use brutex_core::instrument::{Exchange, InstrumentKey, Kind, Segment};
 use brutex_core::symbol::SYMBOL_CAPACITY;
 
-use crate::calendar::{DayKind, Session};
+use crate::calendar::{CasEligibility, DayKind, Session};
 use crate::session::{Day, SESSION_CLOSE_MINUTE, SESSION_OPEN_MINUTE};
+
+#[path = "gdfl_cm_auction.rs"]
+pub mod auction;
 
 /// Which of the two capital-market trees a folder belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -304,6 +378,41 @@ pub enum CmRefusal {
         /// What the operating system said.
         kind: std::io::ErrorKind,
     },
+    /// More rows refused than a file may carry and still be the file
+    /// (D-3318): past both [`MAX_BAD_ROWS`] and one row in every
+    /// [`BAD_ROWS_PER`] of its rows.
+    TooManyBadRows {
+        /// The rows refused.
+        refused: u32,
+        /// Every row read, kept or refused.
+        rows: u32,
+    },
+    /// A stem the import's scope files, named for a symbol the exchange was
+    /// not using that day (D-3332 item 1, D-3333 item 2): an old symbol on
+    /// or after its change, or a new one before it. Never guessed past.
+    SymbolNotInUse {
+        /// The change the stem's day falls on the wrong side of.
+        stale: Stale,
+    },
+    /// The calendar records the day's special-session windows, but the
+    /// store's session authority (`session::Window::verdict`) keeps no bar
+    /// at their first minute, so the day would land nothing (D-3319).
+    CalendarWindowNotLanded {
+        /// What the calendar of record says the day was.
+        kind: DayKind,
+    },
+    /// A closing-auction candidate row of a share whose eligibility on the
+    /// day is not known (D-3320): neither an auction print nor a trade is
+    /// guessed. Read again once the day's security master is installed.
+    AuctionEligibilityUnknown {
+        /// Why the eligibility is unknown, in the master's own words.
+        why: String,
+    },
+    /// The month's auction sidecar refused the day's prints (D-3320).
+    AuctionSidecar {
+        /// What the sidecar said.
+        why: String,
+    },
 }
 
 impl core::fmt::Display for CmRefusal {
@@ -371,11 +480,56 @@ impl core::fmt::Display for CmRefusal {
             Self::ArchiveMemberCorrupt { member } => write!(f, "{member} does not inflate"),
             Self::TickStoreMalformed { what } => write!(f, "tick store malformed: {what}"),
             Self::TickStoreUnavailable { kind } => write!(f, "tick store unavailable: {kind}"),
+            Self::TooManyBadRows { refused, rows } => write!(
+                f,
+                "{refused} of {rows} rows refused, more than {MAX_BAD_ROWS} and more than one \
+                 in every {BAD_ROWS_PER}: the file is refused whole"
+            ),
+            Self::SymbolNotInUse { stale } => match stale {
+                Stale::AfterChange(change) => write!(
+                    f,
+                    "{} was not the exchange's symbol that day: it became {} on {}",
+                    change.old, change.new, change.effective
+                ),
+                Stale::BeforeChange(change) => write!(
+                    f,
+                    "{} was not the exchange's symbol that day: it replaced {} only on {}",
+                    change.new, change.old, change.effective
+                ),
+            },
+            Self::CalendarWindowNotLanded { kind } => write!(
+                f,
+                "the calendar records {kind:?}, but the store's session authority keeps no bar \
+                 in its first window, so the day would land nothing"
+            ),
+            Self::AuctionEligibilityUnknown { why } => write!(
+                f,
+                "a closing-auction candidate row, and the share's eligibility that day is \
+                 unknown: {why}"
+            ),
+            Self::AuctionSidecar { why } => write!(f, "auction sidecar refused: {why}"),
         }
     }
 }
 
 impl core::error::Error for CmRefusal {}
+
+impl CmRefusal {
+    /// The store symbol a refused stem would have been filed under, where the
+    /// refusal is about one series' name: for [`CmRefusal::SymbolNotInUse`]
+    /// the newest symbol its chain of changes reaches. `None` for every other
+    /// refusal. A filtered import refuses the stem only when it wants that
+    /// series.
+    #[must_use]
+    pub fn filed_as(&self) -> Option<&'static str> {
+        match self {
+            Self::SymbolNotInUse {
+                stale: Stale::AfterChange(change) | Stale::BeforeChange(change),
+            } => Some(alias::LINEAGE.current(change.new)),
+            _ => None,
+        }
+    }
+}
 
 /// The tree and the day a day folder's name states.
 ///
@@ -578,6 +732,330 @@ pub fn stem_of(key: &InstrumentKey) -> Option<(CmKind, String)> {
     }
 }
 
+// ══ The import's scope: what is filed besides the swept surface (D-3333) ══
+
+/// How a decoded LTP becomes paisa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceRule {
+    /// At most two decimals, exactly; a third refuses the row (design §3.3,
+    /// round-4 review). Every swept and stored series but one.
+    Exact,
+    /// Any number of decimals, snapped half-up onto the two-place grid once,
+    /// here (`CLAUDE.md` §7: "Snapping happens once, at the write boundary,
+    /// half-up"). Only `INDIA VIX`, reference only, whose rows carry three or
+    /// more decimals (charter, GDFL section, "Third decimal in the LTP":
+    /// 21,870 such rows on 2024-04-01) and which would otherwise be refused
+    /// row by row (D-3333 item 1).
+    HalfUp,
+}
+
+/// Which files of a day an import files, and under which key (D-3333).
+///
+/// [`CmScope::swept`] is the swept surface and nothing else: NIFTY,
+/// BANKNIFTY and the F&O shares, each under its own key, exactly what
+/// [`resolve`] answers, and every source's default. [`CmScope::stored`] adds,
+/// stored and never swept (`CLAUDE.md` §1):
+///
+/// - every other applied index row of `core::alias` (D-3332), each under
+///   its store key, `INDIA VIX` reference only;
+/// - every share symbol of an applied `alias::SYMBOL_CHANGES` row and every
+///   share the options store holds contracts on (the caller names them);
+///
+/// and it files every share stem, swept or stored, under the key
+/// [`alias::LINEAGE`]'s `filed_under` names for the day, refusing a stem the
+/// exchange was not using that day ([`CmRefusal::SymbolNotInUse`]).
+///
+/// # Cost
+///
+/// Built once per run, O(rows of the alias table + names given). A stem's
+/// filing is [`resolve`]'s bounded probe, then for an index a walk of at
+/// most the alias table's nine rows, for a share one probe of a hash map of
+/// the stored shares (expected O(1), plus the key's bytes; the one hash map
+/// of this module, `CM-13`'s stated exception) and at most one probe per
+/// hop of the symbol-change chain, which the table's length bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmScope {
+    /// Whether anything beyond the swept surface is filed.
+    stored: bool,
+    /// The applied index rows beyond NIFTY and BANKNIFTY, in table order.
+    indices: Vec<&'static IndexRow>,
+    /// The stored share symbols beyond the F&O list, in the order given.
+    shares: Vec<Box<str>>,
+    /// Each of `shares`, with its position.
+    share_at: HashMap<Box<str>, usize>,
+    /// The root of the dated NSE security masters
+    /// (`<store>/session-masters`), read for closing-auction eligibility
+    /// (D-3320); `None` names none, and an eligibility asked of it is unknown.
+    masters: Option<PathBuf>,
+}
+
+/// The swept surface, shared by every listing built without a scope.
+static SWEPT_SCOPE: OnceLock<Arc<CmScope>> = OnceLock::new();
+
+impl CmScope {
+    /// The swept surface alone: NIFTY, BANKNIFTY and the F&O shares under
+    /// their own keys, as [`resolve`] files them.
+    #[must_use]
+    pub fn swept() -> Self {
+        Self {
+            stored: false,
+            indices: Vec::new(),
+            shares: Vec::new(),
+            share_at: HashMap::new(),
+            masters: None,
+        }
+    }
+
+    /// [`CmScope::swept`], built once and shared.
+    #[must_use]
+    pub fn swept_shared() -> Arc<Self> {
+        Arc::clone(SWEPT_SCOPE.get_or_init(|| Arc::new(Self::swept())))
+    }
+
+    /// The scope of D-3333: the swept surface, every other applied index row
+    /// of `core::alias`, every share symbol of an applied symbol change, and
+    /// each of `option_underlyings` (the underlyings the options store holds)
+    /// that `alias::option_underlying` calls a share. An index underlying is
+    /// skipped here: the index import files it through its alias row.
+    ///
+    /// # Errors
+    ///
+    /// A name that is not a share symbol the store files under its own
+    /// spelling (empty, too long, an illegal byte, a lower-case letter, a
+    /// series dot), named.
+    pub fn stored<I, S>(option_underlyings: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut scope = Self {
+            stored: true,
+            indices: Vec::new(),
+            ..Self::swept()
+        };
+        for row in &alias::INDEX_ROWS {
+            let swept = InstrumentKey::index(Exchange::Nse, row.store_key)
+                .is_ok_and(|key| key.is_sweepable());
+            if row.status.applies() && !swept {
+                scope.indices.push(row);
+            }
+        }
+        for change in &alias::SYMBOL_CHANGES {
+            if change.status.applies() {
+                scope.add_share(change.old)?;
+                scope.add_share(change.new)?;
+            }
+        }
+        for name in option_underlyings {
+            let name = name.as_ref();
+            if alias::option_underlying(name).segment == Segment::Index {
+                continue;
+            }
+            scope.add_share(name)?;
+        }
+        Ok(scope)
+    }
+
+    /// This scope reading closing-auction eligibility from the dated NSE
+    /// security masters under `root` (D-3320).
+    #[must_use]
+    pub fn with_masters(self, root: PathBuf) -> Self {
+        Self {
+            masters: Some(root),
+            ..self
+        }
+    }
+
+    /// Whether anything beyond the swept surface is filed.
+    #[must_use]
+    pub const fn is_stored(&self) -> bool {
+        self.stored
+    }
+
+    /// The stored index rows, in table order.
+    #[must_use]
+    pub fn indices(&self) -> &[&'static IndexRow] {
+        &self.indices
+    }
+
+    /// The stored share symbols beyond the F&O list, in the order added.
+    #[must_use]
+    pub fn shares(&self) -> &[Box<str>] {
+        &self.shares
+    }
+
+    /// Adds one share symbol; an F&O share already has its swept slot.
+    fn add_share(&mut self, name: &str) -> Result<(), String> {
+        let own = InstrumentKey::cash(Exchange::Nse, name)
+            .ok()
+            .filter(|key| key.underlying.as_str() == name && !name.contains('.'));
+        let Some(key) = own else {
+            return Err(format!(
+                "{name:?} is not a share symbol the store files under its own spelling"
+            ));
+        };
+        if key.is_sweepable() || self.share_at.contains_key(name) {
+            return Ok(());
+        }
+        self.share_at.insert(name.into(), self.shares.len());
+        self.shares.push(name.into());
+        Ok(())
+    }
+
+    /// The applied, stored index row `test` picks, with its position: a walk
+    /// of at most the alias table's rows, a compile-time constant.
+    fn index_where(&self, test: impl Fn(&IndexRow) -> bool) -> Option<(usize, &'static IndexRow)> {
+        for (at, row) in self.indices.iter().enumerate() {
+            if test(row) {
+                return Some((at, *row));
+            }
+        }
+        None
+    }
+
+    /// The applied, stored index row whose `indexSymbol` is `name`.
+    fn index_row(&self, name: &str) -> Option<(usize, &'static IndexRow)> {
+        self.index_where(|row| row.index_symbol == name)
+    }
+
+    /// The applied, stored index row filed under `store_key`.
+    fn index_keyed(&self, store_key: &str) -> Option<&'static IndexRow> {
+        self.index_where(|row| row.store_key == store_key)
+            .map(|(_, row)| row)
+    }
+
+    /// How many stem slots this scope adds to tree `kind`'s ticker map.
+    #[must_use]
+    pub fn extra_slots(&self, kind: CmKind) -> usize {
+        match kind {
+            CmKind::Indices => self.indices.len(),
+            CmKind::Stocks => self.shares.len(),
+        }
+    }
+
+    /// The slot past [`TICKER_SLOTS`] a stem of tree `kind` takes in this
+    /// scope, by its exact bytes; `None` for a swept stem (it has its own
+    /// slot) and for every stem off the scope.
+    #[must_use]
+    pub fn extra_slot(&self, kind: CmKind, stem: &str) -> Option<usize> {
+        let name = stem.strip_suffix(kind.descriptor().stem_suffix)?;
+        match kind {
+            CmKind::Indices => self.index_row(name).map(|(at, _)| at),
+            CmKind::Stocks if name.len() > SYMBOL_CAPACITY => None,
+            CmKind::Stocks => self.share_at.get(name).copied(),
+        }
+    }
+
+    /// Whether a share symbol is filed by this scope: an F&O share, or a
+    /// stored one.
+    fn files_share(&self, name: &str) -> bool {
+        let swept = InstrumentKey::cash(Exchange::Nse, name)
+            .is_ok_and(|key| key.underlying.as_str() == name && key.is_sweepable());
+        swept || (self.stored && self.share_at.contains_key(name))
+    }
+
+    /// The key a file of tree `kind` named `stem` is filed under on `day`,
+    /// `None` for a stem this scope does not file.
+    ///
+    /// # Errors
+    ///
+    /// [`CmRefusal::SymbolNotInUse`] for a share stem the exchange was not
+    /// using on `day` (stored scope only).
+    pub fn filing(
+        &self,
+        kind: CmKind,
+        stem: &str,
+        day: Day,
+    ) -> Result<Option<InstrumentKey>, CmRefusal> {
+        let swept = match resolve(kind, stem) {
+            Resolution::Swept(key) => Some(key),
+            _ => None,
+        };
+        if !self.stored {
+            return Ok(swept);
+        }
+        let Some(name) = stem.strip_suffix(kind.descriptor().stem_suffix) else {
+            return Ok(None);
+        };
+        match kind {
+            CmKind::Indices => Ok(swept.or_else(|| {
+                self.index_row(name)
+                    .and_then(|(_, row)| InstrumentKey::index(Exchange::Nse, row.store_key).ok())
+            })),
+            CmKind::Stocks => {
+                if name.len() > SYMBOL_CAPACITY || !self.files_share(name) {
+                    return Ok(None);
+                }
+                match alias::LINEAGE.filed_under(name, ymd(day)) {
+                    Ok(current) => Ok(InstrumentKey::cash(Exchange::Nse, current).ok()),
+                    Err(stale) => Err(CmRefusal::SymbolNotInUse { stale }),
+                }
+            }
+        }
+    }
+
+    /// The tree and the stem `key`'s file carries on `day`, the inverse of
+    /// [`CmScope::filing`]: under the stored scope a share's stem is the
+    /// symbol its chain of changes was using that day (`TMPV` before
+    /// 2025-10-24 is `TATAMOTORS.NSE`), an index's its `indexSymbol`.
+    #[must_use]
+    pub fn stem_for(&self, key: &InstrumentKey, day: Day) -> Option<(CmKind, String)> {
+        if !self.stored || key.exchange != Exchange::Nse {
+            return stem_of(key);
+        }
+        match (key.segment, key.kind) {
+            (Segment::Index, Kind::Index) => stem_of(key).or_else(|| {
+                self.index_keyed(key.underlying.as_str()).map(|row| {
+                    (
+                        CmKind::Indices,
+                        format!("{}{}", row.index_symbol, INDICES.stem_suffix),
+                    )
+                })
+            }),
+            (Segment::Cash, Kind::Equity) => {
+                let on = ymd(day);
+                let mut stem = key.underlying.as_str();
+                for hop in alias::LINEAGE.backward(key.underlying.as_str()) {
+                    if on >= hop.effective {
+                        break;
+                    }
+                    stem = hop.old;
+                }
+                self.files_share(stem)
+                    .then(|| (CmKind::Stocks, format!("{stem}{}", STOCKS.stem_suffix)))
+            }
+            _ => None,
+        }
+    }
+
+    /// How `key`'s LTPs become paisa: [`PriceRule::HalfUp`] for a reference
+    /// only index row of the stored scope, [`PriceRule::Exact`] for every
+    /// other series.
+    #[must_use]
+    pub fn price_rule(&self, key: &InstrumentKey) -> PriceRule {
+        let reference = key.kind == Kind::Index
+            && self
+                .index_keyed(key.underlying.as_str())
+                .is_some_and(|row| row.reference_only);
+        if reference {
+            PriceRule::HalfUp
+        } else {
+            PriceRule::Exact
+        }
+    }
+
+    /// The dated NSE security masters' root this scope reads, if any.
+    #[must_use]
+    pub fn masters(&self) -> Option<&std::path::Path> {
+        self.masters.as_deref()
+    }
+}
+
+/// `day` as `core::alias` dates a symbol change.
+fn ymd(day: Day) -> Ymd {
+    Ymd::new(day.year(), day.month(), day.day())
+}
+
 /// What one ticker slot of a listing holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Held<T> {
@@ -596,25 +1074,44 @@ enum Held<T> {
 
 /// Names filed by their ticker-map slot: an array of [`TICKER_SLOTS`] cells,
 /// so "does ticker X have a name here" is one index. Design §3.3, revision 8.
+///
+/// A stored scope (D-3333) adds one cell per stem it files beyond the swept
+/// surface, after the array: a swept stem is still one index, and a stored
+/// one is one probe of the scope ([`CmScope::extra_slot`]) and one index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotTable<T> {
     /// The tree the names were found in, which decides the key space their
     /// stems are probed in (design §3.3, revision 9).
     kind: CmKind,
     cells: [Held<T>; TICKER_SLOTS],
-    /// Names whose stem is off the swept surface, counted for the census.
+    /// One cell per stem the scope files beyond the swept surface.
+    extra: Vec<Held<T>>,
+    /// What is filed beyond the swept surface.
+    scope: Arc<CmScope>,
+    /// Names whose stem is off the scope, counted for the census.
     unresolved: usize,
     /// Every name offered.
     names: usize,
 }
 
 impl<T> SlotTable<T> {
-    /// An empty table for names found in tree `kind`.
+    /// An empty table for names found in tree `kind`, of the swept surface.
     #[must_use]
     pub fn new(kind: CmKind) -> Self {
+        Self::scoped(kind, CmScope::swept_shared())
+    }
+
+    /// An empty table for names found in tree `kind`, filing what `scope`
+    /// files.
+    #[must_use]
+    pub fn scoped(kind: CmKind, scope: Arc<CmScope>) -> Self {
         Self {
             kind,
             cells: std::array::from_fn(|_| Held::Empty),
+            extra: std::iter::repeat_with(|| Held::Empty)
+                .take(scope.extra_slots(kind))
+                .collect(),
+            scope,
             unresolved: 0,
             names: 0,
         }
@@ -626,30 +1123,50 @@ impl<T> SlotTable<T> {
         self.kind
     }
 
+    /// The slot a stem takes: its swept slot, or [`TICKER_SLOTS`] plus its
+    /// scope's extra slot.
+    fn slot_of(&self, stem: &str) -> Option<usize> {
+        stem_slot(self.kind, stem).or_else(|| {
+            self.scope
+                .extra_slot(self.kind, stem)
+                .map(|at| at + TICKER_SLOTS)
+        })
+    }
+
+    /// The cell of a slot [`SlotTable::slot_of`] answered.
+    fn cell(&self, slot: usize) -> Option<&Held<T>> {
+        match slot.checked_sub(TICKER_SLOTS) {
+            None => self.cells.get(slot),
+            Some(at) => self.extra.get(at),
+        }
+    }
+
     /// Files `name` (`<stem>.<ext>`) with `value` under its stem's slot, or
-    /// counts it when the stem is off the surface: one split of the name, one
-    /// [`stem_slot`] and one index, so O(1) per name beyond the name's own
-    /// length. The shape (one index, no hash, set, search or sort) is CM-13,
-    /// proven by `pull::gdfl_cm::tests::day_folder_lookup_is_one_index_into_a_ticker_slot_array`;
+    /// counts it when the stem is off the scope: one split of the name, one
+    /// [`stem_slot`] (and for a stored scope one [`CmScope::extra_slot`]) and
+    /// one index, so O(1) per name beyond the name's own length. The shape
+    /// (one index, no search or sort; one hash probe only for a stored
+    /// share) is CM-13, proven by
+    /// `pull::gdfl_cm::tests::day_folder_lookup_is_one_index_into_a_ticker_slot_array`;
     /// UNVERIFIED as a measured time (`docs/06-limits.md`).
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "`stem_slot` returns a slot of the ticker map, and every such \
-                  slot is below `TICKER_SLOTS`, the array's length; \
-                  `ticker_map_equity_keys_are_the_universe_shares` indexes an \
-                  array of that length with every swept slot"
-    )]
     pub fn file(&mut self, name: &str, value: T) {
         let Some((stem, ext)) = name.rsplit_once('.') else {
             self.skip();
             return;
         };
-        let Some(slot) = stem_slot(self.kind, stem) else {
+        let Some(slot) = self.slot_of(stem) else {
+            self.skip();
+            return;
+        };
+        let cell = match slot.checked_sub(TICKER_SLOTS) {
+            None => self.cells.get_mut(slot),
+            Some(at) => self.extra.get_mut(at),
+        };
+        let Some(cell) = cell else {
             self.skip();
             return;
         };
         self.names += 1;
-        let cell = &mut self.cells[slot];
         // A third spelling of the extension anywhere among a ticker's names is
         // named as that; only names all spelled `.csv` or `.CSV` are twins.
         *cell = match (ext, &*cell) {
@@ -660,7 +1177,7 @@ impl<T> SlotTable<T> {
         };
     }
 
-    /// Counts a name that is not filed: offered, and off the surface. A day
+    /// Counts a name that is not filed: offered, and off the scope. A day
     /// zip's member outside its day folder is counted here (CM-13).
     pub const fn skip(&mut self) {
         self.names += 1;
@@ -679,8 +1196,9 @@ impl<T> SlotTable<T> {
         self.names == 0
     }
 
-    /// How many names resolve to no swept ticker: series files, INDIA VIX,
-    /// any unknown stem. Report only, for the census.
+    /// How many names resolve to no ticker of the scope: series files, any
+    /// unknown stem, and under the swept scope INDIA VIX and every other
+    /// index. Report only, for the census.
     #[must_use]
     pub const fn unresolved(&self) -> usize {
         self.unresolved
@@ -694,7 +1212,7 @@ impl<T> SlotTable<T> {
     /// `.CSV` were filed for the stem, and [`CmRefusal::ExtensionUnknown`] when
     /// any name filed for it has a third spelling of the extension.
     pub fn get(&self, stem: &str) -> Result<Option<(&str, ExtVariant, &T)>, CmRefusal> {
-        let held = stem_slot(self.kind, stem).and_then(|slot| self.cells.get(slot));
+        let held = self.slot_of(stem).and_then(|slot| self.cell(slot));
         match held {
             Some(Held::One(name, ext, value)) => Ok(Some((name, *ext, value))),
             Some(Held::OddExtension) => Err(CmRefusal::ExtensionUnknown),
@@ -735,24 +1253,116 @@ impl<L> ListedFile<L> {
 /// One day of one tree as a [`CmSource`] lists it: every entry in the
 /// source's own order (a day zip's central-directory order), each file of
 /// the day folder also filed by ticker slot, so "does ticker X have a file
-/// this day" is one index (design §3.3, revision 8; D-2800).
+/// this day" is one index (design §3.3, revision 8; D-2800). It carries the
+/// scope it was built under (D-3333), and for a stocks day from 2026-08-03
+/// the day's closing-auction eligibility source (D-3320).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DayListing<L> {
     day: Day,
     folder: String,
     entries: Vec<ListedFile<L>>,
     table: SlotTable<usize>,
+    scope: Arc<CmScope>,
+    cas: Cas,
+}
+
+/// Where a day's closing-auction eligibility comes from (D-3320).
+#[derive(Debug, Clone)]
+enum Cas {
+    /// Not asked: an index day, or a stocks day before 2026-08-03.
+    NotRequired,
+    /// The day's receipt-checked NSE security master.
+    Master(Arc<crate::cash_session_cache::VerifiedLifecycleMaster>),
+    /// No master could be read, and why: every eligibility is unknown.
+    Unknown(String),
+}
+
+impl PartialEq for Cas {
+    /// Two loaded masters are one when their receipts are one.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::NotRequired, Self::NotRequired) => true,
+            (Self::Master(a), Self::Master(b)) => a.provenance() == b.provenance(),
+            (Self::Unknown(a), Self::Unknown(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Cas {}
+
+impl Cas {
+    /// The eligibility source of tree `kind` on `day` under `scope`: read
+    /// once per listing, O(the master's bytes), only for a stocks day from
+    /// 2026-08-03.
+    fn of(kind: CmKind, day: Day, scope: &CmScope) -> Self {
+        if kind != CmKind::Stocks || !crate::vendor::cash_auction_eligibility_required(day) {
+            return Self::NotRequired;
+        }
+        match scope.masters() {
+            None => Self::Unknown(format!(
+                "UNVERIFIED cash eligibility on {day}: this import names no security masters"
+            )),
+            Some(root) => match crate::cash_session_cache::read_local_lifecycle(root, day) {
+                Ok(master) => Self::Master(Arc::new(master)),
+                Err(why) => Self::Unknown(why),
+            },
+        }
+    }
+
+    /// The closing-auction rule for a share `symbol` this day: one probe of
+    /// the master's parsed index (expected O(1), `cash_session_cache`).
+    fn auction(&self, symbol: &str) -> Auction {
+        let master = match self {
+            Self::NotRequired => return Auction::NotAsked,
+            Self::Unknown(why) => return Auction::Unknown(why.clone()),
+            Self::Master(master) => master,
+        };
+        let Some(isin) = share_isin(symbol) else {
+            return Auction::Unknown(format!(
+                "UNVERIFIED cash eligibility of {symbol}: core::universe records no ISIN for it"
+            ));
+        };
+        match master.cas_eligibility(symbol, &isin) {
+            Ok(CasEligibility::Eligible) => Auction::Eligible,
+            Ok(CasEligibility::NotEligible) => Auction::NotEligible,
+            Ok(CasEligibility::Unknown) => Auction::Unknown(format!(
+                "UNVERIFIED cash eligibility of {symbol}: the master holds no flag"
+            )),
+            Err(why) => Auction::Unknown(why),
+        }
+    }
+}
+
+/// A share's ISIN as `core::universe` records it: the F&O list's, else the
+/// total-market list's.
+fn share_isin(symbol: &str) -> Option<String> {
+    let fno = brutex_core::universe::FNO_INDEX
+        .position(symbol)
+        .and_then(|at| brutex_core::universe::FNO_UNDERLYINGS_ISIN.get(at))
+        .filter(|isin| !isin.is_empty())
+        .map(|isin| (*isin).to_owned());
+    fno.or_else(|| brutex_core::universe::nse_isin(symbol).map(|isin| isin.to_string()))
 }
 
 impl<L> DayListing<L> {
-    /// An empty listing of tree `kind` for `day`.
+    /// An empty listing of tree `kind` for `day`, of the swept surface.
     #[must_use]
     pub fn new(kind: CmKind, day: Day) -> Self {
+        Self::scoped(kind, day, CmScope::swept_shared())
+    }
+
+    /// An empty listing of tree `kind` for `day`, filing what `scope` files.
+    /// A stocks day from 2026-08-03 reads its security master here, once.
+    #[must_use]
+    pub fn scoped(kind: CmKind, day: Day, scope: Arc<CmScope>) -> Self {
         Self {
             day,
             folder: day_folder_name(kind, day),
             entries: Vec::new(),
-            table: SlotTable::new(kind),
+            table: SlotTable::scoped(kind, Arc::clone(&scope)),
+            cas: Cas::of(kind, day, &scope),
+            scope,
         }
     }
 
@@ -792,6 +1402,12 @@ impl<L> DayListing<L> {
         self.day
     }
 
+    /// The scope the listing files.
+    #[must_use]
+    pub fn scope(&self) -> &CmScope {
+        &self.scope
+    }
+
     /// The day folder every file's entry name starts with:
     /// `GFDLCM_INDICES_TICK_01042024`.
     #[must_use]
@@ -805,12 +1421,34 @@ impl<L> DayListing<L> {
         &self.entries
     }
 
-    /// How many entries name no swept ticker's file: series files, INDIA
-    /// VIX, folder entries, names outside the day folder, unknown stems.
-    /// Report only, for the census.
+    /// How many entries name no ticker of the scope: series files, folder
+    /// entries, names outside the day folder, unknown stems (and INDIA VIX
+    /// under the swept scope). Report only, for the census.
     #[must_use]
     pub const fn unresolved(&self) -> usize {
         self.table.unresolved()
+    }
+
+    /// The closing-auction rule for `key`'s file this day (D-3320):
+    /// [`Auction::NotAsked`] on an index listing or before 2026-08-03.
+    #[must_use]
+    pub fn auction_for(&self, key: &InstrumentKey) -> Auction {
+        if self.kind() == CmKind::Stocks {
+            self.cas.auction(key.underlying.as_str())
+        } else {
+            Auction::NotAsked
+        }
+    }
+
+    /// The key the file named `stem` is filed under this day
+    /// ([`CmScope::filing`]), `None` for a stem off the scope.
+    ///
+    /// # Errors
+    ///
+    /// [`CmRefusal::SymbolNotInUse`] for a share stem the exchange was not
+    /// using this day.
+    pub fn filing(&self, stem: &str) -> Result<Option<InstrumentKey>, CmRefusal> {
+        self.scope.filing(self.kind(), stem, self.day)
     }
 
     /// The file holding `stem`, if the day has one: one slot index.
@@ -879,11 +1517,23 @@ pub trait CmSource {
     ) -> Result<Vec<u8>, CmRefusal>;
 }
 
-/// The first second of the session, 09:15:00, as a second of the IST day.
-const SESSION_OPEN_SOD: u32 = SESSION_OPEN_MINUTE * 60;
+/// A file may refuse at most this many rows, unless they are also at most
+/// one in every [`BAD_ROWS_PER`] of its rows (D-3318). Chosen, not sourced:
+/// the measured worst case is 4 of 44,168 (`NIFTY 50`, 2022-03-07).
+pub const MAX_BAD_ROWS: u32 = 64;
 
-/// The first second after the session, 15:30:00, as a second of the IST day.
-const SESSION_CLOSE_SOD: u32 = SESSION_CLOSE_MINUTE * 60;
+/// See [`MAX_BAD_ROWS`].
+pub const BAD_ROWS_PER: u32 = 1_000;
+
+/// How many of a file's refused rows are named with their line (D-3318);
+/// every one is counted. A bound, so a file of bad rows cannot make its log
+/// line unbounded (D-3341).
+pub const NAMED_ROWS: usize = 16;
+
+/// The same-second spread [`CmFile::dual_spread`] counts, in basis points of
+/// the lower value (D-3335). Chosen, not sourced; the ledger counts, it never
+/// decides.
+pub const DUAL_SPREAD_BPS: u32 = 10;
 
 /// What a file must be: the tree it was found in, its own stem and its
 /// folder's day.
@@ -897,6 +1547,187 @@ pub struct Expect<'a> {
     pub day: Day,
 }
 
+/// A share's closing-auction eligibility on the file's day, as the reader
+/// applies it (D-3320).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Auction {
+    /// Not asked: an index file, or a day before 2026-08-03.
+    NotAsked,
+    /// Flag 1 in the day's security master: a candidate row is an auction
+    /// print.
+    Eligible,
+    /// Flag 0: a candidate row is an ordinary row.
+    NotEligible,
+    /// No flag could be read, and why: a candidate row refuses the file.
+    Unknown(String),
+}
+
+/// What [`decode_with`] applies beyond the file's own shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rules {
+    /// The day's session (D-3319): "in session" is a minute inside one of its
+    /// windows, and an index file must reach the end of its last window.
+    pub session: Session,
+    /// How an LTP becomes paisa.
+    pub price: PriceRule,
+    /// The share's closing-auction eligibility (D-3320).
+    pub auction: Auction,
+}
+
+impl Rules {
+    /// A regular full session, exact prices, no auction asked.
+    #[must_use]
+    pub const fn regular() -> Self {
+        Self {
+            session: Session::full(),
+            price: PriceRule::Exact,
+            auction: Auction::NotAsked,
+        }
+    }
+}
+
+/// Why one row was refused and not kept (D-3318).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RowFault {
+    /// The LTP is zero. What a zero means is UNVERIFIED and not guessed.
+    ZeroLtp,
+    /// The LTP is a plain decimal off the two-place grid, below one tick, or
+    /// past what paisa hold.
+    OffGrid,
+    /// Not ten fields, not UTF-8, a time that is not `HH:MM:SS`, an LTP that
+    /// is not a plain decimal, or a quote, quantity or open-interest field
+    /// that is not a plain number.
+    Malformed,
+}
+
+impl RowFault {
+    /// The fault's word in a log line: `zero_ltp`, `off_grid` or `malformed`.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ZeroLtp => "zero_ltp",
+            Self::OffGrid => "off_grid",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
+/// One refused row, named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedRow {
+    /// One-based line number in the file.
+    pub line: u32,
+    /// The second it is stamped at, when its Time read.
+    pub sod: Option<u32>,
+    /// Why it was refused.
+    pub fault: RowFault,
+}
+
+/// The rows a file refused (D-3318): every one counted by fault, the first
+/// [`NAMED_ROWS`] named.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowsRefused {
+    /// `rows_refused_zero_ltp`.
+    pub zero_ltp: u32,
+    /// `rows_refused_off_grid`.
+    pub off_grid: u32,
+    /// `rows_refused_malformed`.
+    pub malformed: u32,
+    /// The first [`NAMED_ROWS`] refused rows, in file order.
+    pub named: Vec<RefusedRow>,
+}
+
+impl RowsRefused {
+    /// Every refused row: D-3335's `rows_refused`.
+    #[must_use]
+    pub const fn total(&self) -> u32 {
+        self.zero_ltp
+            .saturating_add(self.off_grid)
+            .saturating_add(self.malformed)
+    }
+
+    /// Counts one refused row, and names it while there is room.
+    fn note(&mut self, row: RefusedRow) {
+        let counter = match row.fault {
+            RowFault::ZeroLtp => &mut self.zero_ltp,
+            RowFault::OffGrid => &mut self.off_grid,
+            RowFault::Malformed => &mut self.malformed,
+        };
+        *counter = counter.saturating_add(1);
+        if self.named.len() < NAMED_ROWS {
+            self.named.push(row);
+        }
+    }
+
+    /// The named rows as `line:fault` words, space-separated, for a log line.
+    #[must_use]
+    pub fn named_text(&self) -> String {
+        let words: Vec<String> = self
+            .named
+            .iter()
+            .map(|row| format!("{}:{}", row.line, row.fault.code()))
+            .collect();
+        words.join(" ")
+    }
+}
+
+/// An index file's same-second dual values (D-3335 `dual_spread_s`,
+/// `dual_spread_max_bps`; DB-G96). Counted over consecutive kept rows
+/// stamped with one in-session second; the rows are never altered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DualSpread {
+    /// Seconds whose rows span at least [`DUAL_SPREAD_BPS`] of the lower
+    /// value.
+    pub seconds: u32,
+    /// The widest such spread, in whole basis points (0 when none).
+    pub max_bps: u32,
+    /// The second of the widest, when there is one.
+    pub max_at: Option<u32>,
+}
+
+/// The run of consecutive rows sharing one second, for [`DualSpread`].
+#[derive(Debug, Clone, Copy, Default)]
+struct SpreadRun {
+    /// The run's second, its lowest and its highest value.
+    run: Option<(u32, i64, i64)>,
+}
+
+impl SpreadRun {
+    /// One kept in-session index row.
+    fn observe(&mut self, sod: u32, ltp: i64, out: &mut DualSpread) {
+        match self.run {
+            Some((at, low, high)) if at == sod => {
+                self.run = Some((at, low.min(ltp), high.max(ltp)));
+            }
+            _ => {
+                self.finish(out);
+                self.run = Some((sod, ltp, ltp));
+            }
+        }
+    }
+
+    /// Closes the run, counting it when it is wide enough.
+    fn finish(&mut self, out: &mut DualSpread) {
+        let Some((at, low, high)) = self.run.take() else {
+            return;
+        };
+        if low <= 0 {
+            return;
+        }
+        let span = i128::from(high) - i128::from(low);
+        let scaled = span * 10_000;
+        if scaled < i128::from(DUAL_SPREAD_BPS) * i128::from(low) {
+            return;
+        }
+        let bps = u32::try_from(scaled / i128::from(low)).unwrap_or(u32::MAX);
+        out.seconds = out.seconds.saturating_add(1);
+        if bps > out.max_bps {
+            out.max_bps = bps;
+            out.max_at = Some(at);
+        }
+    }
+}
+
 /// One row, as the file stated it, in file order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CmRow {
@@ -904,8 +1735,8 @@ pub struct CmRow {
     pub line: u32,
     /// Second of the IST day the row is stamped at, `0..86_400`.
     pub sod: u32,
-    /// Last traded price in paisa, exactly as written to two places, at least
-    /// one tick.
+    /// Last traded price in paisa, exactly as written to two places (or, for
+    /// [`PriceRule::HalfUp`], snapped onto them once), at least one tick.
     pub ltp: i64,
     /// Last traded quantity. Zero on every NIFTY 50 and NIFTY BANK row (charter).
     pub ltq: u64,
@@ -919,28 +1750,40 @@ pub struct CmFile {
     /// Whether the last byte was a newline. A complete final row without one
     /// is accepted: 17 of 79 NIFTY 50 files of 2018 end that way.
     pub final_newline: bool,
-    /// Every row, in file order, none dropped, none moved.
+    /// Every kept row, in file order, none moved: a refused row (D-3318) and
+    /// an auction print (D-3320) are the only rows not here.
     pub rows: Vec<CmRow>,
-    /// The largest stamp in the file AS WRITTEN, as a second of the IST day:
-    /// the running maximum, which a late row never raises (design §3.3,
+    /// The largest stamp of a kept row AS WRITTEN, as a second of the IST
+    /// day: the running maximum, which a late row never raises (design §3.3,
     /// revision 9, C45). The index end check reads this, never the last row
     /// in file order. The design judges the largest EFFECTIVE stamp, after the
     /// fold's UTC re-stamp, which can land a row up to 2 s above this; the
     /// re-stamp is the fold's (D-0805, pending), so this reader is stricter by up to
     /// 2 s and never more lenient (D-0808).
     pub max_sod: u32,
-    /// Rows stamped before 09:15:00.
+    /// Kept rows stamped before the day's first window opens.
     pub rows_pre: u32,
-    /// Rows stamped in [09:15:00, 15:30:00), whatever their LTQ.
+    /// Kept rows stamped inside one of the day's windows, whatever their LTQ.
     pub rows_in_session: u32,
-    /// Rows stamped at or after 15:30:00.
+    /// Kept rows stamped outside every window, at or after the first open.
     pub rows_post: u32,
-    /// Rows whose LTQ is zero: every index row, and the stock rows the fold
-    /// drops (D-0805, pending).
+    /// Kept rows whose LTQ is zero: every index row, and the stock rows the
+    /// fold drops (D-0805, pending).
     pub ltq_zero_rows: u32,
     /// Whether a cut last row stamped after the session, with a complete
     /// post-session row before it, was dropped (design §3.3, revision 4).
     pub tail_truncated_post_session: bool,
+    /// The rows refused by name and not kept (D-3318).
+    pub refused: RowsRefused,
+    /// Kept rows whose LTP carried more than two decimals and was snapped
+    /// half-up ([`PriceRule::HalfUp`]); always 0 under [`PriceRule::Exact`].
+    pub rows_snapped: u32,
+    /// An index file's same-second dual values (D-3335; DB-G96); zero for a
+    /// stock file.
+    pub dual_spread: DualSpread,
+    /// The closing-auction prints diverted from `rows` (D-3320), in file
+    /// order, identical consecutive rows merged with their count.
+    pub auction: Vec<auction::Print>,
     /// The file's length in bytes.
     pub source_len: u64,
     /// CRC-32 (the zip polynomial) of the file's bytes, which the archive
@@ -950,7 +1793,8 @@ pub struct CmFile {
     pub source_digest: [u8; 32],
 }
 
-/// Decodes one capital-market file, without the archive check.
+/// Decodes one capital-market file under [`Rules::regular`], without the
+/// archive check.
 ///
 /// Crate-private since the round-5 review: design §3.3 verifies every file
 /// before it is gridded, "never a fallback to the unverified tree", so
@@ -960,17 +1804,215 @@ pub struct CmFile {
 ///
 /// # Errors
 ///
-/// [`CmRefusal::HeaderUnknown`], [`CmRefusal::TickerMismatch`],
-/// [`CmRefusal::DateMismatch`], [`CmRefusal::MalformedRow`],
-/// [`CmRefusal::PriceRefused`], [`CmRefusal::RowsOverCap`] or
-/// [`CmRefusal::NoSessionRows`], each naming the first line that failed.
+/// As [`decode_with`].
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the reader's shape tests decode under the regular rules; \
+                  `read_listed` decodes under the day's own"
+    )
+)]
 pub(crate) fn decode(bytes: &[u8], expect: &Expect<'_>) -> Result<CmFile, CmRefusal> {
-    decode_capped(bytes, expect, crate::fetch::MAX_ROWS)
+    decode_with(bytes, expect, &Rules::regular())
+}
+
+/// Decodes one capital-market file under `rules`, without the archive check.
+///
+/// # Errors
+///
+/// [`CmRefusal::HeaderUnknown`], [`CmRefusal::TickerMismatch`] and
+/// [`CmRefusal::DateMismatch`] at their first line; a malformed last line with
+/// no newline after it (`MalformedRow`); [`CmRefusal::RowsOverCap`];
+/// [`CmRefusal::TooManyBadRows`]; the first refused row's own refusal
+/// (`PriceRefused` or `MalformedRow`) when no row was kept;
+/// [`CmRefusal::AuctionEligibilityUnknown`] at a candidate row of an unknown
+/// eligibility; [`CmRefusal::NoSessionRows`]; [`CmRefusal::IndexEndsInSession`].
+pub(crate) fn decode_with(
+    bytes: &[u8],
+    expect: &Expect<'_>,
+    rules: &Rules,
+) -> Result<CmFile, CmRefusal> {
+    decode_ruled(bytes, expect, rules, crate::fetch::MAX_ROWS)
 }
 
 /// [`decode`] with the row bound as a parameter, so the bound's refusal is
 /// testable without a million-row fixture.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the row bound's own test is its one caller")
+)]
 fn decode_capped(bytes: &[u8], expect: &Expect<'_>, cap: usize) -> Result<CmFile, CmRefusal> {
+    decode_ruled(bytes, expect, &Rules::regular(), cap)
+}
+
+/// The first second of `session`'s first window and the first second after
+/// its last, as seconds of the IST day.
+fn session_bounds(session: Session) -> (u32, u32) {
+    let count = usize::from(session.count).clamp(1, crate::calendar::MAX_WINDOWS);
+    let first = session
+        .windows
+        .first()
+        .map_or(SESSION_OPEN_MINUTE, |w| u32::from(w.from));
+    let last = session
+        .windows
+        .get(count - 1)
+        .map_or(SESSION_CLOSE_MINUTE, |w| u32::from(w.to) + 1);
+    (first * 60, last * 60)
+}
+
+/// Whether a kept stock row is a closing-auction candidate (D-3320 item 3):
+/// in `[15:15:00, 15:30:00)`, bid and ask both zero, LTQ positive.
+fn auction_candidate(parsed: &Parsed) -> bool {
+    let from = u32::from(crate::calendar::CAS_CONTINUOUS_CLOSE) * 60;
+    let to = u32::from(crate::calendar::CAS_SESSION_END) * 60;
+    parsed.row.sod >= from && parsed.row.sod < to && parsed.quotes_zero && parsed.row.ltq > 0
+}
+
+/// The running state of one decode: the file being built, and what the
+/// checks at its end need (D-3318's counts, D-3320's prints, D-3335's
+/// spread).
+struct Reading<'r> {
+    /// The file so far.
+    file: CmFile,
+    /// The day's rules.
+    rules: &'r Rules,
+    /// The tree the file was found in.
+    kind: CmKind,
+    /// The first second of the day's first window.
+    open_sod: u32,
+    /// Kept rows a session can use: an index row in a window, a traded stock
+    /// row in a window, or an auction print.
+    usable: u32,
+    /// Every row read, kept or refused.
+    read: u32,
+    /// The first refused row's own refusal, for a file that keeps no row.
+    first_refusal: Option<CmRefusal>,
+    /// The run of rows sharing one second, for the spread count.
+    spread: SpreadRun,
+}
+
+impl Reading<'_> {
+    /// One refused row (D-3318): counted, named while there is room, and the
+    /// first one kept for a file that keeps no row at all.
+    fn refuse(&mut self, row: RefusedRow, refusal: CmRefusal) {
+        self.file.refused.note(row);
+        self.first_refusal.get_or_insert(refusal);
+    }
+
+    /// One parsed row: an eligible share's auction print is diverted
+    /// (D-3320), a candidate row of an unknown eligibility refuses the file,
+    /// and every other row is classified against the day's windows and kept.
+    fn keep(&mut self, parsed: Parsed) -> Result<(), CmRefusal> {
+        if parsed.snapped {
+            self.file.rows_snapped = self.file.rows_snapped.saturating_add(1);
+        }
+        if self.kind == CmKind::Stocks && auction_candidate(&parsed) {
+            match &self.rules.auction {
+                Auction::Eligible => {
+                    auction::merge(&mut self.file.auction, parsed.row);
+                    self.usable = self.usable.saturating_add(1);
+                    return Ok(());
+                }
+                Auction::Unknown(why) => {
+                    return Err(CmRefusal::AuctionEligibilityUnknown { why: why.clone() });
+                }
+                Auction::NotEligible | Auction::NotAsked => {}
+            }
+        }
+        let row = parsed.row;
+        let file = &mut self.file;
+        let minute = u16::try_from(row.sod / 60).unwrap_or(u16::MAX);
+        if row.sod < self.open_sod {
+            file.rows_pre = file.rows_pre.saturating_add(1);
+        } else if self.rules.session.expects(minute) {
+            file.rows_in_session = file.rows_in_session.saturating_add(1);
+            if self.kind == CmKind::Indices || row.ltq > 0 {
+                self.usable = self.usable.saturating_add(1);
+            }
+            if self.kind == CmKind::Indices {
+                self.spread.observe(row.sod, row.ltp, &mut file.dual_spread);
+            }
+        } else {
+            file.rows_post = file.rows_post.saturating_add(1);
+        }
+        if row.ltq == 0 {
+            file.ltq_zero_rows = file.ltq_zero_rows.saturating_add(1);
+        }
+        // The running maximum: a late row is below it and never raises it, so
+        // at the end it is the stamp of the last in-order row.
+        file.max_sod = file.max_sod.max(row.sod);
+        file.rows.push(row);
+        Ok(())
+    }
+
+    /// The checks at the file's end, in order: too many refused rows
+    /// (D-3318), a file that kept nothing names its first refused row, no
+    /// session row, and an index file that ends before `end_sod`.
+    fn finish(mut self, end_sod: u32) -> Result<CmFile, CmRefusal> {
+        self.spread.finish(&mut self.file.dual_spread);
+        let file = self.file;
+        let refused = file.refused.total();
+        if refused > MAX_BAD_ROWS
+            && u64::from(refused) * u64::from(BAD_ROWS_PER) > u64::from(self.read)
+        {
+            return Err(CmRefusal::TooManyBadRows {
+                refused,
+                rows: self.read,
+            });
+        }
+        if file.rows.is_empty()
+            && file.auction.is_empty()
+            && let Some(first) = self.first_refusal
+        {
+            return Err(first);
+        }
+        if self.usable == 0 {
+            return Err(CmRefusal::NoSessionRows);
+        }
+        // Design §3.3, revision 9 (C45): the largest stamp, never the last row
+        // in file order, so a file ending on late rows stamped inside the
+        // session is handed on whole and the fold places them. `usable > 0`
+        // means a row was read, so `max_sod` is a real stamp here. On a
+        // special session the end is its last window's (D-3319).
+        if self.kind == CmKind::Indices && file.max_sod < end_sod {
+            return Err(CmRefusal::IndexEndsInSession {
+                max_sod: file.max_sod,
+            });
+        }
+        Ok(file)
+    }
+}
+
+/// A file with no row read yet: its header, its last byte and its digests.
+fn empty_file(bytes: &[u8], header: HeaderVariant, final_newline: bool) -> CmFile {
+    CmFile {
+        header,
+        final_newline,
+        rows: Vec::new(),
+        max_sod: 0,
+        rows_pre: 0,
+        rows_in_session: 0,
+        rows_post: 0,
+        ltq_zero_rows: 0,
+        tail_truncated_post_session: false,
+        refused: RowsRefused::default(),
+        rows_snapped: 0,
+        dual_spread: DualSpread::default(),
+        auction: Vec::new(),
+        source_len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        source_digest: brutex_core::blake3::hash(bytes),
+        source_crc32: crate::gdfl_archive::crc32(bytes),
+    }
+}
+
+/// The decoder behind [`decode`], [`decode_with`] and [`decode_capped`].
+fn decode_ruled(
+    bytes: &[u8],
+    expect: &Expect<'_>,
+    rules: &Rules,
+    cap: usize,
+) -> Result<CmFile, CmRefusal> {
     let (body, final_newline) = match bytes.strip_suffix(b"\n") {
         Some(body) => (body, true),
         None => (bytes, false),
@@ -987,21 +2029,17 @@ fn decode_capped(bytes: &[u8], expect: &Expect<'_>, cap: usize) -> Result<CmFile
         expect.day.month(),
         expect.day.year()
     );
-    let mut file = CmFile {
-        header,
-        final_newline,
-        rows: Vec::new(),
-        max_sod: 0,
-        rows_pre: 0,
-        rows_in_session: 0,
-        rows_post: 0,
-        ltq_zero_rows: 0,
-        tail_truncated_post_session: false,
-        source_len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        source_digest: brutex_core::blake3::hash(bytes),
-        source_crc32: crate::gdfl_archive::crc32(bytes),
+    let (open_sod, end_sod) = session_bounds(rules.session);
+    let mut reading = Reading {
+        file: empty_file(bytes, header, final_newline),
+        rules,
+        kind: expect.kind,
+        open_sod,
+        usable: 0,
+        read: 0,
+        first_refusal: None,
+        spread: SpreadRun::default(),
     };
-    let mut usable: u32 = 0;
     let mut index = 0_usize;
     while let Some(raw) = lines.next() {
         // Line 1 is the header, so the row at `index` 0 is line 2.
@@ -1019,53 +2057,42 @@ fn decode_capped(bytes: &[u8], expect: &Expect<'_>, cap: usize) -> Result<CmFile
             }
             // Before the row bound: a dropped cut tail is not a row (round-5
             // review).
-            if post_session_tail(raw, expect, &date, file.rows.last()) {
-                file.tail_truncated_post_session = true;
+            if post_session_tail(raw, expect, &date, reading.file.rows.last(), end_sod) {
+                reading.file.tail_truncated_post_session = true;
                 break;
             }
         }
-        if file.rows.len() >= cap {
+        if usize::try_from(reading.read).unwrap_or(usize::MAX) >= cap {
             return Err(CmRefusal::RowsOverCap { cap });
         }
-        let row = parse_row(strip_cr(raw), line, expect, &date)?;
-        if row.sod < SESSION_OPEN_SOD {
-            file.rows_pre = file.rows_pre.saturating_add(1);
-        } else if row.sod < SESSION_CLOSE_SOD {
-            file.rows_in_session = file.rows_in_session.saturating_add(1);
-            if expect.kind == CmKind::Indices || row.ltq > 0 {
-                usable = usable.saturating_add(1);
-            }
-        } else {
-            file.rows_post = file.rows_post.saturating_add(1);
+        reading.read = reading.read.saturating_add(1);
+        match parse_row(strip_cr(raw), line, expect, &date, rules.price) {
+            Ok(parsed) => reading.keep(parsed)?,
+            Err(RowError::File(why)) => return Err(why),
+            // A malformed last line with no newline after it is where a cut
+            // file shows (CM-07): the whole file, as before D-3318.
+            Err(RowError::Row {
+                fault: RowFault::Malformed,
+                refusal,
+                ..
+            }) if last_without_newline => return Err(refusal),
+            Err(RowError::Row {
+                fault,
+                sod,
+                refusal,
+            }) => reading.refuse(RefusedRow { line, sod, fault }, refusal),
         }
-        if row.ltq == 0 {
-            file.ltq_zero_rows = file.ltq_zero_rows.saturating_add(1);
-        }
-        // The running maximum: a late row is below it and never raises it, so
-        // at the end it is the stamp of the last in-order row.
-        file.max_sod = file.max_sod.max(row.sod);
-        file.rows.push(row);
     }
-    if usable == 0 {
-        return Err(CmRefusal::NoSessionRows);
-    }
-    // Design §3.3, revision 9 (C45): the largest stamp, never the last row in
-    // file order, so a file ending on late rows stamped inside the session is
-    // handed on whole and the fold places them. `usable > 0` means a row was
-    // read, so `max_sod` is a real stamp here.
-    if expect.kind == CmKind::Indices && file.max_sod < SESSION_CLOSE_SOD {
-        return Err(CmRefusal::IndexEndsInSession {
-            max_sod: file.max_sod,
-        });
-    }
-    Ok(file)
+    reading.finish(end_sod)
 }
 
 /// Whether `bytes`, the file's last line with no newline after it, is a cut
 /// row that can only be a post-session row (design §3.3, revision 4): fewer
 /// than ten fields but at least four, so a comma closed the Time; this file's
-/// own Ticker and Date; a real Time at or after 15:30:00; and a complete row
-/// before it also stamped at or after 15:30:00. Since the round-3 review the
+/// own Ticker and Date; a real Time at or after `end_sod` (15:30:00 on a
+/// regular day, the end of the last window on a special session, D-3319);
+/// and a complete row before it also stamped at or after it. Since the
+/// round-3 review the
 /// fields after the Time must also be a prefix of a row ([`is_row_prefix`]),
 /// so a corrupted row is not recorded as a cut one. A last line ending in a
 /// bare CR never reaches this test: [`decode`] refuses it first (round-4 and
@@ -1076,6 +2103,7 @@ fn post_session_tail(
     expect: &Expect<'_>,
     date: &str,
     before: Option<&CmRow>,
+    end_sod: u32,
 ) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -1088,8 +2116,8 @@ fn post_session_tail(
         && fields.len() < 10
         && ticker == expect.stem
         && row_date == date
-        && second_of_day(time).is_some_and(|sod| sod >= SESSION_CLOSE_SOD)
-        && before.is_some_and(|row| row.sod >= SESSION_CLOSE_SOD)
+        && second_of_day(time).is_some_and(|sod| sod >= end_sod)
+        && before.is_some_and(|row| row.sod >= end_sod)
         && fields.get(3..).is_some_and(is_row_prefix)
 }
 
@@ -1150,10 +2178,46 @@ fn strip_cr(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
 
+/// What [`parse_row`] read off one row beyond the row itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Parsed {
+    /// The row.
+    row: CmRow,
+    /// Whether the bid and the ask are both zero (D-3320's auction test).
+    quotes_zero: bool,
+    /// Whether the LTP carried more than two decimals and was snapped.
+    snapped: bool,
+}
+
+/// Why [`parse_row`] did not keep a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowError {
+    /// The row is not this file's: the whole file refuses (D-3318 keeps
+    /// these whole).
+    File(CmRefusal),
+    /// The row is refused by name and the file read on (D-3318); `refusal`
+    /// is what the file says when it keeps no row at all.
+    Row {
+        fault: RowFault,
+        sod: Option<u32>,
+        refusal: CmRefusal,
+    },
+}
+
 /// One row's ten fields, checked in column order.
-fn parse_row(bytes: &[u8], line: u32, expect: &Expect<'_>, date: &str) -> Result<CmRow, CmRefusal> {
-    let malformed = CmRefusal::MalformedRow { line };
-    let text = std::str::from_utf8(bytes).map_err(|_| malformed.clone())?;
+fn parse_row(
+    bytes: &[u8],
+    line: u32,
+    expect: &Expect<'_>,
+    date: &str,
+    price: PriceRule,
+) -> Result<Parsed, RowError> {
+    let malformed = |sod: Option<u32>| RowError::Row {
+        fault: RowFault::Malformed,
+        sod,
+        refusal: CmRefusal::MalformedRow { line },
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| malformed(None))?;
     let mut fields = [""; 10];
     let mut count = 0_usize;
     for field in text.split(',') {
@@ -1163,7 +2227,7 @@ fn parse_row(bytes: &[u8], line: u32, expect: &Expect<'_>, date: &str) -> Result
         count = count.saturating_add(1);
     }
     if count != fields.len() {
-        return Err(malformed);
+        return Err(malformed(None));
     }
     let [
         ticker,
@@ -1178,31 +2242,45 @@ fn parse_row(bytes: &[u8], line: u32, expect: &Expect<'_>, date: &str) -> Result
         open_interest,
     ] = fields;
     if ticker != expect.stem {
-        return Err(CmRefusal::TickerMismatch { line });
+        return Err(RowError::File(CmRefusal::TickerMismatch { line }));
     }
     if row_date != date {
-        return Err(CmRefusal::DateMismatch { line });
+        return Err(RowError::File(CmRefusal::DateMismatch { line }));
     }
-    let sod = second_of_day(time).ok_or_else(|| malformed.clone())?;
-    let paisa = ltp_paisa(last_price).ok_or(CmRefusal::PriceRefused { line })?;
-    // The quote and the open interest are checked for shape and then dropped:
-    // the grid keeps no quote, and every ten-field NIFTY 50 and NIFTY BANK row
-    // of the copy has all six of those fields 0 (charter, GDFL section).
+    let sod = second_of_day(time).ok_or_else(|| malformed(None))?;
+    let (paisa, snapped) = ltp_of(last_price, price).map_err(|fault| RowError::Row {
+        fault,
+        sod: Some(sod),
+        refusal: CmRefusal::PriceRefused { line },
+    })?;
+    // The quote and the open interest are checked for shape; the grid keeps
+    // no quote, and every ten-field NIFTY 50 and NIFTY BANK row of the copy
+    // has all six of those fields 0 (charter, GDFL section). Whether both
+    // quotes are zero is D-3320's auction test, and nothing else.
     if !(is_decimal(bid)
         && is_decimal(ask)
         && is_digits(bid_qty)
         && is_digits(ask_qty)
         && is_digits(open_interest))
     {
-        return Err(malformed);
+        return Err(malformed(Some(sod)));
     }
-    let ltq = digits_u64(last_qty).ok_or(malformed)?;
-    Ok(CmRow {
-        line,
-        sod,
-        ltp: paisa,
-        ltq,
+    let ltq = digits_u64(last_qty).ok_or_else(|| malformed(Some(sod)))?;
+    Ok(Parsed {
+        row: CmRow {
+            line,
+            sod,
+            ltp: paisa,
+            ltq,
+        },
+        quotes_zero: is_zero(bid) && is_zero(ask),
+        snapped,
     })
+}
+
+/// Whether a plain decimal's every digit is zero.
+fn is_zero(text: &str) -> bool {
+    text.bytes().all(|b| b == b'0' || b == b'.')
 }
 
 /// `HH:MM:SS` as a second of the day, or `None`.
@@ -1217,26 +2295,45 @@ fn second_of_day(time: &str) -> Option<u32> {
         .then_some(hours * 3_600 + minutes * 60 + seconds)
 }
 
-/// The LTP in paisa, exactly, or `None` when the text is not a plain decimal
-/// of at most two places, does not fit, or is below one tick.
+/// The LTP in paisa and whether it was snapped, or the row's fault: not a
+/// plain decimal ([`RowFault::Malformed`]), zero ([`RowFault::ZeroLtp`]), or
+/// off the grid, past what paisa hold, or below one tick
+/// ([`RowFault::OffGrid`]).
 ///
-/// Design §3.3 (Row checks): decoded with `csv::paisa`, the F&O reader's
-/// conversion, so a third decimal REFUSES rather than snapping, for that
-/// function's own first reason: the tick grid is two places (`CLAUDE.md` §7),
-/// so a third digit is the vendor sending something this build does not
-/// understand (round-4 review; D-0808). `is_decimal` is checked first because
-/// `csv::paisa` also takes a sign and an empty fraction (`10000.`), neither of
-/// which this column carries.
+/// Design §3.3 (Row checks): under [`PriceRule::Exact`] decoded with
+/// `csv::paisa`, the F&O reader's conversion, so a third decimal REFUSES
+/// rather than snapping, for that function's own first reason: the tick grid
+/// is two places (`CLAUDE.md` §7), so a third digit is the vendor sending
+/// something this build does not understand (round-4 review; D-0808).
+/// `is_decimal` is checked first because `csv::paisa` also takes a sign and
+/// an empty fraction (`10000.`), neither of which this column carries. Under
+/// [`PriceRule::HalfUp`] (INDIA VIX only, D-3333) the same text is snapped
+/// half-up by `Paisa::from_rupee_text_half_up`, the one half-up reader.
 ///
 /// "One tick" is `costs::rate::TICK`, 5 paisa, as design §3.3 names it. That
 /// constant is documented as the NSE and BSE index-OPTION premium tick; here
 /// it is used only as a positivity floor, never as the tick of an index level
 /// or of a cash equity, neither of which this reader asserts (round-3 review).
-fn ltp_paisa(text: &str) -> Option<i64> {
+fn ltp_of(text: &str, rule: PriceRule) -> Result<(i64, bool), RowFault> {
     if !is_decimal(text) {
-        return None;
+        return Err(RowFault::Malformed);
     }
-    crate::csv::paisa(text).filter(|&paisa| paisa >= costs::rate::TICK.raw())
+    if is_zero(text) {
+        return Err(RowFault::ZeroLtp);
+    }
+    let places = text.split_once('.').map_or(0, |(_, frac)| frac.len());
+    let paisa = match rule {
+        PriceRule::Exact => crate::csv::paisa(text),
+        PriceRule::HalfUp => brutex_core::price::Paisa::from_rupee_text_half_up(text)
+            .ok()
+            .map(brutex_core::price::Paisa::raw),
+    };
+    match paisa {
+        Some(paisa) if paisa >= costs::rate::TICK.raw() => {
+            Ok((paisa, rule == PriceRule::HalfUp && places > 2))
+        }
+        _ => Err(RowFault::OffGrid),
+    }
 }
 
 /// Digits, optionally a dot and more digits: no sign, no space, no exponent.
@@ -1261,20 +2358,73 @@ fn digits_u64(text: &str) -> Option<u64> {
     }
 }
 
-/// Whether the calendar says `day` was a regular full session, the only kind
-/// the one-second grid holds.
+/// Whether the import reads `day` ([`session_of`]), without the session.
 ///
 /// # Errors
 ///
-/// [`CmRefusal::CalendarUnmeasured`] outside the measured span, and
-/// [`CmRefusal::CalendarNotRegular`] for a closed day, a special session or a
-/// day whose length was never measured.
+/// As [`session_of`].
 pub fn session_gate(day: Day) -> Result<(), CmRefusal> {
-    match crate::calendar::sourced_kind_of(i64::from(day.days_from_epoch())) {
-        DayKind::Open(session) if session == Session::full() => Ok(()),
+    session_of(day).map(|_| ())
+}
+
+/// The session `day` held, when the import reads it (D-3319): a regular
+/// full session, or a special session whose windows the calendar of record
+/// ([`crate::calendar::exchange_kind_of`]) holds — the Muhurat sessions, the
+/// disaster-recovery drills, the 2021-02-24 outage day — read inside those
+/// windows. One `exchange_kind_of` (O(1), `calendar.rs` states its bound)
+/// and, for a special session, one [`landed`] check.
+///
+/// # Errors
+///
+/// [`CmRefusal::CalendarUnmeasured`] outside the calendar's spans,
+/// [`CmRefusal::CalendarNotRegular`] for a closed day or a session of
+/// unmeasured length, and [`CmRefusal::CalendarWindowNotLanded`] for a
+/// special session the store's session authority would land nothing of.
+pub fn session_of(day: Day) -> Result<Session, CmRefusal> {
+    admitted(
+        day,
+        crate::calendar::exchange_kind_of(i64::from(day.days_from_epoch())),
+    )
+}
+
+/// The admission rule of [`session_of`] on what the calendar said `day` was:
+/// a regular session, or a special one the store's session authority keeps,
+/// is read; a day of unmeasured length, a closed day and a day outside the
+/// spans are refused by name (D-3319 item 2).
+fn admitted(day: Day, kind: DayKind) -> Result<Session, CmRefusal> {
+    match kind {
+        DayKind::Open(session) if session == Session::full() || landed(day, session) => Ok(session),
+        DayKind::Open(session) => Err(CmRefusal::CalendarWindowNotLanded {
+            kind: DayKind::Open(session),
+        }),
         DayKind::Unmeasured => Err(CmRefusal::CalendarUnmeasured),
         kind => Err(CmRefusal::CalendarNotRegular { kind }),
     }
+}
+
+/// Whether the store's one session authority,
+/// [`crate::session::Window::verdict`] (which `ingest::from_rows` applies to
+/// every bar this import files), keeps a bar at the first minute of every
+/// window of `session` on `day`, on every NSE venue. A special session whose
+/// windows the calendar of record holds but that authority does not would
+/// land nothing and close `done`: refused instead, by name (D-3319). Three
+/// verdicts per window, each O(1).
+fn landed(day: Day, session: Session) -> bool {
+    let Ok(window) = crate::session::Window::new(day, day) else {
+        return false;
+    };
+    let count = usize::from(session.count).min(crate::calendar::MAX_WINDOWS);
+    let midnight = i64::from(day.days_from_epoch()) * 86_400 - crate::session::IST_OFFSET_SECS;
+    session.count > 0
+        && session.windows.iter().take(count).all(|w| {
+            crate::vendor::Venue::ALL.iter().all(|&venue| {
+                let at = midnight + i64::from(w.from) * 60;
+                matches!(
+                    window.verdict(at, crate::session::Cadence::Minute, venue),
+                    Ok(None)
+                )
+            })
+        })
 }
 
 /// One instrument-day's file, located, read and decoded.
@@ -1297,10 +2447,13 @@ pub struct DayFile {
 /// instrument: a day the vendor never shipped is the census's to list and
 /// the fill's to refuse, never a guess here.
 ///
+/// The swept surface only: a stored series (D-3333) is read through
+/// [`read_listed`] from a listing built under its [`CmScope`].
+///
 /// # Errors
 ///
 /// [`CmRefusal::NotSwept`] for an instrument with no stem, the calendar
-/// refusals of [`session_gate`] before anything is read, the source's own
+/// refusals of [`session_of`] before anything is read, the source's own
 /// refusals, and every refusal of [`read_listed`].
 pub fn read_day<S: CmSource>(
     source: &S,
@@ -1322,27 +2475,36 @@ pub fn read_day<S: CmSource>(
 /// would not decode. The check is here, not in the source, so every source
 /// is held to it.
 ///
+/// The stem is the one the listing's scope files `key` under that day
+/// ([`CmScope::stem_for`]); the rows are decoded under the day's session
+/// (D-3319), the key's price rule (D-3333) and, for a share from 2026-08-03,
+/// its closing-auction eligibility (D-3320). A file with refused rows is
+/// logged once, at `warn`, with its counts and named lines (D-3318).
+///
 /// # Errors
 ///
-/// [`CmRefusal::NotSwept`] for an instrument with no stem,
-/// [`CmRefusal::FolderUnknown`] when the listing is not of the instrument's
-/// tree, the calendar refusals of [`session_gate`], the listing refusals of
-/// [`DayListing::locate`], the source's own refusals from
+/// [`CmRefusal::NotSwept`] for an instrument the listing's scope does not
+/// file, [`CmRefusal::FolderUnknown`] when the listing is not of the
+/// instrument's tree, the calendar refusals of [`session_of`], the listing
+/// refusals of [`DayListing::locate`], the source's own refusals from
 /// [`CmSource::fetch`], [`CmRefusal::SourceLengthMismatch`] and
 /// [`CmRefusal::SourceCrcMismatch`], which come before any decode refusal,
-/// and every refusal of [`decode`].
+/// and every refusal of [`decode_with`].
 pub fn read_listed<S: CmSource>(
     source: &S,
     listing: &DayListing<S::Locator>,
     key: &InstrumentKey,
 ) -> Result<Option<DayFile>, CmRefusal> {
-    let (kind, stem) = stem_of(key).ok_or(CmRefusal::NotSwept)?;
+    let (kind, stem) = listing
+        .scope()
+        .stem_for(key, listing.day())
+        .ok_or(CmRefusal::NotSwept)?;
     // The listing must be of the instrument's own tree: a stock listing
     // resolves no index key (design §3.3, revision 9).
     if listing.kind() != kind {
         return Err(CmRefusal::FolderUnknown);
     }
-    session_gate(listing.day())?;
+    let session = session_of(listing.day())?;
     let Some((file, ext)) = listing.locate(&stem)? else {
         return Ok(None);
     };
@@ -1350,19 +2512,47 @@ pub fn read_listed<S: CmSource>(
     // byte bound precedes the fetch (`docs/06-limits.md`).
     let bytes = source.fetch(listing, file)?;
     verify(file, &bytes)?;
-    let decoded = decode(
+    let rules = Rules {
+        session,
+        price: listing.scope().price_rule(key),
+        auction: listing.auction_for(key),
+    };
+    let decoded = decode_with(
         &bytes,
         &Expect {
             kind,
             stem: &stem,
             day: listing.day(),
         },
+        &rules,
     )?;
+    note_refused_rows(listing.day(), file.name(), &decoded.refused);
     Ok(Some(DayFile {
         name: file.name().to_owned(),
         ext,
         file: decoded,
     }))
+}
+
+/// One `warn` line for a file whose rows were refused (D-3318; D-3341: one
+/// line per file, never one per row): the day, the file, every count, and
+/// the named rows as `line:fault` words.
+fn note_refused_rows(day: Day, name: &str, refused: &RowsRefused) {
+    if refused.total() == 0 {
+        return;
+    }
+    let day_text = day.to_string();
+    let named = refused.named_text();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(crate::gdfl_import::TARGET, "rows refused, file read")
+            .with("day", day_text.as_str())
+            .with("file", name)
+            .with("rows_refused", refused.total())
+            .with("zero_ltp", refused.zero_ltp)
+            .with("off_grid", refused.off_grid)
+            .with("malformed", refused.malformed)
+            .with("named", named.as_str()),
+    );
 }
 
 /// Whether `bytes` are byte for byte the file `listed` names: the length
@@ -1950,6 +3140,14 @@ mod tests {
             [".find", "("].concat(),
         ];
         let end_record_scan = [".find", "(|&at| {"].concat();
+        // THE ONE HASH MAP (D-3333): the stored scope's share table, which a
+        // stored share's slot is one probe of; a swept ticker is still one
+        // index. Named and counted, like the end-record scan.
+        let scope_map = |line: &str| {
+            line.trim_start() == ["use std::collections::Hash", "Map;"].concat()
+                || line.contains(&["share_at: Hash", "Map"].concat())
+        };
+        let mut maps = 0;
         let mut scans = 0;
         let here = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
         for file in ["gdfl_cm.rs", "gdfl_archive.rs"] {
@@ -1963,12 +3161,17 @@ mod tests {
                     scans += 1;
                     continue;
                 }
+                if file == "gdfl_cm.rs" && scope_map(line) {
+                    maps += 1;
+                    continue;
+                }
                 for word in &banned {
                     assert!(!line.contains(word.as_str()), "{file}:{}: {line}", at + 1);
                 }
             }
         }
         assert_eq!(scans, 1, "the end-record scan is the one search");
+        assert_eq!(maps, 3, "the scope's share table is the one hash map");
         let folder = listing(&[
             "NIFTY 50.NSE_IDX.csv",
             "INDIA VIX.NSE_IDX.csv",
@@ -2177,6 +3380,29 @@ mod tests {
         one_bad_row(&n50("09:15:01", ltp))
     }
 
+    /// The refused rows a decoded file names, as `(line, fault)`.
+    fn refusals(file: &CmFile) -> Vec<(u32, RowFault)> {
+        file.refused
+            .named
+            .iter()
+            .map(|row| (row.line, row.fault))
+            .collect()
+    }
+
+    /// D-3318: a file whose line `line` is bad decodes, keeps every other
+    /// row, and refuses that one by name with `fault`, counted.
+    fn refuses_only(bytes: &[u8], line: u32, fault: RowFault) -> CmFile {
+        let got = decode(bytes, &nifty(day(2024, 4, 1)));
+        assert!(
+            got.is_ok(),
+            "line {line} {fault:?}: the file refused: {got:?}"
+        );
+        let file = got.unwrap();
+        assert_eq!(refusals(&file), vec![(line, fault)]);
+        assert_eq!(file.refused.total(), 1);
+        file
+    }
+
     fn sod(h: u32, m: u32, s: u32) -> u32 {
         h * 3_600 + m * 60 + s
     }
@@ -2371,15 +3597,6 @@ mod tests {
                 vec![
                     n50("09:15:00", "1"),
                     n50("16:00:00", "1"),
-                    cut(n50("16:00:01", "1"), 9),
-                ],
-                true,
-                4,
-            ),
-            (
-                vec![
-                    n50("09:15:00", "1"),
-                    n50("16:00:00", "1"),
                     cut(
                         index_row("NIFTY BANK.NSE_IDX", "01/04/2024", "16:00:01", "1"),
                         9,
@@ -2419,6 +3636,19 @@ mod tests {
                 "{rows:?} final newline {final_newline}"
             );
         }
+        // A short row the vendor TERMINATED is a malformed row, not a cut
+        // file: since D-3318 it is refused by name and the rest is read.
+        let bytes = synthetic_file(
+            HEADER_OPEN_INTEREST,
+            &[
+                n50("09:15:00", "1"),
+                n50("16:00:00", "1"),
+                cut(n50("16:00:01", "1"), 9),
+            ],
+            true,
+        );
+        let file = refuses_only(&bytes, 4, RowFault::Malformed);
+        assert!(!file.tail_truncated_post_session);
     }
 
     /// A short post-session last row followed by a bare LF is not a cut row.
@@ -2440,10 +3670,10 @@ mod tests {
         ]
         .join("\n");
         lf.push('\n');
-        assert_eq!(
-            decode(lf.as_bytes(), &nifty(day(2024, 4, 1))),
-            Err(CmRefusal::MalformedRow { line: 4 })
-        );
+        // Terminated, so not a cut: refused by name, the rest read (D-3318).
+        let file = refuses_only(lf.as_bytes(), 4, RowFault::Malformed);
+        assert!(!file.tail_truncated_post_session);
+        assert_eq!(file.rows.len(), 2);
     }
 
     /// A cut is a PREFIX of a row: every field after the Time that a comma
@@ -2772,9 +4002,14 @@ mod tests {
             stem: "INDIA VIX.NSE_IDX",
             day: day(2024, 4, 1),
         };
+        // Under the exact rule the four-decimal row is refused by name
+        // (D-3318), never snapped, which leaves no session row.
+        assert_eq!(decode(&bytes, &expect), Err(CmRefusal::NoSessionRows));
+        let alone = modern(&[vix("09:15:01", "13.4175")]);
         assert_eq!(
-            decode(&bytes, &expect),
-            Err(CmRefusal::PriceRefused { line: 2 })
+            decode(&alone, &expect),
+            Err(CmRefusal::PriceRefused { line: 2 }),
+            "a file of one refused row names it"
         );
         // A third digit refuses whatever it is, a zero included: the rule is
         // the column's shape, not whether a snap would change the value.
@@ -2786,11 +4021,9 @@ mod tests {
             "1.00000",
             "0.045",
         ] {
-            assert_eq!(
-                decode(&ltp_row(text), &nifty(day(2024, 4, 1))),
-                Err(CmRefusal::PriceRefused { line: 3 }),
-                "{text}"
-            );
+            let file = refuses_only(&ltp_row(text), 3, RowFault::OffGrid);
+            assert_eq!(file.rows.len(), 2, "{text}");
+            assert_eq!(file.rows_snapped, 0, "{text}");
         }
         // Two places or fewer convert exactly; one place is tenths.
         for (text, paisa) in [
@@ -2900,10 +4133,15 @@ mod tests {
             rows.push(field(at, text));
         }
         rows.push(field(3, "10000,05"));
+        // D-3318: each is refused by name and counted, and the file's other
+        // rows are read; a file of that row alone names it.
         for row in rows {
+            let file = refuses_only(&one_bad_row(&row), 3, RowFault::Malformed);
+            assert_eq!(file.rows.len(), 2, "{row:?}");
+            assert_eq!(file.refused.malformed, 1, "{row:?}");
             assert_eq!(
-                decode(&one_bad_row(&row), &nifty(day(2024, 4, 1))),
-                Err(CmRefusal::MalformedRow { line: 3 }),
+                decode(&modern(std::slice::from_ref(&row)), &nifty(day(2024, 4, 1))),
+                Err(CmRefusal::MalformedRow { line: 2 }),
                 "{row:?}"
             );
         }
@@ -2911,10 +4149,10 @@ mod tests {
         let text = String::from_utf8(bytes.clone()).unwrap();
         let at = text.find("10000.05").unwrap();
         bytes[at] = 0xff;
+        let file = refuses_only(&bytes, 3, RowFault::Malformed);
         assert_eq!(
-            decode(&bytes, &nifty(day(2024, 4, 1))),
-            Err(CmRefusal::MalformedRow { line: 3 }),
-            "a byte that is not UTF-8"
+            file.refused.named[0].sod, None,
+            "a byte that is not UTF-8 names no time"
         );
     }
 
@@ -2929,12 +4167,26 @@ mod tests {
     fn price_refused_refuses() {
         // Twenty nines: a decimal that does not fit `i64` paisa.
         let too_big = "9".repeat(20);
-        for ltp in [
-            "-10000", "+10000", "10000.", ".5", "1E3", "0.04", "0", "", " 10000", &too_big,
+        for (ltp, fault) in [
+            ("-10000", RowFault::Malformed),
+            ("+10000", RowFault::Malformed),
+            ("10000.", RowFault::Malformed),
+            (".5", RowFault::Malformed),
+            ("1E3", RowFault::Malformed),
+            ("", RowFault::Malformed),
+            (" 10000", RowFault::Malformed),
+            ("0.04", RowFault::OffGrid),
+            (&too_big, RowFault::OffGrid),
+            ("0", RowFault::ZeroLtp),
+            ("0.00", RowFault::ZeroLtp),
+            ("00.000", RowFault::ZeroLtp),
         ] {
+            let file = refuses_only(&ltp_row(ltp), 3, fault);
+            assert_eq!(file.refused.named[0].sod, Some(sod(9, 15, 1)), "{ltp:?}");
+            // A file of that one row names it as a price refusal.
             assert_eq!(
-                decode(&ltp_row(ltp), &nifty(day(2024, 4, 1))),
-                Err(CmRefusal::PriceRefused { line: 3 }),
+                decode(&modern(&[n50("09:15:01", ltp)]), &nifty(day(2024, 4, 1))),
+                Err(CmRefusal::PriceRefused { line: 2 }),
                 "{ltp:?}"
             );
         }
@@ -3015,21 +4267,29 @@ mod tests {
     #[test]
     fn only_one_cr_is_stripped_and_nothing_else_is_trimmed() {
         let expect = nifty(day(2024, 4, 1));
+        // A clean session row first, so refusing the tailed one still
+        // leaves the file a session row to read.
         let row = |tail: &str| {
-            let mut bytes = synthetic_file(HEADER_OPEN_INTEREST, &[n50("10:00:00", "100")], false);
+            let mut bytes = synthetic_file(
+                HEADER_OPEN_INTEREST,
+                &[n50("09:15:00", "100"), n50("10:00:00", "100")],
+                false,
+            );
             bytes.extend_from_slice(tail.as_bytes());
             bytes.extend_from_slice(b"\r\n");
             bytes.extend_from_slice(n50("16:00:00", "100").as_bytes());
             bytes.extend_from_slice(b"\r\n");
             bytes
         };
-        assert_eq!(decode(&row(""), &expect).map(|f| f.rows.len()), Ok(2));
+        assert_eq!(decode(&row(""), &expect).map(|f| f.rows.len()), Ok(3));
         for tail in ["\r", " ", "\t", " \r"] {
-            assert_eq!(
-                decode(&row(tail), &expect),
-                Err(CmRefusal::MalformedRow { line: 2 }),
-                "{tail:?}"
-            );
+            // Refused by name, never trimmed (D-3318: the row, not the file).
+            let got = decode(&row(tail), &expect);
+            assert!(got.is_ok(), "{tail:?}: {got:?}");
+            let file = got.unwrap();
+            assert_eq!(file.rows.len(), 2, "{tail:?}");
+            assert_eq!(refusals(&file), vec![(3, RowFault::Malformed)], "{tail:?}");
+            assert!(file.rows.iter().all(|r| r.sod != sod(10, 0, 0)), "{tail:?}");
         }
         let header = format!("{HEADER_OPEN_INTEREST}\r\r\n{}\r\n", n50("16:00:00", "100"));
         assert_eq!(
@@ -3184,38 +4444,123 @@ mod tests {
         ));
     }
 
-    /// 2024-03-02 and 2024-05-18, the disaster-recovery Saturdays with two
-    /// windows. Their four index files are the only ones of the copy whose
-    /// largest stamp is before 15:30:00 (charter, GDFL section), so this
-    /// gate, not `IndexEndsInSession`, is what `read_day` refuses them with.
+    /// A session's windows as `(from, to)` minute pairs.
+    fn windows_of(session: Session) -> Vec<(u16, u16)> {
+        session
+            .windows
+            .iter()
+            .take(usize::from(session.count))
+            .map(|w| (w.from, w.to))
+            .collect()
+    }
+
+    /// D-3319 (DB-072, DB-G55): the disaster-recovery drills, the
+    /// 2021-02-24 outage day and the 2025 Muhurat are read inside the windows
+    /// the calendar records, which the store's session authority already
+    /// keeps (`calendar::kind_of`'s irregular table): before D-3319 each was
+    /// refused whole as `CalendarNotRegular`.
+    #[test]
+    fn special_sessions_are_read_inside_their_windows() {
+        let drill = vec![(555, 599), (690, 749)];
+        for (d, windows) in [
+            (day(2024, 3, 2), drill.clone()),
+            (day(2024, 5, 18), drill),
+            (day(2021, 2, 24), vec![(555, 699), (945, 1_019)]),
+            (day(2025, 10, 21), vec![(825, 884)]),
+        ] {
+            let got = session_of(d);
+            assert!(got.is_ok(), "{d}: {got:?}");
+            let session = got.unwrap();
+            assert_ne!(session, Session::full(), "{d}");
+            assert_eq!(windows_of(session), windows, "{d}");
+            assert!(landed(d, session), "{d}");
+            assert_eq!(session_gate(d), Ok(()), "{d}");
+        }
+        assert_eq!(session_of(day(2024, 4, 1)), Ok(Session::full()));
+    }
+
+    /// CM-06 (its wording is WP-99's to restate under D-3319): a special
+    /// session is never gridded AS A REGULAR DAY. Every one the calendar of
+    /// record holds -- the drills, the 2021-02-24 outage day and every
+    /// Muhurat -- is answered with its own recorded windows, never 09:15 to
+    /// 15:30, so a row outside them is not in session. Until D-3319 each was
+    /// refused whole instead.
     #[test]
     fn special_session_is_not_gridded() {
-        for drill in [day(2024, 3, 2), day(2024, 5, 18)] {
-            let got = session_gate(drill);
-            assert!(matches!(
-                got,
-                Err(CmRefusal::CalendarNotRegular {
-                    kind: DayKind::Open(_)
-                })
-            ));
-            assert_ne!(
-                got,
-                Err(CmRefusal::CalendarNotRegular {
-                    kind: DayKind::Open(Session::full())
-                }),
-                "{drill:?}"
-            );
+        for special in crate::calendar::SPECIAL_SESSIONS {
+            let d = Day::from_days(u32::try_from(special.day).unwrap()).unwrap();
+            let got = session_of(d);
+            assert_eq!(got, Ok(special.session), "{d}");
+            if special.session != Session::full() {
+                // A minute before its first window is outside the session.
+                let first = special.session.windows[0].from;
+                assert!(!special.session.expects(first - 1), "{d}");
+                assert!(special.session.expects(first), "{d}");
+            }
         }
     }
 
-    /// 2024-11-01, a Muhurat day with no minute series (`calendar.rs`).
+    /// CM-06 and D-3319 item 2: a day the calendar says traded for a length
+    /// nobody measured is still refused by name, never gridded as a full
+    /// session and never guessed. Since WP-14 recorded every Muhurat's
+    /// window no day of the sourced spans answers this, so the rule is
+    /// driven directly.
     #[test]
     fn length_unmeasured_day_is_not_gridded() {
         assert_eq!(
-            session_gate(day(2024, 11, 1)),
+            admitted(day(2024, 11, 1), DayKind::OpenLengthUnmeasured),
             Err(CmRefusal::CalendarNotRegular {
                 kind: DayKind::OpenLengthUnmeasured
             })
+        );
+        assert_eq!(
+            admitted(day(2024, 11, 2), DayKind::Closed),
+            Err(CmRefusal::CalendarNotRegular {
+                kind: DayKind::Closed
+            })
+        );
+        assert_eq!(
+            admitted(day(2024, 11, 1), DayKind::Unmeasured),
+            Err(CmRefusal::CalendarUnmeasured)
+        );
+    }
+
+    /// D-3319 (DB-G69, DB-G87): every Muhurat from 2018-11-07 to 2024-11-01
+    /// has its window recorded (`calendar::SPECIAL_SESSIONS`), and the
+    /// store's session authority (`session::Window::verdict`, WP-13b) keeps
+    /// it, so each is read inside that one window. Before D-3319 each was
+    /// refused whole (`OpenLengthUnmeasured` or `Unmeasured`).
+    #[test]
+    fn every_recorded_muhurat_is_read_inside_its_window() {
+        for (d, from) in [
+            (day(2018, 11, 7), 1_050_u16),
+            (day(2019, 10, 27), 1_095),
+            (day(2020, 11, 14), 1_095),
+            (day(2021, 11, 4), 1_095),
+            (day(2022, 10, 24), 1_095),
+            (day(2023, 11, 12), 1_095),
+            (day(2024, 11, 1), 1_080),
+        ] {
+            let got = session_of(d);
+            assert!(got.is_ok(), "{d}: {got:?}");
+            let session = got.unwrap();
+            assert!(landed(d, session), "{d}");
+            assert_eq!(windows_of(session), vec![(from, from + 59)], "{d}");
+            assert_eq!(session_gate(d), Ok(()), "{d}");
+        }
+        // A session with no window lands nothing, whatever the day, and a
+        // day whose window the store would not keep is refused by name.
+        let empty = Session {
+            count: 0,
+            ..Session::full()
+        };
+        assert!(!landed(day(2024, 4, 1), empty));
+        assert!(
+            CmRefusal::CalendarWindowNotLanded {
+                kind: DayKind::Open(empty)
+            }
+            .to_string()
+            .contains("keeps no bar")
         );
     }
 
@@ -3641,3 +4986,11 @@ mod tests {
         }
     }
 }
+
+/// WP-12a's admission tests (D-3318, D-3319, D-3320, D-3333, D-3335),
+/// declared here, after the module's own tests, so `pull/src/lib.rs` is not
+/// touched and the source-shape scans that stop at the first test attribute
+/// still read every live line above.
+#[cfg(test)]
+#[path = "gdfl_cm_admission_tests.rs"]
+mod admission_tests;

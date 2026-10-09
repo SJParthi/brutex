@@ -6,7 +6,9 @@
 
 use std::path::Path;
 
-use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, DayListing, ListedFile};
+use std::sync::Arc;
+
+use crate::gdfl_cm::{CmKind, CmRefusal, CmScope, CmSource, DayListing, ListedFile};
 use crate::session::Day;
 
 /// CRC-32 of `bytes` with the zip polynomial.
@@ -347,6 +349,9 @@ pub struct Archive<B> {
     days: [Vec<Option<Inner>>; 2],
     /// Names that are not day zips: folder entries and anything else.
     ignored: usize,
+    /// What every day listing files (D-3333): the swept surface unless
+    /// [`Archive::with_scope`] names another.
+    scope: Arc<CmScope>,
 }
 
 impl Archive<std::fs::File> {
@@ -431,7 +436,14 @@ impl<B: ReadAt> Archive<B> {
             first,
             days,
             ignored,
+            scope: CmScope::swept_shared(),
         })
+    }
+
+    /// This archive, its day listings filing what `scope` files (D-3333).
+    #[must_use]
+    pub fn with_scope(self, scope: Arc<CmScope>) -> Self {
+        Self { scope, ..self }
     }
 
     /// How many names in the archive are not day zips. Report only: the
@@ -515,7 +527,7 @@ impl<B: ReadAt> CmSource for Archive<B> {
             base: inner.header,
             len: inner.len,
         };
-        let mut listing = DayListing::new(kind, day);
+        let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));
         for entry in central_directory(&span)? {
             let locator = ZipLocator {
                 base: inner.header,
