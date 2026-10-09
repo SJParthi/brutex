@@ -820,7 +820,11 @@ impl Sink {
         // THE TORN TAIL IS CLOSED BEFORE THE FIRST APPEND. See
         // `terminate_torn_tail`: without this the first event of the new
         // process fuses onto whatever the old one was killed in the middle of.
-        let (bytes, torn) = terminate_torn_tail(&mut *target, &path, found);
+        // AND A TEAR THE FULL DISK WOULD NOT CLOSE STAYS OPEN, SO THE FIRST
+        // APPEND CLOSES IT: `Inner::torn` makes that append lead with the
+        // newline. Starting `torn: false` here let the first event fuse onto the
+        // fragment while it reported `Written` (sobs-3, D-4412).
+        let (bytes, torn, still_torn) = terminate_torn_tail(&mut *target, &path, found);
         // THE NUMBERS AN EARLIER SINK BURNT ON DROPPED EVENTS ARE NOT ISSUED
         // AGAIN. `resume_point` reads the last line that LANDED; a process whose
         // disk stayed full to its exit numbered events past it, and resuming
@@ -834,10 +838,9 @@ impl Sink {
         let seq = resumed.seq.max(prior.issued);
         let mut sink = Self::around(config, target, bytes, seq, resumed.last_at);
         sink.held_lock = Some(held);
-        sink.inner
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .ledger = ledger;
+        let inner = sink.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.ledger = ledger;
+        inner.torn = still_torn;
         // RUN IDS RESUME ABOVE EVERY RUN THE LOG CARRIES, not above the last
         // `seq` alone: a process that reserved two ids and wrote an event only
         // under the second left a `seq` below that id. hunt-costs-2, D-1536.
@@ -1722,8 +1725,10 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 
 /// Closes a torn tail before anything is appended to it, and says so.
 ///
-/// Returns the running byte count the sink starts from, and the notice naming
-/// the tear when there was one.
+/// Returns the running byte count the sink starts from, the notice naming the
+/// tear when there was one, and whether the tear is STILL open — its
+/// terminating byte refused by a full disk — so the sink's first append leads
+/// with the newline instead (sobs-3, D-4412).
 ///
 /// # What this is for
 ///
@@ -1785,9 +1790,13 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 /// request. A refusing double does, and it is the same seam
 /// `a_write_that_cannot_land_is_counted_and_named_rather_than_silently_lost`
 /// already uses. The indirect call happens once, at open.
-fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, Option<String>) {
+fn terminate_torn_tail(
+    target: &mut dyn Target,
+    path: &Path,
+    len: u64,
+) -> (u64, Option<String>, bool) {
     if !ends_mid_line(path, len) {
-        return (len, None);
+        return (len, None, false);
     }
     match target.append(b"\n") {
         // The byte is part of the file now, so the running count owns it too —
@@ -1797,11 +1806,12 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
             len.saturating_add(1),
             Some(format!(
                 "{}: the last line had no newline — a record torn by a kill, a power \
-                 cut or a disk that filled mid-line. It has been terminated, so it is ONE line the reader counts in \
-                 Tail::malformed and the next event starts clean; the torn record's own \
-                 bytes are gone and are not recoverable",
+                 cut or a disk that filled mid-line. It has been terminated, so it is ONE \
+                 line the reader counts in Tail::malformed and the next event starts \
+                 clean; the torn record's own bytes are gone and are not recoverable",
                 path.display()
             )),
+            false,
         ),
         // NOTHING FURTHER IS LOST BY CARRYING ON. The file was already
         // unwritable-or-worse and the very next append will say so in its own
@@ -1810,10 +1820,11 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
             len,
             Some(format!(
                 "{}: the last line had no newline and the terminating byte could not be \
-                 written — {e}; the next event will fuse onto the torn record and both \
-                 will read as one malformed line",
+                 written — {e}; the next append leads with the newline, so the torn record \
+                 is one malformed line and the next event a line of its own",
                 path.display()
             )),
+            true,
         ),
     }
 }
@@ -4382,10 +4393,14 @@ mod tests {
         let brittle = Arc::new(Brittle::default());
         brittle.refuse();
         let mut target = Arc::clone(&brittle);
-        let (bytes, why) = super::terminate_torn_tail(
+        let (bytes, why, still_torn) = super::terminate_torn_tail(
             &mut target,
             &current_path(&dir),
             u64::try_from(torn.len()).unwrap(),
+        );
+        assert!(
+            still_torn,
+            "the tear is still open, and the sink is told so"
         );
         assert_eq!(
             bytes,
@@ -4395,7 +4410,7 @@ mod tests {
         let said = why.expect("a tear that could not be closed is still reported");
         assert!(said.contains("could not be written"), "{said}");
         assert!(
-            said.contains("fuse"),
+            said.contains("leads with the newline"),
             "and it says what will happen next rather than implying a repair: {said}"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
@@ -5037,6 +5052,57 @@ mod tests {
             "never asked: no directory is held"
         );
         crate::loss::tests::disarm();
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A TORN TAIL THE FULL DISK WOULD NOT CLOSE AT OPEN IS CLOSED BY THE
+    /// FIRST APPEND (sobs-3, D-4412).** The audit's probe P6: a log whose last
+    /// line is torn, reopened on a full disk, so the terminating byte is
+    /// refused; then space returns. It measured `emit = Written`, `written=1`,
+    /// `dropped=0` — and the event unreadable, fused onto the fragment, because
+    /// `around` started the sink with `torn: false`. Now the first append leads
+    /// with the newline: the fragment is ONE malformed line and the event is
+    /// readable, and a whole file still gains no stray byte.
+    #[test]
+    fn a_torn_tail_the_full_disk_kept_open_at_open_is_closed_by_the_first_append() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("torn-full-at-open");
+        let config = Config::new(&dir);
+        let full = Arc::new(AtomicBool::new(false));
+        {
+            let sink = filling(&config, &full);
+            for _ in 0..3 {
+                assert!(sink.emit(&Event::info("t", "whole")).is_written());
+            }
+        }
+        let mut bytes = std::fs::read(current_path(&dir)).expect("the file");
+        bytes.extend_from_slice(br#"{"seq":4,"ms":5,"level":"info","target":"t","msg":"tor"#);
+        std::fs::write(current_path(&dir), &bytes).expect("torn");
+
+        full.store(true, Ordering::Relaxed);
+        let sink = filling(&config, &full);
+        let said = sink.health().last_error.expect("the tear is named");
+        assert!(said.contains("leads with the newline"), "{said}");
+        assert_eq!(
+            std::fs::read(current_path(&dir)).expect("the file"),
+            bytes,
+            "the full disk took no byte"
+        );
+        full.store(false, Ordering::Relaxed);
+        assert!(sink.emit(&Event::info("t", "after the tear")).is_written());
+        let found = crate::tail::tail(&dir, sink.keep_files(), &crate::tail::Query::last(10));
+        assert_eq!(
+            found.records[0].message, "after the tear",
+            "readable on its own line — fused, it is inside the malformed one: {found:?}"
+        );
+        assert_eq!(found.malformed, 1, "the fragment, once");
+        assert_eq!(found.records.len(), 4);
+        assert!(sink.emit(&Event::info("t", "and the next")).is_written());
+        let file = std::fs::read(current_path(&dir)).expect("the file");
+        assert!(
+            !file.windows(2).any(|pair| pair == b"\n\n"),
+            "the newline is led with once, not on every append"
+        );
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }

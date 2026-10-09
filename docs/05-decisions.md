@@ -66353,3 +66353,21 @@ build VM's virtual disk, 300 calls each): after one event p50 10.4 ms, p99
 20.0 ms, max 72.2 ms; after 100 events p50 11.9 ms, p99 19.0 ms, max 21.3 ms.
 Three `fsync`s and one `open`, once per process exit — never per event, so the
 emit path is unchanged. Proof: FXA-02.
+
+### D-4412 — A torn tail the full disk would not close at open is closed by the first append — 2026-10-09
+
+**Finding (sobs-3, probe P6).** `Sink::open` terminates a torn last line
+before the first append. When the disk was full at that moment the
+terminating byte was refused, `terminate_torn_tail` named it, and `around`
+then built the sink with `Inner::torn = false`. The first event after space
+returned was appended straight onto the fragment: `emit` returned `Written`,
+`written=1 dropped=0`, and the event was unreadable inside one malformed line.
+`emit` already carried exactly this state forward for a tear it made itself
+(D-1539); the open path dropped it.
+
+**Decision.** `terminate_torn_tail` returns whether the tear is still open,
+and `Sink::resumed` sets `Inner::torn` from it, so the first append leads with
+the newline and is a line of its own. The notice now says that instead of
+"the next event will fuse". A whole file still gains no byte at open, and the
+newline is led with once. Proof: FXA-03, which fails with the flag forced to
+`false` (checked on this tree).
