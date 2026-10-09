@@ -14540,9 +14540,15 @@ fn measure_top(
     // one the sequential loop computed, whatever the core count. The cost is
     // `O(band x (G + 7 x trades))` -- `G` one exit grid -- divided across cores,
     // and `band` is at most `8 x TOP_CEILING`.
+    #[cfg(test)]
+    let hook = MEASURE_ROW_HOOK.with(|hook| hook.borrow().clone());
     rows.par_iter_mut()
         .take(measured_band(rules.top))
         .for_each(|row| {
+            #[cfg(test)]
+            if let Some(hook) = &hook {
+                hook();
+            }
             // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
             // was worse than opposite — it was cross-wired.
             //
@@ -14579,6 +14585,17 @@ fn measure_top(
                 bars, column, row.scored, horizon, side, &g, &row.cell, facts,
             );
         });
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: called once per measured row of [`measure_top`]'s band, so a
+    /// test can prove two rows are measured at once (W2-cli8-7, D-4722). Read
+    /// on the thread that calls `measure_top`, so no other test's measurement
+    /// sees it.
+    pub(crate) static MEASURE_ROW_HOOK: std::cell::RefCell<
+        Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
 /// The screen's ranked table: one row per printed combination, its side, its

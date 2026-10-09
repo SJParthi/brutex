@@ -65202,3 +65202,16 @@ now folds 500 rows (100 filtered out) and checks at every step that at most
 `LIST_ROWS` are held, then that exactly the newest 40 matching rows are held
 in order at an unchanged capacity. With `pop_front` deleted it failed "row
 50: the window grew". No production code changes.
+
+### D-4722 — The measured band's parallelism is pinned — 2026-10-09
+
+**Finding.** W2-cli8-7, test gap. `measure_top` measures its band with
+`par_iter_mut`, but a sequential loop gives the same answer, so reverting it
+passed every test.
+
+**Decision.** A test-only hook, `MEASURE_ROW_HOOK`, runs once per measured
+row. `the_measured_band_measures_two_rows_at_once` installs a rendezvous on a
+two-thread pool: it passes only when two rows are inside the hook at once
+(bounded wait of 20 s), and the band's figures equal a one-thread pool's.
+With `iter_mut` it failed "two rows of the band were never measured at the
+same moment".

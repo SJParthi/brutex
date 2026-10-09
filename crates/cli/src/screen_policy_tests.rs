@@ -1842,3 +1842,157 @@ fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
 }
 
 // ---------------------------------------------------------------------------
+// W2-cli8-7 (D-4722): the measured band runs on more than one core at once.
+// ---------------------------------------------------------------------------
+
+/// Where two measured rows meet: the first to arrive waits, bounded, for a
+/// second; a second arriving while the first waits is the overlap.
+#[derive(Default)]
+struct Meeting {
+    state: std::sync::Mutex<(u32, bool, bool)>,
+    met: std::sync::Condvar,
+}
+
+impl Meeting {
+    /// One row arrives. `(waiting, overlapped, gave_up)`.
+    fn arrive(&self) {
+        let mut state = self.state.lock().expect("meeting lock");
+        if state.0 > 0 {
+            state.1 = true;
+            self.met.notify_all();
+            return;
+        }
+        if state.1 || state.2 {
+            return;
+        }
+        state.0 += 1;
+        let (mut state, waited) = self
+            .met
+            .wait_timeout_while(state, std::time::Duration::from_secs(20), |state| !state.1)
+            .expect("meeting wait");
+        state.0 -= 1;
+        if waited.timed_out() {
+            state.2 = true;
+        }
+    }
+
+    fn overlapped(&self) -> bool {
+        self.state.lock().expect("meeting lock").1
+    }
+}
+
+/// The band fixture `the_parallel_band_matches_a_sequential_measurement` uses:
+/// up to forty priced rows of the eight-session slice, Long side.
+fn band_rows<'a>(fixture: &'a Ranked, facts: &runner::trade::SliceFacts) -> Vec<Screened<'a>> {
+    let bars = &fixture.bars;
+    let column = &fixture.run.column;
+    let horizon = Horizon::DEFAULT;
+    let stops = stop_ladder_ppm(bars, horizon.as_bars() as usize);
+    let levels = grid::Levels {
+        rungs: grid_rungs(bars),
+        step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
+        forced: None,
+        ratios: true,
+        stops_ppm: &stops,
+    };
+    fixture
+        .run
+        .ranked
+        .top
+        .iter()
+        .take(40)
+        .enumerate()
+        .filter_map(|(rank, scored)| {
+            let g = grid::evaluate_over(
+                bars,
+                column,
+                &scored.mask,
+                horizon,
+                side_of_direction(Direction::Long),
+                levels,
+                facts,
+            );
+            let cell = g.best().copied()?;
+            Some(Screened {
+                side: Direction::Long,
+                scored,
+                rank,
+                cell,
+                tightest: None,
+                admitted: false,
+                consistency: None,
+                steady: true,
+                calendar_unmeasured: false,
+            })
+        })
+        .collect()
+}
+
+/// W2-cli8-7, D-4722. THE BAND IS MEASURED IN PARALLEL, observed rather than
+/// read off the source. On a two-thread pool each measured row checks in at a
+/// meeting point; the first waits (bounded, 20 s) for a second, and a second
+/// arriving while the first still waits proves two rows were being measured
+/// at the same moment. A sequential loop cannot produce that: its first row
+/// waits alone, gives up, and every later row arrives with nobody waiting.
+/// The figures are still the sequential ones, row for row.
+#[test]
+fn the_measured_band_measures_two_rows_at_once() {
+    let fixture = Ranked::of(8);
+    let facts = runner::trade::SliceFacts::of(&fixture.bars, &fixture.run.column);
+    let mut rules = Rules::elite(0, 25);
+    rules.top = 1;
+    let mut parallel = band_rows(&fixture, &facts);
+    let mut sequential = band_rows(&fixture, &facts);
+    assert!(parallel.len() > 2, "fixture: rows to measure");
+    let meeting = std::sync::Arc::new(Meeting::default());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("a two-thread pool");
+    pool.install(|| {
+        let arrive = std::sync::Arc::clone(&meeting);
+        MEASURE_ROW_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(std::sync::Arc::new(move || arrive.arrive()));
+        });
+        measure_top(
+            &mut parallel,
+            &fixture.bars,
+            &fixture.run.column,
+            Horizon::DEFAULT,
+            rules,
+            &facts,
+        );
+        MEASURE_ROW_HOOK.with(|hook| *hook.borrow_mut() = None);
+    });
+    assert!(
+        meeting.overlapped(),
+        "two rows of the band were never measured at the same moment"
+    );
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("a one-thread pool");
+    one.install(|| {
+        measure_top(
+            &mut sequential,
+            &fixture.bars,
+            &fixture.run.column,
+            Horizon::DEFAULT,
+            rules,
+            &facts,
+        );
+    });
+    assert_eq!(
+        parallel
+            .iter()
+            .map(|row| row.consistency.clone())
+            .collect::<Vec<_>>(),
+        sequential
+            .iter()
+            .map(|row| row.consistency.clone())
+            .collect::<Vec<_>>(),
+        "the parallel band is the sequential band, row for row"
+    );
+}
+
+// ---------------------------------------------------------------------------
