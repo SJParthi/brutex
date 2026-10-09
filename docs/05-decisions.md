@@ -66566,3 +66566,33 @@ and `a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime`
 now cover V2 as well; `runner::research_family_readiness::legacy_resolution_identity_matches_the_recorded_pre_extraction_library`
 keeps the V1 and V2 digests as records and pins the four V3 digests from this
 build (not an independent capture).
+
+### D-4507 — An exchange test listing is found whatever its spacing or case — 2026-10-09
+
+**What was observed (audit `satk-1`, low).** `core::vendor::decode_master_row`
+declined a row as `Skip::TestInstrument` when its raw `underlying` or
+`trading_symbol` contained `NSETEST` or `BSETEST`, case-sensitive. The identity
+built from the same field later goes through `collapse_spaces` and
+`Symbol::new`, which remove spaces and upper-case, so an index row spelled
+`NSE TEST`, `BSE TEST 1` or `nsetest` passed the filter and was KEPT as the real
+index `NSETEST`, `BSETEST1` or `NSETEST` (probe P03).
+
+**Decision.** The scan runs on the folded field: `holds_test_marker` copies the
+field into a `[u8; MAX_FIELD_BYTES]` buffer with every ASCII whitespace byte
+removed and every ASCII letter upper-cased, and searches that for either
+marker. It is applied to both fields, as before. It is at least as broad as the
+identity's own normalisation, so no spelling that reaches the store as a
+marker's symbol can pass it. O(1): it runs after `MasterRow::over_wide`, so the
+field is at most 64 bytes and fits the buffer exactly.
+
+**What changes.** Rows whose underlying or trading symbol carries a marker in
+any spacing or case are declined as `TestInstrument` instead of kept. No stored
+format, digest or vocabulary changes. Nothing else in the filter changes: a
+hyphenated `NSE-TEST` is still not a marker, because the identity rule does not
+remove a hyphen either. This supersedes the unmerged D-3152 fix (case only),
+which never reached this tree.
+
+**Tests.** `core::vendor::tests::a_test_marker_is_found_whatever_its_spacing_or_case`
+(eleven spacings and cases on an index row, a contract row and the trading
+symbol, a marker in the last bytes at the 64-byte gate, and near misses and real
+names that must stay kept); it fails on the raw scan.
