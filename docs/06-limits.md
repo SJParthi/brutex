@@ -12880,10 +12880,13 @@ Both are comparison sorts, so each level costs `O(|F| log |F|)` comparisons
 beyond the join, and the cost grows with the frontier. It replaced an
 `|F|^2 / 2` pairwise scan, and it is per level, never per pair or per bar.
 
-**The top-results keeper admits in O(log cap), not O(1).** `keep::Best::offer`
-refuses in one root comparison and admits with a binary-heap sift of at most
-`floor(log2(cap))` levels. It has no production caller today; the bound is
-stated so one does not inherit an unstated cost (audit finding o1engine-20).
+**The top-results keeper is gone, and its O(log cap) with it (D-4480).**
+`keep::Best::offer` refused in one root comparison and admitted with a
+binary-heap sift of at most `floor(log2(cap))` levels. It had no production
+caller (D-0762) and no bench row ever timed it, so audit finding o1engine-20
+was closed by removing the type and its tests rather than by measuring a cost
+no run paid. What a caller retains is its own sink's cost; `runner::rank`'s
+heap is the one a run pays.
 
 **Duplicate rejection at k>=2 is absent, not measured (D-1440).** The prefix
 join is injective, so `duplicates` is written as a literal zero at k>=2 and no
@@ -15147,14 +15150,10 @@ pass over the bars at a once-per-report boundary, O(bars).
   levels of a halted sweep and now says so through `closure_complete`; it
   still returns those sets in `kept`. `validate` records `halted` beside its
   candidate count, and the streamed rankers mark the two levels `Unknown`.
-- **`keep::Best` probes a hash set on every offer (v4-4, D-1497).** The
-  duplicate check is the insert into a pre-reserved `MaskSet` (no `contains`
-  scan, so Gate 11 rule 7 is not engaged): expected O(1), hashing six words,
-  not a worst-case bound. A refusal when full removes that mask again, and an
-  eviction removes the evicted one, all inside a `cap + 1` reservation. The
-  O(log cap) sift stated above is unchanged, and the "one root comparison"
-  refusal above now also pays this insert and removal. Memory is `cap`
-  itemsets plus `cap + 1` masks. Not timed.
+- **`keep::Best` probed a hash set on every offer (v4-4, D-1497); removed
+  with the type by D-4480.** The probe, its `cap + 1` reservation and the
+  O(log cap) sift went together; nothing in the engine retains a bounded
+  top list now.
 - **The two member forms read up to 168,192 bytes (W1-api3-6, D-1499).**
   `/pull/spot` and `/ingest/queue` carry `ingest::MAX_MEMBER_FORM_BYTES`, so
   D-1202's "`param` scans a form body of at most 8,192 bytes" is 168,192 bytes
@@ -16358,7 +16357,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | o1api-4 | `param` scans the query once per field | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | not timed here |
 | W3-engine1-0, ET-o1-proof-coverage-2 | the subset prune is Θ(k) per candidate | Apriori's prune must test the k-2 subsets that are not the join's two parents; C-E-12 times one probe | C-E-12 (engine bench) |
 | W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | not timed here |
-| W3-engine1-2, o1engine-20 | `keep::Best::offer` admits in O(log cap) | It has no production caller (`engine/tests/production_callers.rs` fails the day one appears), so no run pays it | none: no caller |
+| W3-engine1-2, o1engine-20 | ~~`keep::Best::offer` admits in O(log cap)~~ REMOVED by D-4480 | It had no production caller and no measurement, so the type was deleted with its tests; `engine/tests/production_callers.rs` refuses its return | none: removed |
 
 **Not removed and not inherent, now measured: o1api-33 (D-2291).**
 `decode_body` builds a whole `serde_json::Value` tree. Its time is O(body),

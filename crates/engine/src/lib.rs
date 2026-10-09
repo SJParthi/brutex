@@ -102,10 +102,10 @@ pub mod column;
 /// [`Sweep::levels`] keeps every survivor of every level to the end of the run,
 /// and that retention -- not the search space -- is what reached 7.4 GB and an
 /// exit 137 on a full-range sweep. [`keep::Streamed`] is the same walk holding
-/// two levels instead of all of them; [`keep::Best`] is a bounded retention a
-/// caller could feed from the level boundary, and no production caller does
-/// (D-0762). Neither is a depth parameter and the
-/// module header says why at length.
+/// two levels instead of all of them. What a caller keeps from the level
+/// boundary is the caller's own sink: the bounded retention this module once
+/// offered had no production caller and was removed (D-0762, D-4480). It is not
+/// a depth parameter and the module header says why at length.
 pub mod keep;
 pub mod resume;
 
@@ -2647,48 +2647,54 @@ mod tests {
 
     /// **`CLAUDE.md` §3 rule 5, measured on bytes.**
     ///
-    /// Three independent walks of one column, each feeding a bounded retention,
-    /// each serialised. A retention whose ties broke on ARRIVAL would not
-    /// survive this: `drain` spreads support counting across every core, so the
-    /// order candidates reach the sink is the schedule's, and the schedule is
-    /// not the same twice.
+    /// Three independent walks of one column, each handing every level to a
+    /// sink that serialises it at the boundary. `drain` spreads support
+    /// counting across every core, so the order candidates are COUNTED in is
+    /// the schedule's, and the schedule is not the same twice; the order a
+    /// level is HANDED OVER in must not be. A level filed on arrival would not
+    /// survive this.
     ///
-    /// The fourth comparison is the one that would catch a cut made on a partial
-    /// order -- the retaining walk's own survivors, pushed through the same
-    /// retention, must land on the same bytes.
+    /// The fourth comparison is the retaining walk's own survivors, serialised
+    /// the same way, which must land on the same bytes. This used to be made
+    /// through `keep::Best`, a bounded retention with no production caller;
+    /// D-4480 removed it and the property it was standing in for -- the
+    /// boundary's order is a function of the candidates alone -- is asked of
+    /// the boundary directly.
     #[test]
-    #[allow(clippy::expect_used, reason = "test-only: a small cap always reserves")]
     fn two_streamed_runs_of_one_sweep_serialise_to_the_same_bytes() {
         let (live, column) = a_climbing_column();
         let ladder = Ladder::with_min_hits(1);
 
         let run = || {
-            let mut best = keep::Best::try_with_capacity(11).expect("a small cap reserves");
-            let out =
-                ladder.walk_column_streamed(&column, &live, &mut |f, _, _| best.offer_level(f));
-            (
-                out.streamed,
-                best.discarded(),
-                bytes_of(&best.into_ordered()),
-            )
+            let mut bytes: Vec<u8> = Vec::new();
+            let out = ladder.walk_column_streamed(&column, &live, &mut |f, _, _| {
+                bytes.extend_from_slice(&bytes_of(&f.frequent));
+            });
+            (out.streamed, out.levels, bytes)
         };
 
         let first = run();
-        assert!(!first.2.is_empty(), "the fixture must keep something");
-        assert_eq!(first.2.len(), 11 * 56, "and the cap must actually bind");
-        assert!(first.1 > 0, "and the cap must actually refuse something");
+        assert!(!first.2.is_empty(), "the fixture must hand something over");
+        assert_eq!(
+            first.2.len(),
+            usize::try_from(first.0)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(56),
+            "and every survivor the count names is in the bytes"
+        );
+        assert!(
+            first.1.len() > 2,
+            "the fixture must climb, or the boundary order is untested"
+        );
         assert_eq!(first, run(), "a second run must be byte-identical");
         assert_eq!(first, run(), "and a third");
 
         let retained = ladder.walk_column(&column, &live, &|_, _, _| {});
-        let mut from_retained = keep::Best::try_with_capacity(11).expect("a small cap reserves");
-        for itemset in retained.all_frequent() {
-            from_retained.offer(*itemset);
-        }
+        let kept: Vec<Itemset> = retained.all_frequent().copied().collect();
         assert_eq!(
             first.2,
-            bytes_of(&from_retained.into_ordered()),
-            "and the streamed path keeps exactly what the retained path would"
+            bytes_of(&kept),
+            "and the streamed path hands over exactly what the retained path keeps"
         );
     }
 
@@ -2734,7 +2740,6 @@ mod tests {
     /// is a 58.7 MB owned copy on a real rung, so it is worth proving it copies
     /// the same column rather than assuming it.
     #[test]
-    #[allow(clippy::expect_used, reason = "test-only: a small cap always reserves")]
     fn the_copying_streamed_walk_agrees_with_the_column_one() {
         let live: Vec<u32> = (0..8).collect();
         let spec: Vec<Vec<u32>> = (0..64_u32)
@@ -2744,20 +2749,26 @@ mod tests {
         let masks = bars(&rows);
         let ladder = Ladder::with_min_hits(1);
 
-        let mut from_masks = keep::Best::try_with_capacity(5).expect("a small cap reserves");
-        let a = ladder.walk_streamed(&masks, &live, &mut |f, _, _| from_masks.offer_level(f));
+        let mut from_masks: Vec<Itemset> = Vec::new();
+        let a = ladder.walk_streamed(&masks, &live, &mut |f, _, _| {
+            from_masks.extend_from_slice(&f.frequent);
+        });
 
-        let mut from_column = keep::Best::try_with_capacity(5).expect("a small cap reserves");
+        let mut from_column: Vec<Itemset> = Vec::new();
         let b = ladder.walk_column_streamed(&Column::from_rows(&masks), &live, &mut |f, _, _| {
-            from_column.offer_level(f);
+            from_column.extend_from_slice(&f.frequent);
         });
 
         assert_eq!(a.levels, b.levels, "the same ladder, either way in");
         assert_eq!(a.streamed, b.streamed);
         assert_eq!(a.bars, b.bars);
+        assert!(
+            !from_masks.is_empty(),
+            "the fixture must hand something over"
+        );
         assert_eq!(
-            bytes_of(&from_masks.into_ordered()),
-            bytes_of(&from_column.into_ordered()),
+            bytes_of(&from_masks),
+            bytes_of(&from_column),
             "and the same rows out"
         );
     }

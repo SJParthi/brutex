@@ -66459,3 +66459,37 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4480 — `keep::Best` is removed, not measured — 2026-10-09
+
+**What was observed.** Audit finding o1engine-20: the bounded best-results
+keeper `engine::keep::Best` admitted in O(log cap) (a binary-heap sift) plus a
+hash probe per offer, and every document that named the cost said
+"Measured: none: no caller". Reading the callers confirmed it: no shipping
+source in `engine` constructs it, and no other crate's `src` names it --
+`runner::rank` keeps its own heap, scored by forward edge, which support
+cannot stand in for. Its only users were its own eight tests, two engine
+tests that used it as a convenient sink, and the D-0762 scan that pinned the
+absence of a caller.
+
+**Decided.** Remove it: `Best`, its two order helpers `ranks_below` and
+`weaker`, and the eight tests that exercised nothing else. The two engine
+tests that used it as a sink (`two_streamed_runs_of_one_sweep_serialise_to_the_same_bytes`,
+`the_copying_streamed_walk_agrees_with_the_column_one`) now serialise every
+level the boundary hands over, which asks the property they relied on -- the
+boundary's order is a function of the candidates, not of the schedule --
+directly and over every survivor rather than the top eleven. SR-03's test is
+rewritten as a sink that keeps nothing against one that keeps everything,
+the two extremes any retention lies between. The D-0762 scan is replaced by
+`best_is_gone_and_no_crate_names_it`, which refuses the token in shipping
+source and the definitions in `keep.rs`. C4-ENGINE-04, AFX-08 and AFX-09 are
+retired with their tests; FXD-01 is the guard.
+
+**Rejected.** Measuring it. A bench row would time a cost no run pays, and
+the finding's own rule is that an unmeasured cost on a live path is the
+defect; with no path at all, the honest state is no cost. A caller that wants
+a bounded top list writes its sink at the level boundary and brings its own
+measurement, as `runner::rank` did.
+
+**Store, digests and outputs.** None change. No run constructed `Best`, so no
+stored output, digest or report was ever derived from it.
