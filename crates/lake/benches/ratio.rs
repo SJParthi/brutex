@@ -233,15 +233,15 @@ fn plain_columns(n: usize) -> [Vec<i64>; 7] {
 /// The seven values at `i`, or `None` past the end — the floor a row read
 /// cannot go under.
 fn plain_row(columns: &[Vec<i64>; 7], i: usize) -> Option<[i64; 7]> {
-    let [a, b, c, d, e, f, g] = columns;
+    let [c0, c1, c2, c3, c4, c5, c6] = columns;
     Some([
-        *a.get(i)?,
-        *b.get(i)?,
-        *c.get(i)?,
-        *d.get(i)?,
-        *e.get(i)?,
-        *f.get(i)?,
-        *g.get(i)?,
+        *c0.get(i)?,
+        *c1.get(i)?,
+        *c2.get(i)?,
+        *c3.get(i)?,
+        *c4.get(i)?,
+        *c5.get(i)?,
+        *c6.get(i)?,
     ])
 }
 
