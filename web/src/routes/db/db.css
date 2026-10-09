@@ -1,0 +1,44 @@
+/*
+ * /db — THE PAGE'S SHARED TOKENS.
+ *
+ * WP-00 split routes/db/+page.svelte into a shell and components, and every
+ * component's rules moved into that component's own scoped <style>. What
+ * stayed shared is the two custom properties below: the census grid's row and
+ * header heights, read by more than one component through `var(--dbrow)` and
+ * `var(--dbhead)`. A custom property inherits, so it is declared ONCE, on the
+ * page root the shell draws (`<div class="pane db">`), and imported by the
+ * shell alone. Moved verbatim from the page's `.db` rule; `.pane.db` because
+ * this stylesheet is global and the page root carries both classes.
+ */
+/* THE HAND-ROLLED FEED MENU IS GONE, and with it the last place this page
+   drew a control of its own. `.mnyb`, `.menu`, `.opt` and their tick/name/
+   count children styled ONE dropdown — the broker feed — while every other
+   rung here was already `$lib/Picker.svelte`. /ingest had a second, different
+   hand-rolled copy of the same question. That divergence, not the class
+   names, is why the two pages still looked unalike after their labels were
+   unified: a reader looks at the menu. Both feed rungs are `Picker` now, so
+   these rules have nothing left to match. */
+
+/* Everything here is expressed through `theme.css` tokens. No literal colour,
+   no literal font, no second theme system — and every `transition` and
+   `animation` sits inside the reduced-motion guard, the same discipline the
+   theme file holds itself to. */
+
+.pane.db {
+  /* 40px, AND IT IS THE SAME 40 THE WINDOWING ARITHMETIC USES. `ROW = 40` in
+     the script places row N at `N * 40px`; if these two ever disagree the
+     rows drift away from the scrollbar a pixel per row and the list is
+     unusable by the thousandth. Neither number moves without the other.
+
+     IT WAS 32 ONCE AND THAT IS RECORDED AS CRAMPED at the grid's 14px type —
+     see the script's own note beside `ROW`. Written here because the table's
+     height is now `25 * this + --dbhead`, which makes this token the most
+     tempting thing on the page to shave: it is a 25x lever, one pixel off it
+     buys twenty-five of page. The measurement above is why it stays at 40. */
+  --dbrow: 40px;
+  /* 30px, THE SAME `HEAD` THE SCRIPT SUBTRACTS. The sticky header covers the
+     top of the scroll box, so `moveTo` clears the cursor by it and `.tbl`'s
+     floor adds it to the 25 rows. Three readers of one measurement; it is a
+     token so there is one place to change it. */
+  --dbhead: 30px;
+}
