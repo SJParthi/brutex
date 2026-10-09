@@ -13586,6 +13586,22 @@ fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -
 /// o1api-4, D-1202.
 pub const MAX_REQUEST_TARGET_BYTES: usize = 8 * 1024;
 
+/// The longest request target `/bars/window.json` reads, and the one route
+/// whose query repeats a field.
+///
+/// D-3326 (WP-31): one window request names every series it merges as a
+/// repeated `key=<census key>`, up to `bars::MAX_SERIES` = 1,024 of them, so
+/// a chain is ordered and paged on the server in one request rather than one
+/// per contract. A NIFTY option key is 35 bytes, plus `&key=`; 1,024 of them
+/// are about 41 KiB. 60 KiB holds them under hyper's `u16::MAX - 1` target
+/// ceiling stated above. Every other route keeps [`MAX_REQUEST_TARGET_BYTES`].
+pub const MAX_WINDOW_TARGET_BYTES: usize = 60 * 1024;
+
+/// The query fields one route reads as a LIST, with [`params`]: repeating
+/// them is the request, not an ambiguity. `/bars/window.json`'s `key` (D-3326,
+/// WP-31). Any other route, and any other field, still refuses a repeat.
+const MULTI_VALUED_QUERY_FIELDS: [(&str, &str); 1] = [("/bars/window.json", "key")];
+
 /// The most header bytes (every name plus every value) this server reads.
 ///
 /// Generous on purpose: a browser sends every cookie any other program on
@@ -13648,12 +13664,17 @@ fn request_bounds_refusal(
     headers: &axum::http::HeaderMap,
 ) -> Option<(axum::http::StatusCode, String)> {
     let target = uri.path_and_query().map_or(0, |pq| pq.as_str().len());
-    if target > MAX_REQUEST_TARGET_BYTES {
+    let cap = if uri.path() == "/bars/window.json" {
+        MAX_WINDOW_TARGET_BYTES
+    } else {
+        MAX_REQUEST_TARGET_BYTES
+    };
+    if target > cap {
         return Some((
             axum::http::StatusCode::URI_TOO_LONG,
             format!(
                 "REFUSED — the request target is {target} bytes and this server \
-                 reads at most {MAX_REQUEST_TARGET_BYTES}. Nothing was read or run.\n"
+                 reads at most {cap}. Nothing was read or run.\n"
             ),
         ));
     }
@@ -13670,7 +13691,27 @@ fn request_bounds_refusal(
             ),
         ));
     }
-    repeated_query_key(uri.query().unwrap_or("")).map(|key| {
+    // A LIST FIELD OF THIS ROUTE IS LEFT OUT OF THE CHECK; every other field
+    // of its query, and every field of every other route, is still checked.
+    let query = uri.query().unwrap_or("");
+    let listed = MULTI_VALUED_QUERY_FIELDS
+        .iter()
+        .filter(|(path, _)| *path == uri.path())
+        .map(|(_, field)| *field)
+        .next();
+    let rest: String;
+    let checked = match listed {
+        Some(field) => {
+            rest = query
+                .split('&')
+                .filter(|pair| pair.split_once('=').map_or(*pair, |(key, _)| key) != field)
+                .collect::<Vec<_>>()
+                .join("&");
+            rest.as_str()
+        }
+        None => query,
+    };
+    repeated_query_key(checked).map(|key| {
         (
             axum::http::StatusCode::BAD_REQUEST,
             format!(
@@ -24275,13 +24316,12 @@ mod tests {
             "the calendar owes the same either way — that is the fixed point a \
              hole is measured against: {whole_body} / {holed_body}"
         );
-        // ONE FEED, ONE SYMBOL — SO NOTHING INDEPENDENT CAN VOTE, and the
-        // answer says the TABLE decided it rather than quietly deriving a
-        // denominator from the very bars under test.
+        // THE CALENDAR OF RECORD DECIDED IT (D-3336), and the answer says so
+        // rather than quietly deriving a denominator from the very bars under
+        // test. No peer voted.
         assert!(
-            whole_body.contains(r#""source":"table""#) && whole_body.contains(r#""voted_by":[]"#),
-            "the answer NAMES the calendar that decided it, and with no peer to \
-             vote that is the typed table: {whole_body}"
+            whole_body.contains(r#""source":"record""#) && whole_body.contains(r#""voted_by":[]"#),
+            "the answer NAMES the calendar that decided it: {whole_body}"
         );
 
         // ─── AND THE TABLE SEES AN EDGE HOLE, WHICH IS WHY IT IS THE FALLBACK
@@ -24466,8 +24506,10 @@ mod tests {
         );
 
         let site = std::sync::Arc::new(Site::serving(&masters("gapspeer", None, None), &root));
+        // THE PEER VOTE IS ASKED FOR BY NAME since D-3336; the default is the
+        // calendar of record.
         let uri: axum::http::Uri = "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX\
-             &symbol=NIFTY&timeframe=1min&month=2024-01"
+             &symbol=NIFTY&timeframe=1min&month=2024-01&calendar=peers"
             .parse()
             .expect("a uri");
         let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;

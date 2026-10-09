@@ -141,9 +141,17 @@ pub(super) fn compact(
                 Ok(bps) => (Some(bps), None),
                 Err(why) => (None, Some(reasons.intern(why.code().to_owned()))),
             };
-            let current = change(month_change(series.segment, Some(row.closes)));
+            let current = change(month_change(
+                series.segment,
+                series.symbol.as_str(),
+                Some(row.closes),
+            ));
             let before = month_before(*month).and_then(|at| held_row(census, &series.at(at)));
-            let previous = change(month_change(series.segment, before.map(|held| held.closes)));
+            let previous = change(month_change(
+                series.segment,
+                series.symbol.as_str(),
+                before.map(|held| held.closes),
+            ));
             rows.push((
                 instruments.intern(series.to_string()),
                 months.intern(month.to_string()),

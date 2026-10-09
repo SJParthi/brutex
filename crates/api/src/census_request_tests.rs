@@ -875,6 +875,9 @@ async fn cold_warm_and_cold_again_calendars_are_byte_identical() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        // AND THE KEPT ANSWERS AND MONTH COUNTS (D-3336), or "cold" would be
+        // the answer kept by the warm request.
+        fixture.site.calendars.forget_answers();
     };
     for query in [
         "feed=dhan",
@@ -1037,8 +1040,11 @@ async fn query_edges_on_bars_and_calendar_are_pinned() {
 
     let (status, exchange) = fixture.calendar_answer("feed=dhan&symbol=").await;
     assert_eq!(status, axum::http::StatusCode::OK);
+    // THE EXCHANGE BRANCH, AND SINCE D-3336 A SHARE VOTES FOR NOTHING: only
+    // NIFTY and BANKNIFTY hold the exchange calendar (WP-35).
     assert!(
-        exchange.contains(r#""derivedFrom":["ADANIENT"]"#),
+        exchange.contains(r#""target":{"kind":"exchange"}"#)
+            && exchange.contains(r#""derivedFrom":[]"#),
         "{exchange}"
     );
     let (status, page) = fixture.bars("symbol=&vendor=dhan&month=2025-05");
@@ -3387,7 +3393,9 @@ fn kept_nifty(fixture: &Fixture) -> Option<(SystemTime, Arc<pull::calendar::Cale
         .map(|(at, calendar)| (*at, Arc::clone(calendar)))
 }
 
-/// Empty the calendar cache, as a server that has not yet derived one.
+/// Empty the calendar cache, as a server that has not yet derived one: the
+/// derived calendars, and since D-3336 the kept `/calendar.json` answers and
+/// month counts too.
 fn forget_calendars(fixture: &Fixture) {
     fixture
         .site
@@ -3395,6 +3403,53 @@ fn forget_calendars(fixture: &Fixture) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+    fixture.site.calendars.forget_answers();
+}
+
+/// What one caller kept for Dhan's NIFTY, and under which stamp.
+///
+/// Since D-3336 `/calendar.json` keeps its whole ANSWER under the asked feed's
+/// stamp rather than a derived calendar per series (WP-35); the peer vote and
+/// the observation still keep NIFTY's derived calendar. Either way the rule
+/// these tests pin is the same: kept under Dhan's own modified time, and met by
+/// the next call.
+enum Kept {
+    /// A kept `/calendar.json` answer.
+    Answer(Arc<crate::calendar_of::KeptAnswer>),
+    /// A kept derived calendar.
+    Calendar(Arc<pull::calendar::Calendar>),
+}
+
+impl Kept {
+    /// Whether `other` is this very kept value, not an equal copy.
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Answer(one), Self::Answer(two)) => Arc::ptr_eq(one, two),
+            (Self::Calendar(one), Self::Calendar(two)) => Arc::ptr_eq(one, two),
+            (Self::Answer(_), Self::Calendar(_)) | (Self::Calendar(_), Self::Answer(_)) => false,
+        }
+    }
+}
+
+/// What `caller` keeps for Dhan's NIFTY: see [`Kept`].
+fn kept_by(fixture: &Fixture, caller: Caller) -> Option<(SystemTime, Kept)> {
+    match caller {
+        Caller::Symbol | Caller::Exchange => {
+            let symbol = if matches!(caller, Caller::Symbol) {
+                "NIFTY"
+            } else {
+                ""
+            };
+            fixture
+                .site
+                .calendars
+                .kept_answer(&(Vendor::Dhan, None, symbol.to_owned()))
+                .map(|(at, kept)| (at, Kept::Answer(kept)))
+        }
+        Caller::Peer | Caller::Observation => {
+            kept_nifty(fixture).map(|(at, calendar)| (at, Kept::Calendar(calendar)))
+        }
+    }
 }
 
 /// A CALENDAR DERIVED FROM A CENSUS IS KEPT UNDER THAT CENSUS'S STAMP, NOT A
@@ -3486,7 +3541,7 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
     for caller in Caller::ALL {
         forget_calendars(&fixture);
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: May");
-        let first = kept_nifty(&fixture);
+        let first = kept_by(&fixture, caller);
         assert_eq!(
             first.as_ref().map(|(at, _)| *at),
             Some(dhan),
@@ -3495,8 +3550,8 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: again");
         assert!(
             first
-                .zip(kept_nifty(&fixture))
-                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+                .zip(kept_by(&fixture, caller))
+                .is_some_and(|((_, first), (_, second))| first.same(&second)),
             "{caller:?}: the second call met the kept calendar and kept no other"
         );
     }
@@ -3821,7 +3876,7 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
     for caller in Caller::ALL {
         forget_calendars(&fixture);
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: May");
-        let first = kept_nifty(&fixture);
+        let first = kept_by(&fixture, caller);
         assert_eq!(
             first.as_ref().map(|(at, _)| *at),
             Some(dhan),
@@ -3830,8 +3885,8 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: again");
         assert!(
             first
-                .zip(kept_nifty(&fixture))
-                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+                .zip(kept_by(&fixture, caller))
+                .is_some_and(|((_, first), (_, second))| first.same(&second)),
             "{caller:?}: the second call met the kept calendar and kept no other"
         );
     }
@@ -3863,6 +3918,8 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
 #[tokio::test]
 async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
     let fixture = nifty_store("census-request-unheld-names");
+    // SINCE D-3336 THE ROUTE KEEPS ITS ANSWER, not a derived calendar
+    // (WP-35): what is counted is every calendar and every answer kept.
     let held = |fixture: &Fixture| {
         fixture
             .site
@@ -3870,12 +3927,13 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+            + fixture.site.calendars.kept_answers()
     };
     let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert!(body.contains(r#""sessions":1"#), "{body}");
-    let kept = kept_nifty(&fixture).expect("the held name's calendar is kept");
-    assert_eq!(held(&fixture), 1, "one held name, one calendar");
+    let kept = kept_by(&fixture, Caller::Symbol).expect("the held name's answer is kept");
+    assert_eq!(held(&fixture), 1, "one held name, one answer");
     let spellings = [
         "%20NIFTY",
         "NIFTY%20",
@@ -3896,7 +3954,7 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
     let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert!(
-        kept_nifty(&fixture).is_some_and(|(_, again)| Arc::ptr_eq(&kept.1, &again)),
-        "the held name's next call met its calendar"
+        kept_by(&fixture, Caller::Symbol).is_some_and(|(_, again)| kept.1.same(&again)),
+        "the held name's next call met its answer"
     );
 }

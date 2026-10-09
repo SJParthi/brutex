@@ -107,3 +107,27 @@ export function unreadablePeers(calendar) {
   if (!Array.isArray(list) || !list.every((name) => typeof name === 'string')) return null;
   return list;
 }
+
+/**
+ * The rung `/gaps.json` audits a stored series at: its own `1min` months when
+ * the census holds any, else its `1s` months (D-3336 §4), else none.
+ *
+ * One second is FINER than a minute: the server folds it to minutes with
+ * `pull::fold` and audits the seconds an index owes. GDFL holds nothing but
+ * `1s` (D-2802), so a page that offered only `1min` could audit none of its
+ * series (DB-073). A daily or other coarser rung cannot prove its source
+ * minutes and is never offered.
+ *
+ * @param {Iterable<{ instrument: string, timeframe: string }>} rows the census rows
+ * @param {string} instrument the census key asked for
+ * @returns {'1min' | '1s' | null}
+ */
+export function auditRung(rows, instrument) {
+  let second = false;
+  for (const row of rows) {
+    if (row.instrument !== instrument) continue;
+    if (row.timeframe === '1min') return '1min';
+    if (row.timeframe === '1s') second = true;
+  }
+  return second ? '1s' : null;
+}

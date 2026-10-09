@@ -228,7 +228,7 @@ pub(super) fn store_body(
         write_change(
             &mut out,
             "chg",
-            month_change(series.segment, Some(row.closes)),
+            month_change(series.segment, series.symbol.as_str(), Some(row.closes)),
         );
         // THE PREVIOUS MONTH IS A PROBE, NOT A SCAN, AND NOT AN ASSUMPTION. A
         // month the census does not hold is `no_earlier_month` — never zero,
@@ -237,7 +237,11 @@ pub(super) fn store_body(
         write_change(
             &mut out,
             "prev_chg",
-            month_change(series.segment, before.map(|held| held.closes)),
+            month_change(
+                series.segment,
+                series.symbol.as_str(),
+                before.map(|held| held.closes),
+            ),
         );
         out.push('}');
     }
@@ -531,7 +535,7 @@ mod tests {
     #[test]
     fn a_month_with_no_close_recorded_is_unknown_and_never_zero() {
         assert_eq!(
-            month_change(Segment::Index, Some(Closes::UNKNOWN)),
+            month_change(Segment::Index, "NIFTY", Some(Closes::UNKNOWN)),
             Err(Unknown::NotRecorded)
         );
         let nifty = series(Segment::Index, "NIFTY");

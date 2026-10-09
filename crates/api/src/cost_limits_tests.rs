@@ -229,19 +229,25 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
         ],
     );
     let window = item(BARS, "pub fn window(");
-    // The read moved into `read_in_time`, which carries the lookback across
-    // months (D-1762); the window still calls it for every non-seek request.
-    let read = item(BARS, "fn read_in_time(");
+    // D-3326 (WP-31): a non-time sort streams every kept row once through
+    // `scan`, holding at most `offset + limit` of them, and still orders only
+    // the page. The O(n) READ stands; the O(n) memory is gone, and WP-99
+    // rewrites the bullet's memory clause with WP-31's measurements.
+    let scan = item(BARS, "fn scan(");
     assert!(
-        window.contains("read_in_time(") && read.contains("slots(file, 0, held)"),
-        "every bar is read: {window}\n{read}"
+        window.contains("scan(") && scan.contains("for row in run.start..run.end {"),
+        "every kept bar is read: {window}\n{scan}"
     );
     assert!(
-        window.contains("page_of(all, offset, limit, order)"),
-        "{window}"
+        scan.contains("page_of(kept, offset, limit, order)"),
+        "{scan}"
     );
     assert!(
-        !window.contains("all.sort_by(order)") && !window.contains("want - 1"),
+        scan.contains("kept = page_of(std::mem::take(&mut kept), 0, depth, order);"),
+        "the rows kept while streaming are bounded by the page's depth: {scan}"
+    );
+    assert!(
+        !window.contains("all.sort_by(order)") && !scan.contains("want - 1"),
         "nothing outside the page is ordered: {window}"
     );
     assert!(BARS.contains("pub const MAX_WINDOW_MONTHS: usize = 240;"));
@@ -259,13 +265,23 @@ fn w1_api5_5_the_calendar_route_sorts_its_feed_per_request_and_its_doc_says_so()
             "corrected",
         ],
     );
+    // D-3336 (WP-35) REMOVED THE PER-REQUEST SORT: a request is answered from
+    // the answer kept under the feed's manifest stamp, and only a miss walks
+    // the census, once over its keys with no sort and no copy (`held_series`).
+    // The D-1446 bullet above still prices the old cost; WP-99 rewrites it.
     let route = item(CALENDAR_ROUTE, "pub(super) fn calendar_json_reading(");
-    assert_eq!(
-        route
-            .matches("census::held_entries(std::slice::from_ref(")
-            .count(),
-        2,
-        "both branches collect and sort the feed's entries: {route}"
+    assert!(
+        !route.contains("census::held_entries("),
+        "no request collects and sorts the feed's entries: {route}"
+    );
+    assert!(
+        route.contains("site.calendars.answer(&key, at)"),
+        "a request asks the kept answer first: {route}"
+    );
+    let walk = item(CALENDAR_ROUTE, "fn held_series(");
+    assert!(
+        walk.contains("manifest.held_keys()") && !walk.contains("held_entries"),
+        "a miss walks the census's keys once: {walk}"
     );
     assert!(
         SERVER.contains(
@@ -332,7 +348,9 @@ fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
             "zero-filled records",
         ],
     );
-    let route = item(BARS_ROUTE, "pub(super) async fn bars_json(");
+    // THE BODY MOVED ONTO THE BLOCKING POOL (D-3326, DB-066): the handler
+    // admits it and `month_answer` reads the month, with the same fallback.
+    let route = item(BARS_ROUTE, "fn month_answer(");
     assert!(
         route.contains(".filter(|&index| index < held)\n        .unwrap_or(0);"),
         "a bisection that lands past the end falls back to the whole month: {route}"
