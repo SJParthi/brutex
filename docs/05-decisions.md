@@ -66614,6 +66614,19 @@ records. Proved by
 `a_ts_window_with_extremes_reads_each_month_once_until_it_moves` and
 `a_scan_past_its_ceiling_is_refused_by_name`. FXB1-11, FXB1-12.
 
+### D-4440 — The qualified campaign's whole-history read is measured, and kept — 2026-10-09
+
+**What was observed.** W1-api1-4: `/boolean-qualified-campaign.json` reads
+and authenticates its H acknowledged records on every GET; argued inherent,
+never timed.
+
+**Decided.** Kept: the page's `"history_checked":true` says every record was
+read for THIS answer, and a record that rots in place with its metadata
+unchanged is invisible to any cache keyed on metadata. A test proves the
+oldest of 40 records, damaged, refuses the page; the GET is measured at
+H = 1, 100, 1,000 and 7,000. Proved by
+`a_qualified_history_of_h_records_is_read_whole_for_every_answer`. FXB1-13.
+
 ### D-4441 — The audit journal's per-request cost is measured as its directory grows — 2026-10-09
 
 **What was observed.** W1-api3-0: each audited request creates one file in

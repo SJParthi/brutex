@@ -12492,8 +12492,12 @@ below is timed.
 Six audit findings (W1-api1-4, W1-api1-5, W1-api1-6, W1-api2-2, W1-api2-3,
 W1-api6-3) named a JSON route whose per-request cost grows with saved evidence
 and was stated nowhere here. One of them is narrowed in code; the rest are
-stated as they are. Every bound below is read off the source. None is timed:
-no bench row covers these routes, so each is UNVERIFIED as a measurement.
+stated as they are. Every bound below is read off the source. None was
+timed: no bench row covers these routes, so each was UNVERIFIED as a
+measurement. Since D-4440 the bullets for W1-api1-4, W1-api1-6 and W1-api2-3
+carry a measurement by `api::latency` (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each), each under the
+decision its bullet names, or say exactly what was timed in the route's
+place; W1-api6-3 says why its one read is counted rather than timed.
 
 - **`/boolean-candidates.json` and the Boolean evidence routes: an unpinned
   first page reuses a held reader that is still current (W1-api1-5).**
@@ -12545,6 +12549,12 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   reservation walk underneath is bounded by `DIRECTORY_LIMIT` (1,000,000
   directories) and every read by `detail::MAX_SCAN_BYTES`, so the cost is
   bounded per request though it grows with H; there is no cache by design.
+  **Measured since D-4440** (`latency_qualified_campaign_by_history_length`,
+  `api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each, p50 / p99 / max): H = 1 ⟨a14_1⟩; H = 100 ⟨a14_100⟩;
+  H = 1,000 ⟨a14_1000⟩; H = 7,000 ⟨a14_7000⟩, just under the history
+  admission `MAX_SCAN_BYTES` allows (about 7,100 records of 9,200 bytes).
+  `a_qualified_history_of_h_records_is_read_whole_for_every_answer` proves the
+  oldest of 40 records, damaged in place, refuses the page.
 - **`/candidate-trades.json` read the whole sealed catalog more than once a
   page (W1-api2-2).** `candidatejson::render` called
   `candidate_trades::read_model` twice itself (open, and the "changed during
