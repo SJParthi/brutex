@@ -144,6 +144,64 @@ pub struct Cache {
     /// single-flight test to know every follower has joined before the
     /// leader finishes; nothing in production reads it.
     waiting: std::sync::atomic::AtomicUsize,
+    /// Month counts already made, each under the census entry it was read
+    /// under: see [`month_days`]. D-3336.
+    months: std::sync::Mutex<std::collections::HashMap<MonthKey, (CensusEntry, MonthDays)>>,
+    /// Whole `/calendar.json` answers, each under the asked feed's manifest
+    /// stamp: see [`Cache::answer`]. D-3336.
+    answers: std::sync::Mutex<
+        std::collections::HashMap<AnswerKey, (std::time::SystemTime, std::sync::Arc<KeptAnswer>)>,
+    >,
+}
+
+/// One month file of one series at one rung: vendor, exchange, segment,
+/// symbol, rung and month.
+pub type MonthKey = (Vendor, String, String, String, Timeframe, YearMonth);
+
+/// What a census entry says of one month file: its rows, and the stamps of
+/// its first and last bar.
+///
+/// The key a month count is remembered under. The store is append-only and
+/// a month is rewritten only as a new generation, which moves its census
+/// entry, so an entry that has not moved names bytes already counted. D-3336.
+pub type CensusEntry = (u64, i64, i64);
+
+/// Which `/calendar.json` answer: the feed, the rung asked for (`None` for the
+/// feed's default) and the symbol asked for (empty for the exchange).
+pub type AnswerKey = (Vendor, Option<Timeframe>, String);
+
+/// One `/calendar.json` answer as the route keeps it: the status code and the
+/// body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptAnswer {
+    /// The HTTP status.
+    pub status: u16,
+    /// The JSON body.
+    pub body: String,
+}
+
+/// Bars one month file holds on each civil day of its month, at any rung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonthDays {
+    /// Index 0 is the 1st.
+    counts: [u32; 31],
+}
+
+impl MonthDays {
+    /// Bars held on the day `offset` days after the 1st; zero past the month.
+    #[must_use]
+    pub fn count(&self, offset: usize) -> u32 {
+        self.counts.get(offset).copied().unwrap_or(0)
+    }
+}
+
+/// Why [`month_days`] could not count a month.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonthFault {
+    /// The file did not open, in [`crate::bars::open`]'s words.
+    Unopened(String),
+    /// It opened and a lookup inside it failed.
+    Unreadable(String),
 }
 
 /// The kept calendars' map, as [`Cache::lock`] hands it out.
@@ -174,6 +232,103 @@ impl Cache {
     #[must_use]
     pub fn waiting(&self) -> usize {
         self.waiting.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The `/calendar.json` answer kept for `key` under exactly `stamp`.
+    ///
+    /// One lock and one probe: a request that finds its answer reads no
+    /// census entry and opens no file. D-3336.
+    #[must_use]
+    pub fn answer(
+        &self,
+        key: &AnswerKey,
+        stamp: std::time::SystemTime,
+    ) -> Option<std::sync::Arc<KeptAnswer>> {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .filter(|(at, _)| *at == stamp)
+            .map(|(_, kept)| std::sync::Arc::clone(kept))
+    }
+
+    /// Keep a `/calendar.json` answer for `key` under `stamp`, replacing any
+    /// answer kept under an older one.
+    ///
+    /// The caller keeps only answers whose key the census bounds: the
+    /// exchange, or a symbol the census holds. D-0695, D-3336.
+    pub fn keep_answer(&self, key: AnswerKey, stamp: std::time::SystemTime, kept: KeptAnswer) {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, (stamp, std::sync::Arc::new(kept)));
+    }
+
+    /// The month count remembered for `key` under `entry`.
+    fn remembered(&self, key: &MonthKey, entry: CensusEntry) -> Option<MonthDays> {
+        self.months
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .filter(|(at, _)| *at == entry)
+            .map(|(_, days)| *days)
+    }
+
+    /// Remember a month count for `key` under `entry`.
+    fn remember(&self, key: MonthKey, entry: CensusEntry, days: MonthDays) {
+        self.months
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, (entry, days));
+    }
+
+    /// How many `/calendar.json` answers are kept: for a test to know an
+    /// answer was or was not kept.
+    #[cfg(test)]
+    pub(crate) fn kept_answers(&self) -> usize {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// The `/calendar.json` answer kept for `key`, and the stamp it is kept
+    /// under, whatever that stamp is: for a test to know which.
+    #[cfg(test)]
+    pub(crate) fn kept_answer(
+        &self,
+        key: &AnswerKey,
+    ) -> Option<(std::time::SystemTime, std::sync::Arc<KeptAnswer>)> {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .map(|(at, kept)| (*at, std::sync::Arc::clone(kept)))
+    }
+
+    /// Forget every kept `/calendar.json` answer and every month count, as a
+    /// server that has answered nothing yet: for a test that wants a cold
+    /// request.
+    #[cfg(test)]
+    pub(crate) fn forget_answers(&self) {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.months
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// How many month counts are remembered: for a test to know a count was
+    /// or was not kept.
+    #[cfg(test)]
+    pub(crate) fn remembered_months(&self) -> usize {
+        self.months
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -1227,6 +1382,75 @@ pub(crate) mod tests {
         file.append(&rows).expect("legal bars in timestamp order");
     }
 
+    /// A [`MonthDays`] from counts, for a reading built by hand.
+    pub(crate) const fn month_days_of(counts: [u32; 31]) -> MonthDays {
+        MonthDays { counts }
+    }
+
+    /// **A MONTH'S BARS PER DAY ARE COUNTED WITH TWO LOOKUPS A DAY, AND A
+    /// MONTH WHOSE CENSUS ENTRY HAS NOT MOVED IS ANSWERED FROM MEMORY.** D-3336.
+    ///
+    /// Seconds on three days of a month: the counts are exact, a day with no
+    /// bar is zero, and a day past the month is zero. With the file moved
+    /// aside, the same entry is still answered (it names bytes already read)
+    /// and a moved entry opens the file and is refused by name.
+    #[test]
+    fn month_days_counts_each_day_and_remembers_it_under_its_census_entry() {
+        let root = crate::scratch::path("calendar-of-month-days");
+        let _ = std::fs::remove_dir_all(&root);
+        let march = YearMonth::new(2022, 3).expect("a real month");
+        let (first, fourth) = (epoch_day(2022, 3, 1), epoch_day(2022, 3, 4));
+        let second = |day: i64, s: i64| (day * 86_400 - 19_800 + 33_300 + s) * 1_000_000;
+        let mut stamps: Vec<i64> = (0..5).map(|s| second(first, s)).collect();
+        stamps.extend((0..3).map(|s| second(fourth, s)));
+        stamps.push(second(epoch_day(2022, 3, 31), 0));
+        write_bars_for(&root, "NIFTY", Timeframe::SECOND_1, march, &stamps);
+        let cache = Cache::default();
+        let entry = stamps
+            .first()
+            .zip(stamps.last())
+            .map(|(first, last)| (9, *first, *last));
+        let count = |entry| {
+            month_days(
+                &cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                Timeframe::SECOND_1,
+                march,
+                entry,
+            )
+        };
+        let days = count(entry).expect("the month counts");
+        assert_eq!(days.count(0), 5, "the 1st");
+        assert_eq!(days.count(3), 3, "the 4th");
+        assert_eq!(days.count(6), 0, "the 7th holds nothing");
+        assert_eq!(days.count(30), 1, "the 31st");
+        assert_eq!(days.count(31), 0, "past the month");
+        assert_eq!(cache.remembered_months(), 1);
+
+        let bars = root.join("bars");
+        let aside = root.join("bars-aside");
+        std::fs::rename(&bars, &aside).expect("move the bars aside");
+        assert_eq!(
+            count(entry),
+            Ok(days),
+            "an unmoved entry is answered from memory"
+        );
+        assert!(
+            matches!(count(Some((10, 0, 0))), Err(MonthFault::Unopened(_))),
+            "a moved entry opens the file, and a file that is not there is refused"
+        );
+        assert!(
+            matches!(count(None), Err(MonthFault::Unopened(_))),
+            "and so does a month the census does not name"
+        );
+        std::fs::rename(&aside, &bars).expect("put the bars back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Flips one byte inside record `index` of `NSE/INDEX/NIFTY`'s `rung` file
     /// for `month`, so its checksum block no longer verifies.
     fn corrupt_record(root: &Path, rung: Timeframe, month: YearMonth, index: u64) {
@@ -2118,6 +2342,89 @@ pub fn cached(
         holds,
     )
 }
+
+/// Bars one series' month file holds on each civil day, at any rung
+/// (D-3336).
+///
+/// Two lookups per day through [`store::file::BarFile::first_at_or_after`]:
+/// the first bar at or after the day's IST midnight and the first at or after
+/// the next. Their difference is the day's bar count, and no bar is read
+/// through the month's time index (`.tix`); a month without one bisects, at
+/// most `ceil(log2(n + 1))` reads a lookup. So a one-second month of 470,000
+/// bars costs 32 lookups, where reading it would cost 470,000 records.
+///
+/// Remembered under `entry`, the month's census entry: a request after a
+/// landing that did not touch this month opens nothing.
+///
+/// # Errors
+///
+/// [`MonthFault::Unopened`] when the file did not open, and
+/// [`MonthFault::Unreadable`] when a lookup inside it failed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cache and the root, the four terms of a series' address `bars::open` \
+              takes one by one, the rung and month, and the census entry"
+)]
+pub fn month_days(
+    cache: &Cache,
+    store_root: &Path,
+    vendor: Vendor,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+    rung: Timeframe,
+    month: YearMonth,
+    entry: Option<CensusEntry>,
+) -> Result<MonthDays, MonthFault> {
+    let key: MonthKey = (
+        vendor,
+        exchange.to_owned(),
+        segment.to_owned(),
+        symbol.to_owned(),
+        rung,
+        month,
+    );
+    if let Some(days) = entry.and_then(|at| cache.remembered(&key, at)) {
+        return Ok(days);
+    }
+    let file = crate::bars::open(
+        store_root, vendor, exchange, segment, symbol, rung, month, None,
+    )
+    .map_err(MonthFault::Unopened)?;
+    let days = count_days(&file, month).map_err(MonthFault::Unreadable)?;
+    if let Some(at) = entry {
+        cache.remember(key, at, days);
+    }
+    Ok(days)
+}
+
+/// [`month_days`]' count, from an open file.
+fn count_days(file: &store::file::BarFile, month: YearMonth) -> Result<MonthDays, String> {
+    let first = pull::session::Day::new(month.year(), month.month(), 1)
+        .map_err(|why| format!("{month} has no first day: {why}"))?;
+    let start = i64::from(first.days_from_epoch());
+    let end = i64::from(first.end_of_month().days_from_epoch());
+    let at = |day: i64| -> Result<u64, String> {
+        let midnight = day
+            .checked_mul(86_400)
+            .and_then(|secs| secs.checked_sub(19_800))
+            .and_then(|secs| secs.checked_mul(1_000_000))
+            .ok_or_else(|| format!("day {day} has no IST midnight in microseconds"))?;
+        file.first_at_or_after(midnight)
+            .map_err(|why| format!("{month}: the lookup for day {day} failed: {why}"))
+    };
+    let mut counts = [0_u32; 31];
+    let mut lower = at(start)?;
+    for (slot, day) in counts.iter_mut().zip(start..=end) {
+        let upper = at(day.saturating_add(1))?;
+        *slot = u32::try_from(upper.saturating_sub(lower)).unwrap_or(u32::MAX);
+        lower = upper;
+    }
+    Ok(MonthDays { counts })
+}
+
+#[path = "calendar_record.rs"]
+pub mod record;
 
 /// [`cached`], with the derivation passed in.
 ///

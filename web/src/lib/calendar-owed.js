@@ -129,6 +129,54 @@ export function emptyCalendar(why) {
 }
 
 /**
+ * The per-day minute denominators of a D-3336 `/calendar.json` answer.
+ *
+ * Since D-3336 the server answers the calendar of record as a dense string,
+ * `days`, one code per epoch day from `from`: `.` closed, `R` and `X` regular
+ * sessions, `P` a special session and `H` one with a suspected halt (each
+ * sized in `special`), `U` a session of unrecorded length, `-` outside the
+ * calendar. Minutes are read from `minuteOwed` and `special[].minuteOwed`,
+ * whatever rung the answer was built at, because this page's denominators
+ * are one-minute bars. A closed day is omitted, as the older array did; an
+ * unsized day is `null`, never `0` or `375`.
+ *
+ * @param {any} body
+ * @returns {{ owed: Map<string, number|null>, indexOwed: Map<string, number|null> }}
+ */
+export function denseOwed(body) {
+  /** @type {Map<string, number|null>} */
+  const owed = new Map();
+  /** @type {Map<string, number|null>} */
+  const indexOwed = new Map();
+  const days = typeof body?.days === 'string' ? body.days : '';
+  const from = body?.from;
+  if (!days || !Number.isSafeInteger(from)) return { owed, indexOwed };
+  const regular = Number.isSafeInteger(body?.minuteOwed?.regular) ? body.minuteOwed.regular : null;
+  /** @type {Map<number, any>} */
+  const special = new Map();
+  for (const entry of Array.isArray(body?.special) ? body.special : []) special.set(entry?.day, entry);
+  for (let at = 0; at < days.length; at += 1) {
+    const code = days[at];
+    if (code === '.' || code === '-') continue;
+    const day = from + at;
+    const iso = isoOfEpochDay(day);
+    const sized = special.get(day);
+    if (sized) {
+      owed.set(iso, sized.minuteOwed ?? null);
+      // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE" (D-0420).
+      indexOwed.set(iso, sized.minuteIndexOwed ?? null);
+    } else if (code === 'R' || code === 'X') {
+      owed.set(iso, regular);
+      indexOwed.set(iso, regular);
+    } else {
+      owed.set(iso, null);
+      indexOwed.set(iso, null);
+    }
+  }
+  return { owed, indexOwed };
+}
+
+/**
  * Read one feed's `/calendar.json` into the page's calendar. Never throws: a
  * refusal or a failure is an empty calendar that names its reason.
  *
@@ -148,17 +196,22 @@ export async function readCalendar(feed, request, signal) {
     if (!response.ok) return emptyCalendar(await refusalFrom('/calendar.json', response));
     const body = await response.json();
     /** @type {Map<string, number|null>} */
-    const owed = new Map();
+    let owed = new Map();
     /** @type {Map<string, number|null>} */
-    const indexOwed = new Map();
-    for (const entry of body?.days ?? []) {
-      const day = isoOfEpochDay(entry.day);
-      owed.set(day, entry.owed ?? null);
-      // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
-      // carry the index-specific field and therefore cannot prove a common
-      // index denominator on the systems-outage day. Falling back to `owed`
-      // would silently restore the false 166-hole claim D-0420 refuses.
-      indexOwed.set(day, entry.indexOwed ?? null);
+    let indexOwed = new Map();
+    if (typeof body?.days === 'string') {
+      // THE D-3336 CALENDAR OF RECORD: a dense day-status string.
+      ({ owed, indexOwed } = denseOwed(body));
+    } else {
+      for (const entry of body?.days ?? []) {
+        const day = isoOfEpochDay(entry.day);
+        owed.set(day, entry.owed ?? null);
+        // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
+        // carry the index-specific field and therefore cannot prove a common
+        // index denominator on the systems-outage day. Falling back to `owed`
+        // would silently restore the false 166-hole claim D-0420 refuses.
+        indexOwed.set(day, entry.indexOwed ?? null);
+      }
     }
     // A DAY ABSENT FROM `days` IS A HOLIDAY ONLY IF IT IS NOT WITHHELD. The
     // server names, in `withheld`, every stretch whose daily rung it did not
@@ -175,7 +228,12 @@ export async function readCalendar(feed, request, signal) {
       withheldMonths: withheld.months,
       from: body?.derivedFrom ?? [],
       clashes: (body?.disagreements ?? []).length,
-      why: owed.size ? '' : 'the store holds no bars for this feed'
+      // A WITHHELD ANSWER NAMES ITS REASON (D-3336): read it, never guess one.
+      why: owed.size
+        ? ''
+        : typeof body?.reason === 'string' && body.reason
+          ? body.reason
+          : 'the store holds no bars for this feed'
     };
   } catch (error) {
     return emptyCalendar(

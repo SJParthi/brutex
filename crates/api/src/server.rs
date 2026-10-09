@@ -24263,13 +24263,12 @@ mod tests {
             "the calendar owes the same either way — that is the fixed point a \
              hole is measured against: {whole_body} / {holed_body}"
         );
-        // ONE FEED, ONE SYMBOL — SO NOTHING INDEPENDENT CAN VOTE, and the
-        // answer says the TABLE decided it rather than quietly deriving a
-        // denominator from the very bars under test.
+        // THE CALENDAR OF RECORD DECIDED IT (D-3336), and the answer says so
+        // rather than quietly deriving a denominator from the very bars under
+        // test. No peer voted.
         assert!(
-            whole_body.contains(r#""source":"table""#) && whole_body.contains(r#""voted_by":[]"#),
-            "the answer NAMES the calendar that decided it, and with no peer to \
-             vote that is the typed table: {whole_body}"
+            whole_body.contains(r#""source":"record""#) && whole_body.contains(r#""voted_by":[]"#),
+            "the answer NAMES the calendar that decided it: {whole_body}"
         );
 
         // ─── AND THE TABLE SEES AN EDGE HOLE, WHICH IS WHY IT IS THE FALLBACK
@@ -24454,8 +24453,10 @@ mod tests {
         );
 
         let site = std::sync::Arc::new(Site::serving(&masters("gapspeer", None, None), &root));
+        // THE PEER VOTE IS ASKED FOR BY NAME since D-3336; the default is the
+        // calendar of record.
         let uri: axum::http::Uri = "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX\
-             &symbol=NIFTY&timeframe=1min&month=2024-01"
+             &symbol=NIFTY&timeframe=1min&month=2024-01&calendar=peers"
             .parse()
             .expect("a uri");
         let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
