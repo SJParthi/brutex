@@ -133,6 +133,9 @@ pub mod daycheck;
 /// alone, and an unsubscribed account was told to wait for tomorrow's
 /// credential.
 pub mod dhan;
+/// The day an option contract SETTLED when the vendor's name states another:
+/// measured re-datings and the calendar, one contract one series. D-3331.
+pub mod expiry_alias;
 pub mod fetch;
 pub mod fno;
 /// WHICH EXPIRED CONTRACT-MONTHS ARE MISSING -- `work`'s question, asked about
@@ -156,6 +159,10 @@ pub mod gdfl_cm;
 /// folded to one-second and one-minute bars through the one ingest door,
 /// incremental by day. D-2802.
 pub mod gdfl_import;
+/// Stock options across a corporate action, detected from the data: the
+/// inferred lot step, the renamed strikes and the vendor OI left unscaled.
+/// D-3331, D-3343.
+pub mod gdfl_lineage;
 /// GDFL NSE options tick files and the contract each ticker names, read from
 /// the yearly zips or the tick store. D-2806.
 pub mod gdfl_nfo;
