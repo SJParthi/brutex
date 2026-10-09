@@ -139,9 +139,13 @@ pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
 pub use crate::record::Record;
 pub use crate::sink::{
-    BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
-    Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
-    paths_newest_first, rotated_path,
+    AUDIT_BASENAME, AUDIT_DIMENSIONS, AUDIT_INDEX_DIR, AUDIT_KEEP_FILES, AUDIT_LIFECYCLE_WORDS,
+    AUDIT_MAX_FILE_BYTES, AUDIT_MAX_POSTING_NAME, AUDIT_POINTER_BYTES, AuditHealth, AuditLine,
+    AuditPointer, BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted,
+    FileTarget, Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Postings, Sink, Target,
+    audit_current_path, audit_generation_path, audit_path_for, audit_posting_path, audit_postings,
+    audit_read, audit_rolled_path, audit_serial, audit_serial_path, current_path,
+    dir_beneath_store, is_audited, paths_newest_first, rotated_path,
 };
 pub use crate::tail::{
     DEFAULT_MAX_SCAN_BYTES, MAX_LIMIT, MAX_LINE_BYTES, Query, READ_BLOCK, Tail, tail,
@@ -152,6 +156,9 @@ use std::sync::OnceLock;
 
 /// The process-wide sink, once something installs one.
 static GLOBAL: OnceLock<Sink> = OnceLock::new();
+
+/// Held across every [`install`], so two never interleave. See there.
+static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Installs the process-wide sink.
 ///
@@ -174,6 +181,19 @@ pub fn install(config: &Config) -> Result<&'static Sink, String> {
     if let Some(why) = config.refusal() {
         return Err(why);
     }
+    // ONE INSTALL AT A TIME. Two installs racing on one directory used to
+    // interleave so that the second's `Sink::open` met the first's directory
+    // lock and was refused with THAT reason while the first had not yet
+    // stored its sink: the loser then found no global sink at all, and a
+    // caller that adopts the winner (`api::emitted::sink`) panicked. Opening
+    // a sink grew a few syscalls with the audit stream (D-3341 item 3), which
+    // widened the window enough to be seen. Serialised, the loser waits and
+    // is refused as "already installed", naming the winner. Every write to
+    // `GLOBAL` happens under this lock, so `get_or_init` below always stores
+    // the sink this call opened.
+    let _one = INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(existing) = GLOBAL.get() {
         return Err(format!(
             "a telemetry sink is already installed, writing {}",
@@ -181,24 +201,7 @@ pub fn install(config: &Config) -> Result<&'static Sink, String> {
         ));
     }
     let sink = Sink::open(config)?;
-    let wanted = sink.path();
-    let installed = GLOBAL.get_or_init(|| sink);
-    if installed.path() == wanted {
-        return Ok(installed);
-    }
-    // ANOTHER THREAD WON THE RACE between the `get` above and this
-    // `get_or_init`, with a different path. The sink this call built has been
-    // dropped and the caller is told which one is live rather than handed one
-    // that is not writing where it asked for. NO TEST DRIVES THIS ARM: it
-    // needs two `install` calls to interleave inside a window of a few
-    // instructions, and `OnceLock` is per process so a test could not retry.
-    // Named here rather than left for a coverage report to find, per
-    // `CLAUDE.md` §3 rule 6.
-    Err(format!(
-        "a telemetry sink was installed concurrently, writing {}; {} is not it",
-        installed.path().display(),
-        wanted.display()
-    ))
+    Ok(GLOBAL.get_or_init(|| sink))
 }
 
 /// The process-wide sink, if one is installed.

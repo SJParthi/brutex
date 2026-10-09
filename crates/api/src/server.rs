@@ -1555,7 +1555,9 @@ pub(crate) async fn recovery_cash_schedule(
 // THE ROUTES THE /db FIX ROUND ADDS, REGISTERED BY THE WP-01 SEAM BEFORE ANY OF
 // THEM IS BUILT. Each module answers its routes with `not_built` until the
 // package named in it lands, and that package edits its own module and never
-// the route table below. `import_journal` is empty until WP-33a fills it.
+// the route table below. `import_journal` (the GDFL import journal's one
+// reader) and `imports` are `pub(crate)` because `/audit.json` and `/logs.json`,
+// which live outside this module, read the journal too (WP-33a, D-3341).
 #[path = "aliases.rs"]
 mod aliases;
 #[path = "chain.rs"]
@@ -1565,9 +1567,9 @@ mod dayflags;
 #[path = "facets.rs"]
 mod facets;
 #[path = "import_journal.rs"]
-mod import_journal;
+pub(crate) mod import_journal;
 #[path = "imports.rs"]
-mod imports;
+pub(crate) mod imports;
 #[path = "provenance.rs"]
 mod provenance;
 #[path = "sources.rs"]

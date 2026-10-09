@@ -289,6 +289,12 @@ pub struct Config {
     /// Empty is the default and costs nothing: with no overrides the hot path
     /// is the same single relaxed atomic load it always was.
     pub target_levels: Vec<(String, Level)>,
+    /// Whether [`Sink::open`] also keeps the durable audit stream beside the
+    /// rolling set: refusals and run lifecycle events, rolled at
+    /// [`AUDIT_MAX_FILE_BYTES`] and kept [`AUDIT_KEEP_FILES`] files, with the
+    /// `audit.idx` index (D-3341 item 3). On by default; a sink around a
+    /// [`Target`] this crate did not open never keeps one.
+    pub audit: bool,
 }
 
 impl Config {
@@ -301,7 +307,15 @@ impl Config {
             keep_files: DEFAULT_KEEP_FILES,
             min_level: Level::Info,
             target_levels: Vec::new(),
+            audit: true,
         }
+    }
+
+    /// The same configuration with the audit stream on or off.
+    #[must_use]
+    pub const fn with_audit(mut self, audit: bool) -> Self {
+        self.audit = audit;
+        self
     }
 
     /// The same configuration with a different file bound.
@@ -592,6 +606,10 @@ struct Inner {
     /// when the fragment was empty is one blank line the reader steps over.
     /// audit-20261003 attacksweep-2, D-1539.
     torn: bool,
+    /// The durable audit stream, when this sink keeps one (D-3341 item 3).
+    /// Behind the same lock as the ring, so an audited line lands in both
+    /// files in one order and under one writer.
+    audit: Option<Audit>,
 }
 
 impl Inner {
@@ -803,6 +821,20 @@ impl Sink {
             resumed.last_at,
         );
         sink.held_lock = Some(held);
+        // THE AUDIT STREAM OPENS UNDER THE SAME DIRECTORY LOCK, so it has one
+        // writer exactly as the ring does. A stream that cannot open is named
+        // and the ring still serves: losing the long record must not cost the
+        // short one (`CLAUDE.md` §4: loud, never silent). D-3341 item 3.
+        if config.audit {
+            let (audit, said) = Audit::open(&config.dir, config.keep_files);
+            sink.inner
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .audit = Some(audit);
+            if let Some(why) = said {
+                sink.report(&why);
+            }
+        }
         // RUN IDS RESUME ABOVE EVERY RUN THE LOG CARRIES, not above the last
         // `seq` alone: a process that reserved two ids and wrote an event only
         // under the second left a `seq` below that id. hunt-costs-2, D-1536.
@@ -871,6 +903,7 @@ impl Sink {
                 last_at,
                 buf: Vec::with_capacity(512),
                 torn: false,
+                audit: None,
             }),
             written: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -1206,7 +1239,8 @@ impl Sink {
         inner.buf.clear();
         // A FRAGMENT THE LAST FAILURE COULD NOT CLOSE IS CLOSED FIRST. See
         // `Inner::torn`.
-        if inner.torn {
+        let led = inner.torn;
+        if led {
             inner.buf.push(b'\n');
         }
         line(&mut inner.buf, inner.seq, at, run, event);
@@ -1240,12 +1274,28 @@ impl Sink {
             roll_failure = Some(why);
         }
         let landed = inner.target.append(&inner.buf);
+        // THE AUDIT COPY, whatever the ring said: a refusal kept only when the
+        // ring could take it would be lost exactly when the disk is in trouble,
+        // which is when it matters most. The same bytes, less the newline led
+        // with for a torn ring fragment, which is the ring's and not this
+        // stream's. Only an audited event reaches this; any other pays one
+        // `Option` test and nothing else. D-3341 item 3.
+        let audit_failure = match inner.audit {
+            Some(ref mut audit) if is_audited(event.level(), event.target(), event.message()) => {
+                let own = inner.buf.get(usize::from(led)..).unwrap_or(&[]);
+                audit.append(own, inner.seq, event.level(), &EventKeys(event))
+            }
+            _ => None,
+        };
         match landed {
             Ok(()) => {
                 inner.bytes = inner.bytes.saturating_add(span);
                 inner.torn = false;
                 drop(guard);
                 if let Some(why) = roll_failure {
+                    self.report(&why);
+                }
+                if let Some(why) = audit_failure {
                     self.report(&why);
                 }
                 self.written.fetch_add(1, Ordering::Relaxed);
@@ -1285,6 +1335,9 @@ impl Sink {
                 if let Some(why) = roll_failure {
                     self.report(&why);
                 }
+                if let Some(why) = audit_failure {
+                    self.report(&why);
+                }
                 let why = format!(
                     "{}: cannot append the event — {e}",
                     current_path(&self.dir).display()
@@ -1319,6 +1372,17 @@ impl Sink {
             self.report(&why);
             why
         })
+    }
+
+    /// What the audit stream has done, and failed to do: `None` when this
+    /// sink keeps none (a [`Target`] sink, or [`Config::audit`] off).
+    ///
+    /// One uncontended lock and a copy of a handful of counters: no
+    /// `metadata` call and no read, for the reason [`Sink::health`] gives.
+    #[must_use]
+    pub fn audit_health(&self) -> Option<AuditHealth> {
+        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.audit.as_ref().map(Audit::health)
     }
 
     /// What it has done, and what it has failed to do.
@@ -1674,6 +1738,764 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
                 path.display()
             )),
         ),
+    }
+}
+
+// ===========================================================================
+// THE AUDIT STREAM (D-3341 item 3; DB-023, DB-G88)
+// ===========================================================================
+//
+// # Why a second stream
+//
+// The ring above is bounded at 64 MiB, and during a pull it held 4 to 12
+// minutes: one 8 MiB file rolled every 35 seconds, two thirds of it expected
+// absences and per-day pull refusals (DB-023, DB-G88). A refusal logged at
+// 14:03 was gone by 14:15, so the one question the log exists for, "why was
+// this day refused", had no answer an hour later.
+//
+// The audit stream keeps only what that question needs: every event at
+// `error` (a refusal names itself at that level throughout this workspace),
+// and every run lifecycle event at `info` or above ([`is_audited`]). It is the
+// same line, byte for byte, as the ring's, so one decoder reads both. It rolls
+// at [`AUDIT_MAX_FILE_BYTES`] and keeps [`AUDIT_KEEP_FILES`] files: at most
+// 1 GiB while rotation works, against the ring's 64 MiB, and holding far fewer
+// kinds of line.
+//
+// # The index: a path probe, not a scan
+//
+// Beside the stream, `audit.idx/<dimension>/<value>.idx` holds one fixed
+// 32-byte [`AuditPointer`] per audited event that carries that value: the
+// event's `day`, its `month` (or its day's), its `feed` (or `vendor`), its
+// `instrument` (or `symbol`), its `contract`, and its `target`. A reader
+// asking "what was refused for NIFTY on 2022-03-07" opens ONE file named by the
+// question and reads the pointers at its end; nothing is scanned and nothing is
+// planned. `CLAUDE.md` §4: the path is the index.
+//
+// The field names are the ones the workspace already writes; this crate knows
+// no vendor and no instrument, only which field a value sits in. An event that
+// carries none of them is still in the stream and indexed by its target.
+//
+// # What it costs, stated
+//
+// An event that is not audited pays one `Option` test and, when the sink keeps
+// a stream, [`is_audited`]: one level comparison and at most one pass over its
+// message, which `crate::event` bounds. An audited event pays one more
+// `write` of its line and at most six index appends of 32 bytes, each through
+// a posting file kept open between events ([`AUDIT_HANDLES`] of them; a miss
+// is one `open`, and at most one `create_dir_all`). None of that grows with the
+// stream, the index or the number of earlier events. Once per
+// [`AUDIT_MAX_FILE_BYTES`] the stream rolls: at most `2 * AUDIT_KEEP_FILES`
+// renames and two small writes, amortised over every line of a 64 MiB file.
+// Nothing is `fsync`ed per event, for the reason the module header gives; the
+// stream is long-lived, not power-cut-proof.
+//
+// **UNVERIFIED as a measurement.** No bench in this crate times an audited
+// emit; the claim above is a count of operations (`CLAUDE.md` §3 rule 6).
+//
+// # Seeding
+//
+// A stream that does not exist yet, beside a ring that does, starts by copying
+// the ring's audited lines, oldest first: the refusals still on disk are kept
+// before the ring rolls them away. Once, at open, bounded by the ring's own
+// ceiling, and counted in [`AuditHealth::seeded`].
+
+/// The audit stream's file stem: `audit.ndjson`, rolled to `audit.<n>.ndjson`.
+pub const AUDIT_BASENAME: &str = "audit";
+
+/// How large the audit file being appended to may get before it rolls: 64 MiB
+/// (D-3341 item 3).
+pub const AUDIT_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How many audit files are kept, the one being written included: 16, so the
+/// stream holds at most 1 GiB while rotation works (D-3341 item 3).
+pub const AUDIT_KEEP_FILES: u8 = 16;
+
+/// The index directory beside the stream.
+pub const AUDIT_INDEX_DIR: &str = "audit.idx";
+
+/// One index record: serial, offset, seq, length, level and a mark.
+pub const AUDIT_POINTER_BYTES: usize = 32;
+
+/// [`AUDIT_POINTER_BYTES`] as a `u64`, for file arithmetic.
+const AUDIT_POINTER_BYTES_U64: u64 = 32;
+
+/// The dimensions the index keeps posting files for, in the order an event's
+/// pointers are appended.
+pub const AUDIT_DIMENSIONS: [&str; 6] =
+    ["day", "month", "feed", "instrument", "contract", "target"];
+
+/// The words that mark a run's lifecycle in an event's message ("run started",
+/// "command finished", "census refused; run stopped").
+pub const AUDIT_LIFECYCLE_WORDS: [&str; 6] = [
+    "started", "finished", "stopped", "ended", "paused", "resumed",
+];
+
+/// The longest posting name the index files, after encoding. A longer value is
+/// counted in [`AuditHealth::unindexed`] and the event stays in the stream.
+pub const AUDIT_MAX_POSTING_NAME: usize = 120;
+
+/// Posting files kept open between events. Past it the set is emptied and
+/// reopened on demand: a constant, so an append is never a search.
+const AUDIT_HANDLES: usize = 64;
+
+/// The mark closing every [`AuditPointer`] image.
+const POINTER_MARK: [u8; 3] = *b"AXI";
+
+/// The audit file being appended to.
+#[must_use]
+pub fn audit_current_path(dir: &Path) -> PathBuf {
+    dir.join(format!("{AUDIT_BASENAME}.{EXTENSION}"))
+}
+
+/// The `n`th rolled audit file, newest at 1.
+#[must_use]
+pub fn audit_rolled_path(dir: &Path, n: u8) -> PathBuf {
+    dir.join(format!("{AUDIT_BASENAME}.{n}.{EXTENSION}"))
+}
+
+/// The file holding the serial of the audit file being appended to.
+#[must_use]
+pub fn audit_serial_path(dir: &Path) -> PathBuf {
+    dir.join(AUDIT_INDEX_DIR).join("serial")
+}
+
+/// The index generation of the audit file of `serial`: every pointer into
+/// that file, and nothing else, so the generation is deleted with the file
+/// and the index is bounded exactly as the stream is.
+#[must_use]
+pub fn audit_generation_path(dir: &Path, serial: u64) -> PathBuf {
+    dir.join(AUDIT_INDEX_DIR).join(serial.to_string())
+}
+
+/// The posting file for `value` in `dimension` of the audit file of `serial`,
+/// or `None` for a dimension the index does not keep or a value it cannot name
+/// ([`AUDIT_MAX_POSTING_NAME`]).
+#[must_use]
+pub fn audit_posting_path(
+    dir: &Path,
+    serial: u64,
+    dimension: &str,
+    value: &str,
+) -> Option<PathBuf> {
+    if !AUDIT_DIMENSIONS.contains(&dimension) {
+        return None;
+    }
+    let name = posting_name(value)?;
+    Some(
+        audit_generation_path(dir, serial)
+            .join(dimension)
+            .join(format!("{name}.idx")),
+    )
+}
+
+/// `value` as a file name: every byte outside `A-Z a-z 0-9 - _` written `%XX`,
+/// so no value can name a path outside its dimension or collide with another.
+/// `None` when empty or longer than [`AUDIT_MAX_POSTING_NAME`] once encoded.
+fn posting_name(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > AUDIT_MAX_POSTING_NAME {
+        return None;
+    }
+    let mut name = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            name.push(char::from(byte));
+        } else {
+            name.push('%');
+            name.push(hex_digit(byte >> 4));
+            name.push(hex_digit(byte & 0x0f));
+        }
+    }
+    (name.len() <= AUDIT_MAX_POSTING_NAME).then_some(name)
+}
+
+/// One upper-case hex digit.
+fn hex_digit(nibble: u8) -> char {
+    char::from(
+        b"0123456789ABCDEF"
+            .get(usize::from(nibble))
+            .copied()
+            .unwrap_or(b'0'),
+    )
+}
+
+/// Whether an event belongs in the audit stream: every event at `error`, and
+/// every event at `info` or above whose target ends in `lifecycle` or whose
+/// message holds one of [`AUDIT_LIFECYCLE_WORDS`] as a word.
+///
+/// `warn` is not a refusal here: the ring's flood was `warn` (an expected
+/// absence logged once per month asked, DB-023), and a stream that took it
+/// would roll as fast as the ring does. O(message length), which
+/// `crate::event` bounds.
+#[must_use]
+pub fn is_audited(level: Level, target: &str, message: &str) -> bool {
+    if level.at_least(Level::Error) {
+        return true;
+    }
+    if !level.at_least(Level::Info) {
+        return false;
+    }
+    target.rsplit('.').next() == Some("lifecycle")
+        || message
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|word| AUDIT_LIFECYCLE_WORDS.contains(&word))
+}
+
+/// Where one audited line is: the serial of its file, its offset and length in
+/// it, its `seq` (which a reader checks the line against) and its level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditPointer {
+    /// The serial of the audit file the line was appended to.
+    pub serial: u64,
+    /// The line's first byte, in that file.
+    pub offset: u64,
+    /// The line's `seq`.
+    pub seq: u64,
+    /// The line's length, newline included.
+    pub len: u32,
+    /// The line's level.
+    pub level: Level,
+}
+
+impl AuditPointer {
+    /// Exactly the bytes the index appends.
+    #[must_use]
+    pub fn image(&self) -> [u8; AUDIT_POINTER_BYTES] {
+        let mut out = [0u8; AUDIT_POINTER_BYTES];
+        let parts: [&[u8]; 6] = [
+            &self.serial.to_le_bytes(),
+            &self.offset.to_le_bytes(),
+            &self.seq.to_le_bytes(),
+            &self.len.to_le_bytes(),
+            &[self.level.rank()],
+            &POINTER_MARK,
+        ];
+        let mut at = 0usize;
+        for part in parts {
+            for (dst, src) in out.iter_mut().skip(at).zip(part.iter()) {
+                *dst = *src;
+            }
+            at = at.saturating_add(part.len());
+        }
+        out
+    }
+
+    /// One record of a posting file, or `None` when it is not one this crate
+    /// wrote (a wrong mark or a level no build names).
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let le8 = |from: usize| -> Option<u64> {
+            let eight = bytes.get(from..from.checked_add(8)?)?;
+            Some(u64::from_le_bytes(<[u8; 8]>::try_from(eight).ok()?))
+        };
+        if bytes.len() != AUDIT_POINTER_BYTES || bytes.get(29..32) != Some(POINTER_MARK.as_slice())
+        {
+            return None;
+        }
+        Some(Self {
+            serial: le8(0)?,
+            offset: le8(8)?,
+            seq: le8(16)?,
+            len: u32::from_le_bytes(<[u8; 4]>::try_from(bytes.get(24..28)?).ok()?),
+            level: Level::of_rank(*bytes.get(28)?)?,
+        })
+    }
+}
+
+/// What the audit stream has done, and what it failed to do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditHealth {
+    /// The audit file being appended to.
+    pub path: PathBuf,
+    /// Its serial: how many times the stream has rolled since it began.
+    pub serial: u64,
+    /// Its size, from the stream's own running count.
+    pub current_bytes: u64,
+    /// Audited lines written by this process (seeded lines included).
+    pub written: u64,
+    /// Audited lines that could not be written and are gone from this stream
+    /// (the ring may still hold them).
+    pub dropped: u64,
+    /// Times the stream rolled.
+    pub rotations: u64,
+    /// Times a roll failed. The first stops rotation for the life of the sink,
+    /// as the ring's does, and the current file grows past its bound.
+    pub rotation_failures: u64,
+    /// Pointers appended to the index.
+    pub index_records: u64,
+    /// Pointers that could not be appended: the line is in the stream and a
+    /// probe for that value will not find it.
+    pub index_failures: u64,
+    /// Values the index could not name ([`AUDIT_MAX_POSTING_NAME`]).
+    pub unindexed: u64,
+    /// Lines copied from the ring when the stream was first opened.
+    pub seeded: u64,
+    /// The most recent failure, in its own words.
+    pub last_error: Option<String>,
+}
+
+impl AuditHealth {
+    /// Whether an operator has to be told about the stream.
+    #[must_use]
+    pub const fn is_loud(&self) -> bool {
+        self.dropped > 0 || self.rotation_failures > 0 || self.index_failures > 0
+    }
+}
+
+/// The text of a field an audited event carries, whether the event is being
+/// written ([`EventKeys`]) or was read back from the ring to seed the stream
+/// ([`Record`]).
+trait Keyed {
+    /// The event's target.
+    fn target(&self) -> &str;
+    /// The text of the field named `key`, when it is text.
+    fn text(&self, key: &str) -> Option<&str>;
+}
+
+/// An event being written, as [`Keyed`].
+struct EventKeys<'e, 'a>(&'e Event<'a>);
+
+impl Keyed for EventKeys<'_, '_> {
+    fn target(&self) -> &str {
+        self.0.target()
+    }
+
+    fn text(&self, key: &str) -> Option<&str> {
+        self.0
+            .fields()
+            .iter()
+            .find(|(name, _)| *name == key)
+            .and_then(|&(_, value)| value.as_str())
+    }
+}
+
+impl Keyed for Record {
+    fn target(&self) -> &str {
+        &self.target
+    }
+
+    fn text(&self, key: &str) -> Option<&str> {
+        self.field(key).and_then(crate::value::OwnedValue::as_str)
+    }
+}
+
+/// Whether `text` is a day as this workspace writes one: `YYYY-MM-DD`.
+fn is_day_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(at, byte)| {
+            if at == 4 || at == 7 {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+}
+
+/// The posting values one event carries, one per [`AUDIT_DIMENSIONS`] entry.
+fn postings_of(keys: &impl Keyed) -> [Option<&str>; 6] {
+    let day = keys.text("day").filter(|text| is_day_text(text));
+    let month = keys
+        .text("month")
+        .filter(|text| text.len() == 7 && is_day_text(&format!("{text}-01")))
+        .or_else(|| day.and_then(|day| day.get(..7)));
+    [
+        day,
+        month,
+        keys.text("feed").or_else(|| keys.text("vendor")),
+        keys.text("instrument").or_else(|| keys.text("symbol")),
+        keys.text("contract"),
+        Some(keys.target()),
+    ]
+}
+
+/// The serial of the audit file being appended to, `0` before the stream has
+/// ever rolled.
+///
+/// # Errors
+///
+/// A serial file that cannot be read, or holds anything but eight bytes.
+pub fn audit_serial(dir: &Path) -> Result<u64, String> {
+    let path = audit_serial_path(dir);
+    match std::fs::read(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+        Ok(bytes) => <[u8; 8]>::try_from(bytes.as_slice())
+            .map(u64::from_le_bytes)
+            .map_err(|_| {
+                format!(
+                    "{}: {} byte(s), not the eight of a serial",
+                    path.display(),
+                    bytes.len()
+                )
+            }),
+    }
+}
+
+/// The file a pointer of `serial` is in, when the current file is
+/// `current_serial`, or `None` once it has rolled past [`AUDIT_KEEP_FILES`].
+#[must_use]
+pub fn audit_path_for(dir: &Path, current_serial: u64, serial: u64) -> Option<PathBuf> {
+    let back = current_serial.checked_sub(serial)?;
+    if back == 0 {
+        return Some(audit_current_path(dir));
+    }
+    u8::try_from(back)
+        .ok()
+        .filter(|back| *back < AUDIT_KEEP_FILES)
+        .map(|back| audit_rolled_path(dir, back))
+}
+
+/// What reading the line one pointer names found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuditLine {
+    /// The line, decoded, its `seq` the pointer's.
+    Found(Record),
+    /// The file it was in has rolled out of the kept set, or no longer holds
+    /// that line.
+    RolledOff,
+    /// A file that is there could not be read, in the failure's own words.
+    Unreadable(String),
+}
+
+/// The line `pointer` names: one positional read, decoded and checked against
+/// the pointer's `seq`. A roll that raced the read moved the line one file
+/// older, and that file is tried too. O(1): at most two reads of one line.
+#[must_use]
+pub fn audit_read(dir: &Path, current_serial: u64, pointer: &AuditPointer) -> AuditLine {
+    for serial_now in [current_serial, current_serial.saturating_add(1)] {
+        let Some(path) = audit_path_for(dir, serial_now, pointer.serial) else {
+            continue;
+        };
+        match crate::tail::read_at(&path, pointer.offset, u64::from(pointer.len)) {
+            Ok(bytes) => {
+                let line = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+                if let Ok(record) = Record::decode(line)
+                    && record.seq == pointer.seq
+                {
+                    return AuditLine::Found(record);
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(e) => return AuditLine::Unreadable(format!("{}: {e}", path.display())),
+        }
+    }
+    AuditLine::RolledOff
+}
+
+/// The newest pointers of one posting file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Postings {
+    /// Up to the number asked for, newest first.
+    pub pointers: Vec<AuditPointer>,
+    /// How many whole records the file holds.
+    pub total: u64,
+    /// Records among those read that would not decode, skipped.
+    pub malformed: u64,
+}
+
+/// The newest `take` pointers `dimension = value` holds, newest first, across
+/// every generation the stream keeps: per generation, newest first, one
+/// `metadata` call and one read of at most the pointers still wanted, at the
+/// posting file's end, whatever its length. At most [`AUDIT_KEEP_FILES`]
+/// generations (and one more, for a roll whose serial was not yet recorded),
+/// so a probe is a bounded number of path lookups, never a walk. A posting
+/// that does not exist is an empty answer: nothing audited carried that value.
+///
+/// # Errors
+///
+/// The serial or a posting file that is there and cannot be read, or a
+/// dimension or value the index cannot name.
+pub fn audit_postings(
+    dir: &Path,
+    dimension: &str,
+    value: &str,
+    take: usize,
+) -> Result<Postings, String> {
+    let current = audit_serial(dir)?;
+    let mut out = Postings::default();
+    let oldest = current.saturating_sub(u64::from(AUDIT_KEEP_FILES));
+    for serial in (oldest..=current.saturating_add(1)).rev() {
+        let path = audit_posting_path(dir, serial, dimension, value)
+            .ok_or_else(|| format!("the audit index keeps no posting for {dimension}={value:?}"))?;
+        let len = match std::fs::metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+            Ok(meta) => meta.len(),
+        };
+        let total = len / AUDIT_POINTER_BYTES_U64;
+        out.total = out.total.saturating_add(total);
+        let left = take.saturating_sub(out.pointers.len());
+        let wanted = total.min(u64::try_from(left).unwrap_or(u64::MAX));
+        if wanted == 0 {
+            continue;
+        }
+        let from = total
+            .saturating_sub(wanted)
+            .saturating_mul(AUDIT_POINTER_BYTES_U64);
+        let bytes =
+            crate::tail::read_at(&path, from, wanted.saturating_mul(AUDIT_POINTER_BYTES_U64))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        for chunk in bytes.chunks_exact(AUDIT_POINTER_BYTES).rev() {
+            match AuditPointer::decode(chunk) {
+                Some(pointer) => out.pointers.push(pointer),
+                None => out.malformed = out.malformed.saturating_add(1),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The audit stream's writer, behind the sink's lock.
+#[derive(Debug)]
+struct Audit {
+    dir: PathBuf,
+    /// The file being appended to, or `None` when it could not be opened.
+    file: Option<File>,
+    /// Its running size.
+    bytes: u64,
+    /// Its serial.
+    serial: u64,
+    /// The roll bound: [`AUDIT_MAX_FILE_BYTES`], and smaller only in a test
+    /// that has to see a roll without writing 64 MiB.
+    max_file_bytes: u64,
+    /// Set by the first failed roll, never cleared: see `Sink::rotation_broken`.
+    rotation_broken: bool,
+    /// Posting files open between events, at most [`AUDIT_HANDLES`].
+    handles: std::collections::HashMap<PathBuf, File>,
+    /// The counters [`Sink::audit_health`] copies out.
+    health: AuditHealth,
+}
+
+impl Audit {
+    /// Opens the stream in `dir`, seeding it from the ring there when it is
+    /// new, and says what went wrong, if anything did.
+    fn open(dir: &Path, ring_keep: u8) -> (Self, Option<String>) {
+        let current = audit_current_path(dir);
+        let mut audit = Self {
+            dir: dir.to_path_buf(),
+            file: None,
+            bytes: 0,
+            serial: 0,
+            max_file_bytes: AUDIT_MAX_FILE_BYTES,
+            rotation_broken: false,
+            handles: std::collections::HashMap::new(),
+            health: AuditHealth {
+                path: current.clone(),
+                ..AuditHealth::default()
+            },
+        };
+        // A STREAM THAT HAS NEVER EXISTED, and only that, is seeded: a
+        // current file or a serial on disk means a stream that was written
+        // before, whose lines must not be copied a second time.
+        let fresh = !current.exists() && !audit_serial_path(dir).exists();
+        audit.serial = match audit_serial(dir) {
+            Ok(serial) => serial,
+            Err(why) => return audit.failed(format!("the audit stream's serial: {why}")),
+        };
+        let mut target = match FileTarget::open(&current) {
+            Ok(target) => target,
+            Err(e) => {
+                return audit.failed(format!(
+                    "{}: cannot open the audit stream — {e}",
+                    current.display()
+                ));
+            }
+        };
+        let found = target.len();
+        // A TORN TAIL IS CLOSED BEFORE THE FIRST APPEND, as the ring's is.
+        let (len, torn) = terminate_torn_tail(&mut target, &current, found);
+        audit.file = Some(target.file);
+        audit.bytes = len;
+        if fresh {
+            audit.seed(ring_keep);
+        }
+        (audit, torn)
+    }
+
+    /// The stream with no file, and the reason, recorded.
+    fn failed(mut self, why: String) -> (Self, Option<String>) {
+        self.health.last_error = Some(why.clone());
+        (self, Some(why))
+    }
+
+    /// Copies the ring's audited lines, oldest first. See the section header.
+    fn seed(&mut self, ring_keep: u8) {
+        use std::io::BufRead as _;
+        let ring = paths_newest_first(&self.dir, ring_keep);
+        for path in ring.iter().rev() {
+            let Ok(file) = File::open(path) else {
+                continue;
+            };
+            for line in std::io::BufReader::new(file).split(b'\n') {
+                let Ok(line) = line else {
+                    break;
+                };
+                let Ok(record) = Record::decode(&line) else {
+                    continue;
+                };
+                if !is_audited(record.level, &record.target, &record.message) {
+                    continue;
+                }
+                let mut whole = line;
+                whole.push(b'\n');
+                if self
+                    .append(&whole, record.seq, record.level, &record)
+                    .is_none()
+                {
+                    self.health.seeded = self.health.seeded.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// Appends one whole line and its pointers, or says why it could not.
+    fn append(&mut self, line: &[u8], seq: u64, level: Level, keys: &impl Keyed) -> Option<String> {
+        let span = u64::try_from(line.len()).unwrap_or(u64::MAX);
+        let mut said = None;
+        if !self.rotation_broken
+            && self.bytes > 0
+            && self.bytes.saturating_add(span) > self.max_file_bytes
+            && let Err(why) = self.roll()
+        {
+            self.rotation_broken = true;
+            self.health.rotation_failures = self.health.rotation_failures.saturating_add(1);
+            self.health.last_error = Some(why.clone());
+            said = Some(why);
+        }
+        let Some(file) = self.file.as_mut() else {
+            self.health.dropped = self.health.dropped.saturating_add(1);
+            return said.or_else(|| self.health.last_error.clone());
+        };
+        if let Err(e) = file.write_all(line) {
+            // A FRAGMENT IS CLOSED, as the ring closes one: one malformed line,
+            // never two lines fused. If this byte fails too, the next open
+            // closes it.
+            let _closed = file.write_all(b"\n");
+            let why = format!(
+                "{}: cannot append an audited line — {e}",
+                self.health.path.display()
+            );
+            self.health.dropped = self.health.dropped.saturating_add(1);
+            self.health.last_error = Some(why.clone());
+            return Some(why);
+        }
+        let pointer = AuditPointer {
+            serial: self.serial,
+            offset: self.bytes,
+            seq,
+            len: u32::try_from(line.len()).unwrap_or(u32::MAX),
+            level,
+        };
+        self.bytes = self.bytes.saturating_add(span);
+        self.health.written = self.health.written.saturating_add(1);
+        let image = pointer.image();
+        for (dimension, value) in AUDIT_DIMENSIONS.into_iter().zip(postings_of(keys)) {
+            let Some(value) = value else {
+                continue;
+            };
+            let Some(path) = audit_posting_path(&self.dir, self.serial, dimension, value) else {
+                self.health.unindexed = self.health.unindexed.saturating_add(1);
+                continue;
+            };
+            if let Err(why) = self.post(path, &image) {
+                self.health.index_failures = self.health.index_failures.saturating_add(1);
+                self.health.last_error = Some(why.clone());
+                said = Some(why);
+            } else {
+                self.health.index_records = self.health.index_records.saturating_add(1);
+            }
+        }
+        said
+    }
+
+    /// Appends one pointer image to one posting file.
+    fn post(&mut self, path: PathBuf, image: &[u8; AUDIT_POINTER_BYTES]) -> Result<(), String> {
+        use std::collections::hash_map::Entry;
+        if self.handles.len() >= AUDIT_HANDLES && !self.handles.contains_key(&path) {
+            self.handles.clear();
+        }
+        let file = match self.handles.entry(path) {
+            Entry::Occupied(open) => open.into_mut(),
+            Entry::Vacant(slot) => {
+                let path = slot.key();
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("{}: cannot create — {e}", parent.display()))?;
+                }
+                let file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(path)
+                    .map_err(|e| format!("{}: cannot open — {e}", path.display()))?;
+                slot.insert(file)
+            }
+        };
+        file.write_all(image)
+            .map_err(|e| format!("an audit index posting: cannot append a pointer — {e}"))
+    }
+
+    /// Rolls the stream: the current file becomes `.1`, each `.n` becomes
+    /// `.n + 1`, the oldest is deleted, and the serial advances. The serial is
+    /// written AFTER the renames, so a crash between them leaves it one behind
+    /// and [`audit_read`]'s second try finds the line one file older.
+    fn roll(&mut self) -> Result<(), String> {
+        let named = |path: &Path, what: &str, e: &std::io::Error| {
+            format!("{}: {what} — {e}", path.display())
+        };
+        let oldest = audit_rolled_path(&self.dir, AUDIT_KEEP_FILES.saturating_sub(1));
+        remove_if_present(&oldest)
+            .map_err(|e| named(&oldest, "cannot delete the oldest audit file", &e))?;
+        for n in (1..AUDIT_KEEP_FILES.saturating_sub(1)).rev() {
+            let from = audit_rolled_path(&self.dir, n);
+            let to = audit_rolled_path(&self.dir, n.saturating_add(1));
+            rename_if_present(&from, &to).map_err(|e| named(&from, "cannot roll", &e))?;
+        }
+        let current = audit_current_path(&self.dir);
+        rename_if_present(&current, &audit_rolled_path(&self.dir, 1))
+            .map_err(|e| named(&current, "cannot roll the audit file", &e))?;
+        let next = self.serial.saturating_add(1);
+        let path = audit_serial_path(&self.dir);
+        let staged = path.with_extension("next");
+        std::fs::create_dir_all(self.dir.join(AUDIT_INDEX_DIR))
+            .and_then(|()| std::fs::write(&staged, next.to_le_bytes()))
+            .and_then(|()| std::fs::rename(&staged, &path))
+            .map_err(|e| named(&path, "cannot record the audit serial", &e))?;
+        self.serial = next;
+        // THE GENERATION OF THE FILE JUST DELETED GOES WITH IT, so the index
+        // never outlives the lines it points at. Its handles are closed first.
+        self.handles.clear();
+        if let Some(gone) = next.checked_sub(u64::from(AUDIT_KEEP_FILES)) {
+            let generation = audit_generation_path(&self.dir, gone);
+            match std::fs::remove_dir_all(&generation) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(named(&generation, "cannot delete the index generation", &e));
+                }
+                _ => {}
+            }
+        }
+        self.file = Some(
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&current)
+                .map_err(|e| named(&current, "cannot open the next audit file", &e))?,
+        );
+        self.bytes = 0;
+        self.health.rotations = self.health.rotations.saturating_add(1);
+        Ok(())
+    }
+
+    /// The counters, with the running size and serial filled in.
+    fn health(&self) -> AuditHealth {
+        AuditHealth {
+            current_bytes: self.bytes,
+            serial: self.serial,
+            ..self.health.clone()
+        }
     }
 }
 
@@ -2065,6 +2887,7 @@ mod tests {
             last_at: 0,
             buf: Vec::new(),
             torn: false,
+            audit: None,
         };
 
         assert_eq!(
@@ -4572,5 +5395,335 @@ mod tests {
         assert_eq!(fresh.reserve_run_id(), Some(1));
         let _ignored = std::fs::remove_dir_all(&dir);
         let _ignored = std::fs::remove_dir_all(&empty);
+    }
+
+    // -----------------------------------------------------------------------
+    // THE AUDIT STREAM (D-3341 item 3; DB-023, DB-G88)
+    // -----------------------------------------------------------------------
+
+    use super::{
+        AUDIT_DIMENSIONS, AUDIT_KEEP_FILES, AUDIT_POINTER_BYTES, AuditLine, AuditPointer,
+        audit_current_path, audit_path_for, audit_posting_path, audit_postings, audit_read,
+        audit_rolled_path, audit_serial, audit_serial_path, is_audited, posting_name,
+    };
+
+    /// The one record a posting probe finds for `dimension = value`.
+    fn probed(dir: &Path, dimension: &str, value: &str) -> Vec<Record> {
+        let postings = audit_postings(dir, dimension, value, 100).expect("a probe");
+        let serial = audit_serial(dir).expect("a serial");
+        postings
+            .pointers
+            .iter()
+            .map(|pointer| match audit_read(dir, serial, pointer) {
+                AuditLine::Found(record) => record,
+                other => panic!("{dimension}={value}: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// **A REFUSAL LANDS IN THE AUDIT STREAM AND IS FOUND BY A PATH PROBE ON
+    /// EVERY KEY IT CARRIES**: its day, its month, its feed, its instrument,
+    /// its contract and its target. The line is the ring's own, byte for byte.
+    /// An event that is not a refusal or a lifecycle step never reaches it.
+    #[test]
+    fn a_refusal_is_kept_in_the_audit_stream_and_found_by_each_of_its_keys() {
+        let dir = scratch("audit-probe");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let refusal = Event::error("gdfl.import", "refused")
+            .with("feed", "gdfl")
+            .with("instrument", "NIFTY")
+            .with("day", "2022-03-07")
+            .with("contract", "2022-03-10-1650000-CE")
+            .with(
+                "why",
+                "line 4820: LTP is not a decimal of at most two places",
+            );
+        assert!(sink.emit(&refusal).is_written());
+        // NOT AUDITED: a warn (the ring's flood was warn), and an info that is
+        // no run's lifecycle.
+        assert!(
+            sink.emit(&Event::warn("api.bars", "read refused").with("day", "2022-03-07"))
+                .is_written()
+        );
+        assert!(
+            sink.emit(&Event::info("pull.run", "ingested").with("day", "2022-03-07"))
+                .is_written()
+        );
+
+        for (dimension, value) in [
+            ("day", "2022-03-07"),
+            ("month", "2022-03"),
+            ("feed", "gdfl"),
+            ("instrument", "NIFTY"),
+            ("contract", "2022-03-10-1650000-CE"),
+            ("target", "gdfl.import"),
+        ] {
+            let found = probed(&dir, dimension, value);
+            assert_eq!(found.len(), 1, "{dimension}={value}: {found:?}");
+            assert!(found[0].matches(&refusal), "{dimension}={value}");
+        }
+        assert!(probed(&dir, "target", "api.bars").is_empty());
+        assert!(probed(&dir, "instrument", "BANKNIFTY").is_empty());
+
+        // THE SAME BYTES AS THE RING'S LINE.
+        let ring = std::fs::read_to_string(current_path(&dir)).expect("ring");
+        let audit = std::fs::read_to_string(audit_current_path(&dir)).expect("audit");
+        assert_eq!(audit.lines().count(), 1);
+        assert_eq!(ring.lines().next(), audit.lines().next());
+
+        let health = sink.audit_health().expect("a file sink keeps a stream");
+        assert_eq!(health.written, 1);
+        assert_eq!(health.index_records, 6);
+        assert_eq!((health.dropped, health.index_failures), (0, 0));
+        assert!(!health.is_loud());
+        assert_eq!(health.current_bytes, audit.len() as u64);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **WHAT IS AUDITED, BY RULE**: every `error`; a lifecycle word or a
+    /// `lifecycle` target at `info` or above; never a `warn` refusal, never a
+    /// `debug` lifecycle step, and a word inside another word is not one.
+    #[test]
+    fn the_audit_rule_takes_errors_and_lifecycles_and_nothing_else() {
+        assert!(is_audited(Level::Error, "pull.spot", "member did not land"));
+        assert!(is_audited(Level::Info, "gdfl.import", "run started"));
+        assert!(is_audited(Level::Info, "gdfl.import", "run finished"));
+        assert!(is_audited(
+            Level::Warn,
+            "pull.run",
+            "finished — BOOKS DO NOT BALANCE"
+        ));
+        assert!(is_audited(Level::Info, "cli.lifecycle", "command refused"));
+        assert!(is_audited(Level::Warn, "autopilot", "paused"));
+        assert!(!is_audited(Level::Warn, "api.bars", "read refused"));
+        assert!(!is_audited(Level::Info, "pull.run", "ingested"));
+        assert!(!is_audited(Level::Debug, "pull.chunk", "chunk finished"));
+        assert!(!is_audited(Level::Info, "x", "unfinished business"));
+        assert!(!is_audited(Level::Info, "x.lifecycles", "noted"));
+        assert!(AUDIT_DIMENSIONS.contains(&"day"));
+    }
+
+    /// **A POSTING NAME CANNOT LEAVE ITS DIMENSION**: every byte outside
+    /// `A-Z a-z 0-9 - _` is escaped, so `..`, `/` and a space are text, and a
+    /// value too long to name is refused rather than cut into another's name.
+    #[test]
+    fn a_posting_name_is_escaped_and_never_a_path() {
+        assert_eq!(posting_name("NIFTY 50").as_deref(), Some("NIFTY%2050"));
+        assert_eq!(posting_name("../x").as_deref(), Some("%2E%2E%2Fx"));
+        assert_eq!(posting_name("M&M").as_deref(), Some("M%26M"));
+        assert_eq!(posting_name(""), None);
+        assert_eq!(posting_name(&"A".repeat(121)), None);
+        assert_eq!(
+            posting_name(&"/".repeat(41)),
+            None,
+            "escaped past the bound"
+        );
+        let dir = Path::new("/store/telemetry");
+        assert_eq!(
+            audit_posting_path(dir, 3, "day", "2022-03-07"),
+            Some(PathBuf::from(
+                "/store/telemetry/audit.idx/3/day/2022-03-07.idx"
+            ))
+        );
+        assert_eq!(audit_posting_path(dir, 0, "nowhere", "x"), None);
+    }
+
+    /// **A POINTER ROUND-TRIPS, AND A RECORD THIS CRATE DID NOT WRITE IS
+    /// REFUSED**: a wrong mark, a level no build names, a short record.
+    #[test]
+    fn a_pointer_round_trips_and_a_foreign_record_is_refused() {
+        let pointer = AuditPointer {
+            serial: 3,
+            offset: 1 << 40,
+            seq: 77,
+            len: 512,
+            level: Level::Error,
+        };
+        let image = pointer.image();
+        assert_eq!(AuditPointer::decode(&image), Some(pointer));
+        let mut marked = image;
+        marked[31] = b'Z';
+        assert_eq!(AuditPointer::decode(&marked), None);
+        let mut ranked = image;
+        ranked[28] = 9;
+        assert_eq!(AuditPointer::decode(&ranked), None);
+        assert_eq!(
+            AuditPointer::decode(&image[..AUDIT_POINTER_BYTES - 1]),
+            None
+        );
+    }
+
+    /// **THE STREAM ROLLS AT ITS BOUND, THE SERIAL MOVES, AND A POINTER STILL
+    /// FINDS ITS LINE IN THE ROLLED FILE**; a line older than the kept set is
+    /// `RolledOff`, never another line; a serial one behind the files (a crash
+    /// between the renames and the serial's write) is found one file on.
+    #[test]
+    fn a_rolled_line_is_found_through_its_serial_and_a_dropped_one_is_said() {
+        let dir = scratch("audit-roll");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 2048;
+        for i in 0..40u32 {
+            assert!(
+                sink.emit(
+                    &Event::error("pull.spot", "member did not land")
+                        .with("instrument", "VBL")
+                        .with("day", "2019-01-02")
+                        .with("i", i)
+                )
+                .is_written()
+            );
+        }
+        let health = sink.audit_health().expect("a stream");
+        assert!(health.rotations >= 3, "{health:?}");
+        // THE INDEX IS BOUNDED WITH THE STREAM: one generation per kept file.
+        let generations = std::fs::read_dir(dir.join(super::AUDIT_INDEX_DIR))
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+            .count();
+        assert!(
+            generations <= usize::from(AUDIT_KEEP_FILES),
+            "{generations}"
+        );
+        assert_eq!(audit_serial(&dir).expect("serial"), health.serial);
+        assert_eq!(health.rotation_failures, 0);
+        let found = probed(&dir, "instrument", "VBL");
+        assert_eq!(found.len(), 40, "every line still in a kept file");
+        let mut seen: Vec<u64> = found
+            .iter()
+            .map(|r| {
+                r.field("i")
+                    .and_then(crate::value::OwnedValue::as_u64)
+                    .unwrap()
+            })
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..40).collect::<Vec<u64>>());
+
+        // A SERIAL ONE BEHIND: the line moved one file older than it says.
+        let first = audit_postings(&dir, "instrument", "VBL", 1)
+            .expect("probe")
+            .pointers[0];
+        let behind = health.serial.saturating_sub(1);
+        assert!(matches!(
+            audit_read(&dir, behind, &first),
+            AuditLine::Found(_)
+        ));
+        // ROLLED OFF: a serial the kept set no longer reaches.
+        let ancient = AuditPointer { serial: 0, ..first };
+        assert_eq!(
+            audit_read(&dir, u64::from(AUDIT_KEEP_FILES) + 5, &ancient),
+            AuditLine::RolledOff
+        );
+        assert_eq!(audit_path_for(&dir, 5, 6), None, "a serial from the future");
+        assert_eq!(audit_path_for(&dir, 5, 5), Some(audit_current_path(&dir)));
+        assert_eq!(audit_path_for(&dir, 5, 3), Some(audit_rolled_path(&dir, 2)));
+        // A POINTER WHOSE SEQ DOES NOT MATCH THE LINE IS NOT THAT LINE.
+        let wrong = AuditPointer {
+            seq: first.seq + 1_000_000,
+            ..first
+        };
+        assert_eq!(
+            audit_read(&dir, health.serial, &wrong),
+            AuditLine::RolledOff
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A NEW STREAM BESIDE AN OLD RING STARTS WITH THE RING'S REFUSALS**,
+    /// oldest first and once: a reopen does not copy them again.
+    #[test]
+    fn a_new_audit_stream_is_seeded_from_the_ring_once() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-seed");
+        {
+            let ring_only = Sink::open(&Config::new(&dir).with_audit(false)).expect("opens");
+            assert!(ring_only.audit_health().is_none());
+            for day in ["2022-03-04", "2022-03-07"] {
+                let _ = ring_only.emit(&Event::error("gdfl.import", "refused").with("day", day));
+                let _ =
+                    ring_only.emit(&Event::info("gdfl.import", "day imported").with("day", day));
+            }
+            let _ = ring_only.emit(&Event::info("gdfl.import", "run finished"));
+        }
+        assert!(!audit_current_path(&dir).exists());
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let health = sink.audit_health().expect("a stream");
+            assert_eq!(health.seeded, 3, "{health:?}");
+            assert_eq!(probed(&dir, "day", "2022-03-07").len(), 1);
+            assert_eq!(probed(&dir, "target", "gdfl.import").len(), 3);
+        }
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert_eq!(again.audit_health().expect("a stream").seeded, 0);
+        assert_eq!(probed(&dir, "target", "gdfl.import").len(), 3);
+        assert!(!audit_serial_path(&dir).exists(), "no roll, no serial");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SINK AROUND A TARGET IT DID NOT OPEN KEEPS NO STREAM**, and an
+    /// absent posting is an empty answer rather than an error.
+    #[test]
+    fn a_target_sink_keeps_no_stream_and_an_absent_posting_is_empty() {
+        let sink = Sink::with_target(&Config::new("/nowhere"), Box::new(NullTarget)).expect("ok");
+        assert!(sink.audit_health().is_none());
+        let dir = scratch("audit-empty");
+        let none = audit_postings(&dir, "day", "2022-03-07", 10).expect("absent is empty");
+        assert_eq!((none.total, none.pointers.len()), (0, 0));
+        assert!(audit_postings(&dir, "nowhere", "x", 10).is_err());
+        assert_eq!(audit_serial(&dir), Ok(0));
+        std::fs::create_dir_all(audit_serial_path(&dir).parent().unwrap()).unwrap();
+        std::fs::write(audit_serial_path(&dir), b"abc").unwrap();
+        assert!(audit_serial(&dir).is_err_and(|why| why.contains("3 byte(s)")));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN INDEX GENERATION IS DELETED WITH ITS FILE**: past
+    /// [`AUDIT_KEEP_FILES`] rolls the oldest file and its pointers go
+    /// together, so a probe finds exactly the lines still kept and the index
+    /// never outgrows the stream.
+    #[test]
+    fn the_oldest_index_generation_goes_with_the_oldest_file() {
+        let dir = scratch("audit-generations");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 1;
+        let lines = u64::from(AUDIT_KEEP_FILES) + 6;
+        for i in 0..lines {
+            let _ = sink.emit(
+                &Event::error("pull.spot", "refused")
+                    .with("instrument", "VBL")
+                    .with("i", i),
+            );
+        }
+        let health = sink.audit_health().expect("a stream");
+        assert_eq!(health.rotations, lines - 1);
+        assert_eq!(health.rotation_failures, 0, "{health:?}");
+        assert!(!super::audit_generation_path(&dir, 0).exists());
+        assert!(super::audit_generation_path(&dir, health.serial).exists());
+        let found = probed(&dir, "instrument", "VBL");
+        assert_eq!(
+            found.len(),
+            usize::from(AUDIT_KEEP_FILES),
+            "one line per kept file"
+        );
+        assert_eq!(
+            found[0]
+                .field("i")
+                .and_then(crate::value::OwnedValue::as_u64),
+            Some(lines - 1),
+            "newest first"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
