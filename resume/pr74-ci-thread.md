@@ -309,3 +309,10 @@ check in just after the 5-hour reset, resume. Weekly: save at 93%, stop at 98%.
   import turning_point. Re-run the R1286-rest-01/-02 tests after resolving.
 - Plan: wait for Gate 18 on ff390a4f and the audit's final sha; then merge both once, validate,
   push. Coordinator told (14:25).
+
+## 2026-10-09 15:30 UTC — shard 0 lost its runner
+- Run 37919296478 (ff390a4f): Gate 18 shard 0/201 (job 113837442435) died at 15:25 with "The
+  runner has received a shutdown signal" (exit 143), 89 min after its baseline (613 s build,
+  1632 s test); no mutant outcome reported. 14 other shards passed so far. PR comment posted
+  (issuecomment-6083937460). TODO when the run completes: `rerun_failed_jobs` on 37919296478
+  ONCE (a run cannot re-run jobs while in progress). A second failure is real: read its log.
