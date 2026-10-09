@@ -118,6 +118,10 @@ struct Asked {
     /// its JSON and with one Warn, rather than passing the unfiltered tail off
     /// as the filtered one (P1-01-02, D-1765).
     ignored: Vec<(&'static str, String)>,
+    /// The feed, instrument, day and contract asked for, answered through the
+    /// audit index (D-3341 item 3). Empty for a request that names none, which
+    /// is answered by the ring alone, exactly as before.
+    keys: Keys,
 }
 
 /// Reads the query string into a bounded [`telemetry::Query`].
@@ -163,6 +167,7 @@ fn asked(raw: &str) -> Asked {
     if run == 0 && !run_word.is_empty() && run_word != "0" {
         ignored.push(("run", run_word));
     }
+    let keys = keys_of(raw, &mut ignored);
     for (param, word) in &ignored {
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::warn("api.logs", "filter ignored")
@@ -193,7 +198,50 @@ fn asked(raw: &str) -> Asked {
         target,
         run,
         ignored,
+        keys,
     }
+}
+
+/// The keyed filters a query names, each unreadable one pushed to `ignored`
+/// rather than read as no filter in silence (D-1765's rule, D-3341 item 3).
+/// `feed` must be a wire this build names; `instrument` an instrument as
+/// [`instrument_of`] reads one; `day` a `YYYY-MM-DD`; `contract` any text up
+/// to a store segment's length.
+fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
+    let mut keys = Keys::default();
+    let feed = crate::server::param(raw, "feed");
+    if !feed.is_empty() {
+        match brutex_core::vendor::Vendor::ALL
+            .into_iter()
+            .find(|vendor| vendor.as_str().eq_ignore_ascii_case(&feed))
+        {
+            Some(vendor) => keys.feed = Some(vendor.as_str().to_owned()),
+            None => ignored.push(("feed", feed)),
+        }
+    }
+    let instrument = crate::server::param(raw, "instrument");
+    if !instrument.is_empty() {
+        match instrument_of(&instrument) {
+            Some(named) => keys.instrument = Some(named),
+            None => ignored.push(("instrument", instrument)),
+        }
+    }
+    let day = crate::server::param(raw, "day");
+    if !day.is_empty() {
+        match crate::server::import_journal::parse_day(&day) {
+            Some(parsed) => keys.day = Some(parsed),
+            None => ignored.push(("day", day)),
+        }
+    }
+    let contract = crate::server::param(raw, "contract");
+    if !contract.is_empty() {
+        if contract.len() <= MAX_CONTRACT_ASKED && !contract.contains(['/', '\\']) {
+            keys.contract = Some(contract);
+        } else {
+            ignored.push(("contract", contract));
+        }
+    }
+    keys
 }
 
 /// `GET /logs.json` — the tail, and every honesty flag the walk carries.
@@ -237,8 +285,14 @@ pub async fn logs_json(
     // with a `run=` filter one half can never match, so that half is read to
     // its cap on every poll. It now runs in `detail`'s log-read pool, and a
     // full pool is a named 429, never a queue. log-3, P1-04-02, D-2327.
+    // A KEYED REQUEST IS ANSWERED FROM THE AUDIT INDEX, then the ring; one
+    // that names no key reads the ring alone, exactly as it always did.
     match crate::detail::run_log_read(move || {
-        json_over(&dir, second.as_deref(), &asked, health.as_ref())
+        if asked.keys.is_empty() {
+            json_over(&dir, second.as_deref(), &asked, health.as_ref())
+        } else {
+            keyed_json(&dir, second.as_deref(), &asked, health.as_ref())
+        }
     })
     .await
     {
@@ -1385,10 +1439,934 @@ impl Ration {
     }
 }
 
+// ---------------------------------------------------------------------------
+// KEYED READS: feed, instrument, day and contract (D-3341 item 3; DB-023,
+// DB-G88, DB-025)
+// ---------------------------------------------------------------------------
+//
+// # What this adds, and why the ring alone could not
+//
+// `/logs.json` filtered by level, target and run, over the newest 4 MiB of a
+// ring that held 4 to 12 minutes during a pull. "Why was NIFTY refused on
+// 2022-03-07" was a question it could answer only within those minutes, and
+// only by a caller who knew the target to ask for.
+//
+// A request naming a `feed`, an `instrument`, a `day` or a `contract` is
+// answered from the durable audit stream each sink keeps
+// (`telemetry::audit_postings`): ONE posting file per key, named by the key, in
+// each half (the server's directory and `cli`'s), and one positional read per
+// line it points at. Nothing is scanned to find them. The newest
+// [`SCAN_BYTES`] of each ring are then read as well, for events written before
+// that half kept a stream (the stream starts the first time a build with it
+// opens the sink, seeded from what the ring still held), and a line found in
+// both is shown once.
+//
+// # What "bears on" means
+//
+// A key matches an event that names it in a field (`feed`/`vendor`,
+// `instrument`/`symbol` with `segment` when both carry one, `day`, `contract`),
+// and three things it cannot match by field:
+//
+// * an event whose target names the feed (`gdfl.import` for `feed=gdfl`): the
+//   GDFL importer names its kind, day and file, never its feed;
+// * a GDFL importer refusal about a FILE: the file name is resolved through
+//   `pull::gdfl_cm::resolve` (`NIFTY 50.NSE_IDX.csv` is `NSE-INDEX-NIFTY`) and
+//   an option ticker through `pull::gdfl_nfo::decode_ticker`, the importer's
+//   own two readers, so the API cannot disagree with what was imported;
+// * a refusal of a WHOLE DAY (the calendar, the census, a listing) of a kind:
+//   it bears on every instrument of that kind's segment that day, and the
+//   record says so with `"scope":"day"`. An event about the month a day falls
+//   in carries `"scope":"month"`; an event naming the key itself, `"event"`.
+//
+// # Cost
+//
+// Per half: at most one `metadata` call and one read per probed posting
+// (two for a day: the day and its month), then one positional read per pointer
+// read, at most [`MAX_KEYED_READS`] across the request, and the ring's
+// [`SCAN_BYTES`]. None of it grows with the stream, the index or the store.
+
+/// The longest `contract` a keyed request reads: a store contract segment
+/// (`brutex_core::instrument::CONTRACT_CAPACITY`) or a vendor ticker, which
+/// can be longer.
+pub const MAX_CONTRACT_ASKED: usize = 64;
+
+/// The most audit lines one keyed request reads, both halves together. The
+/// answer says when pointers were left unread (`index.capped`).
+pub const MAX_KEYED_READS: usize = 2_000;
+
+/// What a keyed request narrows by.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Keys {
+    /// The feed's wire, as `Vendor::as_str` spells it.
+    pub(crate) feed: Option<String>,
+    /// The instrument.
+    pub(crate) instrument: Option<Instrument>,
+    /// The day.
+    pub(crate) day: Option<pull::session::Day>,
+    /// The contract, as the store names its segment, or a vendor ticker.
+    pub(crate) contract: Option<String>,
+}
+
+impl Keys {
+    /// Whether no key was asked for.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.feed.is_none()
+            && self.instrument.is_none()
+            && self.day.is_none()
+            && self.contract.is_none()
+    }
+}
+
+/// An instrument as a request names it: `NSE-INDEX-NIFTY`, `NSE-NIFTY` or
+/// `NIFTY`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Instrument {
+    /// The text asked.
+    pub(crate) asked: String,
+    /// The exchange, when named.
+    pub(crate) exchange: Option<String>,
+    /// The segment, when named.
+    pub(crate) segment: Option<String>,
+    /// The symbol.
+    pub(crate) symbol: String,
+}
+
+/// The instrument `text` names, or `None` when its symbol is not one the store
+/// files (`brutex_core::symbol::Symbol`).
+pub(crate) fn instrument_of(text: &str) -> Option<Instrument> {
+    use brutex_core::instrument::{Exchange, Segment};
+    let exchange = text
+        .split_once('-')
+        .filter(|(exchange, _)| Exchange::parse(exchange).is_ok());
+    let (exchange, segment, symbol) = match exchange {
+        Some((exchange, rest)) => match rest.split_once('-') {
+            Some((segment, symbol)) if Segment::parse(segment).is_ok() => {
+                (Some(exchange), Some(segment), symbol)
+            }
+            _ => (Some(exchange), None, rest),
+        },
+        None => (None, None, text),
+    };
+    brutex_core::symbol::Symbol::new(symbol).ok()?;
+    Some(Instrument {
+        asked: text.to_owned(),
+        exchange: exchange.map(str::to_owned),
+        segment: segment.map(str::to_owned),
+        symbol: symbol.to_owned(),
+    })
+}
+
+/// How an event bears on a request's keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// It names the key itself.
+    Event,
+    /// It refuses a whole day of a kind the key belongs to.
+    Day,
+    /// It is about the month the asked day falls in.
+    Month,
+}
+
+impl Scope {
+    /// The wire's word.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Event => "event",
+            Self::Day => "day",
+            Self::Month => "month",
+        }
+    }
+
+    /// The wider of two.
+    const fn widest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Month, _) | (_, Self::Month) => Self::Month,
+            (Self::Day, _) | (_, Self::Day) => Self::Day,
+            _ => Self::Event,
+        }
+    }
+}
+
+/// The text of one field.
+fn text_of<'r>(record: &'r telemetry::Record, key: &str) -> Option<&'r str> {
+    record.field(key).and_then(telemetry::OwnedValue::as_str)
+}
+
+/// What a GDFL importer event's `about` names, read with the importer's own
+/// readers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum About {
+    /// A file of one instrument: its symbol, the segment its kind files it
+    /// under, and the contract an option ticker names.
+    File {
+        symbol: String,
+        segment: &'static str,
+        contract: Option<String>,
+    },
+    /// A file the importer does not file (a reference index, a series
+    /// variant): it bears on no swept instrument.
+    Unfiled,
+    /// The whole day of the kind: the calendar, the census, the listing.
+    WholeDay { segment: &'static str },
+}
+
+/// What `record`, a GDFL importer event, is about; `None` when it is not one
+/// or names no kind and day.
+fn gdfl_about(record: &telemetry::Record) -> Option<About> {
+    use pull::gdfl_cm::{CmKind, Resolution};
+    use pull::gdfl_import::ImportKind;
+    if record.target != pull::gdfl_import::TARGET {
+        return None;
+    }
+    let kind = ImportKind::parse(text_of(record, "kind")?).ok()?;
+    let segment = kind.segment();
+    let about = text_of(record, "about").unwrap_or("");
+    let cm = match kind {
+        ImportKind::Indices => Some(CmKind::Indices),
+        ImportKind::Stocks => Some(CmKind::Stocks),
+        ImportKind::Options => None,
+    };
+    if let Some(cm) = cm {
+        let Ok((stem, _)) = pull::gdfl_cm::split_name(about) else {
+            return Some(About::WholeDay { segment });
+        };
+        return Some(match pull::gdfl_cm::resolve(cm, stem) {
+            Resolution::Swept(key) => About::File {
+                symbol: key.underlying.as_str().to_owned(),
+                segment,
+                contract: None,
+            },
+            _ => About::Unfiled,
+        });
+    }
+    let day = text_of(record, "day").and_then(crate::server::import_journal::parse_day)?;
+    Some(match pull::gdfl_nfo::decode_ticker(about, day) {
+        Ok(ticker) => About::File {
+            symbol: ticker.underlying.as_str().to_owned(),
+            segment,
+            contract: Some(ticker.contract.to_string()),
+        },
+        // NOT A TICKER: the calendar, the census, the listing. A ticker the
+        // reader refused is still a file of one contract, and the event says
+        // so in `about`; it is matched by its text below.
+        Err(_) if !about.ends_with("CE") && !about.ends_with("PE") => About::WholeDay { segment },
+        Err(_) => About::Unfiled,
+    })
+}
+
+/// How `record` bears on `keys`, or `None` when it does not.
+pub(crate) fn bears(record: &telemetry::Record, keys: &Keys) -> Option<Scope> {
+    let mut scope = Scope::Event;
+    let about = gdfl_about(record);
+    if let Some(ref feed) = keys.feed {
+        let named = text_of(record, "feed")
+            .or_else(|| text_of(record, "vendor"))
+            .is_some_and(|wire| wire == feed);
+        let by_target = record.target.split('.').next() == Some(feed.as_str());
+        if !named && !by_target {
+            return None;
+        }
+    }
+    if let Some(day) = keys.day {
+        let asked = day.to_string();
+        if let Some(text) = text_of(record, "day") {
+            if text != asked {
+                return None;
+            }
+        } else if text_of(record, "month") == asked.get(..7) {
+            scope = scope.widest(Scope::Month);
+        } else {
+            return None;
+        }
+    }
+    if let Some(ref instrument) = keys.instrument {
+        scope = scope.widest(instrument_bears(record, about.as_ref(), instrument)?);
+    }
+    if let Some(ref contract) = keys.contract {
+        let named = text_of(record, "contract") == Some(contract.as_str())
+            || text_of(record, "about") == Some(contract.as_str());
+        let decoded = matches!(
+            about,
+            Some(About::File { contract: Some(ref held), .. }) if held == contract
+        );
+        if !named && !decoded {
+            return None;
+        }
+    }
+    Some(scope)
+}
+
+/// How `record` bears on one instrument.
+fn instrument_bears(
+    record: &telemetry::Record,
+    about: Option<&About>,
+    asked: &Instrument,
+) -> Option<Scope> {
+    let segment_fits = |segment: &str| {
+        asked
+            .segment
+            .as_deref()
+            .is_none_or(|wanted| wanted == segment)
+    };
+    if let Some(about) = about {
+        return match *about {
+            About::File {
+                ref symbol,
+                segment,
+                ..
+            } => (*symbol == asked.symbol && segment_fits(segment)).then_some(Scope::Event),
+            About::WholeDay { segment } => segment_fits(segment).then_some(Scope::Day),
+            About::Unfiled => None,
+        };
+    }
+    let named = text_of(record, "instrument")
+        .or_else(|| text_of(record, "symbol"))
+        .is_some_and(|name| name == asked.symbol || name == asked.asked);
+    let agrees = |field: &str, wanted: Option<&String>| {
+        wanted
+            .is_none_or(|wanted| text_of(record, field).is_none_or(|held| held == wanted.as_str()))
+    };
+    (named
+        && agrees("segment", asked.segment.as_ref())
+        && agrees("exchange", asked.exchange.as_ref()))
+    .then_some(Scope::Event)
+}
+
+/// The postings a keyed request probes: the most selective key it names.
+fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
+    let gdfl = keys
+        .feed
+        .as_deref()
+        .is_none_or(|feed| feed == brutex_core::vendor::Vendor::Gdfl.as_str());
+    let mut out = Vec::with_capacity(3);
+    if let Some(day) = keys.day {
+        let text = day.to_string();
+        out.push(("month", text.get(..7).unwrap_or_default().to_owned()));
+        out.push(("day", text));
+    } else if let Some(ref contract) = keys.contract {
+        out.push(("contract", contract.clone()));
+        if gdfl {
+            out.push(("target", pull::gdfl_import::TARGET.to_owned()));
+        }
+    } else if let Some(ref instrument) = keys.instrument {
+        out.push(("instrument", instrument.symbol.clone()));
+        if instrument.asked != instrument.symbol {
+            out.push(("instrument", instrument.asked.clone()));
+        }
+        if gdfl {
+            out.push(("target", pull::gdfl_import::TARGET.to_owned()));
+        }
+    } else if let Some(ref feed) = keys.feed {
+        out.push(("feed", feed.clone()));
+        if gdfl {
+            out.push(("target", pull::gdfl_import::TARGET.to_owned()));
+        }
+    }
+    out
+}
+
+/// What one half's probe found.
+#[derive(Debug, Default)]
+struct Probed {
+    /// `(half, dimension, value, total pointers, pointers read)`, per posting.
+    postings: Vec<(&'static str, &'static str, String, u64, usize)>,
+    /// Lines found and matched, each with its half and scope.
+    found: Vec<(&'static str, Scope, telemetry::Record)>,
+    /// Pointers whose line has rolled out of the kept stream.
+    rolled_off: u64,
+    /// Pointers left unread at [`MAX_KEYED_READS`].
+    capped: bool,
+    /// Failures, in their own words.
+    errors: Vec<String>,
+}
+
+/// Probes one half's audit index for `keys`, reading at most `budget` lines.
+fn probe_half(
+    half: &'static str,
+    dir: &std::path::Path,
+    keys: &Keys,
+    asked: &Asked,
+    budget: &mut usize,
+    out: &mut Probed,
+) {
+    let serial = match telemetry::audit_serial(dir) {
+        Ok(serial) => serial,
+        Err(why) => {
+            out.errors.push(why);
+            return;
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    for (dimension, value) in probes(keys) {
+        let postings = match telemetry::audit_postings(dir, dimension, &value, *budget) {
+            Ok(postings) => postings,
+            Err(why) => {
+                out.errors.push(why);
+                continue;
+            }
+        };
+        let mut read = 0usize;
+        for pointer in &postings.pointers {
+            if *budget == 0 {
+                out.capped = true;
+                break;
+            }
+            if !seen.insert((pointer.serial, pointer.offset)) {
+                continue;
+            }
+            *budget = budget.saturating_sub(1);
+            read = read.saturating_add(1);
+            match telemetry::audit_read(dir, serial, pointer) {
+                telemetry::AuditLine::Found(record) => {
+                    if let Some(scope) = bears(&record, keys)
+                        && admitted(&record, asked)
+                    {
+                        out.found.push((half, scope, record));
+                    }
+                }
+                telemetry::AuditLine::RolledOff => {
+                    out.rolled_off = out.rolled_off.saturating_add(1);
+                }
+                telemetry::AuditLine::Unreadable(why) => out.errors.push(why),
+            }
+        }
+        // MORE POINTERS THAN WERE FETCHED: the posting holds older lines the
+        // budget did not reach, and the answer says so.
+        if postings.total > u64::try_from(postings.pointers.len()).unwrap_or(u64::MAX) {
+            out.capped = true;
+        }
+        out.postings
+            .push((half, dimension, value, postings.total, read));
+    }
+}
+
+/// Whether a record passes the request's level, target and run filters.
+fn admitted(record: &telemetry::Record, asked: &Asked) -> bool {
+    asked.level.is_none_or(|level| record.level.at_least(level))
+        && (asked.target.is_empty()
+            || record.target == asked.target
+            || record
+                .target
+                .strip_prefix(asked.target.as_str())
+                .is_some_and(|rest| rest.starts_with('.')))
+        && (asked.run == 0 || record.run == asked.run)
+}
+
+/// What a bounded scan of one ring found.
+#[derive(Debug, Default)]
+struct Scanned {
+    found: Vec<(Scope, telemetry::Record)>,
+    bytes_read: u64,
+    files_read: u64,
+    hit_cap: bool,
+    errors: Vec<String>,
+}
+
+/// The newest `budget` bytes of the ring in `dir`, newest file first, keeping
+/// the records `keep` admits. A partial first line of a read is skipped, never
+/// guessed at; so is an unterminated last one.
+fn ring_scan(
+    dir: &std::path::Path,
+    budget: u64,
+    keep: impl Fn(&telemetry::Record) -> Option<Scope>,
+) -> Scanned {
+    use std::io::{Read as _, Seek as _};
+    let mut out = Scanned::default();
+    let mut left = budget;
+    for path in telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES) {
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                out.errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        if len == 0 {
+            continue;
+        }
+        if left == 0 {
+            out.hit_cap = true;
+            break;
+        }
+        let take = len.min(left);
+        let from = len.saturating_sub(take);
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(from))?;
+            file.take(take).read_to_end(&mut bytes)
+        });
+        if let Err(e) = read {
+            out.errors.push(format!("{}: {e}", path.display()));
+            continue;
+        }
+        left = left.saturating_sub(take);
+        out.bytes_read = out.bytes_read.saturating_add(take);
+        out.files_read = out.files_read.saturating_add(1);
+        let mut lines: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
+        // The last piece is after the final newline: empty, or a line being
+        // written. The first is a partial line when the read began mid-file.
+        let _unterminated = lines.pop();
+        let skip_first = usize::from(from > 0);
+        for line in lines.iter().skip(skip_first).rev() {
+            if let Ok(record) = telemetry::Record::decode(line)
+                && let Some(scope) = keep(&record)
+            {
+                out.found.push((scope, record));
+            }
+        }
+        if from > 0 {
+            out.hit_cap = true;
+            break;
+        }
+    }
+    out
+}
+
+/// `/logs.json` for a request that names a key: the audit index of both halves,
+/// then the newest of each ring, merged newest first, each record carrying its
+/// half, its source and how it bears on the keys. See the section header.
+fn keyed_json(
+    dir: &std::path::Path,
+    cli_dir: Option<&std::path::Path>,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+) -> String {
+    let halves: Vec<(&'static str, &std::path::Path)> = std::iter::once(("served", dir))
+        .chain(cli_dir.map(|cli| ("cli", cli)))
+        .collect();
+    let mut budget = MAX_KEYED_READS;
+    let mut probed = Probed::default();
+    for &(half, at) in &halves {
+        probe_half(half, at, &asked.keys, asked, &mut budget, &mut probed);
+    }
+    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = probed
+        .found
+        .into_iter()
+        .map(|(half, scope, record)| (half, "audit", scope, record))
+        .collect();
+    let mut seen: std::collections::HashSet<(&'static str, u64)> =
+        rows.iter().map(|row| (row.0, row.3.seq)).collect();
+    let mut ring = (0u64, 0u64, false, Vec::new());
+    for &(half, at) in &halves {
+        let scanned = ring_scan(at, SCAN_BYTES, |record| {
+            bears(record, &asked.keys).filter(|_| admitted(record, asked))
+        });
+        ring.0 = ring.0.saturating_add(scanned.bytes_read);
+        ring.1 = ring.1.saturating_add(scanned.files_read);
+        ring.2 |= scanned.hit_cap;
+        ring.3.extend(scanned.errors);
+        for (scope, record) in scanned.found {
+            if seen.insert((half, record.seq)) {
+                rows.push((half, "ring", scope, record));
+            }
+        }
+    }
+    rows.sort_by(|left, right| {
+        right
+            .3
+            .at_unix_millis
+            .cmp(&left.3.at_unix_millis)
+            .then_with(|| right.3.seq.cmp(&left.3.seq))
+    });
+    let matched = rows.len();
+    rows.truncate(asked.limit);
+
+    let tail = telemetry::Tail {
+        records: rows.iter().map(|row| row.3.clone()).collect(),
+        bytes_read: ring.0,
+        files_read: u32::try_from(ring.1).unwrap_or(u32::MAX),
+        malformed: 0,
+        hit_scan_cap: ring.2,
+        reached_oldest: !ring.2,
+        partial_tail: false,
+        errors: probed.errors.into_iter().chain(ring.3).collect(),
+        missing: None,
+    };
+    let body = json_of(&tail, asked, health, (dir, cli_dir));
+    let mut out = body.strip_suffix('}').unwrap_or(&body).to_owned();
+    keyed_tail(&mut out, &asked.keys, matched, &rows, &probed.postings);
+    let _ = write!(
+        out,
+        r#","max_reads":{MAX_KEYED_READS},"capped":{},"rolled_off":{}}},"audit_stream":{}}}}}"#,
+        probed.capped,
+        probed.rolled_off,
+        audit_json_of(
+            telemetry::global()
+                .and_then(telemetry::Sink::audit_health)
+                .as_ref()
+        ),
+    );
+    out
+}
+
+/// The `keyed` object a keyed answer ends with, up to its index's counts:
+/// the keys, how many lines matched, and each row's half, source and scope,
+/// in the order the records are.
+fn keyed_tail(
+    out: &mut String,
+    keys: &Keys,
+    matched: usize,
+    rows: &[(&'static str, &'static str, Scope, telemetry::Record)],
+    postings: &[(&'static str, &'static str, String, u64, usize)],
+) {
+    let _ = write!(
+        out,
+        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"matched":{matched},"rows":["#,
+        keys.feed
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        keys.instrument
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), |i| render::json_string(&i.asked)),
+        keys.day.map_or_else(
+            || "null".to_owned(),
+            |d| render::json_string(&d.to_string())
+        ),
+        keys.contract
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+    );
+    for (n, (half, source, scope, record)) in rows.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"seq":{},"half":{},"source":{},"scope":{}}}"#,
+            record.seq,
+            render::json_string(half),
+            render::json_string(source),
+            render::json_string(scope.as_str()),
+        );
+    }
+    out.push_str(r#"],"index":{"postings":["#);
+    for (n, (half, dimension, value, total, read)) in postings.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"half":{},"dimension":{},"value":{},"total":{total},"read":{read}}}"#,
+            render::json_string(half),
+            render::json_string(dimension),
+            render::json_string(value),
+        );
+    }
+    out.push(']');
+}
+
+/// The served sink's audit stream, as JSON; `null` when it keeps none.
+fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
+    let Some(h) = health else {
+        return "null".to_owned();
+    };
+    format!(
+        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{}}}"#,
+        render::json_string(&h.path.display().to_string()),
+        h.serial,
+        h.current_bytes,
+        h.written,
+        h.dropped,
+        h.rotations,
+        h.rotation_failures,
+        h.index_records,
+        h.index_failures,
+        h.unindexed,
+        h.seeded,
+        h.is_loud(),
+        h.last_error
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        telemetry::AUDIT_MAX_FILE_BYTES,
+        telemetry::AUDIT_KEEP_FILES,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// THE GDFL IMPORTER'S OWN REFUSALS, BY KIND AND DAY (DB-025, DB-G09, D-3317)
+// ---------------------------------------------------------------------------
+
+/// What the GDFL importer logged at `error`, by `(kind, day)`, read from the
+/// `cli` half: the evidence `/imports.json` names beside a journal line that
+/// carries no `stage=` (every line written before D-3317).
+///
+/// # Why from the log
+///
+/// The journal's own lines from before D-3317 say `failures=1` and nothing
+/// else, so a census refusal and a vendor's malformed row closed alike
+/// (DB-G09). The importer DID say which: its `refused` event names the day,
+/// the file (`about`) and the reason (`why`), and since D-3317 its `stage` and
+/// `code`. That event is the record; this reads it rather than re-deciding.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ImportRefusals {
+    /// The refusals, keyed `(day, kind)`: a day sorts as its text does, so a
+    /// range of days is a range of the map.
+    by_day: std::collections::BTreeMap<(String, String), Vec<telemetry::Record>>,
+    /// Per kind, the newest [`RATE_WINDOW`] `day imported` events' stamps, in
+    /// milliseconds, oldest first: what the import's pace is measured from.
+    imported: std::collections::HashMap<String, std::collections::VecDeque<i64>>,
+    /// Ring files read to build this.
+    pub(crate) files: u64,
+    /// Bytes read to build this, in all.
+    pub(crate) bytes: u64,
+    /// Lines that would not decode.
+    pub(crate) malformed: u64,
+    /// Files that could not be read, in their own words.
+    pub(crate) errors: Vec<String>,
+}
+
+impl ImportRefusals {
+    /// The refusals logged for one kind and day, oldest first.
+    pub(crate) fn of(&self, kind: &str, day: &str) -> &[telemetry::Record] {
+        self.by_day
+            .get(&(day.to_owned(), kind.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Every `(kind, day)` with a logged refusal in `from..=to`, both
+    /// `YYYY-MM-DD`, oldest first. O(log n + days in the range).
+    pub(crate) fn days(&self, from: &str, to: &str) -> impl Iterator<Item = (&str, &str)> {
+        let low = (from.to_owned(), String::new());
+        self.by_day
+            .range(low..)
+            .take_while(move |((day, _), _)| day.as_str() <= to)
+            .map(|((day, kind), _)| (kind.as_str(), day.as_str()))
+    }
+
+    /// The import's pace for one kind, measured from the gaps between its
+    /// newest `day imported` events: `(gaps, p50 ms, p90 ms)`, or `None` with
+    /// fewer than two events. A gap that spans a pause between runs is one of
+    /// them, which is why the median is the figure to read.
+    pub(crate) fn pace(&self, kind: &str) -> Option<(usize, i64, i64)> {
+        let stamps = self.imported.get(kind)?;
+        let mut gaps: Vec<i64> = stamps
+            .iter()
+            .zip(stamps.iter().skip(1))
+            .map(|(earlier, later)| later.saturating_sub(*earlier).max(0))
+            .collect();
+        if gaps.is_empty() {
+            return None;
+        }
+        gaps.sort_unstable();
+        let at = |per_cent: usize| {
+            let rank = gaps
+                .len()
+                .saturating_mul(per_cent)
+                .div_ceil(100)
+                .saturating_sub(1);
+            gaps.get(rank).copied().unwrap_or(0)
+        };
+        Some((gaps.len(), at(50), at(90)))
+    }
+
+    /// The stamp of a kind's newest `day imported` event.
+    pub(crate) fn newest_import(&self, kind: &str) -> Option<i64> {
+        self.imported.get(kind)?.back().copied()
+    }
+
+    /// Folds one line in, when it is a GDFL importer event at `error`, or one
+    /// of its `day imported` events.
+    fn fold(&mut self, line: &[u8]) {
+        // CHEAP FIRST: a line that cannot be the importer's is not decoded.
+        let wanted = br#""target":"gdfl.import""#;
+        if !line.windows(wanted.len()).any(|window| window == wanted) {
+            return;
+        }
+        let Ok(record) = telemetry::Record::decode(line) else {
+            self.malformed = self.malformed.saturating_add(1);
+            return;
+        };
+        if record.level == telemetry::Level::Info && record.message == "day imported" {
+            if let Some(kind) = text_of(&record, "kind") {
+                let stamps = self.imported.entry(kind.to_owned()).or_default();
+                stamps.push_back(record.at_unix_millis);
+                if stamps.len() > RATE_WINDOW {
+                    let _oldest = stamps.pop_front();
+                }
+            }
+            return;
+        }
+        if record.level != telemetry::Level::Error {
+            return;
+        }
+        let (Some(kind), Some(day)) = (text_of(&record, "kind"), text_of(&record, "day")) else {
+            return;
+        };
+        self.by_day
+            .entry((day.to_owned(), kind.to_owned()))
+            .or_default()
+            .push(record);
+    }
+}
+
+/// How many of a kind's newest `day imported` events its pace is measured
+/// over: 31 events, 30 gaps.
+pub(crate) const RATE_WINDOW: usize = 31;
+
+/// What [`import_refusals`] keeps between calls for one directory.
+#[derive(Debug)]
+struct RefusalTail {
+    /// `(length, modified)` of every rolled ring file, oldest first.
+    rolled: Vec<(u64, Option<std::time::SystemTime>)>,
+    /// The current file's identity and the bytes parsed through its last
+    /// newline.
+    current: (Option<(u64, u64)>, u64),
+    built: std::sync::Arc<ImportRefusals>,
+}
+
+/// Every `cli` directory read so far.
+fn refusal_tails()
+-> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, RefusalTail>> {
+    static TAILS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, RefusalTail>>,
+    > = std::sync::OnceLock::new();
+    TAILS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The GDFL importer's refusals the `cli` ring under `store_root` holds.
+///
+/// # Cost
+///
+/// The first call reads the whole `cli` ring once (at most its 64 MiB
+/// ceiling; 1,158,202 bytes on the operator's store, 9 Oct 2026). After that,
+/// while only the current file grows, a call reads only the bytes appended
+/// since; a roll, or a file replaced, reads the ring again. A line is decoded
+/// only when it names the importer's target.
+pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
+    refusals_in(&cli_half(store_root))
+}
+
+/// [`import_refusals`] over a directory a caller names.
+fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
+    use std::io::{Read as _, Seek as _};
+    use std::os::unix::fs::MetadataExt as _;
+    let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
+    let Some((current, rolled_paths)) = paths.split_first() else {
+        return std::sync::Arc::default();
+    };
+    let rolled: Vec<(u64, Option<std::time::SystemTime>)> = rolled_paths
+        .iter()
+        .rev()
+        .map(|path| {
+            std::fs::metadata(path).map_or((0, None), |meta| (meta.len(), meta.modified().ok()))
+        })
+        .collect();
+    let (identity, len) = std::fs::metadata(current).map_or((None, 0), |meta| {
+        (Some((meta.dev(), meta.ino())), meta.len())
+    });
+    let mut held = refusal_tails()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tail = held
+        .entry(dir.to_path_buf())
+        .or_insert_with(|| RefusalTail {
+            rolled: Vec::new(),
+            current: (None, 0),
+            built: std::sync::Arc::default(),
+        });
+    let fresh = tail.rolled != rolled || tail.current.0 != identity || len < tail.current.1;
+    if fresh {
+        let mut built = ImportRefusals::default();
+        for path in rolled_paths.iter().rev() {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    built.files = built.files.saturating_add(1);
+                    built.bytes = built
+                        .bytes
+                        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                    for line in bytes.split(|&byte| byte == b'\n') {
+                        built.fold(line);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => built.errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+        *tail = RefusalTail {
+            rolled,
+            current: (identity, 0),
+            built: std::sync::Arc::new(built),
+        };
+    }
+    if len > tail.current.1 {
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(current).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(tail.current.1))?;
+            file.take(len.saturating_sub(tail.current.1))
+                .read_to_end(&mut bytes)
+        });
+        let built = std::sync::Arc::make_mut(&mut tail.built);
+        match read {
+            Ok(_) => {
+                if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
+                    for line in bytes
+                        .get(..last)
+                        .unwrap_or_default()
+                        .split(|&byte| byte == b'\n')
+                    {
+                        built.fold(line);
+                    }
+                    tail.current.1 = tail
+                        .current
+                        .1
+                        .saturating_add(u64::try_from(last).unwrap_or(u64::MAX))
+                        .saturating_add(1);
+                }
+                built.files = built.files.saturating_add(u64::from(fresh));
+                built.bytes = built
+                    .bytes
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            }
+            Err(e) => built.errors.push(format!("{}: {e}", current.display())),
+        }
+    }
+    std::sync::Arc::clone(&tail.built)
+}
+
+/// The GDFL importer's refusals of one kind and day that the `cli` half's
+/// audit stream holds: one probe of its `day` posting. For a day the ring has
+/// rolled away; O(pointers of that day).
+pub(crate) fn audited_import_refusals(
+    store_root: &std::path::Path,
+    kind: &str,
+    day: &str,
+) -> Vec<telemetry::Record> {
+    let dir = cli_half(store_root);
+    let Ok(serial) = telemetry::audit_serial(&dir) else {
+        return Vec::new();
+    };
+    let Ok(postings) = telemetry::audit_postings(&dir, "day", day, MAX_KEYED_READS) else {
+        return Vec::new();
+    };
+    let mut out: Vec<telemetry::Record> = postings
+        .pointers
+        .iter()
+        .filter_map(
+            |pointer| match telemetry::audit_read(&dir, serial, pointer) {
+                telemetry::AuditLine::Found(record) => Some(record),
+                _ => None,
+            },
+        )
+        .filter(|record| {
+            record.target == pull::gdfl_import::TARGET
+                && record.level == telemetry::Level::Error
+                && text_of(record, "kind") == Some(kind)
+        })
+        .collect();
+    out.reverse();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     // The same exceptions every test module in this workspace takes.
-    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
 
     use super::*;
 
@@ -2948,5 +3926,315 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
         assert_eq!(logs_page(uri).await.0, axum::http::StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // KEYED READS (D-3341 item 3; DB-023, DB-G88, DB-025)
+    // -----------------------------------------------------------------------
+
+    /// The importer's refusal of one index file, as `gdfl.import` writes it:
+    /// kind, day, file and reason, and no feed or instrument field.
+    fn index_refusal(file: &str, day: &str) -> telemetry::Event<'static> {
+        let file: &'static str = Box::leak(file.to_owned().into_boxed_str());
+        let day: &'static str = Box::leak(day.to_owned().into_boxed_str());
+        telemetry::Event::error("gdfl.import", "refused")
+            .with("kind", "indices")
+            .with("day", day)
+            .with("about", file)
+            .with(
+                "why",
+                "line 9: LTP is not a decimal of at most two decimal places",
+            )
+    }
+
+    /// The `/logs.json` body of a keyed request over `dir` alone.
+    fn keyed(dir: &std::path::Path, query: &str) -> serde_json::Value {
+        let asked = asked(query);
+        assert!(!asked.keys.is_empty(), "{query} names a key");
+        serde_json::from_str(&keyed_json(dir, None, &asked, None)).expect("JSON")
+    }
+
+    /// **THE OPERATOR'S CHECK: NIFTY'S REFUSAL ON 2022-03-07 IS FOUND BY
+    /// FEED, INSTRUMENT AND DAY THROUGH THE AUDIT INDEX**, and BANKNIFTY's
+    /// beside it is not; the GDFL importer names neither its feed nor its
+    /// instrument, and the API reads both from its target and its file name
+    /// with the importer's own resolver. The ring holds the line too, and it
+    /// is shown once.
+    #[test]
+    fn a_refusal_is_found_by_feed_instrument_and_day_through_the_index() {
+        let (dir, sink) = sink_in("keyed-nifty");
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
+        let _ = sink.emit(&index_refusal("NIFTY BANK.NSE_IDX.csv", "2022-03-07"));
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-08"));
+        let _ = sink.emit(
+            &telemetry::Event::error("pull.spot", "member did not land")
+                .with("instrument", "NIFTY")
+                .with("feed", "zerodha")
+                .with("month", "2022-03"),
+        );
+
+        let got = keyed(&dir, "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07");
+        let records = got["records"].as_array().expect("records");
+        assert_eq!(records.len(), 1, "{got:#}");
+        assert_eq!(records[0]["fields"]["about"], "NIFTY 50.NSE_IDX.csv");
+        assert_eq!(got["keyed"]["rows"][0]["source"], "audit");
+        assert_eq!(got["keyed"]["rows"][0]["scope"], "event");
+        assert_eq!(got["keyed"]["matched"], 1);
+        let postings = got["keyed"]["index"]["postings"].as_array().unwrap();
+        assert!(
+            postings
+                .iter()
+                .any(|p| p["dimension"] == "day" && p["total"] == 2)
+        );
+
+        // BANKNIFTY ON THE SAME DAY IS ITS OWN ANSWER.
+        let bank = keyed(&dir, "instrument=NSE-INDEX-BANKNIFTY&day=2022-03-07");
+        assert_eq!(bank["records"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            bank["records"][0]["fields"]["about"],
+            "NIFTY BANK.NSE_IDX.csv"
+        );
+
+        // ZERODHA'S MONTH EVENT BEARS ON THE DAY BY ITS MONTH, AND ONLY UNDER
+        // ZERODHA: GDFL'S ANSWER ABOVE DID NOT CARRY IT.
+        let zerodha = keyed(&dir, "feed=zerodha&instrument=NIFTY&day=2022-03-07");
+        assert_eq!(
+            zerodha["records"].as_array().unwrap().len(),
+            1,
+            "{zerodha:#}"
+        );
+        assert_eq!(zerodha["keyed"]["rows"][0]["scope"], "month");
+
+        // AN INSTRUMENT ALONE PROBES ITS OWN POSTING AND THE IMPORTER'S TARGET:
+        // both of NIFTY's import refusals and Zerodha's month event, which names
+        // NIFTY and no segment that contradicts the index.
+        let all_days = keyed(&dir, "instrument=NSE-INDEX-NIFTY");
+        assert_eq!(
+            all_days["records"].as_array().unwrap().len(),
+            3,
+            "{all_days:#}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LINE WRITTEN BEFORE THE STREAM EXISTED IS FOUND IN THE RING**, with
+    /// `source: ring`: the `cli` log of 5 Oct 2026 holds such lines, and the
+    /// stream begins only when a build that keeps one next opens that sink.
+    #[test]
+    fn a_line_older_than_the_stream_is_found_in_the_ring() {
+        let dir = crate::scratch::path("logs-keyed-ring");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&dir).with_audit(false))
+                .expect("opens");
+            let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
+        }
+        let got = keyed(&dir, "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07");
+        assert_eq!(got["records"].as_array().unwrap().len(), 1, "{got:#}");
+        assert_eq!(got["keyed"]["rows"][0]["source"], "ring");
+        assert_eq!(got["keyed"]["index"]["postings"][0]["total"], 0);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A REFUSAL OF A WHOLE DAY BEARS ON EVERY INSTRUMENT OF ITS SEGMENT**,
+    /// as `scope: day`; a file of another instrument, an unswept reference
+    /// file and another segment do not.
+    #[test]
+    fn a_whole_day_refusal_bears_on_its_segment_and_a_file_on_its_instrument() {
+        let record = |about: &str, kind: &str| {
+            telemetry::Record::decode(
+                format!(
+                    "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+                     \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                     \"fields\":{{\"kind\":\"{kind}\",\"day\":\"2018-11-07\",\"about\":\"{about}\",\
+                     \"why\":\"x\"}}}}"
+                )
+                .as_bytes(),
+            )
+            .expect("a line")
+        };
+        let keys = |instrument: &str| Keys {
+            instrument: instrument_of(instrument),
+            ..Keys::default()
+        };
+        let calendar = record("calendar", "indices");
+        assert_eq!(bears(&calendar, &keys("NSE-INDEX-NIFTY")), Some(Scope::Day));
+        assert_eq!(bears(&calendar, &keys("NIFTY")), Some(Scope::Day));
+        assert_eq!(bears(&calendar, &keys("NSE-CASH-RELIANCE")), None);
+        let vix = record("INDIA VIX.NSE_IDX.csv", "indices");
+        assert_eq!(bears(&vix, &keys("NSE-INDEX-NIFTY")), None);
+        let stock = record("RELIANCE.NSE.csv", "stocks");
+        assert_eq!(
+            bears(&stock, &keys("NSE-CASH-RELIANCE")),
+            Some(Scope::Event)
+        );
+        assert_eq!(bears(&stock, &keys("NSE-INDEX-RELIANCE")), None);
+        let day_only = Keys {
+            day: crate::server::import_journal::parse_day("2018-11-07"),
+            ..Keys::default()
+        };
+        assert_eq!(bears(&calendar, &day_only), Some(Scope::Event));
+        let feed_gdfl = Keys {
+            feed: Some("gdfl".to_owned()),
+            ..Keys::default()
+        };
+        assert_eq!(bears(&calendar, &feed_gdfl), Some(Scope::Event));
+        let feed_zerodha = Keys {
+            feed: Some("zerodha".to_owned()),
+            ..Keys::default()
+        };
+        assert_eq!(bears(&calendar, &feed_zerodha), None);
+    }
+
+    /// **AN OPTION REFUSAL IS FOUND BY ITS CONTRACT AND ITS UNDERLYING**: the
+    /// ticker is read with the importer's own decoder, so the contract the
+    /// store names and the vendor's ticker both find it; the spot index does
+    /// not.
+    #[test]
+    fn an_option_refusal_is_found_by_its_contract_and_its_underlying() {
+        let ticker = "BANKNIFTY15NOV1826700CE";
+        let day = crate::server::import_journal::parse_day("2018-11-06").expect("a day");
+        let decoded = pull::gdfl_nfo::decode_ticker(ticker, day).expect("the importer reads it");
+        let record = telemetry::Record::decode(
+            format!(
+                "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+                 \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                 \"fields\":{{\"kind\":\"options\",\"day\":\"2018-11-06\",\"about\":\"{ticker}\",\
+                 \"why\":\"line 9\"}}}}"
+            )
+            .as_bytes(),
+        )
+        .expect("a line");
+        let by = |contract: &str| Keys {
+            contract: Some(contract.to_owned()),
+            ..Keys::default()
+        };
+        assert_eq!(
+            bears(&record, &by(&decoded.contract.to_string())),
+            Some(Scope::Event)
+        );
+        assert_eq!(bears(&record, &by(ticker)), Some(Scope::Event));
+        assert_eq!(bears(&record, &by("2018-11-15-2670000-PE")), None);
+        let under = |instrument: &str| Keys {
+            instrument: instrument_of(instrument),
+            ..Keys::default()
+        };
+        assert_eq!(
+            bears(&record, &under("NSE-FNO-BANKNIFTY")),
+            Some(Scope::Event)
+        );
+        assert_eq!(bears(&record, &under("BANKNIFTY")), Some(Scope::Event));
+        assert_eq!(bears(&record, &under("NSE-INDEX-BANKNIFTY")), None);
+    }
+
+    /// **AN INSTRUMENT IS READ IN EACH FORM A PAGE WRITES**, a symbol with a
+    /// hyphen included, and a malformed key is NAMED under `ignored` rather
+    /// than read as no filter.
+    #[test]
+    fn instruments_are_read_in_every_form_and_a_bad_key_is_named() {
+        let full = instrument_of("NSE-INDEX-NIFTY").expect("full");
+        assert_eq!(
+            (
+                full.exchange.as_deref(),
+                full.segment.as_deref(),
+                full.symbol.as_str()
+            ),
+            (Some("NSE"), Some("INDEX"), "NIFTY")
+        );
+        let short = instrument_of("NSE-NIFTY").expect("short");
+        assert_eq!((short.segment, short.symbol.as_str()), (None, "NIFTY"));
+        let hyphen = instrument_of("NSE-CASH-BAJAJ-AUTO").expect("hyphen");
+        assert_eq!(hyphen.symbol, "BAJAJ-AUTO");
+        assert_eq!(
+            instrument_of("NSE-BAJAJ-AUTO").expect("hy").symbol,
+            "BAJAJ-AUTO"
+        );
+        assert_eq!(instrument_of("NIFTY").expect("bare").exchange, None);
+        assert!(instrument_of("nifty 50").is_none());
+
+        let read =
+            asked("feed=nasdaq&day=2022-3-7&instrument=x%20y&contract=2019-03-28-1150000-CE");
+        let named: Vec<&str> = read.ignored.iter().map(|(param, _)| *param).collect();
+        assert_eq!(named, ["feed", "instrument", "day"]);
+        assert_eq!(read.keys.contract.as_deref(), Some("2019-03-28-1150000-CE"));
+        assert!(asked("").keys.is_empty());
+    }
+
+    /// **THE IMPORT'S PACE IS THE MEDIAN GAP BETWEEN ITS NEWEST DAYS**, over
+    /// at most [`RATE_WINDOW`] events per kind, and none with fewer than two.
+    #[test]
+    fn the_import_pace_is_the_median_gap_between_its_newest_days() {
+        let mut refusals = ImportRefusals::default();
+        let day = |ms: i64| {
+            format!(
+                "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"info\",\
+                 \"target\":\"gdfl.import\",\"msg\":\"day imported\",\"fields\":{{\"kind\":\"options\",\
+                 \"day\":\"2019-11-14\"}}}}"
+            )
+        };
+        refusals.fold(day(1_000).as_bytes());
+        assert_eq!(refusals.pace("options"), None);
+        // Gaps of 60 s, 59 s, 61 s and one pause of 600 s.
+        for at in [61_000, 120_000, 181_000, 781_000] {
+            refusals.fold(day(at).as_bytes());
+        }
+        assert_eq!(refusals.pace("options"), Some((4, 60_000, 600_000)));
+        assert_eq!(refusals.newest_import("options"), Some(781_000));
+        for n in 0..100 {
+            refusals.fold(day(1_000_000 + n * 1_000).as_bytes());
+        }
+        let (gaps, p50, _) = refusals.pace("options").expect("a pace");
+        assert_eq!((gaps, p50), (RATE_WINDOW - 1, 1_000));
+        assert_eq!(refusals.pace("stocks"), None);
+    }
+
+    /// **THE IMPORTER'S REFUSALS ARE READ ONCE, THEN BY THEIR TAIL**: a line
+    /// appended later is found without re-reading the file, and a line that
+    /// is not the importer's at `error` is never kept.
+    #[test]
+    fn the_importers_refusals_are_read_by_their_tail() {
+        use std::io::Write as _;
+        let dir = crate::scratch::path("logs-import-refusals");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let line = |seq: u32, level: &str, day: &str| {
+            format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+                 \"level\":\"{level}\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                 \"fields\":{{\"kind\":\"options\",\"day\":\"{day}\",\"about\":\"census\",\
+                 \"why\":\"full\"}}}}\n"
+            )
+        };
+        let current = telemetry::current_path(&dir);
+        std::fs::write(
+            &current,
+            line(1, "error", "2019-11-14") + &line(2, "info", "2019-11-14"),
+        )
+        .expect("write");
+        let first = refusals_in(&dir);
+        assert_eq!(first.of("options", "2019-11-14").len(), 1);
+        let bytes = first.bytes;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&current)
+            .expect("open")
+            .write_all(line(3, "error", "2019-11-15").as_bytes())
+            .expect("append");
+        let second = refusals_in(&dir);
+        assert_eq!(second.of("options", "2019-11-15").len(), 1);
+        assert_eq!(
+            second.bytes - bytes,
+            line(3, "error", "2019-11-15").len() as u64,
+            "only the appended line was read"
+        );
+        assert!(second.of("options", "2019-11-16").is_empty());
+        // A ROLL READS THE RING AGAIN, oldest file first.
+        std::fs::rename(&current, telemetry::rotated_path(&dir, 1)).expect("roll");
+        std::fs::write(&current, line(4, "error", "2019-11-18")).expect("write");
+        let third = refusals_in(&dir);
+        assert_eq!(third.of("options", "2019-11-14").len(), 1);
+        assert_eq!(third.of("options", "2019-11-18").len(), 1);
+        assert_eq!(third.files, 2);
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1462,6 +1462,18 @@ impl Vendor {
     /// no row here and does not get one. An alias that restates a collapse would be
     /// a second answer to a question the collapse already answers.
     ///
+    /// # This is a projection of `crate::alias`, held to it by a test
+    ///
+    /// The sourced alias table (D-3332) names every index under every name,
+    /// the Kite tradingsymbol and the store key among them. These two arms
+    /// are exactly its rows whose Kite name, collapsed, is not the store key;
+    /// `core::alias`'s
+    /// `the_zerodha_rename_is_exactly_the_rows_whose_kite_name_is_not_the_key`
+    /// fails if a row is added there that this `match` does not rename, or the
+    /// reverse. Kept as a `match` because it runs on every master row decoded,
+    /// and it is the store key every Zerodha index is already filed under: a
+    /// change here re-keys stored series, which the table must not do silently.
+    ///
     /// **Constant time.** A `match` over string literals switches on the length
     /// first and compares at most one arm.
     #[must_use]

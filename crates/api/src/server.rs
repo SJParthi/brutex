@@ -1555,7 +1555,9 @@ pub(crate) async fn recovery_cash_schedule(
 // THE ROUTES THE /db FIX ROUND ADDS, REGISTERED BY THE WP-01 SEAM BEFORE ANY OF
 // THEM IS BUILT. Each module answers its routes with `not_built` until the
 // package named in it lands, and that package edits its own module and never
-// the route table below. `import_journal` is empty until WP-33a fills it.
+// the route table below. `import_journal` (the GDFL import journal's one
+// reader) and `imports` are `pub(crate)` because `/audit.json` and `/logs.json`,
+// which live outside this module, read the journal too (WP-33a, D-3341).
 #[path = "aliases.rs"]
 mod aliases;
 #[path = "chain.rs"]
@@ -1565,9 +1567,9 @@ mod dayflags;
 #[path = "facets.rs"]
 mod facets;
 #[path = "import_journal.rs"]
-mod import_journal;
+pub(crate) mod import_journal;
 #[path = "imports.rs"]
-mod imports;
+pub(crate) mod imports;
 #[path = "provenance.rs"]
 mod provenance;
 #[path = "sources.rs"]
@@ -1658,7 +1660,7 @@ use census_cache::{
     manifest_stamps, read_as_stamped, refuse_contradicted_absences, stamp_could_read,
 };
 pub use census_cache::{CensusCache, CensusNow, CensusStamps};
-pub(crate) use census_cache::{census_now, census_now_stamped};
+pub(crate) use census_cache::{census_now, census_now_stamped, vendor_census};
 use feeds_route::feeds_json;
 use gaps_route::gaps_json;
 #[cfg(test)]
@@ -30743,11 +30745,8 @@ fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, Strin
         })
         .map(|(key, _)| key.underlying.as_str())
         .collect();
-    let rows = crate::indexmap::join(&nse, feed, symbols);
-    (
-        axum::http::StatusCode::OK,
-        crate::indexmap::json(&nse, &rows),
-    )
+    // A feed with no master lists what its census holds instead (DB-G26).
+    crate::indexmap::answer(site, &nse, feed, symbols)
 }
 
 /// `GET /calendar.json` — which days the exchange traded, and what each owes.

@@ -6,9 +6,15 @@
 //! For each asked instant `t` (UTC seconds, an option bar's own stamp) it reads
 //! the UNDERLYING's bar file on the same feed, at the same rung, in the same
 //! month file, and returns that bar's close only when a bar is stamped at
-//! exactly `t`. The underlying is `NSE/INDEX/<symbol>` for the five F&O index
-//! underlyings `brutex_core::universe::FNO_INDEX_UNDERLYINGS` names and
-//! `NSE/CASH/<symbol>` for every other option underlying, which is a share.
+//! exactly `t`. The underlying's segment and store key come from the sourced
+//! alias table, `brutex_core::alias::option_underlying` (D-3332): an index
+//! option (`NIFTY`, `FINNIFTY`, `NIFTYIT`, `NIFTYFPI`, ...) reads
+//! `NSE/INDEX/<store key>` -- `NIFTYFINSERVICE` for FINNIFTY -- and every other
+//! option underlying is a share, read under `NSE/CASH/<key>`, the newest symbol
+//! its dated changes reach (`TMPV` for TATAMOTORS). The body names the key it
+//! read. Until D-3332 the index set was the five names of
+//! `brutex_core::universe::FNO_INDEX_UNDERLYINGS`, so NIFTYIT and NIFTYFPI were
+//! read as shares and FINNIFTY under a key no feed files (DB-G25, DB-G54).
 //!
 //! **Never a nearest or an earlier bar.** A missing spot bar is answered by
 //! name (`no_spot_bar`, `no_spot_file`, `spot_unreadable`,
@@ -51,19 +57,26 @@ pub const MAX_SPOT_TIMES: usize = 400;
 
 /// The store segment an option underlying's own price series lives under.
 ///
-/// An index underlying (`FNO_INDEX_UNDERLYINGS`, five names) has no cash
-/// equity and its spot is the index; every other F&O underlying is a share
-/// and its spot is its cash series (`CLAUDE.md` §1, D-0682). Not a fallback:
-/// the CASH answer is the definition of a stock option's underlying, and the
-/// response names the path it read, so a store that holds no such series says
-/// `no_spot_file` against that path.
+/// An index underlying has no cash equity and its spot is the index; every
+/// other option underlying is a share and its spot is its cash series
+/// (`CLAUDE.md` §1, D-0682). Which is which is the sourced alias table's
+/// answer (`brutex_core::alias::option_underlying`, D-3332), not five names.
+/// Not a fallback: the CASH answer is the definition of a stock option's
+/// underlying, and the response names the path it read, so a store that holds
+/// no such series says `no_spot_file` against that path.
 #[must_use]
 pub fn underlying_segment(symbol: &str) -> &'static str {
-    if brutex_core::universe::FNO_INDEX_UNDERLYINGS.contains(&symbol) {
-        "INDEX"
-    } else {
-        "CASH"
-    }
+    brutex_core::alias::option_underlying(symbol)
+        .segment
+        .as_str()
+}
+
+/// The store key an option underlying's own price series is filed under:
+/// `NIFTYFINSERVICE` for FINNIFTY, `TMPV` for TATAMOTORS, the symbol itself
+/// where the table names no other (D-3332).
+#[must_use]
+pub fn underlying_key(symbol: &str) -> &str {
+    brutex_core::alias::option_underlying(symbol).key
 }
 
 /// One instant's answer.
@@ -234,7 +247,7 @@ impl SpotAsk {
                 vendor: self.vendor,
                 exchange: &self.exchange,
                 segment: underlying_segment(&self.symbol),
-                symbol: &self.symbol,
+                symbol: underlying_key(&self.symbol),
                 contract: None,
                 timeframe: self.timeframe,
                 month: self.month,
@@ -297,10 +310,11 @@ impl SpotAsk {
         }
         rows.push(']');
         format!(
-            r#"{{"exchange":{},"segment":{},"symbol":{},"timeframe":{},"month":{},"faults":{},"spots":{rows}}}"#,
+            r#"{{"exchange":{},"segment":{},"symbol":{},"key":{},"timeframe":{},"month":{},"faults":{},"spots":{rows}}}"#,
             render::json_string(&self.exchange),
             render::json_string(underlying_segment(&self.symbol)),
             render::json_string(&self.symbol),
+            render::json_string(underlying_key(&self.symbol)),
             render::json_string(self.timeframe.as_str()),
             render::json_string(&self.month.to_string()),
             if faults.is_empty() {

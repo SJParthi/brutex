@@ -45,7 +45,7 @@
 
 use super::{Loaded, ingest, param, render, timeframe_param};
 use crate::bars::OpenRefusalKind;
-use crate::server::spot::{Spot, close_at, underlying_segment};
+use crate::server::spot::{Spot, close_at, underlying_key, underlying_segment};
 use brutex_core::instrument::{Contract, Expiry, OptionSide};
 use pull::pricing::{BarGreeks, BarQuote};
 use pull::riskfree::Series;
@@ -313,7 +313,12 @@ impl GreeksAsk {
         };
         let underlying = match crate::bars::open_classified(
             store_root,
-            self.parts(underlying_segment(&self.symbol), None),
+            // The underlying's key from the alias table (D-3332): FINNIFTY's
+            // spot is filed as NIFTYFINSERVICE, TATAMOTORS's as TMPV.
+            PathParts {
+                symbol: underlying_key(&self.symbol),
+                ..self.parts(underlying_segment(&self.symbol), None)
+            },
         ) {
             Ok(file) => Ok(file),
             Err(refusal) => match refusal.kind {

@@ -193,6 +193,44 @@ async fn a_stock_option_reads_its_cash_series_and_an_unheld_one_says_so_by_name(
     }
 }
 
+/// **DB-G25, DB-G54: THE UNDERLYING IS READ WHERE THE ALIAS TABLE SAYS.**
+/// FINNIFTY's spot is filed as `INDEX/NIFTYFINSERVICE`; NIFTYIT is an index,
+/// not a share; TATAMOTORS's months are filed under `CASH/TMPV` (D-3332,
+/// D-3333). Before, the first answered `no_spot_file` against
+/// `INDEX/FINNIFTY` and the other two against `CASH/<symbol>`.
+#[tokio::test]
+async fn an_underlying_is_read_under_the_key_the_alias_table_names() {
+    let fixture = Fixture::new("spot-alias");
+    let t0 = open_second();
+    write(
+        &fixture.root,
+        "INDEX",
+        "NIFTYFINSERVICE",
+        &[(t0, 2_312_345)],
+    );
+    write(&fixture.root, "INDEX", "NIFTYIT", &[(t0, 3_456_700)]);
+    write(&fixture.root, "CASH", "TMPV", &[(t0, 65_430)]);
+    for (symbol, segment, key, close) in [
+        ("FINNIFTY", "INDEX", "NIFTYFINSERVICE", 2_312_345),
+        ("NIFTYFINSERVICE", "INDEX", "NIFTYFINSERVICE", 2_312_345),
+        ("NIFTYIT", "INDEX", "NIFTYIT", 3_456_700),
+        ("TATAMOTORS", "CASH", "TMPV", 65_430),
+        ("NIFTY", "INDEX", "NIFTY", 2_400_000),
+        ("RELIANCE", "CASH", "RELIANCE", 141_025),
+    ] {
+        let (status, body) = fixture.at(symbol, &[t0]).await;
+        assert_eq!(status, StatusCode::OK, "{symbol}: {body}");
+        assert_eq!(body["segment"], segment, "{symbol}");
+        assert_eq!(body["symbol"], symbol, "{symbol}");
+        assert_eq!(body["key"], key, "{symbol}");
+        assert_eq!(
+            body["spots"],
+            json!([{"t": t0, "close": close, "why": null}]),
+            "{symbol}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn malformed_questions_are_refused_by_name_before_any_file_is_read() {
     let fixture = Fixture::new("spot-refusals");
