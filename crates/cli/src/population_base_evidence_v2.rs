@@ -41,6 +41,8 @@ use super::{CandidateUniverseReceiptV1, CandidateUniverseRowV1};
 #[path = "population_base_evidence_ledger_v2.rs"]
 mod ledger;
 
+#[cfg(test)]
+pub(crate) use ledger::reopen_probe;
 pub use ledger::{
     BaseEvidenceLedgerBoundsV2, BaseEvidenceLedgerReaderV2, BaseEvidenceLedgerRefusalV2,
     BaseEvidenceRecordProjectionV2, BaseEvidenceReopenAuditV2,

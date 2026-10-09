@@ -88,7 +88,10 @@ fn each_request_minute_gap_is_exactly_one_error_event() {
         .collect();
     let store = scratch("store");
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows },
+        &pull::fetch::RawWindow {
+            rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &store,
@@ -104,7 +107,10 @@ fn each_request_minute_gap_is_exactly_one_error_event() {
     // An empty response is the whole session missing: one more gap.
     let empty = scratch("empty");
     let none = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows: Vec::new() },
+        &pull::fetch::RawWindow {
+            rows: Vec::new(),
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &empty,

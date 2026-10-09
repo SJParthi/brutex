@@ -1364,38 +1364,28 @@ fn append_candidate_split_scores(
         let global_candidate_sequence = global_offset
             .checked_add(candidate.candidate_sequence)
             .ok_or_else(|| "global paired candidate sequence overflowed u64".to_owned())?;
+        // ONE PASS OVER THE PERIODS PER CANDIDATE, NOT ONE PER SPLIT (pst-2,
+        // D-2639). Each split used to walk every period, O(C·S·P); each split
+        // now folds at most 64 segment summaries, O(C·(P + S·segments)). The
+        // summaries carry each segment's running-sum extremes, so a split
+        // refuses on exactly the inputs, and with exactly the sentence, the
+        // per-period walk did: proven against that walk, kept as the test
+        // oracle, by
+        // `cli::population_observations_v1::tests::split_scores_from_segment_sums_equal_the_per_period_walk`.
+        let segments = if masks.is_empty() {
+            Vec::new()
+        } else {
+            segment_sums(&candidate.periods, block_width)?
+        };
         for (split_index, (train_mask, test_mask)) in masks.iter().copied().enumerate() {
             let split_sequence = u64::try_from(split_index)
                 .map_err(|_| "CSCV split sequence does not fit u64".to_owned())?;
-            let mut train_score = 0_i64;
-            let mut test_score = 0_i64;
-            for (period_index, period) in candidate.periods.iter().enumerate() {
-                let segment = period_index
-                    .checked_div(block_width)
-                    .ok_or_else(|| "CSCV block width is zero".to_owned())?;
-                let segment = u32::try_from(segment)
-                    .map_err(|_| "CSCV segment index does not fit u32".to_owned())?;
-                let bit = 1_u64
-                    .checked_shl(segment)
-                    .ok_or_else(|| "CSCV segment bit overflowed u64".to_owned())?;
-                if train_mask & bit != 0 {
-                    train_score = train_score.checked_add(period.return_paisa).ok_or_else(|| {
-                        format!(
-                            "CSCV train score overflowed i64 for global candidate {global_candidate_sequence} split {split_sequence}"
-                        )
-                    })?;
-                } else if test_mask & bit != 0 {
-                    test_score = test_score.checked_add(period.return_paisa).ok_or_else(|| {
-                        format!(
-                            "CSCV test score overflowed i64 for global candidate {global_candidate_sequence} split {split_sequence}"
-                        )
-                    })?;
-                } else {
-                    return Err(format!(
-                        "CSCV segment {segment} belongs to neither train nor test mask"
-                    ));
-                }
-            }
+            let (train_score, test_score) = split_scores_of(
+                &segments,
+                (train_mask, test_mask),
+                global_candidate_sequence,
+                split_sequence,
+            )?;
             let identity = split_row_identity(
                 source_identity,
                 global_candidate_sequence,
@@ -1423,6 +1413,105 @@ fn append_candidate_split_scores(
         }
     }
     Ok(())
+}
+
+/// One CSCV segment of one candidate: its index, its exact sum, and the
+/// highest and lowest running sum reached inside it (pst-2, D-2639). Every
+/// figure is exact in `i128`: at most `isize::MAX` periods of `i64` each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SegmentSums {
+    segment: u64,
+    total: i128,
+    high: i128,
+    low: i128,
+}
+
+/// The segment summaries of `periods` in period order, one per non-empty
+/// segment. Refuses a zero block width exactly when the per-period walk did:
+/// when there is a period to place.
+fn segment_sums(
+    periods: &[CandidateSessionPeriodV1],
+    block_width: usize,
+) -> Result<Vec<SegmentSums>, String> {
+    let mut out: Vec<SegmentSums> = Vec::new();
+    for (period_index, period) in periods.iter().enumerate() {
+        let segment = period_index
+            .checked_div(block_width)
+            .ok_or_else(|| "CSCV block width is zero".to_owned())?;
+        let segment =
+            u64::try_from(segment).map_err(|_| "CSCV segment index does not fit u64".to_owned())?;
+        let value = i128::from(period.return_paisa);
+        match out.last_mut() {
+            Some(open) if open.segment == segment => {
+                open.total = open
+                    .total
+                    .checked_add(value)
+                    .ok_or_else(|| "CSCV segment sum overflowed i128".to_owned())?;
+                open.high = open.high.max(open.total);
+                open.low = open.low.min(open.total);
+            }
+            _ => {
+                out.try_reserve(1).map_err(|why| why.to_string())?;
+                out.push(SegmentSums {
+                    segment,
+                    total: value,
+                    high: value,
+                    low: value,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `running` plus one segment, or `None` when any running sum the per-period
+/// walk would have reached inside that segment leaves `i64`.
+fn add_segment(running: i128, segment: SegmentSums) -> Option<i128> {
+    let high = running.checked_add(segment.high)?;
+    let low = running.checked_add(segment.low)?;
+    if high > i128::from(i64::MAX) || low < i128::from(i64::MIN) {
+        return None;
+    }
+    running.checked_add(segment.total)
+}
+
+/// One split's `(train, test)` scores from the candidate's segment summaries,
+/// refusing with the per-period walk's own sentences in its own order.
+fn split_scores_of(
+    segments: &[SegmentSums],
+    (train_mask, test_mask): (u64, u64),
+    global_candidate_sequence: u64,
+    split_sequence: u64,
+) -> Result<(i64, i64), String> {
+    let mut train = 0_i128;
+    let mut test = 0_i128;
+    for summary in segments.iter().copied() {
+        let segment = u32::try_from(summary.segment)
+            .map_err(|_| "CSCV segment index does not fit u32".to_owned())?;
+        let bit = 1_u64
+            .checked_shl(segment)
+            .ok_or_else(|| "CSCV segment bit overflowed u64".to_owned())?;
+        if train_mask & bit != 0 {
+            train = add_segment(train, summary).ok_or_else(|| {
+                format!(
+                    "CSCV train score overflowed i64 for global candidate {global_candidate_sequence} split {split_sequence}"
+                )
+            })?;
+        } else if test_mask & bit != 0 {
+            test = add_segment(test, summary).ok_or_else(|| {
+                format!(
+                    "CSCV test score overflowed i64 for global candidate {global_candidate_sequence} split {split_sequence}"
+                )
+            })?;
+        } else {
+            return Err(format!(
+                "CSCV segment {segment} belongs to neither train nor test mask"
+            ));
+        }
+    }
+    let train = i64::try_from(train).map_err(|_| "CSCV train score left i64".to_owned())?;
+    let test = i64::try_from(test).map_err(|_| "CSCV test score left i64".to_owned())?;
+    Ok((train, test))
 }
 
 fn pair_source_identity(
@@ -2175,16 +2264,20 @@ impl ObservationAuthorityLedgerV1 {
                     file_path.display()
                 )
             })?;
-        if writable && file.metadata().map_err(|why| why.to_string())?.len() == 0 {
-            // A short header write is truncated back to zero bytes, so the next
-            // open initializes again instead of refusing a torn header (D-1854).
-            crate::append_rollback::append(
+        // A short header write is truncated back to zero bytes, so the next
+        // open initializes again instead of refusing a torn header (D-1854);
+        // since conc5-1 (D-2644) a failed header BARRIER is cut and remembered
+        // too, and an all-zero or torn header is re-initialised by the writer.
+        if writable
+            && crate::fixed_tail::init_or_heal_header(
                 &mut file,
+                &file_path,
                 &authority_header(),
-                "observation authority header",
-            )?;
-            file.sync_data()
-                .map_err(|why| format!("cannot initialize observation authority file: {why}"))?;
+                File::sync_data,
+            )
+            .map_err(|why| format!("cannot initialize observation authority file: {why}"))?
+                == crate::fixed_tail::HeaderInit::Written
+        {
             // THE NAMES ARE DURABLE TOO (D-1903, slice24-F2): the lock and
             // authority files were just created, and a file's own barrier does
             // not make its directory entry durable.
@@ -3467,21 +3560,19 @@ impl ObservationAuthorityLedgerV2 {
             .truncate(false)
             .open(&file_path)
             .map_err(|why| format!("cannot open Observation V2 file: {why}"))?;
+        // Truncated back to zero bytes on a short write (D-1854) or a failed
+        // barrier, and an all-zero or torn header re-initialised (conc5-1,
+        // D-2644).
         if writable
-            && file
-                .metadata()
-                .map_err(|why| format!("cannot stat Observation V2 file: {why}"))?
-                .len()
-                == 0
-        {
-            // Truncated back to zero bytes on a short write (D-1854).
-            crate::append_rollback::append(
+            && crate::fixed_tail::init_or_heal_header(
                 &mut file,
+                &file_path,
                 &observation_v2_header(),
-                "Observation V2 header",
-            )?;
-            file.sync_data()
-                .map_err(|why| format!("cannot initialize Observation V2 file: {why}"))?;
+                File::sync_data,
+            )
+            .map_err(|why| format!("cannot initialize Observation V2 file: {why}"))?
+                == crate::fixed_tail::HeaderInit::Written
+        {
             // The new names are made durable (D-1903, slice24-F2).
             sync_observation_root(&admitted_root)?;
         }
@@ -4186,6 +4277,172 @@ mod tests {
         );
     }
 
+    /// The per-period walk `append_candidate_split_scores` ran before pst-2,
+    /// kept verbatim as the oracle the segment summaries are proven against.
+    fn per_period_walk(
+        periods: &[CandidateSessionPeriodV1],
+        block_width: usize,
+        (train_mask, test_mask): (u64, u64),
+        global_candidate_sequence: u64,
+        split_sequence: u64,
+    ) -> Result<(i64, i64), String> {
+        let mut train_score = 0_i64;
+        let mut test_score = 0_i64;
+        for (period_index, period) in periods.iter().enumerate() {
+            let segment = period_index
+                .checked_div(block_width)
+                .ok_or_else(|| "CSCV block width is zero".to_owned())?;
+            let segment = u32::try_from(segment)
+                .map_err(|_| "CSCV segment index does not fit u32".to_owned())?;
+            let bit = 1_u64
+                .checked_shl(segment)
+                .ok_or_else(|| "CSCV segment bit overflowed u64".to_owned())?;
+            if train_mask & bit != 0 {
+                train_score = train_score.checked_add(period.return_paisa).ok_or_else(|| {
+                    format!(
+                        "CSCV train score overflowed i64 for global candidate {global_candidate_sequence} split {split_sequence}"
+                    )
+                })?;
+            } else if test_mask & bit != 0 {
+                test_score = test_score.checked_add(period.return_paisa).ok_or_else(|| {
+                    format!(
+                        "CSCV test score overflowed i64 for global candidate {global_candidate_sequence} split {split_sequence}"
+                    )
+                })?;
+            } else {
+                return Err(format!(
+                    "CSCV segment {segment} belongs to neither train nor test mask"
+                ));
+            }
+        }
+        Ok((train_score, test_score))
+    }
+
+    fn periods_of(values: &[i64]) -> Vec<CandidateSessionPeriodV1> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(sequence, value)| CandidateSessionPeriodV1 {
+                candidate_sequence: 0,
+                candidate_semantic_digest: [9; 32],
+                period_sequence: u64::try_from(sequence).expect("sequence fits"),
+                exit_ist_day: 20_090 + i64::try_from(sequence).expect("day fits"),
+                return_paisa: *value,
+                trades: 1,
+                wins: 0,
+                identity: [1; 32],
+            })
+            .collect()
+    }
+
+    /// pst-2 (D-2639): the segment-summary scores equal the per-period walk
+    /// on every input, Ok and Err alike, sentence for sentence. Enumerated
+    /// exhaustively over every sequence of up to five periods drawn from
+    /// {MIN, -1, 0, 1, MAX}, block widths 0 to 3, every 6-bit train mask
+    /// against its complement, the full mask and the empty mask; plus 70
+    /// one-period segments, which reach a segment bit past 63.
+    #[test]
+    fn split_scores_from_segment_sums_equal_the_per_period_walk() {
+        const VALUES: [i64; 5] = [i64::MIN, -1, 0, 1, i64::MAX];
+        let mut compared = 0_u64;
+        for len in 0..=5_u32 {
+            for code in 0..5_usize.pow(len) {
+                let mut rest = code;
+                let mut values = Vec::new();
+                for _ in 0..len {
+                    values.push(VALUES[rest % 5]);
+                    rest /= 5;
+                }
+                let periods = periods_of(&values);
+                for width in 0..=3_usize {
+                    let summaries = segment_sums(&periods, width);
+                    for train in 0..64_u64 {
+                        for test in [!train & 0x3f, 0x3f, 0] {
+                            let expected = per_period_walk(&periods, width, (train, test), 7, 3);
+                            let got = summaries
+                                .clone()
+                                .and_then(|s| split_scores_of(&s, (train, test), 7, 3));
+                            assert_eq!(
+                                got, expected,
+                                "values {values:?} width {width} masks {train:#x}/{test:#x}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, (1 + 5 + 25 + 125 + 625 + 3125) * 4 * 64 * 3);
+        let wide = periods_of(&[1; 70]);
+        for masks in [(u64::MAX, 0), (0, u64::MAX), (u64::MAX >> 1, 1 << 63)] {
+            assert_eq!(
+                segment_sums(&wide, 1).and_then(|s| split_scores_of(&s, masks, 0, 0)),
+                per_period_walk(&wide, 1, masks, 0, 0)
+            );
+        }
+        assert_eq!(
+            per_period_walk(&wide, 1, (u64::MAX, 0), 0, 0),
+            Err("CSCV segment bit overflowed u64".to_owned())
+        );
+    }
+
+    /// pst-2 (D-2639): through the production door, a running sum that leaves
+    /// i64 inside the split still refuses by name even where the segment
+    /// totals alone would fit, and an exact `i64::MAX` total is kept.
+    #[test]
+    fn a_split_whose_running_sum_overflows_still_refuses() {
+        let layout = derive_layout(4).expect("four periods derive a layout");
+        let masks = canonical_masks(layout).expect("canonical masks derive");
+        let candidate = |values: &[i64]| CandidateSessionObservationsV1 {
+            candidate_sequence: 0,
+            candidate_semantic_digest: [9; 32],
+            periods: periods_of(values),
+            total_return_paisa: 0,
+            total_trades: 4,
+            total_wins: 0,
+        };
+        let mut scores = Vec::new();
+        let why = append_candidate_split_scores(
+            &mut scores,
+            InstrumentFamilyV1::Nifty,
+            &[candidate(&[i64::MAX, 1, -1, 0])],
+            0,
+            layout,
+            &masks,
+            [3; 32],
+        )
+        .expect_err("MAX + 1 in the third split's test half refuses");
+        assert_eq!(
+            why,
+            "CSCV test score overflowed i64 for global candidate 0 split 2"
+        );
+        let mut scores = Vec::new();
+        append_candidate_split_scores(
+            &mut scores,
+            InstrumentFamilyV1::Nifty,
+            &[candidate(&[i64::MAX, 0, 0, 0])],
+            0,
+            layout,
+            &masks,
+            [3; 32],
+        )
+        .expect("an exact i64::MAX total is a score");
+        assert_eq!(scores.len(), 3);
+        assert!(scores.iter().any(|row| row.test_score_paisa == i64::MAX));
+        let mut empty = Vec::new();
+        append_candidate_split_scores(
+            &mut empty,
+            InstrumentFamilyV1::Nifty,
+            &[candidate(&[1, 2, 3, 4])],
+            0,
+            layout,
+            &[],
+            [3; 32],
+        )
+        .expect("no split writes no row");
+        assert!(empty.is_empty());
+    }
+
     #[test]
     fn authority_is_receipt_last_freshly_reopened_and_exactly_reused() {
         let root = test_dir();
@@ -4301,10 +4558,20 @@ mod tests {
         let src = include_str!("population_observations_v1.rs");
         let shipping = src.split("\nmod tests {").next().unwrap_or(src);
         for header in ["&authority_header()", "&observation_v2_header()"] {
-            let (_, after) = shipping
-                // The header goes through the shared rollback since D-1854.
-                .split_once(&format!("&mut file,\n                {header},"))
-                .expect("the header write exists");
+            // The header goes through the shared writer rule since conc5-1
+            // (D-2644): `fixed_tail::init_or_heal_header`, then the root.
+            let mut after = None;
+            for (at, _) in shipping.match_indices("init_or_heal_header(") {
+                let tail = &shipping[at..];
+                let call = tail.split_once(')').map_or(tail, |(head, _)| head);
+                if tail
+                    .get(..call.len() + 40)
+                    .is_some_and(|near| near.contains(header))
+                {
+                    after = Some(tail);
+                }
+            }
+            let after = after.expect("the header write exists");
             let block = after
                 .split_once("let bytes = ")
                 .map_or(after, |(head, _)| head);

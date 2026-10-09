@@ -166,10 +166,32 @@ impl Journal {
         let directory = base.join(hex(&identity));
         durable_directory(&base, &directory)?;
         let owner_path = directory.join("owner.lock");
-        let owner =
-            Flock::try_lock(open_owner(&owner_path)?, owner_path.clone()).map_err(|why| {
-                format!("this exact search is already owned or cannot be locked: {why}")
-            })?;
+        // A SNAPSHOT PROBE IS NOT AN OWNER (expr-1, D-2620). `Snapshot::open`
+        // takes this lock shared for an instant to see whether a writer is
+        // live, and the api does that on every poll; one `try_lock` refused a
+        // real start or resume after its attempt was already appended. The
+        // lock is asked again for a bounded second through a `try_clone` of
+        // one open description; a real owner holds it for its whole run and
+        // is still refused, now named as held past the wait.
+        let opened = open_owner(&owner_path)?;
+        let owner = crate::lock_wait::patiently(|| {
+            Flock::try_lock(
+                opened.try_clone().map_err(std::fs::TryLockError::Error)?,
+                owner_path.clone(),
+            )
+        })
+        .map_err(|why| {
+            let held = matches!(why, std::fs::TryLockError::WouldBlock);
+            format!(
+                "this exact search is already owned or cannot be locked: {why}{}",
+                if held {
+                    " (held past the one-second wait a reader's probe is given)"
+                } else {
+                    ""
+                }
+            )
+        })?;
+        drop(opened);
         File::open(&directory)
             .map_err(error)?
             .sync_all()

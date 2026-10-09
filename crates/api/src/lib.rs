@@ -39,6 +39,7 @@
 
 #![forbid(unsafe_code)]
 
+mod answer_memo;
 pub mod assets;
 pub mod audit;
 pub mod audit_json;
@@ -148,3 +149,10 @@ pub(crate) mod emitted;
 
 #[cfg(test)]
 mod saved_response_boundary_tests;
+
+/// The p50/p99/max line every `#[ignore]`d latency measurement in this crate
+/// prints, with its sample count and the host's load average. Compiled only
+/// under `cfg(test)`: the numbers are recorded in `docs/06-limits.md` and are
+/// never a gate. D-4434.
+#[cfg(test)]
+pub(crate) mod latency;

@@ -79,11 +79,21 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 /// record written afterwards would go somewhere no reader can find.
 pub(crate) fn sink() -> &'static telemetry::Sink {
     static PREPARED: std::sync::Once = std::sync::Once::new();
+    // ONE INSTALL AT A TIME. Two tests calling this at once both passed
+    // `install`'s emptiness check; the second's `Sink::open` of the same file
+    // was refused while the first had not yet published its sink, so
+    // `global()` was still empty and the `expect` below fired. Seen when
+    // `server::shutdown_tests` joined the `emitted` tests as a reader of this
+    // sink (D-2771).
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let dir = crate::scratch::path("telemetry");
     PREPARED.call_once(|| {
         let _ignored = std::fs::remove_dir_all(&dir);
     });
     let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    let _one = INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let installed = match telemetry::install(&config) {
         Ok(installed) => installed,
         Err(_refused) => telemetry::global()
@@ -173,6 +183,25 @@ pub(crate) fn says(record: &telemetry::Record, key: &str, needle: &str) -> bool 
 /// Whether an integer field carries exactly `want`.
 pub(crate) fn counts(record: &telemetry::Record, key: &str, want: u64) -> bool {
     record.field(key).and_then(telemetry::OwnedValue::as_u64) == Some(want)
+}
+
+/// Every record the shared sink holds for one log run, oldest first.
+///
+/// sobs-14, D-4451: a test that drives its work inside [`telemetry::in_run`]
+/// under an id from [`telemetry::reserve_run_id`] reads back its own events and
+/// no other test's, which [`mark`] cannot promise while tests running in
+/// parallel write the same target and message.
+pub(crate) fn run_story(run: u64) -> Vec<telemetry::Record> {
+    let sink = sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes a file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_run(run);
+    let mut records = telemetry::tail(&dir, sink.keep_files(), &query).records;
+    records.reverse();
+    records
 }
 
 /// One production emit site, and the record it must leave in the file.
@@ -815,10 +844,12 @@ fn cases() -> Vec<Case> {
             );
             progress.finished_micros = Some(2);
             progress.refusal = Some("no result was recorded".into());
-            crate::sweeprun::emit_completion(&progress, "sweep", 1);
+            crate::sweeprun::emit_completion(&progress, "sweep", std::time::Instant::now());
         }),
         mine: Box::new(|record| {
-            says(record, "operation", "sweep")
+            // CE-86 / D-2754: the duration is monotonic and says so.
+            says(record, "elapsed_basis", "monotonic")
+                && says(record, "operation", "sweep")
                 && says(record, "outcome", "refused")
                 && says(record, "why", "no result was recorded")
         }),
@@ -1631,11 +1662,58 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
     // could not be stamped`, driven through `note_unstamped_lock` and read back
     // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
-    const REACHED_IN_SERVER_TESTS: usize = 21;
+    // 20 -> 21 at D-2771: `api.serve shutdown drain ended with requests
+    // still in flight`, driven and read back by `server::shutdown_tests::
+    // a_request_still_running_after_the_signal_does_not_hold_the_server_open`.
+    // 21 -> 22 when both met in the PR #74 merge (D-2779): the two lines above
+    // were each written as 20 -> 21 on their own side, and both sites are driven.
+    // 21 -> 22 at D-2526 (conc13-2): `pull.http transport failed, retrying`,
+    // driven over a loopback vendor that closes its first socket unanswered and
+    // read back by `server::tests::a_retried_transport_failure_is_logged_at_warn`.
+    // 22 -> 24 at D-2575 and D-2594: `api.pull cash schedule refused`
+    // (equity-1), read back by
+    // `server::tests::cash_partial_month_replay_refuses_missing_or_corrupt_earlier_receipt`,
+    // and `api.accept accept refused` (conc11-3), read back by
+    // `server::tests::an_accept_failure_is_logged_once_per_window`.
+    // The three lines above were counted on the zero/next side, without
+    // D-2771's site; both sides' sites are driven, and the figure is re-taken
+    // after the zero/next merge.
+    // 24 -> 25 at that merge (D-4610): the zero/next side's 24 plus D-2771's
+    // shutdown drain WARN, which the other side drove; measured on the merged
+    // tree by the sum below.
+    // The other side went 21 -> 25 at D-4449, D-4450, D-4454 and D-4455
+    // (fxb2): `api.pull contract not landed`
+    // (`an_fno_landing_keeps_five_refusal_reasons_and_counts_all_six`),
+    // `pull.run refused before it started`
+    // (`a_run_refused_before_it_starts_is_logged_with_its_reason`), `api.verify
+    // scrub` (`server::verification_route_tests::every_scrub_writes_its_
+    // verdict_to_the_log_once`) and `pull.http retrying a refused request`
+    // (`server::fno_boundary_tests::every_retry_on_the_bars_ladder_is_one_
+    // event_with_its_reason`), each read back from this sink.
+    // 25 -> 28 at the audit-fix merge (D-4627): the four above join this
+    // side's 25, less D-2526's `pull.http transport failed, retrying`, which
+    // logged the same retry `note_retry` logs and was removed so each retry
+    // writes one line; its test reads `note_retry`'s now.
+    const REACHED_IN_SERVER_TESTS: usize = 28;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
-    const REACHED_IN_RECOVERY_TESTS: usize = 2;
+    // 2 -> 3 at D-4448: `pull.recovery recovery blocked`, read back by
+    // `recovery::tests::every_refused_recovery_names_its_stage_and_reason_in_the_log`.
+    const REACHED_IN_RECOVERY_TESTS: usize = 3;
+    // Four sites read back by their own module's tests. `autopilot`'s verdicts
+    // (`autopilot::note_decision`: halted, stalled, backing off; conc13-4,
+    // D-2595), by `autopilot::tests::a_halt_a_stall_and_a_backoff_are_logged`
+    // and `autopilot::tests::a_stall_and_a_halt_are_logged_once_each_with_feed_and_month`;
+    // `autopilot`'s pass halt, clock wait and end (`autopilot::note_backfill`,
+    // sobs-6, D-4453), by the same module's sobs-6 tests; `api.pullrun`
+    // (`pullrun::note_press`, D-4452), by
+    // `pullrun::tests::a_press_logs_its_legs_and_verdict_under_one_run_and_nothing_else`;
+    // and the `api.sweep` lease refusal, by
+    // `sweeprun::tests::a_lease_refusal_is_logged_with_its_reason`. Each side
+    // counted its own; the merge keeps one writer per verdict and per leg, so
+    // this side's `api.pull leg failed` is gone (D-4627, D-4657): 3 + 2 - 1.
+    const REACHED_IN_MODULE_TESTS: usize = 4;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1729,7 +1807,19 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// previous window`, which needs more than fifty cross-site failures and
     /// then a minute's wait — the ration it reports is proven by
     /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
-    const UNREACHABLE: usize = 10;
+    ///
+    /// AND FIVE MORE, added by the zero-findings fixes (2026-10-06), emitted
+    /// but read back by no test here: `autopilot feeds admitted` (clock-1,
+    /// D-2578), `pull.press started` (atomics-1, D-2582), `api.pull partial
+    /// day refused` (clock-2, D-2584), and `api.server background work
+    /// drained` and `api.server background work abandoned at shutdown`
+    /// (autopilot-4, lifecycle-1, D-2583), whose arms the shutdown tests drive
+    /// but which only write into the sink of a process that is ending.
+    ///
+    /// ONE OF THOSE FIVE IS GONE: `pull.press started` went with the press's
+    /// claim on the shared run key, which the per-task log scope replaced at
+    /// the audit-fix merge (D-4625). 15 -> 14.
+    const UNREACHABLE: usize = 14;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1755,17 +1845,49 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
     // named above.
+    //
+    // 63 -> 64 at D-2771: the bounded shutdown drain's WARN, driven in
+    // `server::shutdown_tests`.
+    //
+    // 65 -> 66 when both met in the PR #74 merge (D-2779): D-2771 counted its
+    // WARN as 63 -> 64 on a side without D-1765's two sites.
+    //
+    // 65 -> 66 at D-2526 (conc13-2): `pull.http transport failed, retrying` in
+    // `server::note_transport_retry`, counted in `REACHED_IN_SERVER_TESTS`.
+    //
+    // 66 -> 76 by the zero-findings fixes of 2026-10-06: two read back in
+    // server tests, three in their own module's tests, five named
+    // unreachable (see the three constants).
+    //
+    // The two lines above were counted on the zero/next side, without D-2771's
+    // site; the figure is re-taken after the zero/next merge.
+    //
+    // 76 -> 77 at that merge (D-4610): the zero/next side's 76 plus D-2771's
+    // WARN. Measured: `lib_emit_sites()` returns 77 on the merged tree.
+    //
+    // The other side went 65 -> 72 at D-4448 to D-4455 (fxb2): seven new
+    // sites, each read back in the column its test lives in, above.
+    //
+    // 77 -> 81 at the audit-fix merge: this side's 77 plus that side's seven,
+    // less the three this side's sites duplicated or that the log scope
+    // retired (`pull.http transport failed, retrying`, `api.pull leg failed`
+    // and `pull.press started`; D-4625, D-4627).
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 65,
+        lib_sites, 81,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
+        SITES_HERE
+            + REACHED_IN_SERVER_TESTS
+            + REACHED_IN_RECOVERY_TESTS
+            + REACHED_IN_MODULE_TESTS
+            + UNREACHABLE,
         lib_sites,
-        "every emit site is proven here, in server::tests or recovery::tests, or named above"
+        "every emit site is proven here, in server::tests, recovery::tests or its own \
+         module's tests, or named above"
     );
 }

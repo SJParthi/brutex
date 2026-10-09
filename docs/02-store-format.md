@@ -479,8 +479,14 @@ magic, version and stride: the same 32,768-byte header region, the same
 64-byte slot, the same commit counter, and blocks of whole records anchored at
 byte 32,768. Their block checksums are optional as at bar version 2 (`flags`
 bit 0), and when present live in `.ovl.crc` / `.grk.crc` (§6's sidecar layout).
-Neither is in `store::layout::Layout::KNOWN`, the bar versions a `.bin` resolves
-against. Every integer and float is little-endian. Until P14-03 (D-1959) this
+Both ARE in `store::layout::Layout::KNOWN` (`[V2, V3, OVERLAY, GREEKS]`),
+because `Header::decode` resolves a version while it decodes and a geometry
+outside that list is `UnknownVersion` at its own first byte. What keeps an
+overlay or Greeks header in a `.bin` from being read at its stride is
+`store::file`'s per-kind table (`BAR_TABLE`, `[V2, V3]`, chosen by
+`table_of` from the file kind), never `KNOWN`. Every integer and float is
+little-endian. (This sentence said neither was in `KNOWN`; the code put both
+there. Gap-audit #17, D-3687.) Until P14-03 (D-1959) this
 section gave only each record's width and version.
 
 ### 8.1 `.ovl` — overlay record, 24 bytes
@@ -630,9 +636,10 @@ handle naming the reason (`BarFile::time_lookup` reports it). A read door
 never writes a `.tix`. The writer door — `BarFile::open_or_create` — rebuilds
 one from the committed bars when it finds none it can confirm: O(`n_valid`)
 verified record reads, logged as a `store.tix` info line — once per month at
-open, and again inside an append whose resume entry no longer agrees with the
-header (a torn index write from an append that failed on the same handle,
-D-3302). That
+open, and again inside an append whose index the bars do not vouch for
+(D-3302). A resume entry torn by an append that failed on the same handle, in
+the last committed bar's bucket, is rebuilt alone from at most 65 bar reads
+instead (`time_index::recover`, D-3134, D-4600). That
 open IS the explicit migration path for existing months. When the bars cannot
 be indexed (a block that fails its checksum, two bars in one slot, an intraday
 bar off the grid, a bar outside the month) the writer leaves no `.tix`, the

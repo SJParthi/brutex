@@ -98,6 +98,18 @@ pub const CURDAY_RUNGS: [i32; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 161
 /// an exchange that ordinarily trades Monday to Friday. One definition, three
 /// crates.
 pub const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+
+/// Minutes from IST midnight to the regular NSE open, 09:15.
+///
+/// `pub` for the reason [`IST_OFFSET_MICROS`] is: `orb` counts its windows
+/// from it, and `runner`'s resampler and synthetic sessions anchor on it, so
+/// the sweep side of the graph holds ONE copy. `pull::session`,
+/// `pull::calendar` and `store::path` hold the same number on the other side,
+/// which this crate may not name (gate 22). `orb` and `runner::resample` each
+/// kept a private copy and `runner::synthetic` spelled it as a bare `555`,
+/// tied to nothing; `crates/cli/tests/one_session_open.rs` now holds this one
+/// to `pull::session::SESSION_OPEN_MINUTE`. D-3518.
+pub const SESSION_OPEN_MINUTE: i64 = 9 * 60 + 15;
 const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
 /// The IST calendar-day number for a timestamp.
@@ -1776,13 +1788,29 @@ impl Candle {
         if let Err(why) = self.check() {
             return Err(why);
         }
-        // Containment above proves low <= open, close <= high and low <= high.
-        // Therefore all four prices are positive exactly when low is positive;
-        // repeating the other sign comparisons adds no distinct refusal case.
-        if self.low <= 0 {
+        // ALL FOUR, THROUGH ONE PREDICATE (Z1-slice08-F3, D-2542). This tested
+        // `low` alone and leaned on the containment clauses above, while the
+        // variant's doc says "all four fields are tested, not `low` alone" so
+        // the predicate does not depend on another clause being true. The
+        // four-way test lives in `any_price_not_positive`, which a test calls
+        // with containment broken, so each comparison is killable there.
+        if self.any_price_not_positive() {
             return Err(Corrupt::PriceNotPositive);
         }
         Ok(())
+    }
+
+    /// Is any of the four prices zero or below?
+    ///
+    /// The whole of [`Corrupt::PriceNotPositive`]'s test, with no dependency on
+    /// the ordering or containment clauses of [`Self::check`]: a record with
+    /// `low = 1` and `close = 0` answers `true` here although only a broken
+    /// containment could produce it. [`Self::check_evaluable`] and the
+    /// evaluator's own step both call this, so the two cannot drift.
+    /// Four compares, no loop.
+    #[must_use]
+    pub(crate) const fn any_price_not_positive(&self) -> bool {
+        self.open <= 0 || self.high <= 0 || self.low <= 0 || self.close <= 0
     }
 
     /// `high - low`, or `None` when the subtraction leaves `i64`.
@@ -1960,8 +1988,10 @@ mod candle {
     /// `open == 0 && high == 0 && low == 0 && close == 0` is true of that bar
     /// too. A guard that fires on one zero and a guard that fires only on four
     /// are different refusals, and nothing here could tell them apart. The
-    /// current check refuses any nonpositive low after containment proves it is
-    /// the minimum price; the fixtures still pin each zero-price case.
+    /// current check refuses any one nonpositive price of the four, through
+    /// `Candle::any_price_not_positive`, without leaning on containment
+    /// (Z1-slice08-F3, D-2542; it tested `low` alone for a while); the
+    /// fixtures still pin each zero-price case.
     ///
     /// # Each fixture isolates ONE zero, and `check` must still accept it
     ///
@@ -1999,6 +2029,60 @@ mod candle {
                 "{name}: a single zero price must refuse evaluation on its own"
             );
         }
+    }
+
+    /// THE POSITIVITY PREDICATE TESTS ALL FOUR PRICES WITHOUT LEANING ON
+    /// CONTAINMENT.
+    ///
+    /// Z1-slice08-F3, D-2542. `Corrupt::PriceNotPositive`'s doc says all four
+    /// fields are tested so the predicate never depends on another clause; the
+    /// code tested `low` alone. Here containment is deliberately broken —
+    /// `low = 1, close = 0` is not a bar `check` admits — and the predicate is
+    /// asked directly. Every one of 5^4 = 625 assignments of
+    /// `{i64::MIN, -1, 0, 1, i64::MAX}` to the four prices is enumerated, so
+    /// each `||` and each `<=` is the only clause deciding at least one case.
+    /// On the old code there was no four-way predicate to call; the
+    /// `low`-only test it stood for answers `false` on `low = 1, close = 0`,
+    /// which the first assertion refuses.
+    #[test]
+    fn price_not_positive_does_not_depend_on_containment() {
+        let lone_zero_close = Candle::new(0, 1, 1, 1, 0, 0, OI_NULL);
+        assert!(lone_zero_close.any_price_not_positive());
+        let values = [i64::MIN, -1, 0, 1, i64::MAX];
+        let mut cases = 0_u32;
+        let mut refused = 0_u32;
+        for open in values {
+            for high in values {
+                for low in values {
+                    for close in values {
+                        let candle = Candle::new(0, open, high, low, close, 0, OI_NULL);
+                        let mut nonpositive = 0_u32;
+                        for price in [open, high, low, close] {
+                            if price <= 0 {
+                                nonpositive += 1;
+                            }
+                        }
+                        assert_eq!(
+                            candle.any_price_not_positive(),
+                            nonpositive > 0,
+                            "o{open} h{high} l{low} c{close}"
+                        );
+                        // And `check_evaluable` is exactly `check`, then this.
+                        let expected = match candle.check() {
+                            Err(why) => Err(why),
+                            Ok(()) if nonpositive > 0 => Err(Corrupt::PriceNotPositive),
+                            Ok(()) => Ok(()),
+                        };
+                        assert_eq!(candle.check_evaluable(), expected);
+                        cases += 1;
+                        refused += u32::from(nonpositive > 0);
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 625);
+        // Only the 2^4 all-positive assignments pass.
+        assert_eq!(refused, 625 - 16);
     }
 
     /// The weekday map, checked against dates a reader can verify.

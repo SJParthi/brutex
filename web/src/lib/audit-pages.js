@@ -75,3 +75,48 @@ export function nextOrdinal(merged) {
   if (oldest === undefined || oldest.ordinal <= 0) return null;
   return oldest.ordinal - 1;
 }
+
+/**
+ * One older page's answer, as rows to merge or an error to show.
+ *
+ * OBSV-10, D-3209. `journal_block` answers 200 with `runs: []` and a
+ * `runs_error` when its page read fails. Taken as an empty page, the failure
+ * was never shown and still spent a page of `MAX_PAGES`. A named error wins
+ * over any rows beside it; a body with no `runs` list is an error too, never
+ * an empty page.
+ *
+ * @param {any} body
+ * @returns {{ runs: any[], error: string | null }}
+ */
+export function olderPageOf(body) {
+  const why = typeof body?.runs_error === 'string' ? body.runs_error.trim() : '';
+  if (why !== '') return { runs: [], error: why };
+  if (!Array.isArray(body?.runs)) return { runs: [], error: 'the older page carried no runs list' };
+  return { runs: body.runs, error: null };
+}
+
+// F3, D-3219. `/audit.json` sends `store.generation` as null when no census is
+// held (`crates/api/src/audit_json.rs`: absent or unreadable). The page held it
+// as `?? 0`, so a census that became readable while the page was open read as
+// every one of its commits "measured" between two answers. Zero is a
+// generation; unknown is not zero, and no difference is taken across it.
+
+/**
+ * The manifest generation `/audit.json` reported, or null when it reported none.
+ * @param {unknown} store
+ * @returns {number | null}
+ */
+export function generationOf(store) {
+  const g = store !== null && typeof store === 'object' ? /** @type {Record<string, unknown>} */ (store).generation : undefined;
+  return typeof g === 'number' && Number.isSafeInteger(g) && g >= 0 ? g : null;
+}
+
+/**
+ * Commits between two generations, or null when either is unknown.
+ * @param {number | null} from
+ * @param {number | null} to
+ * @returns {number | null}
+ */
+export function generationStep(from, to) {
+  return from === null || to === null ? null : to - from;
+}

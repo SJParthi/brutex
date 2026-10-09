@@ -86,7 +86,7 @@ impl SelectionAuthorityLedgerV4 {
                     .to_owned(),
             );
         }
-        let lock_path = root.join("results").join("population-write.lock");
+        let lock_path = crate::population::population_write_lock(root);
         let outer_lock = File::open(&lock_path)
             .map_err(|why| format!("{} could not be opened: {why}", lock_path.display()))?;
         outer_lock.lock_shared().map_err(|why| {
@@ -637,7 +637,7 @@ mod tests {
     use runner::exit_grid_policy::{
         EvaluatedExitGridV1, ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1,
         ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-        RationalPercentileV1, ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
+        RationalPercentileV1, ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v3,
     };
     use runner::grid::{Chosen, Ttp};
     use runner::identity::{Direction, Params, Run};
@@ -755,7 +755,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("wide exact ratio interval"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,

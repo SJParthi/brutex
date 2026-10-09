@@ -211,8 +211,8 @@ impl Ledger {
 /// IST is UTC+5:30 with no daylight saving, so the shift is a constant and
 /// there is no zone table to consult — one add and two divides.
 fn ist(ts_micros: i64) -> (i64, u16) {
-    const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
-    let secs = ts_micros.div_euclid(1_000_000) + IST_OFFSET_SECS;
+    // `session`'s offset, the one this crate pins to `store`'s (D-3512).
+    let secs = ts_micros.div_euclid(1_000_000) + crate::session::IST_OFFSET_SECS;
     let day = secs.div_euclid(86_400);
     // `rem_euclid` is non-negative and under 86,400, so this is 0..=1439 and
     // `try_from` cannot fail. `u16::MAX` is the fallback rather than a panic

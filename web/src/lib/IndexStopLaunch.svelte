@@ -1,6 +1,7 @@
 <script>
  import {onDestroy} from 'svelte';
  import {ask} from './ask.js';
+ import {refusalFrom} from './refusal.js';
  import {createIndexStopLaunch,indexStopLaunchPlan,validateIndexStopMetadata,indexStopSplitProposal,indexStopServerMonth,indexStopContextMonth,indexStopRewardRiskCaption,indexStopQualificationHref} from './index-stop-launch.js';
  import IndexConsistencyPolicy from './IndexConsistencyPolicy.svelte';
  import IndexStopQualification from './IndexStopQualification.svelte';
@@ -40,7 +41,7 @@
  async function readConfiguration(){
   const ticket=++generation;configAbort?.abort();const abort=new AbortController();configAbort=abort;config={phase:'loading',body:null,why:''};
   const query=new URLSearchParams();for(const [key,wire] of fields.slice(0,2))if(/^[1-9]\d{0,19}$/.test(settings[key]))query.set(wire,settings[key]);
-  try{const response=await ask('/engine/index-stop-launch.json'+(query.size?'?'+query:''),{cache:'no-store',signal:abort.signal});if(!response.ok)throw new Error(`The live app does not provide single-stop configuration details (HTTP ${response.status}). No sweep was submitted.`);const body=validateIndexStopMetadata(await response.json());if(ticket!==generation||abort.signal.aborted)return;config={phase:'ready',body,why:''};serverMonth=indexStopServerMonth(response.headers.get('date'));onTimeframes([...body.timeframes]);for(const [key,wire] of fields)if(settings[key]===''&&typeof body.configured[wire]==='string')settings[key]=body.configured[wire];}
+  try{const response=await ask('/engine/index-stop-launch.json'+(query.size?'?'+query:''),{cache:'no-store',signal:abort.signal});if(!response.ok)throw new Error(`${await refusalFrom('/engine/index-stop-launch.json',response)}. No sweep was submitted.`);const body=validateIndexStopMetadata(await response.json());if(ticket!==generation||abort.signal.aborted)return;config={phase:'ready',body,why:''};serverMonth=indexStopServerMonth(response.headers.get('date'));onTimeframes([...body.timeframes]);for(const [key,wire] of fields)if(settings[key]===''&&typeof body.configured[wire]==='string')settings[key]=body.configured[wire];}
   catch(why){if(ticket===generation&&!abort.signal.aborted)config={phase:'failed',body:null,why:why instanceof Error?why.message:String(why)};}
  }
  async function start(){if(!active||busy||blockedReason||!prepared.plan)return;localWhy='';try{await controller.start(prepared.plan);}catch(why){localWhy=why instanceof Error?why.message:String(why);}}

@@ -70,6 +70,13 @@ jobs:
           #     is a second language in a tracked file outside web/ (CLAUDE.md
           #     section 2); such a program lives under web/ and is run by path.
           #     D-2342 widens the forms; awk is a pinned ratchet (06-limits).
+          #   * the stream editor's name on any line that is not a comment:
+          #     every invocation runs a program (D-4493).
+          #   * an action that is not one of the seven `ACTIONS` pins in
+          #     .github/source_scan.rs, a pin without its tag comment, an input
+          #     its pin does not admit, `actions/github-script` or any input or
+          #     `INPUT_` variable that carries a program (D-4491), and setup-node
+          #     or a JavaScript runtime outside this file's `web` job (D-4494).
           # Every tracked .yml under .github/, not only workflows/ (D-2341).
           # An empty listing is refused.
           work=$(mktemp -d)
@@ -181,7 +188,9 @@ jobs:
           #
           #   1. `source_scan content`: outside web/, no NUL byte, nothing that
           #      is not UTF-8, no `.rs` opening with a shebang, and no browser
-          #      code in a `.html` or `.css`. Also no NAME holding a control
+          #      code in a `.html` or `.css`: no `<script>` of any kind, frame,
+          #      `srcdoc`, script or `data:` URL, read as gate 1f reads them
+          #      (D-4490). Also no NAME holding a control
           #      character, a non-ASCII byte, `"` or `\` (git quotes those in
           #      every listing read without `-z`), and no `mutants::skip`
           #      token in crate code: `#[cfg_attr(miri, mutants::skip)]`
@@ -324,13 +333,26 @@ jobs:
           # of failure as a permissive one accepting an illegal file: the gate
           # stopped describing the rule it was written to enforce.
           #
-          # `.claude/` is the run configuration IntelliJ and the preview tools
-          # read. It is operator tooling, not source, and it is not shipped.
+          # `.claude/` is the run configuration the preview tools read (not
+          # IntelliJ; see gate 1). It is operator tooling, not source, and it
+          # is not shipped.
           # The listing first: `git ls-files ... | grep || true` swallowed a git
           # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
           # A git that fails stops the step, and an empty listing is refused.
           # D-2311: the rule is `gate_1b` in .github/gates_tree.rs.
+          #
+          # D-4492 (srust-3): `.claude/launch.json` is the only tracked path
+          # under any `.claude` directory outside web/, and it is READ, not
+          # matched by extension: one JSON document, no key twice, exactly the
+          # two configurations docs/07-plan.md section 0 names, each program and
+          # argument list pinned -- `cargo run --release -p api -- serve` and
+          # `npm --prefix web run dev` -- so no shell or other interpreter is
+          # handed a program there. The reader is `launch` in .github/gh_json.rs,
+          # whose tests gate 0 ran.
           "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1b
+          gj="${RUNNER_TEMP:-/tmp}/gh-json"
+          rustc --edition=2024 -D warnings .github/gh_json.rs -o "$gj"
+          "$gj" launch < .claude/launch.json
 
       - name: Gate 1g — no tracked configuration runs a program
         run: |
@@ -426,6 +448,16 @@ jobs:
           # `cookie`/`write`/`body`, `window.location`, `window.open(`,
           # `addEventListener`, `innerHTML`, `outerHTML`, `XMLHttpRequest`,
           # `await fetch(`, `eval(`).
+          #
+          # D-4490 (srust-1): a `<script src>` used to pass whatever its value,
+          # so `src="data:text/javascript,..."` and `<iframe srcdoc=...>`
+          # passed here and in gate 1. Tags are now read as the HTML tokenizer
+          # reads them (a `>` inside quotes does not end one), every attribute
+          # value is decoded (`&#106;`, `&colon;`, `&Tab;`), and refused are: a
+          # script or `data:` URL, `srcdoc`, a frame or plug-in element,
+          # `<base>`, a bare `fetch(`, and every `<script>` but the two the
+          # decisions license, `/typeahead.js` and `/masters.js`, external,
+          # `defer` and empty. A tracked `.html` outside web/ is licensed none.
           #
           # WHAT IT CANNOT SEE: markup assembled at run time from pieces that
           # are not one literal or one `concat!` -- `format!("<scr{}", "ipt>")`.
@@ -668,7 +700,13 @@ jobs:
           f=crates/core/Cargo.toml
           work=$(mktemp -d)
           st=0; "$scan" deps "$f" > "$work/deps" || st=$?
-          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9 "$f" "$work/deps" "$st"
+          # P15-11, D-2518: the module closure of every core root. A
+          # `#[path]` or `include!` reaching another crate's source declares
+          # nothing in the manifest; the verdict refuses any file outside
+          # crates/core/, an unresolved module, and a closure without lib.rs.
+          git ls-files -z > "$work/tracked"
+          st_c=0; git ls-files -z -- crates/core/src/lib.rs crates/core/build.rs 'crates/core/tests/*.rs' 'crates/core/benches/*.rs' 'crates/core/examples/*.rs' | xargs -0 -r "$scan" closure "$work/tracked" > "$work/closure" || st_c=$?
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9 "$f" "$work/deps" "$st" "$work/closure" "$st_c"
           # WHAT THIS STILL CANNOT SEE, because a gate that oversells itself is
           # worse than no gate: a `[patch]` or `[replace]` in the WORKSPACE root
           # that redirects a crate core does not name is not core's declaration
@@ -746,7 +784,11 @@ jobs:
           f=crates/greeks/Cargo.toml
           work=$(mktemp -d)
           st=0; "$scan" deps "$f" > "$work/deps" || st=$?
-          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9b "$f" "$work/deps" "$st"
+          # P15-11, D-2518: as gate 9, every file the greeks roots compile
+          # must lie under crates/greeks/.
+          git ls-files -z > "$work/tracked"
+          st_c=0; git ls-files -z -- crates/greeks/src/lib.rs crates/greeks/build.rs 'crates/greeks/tests/*.rs' 'crates/greeks/benches/*.rs' 'crates/greeks/examples/*.rs' | xargs -0 -r "$scan" closure "$work/tracked" > "$work/closure" || st_c=$?
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9b "$f" "$work/deps" "$st" "$work/closure" "$st_c"
 
       - name: Gate 10b — no invariant identifier means two things
         run: |
@@ -1573,6 +1615,7 @@ jobs:
           #       the only channel in existence at that instant, which is the same
           #       argument telemetry/src/sink.rs carries below.
           #   pull/src/http.rs   eprintln! 6
+          #       r53-1 (D-4413): now 0, written through `telemetry::stderr_line`.
           #       Bar-refusal notices, every one of which ALSO emits a
           #       `pull.decode` event immediately above the print -- verified
           #       site by site, not assumed. 2 -> 6 on 2026-08-29 because the
@@ -1591,6 +1634,8 @@ jobs:
           #   telemetry/src/sink.rs  eprintln! 1
           #       The sink's own last-resort notice. It is the thing that failed,
           #       so it is the one place stderr is the only channel left.
+          #       r53-1 (D-4413): it now goes through `telemetry::stderr_line`, so a
+          #       closed stderr cannot abort the process; the count is 0 here.
           #   telemetry/src/record.rs eprintln! 1 -- REMOVED (D-1109). The one
           #       "eprintln!" in that file is inside a test's assertion message,
           #       a string literal; it prints nothing. The line count read it as a
@@ -1719,16 +1764,19 @@ jobs:
           #     Folded with D-1450.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
-          api/src/main.rs:eprintln!:2
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
-          cli/src/lib.rs:eprintln!:3
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
-          greeks/src/solver.rs:println!:7
-          pull/src/http.rs:eprintln!:6
-          telemetry/src/sink.rs:eprintln!:1'
+          greeks/src/solver.rs:println!:7'
+          # pull/src/http.rs (6), pull/src/csv.rs (1) and telemetry/src/sink.rs
+          # (1) LEFT THIS LIST (r53-1, D-4413):
+          # `eprintln!` panics on a closed stderr and the release profile aborts,
+          # so each now writes through `telemetry::stderr_line`, which counts a
+          # refused line and logs the first. Its one handle is in clause A2.
+          # pull/src/masters.rs's one had already gone with its skip (D-3128,
+          # D-4647).
           # Test-only measurements; production audit/recovery notices also emit.
           #
           # THREE MORE, one kind (D-0695): the STDOUT PROOF LINE of a test's
@@ -1740,7 +1788,14 @@ jobs:
           # did not pass by testing nothing. Each sits inside
           # `#[cfg(test)] mod tests`, so no production path reaches it, and it
           # is not a diagnostic: nothing is wrong when it prints.
+          #
+          # api/src/server.rs println! 0 -> 4 (D-2779), the same kind: three
+          # are the serve-lock holder child's `SERVE-LOCK-HELD`, `-RELEASED`
+          # and `-REFUSED` lines its parent reads, the fourth the serve-lock
+          # cost test's p50/p99/max line. All four are in `#[cfg(test)] mod
+          # tests`; production output still goes through `say!`/`warn_line!`.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
+          api/src/server.rs:println!:4
           api/src/frontierjson.rs:println!:1
           api/src/sweeprun.rs:println!:1
           api/src/trades.rs:println!:2
@@ -1748,18 +1803,24 @@ jobs:
           cli/src/boolean_candidate_tests.rs:eprintln!:2
           cli/src/index_stop_qualification_tests.rs:eprintln!:2
           cli/src/index_stop_tests.rs:println!:1
-          cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
-          # TWO MORE, one kind (D-1933): the stderr half of a degraded decode,
+          # TWO MORE, one kind (D-1849): the result lines of two IGNORED
+          # timing tests (o1cli before/after), run only by hand with
+          # `--ignored --nocapture`; test-only, no production path.
+          declared="$declared cli/src/lib.rs:println!:1
+          cli/src/audited_stored_tests.rs:println!:1"
+          # NONE NOW (two until D-3128, one until D-4413), one kind (D-1933):
+          # the stderr half of a degraded decode,
           # each written beside a `telemetry::emit` of the same counts.
           # `pull/src/csv.rs` names unreadable and negative volume and open
-          # interest a CSV decode stored or skipped (CE-57, D-2681), and
-          # `pull/src/masters.rs` names NSE index categories and elements the
-          # conversion skipped (CE-58, D-2682). Both print only when something
-          # was degraded, so a clean run prints nothing.
-          declared="$declared pull/src/csv.rs:eprintln!:1
-          pull/src/masters.rs:eprintln!:1"
+          # interest a CSV decode stored or skipped (CE-57, D-2681). It prints
+          # only when something was degraded, so a clean run prints nothing.
+          # `pull/src/masters.rs` printed the NSE index entries it skipped
+          # (CE-58, D-2682) until D-3158 refused them instead; the print went
+          # with the skip (D-3128). csv.rs's line LEFT THE LIST with r53-1
+          # (D-4413): it now writes through `telemetry::stderr_line`, declared
+          # once in clause A2 (D-4647).
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -1775,8 +1836,19 @@ jobs:
           # cli/src/main.rs names `stdout()` and `stderr()` once each (v53-2,
           # D-1484): its three prints became one `cli::deliver` write, which
           # says a failed stdout on stderr and emits `cli.output`.
-          declared_handles='api/src/server.rs:handle:3
-          cli/src/main.rs:handle:2'
+          # telemetry/src/say.rs names `stderr()` once: `stderr_line`, the
+          # writer that cannot panic, through which pull's decode notices and
+          # the sink's own last-resort notice go (r53-1, D-4413).
+          # api/src/main.rs and cli/src/lib.rs name `stderr()` once each (r53-1,
+          # D-4463): their seven `eprintln!` -- api main 2, cli lib 3, cli
+          # operation_audit 2 -- PANICKED on a closed stderr and now go through
+          # one `tell` per crate, which writes and drops a failed line. The
+          # diagnostics among them still emit their event beside it.
+          declared_handles='api/src/main.rs:handle:1
+          api/src/server.rs:handle:3
+          cli/src/lib.rs:handle:1
+          cli/src/main.rs:handle:2
+          telemetry/src/say.rs:handle:1'
           # Both sides are compared as sorted lists of non-empty words, so an
           # empty declaration and an empty measurement are equal on the healthy
           # case (the shell had to normalise a blank `printf` line by hand).
@@ -2093,11 +2165,21 @@ jobs:
           # non-blocking `flock` on it, so two sinks cannot write one event
           # stream. It writes no byte, reads none, and names no path outside
           # the sink's own directory. D-1458.
-          declared='sink.rs:std::fs::OpenOptions::new:3
+          #
+          # D-2509 (CE-41) adds four, all inside the sink's own directory. A
+          # failed roll is retried only when `directory_accepts_a_roll` can
+          # create, rename and unlink a probe file of its own
+          # (`<dir>/.roll-probe`, then `.roll-probe.moved`): one more
+          # `OpenOptions::new`, `rename` and `remove_file`. The roll itself
+          # asks `symlink_metadata` whether a rotated file is present, so a
+          # failure after a file was moved ends retries for good. None reads
+          # or writes an event byte.
+          declared='sink.rs:std::fs::OpenOptions::new:4
           sink.rs:std::fs::create_dir_all:1
           sink.rs:std::fs::metadata:1
-          sink.rs:std::fs::remove_file:1
-          sink.rs:std::fs::rename:1
+          sink.rs:std::fs::remove_file:2
+          sink.rs:std::fs::rename:2
+          sink.rs:std::fs::symlink_metadata:1
           tail.rs:std::fs::File::open:2'
 
           # D-2312: clauses A and B are `gates_runtime gate21`.
@@ -2517,6 +2599,11 @@ jobs:
           #     own name defeats it exactly as a rename defeats gate 13.
           #   * Whether the call happens BEFORE the builder on the executed
           #     path. It counts occurrences in a file, not order.
+          #   * A client type renamed by `use .. as`, or a spelling other than
+          #     the five it counts (`Client::builder()`, `Client::new()`,
+          #     `ClientBuilder::new(`, `reqwest::get(`, `blocking::get(`).
+          #     Comments and string literals are blanked before counting, so
+          #     a commented-out guard is no guard (P15-15, D-2520).
           # Both are the conservative direction: it can miss, it cannot
           # falsely accuse.
           #
@@ -3326,8 +3413,13 @@ jobs:
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
           git ls-files -z -- 'crates/*.rs' > "$work/sources.z"
+          # D-3511: the `FILE:LINE:name` -> `FILE<TAB>name` reading is gate
+          # 10's `path-declarations`, not an inline sed program.
+          # D-4493 (srust-4): `FILE:LINE:name` becomes `FILE<TAB>name` through
+          # the Rust tool gate 10 already uses, not a sed program; gate 0 now
+          # refuses sed in any workflow. Gate 25 above built the ledger tool.
           xargs -0 -r "$scan" fns < "$work/sources.z" \
-            | sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' > "$work/path-fns"
+            | "${RUNNER_TEMP:-/tmp}/gates-ledger" path-declarations > "$work/path-fns"
           git ls-files -z > "$work/tracked.z"
           "$scan" modules "$work/tracked.z" > "$work/modules"
           xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"
@@ -3520,19 +3612,22 @@ jobs:
           # this gate green, and the next two deletions with it. The pin is
           # now an EXACT count: adding a measurement fails until its pin is
           # raised in the same change, so a pin cannot fall behind silently.
+          # D-4488: lake 6 -> 7 (FXA-10), runner 3 -> 4 (C-R-06), engine
+          # 14 -> 18 (D-4482's five p99 rows call `interleaved_ratio`, named
+          # so this count sees them; its `p99_ratio` call is gone).
           cover='
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
           pull   crates/pull/benches/ratio.rs   7  C-11 C-12 C-13 C-26 O1P-05
           store  crates/store/benches/ratio.rs  14 C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02 C-TIX-01 C-TIX-02 O1P-01 O1P-02
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
-          lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
+          lake      crates/lake/benches/ratio.rs      7  C-L-01 C-L-02 C-L-03 C-L-04 FXA-10
           telemetry crates/telemetry/benches/ratio.rs 9  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04 O1P-06
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
           vocab     crates/vocab/benches/ratio.rs     12 C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
           indicators crates/indicators/benches/ratio.rs 6  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
-          engine    crates/engine/benches/ratio.rs    14 C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11 C-E-12 O1P-03 O1P-04
-          runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05
+          engine    crates/engine/benches/ratio.rs    18 C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11 C-E-12 O1P-03 O1P-04
+          runner    crates/runner/benches/ratio.rs    4  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05 C-R-06
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
 
@@ -4069,12 +4164,21 @@ jobs:
           # not the same measurement and were never going to agree — a
           # crate-scoped run compiles the test module differently. §54 now says
           # which one it is quoting.
+          #
+          # D-4654: the audit's fix integration added `loss.rs`, `say.rs` and
+          # `scope.rs` and new tests in `record.rs` and `sink.rs`, every new
+          # uncovered line inside a test module: `panic!` arms of failing-only
+          # asserts and methods of test doubles their test never calls. 32 -> 47.
+          # §54's 2026-10-09 follow-up names each line.
           declared='
           clock.rs 1
           level.rs 1
           lib.rs 6
-          record.rs 1
-          sink.rs 20
+          loss.rs 5
+          record.rs 3
+          say.rs 3
+          scope.rs 2
+          sink.rs 23
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

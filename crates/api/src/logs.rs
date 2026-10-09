@@ -113,6 +113,12 @@ struct Asked {
     target: String,
     /// The run the reader narrowed to, or zero for every run.
     run: u64,
+    /// The oldest instant the reader asked for, in Unix milliseconds,
+    /// inclusive. It ENDS the walk at the first older record rather than
+    /// filtering past it (`telemetry::Query::since`), which is what lets a
+    /// run-filtered poll stop at the run's own start instead of reading a
+    /// half's unrelated history to its scan cap (OBSV-05, D-3204).
+    since: Option<i64>,
     /// Each filter the request carried that could not be read, by name, with
     /// what it said. Such a filter is no narrowing, and the answer says so in
     /// its JSON and with one Warn, rather than passing the unfiltered tail off
@@ -140,23 +146,39 @@ fn asked(raw: &str) -> Asked {
     // digit is in the unreserved set — and would have turned any other input
     // into a `%XX` soup that parses to the default, which is the same answer for
     // the wrong reason.
-    let limit = crate::server::param(raw, "limit")
-        .parse::<usize>()
+    //
+    // ONE SCAN for all five fields (o1api-4, D-4436), and the limit is still
+    // read as a whole count, so a run of digits past `usize` asks for the
+    // ceiling rather than the default (gap-audit #4, D-3684). D-4623.
+    let fields = crate::server::Query::parse(raw);
+    let limit = crate::server::whole_count(&fields.param("limit"))
         .unwrap_or(50)
         .clamp(1, PAGE_LIMIT);
-    let level_word = crate::server::param(raw, "level");
+    let level_word = fields.param("level");
     let level = telemetry::Level::of_label(&level_word.to_ascii_lowercase());
-    let target = crate::server::param(raw, "target");
+    let target = fields.param("target");
     // ZERO IS "EVERY RUN", not run zero. An event outside a backfill omits the
     // key entirely, so there is no run zero to ask for and the value is free to
     // mean the absence of a filter.
-    let run_word = crate::server::param(raw, "run");
+    let run_word = fields.param("run");
     let run = run_word
         .parse::<u64>()
         .ok()
         .filter(|run| run.to_string() == run_word)
         .unwrap_or(0);
+    // `since` is a canonical non-negative integer of milliseconds no larger
+    // than `i64::MAX`, read the way `run` is: `+3`, `03` and `3.0` are not
+    // quietly read as some instant, and an unreadable one is NAMED.
+    let since_word = fields.param("since");
+    let since = since_word
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| ms.to_string() == since_word)
+        .and_then(|ms| i64::try_from(ms).ok());
     let mut ignored = Vec::new();
+    if since.is_none() && !since_word.is_empty() {
+        ignored.push(("since", since_word));
+    }
     if level.is_none() && !level_word.is_empty() {
         ignored.push(("level", level_word));
     }
@@ -186,12 +208,16 @@ fn asked(raw: &str) -> Asked {
     if run != 0 {
         query = query.from_run(run);
     }
+    if let Some(ms) = since {
+        query = query.since(ms);
+    }
     Asked {
         query,
         limit,
         level,
         target,
         run,
+        since,
         ignored,
     }
 }
@@ -409,6 +435,12 @@ fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> teleme
     // THE LIMIT APPLIES TO THE UNION. Each half already honoured it, so without
     // this the page would return up to twice what was asked for -- and the
     // caller's `limit` is what bounds the response, not a suggestion.
+    //
+    // A CUT IS AN UNREACHED OLDEST. Records dropped here were read, so they
+    // exist and are not on the page, which is exactly what `reached_oldest`
+    // false means -- one half alone says the same when its own limit stops it
+    // short (OBSV-01, D-3200).
+    let cut = records.len() > limit;
     records.truncate(limit);
 
     telemetry::Tail {
@@ -427,7 +459,7 @@ fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> teleme
         // the merged answer down. Checked rather than assumed: the same field
         // was once `false` on ordinary full pages, which is the defect its own
         // doc records.
-        reached_oldest: served.reached_oldest && ran.reached_oldest,
+        reached_oldest: served.reached_oldest && ran.reached_oldest && !cut,
         partial_tail: served.partial_tail || ran.partial_tail,
         errors: {
             let mut errors = served.errors;
@@ -536,7 +568,7 @@ fn json_of(
     };
     let _ = write!(
         out,
-        r#"],"level":{},"target":{},"run":{run},"run_key":{run_key},"ignored":["#,
+        r#"],"level":{},"target":{},"run":{run},"run_key":{run_key},"since":{},"ignored":["#,
         asked.level.map_or_else(
             || "null".to_owned(),
             |level| render::json_string(level.label())
@@ -546,6 +578,9 @@ fn json_of(
         } else {
             render::json_string(&asked.target)
         },
+        asked
+            .since
+            .map_or_else(|| "null".to_owned(), |ms| ms.to_string()),
     );
     for (n, (param, word)) in asked.ignored.iter().enumerate() {
         if n > 0 {
@@ -964,15 +999,17 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
         let _ = write!(
             out,
             // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
-            // rotating for the life of the process (`Sink::rotation_broken`),
-            // so nothing is overwritten after the failure: the file GROWS. The
-            // banner said the opposite and never said a restart resumes
-            // rotation (CE-41, D-1769).
-            "{} roll(s) failed, so rotation has stopped for the life of this \
-             process: the current file is growing past its bound and no later \
-             event overwrites an older one. The failed roll itself may have \
-             removed the oldest retained file. Fix the cause named below and \
-             restart the server to resume rotation. ",
+            // rotating (`Sink::rotation_broken`), so nothing is overwritten
+            // after the failure: the file GROWS. It looks again once the file
+            // has grown one more bound and the directory accepts a probe, a
+            // bounded number of times, unless the failed roll had already
+            // moved a file (CE-41, D-1769, D-2509).
+            "{} roll(s) failed, so rotation is paused: the current file is \
+             growing past its bound and no later event overwrites an older one. \
+             The failed roll itself may have removed the oldest retained file. \
+             Rotation is retried by itself, a bounded number of times, once the \
+             directory accepts writes again; if it stays paused, fix the cause \
+             named below and restart the server. ",
             h.rotation_failures,
         );
     }
@@ -1081,6 +1118,9 @@ fn json_query(asked: &Asked) -> String {
     if asked.run != 0 {
         let _ = write!(q, "&run={}", asked.run);
     }
+    if let Some(ms) = asked.since {
+        let _ = write!(q, "&since={ms}");
+    }
     q
 }
 
@@ -1132,6 +1172,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
          <label>Level<select name=\"level\"><option value=\"\">every level</option>{levels}</select></label>\
          <label>Target<input type=\"text\" name=\"target\" value=\"{target}\" placeholder=\"pull, pull.member, api.serve\"></label>\
          <label>Run<input type=\"text\" name=\"run\" value=\"{run}\" placeholder=\"every run\"></label>\
+         <label>Since<input type=\"text\" name=\"since\" value=\"{since}\" placeholder=\"Unix ms, inclusive\"></label>\
          <label>Limit<input type=\"number\" name=\"limit\" min=\"1\" max=\"{max}\" value=\"{limit}\"></label>\
          <button type=\"submit\">Show</button>\
          <a href=\"/logs.json{q}\">as JSON</a>\
@@ -1143,6 +1184,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
         } else {
             asked.run.to_string()
         },
+        since = asked.since.map_or_else(String::new, |ms| ms.to_string()),
         limit = asked.limit,
         max = PAGE_LIMIT,
         q = json_query(asked),
@@ -1177,6 +1219,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
 pub async fn note_request(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -1199,7 +1242,9 @@ pub async fn note_request(
     // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
     if rationed(level) {
         let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
-        let admit = FAILED_LINES
+        // THE SITE'S RATIONS, not a process static (P16-04, D-2590).
+        let admit = site
+            .failed_lines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .admit(from_another_site, now);
@@ -1307,9 +1352,6 @@ pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
 /// The length of one rationing window, in milliseconds.
 pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
 
-/// The process's failed-request rations, one per origin class.
-static FAILED_LINES: std::sync::Mutex<Rations> = std::sync::Mutex::new(Rations::new());
-
 /// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
 #[derive(Debug)]
 pub(crate) struct Rations {
@@ -1411,6 +1453,18 @@ mod tests {
         assert!(super::rationed(telemetry::Level::Error));
         assert!(super::rationed(telemetry::Level::Warn));
         assert!(!super::rationed(telemetry::Level::Debug));
+    }
+
+    /// **A `limit` past `usize` asks for the page ceiling, not the default.**
+    /// Gap-audit #4, D-3684.
+    #[test]
+    fn a_limit_past_usize_reads_the_page_ceiling() {
+        assert_eq!(
+            super::asked("limit=99999999999999999999").limit,
+            super::PAGE_LIMIT
+        );
+        assert_eq!(super::asked("limit=nope").limit, 50);
+        assert_eq!(super::asked("limit=7").limit, 7);
     }
 
     /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
@@ -1902,6 +1956,157 @@ mod tests {
         assert_eq!(tail.records.len(), 4, "the union is what the limit bounds");
     }
 
+    /// OBSV-05 (D-3204): a run-filtered read can be bounded to the run's own
+    /// start. Without `since` the walk could not stop at it -- `run=` is a
+    /// skip-filter -- so it read every older line: a torn fragment left by
+    /// an earlier crash counted as `malformed`, and a half bigger than the cap
+    /// set `hit_scan_cap`, and the backtest page's live view refuses on
+    /// either, for a run that had nothing to do with them. With `since` the
+    /// walk ends at the first record older than the run, so neither is read.
+    #[test]
+    fn since_bounds_a_run_poll_to_the_run_and_off_older_damage() {
+        let (dir, sink) = sink_in("since-bound");
+        for _ in 0..40 {
+            let _ = sink.emit(&telemetry::Event::info(
+                "api.serve",
+                "older unrelated history",
+            ));
+        }
+        drop(sink);
+        // A crash fragment: no newline. The next open terminates it into a
+        // standing malformed line (`terminate_torn_tail`).
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.ndjson"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, br#"{"seq":41,"ms""#))
+            .expect("a torn tail");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("reopens");
+        let _ = sink.emit(&telemetry::Event::info("api.serve", "after the restart"));
+        let before = telemetry::now_millis();
+        while telemetry::now_millis() == before {
+            std::hint::spin_loop();
+        }
+        let since = telemetry::now_millis();
+        for _ in 0..5 {
+            let _ = sink.emit_for_run(77, &telemetry::Event::info("cli.audit", "rung sweeping"));
+        }
+        let cli = dir.join(super::CLI_SUBDIR);
+
+        let unbounded = asked("limit=200&run=77");
+        assert!(unbounded.ignored.is_empty());
+        let walked = super::both_halves(
+            &dir,
+            Some(&cli),
+            &unbounded.query.clone().scanning_at_most(1024),
+        );
+        assert!(
+            walked.malformed == 1 || walked.hit_scan_cap,
+            "the unbounded poll reads the older damage or its cap: {walked:?}"
+        );
+        let whole = super::both_halves(&dir, Some(&cli), &unbounded.query);
+        assert_eq!(whole.malformed, 1, "the torn line is in the unbounded walk");
+
+        let bounded = asked(&format!("limit=200&run=77&since={since}"));
+        assert!(bounded.ignored.is_empty(), "{:?}", bounded.ignored);
+        assert_eq!(bounded.since, Some(since));
+        let tail = super::both_halves(
+            &dir,
+            Some(&cli),
+            &bounded.query.clone().scanning_at_most(1024),
+        );
+        assert_eq!(tail.records.len(), 5, "every event of the run");
+        assert_eq!(tail.malformed, 0, "the older torn line is never read");
+        assert!(
+            !tail.hit_scan_cap,
+            "the walk ended at the run's start: {tail:?}"
+        );
+        let json = json_over(&dir, Some(&cli), &bounded, None);
+        assert!(json.contains(&format!(r#""since":{since},"#)), "{json}");
+        assert!(json.contains(r#""malformed":0,"#), "{json}");
+        assert!(page_shell(&bounded, "").contains(&format!(r#"name="since" value="{since}""#)));
+        assert!(
+            page_shell(&bounded, "").contains(&format!("&amp;since={since}"))
+                || page_shell(&bounded, "").contains(&format!("&since={since}"))
+        );
+    }
+
+    /// OBSV-05: `since` is read the way `run` is -- canonical digits only, at
+    /// most `i64::MAX` -- and anything else is NAMED, never read as some other
+    /// instant and never silently dropped.
+    #[test]
+    fn an_unreadable_since_is_named_and_not_applied() {
+        // `+` is a space on the wire, so a literal plus arrives as `%2B`.
+        for (wire, bad) in [
+            ("-1", "-1"),
+            ("%2B5", "+5"),
+            ("05", "05"),
+            ("1.0", "1.0"),
+            ("x", "x"),
+            ("9223372036854775808", "9223372036854775808"),
+            ("18446744073709551616", "18446744073709551616"),
+        ] {
+            let asked = asked(&format!("since={wire}"));
+            assert_eq!(asked.since, None, "{bad}");
+            assert_eq!(asked.query.since_unix_millis, None, "{bad}");
+            assert_eq!(asked.ignored, vec![("since", bad.to_owned())], "{bad}");
+        }
+        for (good, ms) in [
+            ("0", 0_i64),
+            ("1786197791427", 1_786_197_791_427),
+            ("9223372036854775807", i64::MAX),
+        ] {
+            let asked = asked(&format!("since={good}"));
+            assert_eq!(asked.since, Some(ms), "{good}");
+            assert_eq!(asked.query.since_unix_millis, Some(ms), "{good}");
+            assert!(asked.ignored.is_empty(), "{good}");
+        }
+        let none = asked("");
+        assert_eq!(none.since, None);
+        assert!(!json_query(&none).contains("since"));
+    }
+
+    /// OBSV-01 (D-3200): the union's truncation drops records that WERE read,
+    /// so a page cut by it has older events not on it. Each half below reads
+    /// its whole file -- three lines under a limit of four -- and reports
+    /// `reached_oldest`, yet two of the six read are not served. The merged
+    /// flag said `true` and the page withheld "Older events exist".
+    #[test]
+    fn a_union_cut_by_the_limit_has_not_reached_the_oldest() {
+        let (dir, served) = sink_in("merge-cut");
+        let cli_dir = dir.join(super::CLI_SUBDIR);
+        std::fs::create_dir_all(&cli_dir).expect("the cli half");
+        let ran = telemetry::Sink::open(
+            &telemetry::Config::new(&cli_dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        for _ in 0..3 {
+            let _ = ran.emit(&telemetry::Event::info("cli.sweep", "older cli line"));
+        }
+        for _ in 0..3 {
+            let _ = served.emit(&telemetry::Event::info("api.serve", "server line"));
+        }
+        let query = asked("limit=4").query;
+        let alone = telemetry::tail(&cli_dir, telemetry::DEFAULT_KEEP_FILES, &query);
+        assert!(alone.reached_oldest, "each half on its own read everything");
+
+        let tail = super::both_halves(&dir, Some(&cli_dir), &query);
+        assert_eq!(tail.records.len(), 4, "two read records were cut");
+        assert!(
+            !tail.reached_oldest,
+            "a page missing two read events must not claim the oldest was reached"
+        );
+        let json = json_over(&dir, Some(&cli_dir), &asked("limit=4"), None);
+        assert!(json.contains(r#""reached_oldest":false"#), "{json}");
+
+        // Exactly at the limit nothing is cut and the flag stays honest-true.
+        let exact = super::both_halves(&dir, Some(&cli_dir), &asked("limit=6").query);
+        assert_eq!(exact.records.len(), 6);
+        assert!(exact.reached_oldest, "nothing was cut at limit 6");
+    }
+
     #[test]
     fn the_level_filter_is_applied_to_what_is_returned() {
         let (dir, sink) = sink_in("levels");
@@ -2131,12 +2336,9 @@ mod tests {
     #[test]
     fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
         let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(page.contains("rotation is paused"), "{page}");
         assert!(
-            page.contains("rotation has stopped for the life of this process"),
-            "{page}"
-        );
-        assert!(
-            page.contains("restart the server to resume rotation"),
+            page.contains("Rotation is retried by itself") && page.contains("restart the server"),
             "{page}"
         );
         assert!(
@@ -2460,7 +2662,7 @@ mod tests {
         );
         assert!(
             json.contains(
-                r#""level":null,"target":null,"run":null,"run_key":null,"ignored":[{"param":"level","asked":"eror"},{"param":"run","asked":"12x"}],"sink":"#
+                r#""level":null,"target":null,"run":null,"run_key":null,"since":null,"ignored":[{"param":"level","asked":"eror"},{"param":"run","asked":"12x"}],"sink":"#
             ),
             "{json}"
         );
@@ -2475,7 +2677,7 @@ mod tests {
         );
         assert!(
             json.contains(
-                r#""level":"warn","target":"api.backtest","run":18446744073709551615,"run_key":"18446744073709551615","ignored":[],"sink":"#
+                r#""level":"warn","target":"api.backtest","run":18446744073709551615,"run_key":"18446744073709551615","since":null,"ignored":[],"sink":"#
             ),
             "{json}"
         );

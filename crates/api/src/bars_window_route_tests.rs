@@ -74,6 +74,9 @@ impl Fixture {
 
     async fn get_raw(&self, query: &str) -> (StatusCode, Value) {
         let uri = format!("/bars/window.json?{query}").parse().expect("URI");
+        // ADMITTED THROUGH THE STORE-READ POOL (resources-4, P1-04-01,
+        // D-2593), so this keeps apart from a test that holds every slot.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let (status, headers, body) =
             bars_window_json(axum::extract::State(Loaded::clone(&self.site)), uri).await;
         assert_eq!(headers[0].1, "application/json; charset=utf-8");
@@ -520,5 +523,70 @@ fn a_bar_value_past_two_to_the_fifty_three_is_withheld_by_name_not_rounded() {
     assert!(
         sent["faults"].as_str().expect("named").contains("`v`"),
         "{body}"
+    );
+}
+
+/// resources-4, P1-04-01, D-2593. On the old code `/bars/window.json` and
+/// `/backtest.json` ran inline on an async worker and answered 200 however
+/// many ran at once; with every store-read slot held they now answer 429
+/// before reading anything, the backtest refusal in the body shape its page
+/// parses, and a released slot admits the same window again (200, 4 bars).
+#[tokio::test]
+async fn bars_window_and_backtest_reads_run_in_the_store_read_pool_and_answer_429_when_it_is_full()
+{
+    let fixture = Fixture::new("window-route-admission");
+    let ask = || {
+        format!("/bars/window.json?{QUERY}")
+            .parse::<axum::http::Uri>()
+            .expect("URI")
+    };
+    let apart = crate::detail::apart_from_slot_owners().await;
+    let mut held = crate::detail::take_every_store_read_slot(&apart);
+    let (status, _, body) =
+        bars_window_json(axum::extract::State(Loaded::clone(&fixture.site)), ask()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("bars window read not admitted"), "{body}");
+    assert!(!body.contains(r#""bars""#), "nothing was read: {body}");
+
+    held.extend(crate::detail::take_every_store_read_slot(&apart));
+    let (status, _, body) = crate::backtest::backtest_json(
+        "/backtest.json?limit=1"
+            .parse::<axum::http::Uri>()
+            .expect("a uri"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("was not admitted"), "{body}");
+    assert!(
+        body.contains(r#""runs":[]"#),
+        "the page's own shape: {body}"
+    );
+
+    drop(held);
+    let (status, _, body) =
+        bars_window_json(axum::extract::State(Loaded::clone(&fixture.site)), ask()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sent: Value = serde_json::from_str(&body).expect("window JSON");
+    assert_eq!(sent["total"], 4, "{body}");
+    drop(apart);
+    // AND BOTH HANDLERS CALL THE POOL, read off the source so a later inline
+    // rewrite cannot keep this test green by luck.
+    let server = include_str!("server.rs");
+    let window = server
+        .split_once("\nasync fn bars_window_json(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    assert!(
+        window.contains("crate::detail::run_store_read("),
+        "{window}"
+    );
+    let backtest = include_str!("backtest.rs");
+    let handler = backtest
+        .split_once("\npub async fn backtest_json(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    assert!(
+        handler.contains("crate::detail::run_store_read("),
+        "{handler}"
     );
 }

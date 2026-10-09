@@ -1,8 +1,10 @@
 import {ask} from './ask.js';
 import {createPageRequests} from './page-requests.js';
+import {commandReply,refusalFrom,refusalSentence} from './refusal.js';
 import {validateNativeResearchPolicy} from './boolean-launch.js';
 import {validateIndexConsistencyPolicy} from './index-consistency.js';
 import {CAMPAIGN_RUNGS} from './boolean-campaign.js';
+import {IST_OFFSET_MS} from './ist.js';
 import {sweepOutcome} from './sweep.js';
 // @ts-expect-error Node strips erasable TypeScript; the browser resolves this source too.
 import {liveAttemptKey} from './live-progress.ts';
@@ -68,7 +70,7 @@ export function validateIndexStopMetadata(v){
 function month(value,label){if(typeof value!=='string'||!/^[0-9]{4}-(0[1-9]|1[0-2])$/.test(value)||value.startsWith('0000'))throw new Error(`${label} needs an explicit month.`);return {year:Number(value.slice(0,4)),month:Number(value.slice(5)),key:value};}
 /** Server response time only; the browser clock never certifies a full month.
  * @param {any} header */
-export function indexStopServerMonth(header){if(typeof header!=='string')return null;const parsed=Date.parse(header);if(!Number.isFinite(parsed)||new Date(parsed).toUTCString()!==header)return null;const ist=new Date(parsed+19800000),year=ist.getUTCFullYear();return year>=1&&year<=9999?`${String(year).padStart(4,'0')}-${String(ist.getUTCMonth()+1).padStart(2,'0')}`:null;}
+export function indexStopServerMonth(header){if(typeof header!=='string')return null;const parsed=Date.parse(header);if(!Number.isFinite(parsed)||new Date(parsed).toUTCString()!==header)return null;const ist=new Date(parsed+IST_OFFSET_MS),year=ist.getUTCFullYear();return year>=1&&year<=9999?`${String(year).padStart(4,'0')}-${String(ist.getUTCMonth()+1).padStart(2,'0')}`:null;}
 /** Display the preceding minute/daily context month required by the strict
  * native loader. This does not certify that its files or candles exist.
  * @param {string} first */
@@ -142,7 +144,7 @@ export function createIndexStopLaunch({changed,request=ask,visible=()=>typeof do
  const publish=()=>{if(!disposed)changed(freeze(structuredClone(state)));};
  /** @param {unknown} why */const unknown=why=>{state={...state,phase:'unknown',why:why instanceof Error?why.message:String(why)};publish();};
  /** @param {import('./page-requests.js').ReadTicket} ticket */
- async function observe(ticket){try{const response=await request(`/backtest/run.json?attempt=${encodeURIComponent(state.attempt)}`,{cache:'no-store',signal:ticket.signal});if(!ticket.current())return;if(!response.ok)throw new Error(`This exact attempt could not be read (HTTP ${response.status}); its launch will not be resent.`);const body=await response.json();if(!ticket.current())return;state=indexStopLaunchObservation(body?.running,state.plan,state.attempt,state);failures=0;publish();}catch(why){if(ticket.current()){failures=Math.min(4,failures+1);unknown(why);}}finally{if(ticket.current()&&visible()&&['running','unknown'].includes(state.phase))reads.schedule(observe,Math.min(30000,interval*2**failures));}}
+ async function observe(ticket){try{const response=await request(`/backtest/run.json?attempt=${encodeURIComponent(state.attempt)}`,{cache:'no-store',signal:ticket.signal});if(!ticket.current())return;if(!response.ok)throw new Error(`This exact attempt could not be read: ${await refusalFrom('/backtest/run.json',response)}; its launch will not be resent.`);const body=await response.json();if(!ticket.current())return;state=indexStopLaunchObservation(body?.running,state.plan,state.attempt,state);failures=0;publish();}catch(why){if(ticket.current()){failures=Math.min(4,failures+1);unknown(why);}}finally{if(ticket.current()&&visible()&&['running','unknown'].includes(state.phase))reads.schedule(observe,Math.min(30000,interval*2**failures));}}
  const recheck=()=>{if(disposed||!uint(state.attempt)||postAbort)return;reads.cancel();if(visible())return reads.run(observe);};
  const unlisten=listen(()=>{reads.cancel();if(visible()&&['running','unknown'].includes(state.phase))void recheck();});
  return {
@@ -150,10 +152,12 @@ export function createIndexStopLaunch({changed,request=ask,visible=()=>typeof do
    if(disposed||!plans.has(plan))throw new Error('A validated current plan is required before clicking Run sweep.');
    if(postAbort||['starting','running','unknown'].includes(state.phase))throw new Error('The previous request is still active or unconfirmed; no duplicate launch is allowed.');
    reads.cancel();failures=0;const ticket=++epoch,abort=new AbortController();postAbort=abort;state={phase:'starting',attempt:null,plan,searchIdentity:null,completedBatches:null,exhausted:null,qualifications:[],report:null,why:''};publish();
-   try{const response=await request('/engine/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(plan),signal:abort.signal});if(disposed||ticket!==epoch)return;const body=await response.json();if(disposed||ticket!==epoch)return;
+   try{const response=await request('/engine/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(plan),signal:abort.signal});if(disposed||ticket!==epoch)return;
+    // Read once, and a non-2xx keeps its reason (F5, D-3222).
+    const {body,reason}=await commandReply(response);if(disposed||ticket!==epoch)return;
     if(body?.accepted===false&&text(body.refusal)&&response.status!==202&&body.attempt==null&&body.attempt_key==null&&body.started!==true){state={...state,phase:'refused',why:body.refusal};publish();return;}
     if(body?.accepted===true&&uint(body.attempt))state={...state,attempt:body.attempt};
-    if(!response.ok||response.status!==202||body?.accepted!==true||body.refusal!==null||state.attempt===null||body.attempt_key!==undefined&&body.attempt_key!==state.attempt||body.started===false)throw new Error('The launch response is unconfirmed. It may have started; no duplicate request will be sent.');
+    if(!response.ok||response.status!==202||body?.accepted!==true||body.refusal!==null||state.attempt===null||body.attempt_key!==undefined&&body.attempt_key!==state.attempt||body.started===false)throw new Error(`The launch response is unconfirmed (${refusalSentence('/engine/command',response.status,reason)}). It may have started; no duplicate request will be sent.`);
     state={...state,phase:'running'};publish();
    }catch(why){if(!disposed&&ticket===epoch)unknown(why);}finally{if(postAbort===abort)postAbort=null;}
    if(!disposed&&ticket===epoch&&state.phase==='running')await recheck();

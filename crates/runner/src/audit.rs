@@ -225,33 +225,74 @@ pub struct OvernightMove {
 /// bars. One pass, O(bars), at a once-per-report boundary.
 #[must_use]
 pub fn largest_overnight_move(bars: &[indicators::Candle]) -> Option<OvernightMove> {
+    largest_overnight_move_after(None, bars)
+}
+
+/// [`largest_overnight_move`], with the session BEFORE `bars` measured too.
+///
+/// # The overnight into the first signal day (p16num-1, D-2546)
+///
+/// `bars.windows(2)` measures only the overnights INSIDE the slice, so the
+/// move from the last session before the span to the span's first open was
+/// never measured — while the anchored previous-session families read exactly
+/// that session out of the warm-up month. A split effective on a span's first
+/// session lit `gap_down_day` and shifted every previous-day level, and the
+/// D-1540 line named a different, harmless date.
+///
+/// `prior` is that earlier session's LAST record (a daily bar does: its
+/// `close` is the session close); it is measured against `bars`' first open
+/// as one more pair at the front, under the same rules — a different IST day,
+/// a positive close, a tie keeps the earlier session. A `prior` on or after
+/// the first bar's day is ignored rather than trusted. One extra pair, so
+/// still one pass, O(bars), at a once-per-report boundary.
+#[must_use]
+pub fn largest_overnight_move_after(
+    prior: Option<&indicators::Candle>,
+    bars: &[indicators::Candle],
+) -> Option<OvernightMove> {
     let mut best: Option<OvernightMove> = None;
+    if let (Some(before), Some(first)) = (prior, bars.first())
+        && indicators::ist_day(before.ts_micros) < indicators::ist_day(first.ts_micros)
+    {
+        keep_larger(&mut best, before, first);
+    }
     for pair in bars.windows(2) {
         let [before, after] = pair else { continue };
-        let day = indicators::ist_day(after.ts_micros);
-        if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
-            continue;
-        }
-        let ratio = i128::from(after.open.saturating_sub(before.close)) * 1_000_000
-            / i128::from(before.close);
-        // `is_negative`, not `ratio < 0`: zero always fits an `i64`, so the
-        // comparison's boundary was never read and `<=` was an equivalent
-        // mutant (G18-runner, D-2055).
-        let ppm = i64::try_from(ratio).unwrap_or(if ratio.is_negative() {
-            i64::MIN
-        } else {
-            i64::MAX
-        });
-        if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
-            best = Some(OvernightMove {
-                day,
-                prior_close: before.close,
-                open: after.open,
-                ppm,
-            });
-        }
+        keep_larger(&mut best, before, after);
     }
     best
+}
+
+/// Measures the overnight from `before`'s close to `after`'s open into `best`
+/// when the two are different IST days and the close is positive, keeping the
+/// earlier of two equal magnitudes.
+fn keep_larger(
+    best: &mut Option<OvernightMove>,
+    before: &indicators::Candle,
+    after: &indicators::Candle,
+) {
+    let day = indicators::ist_day(after.ts_micros);
+    if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
+        return;
+    }
+    let ratio =
+        i128::from(after.open.saturating_sub(before.close)) * 1_000_000 / i128::from(before.close);
+    // `is_negative`, not `ratio < 0`: zero always fits an `i64`, so the
+    // comparison's boundary was never read and `<=` was an equivalent
+    // mutant (G18-runner, D-2055).
+    let ppm = i64::try_from(ratio).unwrap_or(if ratio.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    });
+    if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
+        *best = Some(OvernightMove {
+            day,
+            prior_close: before.close,
+            open: after.open,
+            ppm,
+        });
+    }
 }
 
 /// What a stock's report says when its bars hold no overnight to measure:
@@ -411,7 +452,7 @@ pub fn render(
     exits: Option<&Grid>,
     folds: Option<&Validated>,
     overfit: Option<&Pbo>,
-    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, Option<usize>)>,
     rows: usize,
 ) -> String {
     render_selected(scope, taken, exits, None, folds, overfit, boot, rows)
@@ -441,7 +482,7 @@ pub fn render_selected(
     selected: Option<&Cell>,
     folds: Option<&Validated>,
     overfit: Option<&Pbo>,
-    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, Option<usize>)>,
     rows: usize,
 ) -> String {
     let mut out = String::with_capacity(4_096);
@@ -869,7 +910,12 @@ fn excursion_block(out: &mut String, cell: &Cell) {
         (
             "mean MAE, winners only",
             ppm_pct(cell.winner_mae),
-            "the tightest stop that keeps every winner",
+            // Z1-slice00-F1, D-2537. This note said "the tightest stop that
+            // keeps every winner". The value is `adverse_won / n`, a MEAN, so a
+            // stop placed there cuts every winner that went further than the
+            // average one. D-0281 corrected the same claim on `cli results` and
+            // left this copy owed. The bound is the WORST row above.
+            "a mean, NOT a stop level: winners past it would be cut",
         ),
         (
             "mean MFE, winners only",
@@ -1246,8 +1292,9 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         let _ = writeln!(
             out,
             "  SHARPEST: variant {}. Winners went {} ppm against before working, \
-             and {} ppm for. Ratio {}. That adverse figure is the tightest stop \
-             that would not have killed a winner.",
+             and {} ppm for. Ratio {}. Both are means over the winners: a stop \
+             at that adverse figure would have cut every winner that went \
+             further.",
             exit_name(sharp),
             sharp.winner_mae,
             sharp.winner_mfe,
@@ -1313,6 +1360,22 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
             "PARTIAL -- these folds ranked a truncated candidate set"
         },
     );
+    // THE CLOSURE FLAG, READ AND PRINTED (D-4503, audit W3-runner1-3, c4a-7).
+    // A halted fold's `candidates` are not only truncated: `closed` cannot see
+    // a superset on a level that was never finished, so some of them may be
+    // counted and priced as closed when they are not. Unconditional, like the
+    // row above, so a zero is visible.
+    let unproved = v.closure_unproved_folds();
+    row(
+        out,
+        "  whose closure is UNPROVED",
+        &unproved.to_string(),
+        if unproved == 0 {
+            "every fold's candidates were checked against a complete level above"
+        } else {
+            "marked ? below -- their candidates may include sets that are not closed"
+        },
+    );
     row(
         out,
         "  still positive out of sample",
@@ -1339,7 +1402,13 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
             f.chosen_side.map_or("-", |d| d.as_str()),
             f.train_bars,
             f.test_bars,
-            f.considered,
+            // `?` after the count when this fold's closure is unproved
+            // (D-4503); the row above the table says what that means.
+            format!(
+                "{}{}",
+                f.considered,
+                if f.closure_unproved { "?" } else { "" }
+            ),
             f.in_sample.worst,
             f.out_of_sample.worst,
             // THE COLUMN `held_up` ACTUALLY JUDGES, and it was not on this table.
@@ -1442,7 +1511,12 @@ pub fn overfitting(out: &mut String, p: &Pbo) {
 }
 
 /// The three bootstrap tests, side by side.
-pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, named: usize) {
+pub fn bootstrap(
+    out: &mut String,
+    rc: Option<&Verdict>,
+    spa: Option<&Verdict>,
+    named: Option<usize>,
+) {
     let _ = writeln!(out, "BOOTSTRAP");
     let _ = writeln!(
         out,
@@ -1466,17 +1540,35 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
             }
         }
     }
+    // A REFUSED STEPDOWN IS NOT A STEPDOWN THAT NAMED NOTHING (p4num-1,
+    // D-2617). A family too short for the block (D-1990) has no Romano-Wolf
+    // answer; printing it as "names 0" told the reader a stepdown had run and
+    // rejected nothing.
+    let shown = named.map_or_else(|| "REFUSED".to_owned(), |n| n.to_string());
     let _ = writeln!(
         out,
         "  {:<28}{:>12}{:>12}{:>10}",
-        "Romano-Wolf (named)", "-", "-", named
+        "Romano-Wolf (named)", "-", "-", shown
     );
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
-         says WHICH, and it names {named}."
-    );
+    match named {
+        Some(named) => {
+            let _ = writeln!(
+                out,
+                "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
+                 says WHICH, and it names {named}."
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
+                 says WHICH, and it was REFUSED: the family's aligned periods are too \
+                 few for the resampling block, so it named nothing because it ran on \
+                 nothing."
+            );
+        }
+    }
 
     // WHAT THE SAMPLE SIZE WAS WORTH, BESIDE THE P-VALUE IT PRODUCED.
     //
@@ -1535,7 +1627,7 @@ mod tests {
             periods: 3,
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&short), None, 1);
+        bootstrap(&mut out, Some(&short), None, Some(1));
         assert!(out.contains("37.1%"), "the measured rate is shown:\n{out}");
         assert!(
             out.contains("  sample: 3 period(s);"),
@@ -1548,7 +1640,7 @@ mod tests {
             ..short
         };
         let mut said = String::new();
-        bootstrap(&mut said, Some(&between), None, 1);
+        bootstrap(&mut said, Some(&between), None, Some(1));
         assert!(said.contains("  sample: 57 period(s);"), "{said}");
         assert!(said.contains("30 periods: measured 13.3%"), "{said}");
         assert!(
@@ -1561,7 +1653,7 @@ mod tests {
             ..short
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&long), None, 1);
+        bootstrap(&mut out, Some(&long), None, Some(1));
         assert!(out.contains("nominal"), "a long sample says so:\n{out}");
         assert!(
             !out.contains("READ THE TWO ROWS ABOVE"),
@@ -1902,7 +1994,7 @@ mod tests {
             Some(selected),
             Some(&Validated::default()),
             Some(&probability_of_overfitting(&[])),
-            Some((None, None, 0)),
+            Some((None, None, Some(0))),
             10,
         )
     }
@@ -2658,13 +2750,65 @@ mod tests {
         );
         assert!(
             out.contains("41 ppm against"),
-            "the sniper figure is the tightest stop that would not have killed a \
-             winner, and it must appear as a number"
+            "the sniper figure is the winners' MEAN adverse excursion, and it \
+             must appear as a number"
         );
         assert!(
             out.contains("depend on intra-bar ordering"),
             "four ambiguous bars must be reported as uncertainty, not hidden"
         );
+    }
+
+    /// THE WINNERS' MEAN ADVERSE EXCURSION IS NEVER CALLED A STOP LEVEL.
+    ///
+    /// Z1-slice00-F1, D-2537. Two winners that went 0 and 100 ppm against have
+    /// a `winner_mae` of 50; a stop at 50 cuts the second. The strategy report
+    /// noted that row "the tightest stop that keeps every winner" and the
+    /// SHARPEST line said "the tightest stop that would not have killed a
+    /// winner" -- both fail this test on the old strings. Every permutation of
+    /// zero, one and both winners, and a cell with no winners at all, is
+    /// rendered, through both surfaces.
+    #[test]
+    fn the_winner_mae_is_never_called_a_stop_level() {
+        let row = |out: &str, label: &str| -> String {
+            let head = format!("  {label}");
+            for line in out.lines() {
+                if line.starts_with(&head) {
+                    return line.to_owned();
+                }
+            }
+            String::new()
+        };
+        for (wins, winner_mae, worst_mae) in [(0_u64, 0, 0), (1, 0, 0), (1, 100, 100), (2, 50, 100)]
+        {
+            let cell = crate::grid::Cell {
+                trades: 2,
+                wins,
+                pessimistic: 100,
+                optimistic: 100,
+                winner_mae,
+                winner_mfe: 400,
+                worst_mae,
+                ..crate::grid::Cell::default()
+            };
+            let mut out = String::new();
+            strategy_report(&mut out, &cell, "SL·TP", CostScope::IndexSpot);
+            assert!(!out.contains("tightest stop"), "{out}");
+            let mean = row(&out, "mean MAE, winners only");
+            assert!(
+                mean.contains("mean") && mean.contains("NOT a stop"),
+                "{mean}"
+            );
+            assert!(
+                row(&out, "WORST MAE, any single trade").contains("THE BOUND"),
+                "{out}"
+            );
+        }
+        let mut out = String::new();
+        grid(&mut out, &populated_grid(), 10);
+        assert!(out.contains("SHARPEST"), "{out}");
+        assert!(!out.contains("tightest stop"), "{out}");
+        assert!(out.contains("Both are means"), "{out}");
     }
 
     /// The risk-policy winner can differ from the unconstrained money maximum;
@@ -2866,7 +3010,7 @@ mod tests {
             strategies: 20,
         };
         let mut out = String::new();
-        bootstrap(&mut out, Some(&clears), Some(&fails), 2);
+        bootstrap(&mut out, Some(&clears), Some(&fails), Some(2));
 
         assert!(out.contains("White's Reality Check"));
         assert!(out.contains("Hansen's SPA"));
@@ -2912,7 +3056,7 @@ mod tests {
             Some(&grid_in),
             Some(&folds),
             Some(&over),
-            Some((None, None, 0)),
+            Some((None, None, Some(0))),
             10,
         );
 
@@ -2934,12 +3078,86 @@ mod tests {
     #[test]
     fn a_refused_bootstrap_is_shown_as_refused_and_never_as_a_pass() {
         let mut out = String::new();
-        bootstrap(&mut out, None, None, 0);
+        bootstrap(&mut out, None, None, None);
         assert!(out.contains("REFUSED"));
         assert!(
             !out.contains("yes"),
             "a test that was refused must never render as clearing"
         );
+    }
+
+    /// p4num-1 / D-2617: a refused stepdown is printed as REFUSED on its own
+    /// row and in its sentence, never as "names 0"; a stepdown that ran and
+    /// rejected nothing still prints 0.
+    #[test]
+    fn a_refused_romano_wolf_is_never_printed_as_naming_zero() {
+        let mut refused = String::new();
+        bootstrap(&mut refused, None, None, None);
+        let row = refused
+            .lines()
+            .find(|line| line.contains("Romano-Wolf (named)"))
+            .expect("the stepdown row");
+        assert!(row.trim_end().ends_with("REFUSED"), "{row}");
+        assert!(!refused.contains("names 0"), "{refused}");
+        assert!(refused.contains("it was REFUSED"), "{refused}");
+
+        let mut ran = String::new();
+        bootstrap(&mut ran, None, None, Some(0));
+        let row = ran
+            .lines()
+            .find(|line| line.contains("Romano-Wolf (named)"))
+            .expect("the stepdown row");
+        assert!(row.trim_end().ends_with('0'), "{row}");
+        assert!(ran.contains("it names 0."), "{ran}");
+    }
+
+    /// p5num-4 / D-2712: an all-winner variant with no drawdown prints `no DD`,
+    /// not the `i64::MAX` sentinel as a ratio, and no average of nothing.
+    #[test]
+    fn the_strategy_report_never_prints_a_sentinel_or_an_empty_mean_as_measured() {
+        let all_won = crate::grid::Cell {
+            trades: 3,
+            wins: 3,
+            pessimistic: 900,
+            optimistic: 900,
+            gross_win: 900,
+            best_trade: 300,
+            min_win: 300,
+            max_drawdown: 0,
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(all_won.return_over_drawdown(), i64::MAX);
+        let mut out = String::new();
+        super::strategy_report(&mut out, &all_won, "x", CostScope::IndexSpot);
+        assert!(!out.contains("92233720368547758"), "{out}");
+        let row = |label: &str| {
+            out.lines()
+                .find(|l| l.contains(label))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(row("return over drawdown").contains("no DD"), "{out}");
+        assert!(row("avg losing trade").contains("no losing trade"), "{out}");
+        assert!(!row("avg winning trade").contains('-'), "{out}");
+
+        let none_won = crate::grid::Cell {
+            trades: 2,
+            wins: 0,
+            pessimistic: -200,
+            optimistic: -200,
+            gross_loss: -200,
+            worst_trade: -100,
+            max_drawdown: 200,
+            ..crate::grid::Cell::default()
+        };
+        let mut out = String::new();
+        super::strategy_report(&mut out, &none_won, "y", CostScope::IndexSpot);
+        let line = out
+            .lines()
+            .find(|l| l.contains("avg winning trade"))
+            .unwrap_or_default();
+        assert!(line.contains("no winning trade"), "{out}");
+        assert!(!line.contains("0.00"), "{out}");
     }
 
     /// o1runner-11 / D-1195: the cut table sorts only its shown rows, and
@@ -3539,6 +3757,84 @@ mod overnight_tests {
             (-510_000..=-490_000).contains(&found.ppm),
             "a 1:2 split is a move of about -50%: {found:?}"
         );
+    }
+
+    /// A SPLIT ON THE FIRST SIGNAL DAY IS THE NAMED OVERNIGHT MOVE WHEN THE
+    /// SESSION BEFORE THE SPAN IS GIVEN. p16num-1, D-2546.
+    ///
+    /// The span starts ON the split session, so `bars.windows(2)` never sees
+    /// the pre-split close and the old measure named a small in-span overnight
+    /// instead. With the prior session's daily record (close 20,002.00) and a
+    /// first open of 10,001.00 the named day is the first signal day and the
+    /// move is -500,000 ppm. A prior on the first day itself, or after it, is
+    /// ignored; no prior, an empty span and a non-positive prior close each
+    /// fall back to the in-span answer.
+    #[test]
+    fn a_split_on_the_first_signal_day_is_the_named_overnight_move() {
+        let (bars, first) = split_at_twenty();
+        let span = &bars[first..];
+        let first_day = indicators::ist_day(span[0].ts_micros);
+        let in_span = largest_overnight_move(span).expect("ten sessions have overnights");
+        assert_ne!(in_span.day, first_day, "the old measure cannot see it");
+        assert_eq!(
+            super::largest_overnight_move_after(None, span),
+            Some(in_span)
+        );
+
+        let previous = bars[first - 1];
+        let daily = |ts: i64, close: i64| Candle::new(ts, close, close, close, close, 0, i64::MIN);
+        let first_open = Candle::new(
+            span[0].ts_micros,
+            1_000_100,
+            1_000_100,
+            1_000_100,
+            1_000_100,
+            0,
+            i64::MIN,
+        );
+        let mut seeded_span = span.to_vec();
+        seeded_span[0] = first_open;
+        let seeded = super::largest_overnight_move_after(
+            Some(&daily(previous.ts_micros, 2_000_200)),
+            &seeded_span,
+        )
+        .expect("a seeded span has an overnight");
+        assert_eq!(seeded.day, first_day);
+        assert_eq!(seeded.prior_close, 2_000_200);
+        assert_eq!(seeded.open, 1_000_100);
+        assert_eq!(seeded.ppm, -500_000);
+
+        // A prior on the first signal day, or later, is not an overnight.
+        for ts in [span[0].ts_micros - 1, span[0].ts_micros, span[1].ts_micros] {
+            assert!(indicators::ist_day(ts) >= first_day, "fixture: {ts}");
+            let same = super::largest_overnight_move_after(Some(&daily(ts, 2_000_200)), span);
+            assert_eq!(same, Some(in_span), "prior at {ts} is ignored");
+        }
+        // A non-positive prior close is skipped like any other.
+        for close in [0, -1, i64::MIN] {
+            let skipped =
+                super::largest_overnight_move_after(Some(&daily(previous.ts_micros, close)), span);
+            assert_eq!(skipped, Some(in_span), "close {close}");
+        }
+        // An empty span has nothing to measure the prior against.
+        assert_eq!(
+            super::largest_overnight_move_after(Some(&daily(previous.ts_micros, 2_000_200)), &[]),
+            None
+        );
+        // One bar plus a prior is exactly one overnight.
+        let one = super::largest_overnight_move_after(
+            Some(&daily(previous.ts_micros, 2_000_200)),
+            &seeded_span[..1],
+        );
+        assert_eq!(one.map(|m| (m.day, m.ppm)), Some((first_day, -500_000)));
+        // A tie keeps the EARLIER session: the seed, measured first.
+        let tie = [
+            Candle::new(span[0].ts_micros, 100, 100, 100, 100, 0, i64::MIN),
+            Candle::new(span[375].ts_micros, 200, 200, 200, 200, 0, i64::MIN),
+        ];
+        let tied = super::largest_overnight_move_after(Some(&daily(previous.ts_micros, 50)), &tie)
+            .expect("two overnights");
+        assert_eq!(tied.day, first_day, "+100% then +100%: the earlier is kept");
     }
 
     /// ONLY A SESSION BOUNDARY IS AN OVERNIGHT MOVE. A jump inside a session

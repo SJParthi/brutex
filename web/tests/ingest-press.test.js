@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
+import * as refusal from '../src/lib/refusal.js';
 
 const source = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
 const ast = /** @type {any} */ (parse(source, { modern: true }));
@@ -34,7 +35,8 @@ const flush = () => new Promise((done) => setImmediate(done));
 
 /** The actual `start`, `runPull` and `stopWatching`, over stubs. */
 function ingest() {
-  const create = new Function('hooks', `
+  // The refusal helpers `runPull` names (F5, D-3222).
+  const create = new Function('hooks', ...Object.keys(refusal), `
     let showProblems=false, problems=[], phase='idle', pressing=false, receipt=null, receipts=[], outcomes=[],
       outcomeIndex=new Map(), samples=[], netError=null, pollError=null, aborted=false, passSummary=null,
       runState=null, askedKeys=new Set(), sent=null, baseline=null, live=null, startedAt=0, lastGrowthAt=0,
@@ -52,7 +54,7 @@ function ingest() {
     snapshot() { const d = deferred(); hooks.snapshots.push(d); return d.promise; },
     /** @type {(url:string,o:any)=>Promise<Response>} */
     request: async (url) => { if (url === '/pull/run') hooks.posts++; return Response.json({ started: true }, { status: 202 }); } };
-  return { app: create(hooks), hooks };
+  return { app: create(hooks, ...Object.values(refusal)), hooks };
 }
 
 test('a second Pull press during the pre-run census is refused, not run', async () => {

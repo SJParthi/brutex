@@ -931,6 +931,45 @@ impl Decoded {
 /// instruments beside real ones, and they would be indistinguishable later.
 const TEST_MARKERS: [&str; 2] = ["NSETEST", "BSETEST"];
 
+/// Whether `field` carries one of [`TEST_MARKERS`] once every ASCII whitespace
+/// byte is removed and every ASCII letter upper-cased (audit satk-1, D-4507).
+/// It holds the case-blind scan D-3152 added on the other branch, and folds
+/// whitespace too, so the merge keeps this one (D-4653).
+///
+/// That is at least the normalisation the identity gets: [`collapse_spaces`]
+/// removes spaces and [`Symbol::new`] upper-cases, so a marker spelled
+/// `NSE TEST`, `nse test` or `BSE\tTest` would otherwise reach the store as
+/// the very symbol the marker names. Whitespace other than a space is folded
+/// too, though `Symbol::new` refuses it anyway: a filter that is broader than
+/// the identity rule cannot let a test listing through.
+///
+/// # Cost
+///
+/// O(1). It runs after [`MasterRow::over_wide`], so `field` is at most
+/// [`MAX_FIELD_BYTES`] bytes and fits the stack buffer exactly; the `zip`
+/// cannot drop a byte of a field that passed that gate. Two needles of seven
+/// bytes over at most 64 folded bytes: a fixed bound, no allocation. The
+/// 64-byte edge is exercised by
+/// `core::vendor::tests::a_test_marker_is_found_whatever_its_spacing_or_case`;
+/// no bench times it, so the time is UNVERIFIED (`docs/06-limits.md`).
+fn holds_test_marker(field: &str) -> bool {
+    let mut folded = [0u8; MAX_FIELD_BYTES];
+    let mut len = 0usize;
+    for (slot, byte) in folded
+        .iter_mut()
+        .zip(field.bytes().filter(|byte| !byte.is_ascii_whitespace()))
+    {
+        *slot = byte.to_ascii_uppercase();
+        len = len.saturating_add(1);
+    }
+    let folded = folded.get(..len).unwrap_or_default();
+    TEST_MARKERS.iter().any(|marker| {
+        folded
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+    })
+}
+
 /// `name` with every ASCII space removed, on the stack.
 ///
 /// Returns the bytes in a fixed buffer rather than a `String`: this runs on
@@ -1471,10 +1510,14 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     }
     let exchange = Exchange::Nse;
 
-    if TEST_MARKERS
-        .iter()
-        .any(|m| row.underlying.contains(m) || row.trading_symbol.contains(m))
-    {
+    // ON THE SPELLING THE IDENTITY WILL HAVE, NOT ON THE RAW FIELD (audit
+    // satk-1, D-4507). The scan used to read the raw bytes, case-sensitive,
+    // while the identity below is built by `collapse_spaces` and `Symbol::new`,
+    // which remove spaces and upper-case. So `NSE TEST`, `BSE TEST 1` and
+    // `nsetest` passed the filter and were filed as the real indices
+    // `NSETEST`, `BSETEST1` and `NSETEST`. Case-blind as D-3152 required:
+    // `031nsetest` is caught too.
+    if holds_test_marker(row.underlying) || holds_test_marker(row.trading_symbol) {
         return declined(Skip::TestInstrument);
     }
 
@@ -1614,7 +1657,14 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // rather than a choice. `INDIA VIX` needs no row there: it collapses to
     // `INDIAVIX`, which is already what Groww writes.
     let underlying = if ty == "IDX" {
-        let collapsed = collapse_spaces(name)?;
+        let mut collapsed = collapse_spaces(name)?;
+        // THE ALIAS IS LOOKED UP ON THE FOLDED NAME, because `Symbol::new`
+        // folds case one line later. Unfolded, `Nifty 50` missed the alias and
+        // was kept as a second index `NIFTY50` beside `NIFTY` -- identity
+        // decided case-sensitively in one step and case-blind in the next.
+        // Folding here changes nothing else: the symbol would be folded anyway.
+        // D-3153.
+        collapsed.bytes.make_ascii_uppercase();
         match vendor.index_alias(collapsed.as_str()) {
             Some(canonical) => Symbol::new(canonical)?,
             None => Symbol::new(collapsed.as_str())?,
@@ -2011,6 +2061,79 @@ mod tests {
                 Some(Skip::TestInstrument),
                 "{u} must be skipped"
             );
+        }
+    }
+
+    /// Audit satk-1, D-4507. Every spacing and case of a test marker is
+    /// declined, on an index row (where spaces are legal and collapsed into the
+    /// identity) and on a contract row, in either field. Before the fix
+    /// `NSE TEST`, `BSE TEST 1` and `nsetest` were KEPT as real indices.
+    #[test]
+    fn a_test_marker_is_found_whatever_its_spacing_or_case() {
+        let spellings = [
+            "NSETEST",
+            "NSE TEST",
+            "BSE TEST 1",
+            "nsetest",
+            "NseTest",
+            "nse test",
+            " N S E T E S T ",
+            "BSE\tTEST",
+            "031NSE TEST",
+            "Bse  Test01",
+            "XNSETESTX",
+            "BSETES T",
+        ];
+        for written in spellings {
+            // `row` copies the underlying into the trading symbol, so each
+            // field is isolated by giving the other a clean real name.
+            let mut by_underlying = row("NSE", "CASH", written, "IDX", "", "");
+            by_underlying.trading_symbol = "NIFTY";
+            assert_eq!(
+                groww(by_underlying).map(Decoded::skip),
+                Ok(Some(Skip::TestInstrument)),
+                "index row underlying {written:?}"
+            );
+            let mut contract = row("NSE", "FNO", written, "FUT", "2036-11-27", "");
+            contract.trading_symbol = "NIFTY36DECFUT";
+            assert_eq!(
+                groww(contract).map(Decoded::skip),
+                Ok(Some(Skip::TestInstrument)),
+                "contract row underlying {written:?}"
+            );
+            let mut by_symbol = row("NSE", "CASH", "NIFTY", "IDX", "", "");
+            by_symbol.trading_symbol = written;
+            assert_eq!(
+                groww(by_symbol).map(Decoded::skip),
+                Ok(Some(Skip::TestInstrument)),
+                "trading symbol {written:?}"
+            );
+        }
+        // At the width gate's limit the whole field is still read: a marker in
+        // its last seven bytes is found.
+        let at_limit = format!("{}NSETEST", "X".repeat(MAX_FIELD_BYTES - 7));
+        assert_eq!(at_limit.len(), MAX_FIELD_BYTES);
+        assert!(super::holds_test_marker(&at_limit));
+        let spaced = format!("{}NSE TEST", " ".repeat(MAX_FIELD_BYTES - 8));
+        assert_eq!(spaced.len(), MAX_FIELD_BYTES);
+        assert!(super::holds_test_marker(&spaced));
+        // And the restraint: near misses and real names are not test listings.
+        for real in [
+            "NIFTY",
+            "NIFTY BANK",
+            "BSE",
+            "NSETES",
+            "NSE-TEST",
+            "BSE TES",
+            "",
+            " ",
+        ] {
+            assert!(!super::holds_test_marker(real), "{real:?}");
+        }
+        for (written, want) in [("NIFTY BANK", "NIFTYBANK"), ("NIFTY", "NIFTY")] {
+            let key = kept(groww(row("NSE", "CASH", written, "IDX", "", "")).expect("ok"))
+                .expect("a real index is kept");
+            assert_eq!(key.underlying.as_str(), want);
         }
     }
 
@@ -2649,7 +2772,7 @@ mod tests {
 
     #[test]
     fn every_series_code_survives_the_open_addressed_table_it_moved_into() {
-        // I-41. `board_of` probes three `MemberIndex` tables instead of
+        // I-41 (row written by D-3504). `board_of` probes three `MemberIndex` tables instead of
         // binary-searching three arrays. A collision that silently dropped a
         // member would not fail to compile and would not look wrong -- it would
         // reclassify a measured bond as `Unrecognised`, which is a LOUD decline

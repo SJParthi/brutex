@@ -80,13 +80,16 @@ use indicators::{Candle, IST_OFFSET_MICROS, OI_NULL};
 /// Microseconds in one minute — the resolution every stored bar is at.
 const MINUTE_MICROS: i64 = 60_000_000;
 
-/// Minutes from IST midnight to the NSE open, 09:15.
+/// Minutes from IST midnight to the NSE open, 09:15: `indicators`' copy, the
+/// one the sweep side of the graph holds.
 ///
 /// The same value as `store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT`,
-/// which `pull::fold` anchors on. `runner` may not name `store`, so the number
-/// is restated, and the cross-crate test named in the module doc is what stops
-/// the two drifting.
-const OPEN_MINUTES_PAST_IST_MIDNIGHT: i64 = 9 * 60 + 15;
+/// which `pull::fold` anchors on. `runner` may not name `store`, and this
+/// restated the number as a private literal until D-3518;
+/// `crates/cli/tests/one_session_open.rs` holds `indicators`' copy to
+/// `pull::session`'s, and the cross-crate test named in the module doc holds
+/// this grid to the fold.
+const OPEN_MINUTES_PAST_IST_MIDNIGHT: i64 = indicators::SESSION_OPEN_MINUTE;
 
 /// Minutes in a day: a period this wide or wider is a daily-class rung, and
 /// keeps the IST-midnight anchor exactly as `pull::fold` does for any bucket of

@@ -134,21 +134,61 @@ fn refuse(why: &str) -> ! {
     std::process::exit(1)
 }
 
+/// A scratch directory that is removed when it goes out of scope.
+///
+/// `loaded` used to hand back a bare `PathBuf` that nothing removed, and the
+/// name carries the process id, so every `cargo bench -p store` left its month
+/// files behind: one run measured 16 directories and 81 MB in `$TMPDIR`
+/// (so1-6, D-4420). A removal that fails is printed with its path and
+/// reason, never swallowed. `process::exit` runs no destructor, so a setup
+/// refusal inside `loaded` removes the directory itself first, through
+/// [`Scratch::refuse`].
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    /// Removes the directory now, printing the path and reason if it stays.
+    fn remove(&self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            println!("BENCH SCRATCH NOT REMOVED — {}: {e}", self.0.display());
+        }
+    }
+
+    /// [`refuse`], after removing the directory `exit` would leave behind.
+    fn refuse(&self, why: &str) -> ! {
+        self.remove();
+        refuse(why)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 /// A bars file holding `n` committed records, and the directory that owns it.
 ///
-/// The directory is returned so it outlives the file; dropping it first would
-/// unlink the bytes the measurement is about.
-fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
+/// The directory is returned so it outlives the file, and it is removed when
+/// the caller drops it. A tuple drops its fields in order, so the file closes
+/// before its directory goes.
+fn loaded(name: &str, n: u64) -> (BarFile, Scratch) {
     let root = std::env::temp_dir().join(format!("brutex-bench-{name}-{}", std::process::id()));
-    let _ignored = std::fs::remove_dir_all(&root);
+    // A directory a crashed run of this same process id left is emptied; any
+    // failure other than its absence refuses rather than measuring over it.
+    match std::fs::remove_dir_all(&root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => refuse(&format!("a stale bench root would not remove: {e}")),
+    }
     // `open_or_create` never creates the store root (D-1522: a missing root
     // on an unmounted volume must refuse), so the bench makes its own first.
     if let Err(e) = std::fs::create_dir_all(&root) {
         refuse(&format!("the bench root would not create: {e}"));
     }
-    let mut file = match BarFile::open_or_create(&root, bench_path(), 7) {
+    let scratch = Scratch(root);
+    let mut file = match BarFile::open_or_create(&scratch.0, bench_path(), 7) {
         Ok(f) => f,
-        Err(e) => refuse(&format!("the bench file would not open: {e}")),
+        Err(e) => scratch.refuse(&format!("the bench file would not open: {e}")),
     };
     // Appended in one batch: `append` requires strictly increasing timestamps,
     // and one call keeps the setup out of the measurement entirely.
@@ -167,9 +207,10 @@ fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
         })
         .collect();
     if let Err(e) = file.append(&batch) {
-        refuse(&format!("the bench file would not fill: {e}"));
+        drop(file);
+        scratch.refuse(&format!("the bench file would not fill: {e}"));
     }
-    (file, root)
+    (file, scratch)
 }
 
 /// 2024-06-01 00:00 IST in epoch microseconds, where every bench bar starts.

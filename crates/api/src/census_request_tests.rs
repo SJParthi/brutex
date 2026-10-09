@@ -3897,3 +3897,38 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
         "the held name's next call met its calendar"
     );
 }
+
+/// **`/calendar.json` is built once per census snapshot, feed and name, and a
+/// refusal or an unheld name is built every time.** W1-api5-5, D-2286.
+///
+/// The repeat is the same body without a build; a name the feed's census does
+/// not hold is answered and never kept, so request text cannot grow the memo;
+/// and a new snapshot, as a pull leaves, drops every kept answer.
+#[tokio::test]
+async fn calendar_json_is_built_once_per_snapshot() {
+    let fixture = nifty_store("census-request-calendar-memo");
+    let memo = &fixture.site.calendar_memo;
+    let start = memo.builds();
+    let (status, first) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{first}");
+    assert!(first.contains(r#""sessions":1"#), "{first}");
+    assert_eq!(fixture.calendar_answer("feed=dhan").await.1, first);
+    assert_eq!(memo.builds() - start, 1, "the repeat built nothing");
+    let (status, named) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{named}");
+    assert_eq!(
+        fixture.calendar_answer("feed=dhan&symbol=NIFTY").await.1,
+        named
+    );
+    assert_eq!(memo.builds() - start, 2, "a held name is kept too");
+    for _ in 0..3 {
+        let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NOSUCH").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    }
+    assert_eq!(memo.builds() - start, 5, "an unheld name is never kept");
+    assert_eq!(memo.len(), 2, "and holds no slot");
+    cold(&fixture);
+    assert_eq!(fixture.calendar_answer("feed=dhan").await.1, first);
+    assert_eq!(memo.builds() - start, 6, "a new snapshot builds again");
+    assert_eq!(memo.len(), 1, "and dropped the older snapshot's answers");
+}

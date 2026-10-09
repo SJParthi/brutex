@@ -3,7 +3,7 @@ import test from 'node:test';
 
 // @ts-expect-error Node 24 strips this module's erasable TypeScript at runtime;
 // the app imports it through SvelteKit's resolver, which also admits `.ts`.
-import { foldLiveProgress, liveAttemptKey, reduceLiveProgress } from '../src/lib/live-progress.ts';
+import { foldLiveProgress, liveAttemptKey, liveLogsPath, reduceLiveProgress } from '../src/lib/live-progress.ts';
 
 const RUN = Object.freeze({
   attempt: 701,
@@ -715,4 +715,24 @@ test('a carry for another attempt does not stand in for this attempt\'s start ma
   const answer = foldLiveProgress(other, RUN, envelope(noMarker, { limit: 200 }));
   assert.equal(answer.progress.phase, 'failed');
   assert.match(answer.progress.why, /start marker/);
+});
+
+test('the live poll is bounded to the attempt start, and only by a usable start', () => {
+  // OBSV-05, D-3204: without `since` the server read every older line of
+  // both halves and the fold refused on the cap or on an old torn line.
+  assert.equal(
+    liveLogsPath('42', { started_micros: 1_786_197_791_427_999 }),
+    '/logs.json?limit=200&run=42&since=1786197791427'
+  );
+  assert.equal(liveLogsPath('42', { started_micros: 0 }), '/logs.json?limit=200&run=42&since=0');
+  assert.equal(liveLogsPath('42', { started_micros: 999 }), '/logs.json?limit=200&run=42&since=0');
+  for (const bad of [undefined, null, -1, 1.5, '1786197791427000', Number.MAX_SAFE_INTEGER + 2, NaN]) {
+    assert.equal(
+      liveLogsPath('42', { started_micros: bad }),
+      '/logs.json?limit=200&run=42',
+      `no guessed bound from ${String(bad)}`
+    );
+  }
+  assert.equal(liveLogsPath('18446744073709551615', null), '/logs.json?limit=200&run=18446744073709551615');
+  assert.equal(liveLogsPath('a&b', {}), '/logs.json?limit=200&run=a%26b');
 });

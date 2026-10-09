@@ -780,19 +780,16 @@ async fn a_window_after_every_discovered_expiry_is_empty_without_claiming_a_fetc
         assert_eq!(record.rows_read, 0);
         assert_eq!(record.bars_stored, 0);
         assert_eq!(record.failures, 0);
-        if also_held {
-            assert!(body.contains("1, resumed rather than refetched"), "{body}");
-            assert!(
-                body.contains("every contract-month with bars owed"),
-                "{body}"
-            );
-        } else {
-            assert!(
-                body.contains("no contract has bars owed within this window"),
-                "{body}"
-            );
-            assert!(!body.contains("Contract-months already held"), "{body}");
-        }
+        // The window is one CLOSED day (a Sunday). Since conc12-1 (D-2535) a
+        // span ends on its last day the calendar does not report closed, so
+        // an all-closed window owes nothing at all and a held contract-month
+        // is never even reached to be counted as resumed: both cases answer
+        // that nothing is owed, and neither claims a fetch.
+        assert!(
+            body.contains("no contract has bars owed within this window"),
+            "{body}"
+        );
+        assert!(!body.contains("resumed rather than refetched"), "{body}");
         assert!(
             !body.contains("the fetched bars were already stored"),
             "{body}"
@@ -997,12 +994,25 @@ async fn rolling_requests_spend_one_shared_permit_per_network_attempt() {
         .expect("owned loopback source")
         .sharing(Some(Arc::clone(&governor)));
 
-        let (status, body, record) = fixture.rolling_report(rolling).await;
+        // L1-R3-5, D-4455: ONE EVENT PER RETRY, and none for a request that
+        // answered first time or was answered with a reason.
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let (status, body, record) = telemetry::in_run(run, fixture.rolling_report(rolling)).await;
         assert_eq!(status, expected_status, "{body}");
         assert_eq!(
             transport.seen.load(std::sync::atomic::Ordering::Relaxed),
             expected_requests
         );
+        let retries = retry_events(run);
+        assert_eq!(retries.len(), expected_requests - 1, "{retries:?}");
+        for retry in &retries {
+            assert_eq!(retry.level, telemetry::Level::Warn);
+            assert!(crate::emitted::says(retry, "what", "rolling request"));
+            assert!(crate::emitted::counts(retry, "status", 500));
+            assert!(crate::emitted::counts(retry, "attempt", 1));
+            assert!(crate::emitted::says(retry, "why", "500"), "{retry:?}");
+        }
         let held = governor.lock().expect("measured shared governor");
         let after = held
             .credit_micro_permits(WindowSpan::Day)
@@ -1208,9 +1218,20 @@ async fn rolling_reason_limits_do_not_truncate_failures_or_committed_counts() {
     assert_eq!(record.rows_read, 7 * 375);
     assert_eq!(record.bars_stored, 375, "six exact replies append nothing");
     assert_eq!(record.failures, 7);
-    assert_eq!(body.matches("OPTIDX MONTH/1 ").count(), 5, "{body}");
-    assert!(!body.contains("OPTIDX MONTH/1 ATM+5"), "{body}");
-    assert!(!body.contains("OPTIDX MONTH/1 ATM+6"), "{body}");
+    // ONE CAUSE, KEPT ONCE PER SHAPE (D-3127). All seven runs failed on the
+    // same obstruction; the sentences differ only in the offset's number, so
+    // `ATM` and the first `ATM+n` are kept and the other five are counted
+    // above and not repeated. This asserted five copies of one cause until
+    // D-3127, which is the receipt that hid a sixth, different cause.
+    assert_eq!(body.matches("OPTIDX MONTH/1 ").count(), 2, "{body}");
+    assert!(body.contains("OPTIDX MONTH/1 ATM CALL"), "{body}");
+    assert!(body.contains("OPTIDX MONTH/1 ATM+1 CALL"), "{body}");
+    for later in ["ATM+2", "ATM+3", "ATM+4", "ATM+5", "ATM+6"] {
+        assert!(
+            !body.contains(&format!("OPTIDX MONTH/1 {later} ")),
+            "{body}"
+        );
+    }
     assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 7);
     assert_eq!(
         fs::read(obstruction).expect("unchanged obstruction"),
@@ -1389,8 +1410,8 @@ fn greek_filing_refuses_an_unaddressable_rung_without_claiming_a_write() {
         &fixture.asked,
         &fixture.site,
         &fixture.wire,
-        fixture.asked.window,
     )
+    .1
     .expect("an unaddressable Greek file must refuse rather than acknowledge");
     assert!(why.contains("no Greek-file timeframe"), "{why}");
     assert!(!fixture.root.join("dhan").exists());
@@ -1443,4 +1464,289 @@ async fn named_pricing_receipt_matches_the_greek_file_commit_or_its_refusal() {
         }
         assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
+}
+
+/// `complete_session` plus three after-close candles whose prices are `null`,
+/// which the decoder skips (D-3122) and which never become a row.
+fn session_with_null_candles() -> String {
+    let mut rows = Vec::new();
+    for minute in 9 * 60 + 15..15 * 60 + 40 {
+        rows.push(format!(
+            r#"["2025-07-01T{:02}:{:02}:00",100,110,90,105,1]"#,
+            minute / 60,
+            minute % 60
+        ));
+    }
+    for minute in 15 * 60 + 40..15 * 60 + 43 {
+        rows.push(format!(
+            r#"["2025-07-01T{:02}:{:02}:00",null,null,null,null,0]"#,
+            minute / 60,
+            minute % 60
+        ));
+    }
+    format!(r#"{{"payload":{{"candles":[{}]}}}}"#, rows.join(","))
+}
+
+/// ROUND 3, D-3182: the F&O chain receipt counted only the rows the decoder
+/// kept, so three candles the vendor sent and the decoder skipped were on
+/// neither the journal's `rows_read` nor the page. The spot path has counted
+/// them since D-3122 and named them since D-3180; the chain path is the same
+/// vendor answer read by the same decoder and must say the same thing.
+#[tokio::test]
+async fn a_named_chain_receipt_counts_and_names_the_candles_the_decoder_skipped() {
+    let mut fixture = Fixture::new(1);
+    let transport = fixture.serve(session_with_null_candles()).await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Stored);
+    assert_eq!(record.bars_stored, 375);
+    assert_eq!(
+        record.rows_read, 388,
+        "the vendor sent 388 candles: 375 stored, 10 after close, 3 skipped"
+    );
+    assert!(
+        body.contains("Candles the decoder skipped"),
+        "the page names the skipped candles: {body}"
+    );
+    assert!(body.contains("3 — 3 null price"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// A later chunk refusal keeps the rows read before it (see
+/// `a_later_named_chunk_refusal_preserves_read_counts_without_filing_a_partial_contract`);
+/// it must keep the skipped candles of those answered chunks the same way.
+#[tokio::test]
+async fn a_refused_contract_keeps_the_skipped_candles_of_its_answered_chunks() {
+    let mut fixture = Fixture::new(1);
+    fixture.asked.window = pull::session::Window::new(
+        Day::new(2025, 7, 1).expect("from day"),
+        Day::new(2025, 7, 2).expect("through day"),
+    )
+    .expect("two generated days");
+    fixture.wire.spec.window_caps = &[(pull::vendor::Granularity::Minute1, 1)];
+    let transport = fixture
+        .serve_replies(
+            vec![
+                (StatusCode::OK, session_with_null_candles()),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "generated permanent refusal".to_owned(),
+                ),
+            ],
+            None,
+        )
+        .await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.bars_stored, 0, "a partial contract is not filed");
+    assert_eq!(
+        record.rows_read, 388,
+        "the first chunk's 385 kept and 3 skipped candles were read"
+    );
+    assert!(body.contains("3 — 3 null price"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+/// ROUND 6 (D-3137). A rolling chunk may cross a month (D-0320, D-1370), and
+/// `file_the_greeks` named its file from the chunk's FIRST day, on the stated
+/// premise that a chunk is one month. A greek stamped in the chunk's second
+/// month was offered to the first month's file and refused as outside it.
+/// Each record now goes to the file of its own IST month.
+#[test]
+fn greeks_in_a_chunk_that_crosses_a_month_are_filed_under_their_own_months() {
+    let fixture = Fixture::new(1);
+    let greek = |ts_micros: i64| store::format::Greek {
+        ts_micros,
+        spot: 2_500_000,
+        volatility: 0.12,
+        delta: 0.5,
+        gamma: 0.01,
+        vega: 0.2,
+        theta: -0.1,
+        rho: 0.05,
+        rate: 0.065,
+        provenance: store::format::Greek::provenance_of(
+            store::format::VOL_FROM_VENDOR,
+            store::format::RATE_FROM_OPERATOR,
+            false,
+            0,
+        ),
+    };
+    // 2025-06-30 15:29 and 2025-07-01 09:15 IST: one chunk, two months.
+    let june = 1_751_277_540_000_000;
+    let july = 1_751_341_500_000_000;
+    let contract = fixture.chain.contracts[0].contract;
+    let why = file_the_greeks(
+        &[greek(june), greek(july)],
+        contract,
+        &fixture.asked,
+        &fixture.site,
+        &fixture.wire,
+    );
+    assert_eq!(why, (2, None), "both months' greeks file");
+    let path = |month: u8| {
+        StorePath::new(PathParts {
+            vendor: fixture.wire.store_vendor,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol: "NIFTY",
+            contract: Some(contract),
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, month).expect("month"),
+            file: FileKind::Greeks,
+        })
+        .expect("an address")
+        .to_path_buf(&fixture.root)
+    };
+    assert!(path(6).is_file(), "June's greek is in June's file");
+    assert!(path(7).is_file(), "July's greek is in July's file");
+}
+
+/// ROUND 7 (D-3139). One greek per month, June then July, 2025.
+fn june_and_july_greeks() -> [store::format::Greek; 2] {
+    let greek = |ts_micros: i64| store::format::Greek {
+        ts_micros,
+        spot: 2_500_000,
+        volatility: 0.12,
+        delta: 0.5,
+        gamma: 0.01,
+        vega: 0.2,
+        theta: -0.1,
+        rho: 0.05,
+        rate: 0.065,
+        provenance: store::format::Greek::provenance_of(
+            store::format::VOL_FROM_VENDOR,
+            store::format::RATE_FROM_OPERATOR,
+            false,
+            0,
+        ),
+    };
+    [greek(1_751_277_540_000_000), greek(1_751_341_500_000_000)]
+}
+
+/// ROUND 7 (D-3139). A group that landed June's bars and not July's files no
+/// July greek: it would join on a stamp with no bar behind it.
+#[test]
+fn greeks_are_kept_only_for_the_months_whose_bars_landed() {
+    let fixture = Fixture::new(1);
+    let june_only = pull::manifest::Held::new(
+        pull::manifest::Entry {
+            key: pull::manifest::EntryKey {
+                contract: Some(fixture.chain.contracts[0].contract),
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Fno,
+                symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                timeframe: Timeframe::MINUTE_1,
+                month: YearMonth::new(2025, 6).expect("June"),
+            },
+            rows: 1,
+            first_ts_micros: 1_751_277_540_000_000,
+            last_ts_micros: 1_751_277_540_000_000,
+        },
+        pull::manifest::Closes::UNKNOWN,
+    );
+    let [june, july] = june_and_july_greeks();
+    assert_eq!(in_landed_months(vec![june, july], &[june_only]), vec![june]);
+    assert_eq!(in_landed_months(vec![june, july], &[]), Vec::new());
+}
+
+/// ROUND 7 (D-3139). June's greek is written, July's file refuses: the count
+/// says one filed and the refusal is named, never zero filed.
+#[test]
+fn a_greek_month_that_refuses_does_not_uncount_the_month_already_filed() {
+    let fixture = Fixture::new(1);
+    let contract = fixture.chain.contracts[0].contract;
+    let july_file = StorePath::new(PathParts {
+        vendor: fixture.wire.store_vendor,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "NIFTY",
+        contract: Some(contract),
+        timeframe: Timeframe::MINUTE_1,
+        month: YearMonth::new(2025, 7).expect("month"),
+        file: FileKind::Greeks,
+    })
+    .expect("an address")
+    .to_path_buf(&fixture.root);
+    fs::create_dir_all(&july_file).expect("block only July's Greek file");
+    let (filed, refused) = file_the_greeks(
+        &june_and_july_greeks(),
+        contract,
+        &fixture.asked,
+        &fixture.site,
+        &fixture.wire,
+    );
+    assert_eq!(filed, 1, "June's greek reached disk and is counted");
+    assert!(refused.is_some(), "July's refusal is named");
+}
+
+/// Every retry decision one log run carries, oldest first.
+fn retry_events(run: u64) -> Vec<telemetry::Record> {
+    crate::emitted::run_story(run)
+        .into_iter()
+        .filter(|record| {
+            record.target == "pull.http" && record.message == "retrying a refused request"
+        })
+        .collect()
+}
+
+/// L1-R3-5, D-4455: THE BARS LADDER LOGS EACH RETRY ONCE, with the vendor's
+/// status, the attempt, the wait and the vendor's words. A 503 and then a
+/// transport-shaped 502 are each re-asked and each logged; the answer that
+/// lands writes no retry, and the window is filed.
+#[tokio::test]
+async fn every_retry_on_the_bars_ladder_is_one_event_with_its_reason() {
+    let _installed = crate::emitted::sink();
+    let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+    let mut fixture = Fixture::new(1);
+    let transport = fixture
+        .serve_replies(
+            vec![
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "generated l1r35 backend refusal".to_owned(),
+                ),
+                (StatusCode::OK, complete_session()),
+            ],
+            None,
+        )
+        .await;
+    let (status, body, record) = telemetry::in_run(run, fixture.report()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.failures, 0);
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let retries = retry_events(run);
+    assert_eq!(retries.len(), 1, "one retry, one event: {retries:?}");
+    let retry = &retries[0];
+    assert_eq!(retry.level, telemetry::Level::Warn);
+    assert!(crate::emitted::says(retry, "what", "window"));
+    assert!(crate::emitted::says(
+        retry,
+        "feed",
+        fixture.asked.feed.wire()
+    ));
+    assert!(crate::emitted::counts(retry, "status", 503));
+    assert!(crate::emitted::counts(retry, "attempt", 1));
+    assert!(crate::emitted::counts(
+        retry,
+        "of",
+        u64::from(THROTTLE_ATTEMPTS)
+    ));
+    assert!(
+        retry
+            .field("wait_ms")
+            .and_then(telemetry::OwnedValue::as_u64)
+            .is_some_and(|ms| ms > 0)
+    );
+    assert_eq!(
+        retry
+            .field("throttled")
+            .and_then(telemetry::OwnedValue::as_bool),
+        Some(false)
+    );
+    assert!(
+        crate::emitted::says(retry, "why", "generated l1r35 backend refusal"),
+        "{retry:?}"
+    );
 }

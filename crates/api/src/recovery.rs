@@ -531,10 +531,16 @@ async fn prepare_reply(site: Loaded, asked: Submission, headers: JsonHeaders) ->
     let predecessor = asked.successor.as_ref().map(|(id, _)| hex(*id));
     // Journal syncs can take time. The blocking worker also survives a browser
     // disconnect; it still cannot claim a run or reach any source/vendor path.
-    let prepared = tokio::task::spawn_blocking(move || prepare_successor(&site, &asked))
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
+    // NAMED INSIDE THE WORKER, which a browser disconnect does not cancel, so
+    // the refusal reaches the log whether or not anybody reads the reply.
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_successor(&site, &asked).inspect_err(|why| {
+            note_blocked(StatusCode::SERVICE_UNAVAILABLE, "prepare", Some(id), why);
+        })
+    })
+    .await
+    .map_err(|dead| task_died("prepare", id, &dead))
+    .and_then(|result| result);
     match prepared {
         Ok(()) => (StatusCode::CREATED, headers, serde_json::json!({
             "started":false,"prepared":true,"plan":hex(id),"windows":count,
@@ -557,22 +563,44 @@ fn update(site: &Site, edit: impl FnOnce(&mut Progress)) {
     }
 }
 
+/// The refusal for a recovery start while a run holds the slot.
+const TWICE: &str = "a pull already owns the run slot; recovery was not started twice";
+
 fn claim(site: &Site, recovery: Option<([u8; 32], bool)>) -> Result<(), String> {
+    // THE CLEAR IS PERSISTED BEFORE THE SLOT IS TAKEN, NOT UNDER IT. Its
+    // journal open, append and up to four fsyncs used to run while this
+    // function held `site.run`, so every poll of `/pull/run.json`, every
+    // chain's progress write and the autopilot's round blocked a Tokio worker
+    // on the device for the whole chain. The plan is not active until the slot
+    // is claimed below, so no STOP can target it in the gap: the clear and the
+    // claim stay atomic with respect to `pull_run_stop`. recovery-5, D-2504.
+    if let Some((id, true)) = recovery {
+        if slot_running(site) {
+            return Err(TWICE.to_owned());
+        }
+        crate::recovery_control::clear_stop(site, id)?;
+    }
     let mut held = site
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if held.as_ref().is_some_and(Progress::running) {
-        return Err("a pull already owns the run slot; recovery was not started twice".to_owned());
+        return Err(TWICE.to_owned());
     }
-    if let Some((id, explicit)) = recovery {
-        if explicit {
-            crate::recovery_control::clear_stop(site, id)?;
-        }
+    if let Some((id, _)) = recovery {
         crate::recovery_control::activate(site, id);
     }
     *held = Some(Progress::claimed());
     Ok(())
+}
+
+/// Whether a run holds the slot, read and released at once.
+fn slot_running(site: &Site) -> bool {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(Progress::running)
 }
 
 fn stopping(site: &Site) -> bool {
@@ -596,6 +624,7 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     let asked = match result {
         Ok(asked) => asked,
         Err(why) => {
+            note_blocked(StatusCode::BAD_REQUEST, "request", None, &why);
             return (
                 StatusCode::BAD_REQUEST,
                 headers,
@@ -610,9 +639,32 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
         // activation pointer, reads source bars, or enters the worker.
         return prepare_reply(site, asked, headers).await;
     }
+    // A PRESS THAT WILL BE REFUSED 409 PAYS NOTHING FIRST. The preflight
+    // replays the plan's journal and the recovery history, O(history), on a
+    // blocking thread, and it ran BEFORE `claim` looked at the slot: every
+    // press while a pull or another recovery ran paid the whole replay to be
+    // told "already owns the run slot", and repeated presses queued replays
+    // on the blocking pool. This probe is one lock read and is advisory only:
+    // `claim` below stays the authority, so a run that starts between the two
+    // is still refused there. P1-04-04, D-2592.
+    //
+    // AND IT IS A REFUSAL LIKE `claim`'s, SO IT IS LOGGED LIKE ONE: stage
+    // `slot`, the plan named (sobs-8, D-4448). Without this the probe turned
+    // the logged 409 back into a silent one. D-2592 and D-4448 met here;
+    // D-4628.
+    if slot_running(&site) {
+        note_blocked(StatusCode::CONFLICT, "slot", Some(id), TWICE);
+        return (
+            StatusCode::CONFLICT,
+            headers,
+            serde_json::json!({"started":false,"why":TWICE}).to_string(),
+        );
+    }
     let preflight_site = Loaded::clone(&site);
     let preflight = tokio::task::spawn_blocking(move || {
-        preflight_submission(&preflight_site, &asked)?;
+        preflight_submission(&preflight_site, &asked).inspect_err(|why| {
+            note_blocked(StatusCode::SERVICE_UNAVAILABLE, "preflight", Some(id), why);
+        })?;
         Ok::<_, String>(asked)
     })
     .await
@@ -630,6 +682,7 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
         }
     };
     if let Err(why) = claim(&site, Some((id, true))) {
+        note_blocked(StatusCode::CONFLICT, "slot", Some(id), &why);
         return (
             StatusCode::CONFLICT,
             headers,
@@ -640,9 +693,11 @@ pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryR
     // seed syncs must not leave a claimed run with no worker. The response
     // still waits for the durable activation result, not mere acceptance.
     let units = asked.successor.is_none().then_some(asked.units);
+    // `activate_durable` names its own refusal, inside the detached task; a
+    // task that died before it could is named here.
     let prepared = tokio::spawn(activate_durable(site, id, units))
         .await
-        .map_err(failure)
+        .map_err(|dead| task_died("activation", id, &dead))
         .and_then(|result| result);
     if let Err(why) = prepared {
         return (
@@ -678,11 +733,62 @@ async fn activate_durable(
             update(&site, |progress| {
                 progress.finished = Some(format!("Recovery BLOCKED: {why}"));
             });
+            note_blocked(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "activation",
+                Some(id),
+                &why,
+            );
             return Err(why);
         }
     };
     let _task = tokio::spawn(drive(site, id, Ok(prepared), true));
     Ok(())
+}
+
+/// A recovery that was asked for and did not start, with why, on the surface
+/// that outlives the reply (sobs-8, D-4448).
+///
+/// # What was kept only in memory
+///
+/// Every refusal of `/pull/recovery` (a body that is not a plan, a preflight
+/// the saved history refuses, a run slot already held, a preparation refused,
+/// an activation BLOCKED) was the HTTP reply's `why` and, for a blocked
+/// activation, `Progress::finished`, which the next press overwrites and a
+/// restart loses. `api.request` logs the status and never the reason. One
+/// event per refused request, at the boundary: never per window.
+///
+/// `Error` for a refusal on this server's side (5xx), `Warn` for one the
+/// request can fix (4xx). `stage` names which check refused; `plan` is the
+/// plan's 64-hex identity, or empty when the body never named one.
+fn note_blocked(code: StatusCode, stage: &str, plan: Option<[u8; 32]>, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if code.is_server_error() {
+                telemetry::Level::Error
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.recovery",
+            "recovery blocked",
+        )
+        .with("stage", telemetry::Value::Str(stage))
+        .with("status", telemetry::Value::Uint(u64::from(code.as_u16())))
+        .with(
+            "plan",
+            telemetry::Value::Str(&plan.map_or_else(String::new, hex)),
+        )
+        .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// A recovery task that ended before it could name its own refusal (a panic
+/// in a build that unwinds, or a runtime shutting down): the runtime's words,
+/// logged once with the stage it died in, and returned for the reply.
+fn task_died(stage: &str, id: [u8; 32], dead: &tokio::task::JoinError) -> String {
+    let why = failure(dead);
+    note_blocked(StatusCode::SERVICE_UNAVAILABLE, stage, Some(id), &why);
+    why
 }
 
 /// Only an already-seeded, explicitly activated plan may resume at boot.
@@ -840,6 +946,47 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
     Ok(journal)
 }
 
+/// What a finished recovery worker answers, given the run's own answer and
+/// whether its terminal control record was written.
+///
+/// The control append's `?` used to return ITS error and drop the run's, so a
+/// plan that blocked on, say, a refused vendor window was reported as only
+/// "No space left on device", and the operator acted on the wrong cause. Both
+/// are kept now: the run's reason first, the record's failure after it. A run
+/// that succeeded but could not record its end is a failure, because the next
+/// process will not see it as finished. conc:recovery-6, D-2798.
+///
+/// The same finding was fixed on zero/next as [`with_terminal`] (recovery-6,
+/// D-2503); the merge keeps both. A run that failed and could not record its
+/// end reads through it ("<cause>; terminal state not recorded: <append
+/// error>"); a run that succeeded and could not record its end keeps the
+/// sentence above, which names that the recovery finished.
+fn terminal_outcome(
+    answer: Result<String, String>,
+    sealed: Result<(), String>,
+) -> Result<String, String> {
+    match (answer, sealed) {
+        (Ok(_), Err(record)) => Err(format!(
+            "the recovery finished, but its end could not be recorded: {record}"
+        )),
+        (answer, sealed) => with_terminal(answer, sealed),
+    }
+}
+
+/// The run's own answer and its terminal control append, combined so that a
+/// refused terminal append never hides the error that ended the run.
+///
+/// The usual reason `execute` fails mid-run is a refused plan-journal append,
+/// which poisons the journal; the terminal append then fails with "poisoned",
+/// and returning that alone replaced the root cause (a full disk, an I/O
+/// error) everywhere it is shown. recovery-6, D-2503.
+fn with_terminal<T>(answer: Result<T, String>, terminal: Result<(), String>) -> Result<T, String> {
+    match (answer, terminal) {
+        (Err(ran), Err(sealed)) => Err(format!("{ran}; terminal state not recorded: {sealed}")),
+        (answer, terminal) => terminal.and(answer),
+    }
+}
+
 async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, explicit: bool) {
     // A caught unwind is not a clean finish; durable InFlight reservations are
     // intentionally left for the next process, still charged to their budget.
@@ -852,20 +999,26 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
             .and_then(|file| file.sync_all())
             .map_err(failure)?;
         let answer = execute(&worker_site, &mut journal, &mut attempts, explicit).await;
-        let mut control = journal
+        let sealed = journal
             .latest
             .get(&CONTROL)
             .cloned()
-            .ok_or("missing plan seal")?;
-        control.status = if answer.is_ok() {
-            Status::Verified
-        } else {
-            Status::Blocked
-        };
-        journal.append(control).map_err(failure)?;
-        answer
+            .ok_or_else(|| "missing plan seal".to_owned())
+            .and_then(|mut control| {
+                control.status = if answer.is_ok() {
+                    Status::Verified
+                } else {
+                    Status::Blocked
+                };
+                journal.append(control).map_err(failure)
+            });
+        terminal_outcome(answer, sealed)
     });
     let result = worker.await.map_err(failure).and_then(|result| result);
+    // A BLOCKED RECOVERY ENDS AT ERROR, NOT INFO. It was Info either way, so
+    // `/logs?level=warn` hid every blocked plan and its reason. conc13-1,
+    // D-2595.
+    let level = recovery_end_level(&result);
     let text = result.unwrap_or_else(|why| format!("Recovery BLOCKED: {why}. Existing source data is preserved; this is not complete coverage."));
     crate::recovery_control::idle(&site);
     update(&site, |progress| {
@@ -876,10 +1029,20 @@ async fn drive(site: Loaded, id: [u8; 32], prepared: Result<Journal, String>, ex
         }
     });
     let _ = telemetry::emit(
-        &telemetry::Event::info("pull.recovery", "recovery ended")
+        &telemetry::Event::new(level, "pull.recovery", "recovery ended")
             .with("plan", telemetry::Value::Str(&hex(id)))
             .with("summary", telemetry::Value::Str(&text)),
     );
+}
+
+/// The level a recovery's end is logged at: Info when it verified, Error when
+/// it was blocked (conc13-1, D-2595).
+const fn recovery_end_level<T>(result: &Result<T, String>) -> telemetry::Level {
+    if result.is_ok() {
+        telemetry::Level::Info
+    } else {
+        telemetry::Level::Error
+    }
 }
 
 fn load_lifecycle(
@@ -924,7 +1087,7 @@ async fn execute(
     attempts: &mut Journal,
     explicit: bool,
 ) -> Result<String, String> {
-    let starting_rows = crate::pullrun::rows_now(site);
+    let starting_rows = crate::pullrun::rows_now_off_worker(site).await;
     let keys: Vec<_> = journal
         .order
         .iter()
@@ -971,6 +1134,7 @@ async fn execute(
         // Reconcile each exact window on explicit resume; do not trust an old
         // green checkpoint after independent store changes. Child budgets stay.
         let assessment = assess(site, &item.body, &lifecycle).await;
+        let mut refused = None;
         match assessment {
             Ok(mut found) => {
                 for day in &found.retry_days {
@@ -988,19 +1152,15 @@ async fn execute(
                 item.status = Status::Blocked;
                 item.diagnostics = 1;
                 note(&item.body, &why);
-                let asked = checked(&item.body, ingest::today_ist().map_err(failure)?)?;
-                site.journal()
-                    .append(&crate::audit::Record::member_failure(
-                        crate::audit::Scope::Spot,
-                        std::time::SystemTime::now(),
-                        symbol(&asked)?,
-                        asked.window,
-                        &why,
-                    ))
-                    .map_err(failure)?;
+                refused = Some(why);
             }
         }
-        journal.append(item).map_err(failure)?;
+        if let Some(why) = refused {
+            let body = item.body.clone();
+            record_blocked(journal, item, || audit_receipt(site, &body, &why))?;
+        } else {
+            journal.append(item).map_err(failure)?;
+        }
         update(site, |progress| {
             if let Some(feed) = progress.feeds.first_mut() {
                 feed.legs_done = feed.legs_done.saturating_add(1);
@@ -1024,6 +1184,42 @@ async fn execute(
         "Reconciliation finished: {} stored windows verified against measured schedule; {} not applicable; {} unverified; {} missing/blocked. This is NOT complete historical coverage or point-in-time identity proof. Details: /pull/recovery.json and /audit. No source data was replaced.",
         counts.0, counts.1, counts.2, counts.3
     ))
+}
+
+/// The `/audit` receipt for a window the plan could not resolve.
+fn audit_receipt(site: &Loaded, body: &str, why: &str) -> Result<(), String> {
+    let asked = checked(body, ingest::today_ist().map_err(failure)?)?;
+    site.journal()
+        .append(&crate::audit::Record::member_failure(
+            crate::audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            symbol(&asked)?,
+            asked.window,
+            why,
+        ))
+        .map_err(failure)
+}
+
+/// Records a window the plan could not resolve: the plan's own Blocked item
+/// FIRST, then the `/audit` receipt `receipt` writes.
+///
+/// The receipt's `?` ran before the item's append, so an audit journal that
+/// refused the receipt (busy, full) aborted the plan with the window never
+/// marked Blocked in it: the next resume found it still Queued and the
+/// operator's plan said nothing about it. The receipt's failure still ends the
+/// pass, loudly and by name; it no longer erases the plan's record.
+/// conc:recauto-2, D-2798.
+fn record_blocked(
+    journal: &mut Journal,
+    item: Record,
+    receipt: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    journal.append(item).map_err(failure)?;
+    receipt().map_err(|why| {
+        format!(
+            "the window is recorded Blocked in the plan, but its /audit receipt was refused: {why}"
+        )
+    })
 }
 
 fn note(body: &str, why: &str) {
@@ -1081,6 +1277,40 @@ fn stored_scope_key(body: &str) -> Result<String, String> {
     ))
 }
 
+/// The shared ledger's rows in its stable first-appearance order.
+/// recovery-3, D-2503.
+///
+/// Named `pending_in_order` on zero/next; renamed in the merge with PR #74's
+/// [`pending_in_order`], which fixed the same finding (conc:recovery-3,
+/// D-2798) and now filters this walk.
+fn ledger_in_order(attempts: &Journal) -> impl Iterator<Item = &Record> {
+    attempts
+        .order
+        .iter()
+        .filter_map(|key| attempts.latest.get(key))
+}
+
+/// The attempts a reconcile pass retries, in the journal's first-appearance
+/// order.
+///
+/// `latest` is a `HashMap`, whose walk order is seeded per process, so walking
+/// it sent the same interrupted requests to the vendor in a different order on
+/// every run and wrote the plan journal's bytes in that order too: two runs
+/// over one store were not byte-identical (`CLAUDE.md` §3 rule 5). `order` is
+/// the journal's own replayed key order, stable across restarts. One `get` per
+/// key. conc:recovery-3, D-2798; recovery-3, D-2503.
+fn pending_in_order(attempts: &Journal, explicit: bool) -> Vec<Record> {
+    ledger_in_order(attempts)
+        .filter(|row| {
+            matches!(
+                row.status,
+                Status::Queued | Status::InFlight | Status::Unverified
+            ) || (explicit && row.status == Status::Blocked)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Reconcile requests interrupted after storage but before their receipt, even
 /// if the parent's gap has disappeared. A lost receipt never invents new-row
 /// counts or marks the old request clean. Explicit reactivation may retry a
@@ -1105,18 +1335,13 @@ async fn reconcile_pending(
             .or_default()
             .push(asked.window);
     }
-    let pending: Vec<_> = attempts
-        .latest
-        .values()
-        .filter(|row| {
-            matches!(
-                row.status,
-                Status::Queued | Status::InFlight | Status::Unverified
-            ) || (explicit && row.status == Status::Blocked)
-        })
-        .cloned()
-        .collect();
-    for mut item in pending {
+    // FIRST-SEEN ORDER, NOT HASH ORDER. `latest` is a `HashMap` with a
+    // per-process seed, so two runs over one attempts.bin reassessed and
+    // appended in different orders and wrote different bytes (§3 rule 5), and
+    // a STOP mid-loop left a different set unreconciled. `order` is the
+    // journal's own stable first-appearance order. recovery-3, D-2503;
+    // conc:recovery-3, D-2798.
+    for mut item in pending_in_order(attempts, explicit) {
         if stopping(site) {
             return Err("stopped while reconciling interrupted requests".to_owned());
         }
@@ -1667,7 +1892,7 @@ async fn retry_day(
             !current.retry_days.is_empty(),
         );
         append_attempt(journal, attempts, item.clone())?;
-        let stored_rows = crate::pullrun::rows_now(site);
+        let stored_rows = crate::pullrun::rows_now_off_worker(site).await;
         update(site, |progress| {
             progress.rows_now = stored_rows;
             progress.retries = progress
@@ -2307,10 +2532,337 @@ mod tests {
             events
                 .iter()
                 .any(|event| crate::emitted::says(event, "plan", &hex(id))
-                    && crate::emitted::says(event, "summary", "Recovery BLOCKED"))
+                    && crate::emitted::says(event, "summary", "Recovery BLOCKED")
+                    // conc13-1, D-2595: a blocked end is Error, not Info, so
+                    // `/logs?level=warn` shows it. Info on the old code.
+                    && event.level == telemetry::Level::Error)
+        );
+        assert_eq!(
+            recovery_end_level(&Ok::<(), String>(())),
+            telemetry::Level::Info
+        );
+        assert_eq!(
+            recovery_end_level(&Err::<(), String>(String::new())),
+            telemetry::Level::Error
         );
         assert!(!site.run.lock().unwrap().as_ref().unwrap().running());
         assert!(!root.exists());
+    }
+
+    /// **An unresolved window is recorded Blocked in the plan even when its
+    /// `/audit` receipt is refused.** conc:recauto-2, D-2798.
+    #[test]
+    fn a_refused_audit_receipt_does_not_erase_the_blocked_window() {
+        let root = crate::scratch::path("recovery-blocked-first");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut item = record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "scan",
+        ));
+        item.status = Status::Blocked;
+        let key = item.key;
+        let why = record_blocked(&mut plan, item.clone(), || {
+            Err("audit journal is busy".to_owned())
+        })
+        .unwrap_err();
+        assert!(
+            why.contains("recorded Blocked") && why.ends_with("audit journal is busy"),
+            "{why}"
+        );
+        assert_eq!(
+            plan.latest.get(&key).map(|row| row.status),
+            Some(Status::Blocked)
+        );
+        drop(plan);
+        let reopened = Journal::open(&root.join("plan.bin")).unwrap();
+        assert_eq!(
+            reopened.latest.get(&key).map(|row| row.status),
+            Some(Status::Blocked),
+            "durably, before the receipt was tried"
+        );
+        drop(reopened);
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        let mut ran = false;
+        record_blocked(&mut plan, item, || {
+            ran = true;
+            Ok(())
+        })
+        .expect("a written receipt");
+        assert!(ran, "the receipt is still written");
+        drop(plan);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A failed terminal record never replaces the reason a recovery ended.**
+    /// conc:recovery-6, D-2798. All four combinations.
+    #[test]
+    fn a_failed_terminal_record_keeps_the_reason_the_run_ended() {
+        let ok = || Ok::<String, String>("Recovery complete".to_owned());
+        let blocked = || Err::<String, String>("vendor refused a window".to_owned());
+        let full = || Err::<(), String>("No space left on device".to_owned());
+        assert_eq!(terminal_outcome(ok(), Ok(())), ok());
+        assert_eq!(terminal_outcome(blocked(), Ok(())), blocked());
+        let both = terminal_outcome(blocked(), full()).unwrap_err();
+        assert!(
+            both.starts_with("vendor refused a window;")
+                && both.ends_with("No space left on device"),
+            "{both}"
+        );
+        let unrecorded = terminal_outcome(ok(), full()).unwrap_err();
+        assert!(
+            unrecorded.contains("could not be recorded")
+                && unrecorded.ends_with("No space left on device"),
+            "{unrecorded}"
+        );
+    }
+
+    /// **A reconcile pass retries interrupted attempts in the journal's own
+    /// order, every run.** conc:recovery-3, D-2798. Thirty-two keys make a
+    /// `HashMap` walk that matches insertion order vanishingly unlikely, and
+    /// every status is covered: only `Queued`, `InFlight` and `Unverified` are
+    /// retried, `Blocked` only on an explicit reactivation, and a key appended
+    /// twice keeps its first position with its latest state.
+    #[test]
+    fn interrupted_attempts_are_reconciled_in_journal_order() {
+        let root = crate::scratch::path("recovery-pending-order");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut attempts = Journal::open(&root.join("attempts.bin")).unwrap();
+        let statuses = [
+            Status::Queued,
+            Status::InFlight,
+            Status::Unverified,
+            Status::Blocked,
+            Status::Verified,
+            Status::Exhausted,
+        ];
+        let mut written = Vec::new();
+        for day in 1..=32_u32 {
+            let mut row = record(canonical(
+                "NIFTY",
+                "1min",
+                Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+                &format!("gap{day}"),
+            ));
+            row.status = statuses[day as usize % statuses.len()];
+            attempts.append(row.clone()).unwrap();
+            written.push(row);
+        }
+        // The first key again, now Unverified: its place stays first.
+        let mut first = written[0].clone();
+        first.status = Status::Unverified;
+        attempts.append(first.clone()).unwrap();
+        written[0] = first;
+        for explicit in [false, true] {
+            let want: Vec<[u8; 32]> = written
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.status,
+                        Status::Queued | Status::InFlight | Status::Unverified
+                    ) || (explicit && row.status == Status::Blocked)
+                })
+                .map(|row| row.key)
+                .collect();
+            let got: Vec<[u8; 32]> = pending_in_order(&attempts, explicit)
+                .iter()
+                .map(|row| row.key)
+                .collect();
+            assert_eq!(got, want, "explicit={explicit}");
+            assert!(!got.is_empty());
+        }
+        assert_eq!(
+            pending_in_order(&attempts, false)[0].status,
+            Status::Unverified,
+            "the latest state of a key, at its first position"
+        );
+        drop(attempts);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// sobs-8, D-4448: A RECOVERY TASK THAT DIES BEFORE IT CAN NAME ITS
+    /// REFUSAL IS NAMED FOR IT, with the runtime's words, the stage and the
+    /// plan, and the same words go back to the reply.
+    #[tokio::test]
+    async fn a_recovery_task_that_dies_is_named_with_its_stage() {
+        let _installed = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        let dead = tokio::spawn(async { panic!("sobs8 task panic") })
+            .await
+            .expect_err("the task panicked");
+        let why = task_died("activation", [0x5a; 32], &dead);
+        assert!(why.contains("sobs8 task panic"), "{why}");
+        let logged: Vec<_> = crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+            .into_iter()
+            .filter(|event| crate::emitted::says(event, "why", "sobs8 task panic"))
+            .collect();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let event = &logged[0];
+        assert_eq!(event.level, telemetry::Level::Error);
+        assert!(crate::emitted::says(event, "stage", "activation"));
+        assert!(crate::emitted::counts(event, "status", 503));
+        assert!(crate::emitted::says(event, "plan", &hex([0x5a; 32])));
+    }
+
+    /// sobs-8, D-4448: EVERY REFUSED RECOVERY NAMES ITS REASON IN THE LOG, not
+    /// only in the reply and in memory: a body that is not a plan (Warn), a
+    /// held run slot (Warn), a preflight the history refuses (Error), a
+    /// refused preparation (Error) and a BLOCKED activation (Error), each one
+    /// `pull.recovery` "recovery blocked" carrying its stage, plan and why.
+    #[tokio::test]
+    async fn every_refused_recovery_names_its_stage_and_reason_in_the_log() {
+        let _installed = crate::emitted::sink();
+        a_bad_body_and_a_held_slot_are_logged_at_warn().await;
+        a_refused_preflight_and_preparation_are_logged_at_error().await;
+        a_blocked_activation_is_logged_at_error().await;
+    }
+
+    /// Every "recovery blocked" line at `stage` written since `from`.
+    fn blocked(from: u64, stage: &str) -> Vec<telemetry::Record> {
+        crate::emitted::landed(from, "pull.recovery", "recovery blocked")
+            .into_iter()
+            .filter(|event| crate::emitted::says(event, "stage", stage))
+            .collect()
+    }
+
+    /// A body that is not a plan (400), and a held run slot (409): both Warn.
+    async fn a_bad_body_and_a_held_slot_are_logged_at_warn() {
+        // A BODY THAT IS NOT A PLAN: 400, Warn, no plan named.
+        let root = crate::scratch::path("sobs8-request");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let from = crate::emitted::mark();
+        let (status, _, answer) =
+            start(State(Loaded::clone(&site)), "invalid=sobs8".to_owned()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        let request: Vec<_> = blocked(from, "request")
+            .into_iter()
+            .filter(|event| crate::emitted::counts(event, "status", 400))
+            .collect();
+        assert!(!request.is_empty(), "the malformed body is logged");
+        assert!(
+            request
+                .iter()
+                .all(|event| event.level == telemetry::Level::Warn)
+        );
+        let reply: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert!(
+            request.iter().any(|event| crate::emitted::says(
+                event,
+                "why",
+                reply["why"].as_str().unwrap()
+            )),
+            "the reply's own reason is the logged one: {request:?}"
+        );
+
+        // A HELD RUN SLOT: 409, Warn, the plan named.
+        let scratch = crate::scratch::path("sobs8-slot");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let site = Loaded::new(Site::load(&scratch.join("missing-masters"), &scratch));
+        let selected = leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30));
+        let body = encoded_leg(&selected);
+        let id = scope_identity(&plan(vec![selected], today()).unwrap());
+        claim(&site, None).unwrap();
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        let slot = blocked(from, "slot");
+        assert!(
+            slot.iter()
+                .any(|event| event.level == telemetry::Level::Warn
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(event, "why", "already owns the run slot")),
+            "{slot:?}"
+        );
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// A preflight the saved history refuses (503), and a preparation whose
+    /// predecessor was never activated here (503): both Error.
+    async fn a_refused_preflight_and_preparation_are_logged_at_error() {
+        // A PREFLIGHT THE SAVED HISTORY REFUSES: 503, Error.
+        let (scratch, site, body, id) = missing_fixture("sobs8-preflight");
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), body.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let preflight = blocked(from, "preflight");
+        assert!(
+            preflight
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::counts(event, "status", 503)
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(event, "why", "original window states")),
+            "{preflight:?}"
+        );
+
+        // A PREPARATION REFUSED: the predecessor was never activated here.
+        let request = successor_form(&body, [3; 32], [4; 32], true);
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(
+            !blocked(from, "request").is_empty(),
+            "a successor naming another scope is refused as a request: {answer}"
+        );
+        let request = successor_form(&body, id, [4; 32], true);
+        let fresh = crate::scratch::path("sobs8-prepare");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let empty = Loaded::new(Site::load(&fresh.join("missing-masters"), &fresh));
+        let from = crate::emitted::mark();
+        let (status, _, answer) = start(State(Loaded::clone(&empty)), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let prepare = blocked(from, "prepare");
+        assert!(
+            prepare
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::says(
+                        event,
+                        "why",
+                        "not recorded in active recovery history"
+                    )),
+            "{prepare:?}"
+        );
+        std::fs::remove_dir_all(&fresh).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// An activation whose source store is not a directory: Error, and nothing
+    /// is created.
+    async fn a_blocked_activation_is_logged_at_error() {
+        // A BLOCKED ACTIVATION: the source store is not a directory.
+        let gone = crate::scratch::path("sobs8-activation");
+        let site = Loaded::new(Site::load(
+            &gone.join("missing-masters"),
+            &gone.join("absent"),
+        ));
+        let id = key("sobs8 activation fixture");
+        let from = crate::emitted::mark();
+        let refused = activate_durable(Loaded::clone(&site), id, Some(Vec::new()))
+            .await
+            .expect_err("a missing store root blocks the activation");
+        let activation = blocked(from, "activation");
+        assert!(
+            activation
+                .iter()
+                .any(|event| event.level == telemetry::Level::Error
+                    && crate::emitted::says(event, "plan", &hex(id))
+                    && crate::emitted::says(
+                        event,
+                        "why",
+                        "configured source store is unavailable"
+                    )),
+            "{activation:?}"
+        );
+        assert!(
+            refused.contains("configured source store is unavailable"),
+            "{refused}"
+        );
+        assert!(!gone.join("absent").exists(), "nothing was created");
     }
 
     /// audit-20261003 hunt-api-4, D-1584: ONE RETIRED SYMBOL CANNOT BLOCK
@@ -2479,6 +3031,139 @@ mod tests {
         drop(journal);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    /// PENDING ROWS ARE RECONCILED IN THE LEDGER'S OWN ORDER. recovery-3,
+    /// D-2503.
+    ///
+    /// The rows came from `HashMap::values`, whose order is per-process
+    /// random, so two runs over the same ledger wrote different bytes. Rows
+    /// appended in a known order must come back in exactly that order.
+    #[test]
+    fn pending_rows_come_back_in_first_seen_order() {
+        let root = crate::scratch::path("recovery-pending-order");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut attempts = Journal::open(&root.join("attempts.bin")).unwrap();
+        let bodies: Vec<String> = (1..=28u8)
+            .map(|day| {
+                canonical(
+                    "NIFTY",
+                    "1day",
+                    Window::new(date(2026, 2, day), date(2026, 2, day)).unwrap(),
+                    "gap",
+                )
+            })
+            .collect();
+        for body in &bodies {
+            attempts.append(record(body.clone())).unwrap();
+        }
+        let seen: Vec<&str> = ledger_in_order(&attempts)
+            .map(|row| row.body.as_str())
+            .collect();
+        let wanted: Vec<&str> = bodies.iter().map(String::as_str).collect();
+        assert_eq!(seen, wanted);
+        drop(attempts);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// AN EXPLICIT START PERSISTS ITS CLEAR WITHOUT HOLDING THE RUN SLOT.
+    /// recovery-5, D-2504.
+    ///
+    /// The clear's journal open, append and fsyncs ran under `site.run`, so
+    /// every slot reader waited on the device. The slot is only READ before
+    /// the clear (and released at once); the guard that installs the claim is
+    /// taken after it. Read from `claim`'s own source, because a test cannot
+    /// hold the slot without also blocking the read that must precede the
+    /// clear. The behaviour is pinned beside it: the clear lands, the claim
+    /// succeeds once, and a second explicit claim is refused before it
+    /// persists anything.
+    #[test]
+    fn an_explicit_claim_persists_its_clear_outside_the_run_lock() {
+        let body = include_str!("recovery.rs")
+            .split_once("\nfn claim(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        let cleared = body.find("clear_stop(site, id)").unwrap();
+        let guarded = body.find("let mut held").unwrap();
+        assert!(
+            cleared < guarded,
+            "the clear must be persisted before the run guard is taken"
+        );
+        let root = crate::scratch::path("recovery-claim-unlocked");
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let id = key("claim-unlocked");
+        claim(&site, Some((id, true))).unwrap();
+        assert!(!crate::recovery_control::is_stopped(&site, id).unwrap());
+        assert!(slot_running(&site));
+        let twice = claim(&site, Some((id, true))).unwrap_err();
+        assert!(twice.contains("not started twice"), "{twice}");
+        let implicit = claim(&site, None).unwrap_err();
+        assert!(implicit.contains("not started twice"), "{implicit}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// P1-04-04, D-2592. The request below activates a successor that was
+    /// never prepared, so its preflight refuses 503. On the old code the
+    /// preflight (an O(history) replay) ran BEFORE the slot was looked at, so
+    /// with a pull holding the slot this press answered that 503; it now
+    /// answers 409 before any replay, writes nothing, and once the slot is
+    /// free the same press reaches the preflight again (503), proving the
+    /// order rather than a changed answer.
+    #[tokio::test]
+    async fn a_recovery_press_while_a_pull_runs_is_refused_before_any_journal_replay() {
+        let (scratch, site, body, old) = missing_fixture("recovery-busy-preflight");
+        let request = successor_form(&body, old, [53; 32], false);
+        let before = history_bytes(&site);
+        *site.run.lock().unwrap() = Some(Progress::claimed());
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert!(answer.contains("already owns the run slot"), "{answer}");
+        assert!(answer.contains(r#""started":false"#), "{answer}");
+        assert_eq!(
+            history_bytes(&site),
+            before,
+            "a refused press writes nothing"
+        );
+        // A FINISHED run in the slot is not a running one: the probe admits.
+        site.run.lock().unwrap().as_mut().unwrap().finished = Some(String::from("done"));
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert!(!answer.contains("already owns the run slot"), "{answer}");
+        *site.run.lock().unwrap() = None;
+        let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert_eq!(history_bytes(&site), before, "the preflight writes nothing");
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// A REFUSED TERMINAL APPEND KEEPS THE ERROR THAT ENDED THE RUN.
+    /// recovery-6, D-2503.
+    #[test]
+    fn a_refused_terminal_append_keeps_the_root_cause() {
+        let both = with_terminal::<()>(
+            Err("No space left on device".to_owned()),
+            Err("journal is poisoned".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            both,
+            "No space left on device; terminal state not recorded: journal is poisoned"
+        );
+        assert_eq!(
+            with_terminal::<()>(Err("ran".to_owned()), Ok(())),
+            Err("ran".to_owned())
+        );
+        assert_eq!(
+            with_terminal(Ok(1), Err("sealed".to_owned())),
+            Err("sealed".to_owned())
+        );
+        assert_eq!(with_terminal(Ok(7), Ok(())), Ok(7));
     }
 
     /// **A BUSY SEAT COSTS NO ATTEMPT.** D-2761, recovery-1.

@@ -2363,6 +2363,21 @@ impl PopulationV5Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("Population V5 root changed while child files opened".to_owned());
             }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock. Receipt-last, so bytes past the last whole
+                // record were never acknowledged; a whole record is never cut.
+                for (file, path, stride) in [
+                    (&row_file, &row_path, POPULATION_V5_ROW_BYTES),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        POPULATION_V5_COMPLETION_BYTES,
+                    ),
+                ] {
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride as u64, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let row_generation = file_generation(&row_file, &row_path, bounds.max_row_bytes())?;
             let completion_generation = file_generation(
@@ -2402,6 +2417,8 @@ impl PopulationV5Ledger {
     }
 
     fn scan(&mut self) -> Result<(), PopulationV5Refusal> {
+        #[cfg(test)]
+        SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
         let row_records = checked_record_count(
             self.row_generation.len,
             POPULATION_V5_ROW_BYTES,
@@ -2533,16 +2550,23 @@ impl PopulationV5Ledger {
             return self.reuse_existing(prepared, &existing);
         }
         if let Some(trailing) = self.trailing.clone() {
-            return self.complete_trailing(prepared, &trailing);
+            self.withdraw_trailing(prepared, &trailing)?;
         }
         let count = u64::try_from(prepared.rows.len())
             .map_err(|_| "Population V5 prepared count does not fit u64".to_owned())?;
         self.require_append_bound(count, 1)?;
         let first = self.row_records;
+        let block_start = row_offset(first)?;
         self.append_row_suffix(&prepared.rows, 0)?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Population V5 rows: {why}"))?;
+        // A failed barrier cuts the whole block back and is remembered for
+        // this process; a second barrier never confirms it (conc4-2, D-2555).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Population V5 rows: {why}"))?;
         self.row_records = self
             .row_records
             .checked_add(count)
@@ -2553,47 +2577,41 @@ impl PopulationV5Ledger {
         self.finish_written(prepared.population_id)
     }
 
-    fn complete_trailing(
+    /// Cuts the receipt-less trailing block before this append writes.
+    ///
+    /// No Completion acknowledged it, so it is scratch. When it is this exact
+    /// retry's own prefix it is REWRITTEN, not vouched for: it may be the bytes
+    /// of a run whose barrier failed, and a barrier on this descriptor cannot
+    /// prove them durable (conc4-2, D-2555). When it is another identity's,
+    /// refusing every other block because of it wedged the rung for good
+    /// (pop2-4, D-1905), so it is discarded with a warn event (D-2555).
+    fn withdraw_trailing(
         &mut self,
         prepared: &PreparedPopulationV5,
         trailing: &TrailingRows,
-    ) -> Result<PopulationV5StructuralCommit, PopulationV5Refusal> {
-        let prefix_len = trailing.rows.len();
-        let expected_prefix = prepared.rows.get(..prefix_len).ok_or_else(|| {
-            format!(
-                "Population V5 trailing block has {prefix_len} rows above retry count {}",
-                prepared.rows.len()
-            )
-        })?;
-        if trailing.population_id != prepared.population_id
-            || trailing.rows.as_slice() != expected_prefix
-        {
-            return Err(format!(
-                "Population V5 trailing Population {} is not an exact canonical prefix of retry {}",
-                hex32(trailing.population_id),
-                hex32(prepared.population_id)
-            ));
+    ) -> Result<(), PopulationV5Refusal> {
+        let at = row_offset(trailing.first_row_record)?;
+        let exact = trailing.population_id == prepared.population_id
+            && prepared.rows.get(..trailing.rows.len()) == Some(trailing.rows.as_slice());
+        if exact {
+            self.row_file
+                .set_len(at)
+                .and_then(|()| self.row_file.sync_all())
+                .map_err(|why| format!("cannot cut Population V5 retry prefix: {why}"))?;
+        } else {
+            crate::fixed_tail::discard_orphan(
+                &self.row_file,
+                &self.row_path,
+                at,
+                &format!(
+                    "Population V5 {} that is not this exact retry",
+                    hex32(trailing.population_id)
+                ),
+            )?;
         }
-        let missing = prepared
-            .rows
-            .len()
-            .checked_sub(prefix_len)
-            .ok_or_else(|| "Population V5 trailing prefix length underflowed".to_owned())?;
-        let missing = u64::try_from(missing)
-            .map_err(|_| "Population V5 missing suffix count does not fit u64".to_owned())?;
-        self.require_append_bound(missing, 1)?;
-        self.require_unchanged()?;
-        self.append_row_suffix(&prepared.rows, prefix_len)?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync completed Population V5 row prefix: {why}"))?;
-        self.row_records = self.row_records.checked_add(missing).ok_or_else(|| {
-            "Population V5 row count overflowed while completing prefix".to_owned()
-        })?;
-        self.refresh_row_generation()?;
-        self.require_unchanged()?;
-        self.append_completion(prepared, trailing.first_row_record)?;
-        self.finish_written(prepared.population_id)
+        self.row_records = trailing.first_row_record;
+        self.trailing = None;
+        self.refresh_row_generation()
     }
 
     fn append_row_suffix(
@@ -2618,10 +2636,18 @@ impl PopulationV5Ledger {
         first_row_record: u64,
     ) -> Result<(), PopulationV5Refusal> {
         let completion = prepared.expected_completion(self.completion_records, first_row_record)?;
+        let completion_start = self
+            .completion_records
+            .checked_mul(POPULATION_V5_COMPLETION_BYTES as u64)
+            .ok_or_else(|| "Population V5 Completion offset overflowed".to_owned())?;
         append_raw(&mut self.completion_file, &completion.encode()?)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Population V5 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Population V5 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completion_records = self
             .completion_records
@@ -2635,13 +2661,55 @@ impl PopulationV5Ledger {
         &mut self,
         population_id: [u8; 32],
     ) -> Result<PopulationV5StructuralCommit, PopulationV5Refusal> {
-        self.scan()?;
-        let receipt = self.receipts.get(&population_id).copied().ok_or_else(|| {
-            format!(
+        // THE NEW BLOCK IS READ BACK AND VALIDATED, NOT THE WHOLE LEDGER
+        // (W2-cli12-4, D-1845). This called `scan`, which re-decoded and
+        // re-validated every row of every Population already stored. Those
+        // blocks were scanned when this writer opened, and `require_unchanged`
+        // has held their bytes since; the block just written is decoded from
+        // disk and validated by the same `validate_complete_block` a scan runs,
+        // with the same contiguity and identity checks, so the receipt is the
+        // one a scan derives. `commit_population_v5` still reopens the ledger
+        // read-only, scans it whole and compares receipts.
+        let index = self
+            .completion_records
+            .checked_sub(1)
+            .ok_or_else(|| "Population V5 appended no Completion".to_owned())?;
+        let completion = PopulationV5CompletionRecord::decode(&read_fixed_at(
+            &mut self.completion_file,
+            index,
+            POPULATION_V5_COMPLETION_BYTES,
+            "Completion",
+        )?)?;
+        let end = completion
+            .first_row_record
+            .checked_add(completion.row_count)
+            .ok_or_else(|| "Population V5 completed row range overflowed".to_owned())?;
+        if completion.block_sequence != index || end != self.row_records {
+            return Err(format!(
+                "Population V5 Completion {index} is not contiguous/canonical"
+            ));
+        }
+        require_block_bound(self.bounds, completion.row_count)?;
+        let rows = self.read_rows(completion.first_row_record, completion.row_count)?;
+        let receipt = validate_complete_block(&rows, &completion)?;
+        if receipt.population_id != population_id {
+            return Err(format!(
                 "Population V5 appended identity {} was not indexed",
                 hex32(population_id)
-            )
-        })?;
+            ));
+        }
+        if self
+            .receipts
+            .insert(receipt.population_id, receipt)
+            .is_some()
+        {
+            return Err(format!(
+                "Population V5 identity {} appears more than once",
+                hex32(receipt.population_id)
+            ));
+        }
+        self.trailing = None;
+        self.require_unchanged()?;
         Ok(PopulationV5StructuralCommit::Written(receipt))
     }
 
@@ -2671,6 +2739,10 @@ impl PopulationV5Ledger {
                 hex32(existing.population_id)
             ));
         }
+        // A path whose barrier failed in this process is never confirmed by
+        // a second one (conc4-2, D-2555).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
+        crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path)?;
         self.row_file
             .sync_data()
             .map_err(|why| format!("cannot sync reused Population V5 rows: {why}"))?;
@@ -2928,14 +3000,10 @@ impl PopulationV5Authority {
     }
 
     /// Reads one fixed-offset row after validating every retained generation.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only from tests; narrowed from a module-wide expect so a
-                      NEW dead item in this module warns (CE-95, D-1956)"
-        )
-    )]
+    // TEST-ONLY SINCE D-1845 (W2-cli11-1, W2-cli12-3): no production path
+    // reads one row this way, so the per-row whole-file cost the limit states
+    // cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -3009,14 +3077,9 @@ impl CommittedStoredPopulationV5 {
     /// files per call".
     /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
     /// cost.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only from tests; narrowed from a module-wide expect so a
-                      NEW dead item in this module warns (CE-95, D-1956)"
-        )
-    )]
+    // TEST-ONLY SINCE D-1845 (W2-cli12-3): no production path reads one row
+    // this way, so the two whole preparations cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -3114,6 +3177,12 @@ impl CommittedStoredPopulationV5 {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: whole-ledger scans on this thread. D-1845.
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Commits the exact retained three-ledger successor join as Population V5.
 ///
 /// This is the sole production preparation door. It takes the nonconstructible
@@ -3130,10 +3199,13 @@ impl CommittedStoredPopulationV5 {
 /// intentionally not described as O(1).
 ///
 /// The file bytes above include the whole V5 ledger, and not once. The ledger
-/// is scanned, every row decoded, three times per written commit: `open_write`
-/// scans it, `finish_written` scans it again after the Completion, and the
-/// fresh `open_read` scans it a third time; a reused Population is scanned
-/// twice, because `reuse_existing` neither scans nor calls `finish_written`.
+/// is scanned, every row decoded, twice per commit, written or reused:
+/// `open_write` scans it and the fresh `open_read` scans it again.
+/// `finish_written` reads back and validates only the block just written; it
+/// rescanned the whole ledger until D-1845 (W2-cli12-4). The two scans are
+/// inherent to what the commit proves: the writer's scan is the index the
+/// append and its duplicate check run on, and the reader's is the independent
+/// reopen the authority is returned from.
 /// Each scan decodes every row of every Population already in the ledger,
 /// and decoding a row validates it, re-encodes it (which validates it again),
 /// and `validate_complete_block` validates it once more, so the V5 ledger
@@ -3508,6 +3580,13 @@ fn read_fixed_at<const N: usize>(
 
 /// Label every append to this ledger names, and its rollback test injects with.
 const APPEND_LABEL: &str = "Population V5 fixed record";
+
+/// The byte offset of row record `index` (the row file is headerless).
+fn row_offset(index: u64) -> Result<u64, PopulationV5Refusal> {
+    index
+        .checked_mul(POPULATION_V5_ROW_BYTES as u64)
+        .ok_or_else(|| "Population V5 row offset overflowed".to_owned())
+}
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationV5Refusal> {
     crate::append_rollback::append(file, raw, APPEND_LABEL)
@@ -4703,6 +4782,53 @@ mod tests {
         assert_completion_record_bound(&populations);
     }
 
+    /// W2-cli12-4, D-1845: a written append reads back and validates its own
+    /// block and does not rescan the ledger; its receipts are the ones a
+    /// fresh scan derives.
+    #[test]
+    fn a_written_append_validates_its_own_block_and_does_not_rescan() {
+        let populations = [
+            prepared_with_statuses(
+                &[AdmissionV3Status::Admitted],
+                &[AdmissionV3Status::Admitted],
+            )
+            .0,
+            prepared_with_statuses(
+                &[AdmissionV3Status::Rejected],
+                &[AdmissionV3Status::Admitted],
+            )
+            .0,
+        ];
+        assert_ne!(populations[0].population_id, populations[1].population_id);
+        let root = TestRoot::new("append-no-rescan");
+        let scans = || SCANS.with(std::cell::Cell::get);
+        let mut writer =
+            PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer opens");
+        let before = scans();
+        let receipts = populations.each_ref().map(|prepared| {
+            writer
+                .append(prepared)
+                .expect("the Population writes")
+                .receipt()
+        });
+        assert_eq!(scans(), before, "an append rescanned the ledger");
+        drop(writer);
+        let reopened = PopulationV5Ledger::open_read(root.path(), bounds()).expect("reader opens");
+        for (prepared, receipt) in populations.iter().zip(receipts) {
+            assert_eq!(
+                reopened
+                    .structural_receipt(&prepared.population_id)
+                    .expect("indexed"),
+                Some(receipt),
+                "the append's receipt is the one a scan derives"
+            );
+        }
+        assert_eq!(
+            (receipts[1].block_sequence(), receipts[1].first_row_record()),
+            (1, 2)
+        );
+    }
+
     fn assert_row_record_bound(populations: &[PreparedPopulationV5; 3]) {
         let row_limited = PopulationV5Bounds::new(
             4,
@@ -5085,6 +5211,55 @@ mod tests {
         }
     }
 
+    /// conc4-2, D-2555: a failed row or Completion barrier cuts the block
+    /// back, so no later barrier on a fresh descriptor vouches for it; the
+    /// exact retry over its own receipt-less prefix issues a barrier of its
+    /// own (a fault armed on that retry cuts the prefix too); the rerun writes.
+    #[test]
+    fn a_failed_population_v5_barrier_is_cut_and_the_retry_rewrites() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let prepared = prepared(1, 1);
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new("failed-v5-barrier");
+            create_empty_files(root.path());
+            {
+                let _armed = Armed::arm(name, Kind::Sync);
+                let mut writer =
+                    PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer");
+                assert!(writer.append(&prepared).is_err(), "{name}");
+            }
+            assert_eq!(
+                std::fs::metadata(root.path().join(COMPLETION_FILE))
+                    .expect("measure")
+                    .len(),
+                0,
+                "{name}: no Completion survives"
+            );
+            if name == COMPLETION_FILE {
+                // The rows are now a receipt-less exact prefix of the retry.
+                let _armed = Armed::arm(ROW_FILE, Kind::Sync);
+                let mut writer =
+                    PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer");
+                assert!(writer.append(&prepared).is_err());
+                assert!(!Armed::pending(), "the retry issued its own barrier");
+            }
+            assert_eq!(
+                std::fs::metadata(root.path().join(ROW_FILE))
+                    .expect("measure")
+                    .len(),
+                0,
+                "{name}: the rows are cut back"
+            );
+            assert!(
+                PopulationV5Ledger::open_write(root.path(), bounds())
+                    .expect("writer")
+                    .append(&prepared)
+                    .expect("the exact rerun writes")
+                    .was_written()
+            );
+        }
+    }
+
     #[test]
     fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
         let root = TestRoot::new("append-rollback");
@@ -5124,8 +5299,12 @@ mod tests {
         assert_eq!(std::fs::read(&row_path).expect("read rows"), expected_rows);
     }
 
+    /// pop2-4 / ledgerall-1, D-2555: a receipt-less trailing block of ANOTHER
+    /// identity was never acknowledged, so the writer discards it and commits
+    /// its own block rather than refusing the rung for good. A Completion
+    /// without rows still refuses.
     #[test]
-    fn foreign_orphan_and_orphan_completion_fail_closed_without_truncation() {
+    fn foreign_orphan_is_discarded_and_orphan_completion_fails_closed() {
         let root = TestRoot::new("foreign-orphan");
         let expected = prepared(1, 1);
         let foreign = prepared(1, 0);
@@ -5133,21 +5312,20 @@ mod tests {
         let row_path = root.path().join(ROW_FILE);
         let foreign_raw = foreign.rows[0].encode().expect("encode foreign orphan");
         std::fs::write(&row_path, foreign_raw).expect("write foreign orphan");
-        let before = std::fs::read(&row_path).expect("read foreign orphan before retry");
         let mut writer = PopulationV5Ledger::open_write(root.path(), bounds())
             .expect("foreign-orphan writer opens structurally");
         assert!(
             writer
                 .append(&expected)
-                .expect_err("foreign orphan must refuse")
-                .contains("not an exact canonical prefix")
+                .expect("a foreign orphan is scratch")
+                .was_written()
         );
         drop(writer);
-        assert_eq!(
-            std::fs::read(&row_path).expect("read foreign orphan after refusal"),
-            before,
-            "valid foreign orphan bytes must never be truncated"
-        );
+        let mut expected_rows = Vec::new();
+        for row in &expected.rows {
+            expected_rows.extend_from_slice(&row.encode().expect("encode expected row"));
+        }
+        assert_eq!(std::fs::read(&row_path).expect("rows"), expected_rows);
 
         let torn_root = TestRoot::new("orphan-completion");
         create_empty_files(torn_root.path());
@@ -5261,6 +5439,38 @@ mod tests {
             panic!("ragged row file must refuse");
         };
         assert!(ragged_refusal.contains("ragged"));
+    }
+
+    /// rnew-1, D-4460: a process killed while writing a row or the Completion
+    /// leaves a sub-record tail. A reader still refuses it; the next writer
+    /// cuts it, says so once, and keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_in_either_file_is_cut_by_the_writer_and_history_kept() {
+        let root = TestRoot::new("kill-torn");
+        let receipt = {
+            let mut writer =
+                PopulationV5Ledger::open_write(root.path(), bounds()).expect("writer opens");
+            writer
+                .append(&prepared(1, 1))
+                .expect("fixture writes")
+                .receipt()
+        };
+        let rows = root.path().join(ROW_FILE);
+        let completions = root.path().join(COMPLETION_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[
+                (rows.as_path(), POPULATION_V5_ROW_BYTES as u64),
+                (completions.as_path(), POPULATION_V5_COMPLETION_BYTES as u64),
+            ],
+            &mut || {
+                let opened = PopulationV5Ledger::open_read(root.path(), bounds())?;
+                Ok(format!(
+                    "{:?}",
+                    opened.structural_receipt(&receipt.population_id())?
+                ))
+            },
+            &mut || PopulationV5Ledger::open_write(root.path(), bounds()).map(drop),
+        );
     }
 
     #[cfg(unix)]

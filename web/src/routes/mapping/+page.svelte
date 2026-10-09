@@ -148,7 +148,9 @@
          The Rust-rendered `/masters` page has always read the truthful one, so
          the two front ends disagreed about whether a stale master was visible.
          They now agree. */
-      restartNeeded = Boolean(body.restart_required);
+      // `null` when a master could not be read (OBSV-02, D-3201): the flag is
+      // then unknown, never a guessed false.
+      restartNeeded = body.restart_required === null ? null : Boolean(body.restart_required);
     } catch (error) {
       if (!ticket.current()) return;
       // A FAILED STATUS READ IS NAMED, AND THE RESTART FLAG IT FED BECOMES
@@ -176,6 +178,16 @@
       // than any other request this console makes. Timing out at 15 s would
       // report a working ladder as a wedged server.
       const response = await ask('/masters/refresh', { method: 'POST', ms: 90_000 });
+      // A REFUSAL THAT IS NOT JSON IS NAMED, NOT PARSED (F4, D-3221). The
+      // request-bounds and cross-site layers refuse in plain text before the
+      // handler runs; `response.json()` threw on it, and the catch below then
+      // said "The refresh keeps running on the server" about a refresh that
+      // was never dispatched. Every JSON answer is read as before.
+      if (!response.ok && !(response.headers.get('content-type') ?? '').includes('json')) {
+        masters = { phase: 'done', rows: [], why: await refusalFrom('/masters/refresh', response), universe: '' };
+        await readMasters();
+        return;
+      }
       const body = await response.json();
       /* THE 502 AND THE THREE FIELDS THAT EXPLAIN IT WERE ALL BEING IGNORED.
          `mastersrun.rs:592` answers 502 whenever
@@ -658,6 +670,9 @@
                 {#if file.modified_unix_millis}
                   <span class="dim">{stampLabel(file.modified_unix_millis)} IST</span>
                 {/if}
+              {:else if file.unreadable}
+                <span class="no">unreadable</span>
+                <span class="dim">{file.unreadable}</span>
               {:else}
                 <span class="no">absent</span>
               {/if}

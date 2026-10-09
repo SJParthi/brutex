@@ -88,6 +88,91 @@ fn a_field_is_matched_by_its_whole_key() {
     assert_eq!(params("m=a&mm=b&m=c&m", "m"), vec!["a", "c"]);
 }
 
+/// o1api-4, D-4436: the split-once reader answers every field exactly as
+/// [`param`] does, first value winning, a bare key naming nothing, and an
+/// escape decoded the same way.
+#[test]
+fn a_split_query_answers_every_field_as_param_does() {
+    let corpus = [
+        "qq=1&q=2",
+        "q",
+        "q=",
+        "q=a+b%21",
+        "x=1",
+        "",
+        "a=1&a=2",
+        "a&a=2",
+        "a=b=c",
+        "=x&q=1",
+        "&&a=1&&q=%zz",
+        "%71=1&q=2",
+        "feed=dhan&from=2026-01&to=2026-02&timeframe=1min&sort=c&dir=asc",
+    ];
+    let names = [
+        "q", "qq", "x", "a", "", "%71", "b", "feed", "to", "dir", "absent",
+    ];
+    for raw in corpus {
+        let split = Query::parse(raw);
+        for name in names {
+            assert_eq!(split.param(name), param(raw, name), "{raw:?} {name:?}");
+        }
+    }
+}
+
+/// What reading a route's fields costs at the request-target ceiling: one
+/// [`param`] scan per field against one [`Query`] split and a probe per
+/// field, for the eleven fields `/bars/window.json` reads with its fields at
+/// the END of an 8 KiB query. A measurement, run on purpose; the numbers are
+/// in `docs/06-limits.md`'s D-4436 row. o1api-4.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_query_fields_scan_per_field_against_split_once() -> Result<(), String> {
+    let tail = "&feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min\
+                &from=2024-01&to=2024-02&sort=c&dir=asc&offset=0&limit=100";
+    let mut raw = String::with_capacity(MAX_REQUEST_TARGET_BYTES);
+    let mut n = 0;
+    while raw.len() + tail.len() + 12 < MAX_REQUEST_TARGET_BYTES - 64 {
+        std::fmt::Write::write_fmt(&mut raw, format_args!("pad{n}=x&"))
+            .map_err(|e| e.to_string())?;
+        n += 1;
+    }
+    raw.push_str(tail.trim_start_matches('&'));
+    let names = [
+        "feed",
+        "exchange",
+        "segment",
+        "symbol",
+        "timeframe",
+        "from",
+        "to",
+        "sort",
+        "dir",
+        "offset",
+        "limit",
+    ];
+    let scan = crate::latency::Timed::run(20_000, || {
+        let total: usize = names.iter().map(|name| param(&raw, name).len()).sum();
+        if total > 0 {
+            Ok(())
+        } else {
+            Err("no field read".to_owned())
+        }
+    })?;
+    let split = crate::latency::Timed::run(20_000, || {
+        let fields = Query::parse(&raw);
+        let total: usize = names.iter().map(|name| fields.param(name).len()).sum();
+        if total > 0 {
+            Ok(())
+        } else {
+            Err("no field read".to_owned())
+        }
+    })?;
+    println!("query of {} bytes, {} fields", raw.len(), n + names.len());
+    println!("{}", scan.line("11 fields by param, one scan each"));
+    println!("{}", split.line("11 fields by Query::parse, one split"));
+    Ok(())
+}
+
 /// probeapi-5 and o1api-3, over a real socket and the production layer stack:
 /// a repeated key is 400, a target past the cap 414, headers past theirs 431,
 /// and each boundary itself is admitted.

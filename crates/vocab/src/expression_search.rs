@@ -213,10 +213,10 @@ impl Cursor {
                 for slot in code.iter_mut().skip(usize::from(self.length)) {
                     *slot = Instruction::Pad;
                 }
-                return Ok(Step::Candidate(Expression {
-                    code,
-                    len: usize::from(self.length),
-                }));
+                return Ok(Step::Candidate(Expression::from_parts(
+                    &code,
+                    usize::from(self.length),
+                )));
             }
             *self.starts.get_mut(at).ok_or(Refusal::Cursor)? = start;
             *self.depths.get_mut(at).ok_or(Refusal::Cursor)? = depth;

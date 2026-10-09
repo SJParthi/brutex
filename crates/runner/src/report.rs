@@ -336,6 +336,40 @@ pub fn render_ranked(outcome: &RankedOutcome, id: Option<&RunId>) -> String {
     out
 }
 
+/// The threshold rows below two distinct tests; `true` when it rendered them.
+///
+/// At one test there is no best-of-many luck floor, but FINDINGS still judges
+/// every row against `bonferroni_t(1)` = 1.96, so this block prints that bar
+/// rather than saying there is none (p2run-1, D-2619). At zero tests nothing
+/// was judged and the threshold is `-`.
+fn few_hypotheses(out: &mut String, n: u64) -> bool {
+    match n {
+        0 => row(
+            out,
+            "threshold",
+            "-",
+            "too few hypotheses to have a noise floor",
+        ),
+        1 => {
+            row(
+                out,
+                "best t-stat by luck alone",
+                "-",
+                "one test has no best-of-many luck to beat",
+            );
+            row(
+                out,
+                "t required (Bonferroni 5%)",
+                &format!("{:.2}", crate::significance::bonferroni_t(1)),
+                "the bar FINDINGS judges this one test against",
+            );
+        }
+        _ => return false,
+    }
+    let _ = writeln!(out);
+    true
+}
+
 /// The significance block from exact raw and duplicate-deflated counts.
 fn significance_counts(out: &mut String, raw: u64, effective: u64) {
     let _ = writeln!(out, "SIGNIFICANCE");
@@ -351,14 +385,7 @@ fn significance_counts(out: &mut String, raw: u64, effective: u64) {
         &effective.to_string(),
         "exact duplicates removed -- same support, same test",
     );
-    if effective < 2 {
-        row(
-            out,
-            "threshold",
-            "-",
-            "too few hypotheses to have a noise floor",
-        );
-        let _ = writeln!(out);
+    if few_hypotheses(out, effective) {
         return;
     }
     row(
@@ -410,14 +437,7 @@ fn significance(out: &mut String, sweep: &Sweep) {
         &n.to_string(),
         "exact duplicates removed -- same support, same test",
     );
-    if n < 2 {
-        row(
-            out,
-            "threshold",
-            "-",
-            "too few hypotheses to have a noise floor",
-        );
-        let _ = writeln!(out);
+    if few_hypotheses(out, n) {
         return;
     }
     row(
@@ -497,7 +517,13 @@ fn paisa(mean: f64) -> i64 {
 #[must_use]
 pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     let rows: Vec<&crate::rank::Scored> = ranked.top.iter().collect();
-    render_findings_of(&rows, ranked.considered, sweep)
+    render_findings_at(
+        &rows,
+        ranked.considered,
+        crate::significance::effective_trials(sweep),
+        crate::rank::Lens::Detectability,
+        ranked.inexact(),
+    )
 }
 
 /// [`render_findings`] for the streamed ranked path, using the exact trial
@@ -510,6 +536,7 @@ pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> Strin
         ranked.considered,
         outcome.effective_trials,
         ranked.lens,
+        ranked.inexact(),
     )
 }
 
@@ -542,6 +569,10 @@ pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> Strin
 /// Recomputing it from the rows would make the report say the search found as
 /// many combinations as it kept, which is the distinction `Ranked::considered`
 /// exists to protect.
+///
+/// A filtered list carries no ranking, so it carries no refusal count: the
+/// rows are whatever the caller kept. A caller holding a [`Ranked`] reaches
+/// [`render_findings`] instead, which prints `Ranked::inexact` (D-4486).
 #[must_use]
 pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep: &Sweep) -> String {
     render_findings_at(
@@ -549,6 +580,7 @@ pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep:
         considered,
         crate::significance::effective_trials(sweep),
         crate::rank::Lens::Detectability,
+        0,
     )
 }
 
@@ -579,11 +611,17 @@ fn bar_rows(out: &mut String, bar: f64, trials: u64) {
 }
 
 /// Findings with the trial count and ranking lens already resolved.
+///
+/// `inexact` is `Ranked::inexact`: rows refused because a money total reached
+/// 2^53 paisa (GAP16-26, D-4486). Printed when it is not zero, so every report
+/// of an ordinary series is byte-identical to the one before that refusal
+/// existed, and a report that lost rows to it says how many and why.
 fn render_findings_at(
     rows: &[&crate::rank::Scored],
     considered: u64,
     n: u64,
     lens: crate::rank::Lens,
+    inexact: u64,
 ) -> String {
     let mut out = String::with_capacity(1_024);
     // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
@@ -612,6 +650,14 @@ fn render_findings_at(
             }
         },
     );
+    if inexact > 0 {
+        row(
+            &mut out,
+            "REFUSED, money inexact",
+            &inexact.to_string(),
+            "a money total at or past 2^53 paisa, past the integers a double holds exactly",
+        );
+    }
     bar_rows(&mut out, bar, n);
     let _ = writeln!(out);
 
@@ -1072,7 +1118,10 @@ pub fn names_from_words(words: [u64; vocab::mask::WORDS]) -> Vec<String> {
               instrumented, so it leaves no uncoverable region behind."
 )]
 mod tests {
-    use super::{Outcome, condition_names, conditions_line, permille, render, render_auto};
+    use super::{
+        Outcome, condition_names, conditions_line, permille, render, render_auto,
+        significance_counts,
+    };
     use crate::identity::{Direction, Params, Run, data_digest, identity};
     use crate::{Sweeper, synthetic};
     use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -1536,6 +1585,27 @@ mod tests {
         assert_eq!(cell(&text, "threshold"), "-");
     }
 
+    /// p2run-1 / D-2619: at ONE distinct test FINDINGS judges every row against
+    /// `bonferroni_t(1)`, so SIGNIFICANCE prints that bar instead of saying
+    /// there is no threshold; zero tests still print `-`.
+    #[test]
+    fn one_distinct_test_prints_the_bar_findings_judges_it_against() {
+        let mut one = String::new();
+        significance_counts(&mut one, 3, 1);
+        assert_eq!(cell(&one, "t required (Bonferroni 5%)"), "1.96", "{one}");
+        assert_eq!(
+            cell(&one, "t required (Bonferroni 5%)"),
+            format!("{:.2}", crate::significance::bonferroni_t(1))
+        );
+        assert!(!one.contains("too few hypotheses"), "{one}");
+        assert_eq!(cell(&one, "best t-stat by luck alone"), "-", "{one}");
+
+        let mut none = String::new();
+        significance_counts(&mut none, 0, 0);
+        assert_eq!(cell(&none, "threshold"), "-", "{none}");
+        assert!(!none.contains("Bonferroni"), "{none}");
+    }
+
     #[test]
     fn every_finding_is_printed_beside_the_bar_it_had_to_clear() {
         // The failure this guards: a reader sees t = 4.1, remembers that three
@@ -1711,6 +1781,7 @@ mod tests {
                 3_689,
                 3_689,
                 crate::rank::Lens::Detectability,
+                0,
             )
         };
         let text = verdicts(&thin);

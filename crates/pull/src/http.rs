@@ -307,7 +307,19 @@ pub struct HttpSource {
     /// Holding the assembled value is not a wider exposure than holding the
     /// token was — it is the same secret, in the same struct, behind the same
     /// hand-written `Debug`.
-    header_value: String,
+    ///
+    /// # A validated, SENSITIVE `HeaderValue` (P1-19-01, P11-03, D-2525)
+    ///
+    /// This was a `String` handed to the request builder on every send. A token
+    /// holding a byte a header cannot carry — a stored newline — passed
+    /// construction and failed inside `send`, where it was reported as
+    /// `TransportFailed` ("was not reached") and retried like a network blip.
+    /// It is now parsed ONCE here, and a value that is not a header value
+    /// refuses construction as [`FetchError::CredentialNotAHeaderValue`]
+    /// before a client or a permit exists. It is marked sensitive, so the
+    /// HTTP stack's own `Debug` of a header map prints `Sensitive` rather than
+    /// the token.
+    header_value: reqwest::header::HeaderValue,
     client: reqwest::Client,
     /// THE BUDGET, ENFORCED RATHER THAN MERELY DECLARED.
     ///
@@ -506,6 +518,24 @@ impl HttpSource {
         }
     }
 
+    /// The assembled auth value as a header the HTTP client will send, marked
+    /// sensitive (P1-19-01, P11-03, D-2525).
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::CredentialNotAHeaderValue`] naming the header and never
+    /// the value, for a credential holding a byte no header can carry. The
+    /// caller drops the assembled `String` either way; nothing else holds it.
+    fn sensitive_header(
+        header: &'static str,
+        assembled: &str,
+    ) -> Result<reqwest::header::HeaderValue, FetchError> {
+        let mut value = reqwest::header::HeaderValue::from_str(assembled)
+            .map_err(|_| FetchError::CredentialNotAHeaderValue { header })?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
+
     /// Builds a source for one vendor.
     ///
     /// # Errors
@@ -515,6 +545,8 @@ impl HttpSource {
     /// deployment fault rather than a vendor one.
     /// [`FetchError::CredentialMismatch`] if the credential does not match the
     /// scheme — see [`Self::header_value`].
+    /// [`FetchError::CredentialNotAHeaderValue`] if the assembled credential
+    /// cannot be sent as a header — see [`Self::sensitive_header`].
     pub fn new(spec: HttpSpec, credential: Credential) -> Result<Self, FetchError> {
         // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
         // costs nothing to find; building a TLS client first would spend that
@@ -523,7 +555,8 @@ impl HttpSource {
         // print is what `CLAUDE.md` §8's comparison is made on; see
         // `Credential::print`.
         let print = credential.print();
-        let header_value = Self::header_value(spec.auth.scheme, credential)?;
+        let assembled = Self::header_value(spec.auth.scheme, credential)?;
+        let header_value = Self::sensitive_header(spec.auth.header, &assembled)?;
         let client = pooled_client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
         })?;
@@ -598,18 +631,35 @@ impl HttpSource {
     /// A source whose feed declares no budget is left ungoverned: handing one a
     /// governor would enforce a ceiling nobody wrote down, which is the
     /// invention §3 rule 1 forbids.
+    ///
+    /// # `None` keeps the private governor (pull1-2, D-2524)
+    ///
+    /// Handing over NOTHING is not handing over "no budget". This used to
+    /// assign the argument unconditionally, so a governed source given `None`
+    /// dropped the private governor `new` built and `wait_for_permit` became a
+    /// no-op: the api's `shared_governor` answers `None` for a poisoned budget
+    /// list, and that one panic elsewhere switched the vendor's ceiling off for
+    /// every later source. A `None` is now a no-op: the source stays governed
+    /// by its own instance and charges it itself.
     #[must_use]
     pub fn sharing(
         mut self,
         governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
     ) -> Self {
-        if self.governor.is_some() {
-            // THE CALLER NOW CHARGES, and only if it actually handed one over.
+        // NOTHING HANDED OVER IS NOT "NO GOVERNOR". `None` used to replace the
+        // source's own governor and clear its charge, so a caller that had no
+        // shared instance to give left a budgeted feed ungoverned: no permit
+        // was asked for by anyone. The source keeps its own and charges it.
+        // conc:pull1-2, D-2799. The same rule was reached independently as
+        // pull1-2, D-2524 (see the doc above): replace only when the source is
+        // governed AND a governor was actually handed over.
+        if let (Some(_), Some(shared)) = (&self.governor, governor) {
+            // THE CALLER NOW CHARGES, because it actually handed one over.
             // Sharing a governor and spending from it are one act; both sides
             // calling `admit` is two permits for one request. See
             // `charged_by_caller`.
-            self.charged_by_caller = governor.is_some();
-            self.governor = governor;
+            self.charged_by_caller = true;
+            self.governor = Some(shared);
         }
         self
     }
@@ -832,8 +882,12 @@ impl HttpSource {
     ///
     /// Returned as a pair rather than applied inside, so a test can assert the
     /// NAME without ever seeing the value.
-    fn header(&self) -> (&'static str, &str) {
-        (self.spec.auth.header, &self.header_value)
+    ///
+    /// The value is a refcounted clone of the one validated, sensitive
+    /// `HeaderValue` built in [`Self::new`] (P11-03, D-2525): the flag travels
+    /// with it into the request.
+    fn header(&self) -> (&'static str, reqwest::header::HeaderValue) {
+        (self.spec.auth.header, self.header_value.clone())
     }
 }
 
@@ -934,20 +988,24 @@ fn note_answer(
 /// **the seven arrays disagreeing in length**, the trap that would otherwise
 /// yield a short window filed as complete.
 ///
-/// # Memory — a whole tree, and UNMEASURED
+/// # Memory — a whole tree, MEASURED
 ///
 /// The body is parsed into one `serde_json::Value` tree before any field is
 /// read, so the tree, the body and the decoded columns are alive at once. A
 /// `Value` is 32 bytes on this build (pinned by
 /// `the_json_tree_is_thirty_two_bytes_a_node`) against as few as two bytes of
-/// text for one array element (`0,`), so the tree alone can reach ~16× the
-/// body, and more while an array's backing vector doubles. Since D-1570
+/// text for one array element (`0,`), and since D-1570
 /// (`arbitrary_precision`) a number node also owns its digits in one heap
-/// allocation, so a body of one-digit numbers can reach about twice that
-/// (~32×, allocator overhead included, also UNMEASURED). A body is capped at
-/// [`MAX_RESPONSE_BYTES`]. That is an ARGUED bound: no peak has been measured,
-/// and the typed or streaming decode that would remove the tree is not built.
-/// o1api-33, D-1203; `docs/06-limits.md` states it.
+/// allocation. The peak above the body is COUNTED by
+/// `a_json_decodes_peak_memory_is_measured_against_its_body` in
+/// `crates/pull/tests/allocation.rs` (D-2291): 12x the body for a Dhan
+/// 34,000-bar chunk as the vendor quotes it, 7x for a Zerodha answer of the
+/// same size, and 17x for the cheapest hostile text per node, one array of a
+/// million zeros, under the [`MAX_RESPONSE_BYTES`] cap (so at most about
+/// 1.1 GiB for a 64 MiB hostile body). Bytes asked of the allocator: its own
+/// per-block overhead is not counted. The typed or streaming decode that would
+/// remove the tree is not built. o1api-33, D-1203, D-2291; `docs/06-limits.md`
+/// states it.
 pub fn decode_body(
     body: &str,
     spec: &HttpSpec,
@@ -1134,8 +1192,17 @@ fn decode_value(
                 note_negative_volume_bars(decided.negative_volume, keep.len());
                 note_negative_interest_bars(decided.negative_open_interest, keep.len());
                 let mut arrays = arrays;
-                note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
-                RawWindow::decode(&arrays)
+                // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+                finish(
+                    &mut arrays,
+                    keep.len(),
+                    crate::fetch::DecodeSkips {
+                        null_price: decided.null_bars,
+                        negative_volume: decided.negative_volume,
+                        negative_open_interest: decided.negative_open_interest,
+                        impossible_ohlc: 0,
+                    },
+                )
             })()
         }
         // ONE OBJECT PER BAR — the shape `crate::vendor`'s Groww row declares.
@@ -1273,9 +1340,7 @@ fn decode_objects(
         open_interest: Vec::new(),
     };
 
-    let mut null_bars = 0usize;
-    let mut negative = 0usize;
-    let mut interest = 0usize;
+    let mut skipped = crate::fetch::DecodeSkips::default();
     for (i, item) in items.iter().enumerate() {
         // A field missing from ONE object is refused naming both the field and
         // which bar it was, because "the vendor sent 400 bars and one of them
@@ -1299,7 +1364,7 @@ fn decode_objects(
         // that had no trade, and this store cannot tell an invented zero from a
         // real one afterwards.
         //
-        // Skipped rather than silent: `null_bars` is counted and travels with
+        // Skipped rather than silent: `skipped.null_price` is counted and travels with
         // the window, so a run that dropped half its bars says so. `CLAUDE.md`
         // §4 — degrade loudly and name the reason.
         //
@@ -1312,7 +1377,7 @@ fn decode_objects(
             .iter()
             .any(|name| one(name).is_ok_and(serde_json::Value::is_null))
         {
-            null_bars += 1;
+            skipped.null_price += 1;
             continue;
         }
         // THE SAME COUNT RULE AS THE COLUMNAR SHAPE (c4a-1, c4a-2, D-1490).
@@ -1323,11 +1388,11 @@ fn decode_objects(
         ) {
             CountVerdict::Keep => {}
             CountVerdict::NegativeVolume => {
-                negative = negative.saturating_add(1);
+                skipped.negative_volume = skipped.negative_volume.saturating_add(1);
                 continue;
             }
             CountVerdict::NegativeInterest => {
-                interest = interest.saturating_add(1);
+                skipped.negative_open_interest = skipped.negative_open_interest.saturating_add(1);
                 continue;
             }
         }
@@ -1356,8 +1421,8 @@ fn decode_objects(
     // window an operator has to know about — it is not an error, and it is not
     // a full answer either. Emitted once per window rather than once per bar,
     // because 375 lines of "skipped" is noise and one count is information.
-    if null_bars > 0 {
-        // BOTH, and the event is the load-bearing one. `eprintln!` reaches the
+    if skipped.null_price > 0 {
+        // BOTH, and the event is the load-bearing one. The stderr line reaches the
         // operator watching a terminal; the event reaches the log FILE, which is
         // the thing handed to somebody diagnosing a run that already finished.
         // A diagnostic that exists only on a terminal nobody kept is a fact this
@@ -1368,25 +1433,31 @@ fn decode_objects(
                 "pull.decode",
                 "bars carried a null price and were skipped",
             )
-            .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
+            .with(
+                "skipped",
+                u64::try_from(skipped.null_price).unwrap_or(u64::MAX),
+            )
             .with("bars", u64::try_from(items.len()).unwrap_or(u64::MAX)),
         );
-        eprintln!(
-            "brutex: {null_bars} of {} bars carried a null price and were \
+        // The count is the carried `DecodeSkips` field (D-3122); the line goes
+        // through `stderr_line`, which cannot panic (r53-1, D-4413; D-4648).
+        let _printed = telemetry::stderr_line(format_args!(
+            "brutex: {} of {} bars carried a null price and were \
              skipped — the vendor reported no trade in those minutes",
+            skipped.null_price,
             items.len()
-        );
+        ));
     }
 
-    note_negative_volume_bars(negative, items.len());
-    note_negative_interest_bars(interest, items.len());
+    note_negative_volume_bars(skipped.negative_volume, items.len());
+    note_negative_interest_bars(skipped.negative_open_interest, items.len());
 
     // THE THIRD DOOR GETS THE RULE AT THE SAME TIME AS THE FIRST. Three
     // separate rules in this decoder reached two of the three shapes and missed
     // the same one; this one is applied at every `RawWindow::decode` in the
     // file, so a shape cannot be forgotten without deleting the call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), items.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(&mut arrays, items.len(), skipped)
 }
 
 /// The unit [`decode_body`] leaves prices in, whatever the vendor quoted.
@@ -1525,6 +1596,160 @@ pub(crate) fn number_text(number: &serde_json::Number) -> Option<String> {
         out.push_str(digits.get(split..)?);
     }
     Some(out)
+}
+
+/// Why a JSON number is not a whole `i64` (audit r64-4, D-4508).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotWhole {
+    /// The text is not an optional `-`, decimal digits, an optional point
+    /// with digits after it, and an optional `e`/`E` exponent.
+    NotDecimal,
+    /// A non-zero digit falls after the point: a fraction, not a whole number.
+    Fractional,
+    /// A whole number, and outside `i64`.
+    OutOfRange,
+}
+
+impl NotWhole {
+    /// The reason in words, for a refusal that names it.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::NotDecimal => "it is not a decimal number",
+            Self::Fractional => "it has a non-zero digit after the point, so it is a fraction",
+            Self::OutOfRange => "it is a whole number outside i64",
+        }
+    }
+}
+
+/// A JSON number that is exactly a whole number, as an `i64`, or the reason
+/// it is not (audit r64-4, D-4508).
+///
+/// # Why the price reader could not do this
+///
+/// Since D-1570 a [`serde_json::Number`] carries the vendor's own digits, so a
+/// whole count written `7.000` arrives as `7.000` rather than as an `f64` that
+/// printed `7.0`. The count and stamp readers sent that text through
+/// [`crate::csv::paisa`], a TWO-decimal price reader, and a third decimal is a
+/// refusal there: `7.000`, `1700000000.000` and `-0.000` were refused as
+/// unreadable while `7.0` and `1.7e9` were accepted. D-1491 accepts a
+/// whole-number decimal, and that reader also multiplied by 100 first, so a
+/// whole number above `i64::MAX / 100` written with a point was refused as well.
+///
+/// # What this accepts
+///
+/// Any number of digits after the point, so long as every one is zero, and
+/// any exponent: `7.000`, `7.` followed by a hundred thousand zeros, `0.7e1`,
+/// `-0.000` (zero), `9223372036854775807.000` and `-9223372036854775808.0`
+/// (the caller decides whether `i64::MIN` is legal for its field). A non-zero
+/// digit after the point, wherever the exponent puts it, is [`NotWhole::Fractional`].
+/// A zero mantissa is zero at any exponent, even one past `i64`.
+///
+/// # Cost
+///
+/// O(text length) in one pass, plus at most 19 digit steps to accumulate the
+/// magnitude: the text is the cell the body already holds, bounded by the
+/// response cap, and nothing is allocated beyond `to_string`. No exponent
+/// widens the work: digits the exponent moves past the text are zeros that
+/// are counted, not written.
+pub(crate) fn whole_number(number: &serde_json::Number) -> Result<i64, NotWhole> {
+    whole_text(&number.to_string())
+}
+
+/// [`whole_number`] on the vendor's text itself.
+fn whole_text(text: &str) -> Result<i64, NotWhole> {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        None => (text, None),
+        Some(at) => (
+            text.get(..at).ok_or(NotWhole::NotDecimal)?,
+            Some(
+                text.get(at.saturating_add(1)..)
+                    .ok_or(NotWhole::NotDecimal)?,
+            ),
+        ),
+    };
+    // An exponent, when there is one, is a sign and digits; `7e` is not `7`.
+    if exponent.is_some_and(|exponent| !exponent_reads(exponent)) {
+        return Err(NotWhole::NotDecimal);
+    }
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return Err(NotWhole::NotDecimal),
+        None => (unsigned, ""),
+    };
+    let decimal = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !decimal(whole) || !decimal(fraction) {
+        return Err(NotWhole::NotDecimal);
+    }
+    // The digits as one run, `whole` then `fraction`, with the point after
+    // `whole.len()` of them before the exponent moves it.
+    let digit = |at: usize| {
+        whole
+            .as_bytes()
+            .get(at)
+            .or_else(|| fraction.as_bytes().get(at.checked_sub(whole.len())?))
+            .map_or(0, |byte| byte.saturating_sub(b'0'))
+    };
+    let width = whole.len().saturating_add(fraction.len());
+    // The first and last non-zero digits. All zero is zero at any exponent.
+    let mut first = None;
+    let mut last = 0_usize;
+    for at in 0..width {
+        if digit(at) != 0 {
+            first = first.or(Some(at));
+            last = at;
+        }
+    }
+    let Some(first) = first else {
+        return Ok(0);
+    };
+    // Where the point lands, in digits from the start of the run. An exponent
+    // past `i64` puts it past every digit (a magnitude past `i64`) or before
+    // every digit (a fraction), and either answer is decided by its sign.
+    let shift: i128 = match exponent.map(|exponent| (exponent, exponent.parse::<i64>())) {
+        None => 0,
+        Some((_, Ok(shift))) => i128::from(shift),
+        Some((exponent, Err(_))) if exponent.starts_with('-') => {
+            return Err(NotWhole::Fractional);
+        }
+        Some(_) => return Err(NotWhole::OutOfRange),
+    };
+    let point = i128::try_from(whole.len())
+        .map_err(|_| NotWhole::OutOfRange)?
+        .saturating_add(shift);
+    let first_at = i128::try_from(first).map_err(|_| NotWhole::OutOfRange)?;
+    let last_at = i128::try_from(last).map_err(|_| NotWhole::OutOfRange)?;
+    if last_at >= point {
+        return Err(NotWhole::Fractional);
+    }
+    // `|i64::MIN|` has nineteen digits, so a twentieth is out of range
+    // whatever it is, and nineteen bounds the loop below.
+    if point.saturating_sub(first_at) > 19 {
+        return Err(NotWhole::OutOfRange);
+    }
+    let mut magnitude: i128 = 0;
+    let mut at = first_at;
+    while at < point {
+        let place = usize::try_from(at).map_err(|_| NotWhole::OutOfRange)?;
+        magnitude = magnitude
+            .saturating_mul(10)
+            .saturating_add(i128::from(digit(place)));
+        at = at.saturating_add(1);
+    }
+    let signed = if negative { -magnitude } else { magnitude };
+    i64::try_from(signed).map_err(|_| NotWhole::OutOfRange)
+}
+
+/// Whether an exponent is an optional sign and at least one decimal digit.
+fn exponent_reads(exponent: &str) -> bool {
+    let digits = exponent
+        .strip_prefix('-')
+        .or_else(|| exponent.strip_prefix('+'))
+        .unwrap_or(exponent);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// One price value, whatever shape carried it.
@@ -1692,7 +1917,7 @@ fn volumes(
 /// fallback that hides a failure; a bar dropped and counted is the loud degrade
 /// the same rule allows.
 ///
-/// **BOTH, and the event is the load-bearing one.** `eprintln!` reaches an
+/// **BOTH, and the event is the load-bearing one.** The stderr line reaches an
 /// operator watching a terminal; the event reaches the log FILE, which is what
 /// is handed to somebody diagnosing a run that already finished.
 fn note_null_bars(null_bars: usize, bars: usize) {
@@ -1714,10 +1939,10 @@ fn note_null_bars(null_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {null_bars} of {bars} bars carried a null price and were \
          skipped — the vendor reported no trade in those minutes"
-    );
+    ));
 }
 
 /// One event per WINDOW for rows dropped over an impossible volume.
@@ -1749,12 +1974,12 @@ fn note_negative_volume_bars(negative_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {negative_bars} of {bars} bars carried a NEGATIVE volume and \
          were skipped — a volume counts shares traded, so those rows carry no \
          quantity. The rest of the window is kept: this used to refuse all of \
          it, which cost one instrument every intraday rung it had."
-    );
+    ));
 }
 
 /// One event per WINDOW for rows whose open interest cannot be a count.
@@ -1783,12 +2008,33 @@ fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {negative_bars} of {bars} bars carried a NEGATIVE open \
          interest and were skipped — open interest is contracts outstanding \
          and is never below zero. `i64::MIN` is NOT counted here: that is the \
          null sentinel and is refused by name."
-    );
+    ));
+}
+
+/// Drops the impossible bars (counted and logged by [`note_impossible_bars`]),
+/// decodes the arrays, and attaches every skip to the window — or the refusal
+/// as it was.
+///
+/// One site for all three shapes, so a shape cannot attach the rows and forget
+/// the count — which is how the count was forgotten in the first place: each
+/// skip was logged and never reached the window, so the receipt balanced over
+/// candles that were not on it (D-3122).
+fn finish(
+    arrays: &mut ParallelArrays,
+    bars: usize,
+    mut skipped: crate::fetch::DecodeSkips,
+) -> Result<RawWindow, FetchError> {
+    skipped.impossible_ohlc = drop_impossible_bars(arrays);
+    note_impossible_bars(skipped.impossible_ohlc, bars);
+    RawWindow::decode(arrays).map(|mut window| {
+        window.skipped = skipped;
+        window
+    })
 }
 
 /// One event per WINDOW for rows whose four prices cannot be a bar.
@@ -1814,12 +2060,12 @@ fn note_impossible_bars(dropped: usize, bars: usize) {
             telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
         ),
     );
-    eprintln!(
+    let _printed = telemetry::stderr_line(format_args!(
         "brutex: {dropped} of {bars} bars carried an impossible OHLC and were \
          skipped — a high below its low, or a negative price. Caught here, \
          where the vendor's own row is still in hand, rather than at the store \
          append where the index names nothing an operator can open."
-    );
+    ));
 }
 
 /// Which rows of a columnar body are bars at all, and how many are not.
@@ -2217,36 +2463,42 @@ fn kept<'a>(
 /// reachable branch to check, and an unreachable branch is a coverage hole with
 /// a comment on it.
 ///
+/// **Amended by D-4508 (audit r64-4).** The second arm no longer divides by
+/// 100: it reads any whole-number decimal with [`whole_number`], which CAN
+/// produce `i64::MIN` from `-9223372036854775808.0`. So the sentinel check now
+/// runs after both arms, and that branch is reachable and tested.
+///
 /// # Errors
 ///
-/// [`FetchError::TransportFailed`] naming the field and the value.
+/// [`FetchError::TransportFailed`] naming the field, the value and the reason:
+/// not a number, a fraction, a whole number past `i64`, or the sentinel.
 fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
-    if let Some(n) = v.as_i64() {
-        if n == i64::MIN {
-            return Err(FetchError::TransportFailed {
-                detail: format!(
-                    "{name:?} holds {v}, which is the value this store reserves \
-                     for a field the vendor did NOT send (CLAUDE.md §7: \
-                     i64::MIN is the open-interest null and zero means zero). \
-                     Stored, it would read back as an absence rather than as \
-                     the number that arrived, so it is refused here where the \
-                     vendor's own value is still visible."
-                ),
-            });
-        }
-        return Ok(n);
-    }
-    let refuse = || FetchError::TransportFailed {
-        detail: format!("{name:?} holds {v}, which is not a whole number"),
-    };
-    let number = v.as_number().ok_or_else(refuse)?;
-    let hundredths =
-        crate::csv::paisa(&number_text(number).ok_or_else(refuse)?).ok_or_else(refuse)?;
-    if hundredths % 100 == 0 {
-        Ok(hundredths / 100)
+    // ANY NUMBER OF ZERO DECIMALS IS A WHOLE NUMBER (audit r64-4, D-4508).
+    // This read the text through `csv::paisa`, a two-decimal price reader, so
+    // `7.000` refused the whole answer as unreadable while `7.0` was accepted;
+    // a fraction is now refused by name, and so is a whole number past `i64`.
+    let n = if let Some(n) = v.as_i64() {
+        n
     } else {
-        Err(refuse())
+        let refuse = |why: &str| FetchError::TransportFailed {
+            detail: format!("{name:?} holds {v}, which is not a whole number: {why}"),
+        };
+        let number = v.as_number().ok_or_else(|| refuse("it is not a number"))?;
+        whole_number(number).map_err(|not| refuse(not.reason()))?
+    };
+    if n == i64::MIN {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "{name:?} holds {v}, which is the value this store reserves \
+                 for a field the vendor did NOT send (CLAUDE.md §7: \
+                 i64::MIN is the open-interest null and zero means zero). \
+                 Stored, it would read back as an absence rather than as \
+                 the number that arrived, so it is refused here where the \
+                 vendor's own value is still visible."
+            ),
+        });
     }
+    Ok(n)
 }
 
 /// One VOLUME, which counts shares traded and is therefore never negative.
@@ -3540,20 +3792,29 @@ fn decode_positional(
             .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
             .with("bars", u64::try_from(rows.len()).unwrap_or(u64::MAX)),
         );
-        eprintln!(
+        let _printed = telemetry::stderr_line(format_args!(
             // "in those intervals", not "in those minutes": this decoder is
             // rung-blind by design and a daily pull comes through it too.
             "brutex: {null_bars} of {} bars carried a null price and were skipped \
              — the vendor reported no trade in those intervals",
             rows.len()
-        );
+        ));
     }
 
     note_negative_volume_bars(negative, rows.len());
     note_negative_interest_bars(interest, rows.len());
     // AND THE SECOND DOOR. See the note on the object shape's call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(
+        &mut arrays,
+        rows.len(),
+        crate::fetch::DecodeSkips {
+            null_price: null_bars,
+            negative_volume: negative,
+            negative_open_interest: interest,
+            impossible_ohlc: 0,
+        },
+    )
 }
 
 /// One timestamp cell, in whichever spelling this feed uses.
@@ -3949,6 +4210,26 @@ mod tests {
     /// moves it forward only. The cursor therefore answers the exact question
     /// this test is about -- **was the governor asked at all** -- with no sleep,
     /// no ceiling to exhaust, and no race against the second rolling over.
+    /// **A source handed no governor keeps its own and charges it.**
+    /// conc:pull1-2, D-2799.
+    #[test]
+    fn sharing_nothing_keeps_the_sources_own_governor() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let own = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let kept = owned.sharing(None);
+        assert!(
+            kept.governor
+                .as_ref()
+                .is_some_and(|held| std::sync::Arc::ptr_eq(held, &own)),
+            "the source's own governor stays"
+        );
+        assert!(!kept.charged_by_caller, "and the source still charges it");
+    }
+
     #[tokio::test]
     async fn a_shared_governor_is_charged_by_the_caller_and_not_again_here() {
         let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
@@ -4109,6 +4390,90 @@ mod tests {
             "names the cursor: {why}"
         );
         assert_eq!(credit(&held), before, "nothing was charged");
+    }
+
+    /// **`sharing(None)` KEEPS THE PRIVATE GOVERNOR (pull1-2, D-2524).**
+    ///
+    /// On the old code `sharing` assigned its argument whenever the source was
+    /// governed, so `sharing(None)` left `governor == None` and
+    /// `charged_by_caller == false` -- nobody charged anything, and the first
+    /// assertion below failed. Every ordering of the two calls a server makes
+    /// is walked, plus the ungoverned source that must stay ungoverned.
+    #[tokio::test]
+    async fn sharing_none_keeps_the_private_governor() {
+        type Shared = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let build =
+            || HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let same = |a: Option<&Shared>, b: &Shared| a.is_some_and(|a| std::sync::Arc::ptr_eq(a, b));
+        let cursor_of = |held: &Shared| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cursor_micros()
+        };
+
+        // NONE ALONE: the private instance survives and is still charged here.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("Dhan is budgeted"));
+        let source = source.sharing(None);
+        assert!(
+            same(source.governor.as_ref(), &private),
+            "sharing(None) must keep the governor `new` built, not drop it"
+        );
+        assert!(
+            !source.charged_by_caller,
+            "nobody handed a governor over, so this source still charges its own"
+        );
+        // AND IT REALLY IS CHARGED: the cursor moves on a permit. The clock is
+        // read first for the reason the shared-governor test gives.
+        let _origin = crate::rate::monotonic_micros();
+        tokio::time::sleep(core::time::Duration::from_millis(2)).await;
+        let before = cursor_of(&private);
+        source
+            .wait_for_permit()
+            .await
+            .expect("a fresh governor admits");
+        assert!(
+            cursor_of(&private) > before,
+            "the kept private governor is the one spent"
+        );
+
+        // NONE TWICE: idempotent.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("budgeted"));
+        let source = source.sharing(None).sharing(None);
+        assert!(same(source.governor.as_ref(), &private));
+        assert!(!source.charged_by_caller);
+
+        // SOME THEN NONE: a later `None` does not undo a real hand-over.
+        let held = std::sync::Arc::clone(build().governor.as_ref().expect("budgeted"));
+        let source = build()
+            .sharing(Some(std::sync::Arc::clone(&held)))
+            .sharing(None);
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(
+            source.charged_by_caller,
+            "the caller that handed it over still charges"
+        );
+
+        // NONE THEN SOME: the hand-over still lands after a no-op.
+        let source = build()
+            .sharing(None)
+            .sharing(Some(std::sync::Arc::clone(&held)));
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(source.charged_by_caller);
+
+        // AN UNGOVERNED SOURCE stays ungoverned whatever it is handed.
+        for offered in [None, Some(std::sync::Arc::clone(&held))] {
+            let mut source = build();
+            source.governor = None;
+            let source = source.sharing(offered);
+            assert!(source.governor.is_none(), "no ceiling nobody wrote down");
+            assert!(!source.charged_by_caller);
+        }
     }
 
     /// A throttle lowers the allowance; clean answers raise it again.
@@ -4380,8 +4745,9 @@ mod tests {
 
     /// **THE TREE NODE THE MEMORY NOTE ON `decode_body` IS ARGUED FROM.**
     ///
-    /// o1api-33, D-1203: the peak memory of a decode is unmeasured, and the
-    /// stated bound rests on this size. A `serde_json` feature that widens the
+    /// o1api-33, D-1203, D-2291: the peak memory of a decode is counted by
+    /// `crates/pull/tests/allocation.rs`, and the per-node part of it rests on
+    /// this size. A `serde_json` feature that widens the
     /// node (`arbitrary_precision`, for one) changes the bound, and this fails
     /// so the note and `docs/06-limits.md` are revisited rather than left wrong.
     #[test]
@@ -4391,8 +4757,9 @@ mod tests {
         let doc = &source[..source
             .find(&format!("{}{}", "pub fn decode_", "body("))
             .expect("decode_body exists")];
-        assert!(doc.contains("# Memory — a whole tree, and UNMEASURED"));
-        assert!(doc.contains("~16× the\n/// body"));
+        assert!(doc.contains("# Memory — a whole tree, MEASURED"));
+        assert!(doc.contains("12x the body for a Dhan"));
+        assert!(doc.contains("17x for the cheapest hostile text per node"));
     }
 
     /// Every price the paisa grid can hold, held exactly.
@@ -6167,9 +6534,11 @@ mod tests {
         let (name, value) = source.header();
         assert_eq!(name, "Authorization");
         assert_eq!(
-            value, "token APIKEY:TOKEN",
+            value.to_str().expect("an ASCII header"),
+            "token APIKEY:TOKEN",
             "key first, one colon, one trailing space in the prefix"
         );
+        assert!(value.is_sensitive(), "P11-03, D-2525");
         assert!(
             zerodha
                 .extra_headers
@@ -6210,6 +6579,91 @@ mod tests {
                 given_two: true
             }
         );
+    }
+
+    /// **A CREDENTIAL THAT IS NOT A HEADER VALUE REFUSES AT CONSTRUCTION, AND A
+    /// GOOD ONE IS HELD SENSITIVE (P1-19-01, P11-03, D-2525).**
+    ///
+    /// On the old code `header_value` was a `String` and `new` never parsed it,
+    /// so every "bad" case below BUILT a source (the first `expect_err` failed)
+    /// and the newline surfaced only at send time as `TransportFailed`; and
+    /// there was no `HeaderValue` to ask `is_sensitive` of. Walked for every
+    /// HTTP feed in `Feed::ALL`, with each refused byte at the start, the
+    /// middle and the end of the token, and in the key of a two-secret scheme.
+    /// A scheme mismatch still refuses FIRST, as `CredentialMismatch`.
+    #[test]
+    fn a_credential_that_is_not_a_header_value_is_refused_at_construction() {
+        const TOKEN: &str = "TOKENBYTES";
+        let refused_bytes = ['\n', '\r', '\0', '\u{01}', '\u{1f}', '\u{7f}'];
+        let mut walked = 0_usize;
+        for feed in crate::vendor::Feed::ALL {
+            let crate::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let two = spec.auth.scheme.names_two_secrets();
+            let credential = |token: String, key: String| {
+                if two {
+                    Credential::pair(key, token)
+                } else {
+                    Credential::token(token)
+                }
+            };
+            for bad in refused_bytes {
+                let mut cases = vec![
+                    (format!("{bad}{TOKEN}"), "KEY".to_owned()),
+                    (format!("TOKEN{bad}BYTES"), "KEY".to_owned()),
+                    (format!("{TOKEN}{bad}"), "KEY".to_owned()),
+                ];
+                if two {
+                    cases.push((TOKEN.to_owned(), format!("KEY{bad}")));
+                }
+                for (token, key) in cases {
+                    let why = HttpSource::new(spec, credential(token, key))
+                        .expect_err("a credential no header can carry refuses");
+                    assert_eq!(
+                        why,
+                        FetchError::CredentialNotAHeaderValue {
+                            header: spec.auth.header
+                        },
+                        "{feed} {bad:?}"
+                    );
+                    let said = why.to_string();
+                    assert!(!said.contains("TOKEN"), "the value is never shown: {said}");
+                    assert!(said.contains(spec.auth.header), "{said}");
+                    walked += 1;
+                }
+            }
+            // THE ORDER: a mismatch is named before the bytes are looked at.
+            let mismatched = if two {
+                Credential::token(format!("{TOKEN}\n"))
+            } else {
+                Credential::pair("KEY".to_owned(), format!("{TOKEN}\n"))
+            };
+            assert!(
+                matches!(
+                    HttpSource::new(spec, mismatched),
+                    Err(FetchError::CredentialMismatch { .. })
+                ),
+                "{feed}: a scheme mismatch refuses first"
+            );
+            // A GOOD CREDENTIAL, including a tab and a space a header CAN
+            // carry, builds, and its header is sensitive everywhere it goes.
+            for good in [TOKEN, "TOKEN\tBYTES", "TOKEN BYTES"] {
+                let source = HttpSource::new(spec, credential(good.to_owned(), "KEY".to_owned()))
+                    .expect("a header-safe credential builds");
+                let (name, value) = source.header();
+                assert!(value.is_sensitive(), "{feed}: the auth header is sensitive");
+                let mut map = reqwest::header::HeaderMap::new();
+                map.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                        .expect("a header name"),
+                    value,
+                );
+                let printed = format!("{map:?} {source:?}");
+                assert!(!printed.contains("BYTES"), "{feed}: {printed}");
+            }
+        }
+        assert!(walked >= 18, "at least one HTTP feed was walked: {walked}");
     }
 
     /// The blocking seam refuses by name rather than silently blocking, and
@@ -7173,6 +7627,106 @@ mod tests {
             one_number(&serde_json::json!(41), "open_interest").expect("an ordinary count"),
             41
         );
+    }
+
+    /// **A WHOLE NUMBER WITH ANY NUMBER OF ZERO DECIMALS IS A WHOLE NUMBER,
+    /// AND A FRACTION IS REFUSED BY NAME** (audit r64-4, D-4508).
+    ///
+    /// Since D-1570 the reader sees the vendor's own digits, and the two-decimal
+    /// price reader it went through refused `7.000` as unreadable. The extremes:
+    /// `i64::MAX` and `i64::MIN` with zero decimals, `-0.000`, a hundred
+    /// thousand zeros, exponents that land the point on, inside and past the
+    /// digits, exponents past `i64`, and the one-digit-past-`i64` neighbours.
+    #[test]
+    fn a_whole_number_with_any_zero_decimals_reads_and_a_fraction_is_refused_by_name() {
+        use super::{NotWhole, whole_text};
+        let zeros = format!("7.{}", "0".repeat(100_000));
+        let max = format!("{}.000", i64::MAX);
+        let min = format!("{}.0", i64::MIN);
+        for (text, want) in [
+            ("7", Ok(7)),
+            ("7.0", Ok(7)),
+            ("7.00", Ok(7)),
+            ("7.000", Ok(7)),
+            ("7.0000000", Ok(7)),
+            (zeros.as_str(), Ok(7)),
+            ("1700000000.000", Ok(1_700_000_000)),
+            ("-0.000", Ok(0)),
+            ("-0", Ok(0)),
+            ("0.000", Ok(0)),
+            (max.as_str(), Ok(i64::MAX)),
+            (min.as_str(), Ok(i64::MIN)),
+            ("1.7e9", Ok(1_700_000_000)),
+            ("1.7E+9", Ok(1_700_000_000)),
+            ("0.7e1", Ok(7)),
+            ("700e-2", Ok(7)),
+            ("7000.000e-3", Ok(7)),
+            ("0e-1", Ok(0)),
+            ("0.000e99999999999999999999", Ok(0)),
+            ("-0e-99999999999999999999", Ok(0)),
+            ("9.223372036854775807e18", Ok(i64::MAX)),
+            ("7.5", Err(NotWhole::Fractional)),
+            ("7.0001", Err(NotWhole::Fractional)),
+            ("-0.001", Err(NotWhole::Fractional)),
+            ("5e-1", Err(NotWhole::Fractional)),
+            ("7e-99999999999999999999", Err(NotWhole::Fractional)),
+            ("9223372036854775808.000", Err(NotWhole::OutOfRange)),
+            ("-9223372036854775809.0", Err(NotWhole::OutOfRange)),
+            ("1e19", Err(NotWhole::OutOfRange)),
+            ("1e20", Err(NotWhole::OutOfRange)),
+            ("1e21", Err(NotWhole::OutOfRange)),
+            ("123456789012345678901", Err(NotWhole::OutOfRange)),
+            ("7e99999999999999999999", Err(NotWhole::OutOfRange)),
+            ("", Err(NotWhole::NotDecimal)),
+            ("-", Err(NotWhole::NotDecimal)),
+            (".5", Err(NotWhole::NotDecimal)),
+            ("7.", Err(NotWhole::NotDecimal)),
+            ("7.0x", Err(NotWhole::NotDecimal)),
+            ("x7", Err(NotWhole::NotDecimal)),
+            ("7e", Err(NotWhole::NotDecimal)),
+            ("7e+", Err(NotWhole::NotDecimal)),
+            ("7e1.5", Err(NotWhole::NotDecimal)),
+            ("0e", Err(NotWhole::NotDecimal)),
+            ("0ex", Err(NotWhole::NotDecimal)),
+            ("--7", Err(NotWhole::NotDecimal)),
+        ] {
+            let shown = text.get(..40).unwrap_or(text);
+            assert_eq!(whole_text(text), want, "{shown}");
+        }
+        // Each reason is distinct and names itself.
+        assert!(NotWhole::Fractional.reason().contains("fraction"));
+        assert!(NotWhole::OutOfRange.reason().contains("outside i64"));
+        assert!(NotWhole::NotDecimal.reason().contains("not a decimal"));
+
+        // Through `one_number`, from a JSON body, as the vendor sends it.
+        let read = |body: &str| {
+            let v: serde_json::Value = serde_json::from_str(body).expect("JSON");
+            one_number(&v, "volume")
+        };
+        for (body, want) in [
+            ("7.000", 7),
+            ("1700000000.000", 1_700_000_000),
+            ("-0.000", 0),
+            (max.as_str(), i64::MAX),
+            (zeros.as_str(), 7),
+        ] {
+            let shown = body.get(..40).unwrap_or(body);
+            assert_eq!(read(body).expect(shown), want, "{shown}");
+        }
+        for (body, says) in [
+            ("7.5", "fraction"),
+            ("9223372036854775808.000", "outside i64"),
+            (min.as_str(), "did NOT send"),
+            ("\"7\"", "not a number"),
+        ] {
+            let Err(FetchError::TransportFailed { detail }) = read(body) else {
+                panic!("{body} must be refused")
+            };
+            assert!(
+                detail.contains(says) && detail.contains("\"volume\""),
+                "{body}: {detail}"
+            );
+        }
     }
 
     /// And the refusal reaches the whole decode, not just the leaf.

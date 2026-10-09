@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
+import { auditRefusal, headerRefusal, headerRefusalFrom, reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
 import { readCalendar } from '../src/lib/calendar-owed.js';
 import { censusFailure, createCensusLoader } from '../src/lib/store-census.js';
 
@@ -74,4 +74,80 @@ test('each of the four readers goes through the named-reason helper', () => {
   const mapping = source('../src/routes/mapping/+page.svelte');
   assert.match(mapping, /refusalFrom\('\/indexmap\.json', response\)/);
   assert.doesNotMatch(mapping, /body\?\.error/);
+});
+
+test('a stamped refusal names the failed half only: an unreadable census, a master that did not read (W2)', async () => {
+  const headers = (/** @type {Record<string, string>} */ h) => new Headers(h);
+  assert.equal(headerRefusal(null), null);
+  assert.equal(headerRefusal(headers({})), null);
+  assert.equal(headerRefusal(headers({ 'x-brutex-master-state': 'read', 'x-brutex-master-note': 'dhan: master read; 5 instrument(s)',
+    'x-brutex-census-state': 'held', 'x-brutex-census-note': 'dhan: 1 month(s), 2 row(s), generation 3' })), null);
+  assert.equal(headerRefusal(headers({ 'x-brutex-census-state': 'absent', 'x-brutex-census-note': 'dhan: UNAVAILABLE ? no manifest' })), null);
+  assert.equal(headerRefusal(headers({ 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': '  dhan: UNREADABLE  ' })),
+    'the store census is unreadable: dhan: UNREADABLE');
+  assert.equal(headerRefusal(headers({ 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': '   ' })),
+    'the store census is unreadable and the response carried no census note');
+  assert.equal(headerRefusal(headers({ 'x-brutex-master-state': 'UNAVAILABLE' })),
+    'the instrument master is UNAVAILABLE and the response carried no master note');
+  assert.equal(await headerRefusalFrom('/instruments.json', Response.json({ refused: 'no feed called x', feed: 'x' }, { status: 400 })),
+    '/instruments.json answered HTTP 400: no feed called x');
+  assert.equal(await headerRefusalFrom('/instruments.json', Response.json([], { status: 503, headers: { 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': 'n' } })),
+    '/instruments.json answered HTTP 503: the store census is unreadable: n');
+});
+
+// W6 (OBSV-17, D-3216): `/backtest/run.json` answers an unreadable attempt with
+// 503 (or a malformed `?attempt=` with 400) and the reason nested in
+// `{"running":{"status":"unknown","why":…}}` (`crates/api/src/sweeprun.rs`
+// `browser_attempt_unknown`, `unknown_status`). None of the three top-level keys
+// carries it, so every reader printed the status alone.
+test('an unknown running status is read for its why, and only an unknown one (W6)', async () => {
+  const why = 'persistent invocation read unavailable: Saturated';
+  assert.equal(refusalOf({ running: { where: 'browser', status: 'unknown', requested_attempt: '9', in_flight: false, why, refusal: null, report: null } }), why);
+  assert.equal(refusalOf({ running: { where: 'cli', status: 'unknown', in_flight: false, why: `  ${why}  `, refusal: null } }), why);
+  assert.equal(refusalOf({ error: 'top level first', running: { status: 'unknown', why } }), 'top level first');
+  for (const body of [{ running: null }, { running: { status: 'running', why } }, { running: { status: 'unknown', why: '' } },
+    { running: { status: 'unknown', why: 7 } }, { running: { status: 'unknown' } }, { running: [why] }, { running: why }]) {
+    assert.equal(refusalOf(body), null, JSON.stringify(body));
+  }
+  assert.equal(await refusalFrom('/backtest/run.json', Response.json({ running: { status: 'unknown', why } }, { status: 503 })),
+    `/backtest/run.json answered HTTP 503: ${why}`);
+});
+
+// F1 (OBSV-19, D-3218): the audit layer refuses any audited route with its own
+// envelope, whose `why` says whether the handler ran. `refusalOf` read only
+// `refusal` from it, so /live.json, /frontier.json, /backtest/run.json and
+// /engine/boolean-launch.json readers dropped that half.
+test('an audit-layer envelope is read for its refusal and its why, and only a validated one (F1)', async () => {
+  const body = { schema_version: 1, refusal: 'bounded terminal audit could not settle: Busy', code: 'invocation_audit_unavailable',
+    handler_completed: true, why: 'The handler already ran. Its work may still be running or saved; inspect the exact invocation before retrying a write.' };
+  assert.equal(refusalOf(body), `${body.refusal} ${body.why}`);
+  assert.equal(await refusalFrom('/live.json', Response.json(body, { status: 503 })), `/live.json answered HTTP 503: ${body.refusal} ${body.why}`);
+  const read = { schema_version: 1, refusal: 'invocation index is busy', code: 'invocation_audit_read_unavailable', why: 'No audit snapshot was published.' };
+  assert.equal(refusalOf(read), 'invocation index is busy No audit snapshot was published.');
+  for (const damage of [{ schema_version: 2 }, { code: 'invocation_audit' }, { handler_completed: 1 }, { why: null }]) {
+    assert.equal(refusalOf({ ...body, ...damage }), body.refusal, `unvalidated ${JSON.stringify(damage)} falls back to the bare refusal key`);
+  }
+  assert.equal(refusalOf({ ...read, handler_completed: false }), read.refusal);
+  assert.equal(auditRefusal({ ...read, why: '  ' }), 'invocation index is busy', 'an empty why adds nothing');
+  assert.equal(auditRefusal({ ...read, refusal: 'r'.repeat(4096), why: 'w'.repeat(4096) }), `${'r'.repeat(4096)} ${'w'.repeat(4096)}`);
+  assert.equal(auditRefusal({ ...read, refusal: 'r'.repeat(4097) }), null);
+  assert.equal(auditRefusal({ ...read, why: 'w'.repeat(4097) }), null);
+  for (const bad of [null, [], 'text', {}]) assert.equal(auditRefusal(bad), null);
+});
+
+// F5 (OBSV-24, D-3222): a command POST's reply is read once. A 2xx is parsed
+// as JSON (null when it is not); a non-2xx is read as text, so a plain-text
+// refusal keeps its sentence and a JSON one its body.
+test('a command reply keeps a non-2xx reason, plain or JSON, and never throws (F5)', async () => {
+  const { commandReply } = /** @type {any} */ (await import('../src/lib/refusal.js'));
+  assert.deepEqual(await commandReply(Response.json({ accepted: true, attempt: '1' }, { status: 202 })), { body: { accepted: true, attempt: '1' }, reason: null });
+  assert.deepEqual(await commandReply(new Response('{', { status: 202 })), { body: null, reason: null });
+  const audit = { schema_version: 1, refusal: 'bounded request audit capacity is full', code: 'invocation_audit_unavailable',
+    handler_completed: false, why: 'The handler was not dispatched because its required audit start was unavailable.' };
+  assert.deepEqual(await commandReply(Response.json(audit, { status: 429 })), { body: audit, reason: `${audit.refusal} ${audit.why}` });
+  assert.deepEqual(await commandReply(new Response('REFUSED — the request target is 9000 bytes. Nothing was read or run.\n', { status: 414 })),
+    { body: null, reason: 'REFUSED — the request target is 9000 bytes. Nothing was read or run.' });
+  assert.deepEqual(await commandReply(/** @type {any} */ ({ ok: false, status: 502, text: async () => { throw new Error('reset'); } })), { body: null, reason: null });
+  assert.deepEqual(await commandReply(/** @type {any} */ ({ ok: true, status: 202, json: async () => ({ accepted: true }) })), { body: { accepted: true }, reason: null },
+    'a 2xx is read through json() alone');
 });

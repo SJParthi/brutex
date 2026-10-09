@@ -264,6 +264,34 @@ pub fn is_busy(why: &str) -> bool {
     why.starts_with(BUSY)
 }
 
+/// How long [`begin`] waits for the invocation index's lock.
+///
+/// Every `/backtest/run.json` poll and every status read takes the index's
+/// SHARED lock for one record read, so a CLI start that met one of those
+/// instants was refused "busy" with no writer anywhere (conc:cli1-2). The
+/// holders it waits for hold for one read or one append, microseconds; a
+/// second is far past that and still refuses a holder that does not let go.
+/// D-2799.
+const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Retries `take` while it answers `WouldBlock`, every millisecond, until
+/// `wait` has passed; any other answer is returned at once. The last
+/// `WouldBlock` is the refusal.
+fn within<T>(
+    wait: std::time::Duration,
+    mut take: impl FnMut() -> Result<T, std::fs::TryLockError>,
+) -> Result<T, std::fs::TryLockError> {
+    let started = std::time::Instant::now();
+    loop {
+        match take() {
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < wait => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            answer => return answer,
+        }
+    }
+}
+
 fn lock_error(why: std::fs::TryLockError) -> String {
     match why {
         std::fs::TryLockError::WouldBlock => {
@@ -442,11 +470,35 @@ impl Attempt {
     }
 
     /// Explicitly end the operation after its result publication has settled.
+    ///
+    /// A TERMINAL THAT CANNOT BE CONFIRMED IS LOGGED HERE, once, for every
+    /// caller (sobs-4, D-4462). It was logged only from `Drop`, which never
+    /// sees this failure: the attempt is disarmed whether or not the terminal
+    /// landed, so an explicit `finish` that failed reached the log only if its
+    /// caller happened to log it, and the CLI's caller printed it to stdout.
     /// # Errors
     /// A missing durability barrier, prior audit failure or duplicate terminal.
     pub fn finish(&mut self, phase: Phase, status: u16) -> Result<(), String> {
+        let settled = self.settle(phase, status);
+        if let Err(why) = &settled {
+            crate::note(
+                &telemetry::Event::error("cli.audit", "terminal audit unconfirmed")
+                    .with("phase", phase.label())
+                    .with("why", telemetry::Value::Str(why.as_str())),
+            );
+        }
+        settled
+    }
+
+    /// [`Self::finish`]'s write, disarming the attempt once it was tried.
+    fn settle(&mut self, phase: Phase, status: u16) -> Result<(), String> {
         if !phase.terminal() {
             return Err(error("finish requires an explicit terminal phase"));
+        }
+        #[cfg(test)]
+        if tests::take_finish_fault() {
+            self.armed = false;
+            return Err(error("injected terminal audit fault"));
         }
         let result = self
             .state
@@ -474,12 +526,10 @@ impl Drop for Attempt {
             } else {
                 Phase::Cancelled
             };
+            // `finish` has logged the failure; this line is for whoever is
+            // watching, and it cannot panic on a closed stderr (r53-1).
             if let Err(why) = self.finish(phase, 0) {
-                let _noted = telemetry::emit(
-                    &telemetry::Event::error("cli.audit", "terminal audit unconfirmed")
-                        .with("why", telemetry::Value::Str(&why)),
-                );
-                eprintln!("{why}; terminal audit is unconfirmed");
+                crate::tell(format_args!("{why}; terminal audit is unconfirmed"));
             }
         }
     }
@@ -522,7 +572,10 @@ pub fn completed_boundary() {
                     &telemetry::Event::error("cli.audit", "boundary audit unconfirmed")
                         .with("why", telemetry::Value::Str(&why)),
                 );
-                eprintln!("{why}; this invocation cannot acknowledge a successful terminal audit");
+                // Cannot panic on a closed stderr (r53-1, D-4463).
+                crate::tell(format_args!(
+                    "{why}; this invocation cannot acknowledge a successful terminal audit"
+                ));
             }
         }
     });
@@ -543,15 +596,21 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
     // duplicate left in a child another thread spawned would otherwise hold it
     // and report this journal busy with no writer alive (D-0693).
     let index_path = base.join("index.bin");
-    let mut index = Flock::try_lock(
-        options()
+    // A READER IS NOT ANOTHER OPERATION (cli1-2, D-2620). `read` holds this
+    // index shared for one record and a sync, and the browser polls it through
+    // every audited GET route; one `try_lock` turned that poll into a FAILED
+    // sweep. The lock is asked again for a bounded second (`INDEX_LOCK_WAIT`,
+    // D-2799), each attempt on its own open, so a refused attempt holds
+    // nothing, and a real writer still past the bound is BUSY as before.
+    let mut index = within(INDEX_LOCK_WAIT, || {
+        let file = options()
             .read(true)
             .append(true)
             .create(true)
             .open(&index_path)
-            .map_err(error)?,
-        index_path.as_path(),
-    )
+            .map_err(std::fs::TryLockError::Error)?;
+        Flock::try_lock(file, index_path.as_path())
+    })
     .map_err(lock_error)?;
     let bytes = length(&index)?;
     let ordinal = (bytes / STRIDE)
@@ -698,4 +757,4 @@ pub fn page(root: &Path, before: Option<u64>, limit: usize) -> Result<Vec<Record
 
 #[cfg(test)]
 #[path = "operation_audit_tests.rs"]
-mod tests;
+pub(crate) mod tests;

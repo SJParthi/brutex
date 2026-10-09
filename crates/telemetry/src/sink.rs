@@ -80,6 +80,12 @@
 //!   2. [`Sink::health`] carries a running count of dropped events and the
 //!      most recent failure in its own words. This is what a page renders.
 //!   3. The **first** failure, and only the first, goes to `stderr`.
+//!   4. Each dropped event's number is recorded in the loss ledger beside the
+//!      set (`crate::loss`), a fixed-length record made while the disk had
+//!      room and only overwritten afterwards. The next sink on the directory
+//!      resumes above every number burnt and writes one `Error` line saying
+//!      how many were lost, so a loss outlives the process that suffered it
+//!      (sobs-2, D-4410). Until then, 2 and 3 die with the process.
 //!
 //! The trade-off, stated: between the first failure and the moment somebody
 //! reads [`Sink::health`], those events are gone and cannot be recovered. They
@@ -123,7 +129,9 @@ use crate::clock::now_millis;
 use crate::encode::line;
 use crate::event::{Event, MAX_TARGET_BYTES};
 use crate::level::Level;
+use crate::loss::{Found, Ledger, Loss};
 use crate::record::Record;
+use crate::value::Value;
 
 /// The name every file in the set starts with.
 pub const BASENAME: &str = "events";
@@ -144,9 +152,9 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Eight. With the bound above that is a **64 MiB ceiling on this crate's
 /// footprint while rotation works**: negligible beside the 40 GB lake, and
 /// small enough that no operator has to think about it. It used to say
-/// "forever", and it is not: after the first failed roll `rotation_broken`
-/// stops rotating for the life of the sink and the current file grows past
-/// its bound, loudly, in [`Health`]. D-1324. It is also ~260,000 events
+/// "forever", and it is not: after a failed roll `rotation_broken` pauses
+/// rotation and the current file grows past its bound, loudly, in [`Health`],
+/// until a bounded retry succeeds (D-2509) or, past it, until restart. D-1324. It is also ~260,000 events
 /// of history, which is several backfills.
 pub const DEFAULT_KEEP_FILES: u8 = 8;
 
@@ -591,6 +599,14 @@ struct Inner {
     /// when the fragment was empty is one blank line the reader steps over.
     /// audit-20261003 attacksweep-2, D-1539.
     torn: bool,
+    /// Where a DROPPED event is recorded for the next sink on this directory.
+    ///
+    /// `None` for a sink around a target this crate did not open, and for a
+    /// directory whose ledger could not be opened — which [`Sink::open`] names.
+    /// See `crate::loss`: the log cannot carry the fact of its own loss when
+    /// the disk refuses it, so a fixed-length record made while the disk had
+    /// room carries it instead (sobs-2, D-4410).
+    ledger: Option<Ledger>,
 }
 
 impl Inner {
@@ -678,11 +694,28 @@ pub struct Sink {
     /// `[1862, 927, 926, 0, 0]` in two events — the retained history emptied
     /// one file per event while the sink reported only that rolling had failed.
     ///
-    /// So the first failure stops rotation for the life of the sink. The
-    /// current file then grows past its bound, which is the documented
+    /// So a failure pauses rotation, and only `may_roll`'s bounded, probed
+    /// retry resumes it (D-2509). The current file meanwhile grows past its
+    /// bound, which is the documented
     /// degradation and is visible in [`Health::current_bytes`] — and the events
     /// already on disk survive, which is the whole point of keeping them.
     rotation_broken: AtomicBool,
+    /// The current-file size at which a broken rotation is looked at again:
+    /// one more file bound past the size it failed at. CE-41, D-2509.
+    ///
+    /// `rotation_broken` used to be final for the life of the sink, so one
+    /// transient refusal (a mount briefly read-only, a full disk freed a
+    /// minute later) let the current file grow without bound until a restart.
+    /// A retry is now made once per further bound, and only after a probe
+    /// shows the directory accepts a create, a rename and an unlink, so a
+    /// directory that still refuses is never shifted (the hazard documented on
+    /// `rotation_broken`). An attempt that failed AFTER it had moved or
+    /// deleted a file ends retries for good, because repeating it is that
+    /// shift. At most `keep_files` failed attempts are made in all; after them
+    /// rotation stays stopped, as before, and says so.
+    roll_retry_at: AtomicU64,
+    /// Failed roll attempts so far, bounded by `keep_files`. CE-41, D-2509.
+    roll_attempts: AtomicU64,
 
     /// **BOTH FLOORS, IN ONE WORD, BECAUSE TWO WORDS COULD DISAGREE.**
     ///
@@ -786,27 +819,56 @@ impl Sink {
         })?;
         let held = hold_directory(&config.dir)?;
         let path = current_path(&config.dir);
-        let mut target = FileTarget::open(&path)
+        let target = FileTarget::open(&path)
             .map_err(|e| format!("{}: cannot open the event stream — {e}", path.display()))?;
         let found = target.len();
-        let resumed = resume_point(&config.dir, config.keep_files);
+        Ok(Self::resumed(config, held, Box::new(target), found))
+    }
+
+    /// Everything [`Sink::open`] does once the directory is held and the
+    /// current file is open: the resume, the torn tail, the loss ledger and the
+    /// notices each can owe.
+    ///
+    /// Split out so a test can hand it a [`Target`] that refuses — a full disk —
+    /// while the directory, its lock and its loss ledger are real.
+    fn resumed(config: &Config, held: File, mut target: Box<dyn Target>, found: u64) -> Self {
+        let path = current_path(&config.dir);
+        // The resume and the reason a numbering restarted (CE-51, D-2510), now
+        // inside the split-out open (sobs-3, D-4412; D-4654).
+        let (resumed, unresumed) = resume_point(&config.dir, config.keep_files);
         // THE TORN TAIL IS CLOSED BEFORE THE FIRST APPEND. See
         // `terminate_torn_tail`: without this the first event of the new
         // process fuses onto whatever the old one was killed in the middle of.
-        let (bytes, torn) = terminate_torn_tail(&mut target, &path, found);
-        let mut sink = Self::around(
-            config,
-            Box::new(target),
-            bytes,
-            resumed.seq,
-            resumed.last_at,
-        );
+        // AND A TEAR THE FULL DISK WOULD NOT CLOSE STAYS OPEN, SO THE FIRST
+        // APPEND CLOSES IT: `Inner::torn` makes that append lead with the
+        // newline. Starting `torn: false` here let the first event fuse onto the
+        // fragment while it reported `Written` (sobs-3, D-4412).
+        let (bytes, torn, still_torn) = terminate_torn_tail(&mut *target, &path, found);
+        // THE NUMBERS AN EARLIER SINK BURNT ON DROPPED EVENTS ARE NOT ISSUED
+        // AGAIN. `resume_point` reads the last line that LANDED; a process whose
+        // disk stayed full to its exit numbered events past it, and resuming
+        // from the file alone re-issued those numbers and erased the hole
+        // `Tail::missing` reads as the drop's receipt (sobs-2, D-4410).
+        let (ledger, ledger_found) = Ledger::open(&config.dir, resumed.seq);
+        let prior = match ledger_found {
+            Found::Read(loss) => loss,
+            Found::Made | Found::Unusable(_) => Loss::default(),
+        };
+        let seq = resumed.seq.max(prior.issued);
+        let mut sink = Self::around(config, target, bytes, seq, resumed.last_at);
         sink.held_lock = Some(held);
+        let inner = sink.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        inner.ledger = ledger;
+        inner.torn = still_torn;
         // RUN IDS RESUME ABOVE EVERY RUN THE LOG CARRIES, not above the last
         // `seq` alone: a process that reserved two ids and wrote an event only
         // under the second left a `seq` below that id. hunt-costs-2, D-1536.
-        sink.reserved_run = AtomicU64::new(resumed.seq.max(resumed.max_run));
+        sink.reserved_run = AtomicU64::new(seq.max(resumed.max_run));
         if let Some(why) = torn {
+            sink.report(&why);
+        }
+        // A NUMBERING THAT RESTARTED FOR A REASON IS NAMED. CE-51, D-2510.
+        if let Some(why) = unresumed {
             sink.report(&why);
         }
         // A FLOOR AHEAD OF THE CLOCK IS NAMED, not carried silently.
@@ -820,7 +882,61 @@ impl Sink {
                 resumed.last_at
             ));
         }
-        Ok(sink)
+        // LAST, so `Health::last_error` ends on the loss rather than on a tear
+        // the loss explains.
+        match ledger_found {
+            Found::Read(loss) if loss.lost > 0 => sink.report_inherited(loss),
+            Found::Read(_) | Found::Made => {}
+            Found::Unusable(why) => {
+                sink.report(&why);
+                let _in_the_log = sink.emit(
+                    &Event::error("telemetry.sink", "the loss ledger is unusable")
+                        .with("why", Value::Str(&why)),
+                );
+            }
+        }
+        sink
+    }
+
+    /// Says what an earlier sink on this directory lost, in the log itself,
+    /// and clears the ledger's count only once that line has landed.
+    ///
+    /// At `Error`, which no floor filters: `Level` has nothing above it, so a
+    /// sink configured at its quietest still writes this. If the notice is
+    /// itself dropped, the drop arm of [`Sink::emit_for_run`] counts it into the
+    /// same ledger, and the next sink reports both.
+    fn report_inherited(&self, loss: Loss) {
+        let ledger = self.dir.join(crate::loss::LEDGER_NAME);
+        self.report(&format!(
+            "{}: {} event(s), numbered from {} to {}, were dropped by an earlier sink on \
+             this directory and never reached the log; those numbers are skipped, not \
+             issued again",
+            ledger.display(),
+            loss.lost,
+            loss.first,
+            loss.issued
+        ));
+        let shown = ledger.display().to_string();
+        let notice = Event::error("telemetry.sink", "events were lost before this sink opened")
+            .with("lost", Value::Uint(loss.lost))
+            .with("first_seq", Value::Uint(loss.first))
+            .with("last_seq", Value::Uint(loss.issued))
+            .with("ledger", Value::Str(&shown));
+        if !self.emit(&notice).is_written() {
+            return;
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let seq = guard.seq;
+        let cleared = guard.ledger.as_mut().map(|ledger| {
+            let reported = ledger.loss.reported(seq);
+            ledger.write(reported)
+        });
+        drop(guard);
+        // NOT CLEARED IS OVER-REPORTED, NEVER HIDDEN: the next sink says the
+        // same loss again, and this says why.
+        if let Some(Err(why)) = cleared {
+            self.report(&why);
+        }
     }
 
     /// The same sink around somewhere other than a file.
@@ -855,6 +971,8 @@ impl Sink {
             run: AtomicU64::new(0),
             reserved_run: AtomicU64::new(seq),
             rotation_broken: AtomicBool::new(false),
+            roll_retry_at: AtomicU64::new(0),
+            roll_attempts: AtomicU64::new(0),
             floors: AtomicU16::new(packed(config.min_level, config.fast_floor())),
             inner: Mutex::new(Inner {
                 target,
@@ -870,6 +988,7 @@ impl Sink {
                 last_at,
                 buf: Vec::with_capacity(512),
                 torn: false,
+                ledger: None,
             }),
             written: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -1048,6 +1167,11 @@ impl Sink {
     /// which is correct, because they are one press — and a leg that finds the
     /// key already held does not take it and does not release it.
     ///
+    /// A held key still names EVERY event the process writes, so a server that
+    /// does other work while a run is in flight no longer claims it: the api
+    /// opens a scope ([`crate::in_run`]) instead, which names only the work
+    /// polled inside it (sobs-14, D-4451).
+    ///
     /// # Cost
     ///
     /// One `compare_exchange`. O(1), lock-free, and exact: two threads racing
@@ -1148,8 +1272,16 @@ impl Sink {
     ///
     /// Never panics and never propagates a failure; the module documentation
     /// says how a failure is surfaced instead.
+    ///
+    /// The run it carries is the innermost scope open on this thread
+    /// ([`crate::in_run`], [`crate::enter`]), and only outside every scope
+    /// the ambient key [`Self::claim_run`] holds. A scope names the work
+    /// actually running; the ambient key names whatever claimed it, which on
+    /// a server is not the work that happens to be writing (sobs-14,
+    /// D-4451).
     pub fn emit(&self, event: &Event<'_>) -> Emitted {
-        self.emit_for_run(self.run.load(Ordering::Relaxed), event)
+        let run = crate::scope::current_run().unwrap_or_else(|| self.run.load(Ordering::Relaxed));
+        self.emit_for_run(run, event)
     }
 
     /// Writes one event under an explicit run id.
@@ -1224,13 +1356,24 @@ impl Sink {
         // Only the notice moves. The other two `report` call sites already
         // dropped the guard first; this was the one that did not.
         let mut roll_failure: Option<String> = None;
-        if !self.rotation_broken.load(Ordering::Relaxed)
-            && inner.bytes > 0
+        if inner.bytes > 0
             && inner.bytes.saturating_add(span) > self.max_file_bytes
+            && self.may_roll(inner.bytes)
             && let Err(why) = self.roll(inner)
         {
-            // NEVER AGAIN, for this sink. See `rotation_broken`.
+            // NOT AGAIN UNTIL ONE MORE BOUND HAS BEEN WRITTEN AND A PROBE
+            // PASSES, and never more than `keep_files` times. See
+            // `rotation_broken` and `roll_retry_at`. CE-41, D-2509.
             self.rotation_broken.store(true, Ordering::Relaxed);
+            let _counted =
+                self.roll_attempts
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_add(1))
+                    });
+            self.roll_retry_at.store(
+                inner.bytes.saturating_add(self.max_file_bytes),
+                Ordering::Relaxed,
+            );
             // The roll failed, so the current file will exceed its bound.
             // The event is still written: losing it because a RENAME failed
             // would be the worse of the two, and a bound that has been
@@ -1276,6 +1419,15 @@ impl Sink {
                 // newline. Discarding this result let the next `Written` event
                 // fuse onto the fragment. attacksweep-2, D-1539.
                 inner.torn = inner.target.append(b"\n").is_err();
+                // AND THE NUMBER THIS EVENT BURNT IS RECORDED WHERE THE NEXT
+                // SINK READS IT, because the log that refused the event will
+                // refuse a line about it too (sobs-2, D-4410). One positioned
+                // write of a fixed-length record, on the drop path only.
+                let seq = inner.seq;
+                let unrecorded = inner
+                    .ledger
+                    .as_mut()
+                    .and_then(|ledger| ledger.note_drop(seq).err());
                 drop(guard);
                 // A ROLL THAT ALSO FAILED IS REPORTED FIRST, so the notice
                 // names the failure that came first. `report` prints once per
@@ -1284,8 +1436,14 @@ impl Sink {
                 if let Some(why) = roll_failure {
                     self.report(&why);
                 }
+                let also = unrecorded.map_or_else(String::new, |also| {
+                    format!(
+                        "; and the loss could not be recorded for the next sink ({also}), so a \
+                         restart will not know of it"
+                    )
+                });
                 let why = format!(
-                    "{}: cannot append the event — {e}",
+                    "{}: cannot append the event — {e}{also}",
                     current_path(&self.dir).display()
                 );
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -1295,29 +1453,51 @@ impl Sink {
         }
     }
 
-    /// Makes everything already written durable.
+    /// Makes everything already written durable: the current file, the loss
+    /// ledger, and — for a sink that holds its directory — the directory, so a
+    /// file created by this process or by a roll is still NAMED after a power
+    /// cut.
     ///
     /// Not called per event; the module documentation says why. A caller that
     /// wants a barrier — before a deliberate shutdown, or straight after the
-    /// event that explains a failure — calls this.
+    /// event that explains a failure — calls this, or [`crate::sync`] for the
+    /// installed sink.
+    ///
+    /// # Cost (sobs-13, D-4411)
+    ///
+    /// At most three `fsync`s — the file, the 127-byte ledger and the
+    /// directory — plus one `open` of the directory. Independent of how many
+    /// events were written: the kernel flushes what is dirty, and an event
+    /// stream at its 8 MiB bound has at most that much. Measured in
+    /// `docs/06-limits.md` (D-4411).
     ///
     /// # Errors
     ///
-    /// The failure in its own words. Unlike [`Sink::emit`] this one *is*
-    /// returned, because a caller that asked for durability has to be told it
-    /// did not get it.
+    /// The first failure in its own words; the steps after it are not tried.
+    /// Unlike [`Sink::emit`] this one *is* returned, because a caller that
+    /// asked for durability has to be told it did not get it.
     pub fn sync(&self) -> Result<(), String> {
         let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let outcome = guard.target.sync();
+        let outcome = guard
+            .target
+            .sync()
+            .map_err(|e| {
+                format!(
+                    "{}: the events were written and not synced — {e}",
+                    current_path(&self.dir).display()
+                )
+            })
+            .and_then(|()| guard.ledger.as_ref().map_or(Ok(()), Ledger::sync));
         drop(guard);
-        outcome.map_err(|e| {
-            let why = format!(
-                "{}: the events were written and not synced — {e}",
-                current_path(&self.dir).display()
-            );
-            self.report(&why);
-            why
-        })
+        outcome
+            .and_then(|()| {
+                if self.held_lock.is_some() {
+                    sync_directory(&self.dir)
+                } else {
+                    Ok(())
+                }
+            })
+            .inspect_err(|why| self.report(why))
     }
 
     /// What it has done, and what it has failed to do.
@@ -1352,39 +1532,87 @@ impl Sink {
     /// has rolled `keep_files` times.
     fn roll(&self, inner: &mut Inner) -> Result<(), String> {
         let keep = self.keep_files.max(1);
+        // WHETHER THIS ATTEMPT HAS MOVED OR DELETED ANYTHING YET. A failure
+        // before the first change leaves the set exactly as it was, so a later
+        // retry is safe; a failure after it is the shift `rotation_broken`
+        // exists to stop repeating, so it ends retries for good. CE-41, D-2509.
+        let mut changed = false;
         let named = |path: &Path, what: &str, e: &std::io::Error| {
             format!("{}: {what} — {e}", path.display())
         };
-        if keep > 1 {
-            // The oldest goes first, or the shift below overwrites a file it
-            // has not yet moved.
-            let oldest = rotated_path(&self.dir, keep.saturating_sub(1));
-            remove_if_present(&oldest)
-                .map_err(|e| named(&oldest, "cannot delete the oldest file", &e))?;
-            for n in (1..keep.saturating_sub(1)).rev() {
-                let from = rotated_path(&self.dir, n);
-                let to = rotated_path(&self.dir, n.saturating_add(1));
-                rename_if_present(&from, &to).map_err(|e| named(&from, "cannot roll", &e))?;
+        let present = |path: &Path| std::fs::symlink_metadata(path).is_ok();
+        let outcome = (|| {
+            if keep > 1 {
+                // The oldest goes first, or the shift below overwrites a file it
+                // has not yet moved.
+                let oldest = rotated_path(&self.dir, keep.saturating_sub(1));
+                let was = present(&oldest);
+                remove_if_present(&oldest)
+                    .map_err(|e| named(&oldest, "cannot delete the oldest file", &e))?;
+                changed |= was;
+                for n in (1..keep.saturating_sub(1)).rev() {
+                    let from = rotated_path(&self.dir, n);
+                    let to = rotated_path(&self.dir, n.saturating_add(1));
+                    let was = present(&from);
+                    rename_if_present(&from, &to).map_err(|e| named(&from, "cannot roll", &e))?;
+                    changed |= was;
+                }
+                let current = current_path(&self.dir);
+                let was = present(&current);
+                rename_if_present(&current, &rotated_path(&self.dir, 1))
+                    .map_err(|e| named(&current, "cannot roll the current file", &e))?;
+                changed |= was;
+            } else {
+                // ONE FILE KEPT MEANS NO HISTORY AT ALL. The current file is
+                // deleted rather than rolled, which is what `keep_files = 1`
+                // asks for; it is stated here so it cannot be mistaken for a
+                // bug.
+                let current = current_path(&self.dir);
+                let was = present(&current);
+                remove_if_present(&current)
+                    .map_err(|e| named(&current, "cannot delete the current file", &e))?;
+                changed |= was;
             }
-            let current = current_path(&self.dir);
-            rename_if_present(&current, &rotated_path(&self.dir, 1))
-                .map_err(|e| named(&current, "cannot roll the current file", &e))?;
-        } else {
-            // ONE FILE KEPT MEANS NO HISTORY AT ALL. The current file is
-            // deleted rather than rolled, which is what `keep_files = 1` asks
-            // for; it is stated here so it cannot be mistaken for a bug.
-            let current = current_path(&self.dir);
-            remove_if_present(&current)
-                .map_err(|e| named(&current, "cannot delete the current file", &e))?;
+            let path = current_path(&self.dir);
+            inner
+                .target
+                .reopen(&path)
+                .map_err(|e| named(&path, "cannot open the next file", &e))
+        })();
+        if let Err(why) = outcome {
+            if changed {
+                self.roll_attempts.store(u64::MAX, Ordering::Relaxed);
+            }
+            return Err(why);
         }
-        let path = current_path(&self.dir);
-        inner
-            .target
-            .reopen(&path)
-            .map_err(|e| named(&path, "cannot open the next file", &e))?;
         inner.bytes = 0;
         self.rotations.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Whether a roll may be attempted now, with the current file at `bytes`.
+    ///
+    /// Always while rotation works. After a failure: only once the file has
+    /// grown one more bound, only while fewer than `keep_files` attempts have
+    /// failed, and only when [`directory_accepts_a_roll`] passes. A probe that
+    /// fails moves the next look one more bound out and shifts nothing.
+    /// Called under the inner lock. CE-41, D-2509.
+    fn may_roll(&self, bytes: u64) -> bool {
+        if !self.rotation_broken.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self.roll_attempts.load(Ordering::Relaxed) >= u64::from(self.keep_files.max(1))
+            || bytes < self.roll_retry_at.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        if directory_accepts_a_roll(&self.dir) {
+            self.rotation_broken.store(false, Ordering::Relaxed);
+            return true;
+        }
+        self.roll_retry_at
+            .store(bytes.saturating_add(self.max_file_bytes), Ordering::Relaxed);
+        false
     }
 
     /// Records a failure, and says it out loud exactly once.
@@ -1402,12 +1630,45 @@ impl Sink {
             // turns one failure into a second denial of service, on the one
             // stream still working. The count in `health()` is the running
             // total; this is the notice that there is a count to look at.
-            eprintln!(
+            //
+            // AND IT CANNOT PANIC. `eprintln!` did, on a closed stderr, and the
+            // release profile aborts on a panic: the notice that a log could
+            // not be written killed the process it described (r53-1, D-4413).
+            // A notice the stream refused is said where the page reads.
+            let printed = crate::say::stderr_line(format_args!(
                 "telemetry: {why}\ntelemetry: this is the ONLY notice; the running count of \
                  lost events is Sink::health().dropped"
-            );
+            ));
+            if !printed {
+                *self
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(format!(
+                    "{why} (and this notice could not be written to stderr; \
+                     telemetry::unprinted() counts such lines)"
+                ));
+            }
         }
     }
+}
+
+/// Whether `dir` accepts the three operations a roll makes: a create, a
+/// rename and an unlink, tried on a probe file of its own. A refusal of any
+/// leaves the log files untouched. CE-41, D-2509.
+fn directory_accepts_a_roll(dir: &Path) -> bool {
+    let probe = dir.join(".roll-probe");
+    let moved = dir.join(".roll-probe.moved");
+    let _stale = remove_if_present(&moved);
+    let accepted = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .and_then(|_created| std::fs::rename(&probe, &moved))
+        .and_then(|()| std::fs::remove_file(&moved))
+        .is_ok();
+    let _left = remove_if_present(&probe);
+    accepted
 }
 
 /// Deletes a path, treating "it was not there" as success.
@@ -1474,15 +1735,50 @@ fn rename_if_present(from: &Path, to: &Path) -> std::io::Result<()> {
 /// is read**: a run id carried only by lines further back than 64 KiB, and
 /// above every `seq` since, is not seen. That is a stated limit in
 /// `docs/06-limits.md`, not a guarantee over the whole set.
-fn resume_point(dir: &Path, keep_files: u8) -> Resumed {
-    paths_newest_first(dir, keep_files)
-        .iter()
-        .find_map(|path| {
-            let len = std::fs::metadata(path).map_or(0, |meta| meta.len());
-            (len > 0).then_some((path, len))
-        })
-        .and_then(|(path, len)| last_records(path, len))
-        .unwrap_or_default()
+///
+/// # And it is said at runtime, not only here
+///
+/// The second value is the sentence `Sink::open` reports when the numbering
+/// restarts for a reason other than an empty set: the newest non-empty file
+/// could not be read or held no decodable line, or its size could not be
+/// measured. A measuring error used to read as length zero, so an unreadable
+/// newest file was skipped for an older one, which this doc forbids; it now
+/// stops the walk there. CE-51, D-2510.
+fn resume_point(dir: &Path, keep_files: u8) -> (Resumed, Option<String>) {
+    const RESTART: &str = "sequence numbers and run ids restart at zero and can repeat ids \
+                           still carried by older events in this set; no older file was \
+                           read in its place, because its numbers could be lower";
+    for path in paths_newest_first(dir, keep_files) {
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() == 0 => {}
+            Ok(meta) => {
+                return last_records(&path, meta.len()).map_or_else(
+                    || {
+                        (
+                            Resumed::default(),
+                            Some(format!(
+                                "{}: the newest non-empty event file could not be read, or \
+                                 its last block holds no line that decodes; {RESTART}",
+                                path.display()
+                            )),
+                        )
+                    },
+                    |resumed| (resumed, None),
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return (
+                    Resumed::default(),
+                    Some(format!(
+                        "{}: cannot measure the newest event file — {e}; {RESTART}",
+                        path.display()
+                    )),
+                );
+            }
+        }
+    }
+    (Resumed::default(), None)
 }
 
 /// What a reopened sink resumes from. See [`resume_point`].
@@ -1551,6 +1847,18 @@ fn hold_directory(dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
+/// Syncs the directory that holds the set, so a file this sink created — at
+/// open, or by a roll — is still NAMED after a power cut. One `open` and one
+/// `fsync` of the directory, at [`Sink::sync`] only (sobs-13, D-4411).
+fn sync_directory(dir: &Path) -> Result<(), String> {
+    crate::loss::hooked(crate::loss::Op::Directory, || File::open(dir)?.sync_all()).map_err(|e| {
+        format!(
+            "{}: the directory holding the events could not be synced — {e}",
+            dir.display()
+        )
+    })
+}
+
 /// Whether the file's last byte is anything but a newline.
 ///
 /// One `open`, one `seek` and a one-byte `read`, at open time only — never on
@@ -1582,8 +1890,10 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 
 /// Closes a torn tail before anything is appended to it, and says so.
 ///
-/// Returns the running byte count the sink starts from, and the notice naming
-/// the tear when there was one.
+/// Returns the running byte count the sink starts from, the notice naming the
+/// tear when there was one, and whether the tear is STILL open — its
+/// terminating byte refused by a full disk — so the sink's first append leads
+/// with the newline instead (sobs-3, D-4412).
 ///
 /// # What this is for
 ///
@@ -1616,11 +1926,13 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 ///
 /// * **The torn event's own bytes.** They were never written. What is
 ///   recovered is the *next* event and the count.
-/// * **Its sequence number.** `resume_point` resumes from the last DECODABLE
-///   line, so the number the torn event carried is handed to the next one and
-///   `Tail::missing` reports no hole. That was true before this change and is
-///   neither caused nor fixed by it; the honest reading of the file is "one
-///   malformed line here", which is what the reader now says.
+/// * **Its sequence number, after a kill.** `resume_point` resumes from the
+///   last DECODABLE line, so the number a KILLED writer's torn event carried is
+///   handed to the next one and `Tail::missing` reports no hole; the honest
+///   reading of the file is "one malformed line here", which is what the reader
+///   says. A tear a FULL DISK left is different: the writer was alive to count
+///   the drop, so its number is in the loss ledger and is not issued again
+///   (sobs-2, D-4410).
 /// * **`Health::is_loud`.** There is no counter in [`Health`] for a record
 ///   torn by another process, and adding a field is a change to
 ///   `crates/api/src/logs.rs`, which builds a `Health` by exhaustive literal.
@@ -1643,9 +1955,13 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 /// request. A refusing double does, and it is the same seam
 /// `a_write_that_cannot_land_is_counted_and_named_rather_than_silently_lost`
 /// already uses. The indirect call happens once, at open.
-fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, Option<String>) {
+fn terminate_torn_tail(
+    target: &mut dyn Target,
+    path: &Path,
+    len: u64,
+) -> (u64, Option<String>, bool) {
     if !ends_mid_line(path, len) {
-        return (len, None);
+        return (len, None, false);
     }
     match target.append(b"\n") {
         // The byte is part of the file now, so the running count owns it too —
@@ -1654,12 +1970,13 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
         Ok(()) => (
             len.saturating_add(1),
             Some(format!(
-                "{}: the last line had no newline — a record torn by a kill or a power \
-                 cut. It has been terminated, so it is ONE line the reader counts in \
-                 Tail::malformed and the next event starts clean; the torn record's own \
-                 bytes are gone and are not recoverable",
+                "{}: the last line had no newline — a record torn by a kill, a power \
+                 cut or a disk that filled mid-line. It has been terminated, so it is ONE \
+                 line the reader counts in Tail::malformed and the next event starts \
+                 clean; the torn record's own bytes are gone and are not recoverable",
                 path.display()
             )),
+            false,
         ),
         // NOTHING FURTHER IS LOST BY CARRYING ON. The file was already
         // unwritable-or-worse and the very next append will say so in its own
@@ -1668,10 +1985,11 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
             len,
             Some(format!(
                 "{}: the last line had no newline and the terminating byte could not be \
-                 written — {e}; the next event will fuse onto the torn record and both \
-                 will read as one malformed line",
+                 written — {e}; the next append leads with the newline, so the torn record \
+                 is one malformed line and the next event a line of its own",
                 path.display()
             )),
+            true,
         ),
     }
 }
@@ -2064,6 +2382,7 @@ mod tests {
             last_at: 0,
             buf: Vec::new(),
             torn: false,
+            ledger: None,
         };
 
         assert_eq!(
@@ -3252,8 +3571,11 @@ mod tests {
             let _outcome = emit_fat(&sink);
         }
         let health = sink.health();
-        assert_eq!(
-            health.rotation_failures, 1,
+        // AT LEAST ONCE, AND BOUNDED. An unlink that refuses changes nothing,
+        // so it may be retried after a further bound, at most `keep_files`
+        // times in all (CE-41, D-2509).
+        assert!(
+            (1..=2).contains(&health.rotation_failures),
             "an unlink that refused for a reason other than absence is a FAILED \
              roll, not a successful one: {health:?}"
         );
@@ -3895,6 +4217,64 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A ROLL THAT FAILED ONCE IS TRIED AGAIN ONCE THE DIRECTORY HEALS.**
+    /// CE-41, D-2509.
+    ///
+    /// The first failed roll stopped rotation for the life of the sink, so a
+    /// mount that was read-only for a minute let the current file grow without
+    /// bound until a restart. Here the directory refuses, then accepts again:
+    /// rotation must resume and the current file come back under its bound.
+    #[test]
+    fn a_roll_that_failed_once_resumes_when_the_directory_heals() {
+        crate::tests::where_permission_binds(
+            "sink::tests::a_roll_that_failed_once_resumes_when_the_directory_heals",
+            a_roll_that_failed_once_resumes_when_the_directory_heals_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_roll_that_failed_once_resumes_when_the_directory_heals_body() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("roll-heals");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(4),
+        )
+        .expect("opens");
+        let fat = "x".repeat(MAX_MESSAGE_BYTES);
+        let emit_fat = |sink: &Sink| sink.emit(&Event::info("t", &fat));
+        for _ in 0..4 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        let mut ro = std::fs::metadata(&dir).expect("the dir").permissions();
+        ro.set_mode(0o555);
+        std::fs::set_permissions(&dir, ro).expect("make it read-only");
+        for _ in 0..6 {
+            let _outcome = emit_fat(&sink);
+        }
+        let mut rw = std::fs::metadata(&dir).expect("the dir").permissions();
+        rw.set_mode(0o755);
+        std::fs::set_permissions(&dir, rw).expect("restore");
+        let failed = sink.health().rotation_failures;
+        let rolled = sink.health().rotations;
+        for _ in 0..6 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        let health = sink.health();
+        let _ignored = std::fs::remove_dir_all(&dir);
+        assert!(failed >= 1, "the premise: a roll failed");
+        assert!(
+            health.rotations > rolled,
+            "rotation never resumed after the directory healed: {health:?}"
+        );
+        assert!(
+            health.current_bytes <= 2 * MIN_FILE_BYTES + 2 * MAX_MESSAGE_BYTES as u64,
+            "the current file stayed past its bound: {health:?}"
+        );
+    }
+
     /// N THREADS PRODUCE EXACTLY N WHOLE LINES.
     ///
     /// The failure this rules out is interleaving: two writes whose bytes land
@@ -3998,6 +4378,72 @@ mod tests {
         std::fs::write(current_path(&dir), b"not this format at all\n").expect("clobbered");
         let third = Sink::open(&Config::new(&dir)).expect("re-opens");
         assert_eq!(third.health().next_seq, 1);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AN UNREADABLE NEWEST FILE RESTARTS THE NUMBERING LOUDLY, AND NO OLDER
+    /// FILE STANDS IN FOR IT. CE-51, D-2510.
+    ///
+    /// The restart at zero was "a stated limit" only in a doc comment: at
+    /// runtime nothing said it, and `reserve_run_id` then reissued ids still
+    /// carried by older events. Here `.1` holds a readable stream and the
+    /// newest file holds no decodable line: the open must not resume from
+    /// `.1`, and it must name the newest file in `last_error`.
+    #[test]
+    fn an_undecodable_newest_file_is_named_and_not_replaced_by_an_older_one() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("resume-undecodable");
+        let config = Config::new(&dir).with_keep_files(4);
+        {
+            let sink = Sink::open(&config).expect("opens");
+            for _ in 0..5 {
+                assert!(sink.emit(&Event::info("t", "m")).is_written());
+            }
+        }
+        std::fs::rename(current_path(&dir), rotated_path(&dir, 1)).expect("roll");
+        std::fs::write(current_path(&dir), b"not this format at all\n").expect("torn");
+        let sink = Sink::open(&config).expect("reopens");
+        let health = sink.health();
+        assert_eq!(health.next_seq, 1, "the older file did not stand in");
+        let why = health.last_error.unwrap_or_default();
+        assert!(why.contains("restart at zero"), "{why}");
+        assert!(why.contains("events.ndjson"), "the file is named: {why}");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A NEWEST FILE WHOSE SIZE CANNOT BE MEASURED STOPS THE WALK THERE, AND
+    /// SAYS SO. CE-51, D-2510, D-4613.
+    ///
+    /// The other half of the test above. A measuring error used to read as
+    /// length zero, so the walk stepped past it to an older file. Here the
+    /// current file is empty, `.1` is a link to itself (so `metadata` fails
+    /// with a loop, not with absence) and `.2` holds a readable stream: the
+    /// open must not resume from `.2`, and it must name `.1`.
+    #[test]
+    fn an_unmeasurable_newest_file_is_named_and_not_replaced_by_an_older_one() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("resume-unmeasurable");
+        let config = Config::new(&dir).with_keep_files(4);
+        {
+            let sink = Sink::open(&config).expect("opens");
+            for _ in 0..5 {
+                assert!(sink.emit(&Event::info("t", "m")).is_written());
+            }
+        }
+        std::fs::rename(current_path(&dir), rotated_path(&dir, 2)).expect("roll");
+        let newest = rotated_path(&dir, 1);
+        std::os::unix::fs::symlink(&newest, &newest).expect("a self-referential link");
+        let sink = Sink::open(&config).expect("reopens");
+        let health = sink.health();
+        assert_eq!(health.next_seq, 1, "the older file did not stand in");
+        let why = health.last_error.unwrap_or_default();
+        assert!(why.contains("cannot measure the newest"), "{why}");
+        assert!(why.contains("restart at zero"), "{why}");
+        assert!(why.contains("events.1.ndjson"), "the file is named: {why}");
+        drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -4239,10 +4685,14 @@ mod tests {
         let brittle = Arc::new(Brittle::default());
         brittle.refuse();
         let mut target = Arc::clone(&brittle);
-        let (bytes, why) = super::terminate_torn_tail(
+        let (bytes, why, still_torn) = super::terminate_torn_tail(
             &mut target,
             &current_path(&dir),
             u64::try_from(torn.len()).unwrap(),
+        );
+        assert!(
+            still_torn,
+            "the tear is still open, and the sink is told so"
         );
         assert_eq!(
             bytes,
@@ -4252,7 +4702,7 @@ mod tests {
         let said = why.expect("a tear that could not be closed is still reported");
         assert!(said.contains("could not be written"), "{said}");
         assert!(
-            said.contains("fuse"),
+            said.contains("leads with the newline"),
             "and it says what will happen next rather than implying a repair: {said}"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
@@ -4310,8 +4760,13 @@ mod tests {
             "not one byte was appended on a guess"
         );
         assert_eq!(health.current_bytes, on_disk);
+        // NOTHING IS CLAIMED ABOUT ITS TAIL. The one thing said is that it
+        // could not be read, which `resume_point` now reports rather than
+        // only documents (CE-51, D-2510).
         assert!(
-            health.last_error.is_none(),
+            health.last_error.as_deref().is_none_or(
+                |why| why.contains("could not be read") && !why.contains("had no newline")
+            ),
             "and nothing is claimed about a file nobody could look at: {health:?}"
         );
         assert_eq!(
@@ -4571,5 +5026,380 @@ mod tests {
         assert_eq!(fresh.reserve_run_id(), Some(1));
         let _ignored = std::fs::remove_dir_all(&dir);
         let _ignored = std::fs::remove_dir_all(&empty);
+    }
+
+    /// A real file behind a switch: appends land in it until `full` is set,
+    /// and are refused with nothing written after — a disk that filled.
+    #[derive(Debug)]
+    struct Fills {
+        file: super::FileTarget,
+        full: Arc<AtomicBool>,
+    }
+
+    impl Target for Fills {
+        fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            if self.full.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left on device",
+                ));
+            }
+            self.file.append(bytes)
+        }
+
+        fn sync(&self) -> std::io::Result<()> {
+            self.file.sync()
+        }
+
+        fn reopen(&mut self, path: &Path) -> std::io::Result<()> {
+            self.file.reopen(path)
+        }
+    }
+
+    /// A sink on `dir` whose disk fills when `full` is set: the directory,
+    /// its lock and its loss ledger are real, as [`Sink::open`] makes them.
+    fn filling(config: &Config, full: &Arc<AtomicBool>) -> Sink {
+        std::fs::create_dir_all(&config.dir).expect("the directory");
+        let held = super::hold_directory(&config.dir).expect("the lock");
+        let file = super::FileTarget::open(&current_path(&config.dir)).expect("the file");
+        let found = file.len();
+        Sink::resumed(
+            config,
+            held,
+            Box::new(Fills {
+                file,
+                full: Arc::clone(full),
+            }),
+            found,
+        )
+    }
+
+    fn ledger_of(dir: &Path) -> crate::loss::Loss {
+        crate::loss::Loss::parse(
+            &std::fs::read(dir.join(crate::loss::LEDGER_NAME)).expect("the ledger"),
+        )
+        .expect("a record")
+    }
+
+    /// **A RESTART AFTER A FULL DISK SKIPS THE LOST NUMBERS AND SAYS SO
+    /// (sobs-2, D-4410).**
+    ///
+    /// The audit's probe P8, as a test: 20 events land, the disk fills for
+    /// 185 more, the process ends. It measured a restart at `next_seq` 21 —
+    /// re-issuing 21..=205 — with `missing = Some(0)` and the 185 reported
+    /// nowhere. Now the next sink resumes above 205, writes one `Error` line
+    /// naming the 185 and the numbers they burnt, the unfiltered tail counts
+    /// the hole, and only the landed notice clears the ledger: a third open
+    /// says nothing more.
+    #[test]
+    fn a_restart_after_a_full_disk_skips_the_lost_numbers_and_says_so() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("loss-restart");
+        let config = Config::new(&dir);
+        let full = Arc::new(AtomicBool::new(false));
+        {
+            let sink = filling(&config, &full);
+            let run = sink.reserve_run_id().expect("an id");
+            for _ in 0..20 {
+                assert!(sink.emit(&Event::info("t", "landed")).is_written());
+            }
+            full.store(true, Ordering::Relaxed);
+            for _ in 0..185 {
+                assert_eq!(
+                    sink.emit_for_run(run, &Event::info("t", "lost")),
+                    Emitted::Dropped
+                );
+            }
+            let health = sink.health();
+            assert_eq!((health.written, health.dropped), (20, 185));
+            assert!(
+                health
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|said| !said.contains("not be recorded")),
+                "the ledger took every drop: {health:?}"
+            );
+        }
+        assert_eq!(
+            ledger_of(&dir),
+            crate::loss::Loss {
+                issued: 205,
+                lost: 185,
+                first: 21
+            },
+            "every burnt number, and the first of them"
+        );
+
+        let again = Sink::open(&config).expect("reopens with space");
+        let health = again.health();
+        assert_eq!(
+            health.next_seq, 207,
+            "205 burnt, 206 the notice: nothing is issued twice"
+        );
+        assert!(again.reserve_run_id().expect("an id") > 205);
+        let said = health.last_error.expect("the loss is named");
+        assert!(
+            said.contains("185 event(s), numbered from 21 to 205"),
+            "{said}"
+        );
+        assert!(said.contains("not issued again"), "{said}");
+        assert!(said.contains(crate::loss::LEDGER_NAME), "{said}");
+
+        let found = crate::tail::tail(&dir, again.keep_files(), &crate::tail::Query::last(50));
+        let notice = &found.records[0];
+        assert_eq!(notice.seq, 206);
+        assert_eq!(notice.level, Level::Error);
+        assert_eq!(notice.target, "telemetry.sink");
+        assert_eq!(notice.message, "events were lost before this sink opened");
+        assert_eq!(
+            notice.field("lost").and_then(crate::OwnedValue::as_u64),
+            Some(185)
+        );
+        assert_eq!(
+            notice
+                .field("first_seq")
+                .and_then(crate::OwnedValue::as_u64),
+            Some(21)
+        );
+        assert_eq!(
+            notice.field("last_seq").and_then(crate::OwnedValue::as_u64),
+            Some(205)
+        );
+        assert_eq!(found.records[1].seq, 20, "the last line that landed");
+        assert_eq!(
+            found.missing,
+            Some(185),
+            "the hole is the drops' receipt again: before the fix this read Some(0)"
+        );
+        assert_eq!(
+            ledger_of(&dir),
+            crate::loss::Loss {
+                issued: 206,
+                lost: 0,
+                first: 0
+            },
+            "cleared only by the landed notice"
+        );
+
+        drop(again);
+        let third = Sink::open(&config).expect("reopens");
+        assert_eq!(third.health().next_seq, 207, "nothing new to say");
+        assert_eq!(third.health().last_error, None);
+        let found = crate::tail::tail(&dir, third.keep_files(), &crate::tail::Query::last(50));
+        assert_eq!(found.records.len(), 21, "one notice, once");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A NOTICE THE STILL-FULL DISK REFUSES IS ITSELF COUNTED, AND THE NEXT
+    /// SINK REPORTS BOTH.** The ledger is cleared only by a notice that
+    /// landed, so a restart onto a disk that is still full loses nothing more
+    /// than one more line, and that line is in the count.
+    #[test]
+    fn a_loss_notice_the_full_disk_refuses_is_counted_into_the_next_one() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("loss-still-full");
+        let config = Config::new(&dir);
+        let full = Arc::new(AtomicBool::new(false));
+        {
+            let sink = filling(&config, &full);
+            assert!(sink.emit(&Event::info("t", "landed")).is_written());
+            full.store(true, Ordering::Relaxed);
+            for _ in 0..3 {
+                assert_eq!(sink.emit(&Event::info("t", "lost")), Emitted::Dropped);
+            }
+        }
+        {
+            let still = filling(&config, &full);
+            let health = still.health();
+            assert_eq!(health.dropped, 1, "the notice itself");
+            assert_eq!(health.next_seq, 6);
+        }
+        assert_eq!(
+            ledger_of(&dir),
+            crate::loss::Loss {
+                issued: 5,
+                lost: 4,
+                first: 2
+            }
+        );
+        full.store(false, Ordering::Relaxed);
+        let open = filling(&config, &full);
+        let found = crate::tail::tail(&dir, open.keep_files(), &crate::tail::Query::last(10));
+        let notice = &found.records[0];
+        assert_eq!(notice.seq, 6);
+        assert_eq!(
+            notice.field("lost").and_then(crate::OwnedValue::as_u64),
+            Some(4)
+        );
+        assert_eq!(
+            notice
+                .field("first_seq")
+                .and_then(crate::OwnedValue::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            notice.field("last_seq").and_then(crate::OwnedValue::as_u64),
+            Some(5)
+        );
+        assert_eq!(found.missing, Some(4));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **WHAT THE LEDGER COULD NOT DO IS SAID, NEVER ASSUMED.** A drop whose
+    /// record could not be written says so in the append failure's own
+    /// notice; a notice that landed and whose clearing write failed is named
+    /// and reported again by the next sink — over-reported, never hidden; and
+    /// a ledger that is not a record is named in the log and in `last_error`.
+    #[test]
+    fn a_ledger_that_cannot_keep_up_is_named_where_the_operator_looks() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("loss-faults");
+        let config = Config::new(&dir);
+        let full = Arc::new(AtomicBool::new(false));
+        {
+            let sink = filling(&config, &full);
+            full.store(true, Ordering::Relaxed);
+            crate::loss::tests::fail_next_write();
+            assert_eq!(sink.emit(&Event::info("t", "lost")), Emitted::Dropped);
+            assert!(!crate::loss::tests::armed(), "the drop asked the ledger");
+            let said = sink.health().last_error.expect("named");
+            assert!(said.contains("cannot append the event"), "{said}");
+            assert!(
+                said.contains("could not be recorded for the next sink"),
+                "{said}"
+            );
+            assert!(said.contains("a restart will not know of it"), "{said}");
+            assert_eq!(sink.emit(&Event::info("t", "lost")), Emitted::Dropped);
+        }
+        assert_eq!(ledger_of(&dir).lost, 1, "the second drop was recorded");
+
+        full.store(false, Ordering::Relaxed);
+        crate::loss::tests::fail_next_write();
+        {
+            let sink = filling(&config, &full);
+            assert!(!crate::loss::tests::armed(), "the clearing write asked");
+            let said = sink.health().last_error.expect("named");
+            assert!(said.contains("could not be written"), "{said}");
+        }
+        assert_eq!(ledger_of(&dir).lost, 1, "not cleared, so said again");
+        let again = filling(&config, &full);
+        let found = crate::tail::tail(&dir, again.keep_files(), &crate::tail::Query::last(10));
+        let notices = found
+            .records
+            .iter()
+            .filter(|record| record.message == "events were lost before this sink opened")
+            .count();
+        assert_eq!(notices, 2, "over-reported, never hidden: {found:?}");
+        assert_eq!(ledger_of(&dir).lost, 0);
+        drop(again);
+
+        std::fs::write(dir.join(crate::loss::LEDGER_NAME), b"not a record").expect("damaged");
+        let damaged = filling(&config, &full);
+        let said = damaged.health().last_error.expect("named");
+        assert!(said.contains("not a record this crate wrote"), "{said}");
+        let found = crate::tail::tail(&dir, damaged.keep_files(), &crate::tail::Query::last(1));
+        assert_eq!(found.records[0].message, "the loss ledger is unusable");
+        assert_eq!(found.records[0].level, Level::Error);
+        assert!(
+            found.records[0]
+                .field("why")
+                .and_then(crate::OwnedValue::as_str)
+                .is_some_and(|why| why.contains("may be issued again")),
+            "{found:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A CLEAN EXIT CAN MAKE THE LOG DURABLE, AND IS TOLD WHICH STEP FAILED
+    /// (sobs-13, D-4411).** `Sink::sync` had no production caller and synced
+    /// the current file alone: the loss ledger and the directory entry of a
+    /// file this process created were left to the page cache. Each of the
+    /// three steps is driven to fail here and named; a sink around a target it
+    /// did not open holds no directory and asks for none.
+    #[test]
+    fn sync_makes_the_file_the_ledger_and_the_directory_durable_and_names_a_failure() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("sync-steps");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert!(sink.emit(&Event::info("t", "exited")).is_written());
+        assert_eq!(sink.sync(), Ok(()));
+        assert_eq!(sink.health().last_error, None);
+
+        crate::loss::tests::fail_next_sync();
+        let said = sink.sync().expect_err("the ledger refused");
+        assert!(said.contains("loss ledger could not be synced"), "{said}");
+
+        crate::loss::tests::fail_next_directory_sync();
+        let said = sink.sync().expect_err("the directory refused");
+        assert!(!crate::loss::tests::armed(), "the directory was asked");
+        assert!(
+            said.contains("directory holding the events could not be synced"),
+            "{said}"
+        );
+        assert!(said.contains(&dir.display().to_string()), "{said}");
+        assert_eq!(sink.health().last_error.as_deref(), Some(said.as_str()));
+        assert_eq!(sink.sync(), Ok(()), "a fault is not latched");
+
+        let elsewhere = Sink::with_target(&Config::new(dir.join("absent")), Box::new(NullTarget))
+            .expect("opens");
+        crate::loss::tests::fail_next_directory_sync();
+        assert_eq!(elsewhere.sync(), Ok(()));
+        assert!(
+            crate::loss::tests::armed(),
+            "never asked: no directory is held"
+        );
+        crate::loss::tests::disarm();
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A TORN TAIL THE FULL DISK WOULD NOT CLOSE AT OPEN IS CLOSED BY THE
+    /// FIRST APPEND (sobs-3, D-4412).** The audit's probe P6: a log whose last
+    /// line is torn, reopened on a full disk, so the terminating byte is
+    /// refused; then space returns. It measured `emit = Written`, `written=1`,
+    /// `dropped=0` — and the event unreadable, fused onto the fragment, because
+    /// `around` started the sink with `torn: false`. Now the first append leads
+    /// with the newline: the fragment is ONE malformed line and the event is
+    /// readable, and a whole file still gains no stray byte.
+    #[test]
+    fn a_torn_tail_the_full_disk_kept_open_at_open_is_closed_by_the_first_append() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("torn-full-at-open");
+        let config = Config::new(&dir);
+        let full = Arc::new(AtomicBool::new(false));
+        {
+            let sink = filling(&config, &full);
+            for _ in 0..3 {
+                assert!(sink.emit(&Event::info("t", "whole")).is_written());
+            }
+        }
+        let mut bytes = std::fs::read(current_path(&dir)).expect("the file");
+        bytes.extend_from_slice(br#"{"seq":4,"ms":5,"level":"info","target":"t","msg":"tor"#);
+        std::fs::write(current_path(&dir), &bytes).expect("torn");
+
+        full.store(true, Ordering::Relaxed);
+        let sink = filling(&config, &full);
+        let said = sink.health().last_error.expect("the tear is named");
+        assert!(said.contains("leads with the newline"), "{said}");
+        assert_eq!(
+            std::fs::read(current_path(&dir)).expect("the file"),
+            bytes,
+            "the full disk took no byte"
+        );
+        full.store(false, Ordering::Relaxed);
+        assert!(sink.emit(&Event::info("t", "after the tear")).is_written());
+        let found = crate::tail::tail(&dir, sink.keep_files(), &crate::tail::Query::last(10));
+        assert_eq!(
+            found.records[0].message, "after the tear",
+            "readable on its own line — fused, it is inside the malformed one: {found:?}"
+        );
+        assert_eq!(found.malformed, 1, "the fragment, once");
+        assert_eq!(found.records.len(), 4);
+        assert!(sink.emit(&Event::info("t", "and the next")).is_written());
+        let file = std::fs::read(current_path(&dir)).expect("the file");
+        assert!(
+            !file.windows(2).any(|pair| pair == b"\n\n"),
+            "the newline is led with once, not on every append"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 }

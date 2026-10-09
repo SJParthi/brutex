@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {parse} from 'svelte/compiler';
 import {createPageRequests,watchVisible} from '../src/lib/page-requests.js';
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function clock(){
@@ -63,13 +64,96 @@ test('health watching is single-flight, pauses hidden, resumes once and cancels 
  visible=true;wake();assert.equal(requests.length,3);stop();requests[2].reply.resolve();await flush();assert.equal(unsubscribed,true);assert.equal(timer.timers.size,0);assert.deepEqual(seen,[2]);
 });
 
+// conc17-2 (D-2567): A HIDDEN PAGE'S STATUS TIMER ISSUES NO READ.
+/** @typedef {{visible:boolean,wake:()=>void,unsubscribed:number,listens:number,options:any}} Visibility */
+/** @returns {Visibility} */
+function visibility(){
+ /** @type {Visibility} */ const state={visible:true,wake:()=>{throw new Error('listener not initialized');},unsubscribed:0,listens:0,options:/** @type {any} */(null)};
+ state.options={visible:()=>state.visible,listen(/** @type {()=>void} */ fn){state.listens++;state.wake=fn;return()=>{state.unsubscribed++;};}};
+ return state;
+}
+
+test('conc17-2: a status timer that comes due while hidden issues no read until a visible wake, then exactly one at once',async()=>{
+ const timer=clock(),seen=visibility(),reads=createPageRequests({...timer,...seen.options});let calls=0;
+ /** @type {import('../src/lib/page-requests.js').Work} */ const poll=async()=>{calls++;reads.schedule(poll,2000);};
+ await reads.run(poll);assert.equal(calls,1);assert.equal(timer.timers.size,1);assert.equal(seen.listens,1);
+ seen.visible=false;
+ for(let n=0;n<5;n++){timer.tick();await flush();}
+ assert.equal(calls,1,'no request leaves a hidden page');assert.equal(timer.timers.size,0,'and nothing reschedules');
+ seen.wake();await flush();assert.equal(calls,1,'a wake that is still hidden runs nothing');
+ seen.visible=true;seen.wake();await flush();assert.equal(calls,2,'one immediate read on return');
+ seen.wake();await flush();assert.equal(calls,2,'a second wake does not double it');
+ assert.equal(timer.timers.size,1,'and the poll resumes its cadence');timer.tick();await flush();assert.equal(calls,3);
+ reads.dispose();reads.dispose();assert.equal(seen.unsubscribed,1,'the listener is removed exactly once');
+ seen.wake();await flush();assert.equal(calls,3,'a wake after disposal runs nothing');
+});
+
+test('conc17-2: a parked read is discarded by cancel, a newer schedule, a direct run and disposal',async()=>{
+ /** @param {(reads:ReturnType<typeof createPageRequests>,count:()=>void)=>Promise<void>|void} interrupt @param {number} expected */
+ const case_=async(interrupt,expected)=>{
+  const timer=clock(),seen=visibility(),reads=createPageRequests({...timer,...seen.options});let calls=0;
+  reads.schedule(async()=>{calls++;},2000);seen.visible=false;timer.tick();await flush();assert.equal(calls,0,'parked, not run');
+  await interrupt(reads,()=>{calls++;});
+  seen.visible=true;seen.wake();await flush();
+  assert.equal(calls,expected);reads.dispose();
+ };
+ await case_(()=>{},1);
+ await case_(reads=>reads.cancel(),0);
+ await case_(reads=>reads.dispose(),0);
+ await case_((reads,count)=>reads.schedule(async()=>{count();},2000),0);
+ await case_(async(reads,count)=>{await reads.run(async()=>{count();});},1);
+});
+
+test('conc17-2: a delay of zero parks too, and a stale queued timer cannot park a revoked read',async()=>{
+ const timer=clock(),seen=visibility(),reads=createPageRequests({...timer,...seen.options});let calls=0;
+ seen.visible=false;reads.schedule(async()=>{calls++;},0);timer.tick();await flush();assert.equal(calls,0);
+ seen.visible=true;seen.wake();await flush();assert.equal(calls,1);
+ reads.schedule(async()=>{calls++;},2000);const queued=[...timer.timers.values()][0].work;reads.cancel();
+ seen.visible=false;queued();seen.visible=true;seen.wake();await flush();assert.equal(calls,1,'the revoked generation stays revoked');
+ seen.wake();await flush();assert.equal(calls,1,'a visible wake with nothing parked issues nothing');reads.dispose();
+});
+
+test('conc17-2: without the two options nothing parks, and watchVisible registers one listener only',async()=>{
+ const timer=clock(),reads=createPageRequests(timer);let calls=0;
+ reads.schedule(async()=>{calls++;},2000);timer.tick();await flush();assert.equal(calls,1);reads.dispose();
+ const seen=visibility();const stop=watchVisible(async()=>{},8000,{...timer,...seen.options});
+ assert.equal(seen.listens,1,'one visibility listener, owned by watchVisible');stop();assert.equal(seen.unsubscribed,1);
+});
+
+test('conc17-2: the backtest status owner is built with the document visibility gate, and it gates',async()=>{
+ const page=readFileSync(new URL('../src/routes/backtest/+page.svelte',import.meta.url),'utf8');
+ const ast=/** @type {any} */(parse(page));
+ /** @type {any} */ let init=null;
+ for(const node of ast.instance.content.body){
+  if(node.type!=='VariableDeclaration')continue;
+  for(const row of node.declarations)if(row.id.type==='Identifier'&&row.id.name==='statusRequests')init=row.init;
+ }
+ assert.ok(init,'the page declares statusRequests');
+ assert.equal(init.type,'CallExpression');assert.equal(init.callee.name,'createPageRequests');assert.equal(init.arguments.length,1);
+ /** @type {Map<()=>void,string>} */ const listeners=new Map();
+ const document={visibilityState:'visible',
+  addEventListener(/** @type {string} */ type,/** @type {()=>void} */ fn){listeners.set(fn,type);},
+  removeEventListener(/** @type {string} */ type,/** @type {()=>void} */ fn){if(listeners.get(fn)===type)listeners.delete(fn);}};
+ const fire=()=>{for(const [fn,type] of [...listeners])if(type==='visibilitychange')fn();};
+ const options=new Function('document',`return (${page.slice(init.arguments[0].start,init.arguments[0].end)});`)(document);
+ const timer=clock(),reads=createPageRequests({...options,...timer});let calls=0;
+ assert.equal(listeners.size,1,'one visibilitychange listener');
+ reads.schedule(async()=>{calls++;},2000);document.visibilityState='hidden';timer.tick();await flush();
+ assert.equal(calls,0,'a hidden document issues no status read');
+ fire();await flush();assert.equal(calls,0,'still hidden');
+ document.visibilityState='visible';fire();await flush();assert.equal(calls,1,'one read on return');
+ reads.dispose();assert.equal(listeners.size,0,'disposal removes the listener it added');
+});
+
 test('the actual layout and legacy status stream use owned cancellation and guarded response publication',()=>{
  const layout=readFileSync(new URL('../src/routes/+layout.svelte',import.meta.url),'utf8');
  assert.match(layout,/watchVisible\(probe, PROBE_MS/);assert.doesNotMatch(layout,/setInterval\(probe/);assert.match(layout,/signal: ticket.signal/);
  assert.match(layout,/refreshProbe = watching.refresh/);assert.match(layout,/onclick=\{\(\) => refreshProbe\(\)\}/);
  const page=readFileSync(new URL('../src/routes/backtest/+page.svelte',import.meta.url),'utf8');
  const status=page.slice(page.indexOf('async function adoptRunning'),page.indexOf('async function startSweep'));
- assert.equal((status.match(/if \(!ticket.current\(\)\) return;/g)??[]).length,6);
+ // 8, not 6: W6 (D-3216) reads a refused run.json body for its reason in
+ // adoptRunning and pollSweep, and each read is followed by its own guard.
+ assert.equal((status.match(/if \(!ticket.current\(\)\) return;/g)??[]).length,8);
  assert.doesNotMatch(page,/setTimeout\(pollSweep/);assert.match(page,/statusRequests.dispose\(\)/);
 });
 
@@ -88,6 +172,8 @@ test('the shared census and optional surface cannot publish for a replaced feed 
  const catalog=page.slice(page.indexOf('async function loadCatalog'),page.indexOf('const heldNow ='));
  assert.match(catalog,/const ticket = catalogGate.begin\(feed\)/);
  assert.match(catalog,/await readStoreCensus\(feed\);\s*if \(!catalogGate.admits\(ticket, activeFeed\)\) return/);
- assert.equal((catalog.match(/if \(!catalogGate.admits\(ticket, activeFeed\)\) return/g)??[]).length,5);
+ // 6, not 5: W1 (D-3211) reads a refused /universes.json body for its reason
+ // in loadSurface, and that read is followed by its own guard.
+ assert.equal((catalog.match(/if \(!catalogGate.admits\(ticket, activeFeed\)\) return/g)??[]).length,6);
  assert.match(page,/return \(\) => catalogGate.invalidate\(\)/);
 });

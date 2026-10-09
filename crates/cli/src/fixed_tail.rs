@@ -245,9 +245,11 @@ pub(crate) fn refuse_after_failed_barrier(path: &Path) -> Result<(), String> {
 /// Cuts a sub-record tail past `header + k·stride`, makes the cut durable, and
 /// reports it. Call ONLY from a writer holding the ledger's exclusive lock.
 ///
-/// `magic` is the file's leading bytes (empty for a headerless file). A file
-/// that does not begin with them is not this ledger, and nothing is cut: the
-/// caller's own header check then refuses it by name.
+/// `magic` is the file's leading bytes: its header's, or for a headerless
+/// ledger the magic every record begins with. A file that does not begin with
+/// them (or, when shorter, with their prefix) is not this ledger, and nothing
+/// is cut: the caller's own check then refuses it by name. Empty `magic` cuts
+/// any file.
 ///
 /// Returns `None` and changes nothing when the file is no longer than
 /// `header` (not this module's question), does not carry `magic`, or already
@@ -275,13 +277,21 @@ pub(crate) fn heal_torn_tail(
         return Ok(None);
     }
     if !magic.is_empty() {
-        let mut leading = vec![0_u8; magic.len()];
+        // A FILE SHORTER THAN ITS MAGIC IS COMPARED OVER THE BYTES IT HAS. A
+        // headerless ledger whose first record was torn holds only a prefix of
+        // that record's magic; anything else is not this ledger, and a writer
+        // that cut it would destroy a renamed or foreign file before refusing
+        // it (CE-89, D-2795).
+        let present = magic
+            .get(..usize::try_from(found).unwrap_or(usize::MAX))
+            .unwrap_or(magic);
+        let mut leading = vec![0_u8; present.len()];
         let mut reader = file;
         reader
             .seek(SeekFrom::Start(0))
             .and_then(|_| std::io::Read::read_exact(&mut reader, &mut leading))
             .map_err(|why| format!("{} could not be read: {why}", path.display()))?;
-        if leading != magic {
+        if leading != present {
             return Ok(None);
         }
     }
@@ -305,6 +315,32 @@ pub(crate) fn heal_torn_tail(
             ),
     );
     Ok(Some(TornTail { kept, found }))
+}
+
+/// The writer's whole repair of what a killed process left in a headered,
+/// fixed-stride ledger (rnew-1, D-4460). Call ONLY from a writer holding the
+/// ledger's exclusive lock, before its header check.
+///
+/// A non-empty strict prefix of `header` is cut to nothing ([`heal_torn_header`];
+/// the caller then writes the header whole, exactly as for a new file), and a
+/// sub-record tail past `header.len() + k·stride` of a file that begins with
+/// `magic` is cut ([`heal_torn_tail`]). Each cut is synced and logged. A whole
+/// record is never cut, and anything else stays for the caller to refuse.
+///
+/// # Errors
+///
+/// Names a measurement, read, truncation or barrier failure.
+pub(crate) fn heal_header_and_tail(
+    file: &File,
+    path: &Path,
+    header: &[u8],
+    stride: u64,
+    magic: &[u8],
+) -> Result<(), String> {
+    heal_torn_header(file, path, header)?;
+    let header_len = u64::try_from(header.len())
+        .map_err(|_| format!("{} header length does not fit u64", path.display()))?;
+    heal_torn_tail(file, path, header_len, stride, magic).map(drop)
 }
 
 /// Discards a receipt-less trailing block that is not the caller's exact
@@ -410,6 +446,153 @@ pub(crate) fn heal_torn_header(
     Ok(Some(TornTail { kept: 0, found }))
 }
 
+/// What [`init_or_heal_header`] did to a writer's file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeaderInit {
+    /// The file already held more than an interrupted header; nothing was
+    /// written. The caller's own header check decides whether it is this
+    /// ledger.
+    Present,
+    /// The file was empty, or held only an interrupted header that was cut,
+    /// and this call wrote `header` and passed its barrier. A file this call
+    /// made non-empty needs its directory synced by the caller (conc11-1).
+    Written,
+}
+
+/// Initialises a writer's fixed header, or heals one that never passed its
+/// barrier, ONE way for every cli ledger (conc5-1, D-2644). Call ONLY from a
+/// writer holding the ledger's exclusive lock; readers keep refusing.
+///
+/// - A file of `1..=header.len()` bytes that are ALL ZERO is an interrupted
+///   genesis: a power cut on a filesystem that extends the size before the
+///   data, or a header whose barrier failed and whose page was then evicted.
+///   No record can follow a header that never passed its barrier, so the
+///   file names nothing; it is cut to zero and reported, as the store's own
+///   `is_interrupted_genesis` does (D-1520, D-1521).
+/// - A strict non-empty prefix of `header` is cut the same way
+///   ([`heal_torn_header`]).
+/// - An empty file then gets `header`, through [`write_at_end`] and
+///   [`sync_or_roll_back`]: a failed write or barrier cuts the file back to
+///   zero bytes, and a failed barrier is remembered for this path
+///   ([`remember_failed_barrier`]). The header was left in place before, so
+///   after eviction it read back as zeros at full length and every later
+///   open, the writer's included, refused the empty ledger for good.
+///
+/// # Errors
+///
+/// Names a measurement, read, truncation, write or barrier failure.
+pub(crate) fn init_or_heal_header(
+    file: &mut File,
+    path: &Path,
+    header: &[u8],
+    sync: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<HeaderInit, String> {
+    heal_zeroed_header(file, path, header.len())?;
+    heal_torn_header(file, path, header)?;
+    let len = file
+        .metadata()
+        .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
+        .len();
+    if len != 0 {
+        return Ok(HeaderInit::Present);
+    }
+    write_at_end(file, &path.display(), 0, header, std::io::Write::write_all)?;
+    sync_or_roll_back(file, path, 0, sync)?;
+    Ok(HeaderInit::Written)
+}
+
+/// The healing half of [`init_or_heal_header`], for a writer whose own header
+/// write keeps a ledger-specific order (a read-back before the barrier):
+/// an all-zero file of at most `header.len()` bytes, or a strict prefix of
+/// `header`, is cut to nothing and reported (conc5-1, D-2644). Call ONLY
+/// from a writer holding the ledger's exclusive lock.
+///
+/// # Errors
+///
+/// Names a measurement, read, truncation or barrier failure.
+pub(crate) fn heal_interrupted_header(
+    file: &File,
+    path: &Path,
+    header: &[u8],
+) -> Result<(), String> {
+    heal_zeroed_header(file, path, header.len())?;
+    heal_torn_header(file, path, header).map(drop)
+}
+
+/// The sixteen-byte header the results, frontier and result-set ledgers
+/// write: the magic, the little-endian version, and four zero bytes.
+pub(crate) fn sixteen_byte_header(magic: [u8; 8], version: u32) -> [u8; 16] {
+    let mut header = [0_u8; 16];
+    for (slot, byte) in header.iter_mut().zip(magic_and_version(magic, version)) {
+        *slot = byte;
+    }
+    header
+}
+
+/// Cuts a file of `1..=header_len` bytes that are all zero back to nothing,
+/// durably, and reports it. Anything else is left alone.
+fn heal_zeroed_header(file: &File, path: &Path, header_len: usize) -> Result<(), String> {
+    let found = file
+        .metadata()
+        .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
+        .len();
+    let Some(len) = usize::try_from(found)
+        .ok()
+        .filter(|&len| len > 0 && len <= header_len)
+    else {
+        return Ok(());
+    };
+    let mut leading = vec![0_u8; len];
+    let mut reader = file;
+    reader
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| std::io::Read::read_exact(&mut reader, &mut leading))
+        .map_err(|why| format!("{} could not be read: {why}", path.display()))?;
+    if leading.iter().any(|&byte| byte != 0) {
+        return Ok(());
+    }
+    file.set_len(0)
+        .and_then(|()| file.sync_all())
+        .map_err(|why| {
+            format!(
+                "{} holds {found} zero bytes where a header that never passed its barrier was; cutting it back to 0 bytes failed: {why}",
+                path.display()
+            )
+        })?;
+    crate::note(
+        &telemetry::Event::warn("cli.ledger", "zero-filled ledger header reinitialised")
+            .with("path", path.display().to_string().as_str())
+            .with("found", found)
+            .with("kept", 0_u64)
+            .with(
+                "reason",
+                "an all-zero header was never acknowledged, so no record can follow it",
+            ),
+    );
+    Ok(())
+}
+
+/// Syncs the directory holding `path`, so a file a writer just created and
+/// initialised keeps its name across a power cut (conc11-1, D-2645).
+///
+/// # Errors
+///
+/// Names the directory and the host's refusal.
+pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory to sync", path.display()))?;
+    File::open(parent)
+        .and_then(|directory| sync_all_hooked(&directory, parent))
+        .map_err(|why| {
+            format!(
+                "the directory {} holding {} could not be synced: {why}",
+                parent.display(),
+                path.display()
+            )
+        })
+}
+
 /// A thread-local fault a test arms to make the NEXT write or barrier whose
 /// subject names `name` fail, so a ledger's own commit path is exercised
 /// against a short write or a failed barrier rather than a copy of it.
@@ -427,6 +610,8 @@ pub(crate) mod fault {
         },
         /// The barrier fails.
         Sync,
+        /// The barrier on a DIRECTORY fails (sobs-12, D-4461).
+        DirectorySync,
     }
 
     std::thread_local! {
@@ -460,12 +645,12 @@ pub(crate) mod fault {
         }
     }
 
-    fn take(subject: &dyn std::fmt::Display, sync: bool) -> Option<Kind> {
+    fn take(subject: &dyn std::fmt::Display, wanted: fn(&Kind) -> bool) -> Option<Kind> {
         let subject = subject.to_string();
         ARMED.with(|armed| {
             let mut armed = armed.borrow_mut();
             let (name, kind, skip) = armed.as_mut()?;
-            if !subject.contains(name.as_str()) || matches!(kind, Kind::Sync) != sync {
+            if !subject.contains(name.as_str()) || !wanted(kind) {
                 return None;
             }
             if *skip > 0 {
@@ -477,15 +662,176 @@ pub(crate) mod fault {
     }
 
     pub(super) fn take_write(subject: &dyn std::fmt::Display) -> Option<usize> {
-        match take(subject, false) {
+        match take(subject, |kind| matches!(kind, Kind::Write { .. })) {
             Some(Kind::Write { keep }) => Some(keep),
             _ => None,
         }
     }
 
     pub(super) fn take_sync(subject: &dyn std::fmt::Display) -> bool {
-        take(subject, true).is_some()
+        take(subject, |kind| matches!(kind, Kind::Sync)).is_some()
     }
+
+    pub(super) fn take_directory_sync(subject: &dyn std::fmt::Display) -> bool {
+        take(subject, |kind| matches!(kind, Kind::DirectorySync)).is_some()
+    }
+}
+
+/// Test support (rnew-1, D-4460): the attack a process killed mid-append
+/// mounts on a ledger.
+#[cfg(test)]
+#[allow(
+    clippy::panic,
+    reason = "a test helper that cannot fail its caller's test is no test at all"
+)]
+pub(crate) mod attack {
+    use std::path::Path;
+
+    /// The tail lengths every writer's heal is attacked with: the shortest, a
+    /// middle and the longest sub-record tail a killed append can leave.
+    /// Every length in between takes the same branch of
+    /// [`super::heal_torn_tail`]: `spare` is nonzero and below `stride`.
+    pub(crate) fn torn_lengths(stride: u64) -> [u64; 3] {
+        [1, stride / 2, stride - 1]
+    }
+
+    /// Runs the attack against each of `files` and each of [`torn_lengths`].
+    /// For every case it appends that many bytes to that file, then requires
+    ///
+    /// * a reader to refuse the ragged file (readers never cut),
+    /// * a writer open to succeed and cut the file back to exactly its length
+    ///   before the tear, so no whole record is dropped,
+    /// * exactly one `torn ledger tail truncated` event naming that file, and
+    /// * the reader then to see exactly the committed state `read` saw before.
+    ///
+    /// `read` opens read-only and summarises what it sees; `write` opens the
+    /// writer and drops it.
+    pub(crate) fn torn_tails(
+        files: &[(&Path, u64)],
+        read: &mut dyn FnMut() -> Result<String, String>,
+        write: &mut dyn FnMut() -> Result<(), String>,
+    ) {
+        let committed = read().unwrap_or_else(|why| panic!("the committed fixture reads: {why}"));
+        for &(path, stride) in files {
+            for torn in torn_lengths(stride) {
+                let before = std::fs::metadata(path)
+                    .unwrap_or_else(|why| panic!("{} measures: {why}", path.display()))
+                    .len();
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .unwrap_or_else(|why| panic!("{} opens to tear: {why}", path.display()));
+                let tail = vec![0x5a_u8; usize::try_from(torn).unwrap_or(usize::MAX)];
+                std::io::Write::write_all(&mut file, &tail)
+                    .and_then(|()| file.sync_all())
+                    .unwrap_or_else(|why| panic!("{} tears: {why}", path.display()));
+                drop(file);
+                assert!(
+                    read().is_err(),
+                    "a reader refuses {} with a {torn}-byte torn tail",
+                    path.display()
+                );
+                drop(crate::noted::take());
+                write().unwrap_or_else(|why| {
+                    panic!(
+                        "the writer heals {} with a {torn}-byte torn tail: {why}",
+                        path.display()
+                    )
+                });
+                let after = std::fs::metadata(path)
+                    .unwrap_or_else(|why| panic!("{} measures: {why}", path.display()))
+                    .len();
+                assert_eq!(
+                    after,
+                    before,
+                    "{} is cut back to its last whole record, and no further",
+                    path.display()
+                );
+                let noted = crate::noted::take();
+                let shown = path.display().to_string();
+                assert_eq!(
+                    noted
+                        .iter()
+                        .filter(|line| line.contains("torn ledger tail truncated")
+                            && line.contains(shown.as_str()))
+                        .count(),
+                    1,
+                    "one logged cut for {shown}: {noted:#?}"
+                );
+                assert_eq!(
+                    read().unwrap_or_else(|why| panic!("the healed ledger reads: {why}")),
+                    committed,
+                    "the healed ledger holds exactly its committed history"
+                );
+            }
+        }
+    }
+}
+
+/// Makes `path`'s directory entry durable: one barrier on its parent
+/// directory (sobs-12, D-4461). A file's own `sync_all` does not make the name
+/// that reaches it durable, so a power cut right after a new ledger's first
+/// synced record could lose the whole file. Called once, when a writer
+/// creates the file, never per record.
+///
+/// # Errors
+///
+/// Names the directory and the failure.
+pub(crate) fn sync_parent(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_directory(parent)
+}
+
+/// Creates `dir` and every missing ancestor, then makes each entry it
+/// created durable by one barrier on that entry's parent (sobs-12,
+/// D-4461). Every barrier completes before this returns, so their order does
+/// not change what is durable. A directory that already existed costs one
+/// `try_exists` and no barrier.
+///
+/// # Errors
+///
+/// Names the directory that could not be measured, made or made durable.
+pub(crate) fn create_dir_all_durable(dir: &Path) -> Result<(), String> {
+    let mut missing = Vec::new();
+    let mut at = Some(dir);
+    while let Some(path) = at.filter(|path| !path.as_os_str().is_empty()) {
+        if path
+            .try_exists()
+            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
+        {
+            break;
+        }
+        missing.push(path);
+        at = path.parent();
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|why| format!("the directory {} could not be made: {why}", dir.display()))?;
+    for created in &missing {
+        sync_parent(created)?;
+    }
+    Ok(())
+}
+
+/// One barrier on a directory, through the test fault hook.
+fn sync_directory(directory: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if fault::take_directory_sync(&directory.display()) {
+        return Err(format!(
+            "the directory {} could not be made durable: injected directory sync fault",
+            directory.display()
+        ));
+    }
+    File::open(directory)
+        .and_then(|opened| opened.sync_all())
+        .map_err(|why| {
+            format!(
+                "the directory {} could not be made durable: {why}",
+                directory.display()
+            )
+        })
 }
 
 #[cfg(test)]
@@ -643,6 +989,36 @@ mod tests {
     }
 
     #[test]
+    fn a_file_shorter_than_its_magic_is_cut_only_when_it_is_a_prefix_of_it() {
+        let path = scratch("short-magic");
+        let mut file = open(&path);
+        file.write_all(b"BTX").expect("torn first record");
+        assert_eq!(
+            heal_torn_tail(&file, &path, 0, 10, b"BTX-MAGIC"),
+            Ok(Some(TornTail { kept: 0, found: 3 })),
+            "a torn first record holds a prefix of its magic"
+        );
+        assert_eq!(contents(&path).len(), 0);
+        file.rewind().expect("rewind");
+        file.write_all(b"BTY").expect("foreign short file");
+        assert_eq!(heal_torn_tail(&file, &path, 0, 10, b"BTX-MAGIC"), Ok(None));
+        assert_eq!(
+            contents(&path),
+            b"BTY".to_vec(),
+            "a foreign file is never cut"
+        );
+        file.write_all(b"-MAGIC!!!!!!").expect("past the magic");
+        assert_eq!(
+            heal_torn_tail(&file, &path, 0, 10, b"BTY-MAGIC"),
+            Ok(Some(TornTail {
+                kept: 10,
+                found: 15
+            })),
+            "a file longer than its magic is compared over the whole magic"
+        );
+    }
+
+    #[test]
     fn a_strict_prefix_of_the_header_is_cut_to_nothing_and_anything_else_is_left() {
         let header = b"HEADER01";
         let path = scratch("torn-header");
@@ -691,5 +1067,229 @@ mod tests {
         assert!(refusal.contains("injected write failure"), "{refusal}");
         assert!(refusal.contains("ALSO failed"), "{refusal}");
         assert_eq!(contents(&path), vec![1; 4]);
+    }
+
+    const HEADER16: [u8; 16] = *b"CONC51HDR\x01\x00\x00\x00\x00\x00\x07";
+
+    fn init(path: &Path) -> Result<HeaderInit, String> {
+        init_or_heal_header(&mut open(path), path, &HEADER16, File::sync_all)
+    }
+
+    /// conc5-1 (D-2644): every all-zero file of 1..=header bytes, every strict
+    /// prefix of the header and an empty file are re-initialised by the
+    /// writer; the exact header, a zero file one byte longer than the header,
+    /// a non-zero foreign file, and a header followed by records are left for
+    /// the caller's own check. On the old code no helper existed and every
+    /// writer refused a full-length zero header as a wrong magic for good.
+    #[test]
+    fn a_zero_filled_full_header_is_reinitialised_by_the_writer() {
+        let path = scratch("conc5-1-zero");
+        for len in 0..=HEADER16.len() {
+            std::fs::write(&path, vec![0_u8; len]).expect("zero fixture");
+            assert_eq!(init(&path), Ok(HeaderInit::Written), "{len} zero bytes");
+            assert_eq!(contents(&path), HEADER16.to_vec(), "{len} zero bytes");
+        }
+        for len in 1..HEADER16.len() {
+            std::fs::write(&path, &HEADER16[..len]).expect("prefix fixture");
+            assert_eq!(init(&path), Ok(HeaderInit::Written), "{len}-byte prefix");
+            assert_eq!(contents(&path), HEADER16.to_vec());
+        }
+        let kept: [Vec<u8>; 5] = [
+            HEADER16.to_vec(),
+            vec![0_u8; HEADER16.len() + 1],
+            b"FOREIGNHEADER123".to_vec(),
+            [&HEADER16[..], &[9_u8; 8][..]].concat(),
+            {
+                let mut torn = vec![0_u8; HEADER16.len()];
+                torn[15] = 1;
+                torn
+            },
+        ];
+        for bytes in kept {
+            std::fs::write(&path, &bytes).expect("kept fixture");
+            assert_eq!(init(&path), Ok(HeaderInit::Present), "{bytes:?}");
+            assert_eq!(contents(&path), bytes, "left for the caller's own check");
+        }
+        // A reader never calls the helper, and the zero header is still
+        // refused by name by a magic check: the healing is the writer's.
+        assert_eq!(
+            sixteen_byte_header(*b"BRUTEXRS", 3)[..12],
+            magic_and_version(*b"BRUTEXRS", 3)
+        );
+        assert_eq!(sixteen_byte_header(*b"BRUTEXRS", 3)[12..], [0_u8; 4]);
+    }
+
+    /// conc5-1 (D-2644): a header whose barrier fails is cut back to zero
+    /// bytes and remembered, a header whose write fails part way is cut back
+    /// too, and the next writer open writes it again. On the old code the
+    /// header bytes were left in place and the failure was not remembered.
+    #[test]
+    fn a_failed_header_barrier_is_cut_and_remembered() {
+        use fault::{Armed, Kind};
+        let path = scratch("conc5-1-barrier");
+        {
+            let _armed = Armed::arm("conc5-1-barrier", Kind::Sync);
+            let refusal = init(&path).expect_err("the barrier fails");
+            assert!(refusal.contains("injected sync fault"), "{refusal}");
+            assert!(!Armed::pending());
+        }
+        assert_eq!(contents(&path), Vec::<u8>::new(), "cut back to nothing");
+        assert!(refuse_after_failed_barrier(&path).is_err(), "remembered");
+        assert_eq!(
+            init(&path),
+            Ok(HeaderInit::Written),
+            "the next open rewrites"
+        );
+        assert_eq!(contents(&path), HEADER16.to_vec());
+
+        let path = scratch("conc5-1-write");
+        for keep in [0, 1, HEADER16.len() - 1] {
+            {
+                let _armed = Armed::arm("conc5-1-write", Kind::Write { keep });
+                assert!(init(&path).is_err(), "a short write at {keep} refuses");
+            }
+            assert_eq!(contents(&path), Vec::<u8>::new(), "cut back at {keep}");
+        }
+        assert_eq!(init(&path), Ok(HeaderInit::Written));
+        assert_eq!(init(&path), Ok(HeaderInit::Present), "and is then present");
+    }
+
+    /// conc11-1 (D-2645): the directory barrier is a real barrier on the
+    /// directory holding the file, and a failure is named.
+    #[test]
+    fn a_created_files_directory_is_synced_and_a_failure_named() {
+        use fault::{Armed, Kind};
+        let path = scratch("conc11-1-directory");
+        sync_parent_directory(&path).expect("the directory syncs");
+        let _armed = Armed::arm("conc11-1-directory", Kind::Sync);
+        let refusal = sync_parent_directory(&path).expect_err("the barrier fails");
+        assert!(refusal.contains("could not be synced"), "{refusal}");
+        assert!(!Armed::pending());
+        assert!(sync_parent_directory(Path::new("")).is_err(), "no parent");
+    }
+
+    /// conc11-1 (D-2645): the two store-root ledgers D-1903 missed sync the
+    /// root after a header this writer initialised, through the shared
+    /// header rule. Measured on the source, as ZL-09 is, because a directory
+    /// entry's durability cannot be observed without a power cut. On the old
+    /// code neither file named a directory barrier.
+    #[test]
+    fn candidate_universe_and_pre_admission_sync_the_root_after_initialising() {
+        for (name, source, function) in [
+            (
+                "candidate_universe.rs",
+                include_str!("candidate_universe.rs"),
+                "fn ensure_header(",
+            ),
+            (
+                "pre_admission_data.rs",
+                include_str!("pre_admission_data.rs"),
+                "fn init_header(",
+            ),
+        ] {
+            let body = source
+                .split_once(function)
+                .expect("the header door exists")
+                .1;
+            let body = body.split_once("\n}\n").map_or(body, |(head, _)| head);
+            let init = body
+                .find("init_or_heal_header(")
+                .expect("the shared header rule is called");
+            let synced = body
+                .find("sync_parent_directory(path)")
+                .expect("the root barrier is called");
+            assert!(init < synced, "{name}: the root is synced after the header");
+        }
+        let pre = include_str!("pre_admission_data.rs");
+        for door in ["fn ensure_header(", "fn ensure_header_v2("] {
+            let body = pre.split_once(door).expect("both doors").1;
+            let body = body.split_once("\n}\n").map_or(body, |(head, _)| head);
+            assert!(body.contains("init_header(file, path,"), "{door}: {body}");
+        }
+    }
+
+    /// sobs-12, D-4461: every directory a writer creates is made durable by a
+    /// barrier on its parent, a failed barrier is refused by name, and a
+    /// directory that already exists takes no barrier at all.
+    #[test]
+    fn created_directories_are_made_durable_and_a_failed_barrier_is_named() {
+        let base = scratch("durable-dirs")
+            .parent()
+            .expect("scratch parent")
+            .to_path_buf();
+        let outer = base.join("a");
+        let deep = outer.join("b");
+        let named = |path: &Path| path.display().to_string();
+
+        let armed = fault::Armed::arm(&named(&outer), fault::Kind::DirectorySync);
+        let refusal = create_dir_all_durable(&deep).expect_err("the inner barrier fails");
+        assert!(
+            refusal.contains("injected directory sync fault") && refusal.contains(&named(&outer)),
+            "{refusal}"
+        );
+        assert!(!fault::Armed::pending(), "the barrier on `a` was reached");
+        drop(armed);
+        assert!(deep.is_dir(), "the chain was made before its barriers");
+
+        let fresh = base.join("c").join("d");
+        let armed = fault::Armed::arm(&named(&base), fault::Kind::DirectorySync);
+        let refusal = create_dir_all_durable(&fresh).expect_err("a barrier in the chain fails");
+        assert!(refusal.contains(&named(&base)), "{refusal}");
+        drop(armed);
+
+        let armed = fault::Armed::arm(&named(&base), fault::Kind::DirectorySync);
+        create_dir_all_durable(&deep).expect("an existing chain needs nothing");
+        assert!(
+            fault::Armed::pending(),
+            "an existing directory takes no barrier"
+        );
+        drop(armed);
+        create_dir_all_durable(&base.join("e").join("f")).expect("real barriers succeed");
+
+        let file = deep.join("ledger.bin");
+        let armed = fault::Armed::arm(&named(&deep), fault::Kind::DirectorySync);
+        let refusal = sync_parent(&file).expect_err("the parent's barrier fails");
+        assert!(
+            refusal.contains("injected directory sync fault") && refusal.contains(&named(&deep)),
+            "{refusal}"
+        );
+        drop(armed);
+        sync_parent(&file).expect("a real barrier succeeds");
+        sync_parent(Path::new("bare.bin")).expect("a bare name's parent is `.`");
+        let refusal =
+            sync_parent(&base.join("missing").join("x.bin")).expect_err("no such directory");
+        assert!(refusal.contains("could not be made durable"), "{refusal}");
+
+        // A directory barrier fault is not a file write or barrier fault.
+        let _armed = fault::Armed::arm("ledger.bin", fault::Kind::DirectorySync);
+        assert!(fault::take_write(&file.display()).is_none());
+        assert!(!fault::take_sync(&file.display()));
+        assert!(fault::Armed::pending());
+    }
+
+    /// rnew-1, D-4460: the attack helper itself cuts, logs and keeps history
+    /// on a plain headerless file.
+    #[test]
+    fn the_torn_tail_attack_holds_on_a_plain_fixed_stride_file() {
+        let path = scratch("attack");
+        std::fs::write(&path, [7_u8; 3 * 10]).expect("three whole records");
+        let reads = |path: &Path| -> Result<String, String> {
+            let bytes = std::fs::read(path).map_err(|why| why.to_string())?;
+            if bytes.len() % 10 == 0 {
+                Ok(format!("{} records", bytes.len() / 10))
+            } else {
+                Err("ragged".to_owned())
+            }
+        };
+        attack::torn_tails(&[(&path, 10)], &mut || reads(&path), &mut || {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|why| why.to_string())?;
+            heal_torn_tail(&file, &path, 0, 10, &[]).map(drop)
+        });
+        assert_eq!(attack::torn_lengths(4_096), [1, 2_048, 4_095]);
+        assert_eq!(contents(&path).len(), 30);
     }
 }

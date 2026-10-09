@@ -2270,20 +2270,37 @@ impl PopulationFinalizationV4Ledger {
             // an empty file or a strict prefix of the constant header. Only
             // the writer, under the exclusive lock, rewrites that; a reader
             // and any other short content still refuse in `verify_header`.
-            let data_created = created || (writable && holds_torn_header(&mut data_file)?);
-            if data_created {
-                data_file
-                    .seek(SeekFrom::Start(0))
-                    .and_then(|_| data_file.write_all(&header()))
-                    .and_then(|()| data_file.sync_all())
-                    .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?;
-            }
+            //
+            // ONE HEADER RULE (conc5-1, D-2644), as Admission V4.
+            let torn = created || (writable && holds_torn_header(&mut data_file)?);
+            let data_created = (writable
+                && crate::fixed_tail::init_or_heal_header(
+                    &mut data_file,
+                    &data_path,
+                    &header(),
+                    File::sync_all,
+                )
+                .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?
+                    == crate::fixed_tail::HeaderInit::Written)
+                || torn;
             if lock_created || data_created {
                 root_file
                     .sync_all()
                     .map_err(|why| format!("cannot sync Finalization V4 root: {why}"))?;
             }
             verify_header(&mut data_file)?;
+            // pop2-3, D-2625 (extends D-1910): the WRITER, under the exclusive
+            // lock taken above, cuts bytes past the last whole record, which
+            // were never acknowledged; a reader keeps refusing them as ragged.
+            if writable {
+                crate::fixed_tail::heal_torn_tail(
+                    &data_file,
+                    &data_path,
+                    POPULATION_FINALIZATION_V4_HEADER_BYTES,
+                    POPULATION_FINALIZATION_V4_RECORD_BYTES,
+                    &header(),
+                )?;
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, 0)?;
             let data_generation = file_generation(&data_file, &data_path, bounds.file_bytes)?;
             let mut ledger = Self {
@@ -2314,6 +2331,8 @@ impl PopulationFinalizationV4Ledger {
     }
 
     fn scan(&mut self) -> Result<(), PopulationFinalizationV4Refusal> {
+        #[cfg(test)]
+        SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
         self.receipts.clear();
         self.trailing = None;
         let len = self.data_generation.len;
@@ -2403,13 +2422,14 @@ impl PopulationFinalizationV4Ledger {
     /// file, and an exact reuse runs another before it returns, so a reused
     /// append that writes nothing is O(F) as well.
     /// After the Completion is synced, the append hashes the whole data file
-    /// and then rescans the whole ledger: `scan` decodes every record,
-    /// validates every complete block, and ends with a generation check that
-    /// hashes the data file whole again. One append is therefore O(F) in the
-    /// ledger's file bytes F, not O(D) in its own decisions, and the appends
-    /// into one ledger cost quadratically in its length over its life.
-    /// Block validation inserts every decision into hash sets, so the bound
-    /// is expected, not worst case.
+    /// once more, to hold the generation every later check compares with, and
+    /// then reads back and validates only the block it wrote: O(D) in its own
+    /// decisions. It no longer rescans the ledger (W2-cli11-0, D-1845). The
+    /// two whole-file hashes keep one append O(F) in the ledger's file bytes
+    /// F, and that is inherent to the check: a generation that did not hash
+    /// the bytes could not see a same-size rewrite (D-0036). Block validation
+    /// inserts every decision into hash sets, so the bound is expected, not
+    /// worst case.
     /// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole
     /// files per call".
     /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
@@ -2558,12 +2578,35 @@ impl PopulationFinalizationV4Ledger {
             .map_err(|why| format!("cannot sync Finalization V4 directory: {why}"))?;
         self.data_generation =
             file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
-        self.scan()?;
-        let receipt = self
+        // THE NEW BLOCK IS VALIDATED, NOT THE WHOLE LEDGER AGAIN (W2-cli11-0,
+        // D-1845). This called `scan`, which re-read and re-validated every
+        // earlier block. Those blocks were validated when this writer opened
+        // and `require_unchanged` above proved the file still held them; the
+        // block written here is read back from disk and validated in full by
+        // the same `validate_complete_block` a scan would run, so the receipt
+        // is the one a scan derives. `commit_population_finalization_v4`
+        // still reopens the ledger and compares receipts.
+        let block_first = self
+            .record_count
+            .checked_sub(prefix)
+            .ok_or_else(|| "Finalization V4 block start underflowed".to_owned())?;
+        let data = decode_manifest(
+            &read_record_at(&mut self.data_file, block_first)?,
+            DATA_KIND,
+        )?;
+        if data.sequence != sequence || data.source != prepared.source {
+            return Err("Finalization V4 appended block does not read back as written".to_owned());
+        }
+        let receipt = validate_complete_block(&mut self.data_file, block_first, &data)?;
+        if self
             .receipts
-            .get(&prepared.source.finalization_id)
-            .copied()
-            .ok_or_else(|| "Finalization V4 appended block is absent after scan".to_owned())?;
+            .insert(receipt.finalization_id, receipt)
+            .is_some()
+        {
+            return Err("Finalization V4 identity appears more than once".to_owned());
+        }
+        self.trailing = None;
+        self.record_count = next_record_count;
         Ok((true, receipt))
     }
 
@@ -3095,6 +3138,12 @@ impl PopulationFinalizationV4Commit {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: whole-ledger scans on this thread. D-1845.
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Finalizes one retained fresh-reopen Admission V4 capability.
 ///
 /// No row, family, terminal, digest, policy or status is caller-authored.
@@ -3391,6 +3440,59 @@ mod tests {
         assert_eq!(reused.into_authority().structural_receipt(), receipt);
     }
 
+    /// W2-cli11-0, D-1845: an append validates the block it wrote and does
+    /// not rescan the ledger; the open and the commit's fresh reopen are the
+    /// only whole-ledger scans, and the reopened receipt equals the append's.
+    #[test]
+    fn an_append_validates_its_own_block_and_does_not_rescan_the_ledger() {
+        let admission_root = TestRoot::new("scan-admission");
+        let finalization_root = TestRoot::new("scan-finalization");
+        let scans = || SCANS.with(std::cell::Cell::get);
+        let mut receipts = Vec::new();
+        for (count, nifty) in [
+            (31, AdmissionV4FamilyTerminal::InsufficientForCscv),
+            (32, AdmissionV4FamilyTerminal::Evaluated),
+        ] {
+            let source = admission(
+                admission_root.path(),
+                nifty,
+                AdmissionV4FamilyTerminal::Evaluated,
+                count,
+            );
+            let prepared = {
+                let mut source = source;
+                prepare_population_finalization_v4(&mut source).expect("prepare")
+            };
+            let mut writer =
+                PopulationFinalizationV4Ledger::open_write(finalization_root.path(), bounds())
+                    .expect("open");
+            let before = scans();
+            let (written, receipt) = writer.append(&prepared).expect("append");
+            assert!(written);
+            assert_eq!(scans(), before, "the append rescanned the ledger");
+            drop(writer);
+            let reopened =
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .expect("reopen");
+            assert_eq!(
+                reopened
+                    .receipts
+                    .get(&prepared.source.finalization_id)
+                    .copied(),
+                Some(receipt),
+                "the append's receipt is the one a scan derives"
+            );
+            assert_eq!(reopened.receipts.len(), receipts.len() + 1);
+            receipts.push(receipt);
+        }
+        assert_ne!(receipts[0], receipts[1]);
+        assert_eq!(
+            receipts[1].sequence(),
+            1,
+            "the second block follows the first"
+        );
+    }
+
     /// slice24-F1, D-1900: a short write or failed barrier on the evidence or
     /// the Completion is cut back; the exact rerun commits.
     #[test]
@@ -3442,8 +3544,13 @@ mod tests {
                 0,
                 "case {case} ends on a whole record"
             );
-            PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
-                .expect("the cut ledger opens read-only");
+            // A fault on the header's own barrier (hooked since conc5-1,
+            // D-2644) cuts a fresh file to nothing, which a reader refuses as
+            // no ledger; any longer cut ledger still opens read-only.
+            if len > 0 {
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .expect("the cut ledger opens read-only");
+            }
             assert!(matches!(
                 commit_population_finalization_v4(finalization_root.path(), bounds(), source())
                     .expect("the exact rerun commits"),
@@ -3550,11 +3657,19 @@ mod tests {
             HEADER_BYTES as u64 + 6 * RECORD_BYTES as u64
         );
 
+        // pop2-3, D-2625: a sub-record tail is a kill's residue. A reader
+        // still refuses it; the writer cuts it under its lock and commits.
         let ragged = TestRoot::new("ragged");
+        File::create(ragged.path().join(LOCK_FILE)).expect("create ragged lock");
         let mut file = File::create(ragged.path().join(DATA_FILE)).expect("create ragged data");
         file.write_all(&header()).expect("write ragged header");
         file.write_all(&[1]).expect("write ragged byte");
         file.sync_all().expect("sync ragged file");
+        drop(file);
+        let why = PopulationFinalizationV4Ledger::open_read(ragged.path(), bounds())
+            .err()
+            .unwrap_or_default();
+        assert!(why.contains("ragged"), "{why}");
         let ragged_admission_root = TestRoot::new("ragged-admission");
         let ragged_source = admission(
             ragged_admission_root.path(),
@@ -3562,7 +3677,61 @@ mod tests {
             AdmissionV4FamilyTerminal::NaturallyExtinct,
             44,
         );
-        assert!(commit_population_finalization_v4(ragged.path(), bounds(), ragged_source).is_err());
+        assert!(matches!(
+            commit_population_finalization_v4(ragged.path(), bounds(), ragged_source)
+                .expect("the writer cuts the torn tail and commits"),
+            PopulationFinalizationV4Commit::Written(_)
+        ));
+        let len = std::fs::metadata(ragged.path().join(DATA_FILE))
+            .expect("stat healed Finalization data")
+            .len();
+        assert_eq!((len - HEADER_BYTES as u64) % RECORD_BYTES as u64, 0);
+    }
+
+    /// pop2-3, D-2625: every stray length from 1 to one byte short of a
+    /// record past a committed block is cut by the writer alone, back to the
+    /// exact committed bytes; a whole trailing record that fails its seal is
+    /// never cut. On the old code `scan` refused the writer as "ragged".
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        for stray in [1, 64, RECORD_BYTES / 2, RECORD_BYTES - 1, RECORD_BYTES] {
+            let admission_root = TestRoot::new("torn-admission");
+            let finalization_root = TestRoot::new("torn-finalization");
+            let source = admission(
+                admission_root.path(),
+                AdmissionV4FamilyTerminal::Evaluated,
+                AdmissionV4FamilyTerminal::NaturallyExtinct,
+                45,
+            );
+            commit_population_finalization_v4(finalization_root.path(), bounds(), source)
+                .expect("committed fixture");
+            let path = finalization_root.path().join(DATA_FILE);
+            let whole = std::fs::read(&path).expect("whole bytes");
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for the torn append");
+            file.write_all(&vec![0x5a; stray]).expect("torn bytes");
+            drop(file);
+            assert!(
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .is_err(),
+                "{stray}: a reader refuses"
+            );
+            let opened =
+                PopulationFinalizationV4Ledger::open_write(finalization_root.path(), bounds());
+            if stray == RECORD_BYTES {
+                assert!(opened.is_err(), "a whole bad record is refused");
+                assert_eq!(
+                    std::fs::metadata(&path).expect("stat").len(),
+                    whole.len() as u64 + stray as u64,
+                    "a whole record is never cut"
+                );
+            } else {
+                drop(opened.unwrap_or_else(|why| panic!("{stray}: the writer heals: {why}")));
+                assert_eq!(std::fs::read(&path).expect("healed bytes"), whole);
+            }
+        }
     }
 
     #[test]

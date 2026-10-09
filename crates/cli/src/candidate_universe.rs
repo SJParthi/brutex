@@ -76,7 +76,7 @@ use runner::exit_grid_policy::{
     AttestedTrainingV1, ExecutionDigestsV1, ExecutionDispositionV1, ExecutionResolutionV1,
     ExecutionRunV1, ExecutionSeriesV1, ExitGridSelectorV1, ForcedStopV1,
     GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1, RangeResolutionV1, RationalPercentileV1,
-    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v1, instrument_digest_v1,
+    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v2, instrument_digest_v1,
 };
 use runner::grid::{Cell, CellReplay, Chosen, Ttp};
 use runner::identity::{DailyReferenceBinding, Direction, Params, Run};
@@ -644,8 +644,8 @@ impl CandidateUniverseDescriptorV1 {
         require_column_sources("execution", execution_column, execution_series.bars().len())?;
         let signal_stream = CandidateSignalStreamV1::from_bars(signal_bars)?;
         let execution_stream = CandidateExecutionStreamV1::from_series(execution_series)?;
-        let signal_column_digest = column_digest_v1(signal_column);
-        let execution_column_digest = column_digest_v1(execution_column);
+        let signal_column_digest = column_digest_v2(signal_column);
+        let execution_column_digest = column_digest_v2(execution_column);
         require_nonzero_digest("candidate signal column", signal_column_digest)?;
         require_nonzero_digest("candidate execution column", execution_column_digest)?;
         let mut descriptor = Self {
@@ -925,8 +925,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         .map_err(|why| format!("candidate daily data identity refused: {why:?}"))?;
         let signal_stream = CandidateSignalStreamV1::from_bars(signal_bars)?;
         let execution_stream = CandidateExecutionStreamV1::from_series(execution_series)?;
-        let signal_column_digest = column_digest_v1(&signal_column);
-        let execution_column_digest = column_digest_v1(&execution_column);
+        let signal_column_digest = column_digest_v2(&signal_column);
+        let execution_column_digest = column_digest_v2(&execution_column);
         let mut source = Self {
             family,
             rung_seconds,
@@ -1049,8 +1049,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         {
             return Err("candidate production exact stream identity changed".to_owned());
         }
-        if self.signal_column_digest != column_digest_v1(&self.signal_column)
-            || self.execution_column_digest != column_digest_v1(&self.execution_column)
+        if self.signal_column_digest != column_digest_v2(&self.signal_column)
+            || self.execution_column_digest != column_digest_v2(&self.execution_column)
         {
             return Err("candidate production exact column identity changed".to_owned());
         }
@@ -1469,7 +1469,7 @@ fn derive_global_replay_oos_source_id(source: &CandidateGlobalReplayOosSourceV1<
     hasher.update(&source.signal_calendar.digest());
     hasher.update(&source.execution_calendar.digest());
     hasher.update(&source.data_digest);
-    hasher.update(&column_digest_v1(&source.execution_column));
+    hasher.update(&column_digest_v2(&source.execution_column));
     if let Some(spec) = source.execution_column.evaluation_spec_token() {
         hasher.update(spec.fingerprint_v1().as_bytes());
     }
@@ -3752,7 +3752,7 @@ impl CandidateUniverseLedgerV1 {
         &mut self,
         prepared: &PreparedCandidateUniverseV1,
     ) -> Result<CandidateUniverseProductionCommitV1, CandidateUniverseRefusal> {
-        self.require_unchanged()?;
+        self.rescan_if_grown()?;
         let receipt = prepared.receipt;
         receipt.validate()?;
         if receipt.row_count > self.bounds.max_rows {
@@ -3925,6 +3925,34 @@ impl CandidateUniverseLedgerV1 {
         validate_file_block(&mut self.row_file, audit.first_row, &audit.receipt)?;
         self.require_unchanged()?;
         Ok(audit)
+    }
+
+    /// The append's freshness rule (conc10-2, D-2647): unchanged files go on
+    /// as before; files that are the SAME files (device and inode) and only
+    /// GREW -- another writer appended whole universes between this handle's
+    /// open and its append -- are re-scanned whole under the exclusive lock
+    /// this append already holds, exactly as an open would; anything else (a
+    /// replaced, shrunk or same-length-mutated file, or a changed lock file)
+    /// still refuses as stale.
+    ///
+    /// Two `ledger-v6`/`ledger-all` runs whose opens interleaved made the
+    /// second appender refuse "cached audit is stale" after its whole
+    /// preparation, even for an exact reuse of the first one's universe. The
+    /// rescan is the open's own cost, O(rows + completions), paid only when
+    /// another writer moved the files.
+    fn rescan_if_grown(&mut self) -> Result<(), CandidateUniverseRefusal> {
+        if self.require_unchanged().is_ok() {
+            return Ok(());
+        }
+        require_generation(self.lock_generation, &self.writer_lock, &self.lock_path)?;
+        let rows = file_generation(&self.row_file, &self.row_path)?;
+        let receipts = file_generation(&self.receipt_file, &self.receipt_path)?;
+        if !grew_in_place(self.row_generation, rows)
+            || !grew_in_place(self.receipt_generation, receipts)
+        {
+            return self.require_unchanged();
+        }
+        self.scan()
     }
 
     fn require_unchanged(&self) -> Result<(), CandidateUniverseRefusal> {
@@ -6277,15 +6305,20 @@ fn ensure_header(
     stride: u64,
     path: &Path,
 ) -> Result<(), CandidateUniverseRefusal> {
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat candidate file {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&header_bytes(magic, kind, stride)))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
+    // conc5-1 (D-2644): one header rule. A failed header write or barrier is
+    // cut back to nothing and remembered, and an all-zero or torn header the
+    // writer's own failure left is re-initialised instead of refused forever.
+    let init = crate::fixed_tail::init_or_heal_header(
+        file,
+        path,
+        &header_bytes(magic, kind, stride),
+        File::sync_data,
+    )
+    .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
+    // conc11-1 (D-2645): a file this writer just made non-empty keeps its
+    // directory entry across a power cut, as D-1903 gave the Step-3 ledgers.
+    if init == crate::fixed_tail::HeaderInit::Written {
+        crate::fixed_tail::sync_parent_directory(path)?;
     }
     verify_header(file, magic, kind, stride, path)?;
     // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
@@ -6618,6 +6651,20 @@ fn generation_of(metadata: &std::fs::Metadata) -> FileGenerationV1 {
     }
 }
 
+/// Whether `observed` is `expected` itself, or the same file (device and
+/// inode) strictly longer: appended to, never replaced, cut or rewritten at
+/// the same length (conc10-2, D-2647).
+fn grew_in_place(expected: FileGenerationV1, observed: FileGenerationV1) -> bool {
+    if observed == expected {
+        return true;
+    }
+    #[cfg(unix)]
+    if observed.device != expected.device || observed.inode != expected.inode {
+        return false;
+    }
+    observed.len > expected.len
+}
+
 fn require_generation(
     expected: FileGenerationV1,
     file: &File,
@@ -6658,7 +6705,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v2,
+        printed_ohlcv_cost_model_id_v3,
     };
     use runner::identity::ReferenceIntegrity;
 
@@ -7132,9 +7179,13 @@ mod tests {
                 std::fs::metadata(root.path().join("base-evidence-completions-v3.bin"))
                     .expect("measure completions")
                     .len();
-            assert_eq!(
-                completions, 64,
-                "{name}: no completion survives a failed barrier"
+            // No completion RECORD survives: the file holds at most its
+            // header. Since conc5-1 (D-2644) the header barrier is hooked too,
+            // so a fault armed on a fresh ledger can fire there and leave the
+            // file cut to nothing instead of header-only.
+            assert!(
+                completions == 0 || completions == 64,
+                "{name}: no completion survives a failed barrier ({completions} bytes)"
             );
             let written =
                 append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
@@ -7143,6 +7194,96 @@ mod tests {
                 matches!(written, BaseEvidenceProductionCommitV2::Written(_)),
                 "{name}"
             );
+        }
+    }
+
+    /// W2-cli10-0, D-4467: one Base append scans the ledger ONCE, in its
+    /// writer's open, written or reused; the fresh reopen reads only the
+    /// committed completion and its block. It still refuses a damaged block, a
+    /// replaced file, a shortened record file and a vanished completion put
+    /// down between the writer's release and the reopen.
+    #[test]
+    fn a_base_append_scans_once_and_its_bounded_reopen_still_refuses_damage() {
+        use super::population_base_evidence_v2::reopen_probe;
+        type Attack = (&'static str, fn(&std::path::Path));
+        let bounds = BaseEvidenceLedgerBoundsV2::new(64, 8).expect("nonzero Base bounds");
+        let (first_candidate, first_base) = candidate_base_fixture(71, InstrumentFamilyV1::Nifty);
+        let (candidate, base) = candidate_base_fixture(72, InstrumentFamilyV1::Nifty);
+
+        let root = test_dir();
+        let first =
+            append_and_reopen_base_evidence_v2(root.path(), bounds, &first_candidate, &first_base)
+                .expect("the first family commits")
+                .audit();
+        let before = reopen_probe::scans();
+        let written = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+            .expect("the second family commits after the first");
+        assert!(matches!(
+            written,
+            BaseEvidenceProductionCommitV2::Written(_)
+        ));
+        assert_eq!(reopen_probe::scans() - before, 1, "the writer's open only");
+        let before = reopen_probe::scans();
+        let reused = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+            .expect("the exact retry reuses");
+        assert!(matches!(reused, BaseEvidenceProductionCommitV2::Reused(_)));
+        assert_eq!(reopen_probe::scans() - before, 1, "the writer's open only");
+        assert_eq!(written.audit(), reused.audit());
+        let full = BaseEvidenceLedgerReaderV2::open(root.path(), bounds)
+            .expect("a full fresh open")
+            .audit(candidate.universe_id())
+            .expect("generation checked")
+            .expect("the second family is complete");
+        assert_eq!(
+            full,
+            written.audit(),
+            "the bounded reopen derives what a scan derives"
+        );
+        assert_ne!(full, first, "the second block, not the first");
+
+        let attacks: [Attack; 4] = [
+            ("record seal does not match payload", |root| {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(root.join("base-evidence-records-v3.bin"))
+                    .expect("record file opens");
+                file.seek(SeekFrom::Start(64 + 120)).expect("payload seeks");
+                let mut byte = [0_u8; 1];
+                file.read_exact(&mut byte).expect("payload reads");
+                file.seek(SeekFrom::Start(64 + 120)).expect("payload seeks");
+                file.write_all(&[byte[0] ^ 0xA5]).expect("payload corrupts");
+            }),
+            ("no longer names the Base file this append wrote", |root| {
+                let path = root.join("base-evidence-records-v3.bin");
+                let displaced = root.join("base-evidence-records-v3.displaced");
+                std::fs::rename(&path, &displaced).expect("the written inode is displaced");
+                std::fs::copy(&displaced, &path).expect("same bytes at a new inode");
+            }),
+            ("beyond physical record count", |root| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(root.join("base-evidence-records-v3.bin"))
+                    .expect("record file opens")
+                    .set_len(64)
+                    .expect("the block is cut");
+            }),
+            ("disappeared after receipt-last append", |root| {
+                OpenOptions::new()
+                    .write(true)
+                    .open(root.join("base-evidence-completions-v3.bin"))
+                    .expect("completion file opens")
+                    .set_len(64)
+                    .expect("the completion is cut");
+            }),
+        ];
+        for (expected, attack) in attacks {
+            let root = test_dir();
+            reopen_probe::between(attack);
+            let why = append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                .expect_err("damage between the append and the reopen refuses")
+                .to_string();
+            assert!(why.contains(expected), "{expected}: {why}");
         }
     }
 
@@ -7738,7 +7879,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("one broad exact ratio interval"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -8368,6 +8509,139 @@ mod tests {
             "the typed production fixture must derive at least one non-constant supported live condition"
         );
         (best_bit, best_support, ties)
+    }
+
+    /// The Global Replay OOS source id is private and recomputed by
+    /// `require_integrity`; a constant derivation would make that recompute a
+    /// tautology, so every identity-bearing field it hashes must move it.
+    #[test]
+    fn global_replay_oos_source_identity_refuses_any_field_changed_after_construction() {
+        type Tamper = fn(&mut CandidateGlobalReplayOosSourceV1<'_>);
+        let fixture = ProductionFixture::new();
+        let mut source = CandidateGlobalReplayOosSourceV1::new(
+            InstrumentFamilyV1::Nifty,
+            60,
+            Horizon::DEFAULT,
+            fixture.span,
+            fixture.signal_calendar,
+            fixture.execution_calendar,
+            fixture.execution(),
+            &fixture.daily_references,
+            &fixture.context,
+            fixture.daily_binding(),
+            fixture.series(),
+            Widths::pinned().expect("fixture uses measured widths"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+            StoredSpanLoadBoundV1::new(
+                u64::try_from(fixture.execution().len()).expect("signal length fits u64"),
+            )
+            .expect("signal load ceiling is nonzero"),
+            StoredSpanLoadBoundV1::new(
+                u64::try_from(fixture.context.len()).expect("minute length fits u64"),
+            )
+            .expect("minute load ceiling is nonzero"),
+            StoredSpanLoadBoundV1::new(
+                u64::try_from(fixture.daily_bars.len()).expect("daily length fits u64"),
+            )
+            .expect("daily load ceiling is nonzero"),
+        )
+        .expect("the production fixture is a valid OOS source");
+        source
+            .require_integrity()
+            .expect("the untampered OOS source passes its own integrity check");
+        assert_eq!(
+            source.source_id,
+            derive_global_replay_oos_source_id(&source),
+            "construction stores the derived id"
+        );
+
+        let tampered: [(&str, Tamper); 4] = [
+            ("rung", |s| s.rung_seconds = 120),
+            ("signal ceiling", |s| {
+                s.signal_load_bound =
+                    StoredSpanLoadBoundV1::new(s.signal_load_bound.max_records().saturating_add(1))
+                        .expect("raised ceiling is nonzero");
+            }),
+            ("minute ceiling", |s| {
+                s.minute_load_bound =
+                    StoredSpanLoadBoundV1::new(s.minute_load_bound.max_records().saturating_add(1))
+                        .expect("raised ceiling is nonzero");
+            }),
+            ("daily ceiling", |s| {
+                s.daily_load_bound =
+                    StoredSpanLoadBoundV1::new(s.daily_load_bound.max_records().saturating_add(1))
+                        .expect("raised ceiling is nonzero");
+            }),
+        ];
+        let original = (
+            source.rung_seconds,
+            source.signal_load_bound,
+            source.minute_load_bound,
+            source.daily_load_bound,
+        );
+        let mut ids = vec![source.source_id];
+        for (label, tamper) in tampered {
+            tamper(&mut source);
+            let refusal = source.require_integrity().expect_err(label);
+            assert!(
+                refusal.contains("source identity changed after construction"),
+                "{label}: {refusal}"
+            );
+            ids.push(derive_global_replay_oos_source_id(&source));
+            (
+                source.rung_seconds,
+                source.signal_load_bound,
+                source.minute_load_bound,
+                source.daily_load_bound,
+            ) = original;
+            source
+                .require_integrity()
+                .expect("restoring the field restores the identity");
+        }
+        let distinct = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), distinct, "every tampered field moves the id");
+    }
+
+    #[test]
+    fn production_source_refuses_either_column_digest_that_is_not_the_v2_digest_of_its_column() {
+        let fixture = ProductionFixture::new();
+        let mut source = fixture.source();
+        source.validate().expect("the untampered fixture validates");
+
+        let signal_v2 = source.signal_column_digest;
+        let execution_v2 = source.execution_column_digest;
+        assert_eq!(signal_v2, column_digest_v2(&source.signal_column));
+        assert_eq!(execution_v2, column_digest_v2(&source.execution_column));
+
+        // The V1 digest of the very same column is a stale codec, not this
+        // column's production identity.
+        let signal_v1 = runner::exit_grid_policy::column_digest_v1(&source.signal_column);
+        let execution_v1 = runner::exit_grid_policy::column_digest_v1(&source.execution_column);
+        assert_ne!(signal_v1, signal_v2);
+        assert_ne!(execution_v1, execution_v2);
+
+        for (label, signal, execution) in [
+            ("signal only", signal_v1, execution_v2),
+            ("execution only", signal_v2, execution_v1),
+            ("signal foreign", digest(211), execution_v2),
+            ("execution foreign", signal_v2, digest(212)),
+        ] {
+            source.signal_column_digest = signal;
+            source.execution_column_digest = execution;
+            let refusal = source.validate().expect_err(label);
+            assert!(
+                refusal.contains("exact column identity changed"),
+                "{label}: {refusal}"
+            );
+        }
+        source.signal_column_digest = signal_v2;
+        source.execution_column_digest = execution_v2;
+        source
+            .validate()
+            .expect("restoring both digests validates again");
     }
 
     #[test]
@@ -9192,6 +9466,94 @@ mod tests {
                 .expect("generations hold"),
             Some(appended.audit())
         );
+    }
+
+    /// conc10-2 (D-2647): two writers whose opens interleaved both commit.
+    /// B opened before A appended; B's append re-scans the grown files under
+    /// its lock and writes after A's block, and B's exact retry of A's
+    /// universe is `Reused`. A same-length rewrite or a replaced file still
+    /// refuses as stale. On the old code B's first append refused "changed
+    /// since open; cached audit is stale".
+    #[test]
+    fn interleaved_writers_both_commit_after_a_rescan_of_grown_files() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        let root = test_dir();
+        let mut a = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("A opens");
+        let mut b = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("B opens");
+        let first = prepared(70);
+        let second = prepared(71);
+        let written = a.append_complete(&first).expect("A commits");
+        assert!(matches!(
+            written,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        let after = b
+            .append_complete(&second)
+            .expect("B re-scans A's growth and commits");
+        assert!(matches!(
+            after,
+            CandidateUniverseProductionCommitV1::Written(_)
+        ));
+        assert_eq!(after.audit().first_row(), first.receipt().row_count());
+        let reused = b.append_complete(&first).expect("B reuses A's universe");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        assert_eq!(reused.audit(), written.audit());
+        // A, now behind B, re-scans too and reuses B's universe.
+        let reused = a.append_complete(&second).expect("A reuses B's universe");
+        assert!(matches!(
+            reused,
+            CandidateUniverseProductionCommitV1::Reused(_)
+        ));
+        let fresh = CandidateUniverseLedgerV1::open_read(root.path(), bounds).expect("reader");
+        assert_eq!(
+            fresh
+                .reopen_audit(&second.receipt().universe_id())
+                .expect("generations hold"),
+            Some(after.audit())
+        );
+
+        // A same-length rewrite is not growth: still stale.
+        let mut c = CandidateUniverseLedgerV1::open(root.path(), bounds).expect("C opens");
+        let row_path = root.path().join(ROW_FILE);
+        let raw = std::fs::read(&row_path).expect("rows");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&row_path, &raw).expect("same bytes, same length, rewritten");
+        assert!(
+            c.append_complete(&prepared(72))
+                .expect_err("a same-length rewrite refuses")
+                .contains("changed since open")
+        );
+
+        // A replaced file (new inode, longer) is not growth either.
+        let replaced = test_dir();
+        let mut d = CandidateUniverseLedgerV1::open(replaced.path(), bounds).expect("D opens");
+        let path = replaced.path().join(ROW_FILE);
+        let mut bytes = std::fs::read(&path).expect("rows");
+        let displaced = replaced.path().join("rows.displaced");
+        std::fs::rename(&path, &displaced).expect("displaced");
+        bytes.extend_from_slice(&[0_u8; 3]);
+        std::fs::write(&path, &bytes).expect("a new, longer inode");
+        assert!(d.append_complete(&prepared(73)).is_err());
+
+        // The rule itself, exhaustively over its four shapes.
+        let base = file_generation(
+            &std::fs::File::open(&displaced).expect("displaced opens"),
+            &displaced,
+        )
+        .expect("generation");
+        assert!(grew_in_place(base, base));
+        let mut longer = base;
+        longer.len += 1;
+        assert!(grew_in_place(base, longer));
+        let mut shorter = base;
+        shorter.len = shorter.len.saturating_sub(1);
+        assert!(!grew_in_place(base, shorter) || base.len == 0);
+        let mut moved = longer;
+        moved.inode = moved.inode.wrapping_add(1);
+        assert!(!grew_in_place(base, moved));
     }
 
     #[test]

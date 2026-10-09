@@ -257,8 +257,12 @@ pub struct Cell {
     /// Mean adverse excursion of the trades that ENDED PROFITABLE, in basis
     /// points.
     ///
-    /// **The sniper number.** It says how far a winner went against you before
-    /// it worked, which is the tightest stop that would not have killed it.
+    /// **The sniper number.** It says how far a TYPICAL winner went against
+    /// you before it worked. It is a mean, so it is NOT the tightest stop that
+    /// would not have killed a winner: any winner that went further than the
+    /// average one would have been cut by a stop placed here. The stop every
+    /// trade survived is [`Self::worst_mae`]. (Z1-slice00-F1, D-2537: this doc
+    /// and the audit note both called the mean a stop level.)
     pub winner_mae: Ppm,
     /// Mean favourable excursion of the trades that ended profitable.
     pub winner_mfe: Ppm,
@@ -266,8 +270,8 @@ pub struct Cell {
     ///
     /// # The number [`Cell::edge_ratio`] is divided by, and why it is not `winner_mae`
     ///
-    /// `winner_mae` answers *"how far did a winner go against me before it
-    /// worked"* — the tightest stop that would not have killed it. It is the
+    /// `winner_mae` answers *"how far did a typical winner go against me before
+    /// it worked"* — a mean, not a stop level (Z1-slice00-F1). It is the
     /// right question and it has one fatal property as a **ranking** key: it is
     /// computed only over trades that ended profitable, so it is structurally
     /// blind to how large a loser gets.
@@ -1614,6 +1618,25 @@ impl Candidate {
             .map_or(self.cross.refused() > 0, |hole| hole <= exit_offset);
         self.block_only || crossing_hole || self.hole.is_some_and(|hole| hole <= exit_offset)
     }
+
+    /// The offset from `entry` at which this path's TIME exit falls due: its
+    /// last held bar, or the walk's located hole when that lies past it
+    /// (D-4500).
+    ///
+    /// The two differ on exactly one shape. A path whose slice, or whose 15:09
+    /// proof, ended before its deadline holds every bar through `time_exit`
+    /// and has its time exit one PAST it, so the walk records the hole there
+    /// ([`crate::trade::Occupancy::time_unpriced_at`]). Reading the time exit at
+    /// `time_exit` would price a level-less variant at the data's last minute
+    /// -- the manufactured square-off RULE 1c of `crate::trade::walk` refuses --
+    /// and would offer that bar's open as a time-exit attribution beside a
+    /// target touched there. Every other path's hole is at or before
+    /// `time_exit`, so this is `time_exit - entry` unchanged. O(1): two reads,
+    /// UNVERIFIED as a timed measurement (`docs/06-limits.md`, D-4500).
+    fn timed_at(&self) -> usize {
+        let span = self.time_exit.saturating_sub(self.entry);
+        self.hole.map_or(span, |hole| hole.max(span))
+    }
 }
 
 /// The pessimistic exit offset of variant `v` on candidate `c`: the first of
@@ -1622,7 +1645,9 @@ impl Candidate {
 /// so the two cannot disagree about which exit a hole is compared with. O(1),
 /// UNVERIFIED as a measurement; `docs/06-limits.md` states it (D-1514).
 fn pessimistic_offset(c: &Candidate, v: Variant, trails_rungs: &[Ppm]) -> usize {
-    let span = c.time_exit.saturating_sub(c.entry);
+    // `timed_at`, not `time_exit - entry` (D-4500): a path cut before its
+    // deadline has no time exit on any bar it holds.
+    let span = c.timed_at();
     let stop_at = v.stop.map_or(NEVER, |r| c.cross.stop_at(r));
     let target_at = v.target.map_or(NEVER, |r| c.cross.target_at(r));
     let live = Trailing::live(&c.cross, v.tsl, trails_rungs);
@@ -1804,16 +1829,7 @@ fn entry_fills(bars: &[Candle], index: usize, side: Side) -> (i64, i64) {
     // candle whose open sits outside its own high-low is refused HERE rather
     // than priced off extremes that never contained it — the same reasoning
     // `crate::trade::price_one` gives at its own `FillBar::new`.
-    let raw = brutex_core::price::Paisa::from_raw;
-    let Ok(fill_bar) = costs::fill::Bar::new(raw(open), raw(bar.high), raw(bar.low)) else {
-        return (0, open);
-    };
-    let Ok(fills) = costs::fill::fills_at(
-        fill_bar,
-        fill_bar,
-        direction_of(side),
-        costs::fill::Anchor::PrintedExtreme,
-    ) else {
+    let Some(fills) = one_leg_printed(bar, side, true) else {
         return (0, open);
     };
     let worst = match side {
@@ -1821,6 +1837,43 @@ fn entry_fills(bars: &[Candle], index: usize, side: Side) -> (i64, i64) {
         Side::Short => fills.sell().raw(),
     };
     (worst, open)
+}
+
+/// The `PrintedExtreme` fills with THIS bar on one leg only, so only that
+/// leg's sub-tick check can refuse.
+///
+/// # Why not `fills_at(bar, bar, ..)` (p9num-3, D-2544)
+///
+/// `fills_at` checks the SELL leg (a low) against one tick whichever leg the
+/// caller reads. Pricing a same-bar pair therefore refused a long ENTRY whose
+/// low was 1-4 paisa although a long entry reads only the high, and a short's
+/// pessimistic EXIT the same way. The refusal then fell back to a `0` entry or
+/// a zero-P&L exit, while `crate::trade::round_trip`, which puts each leg on its
+/// own bar, accepted and priced the same trade — the two halves disagreed
+/// behind a fallback (`CLAUDE.md` §4).
+///
+/// The other leg is placed on a FLAT bar at this bar's own high. `Bar::new`
+/// has already refused a high below one tick, so that partner leg is at least
+/// a tick on either side and can never refuse; the leg read from `bar` is
+/// checked exactly as `trade::round_trip` checks it. `entering` puts `bar` on
+/// the entry side; otherwise it is the exit side. `None` when `bar` is refused
+/// by `costs::fill::Bar::new` or its used leg is below a tick.
+fn one_leg_printed(bar: &Candle, side: Side, entering: bool) -> Option<costs::fill::Fills> {
+    let raw = brutex_core::price::Paisa::from_raw;
+    let fill_bar = costs::fill::Bar::new(raw(bar.open), raw(bar.high), raw(bar.low)).ok()?;
+    let partner = costs::fill::Bar::flat(fill_bar.high()).ok()?;
+    let (entry, exit) = if entering {
+        (fill_bar, partner)
+    } else {
+        (partner, fill_bar)
+    };
+    costs::fill::fills_at(
+        entry,
+        exit,
+        direction_of(side),
+        costs::fill::Anchor::PrintedExtreme,
+    )
+    .ok()
 }
 
 /// The fill for a market EXIT on the bar at `index`, under one reading.
@@ -1844,15 +1897,9 @@ fn exit_fill(bars: &[Candle], index: usize, side: Side, pessimistic: bool) -> Op
         // spread entirely.
         return Some(bar.open);
     }
-    let raw = brutex_core::price::Paisa::from_raw;
-    let fill_bar = costs::fill::Bar::new(raw(bar.open), raw(bar.high), raw(bar.low)).ok()?;
-    let fills = costs::fill::fills_at(
-        fill_bar,
-        fill_bar,
-        direction_of(side),
-        costs::fill::Anchor::PrintedExtreme,
-    )
-    .ok()?;
+    // The exit leg only: a short's pessimistic exit reads the high and no
+    // longer refuses on a 1-4 paisa low it never uses (p9num-3, D-2544).
+    let fills = one_leg_printed(bar, side, false)?;
     Some(match side {
         Side::Long => fills.sell().raw(),
         Side::Short => fills.buy().raw(),
@@ -2458,7 +2505,7 @@ fn evaluate_timed_with_exact_ladders(
 ///
 /// # The bound, and why it is sufficient
 ///
-/// It is the money term `exit_grid_policy`'s `validate_arithmetic_envelope`
+/// It is the money term `exit_grid_policy`'s `validate_envelope_extremes`
 /// already applies to the V1 grid, over the bars the paths actually touch:
 /// with `A` the largest absolute price on any path and `P` the number of
 /// paths, each trade's fill legs lie inside `[-A, A]`, so one trade moves a
@@ -3047,8 +3094,9 @@ pub fn materialize_expression_cell(
 
 /// [`materialize_expression_cell`] over slice facts the caller already holds
 /// -- the attested training token carries them (D-1141), so a per-ordinal
-/// replay no longer rebuilds them. The program walk itself is still per call;
-/// `docs/06-limits.md` names that bound. Public since D-1184 so `cli`'s
+/// replay no longer rebuilds them. The program walk is still per call here; a
+/// loop over the cells of one grid uses [`ExpressionCellReplay`], which walks
+/// once for all of them (D-1833). Public since D-1184 so `cli`'s
 /// candidate capture can pass the facts it builds once per slice. `facts` must
 /// be [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
 ///
@@ -3069,57 +3117,137 @@ pub fn materialize_expression_cell_over(
     selected: &Cell,
     facts: &crate::trade::SliceFacts,
 ) -> Result<Vec<TradeRow>, String> {
-    let timed = crate::trade::walk_expression_over(
-        bars,
-        column,
-        expression,
-        horizon,
-        direction_of(side),
-        facts,
-    )?;
-    let mut rows = Vec::new();
-    if timed.occupancy.is_empty() {
-        let empty = one_variant(
+    ExpressionCellReplay::prepare(bars, column, expression, horizon, side, grid, facts)?
+        .materialize(selected)
+}
+
+/// [`materialize_expression_cell_over`] for MANY cells of one program's grid:
+/// the program walk and the crossing table are built once in
+/// [`ExpressionCellReplay::prepare`], and each
+/// [`ExpressionCellReplay::materialize`] pays only the cell's own fold.
+///
+/// # Cost (W3-runner2-1, D-1833)
+///
+/// `prepare` is O(B + signals) for the program walk and O(C·(span + L)) for
+/// the crossings over C candidate paths, once. `materialize` is O(C) per cell
+/// plus the rows it returns. Before this door every coordinate of a program
+/// re-walked the program and re-measured every crossing: O(G·(B + signals +
+/// C·(span + L))) for a grid of G cells.
+///
+/// The expression path keeps its own empty-walk rule, which differs from the
+/// mask path's [`CellReplay`]: a walk with no occupancy compares the selected
+/// cell to the empty fold rather than answering "no priceable trade". The
+/// answer is byte-identical to [`materialize_expression_cell`], which is now
+/// this door with a one-cell loop.
+pub struct ExpressionCellReplay<'a> {
+    bars: &'a [Candle],
+    grid: &'a Grid,
+    side: Side,
+    /// `None` when the program's walk had no occupancy at all.
+    prepared: Option<PreparedReplay<'a>>,
+}
+
+impl<'a> ExpressionCellReplay<'a> {
+    /// Walk `expression` once and measure every candidate path against
+    /// `grid`'s own ladders. `facts` must be [`crate::trade::SliceFacts::of`]
+    /// the same `bars` and `column`.
+    ///
+    /// # Errors
+    ///
+    /// The walk's column-alignment refusal, as
+    /// [`materialize_expression_cell`] reports it.
+    pub fn prepare(
+        bars: &'a [Candle],
+        column: &Column,
+        expression: &crate::expression::Expression,
+        horizon: Horizon,
+        side: Side,
+        grid: &'a Grid,
+        facts: &crate::trade::SliceFacts,
+    ) -> Result<Self, String> {
+        #[cfg(test)]
+        EXPRESSION_WALKS.with(|walks| walks.set(walks.get() + 1));
+        let timed = crate::trade::walk_expression_over(
             bars,
-            &[],
-            (
-                grid.stops.rungs(),
-                grid.targets.rungs(),
-                grid.trails.rungs(),
-            ),
-            Variant {
-                stop: selected.stop,
-                target: selected.target,
-                tsl: selected.tsl,
-                ttp: selected.ttp,
-            },
+            column,
+            expression,
+            horizon,
+            direction_of(side),
+            facts,
+        )?;
+        let prepared = (!timed.occupancy.is_empty()).then(|| {
+            PreparedReplay::of(
+                bars,
+                side,
+                Ladders {
+                    stops: &grid.stops,
+                    targets: &grid.targets,
+                    trails: &grid.trails,
+                },
+                facts,
+                &timed,
+            )
+        });
+        Ok(Self {
+            bars,
+            grid,
             side,
-            None,
-        );
-        return if empty == *selected {
-            Ok(rows)
-        } else {
-            Err("selected expression empty cell differs from exact replay".to_owned())
+            prepared,
+        })
+    }
+
+    /// Replays one already-selected cell and proves its detail rows, exactly
+    /// as [`materialize_expression_cell`] does.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`materialize_expression_cell`].
+    pub fn materialize(&self, selected: &Cell) -> Result<Vec<TradeRow>, String> {
+        let mut rows = Vec::new();
+        let Some(prepared) = &self.prepared else {
+            let empty = one_variant(
+                self.bars,
+                &[],
+                (
+                    self.grid.stops.rungs(),
+                    self.grid.targets.rungs(),
+                    self.grid.trails.rungs(),
+                ),
+                Variant {
+                    stop: selected.stop,
+                    target: selected.target,
+                    tsl: selected.tsl,
+                    ttp: selected.ttp,
+                },
+                self.side,
+                None,
+            );
+            return if empty == *selected {
+                Ok(rows)
+            } else {
+                Err("selected expression empty cell differs from exact replay".to_owned())
+            };
         };
+        let replay = prepared.variant(Chosen::from_cell(selected), Some(&mut rows));
+        if replay.cell.as_ref() != Some(selected) {
+            return Err("selected expression cell differs from exact replay".to_owned());
+        }
+        reconcile_rows(selected, &rows)?;
+        Ok(rows)
     }
-    let replay = levelled_timed(
-        bars,
-        side,
-        Ladders {
-            stops: &grid.stops,
-            targets: &grid.targets,
-            trails: &grid.trails,
-        },
-        Chosen::from_cell(selected),
-        Some(&mut rows),
-        facts,
-        &timed,
-    );
-    if replay.cell.as_ref() != Some(selected) {
-        return Err("selected expression cell differs from exact replay".to_owned());
-    }
-    reconcile_rows(selected, &rows)?;
-    Ok(rows)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Program walks [`ExpressionCellReplay::prepare`] has run on this thread
+    /// (test-only probe, D-1833).
+    static EXPRESSION_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Program walks run on the calling thread so far (test-only, D-1833).
+#[cfg(test)]
+pub(crate) fn expression_walks_on_this_thread() -> u64 {
+    EXPRESSION_WALKS.with(std::cell::Cell::get)
 }
 
 /// Proves the row sequence carries the selected cell's ledger aggregates.
@@ -4435,11 +4563,7 @@ fn one_variant(
             live,
             armed,
         };
-        let choices = ExitChoices::of(
-            firing,
-            pess_off,
-            pess_off == c.time_exit.saturating_sub(c.entry),
-        );
+        let choices = ExitChoices::of(firing, pess_off, pess_off == c.timed_at());
         // NO `entry_price` HERE ANY MORE, AND ITS ABSENCE IS THE FIX.
         //
         // This read the execution bar's OPEN and handed the SAME price to both
@@ -4979,7 +5103,10 @@ fn realised(
             },
             _,
         ) if anchor > 0 => {
-            let give_back = paisa_of(ppm, fills.anchor);
+            // A TRAIL IS A STOP: rested at the ceiling distance its trigger
+            // fires at, so a bar printing the trail price exactly fires it
+            // (run2-1, D-2605).
+            let give_back = paisa_ceil_of(ppm, fills.anchor);
             let resting = match side {
                 Side::Long => anchor.saturating_sub(give_back),
                 Side::Short => anchor.saturating_add(give_back),
@@ -5359,6 +5486,20 @@ fn paisa_of(ppm: Ppm, price: i64) -> i64 {
     i64::try_from(scaled).unwrap_or(i64::MAX)
 }
 
+/// [`paisa_of`] rounded UP: the smallest whole paisa move whose ppm of
+/// `price` reaches `ppm`, which is exactly the move the crossing test needs to
+/// fire (run2-1, D-2605). Used for the stop and trail distances only.
+fn paisa_ceil_of(ppm: Ppm, price: i64) -> i64 {
+    let product = i128::from(ppm).saturating_mul(i128::from(price));
+    let floor = product / 1_000_000;
+    let ceil = if product % 1_000_000 > 0 {
+        floor.saturating_add(1)
+    } else {
+        floor
+    };
+    i64::try_from(ceil).unwrap_or(i64::MAX)
+}
+
 /// The two entry prices one reading needs.
 ///
 /// # Why a level cannot be scaled against the price that filled
@@ -5408,8 +5549,20 @@ struct Priced {
 }
 
 /// Where the resting order sat, as a PRICE, against the crossing anchor.
+///
+/// A STOP sits at the CEILING distance and a target at the floor (run2-1,
+/// D-2605). The crossing test fires a rung when `move >= ceil(ppm x anchor /
+/// 1e6)` (`excursion::ppm_of` floors the ratio, so `ppm_of(move) >= ppm` is
+/// exactly that), so a stop placed at the floor distance rested one paisa
+/// inside the price that triggers it: a bar printing the stop price exactly
+/// did not stop out. At the ceiling the order and its trigger are one price,
+/// and a touch fires. A target is a limit order, for which a touch that does
+/// not fill is the conservative reading, so it keeps the floor.
 fn level_price(level: Level, anchor: i64, side: Side) -> i64 {
-    let distance = paisa_of(level.ppm, anchor);
+    let distance = match level.kind {
+        Resting::Stop => paisa_ceil_of(level.ppm, anchor),
+        Resting::Target => paisa_of(level.ppm, anchor),
+    };
     match (level.kind, side) {
         (Resting::Stop, Side::Long) | (Resting::Target, Side::Short) => {
             anchor.saturating_sub(distance)
@@ -6022,6 +6175,7 @@ mod exit_family_tests {
             priceable: true,
             first_refused: None,
             first_missing: None,
+            time_unpriced_at: None,
             priceable_before_hole: false,
         };
         let bar = |price: i64| indicators::Candle {
@@ -6262,11 +6416,12 @@ mod exit_family_tests {
             })
             .unwrap_or_default();
         assert!(
-            oos_loop.contains("replay_selected_over("),
-            "the loop replays over hoisted facts"
+            oos_loop.contains("OosReplaySliceV1::new(oos, &projected_oos, Some(&oos_facts))")
+                && oos_loop.contains("replay_selected_on("),
+            "the loop replays over hoisted facts, held by the fold's one slice (D-1811)"
         );
         let in_loop = oos_loop
-            .split_once("for (ordinal, candidate) in pending.iter().enumerate() {")
+            .split_once(".par_iter()")
             .map(|(_, body)| body)
             .unwrap_or_default();
         assert!(
@@ -6274,13 +6429,17 @@ mod exit_family_tests {
             "no facts per pending candidate"
         );
 
+        // D-1833: a later ordinal is materialised through the grid's one
+        // coordinate replay, which walks over the facts built with the grid.
         let later = include_str!("expression_oos.rs");
         let materialize = later
-            .split_once("pub fn materialize(&self, ordinal: usize)")
-            .map(|(_, rest)| rest.split_once("\n    }\n").map_or(rest, |(body, _)| body))
+            .split_once("impl LaterCoordinateReplayV1<'_> {")
+            .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
             .unwrap_or_default();
         assert!(
-            materialize.contains("materialize_expression_cell_over("),
+            materialize.contains("ExpressionCellReplay::prepare(")
+                && materialize.contains("&later.facts,")
+                && !materialize.contains(built),
             "a later ordinal is materialised over the facts built with its grid"
         );
     }
@@ -7409,6 +7568,96 @@ mod tests {
         }
     }
 
+    /// THE GRID AND `trade::round_trip` REFUSE THE SAME LEGS ON A SUB-TICK LOW.
+    ///
+    /// p9num-3, D-2544. `entry_fills` and `exit_fill` priced a same-bar pair
+    /// through `fills_at(bar, bar, ..)`, which checks the SELL leg — the low —
+    /// against one tick whichever leg is read. A long entry on O 1000 / H 1000
+    /// / L 3 therefore came back `(0, 1000)`, a ZERO worst entry, and a short's
+    /// pessimistic exit on H 1100 / L 3 came back `None` and was booked at zero P&L,
+    /// while `trade::round_trip` (each leg on its own bar) priced both. On the
+    /// old code the first two assertions fail.
+    ///
+    /// The expectation is computed independently, the way `trade::round_trip`
+    /// computes it — `fills_at` with this bar on its own leg and an ordinary
+    /// bar on the other — over every low in a boundary set around the tick
+    /// (`i64::MIN`, negatives, 0, 1, 4, 5, 6, the open, the high) on both sides
+    /// and both legs.
+    #[test]
+    fn grid_and_trade_agree_on_a_sub_tick_low() {
+        let candle = |open: i64, high: i64, low: i64| {
+            indicators::Candle::new(0, open, high, low, open, 10, indicators::OI_NULL)
+        };
+        // The finding's two fixtures, by value.
+        let long_entry = [candle(1_000, 1_000, 3)];
+        assert_eq!(
+            super::entry_fills(&long_entry, 0, Side::Long),
+            (1_000, 1_000)
+        );
+        let short_exit = [candle(1_050, 1_100, 3)];
+        assert_eq!(
+            super::exit_fill(&short_exit, 0, Side::Short, true),
+            Some(1_100)
+        );
+        // The used leg still refuses where trade.rs refuses it.
+        assert_eq!(super::entry_fills(&long_entry, 0, Side::Short), (0, 1_000));
+        assert_eq!(super::exit_fill(&short_exit, 0, Side::Long, true), None);
+
+        let raw = brutex_core::price::Paisa::from_raw;
+        let ordinary = costs::fill::Bar::new(raw(5_000), raw(5_100), raw(4_900)).expect("legal");
+        let high = 2_000_i64;
+        let open = 1_000_i64;
+        let mut priced = 0_u32;
+        let mut refused = 0_u32;
+        for low in [i64::MIN, -1_000, -1, 0, 1, 4, 5, 6, open, high] {
+            let bars = [candle(open.max(low), high, low)];
+            let Ok(this) = costs::fill::Bar::new(raw(open.max(low)), raw(high), raw(low)) else {
+                continue;
+            };
+            for side in [Side::Long, Side::Short] {
+                let direction = super::direction_of(side);
+                let printed = costs::fill::Anchor::PrintedExtreme;
+                // Entry: this bar is the entry, the ordinary bar the exit.
+                let want_entry = costs::fill::fills_at(this, ordinary, direction, printed)
+                    .ok()
+                    .map(|f| match side {
+                        Side::Long => f.buy().raw(),
+                        Side::Short => f.sell().raw(),
+                    });
+                let (got_entry, _) = super::entry_fills(&bars, 0, side);
+                assert_eq!(
+                    got_entry,
+                    want_entry.unwrap_or(0),
+                    "{side:?} entry on low {low}"
+                );
+                // Exit: the ordinary bar is the entry, this bar the exit.
+                let want_exit = costs::fill::fills_at(ordinary, this, direction, printed)
+                    .ok()
+                    .map(|f| match side {
+                        Side::Long => f.sell().raw(),
+                        Side::Short => f.buy().raw(),
+                    });
+                assert_eq!(
+                    super::exit_fill(&bars, 0, side, true),
+                    want_exit,
+                    "{side:?} exit on low {low}"
+                );
+                // The optimistic exit is the open whatever the low is.
+                assert_eq!(super::exit_fill(&bars, 0, side, false), Some(open.max(low)));
+                priced += u32::from(want_entry.is_some()) + u32::from(want_exit.is_some());
+                refused += u32::from(want_entry.is_none()) + u32::from(want_exit.is_none());
+            }
+        }
+        // Both outcomes were reached, so neither half of the comparison is
+        // vacuous: the long entry and the short exit always price, the short
+        // entry and the long exit refuse exactly on the six sub-tick lows.
+        assert_eq!(refused, 6 * 2);
+        assert_eq!(priced, 10 * 4 - 6 * 2);
+        // A missing bar is still the documented refusal on both doors.
+        assert_eq!(super::entry_fills(&[], 0, Side::Long), (0, 0));
+        assert_eq!(super::exit_fill(&[], 0, Side::Short, true), None);
+    }
+
     /// THE BAR THAT MADE THE EARLY RETURN A DEFECT AND NOT A SHORTCUT.
     ///
     /// One of the five shapes
@@ -7954,7 +8203,11 @@ mod tests {
             // adverse reading rounded UP (p3floor-2, D-1769), on top of
             // D-1545's rendering; was 3_310_703_317_024_171_291 here and
             // 5_087_617_185_273_455_494 on staging alone. Counts unchanged.
-            10_616_736_728_369_623_410,
+            //
+            // RE-TAKEN for D-2605 (run2-1): a resting stop and a trail give-back
+            // now take the CEILING paisa, so a level moves out by at most one
+            // paisa; counts unchanged. Was 10_616_736_728_369_623_410.
+            8_101_217_916_793_208_101,
             "every cell of both grids, byte for byte"
         );
     }
@@ -8731,6 +8984,60 @@ mod tests {
         );
     }
 
+    /// run2-1, D-2605: a stop rests at exactly the price its trigger fires at.
+    /// The crossing test fires when `move * 1e6 >= ppm * anchor`, so the stop
+    /// distance must be the SMALLEST such move: a bar printing the stop price
+    /// exactly then stops out. The old floor distance sat one paisa inside it
+    /// (the audit's own case: 87 ppm of 2,502,006 is 217.67, stop at 218 not
+    /// 217). A target keeps the floor, the conservative reading of a limit.
+    #[test]
+    fn a_stop_rests_at_the_price_that_triggers_it() {
+        let fires = |distance: i64, ppm: i64, anchor: i64| {
+            i128::from(distance) * 1_000_000 >= i128::from(ppm) * i128::from(anchor)
+        };
+        for (ppm, anchor) in [
+            (87, 2_502_006),
+            (1, 1),
+            (40_000, 100_000),
+            (333, 1_234_567),
+            (999_999, 7),
+        ] {
+            for side in [Side::Long, Side::Short] {
+                let stop = super::Level {
+                    kind: super::Resting::Stop,
+                    ppm,
+                };
+                let resting = super::level_price(stop, anchor, side);
+                let distance = (resting - anchor).abs();
+                assert!(fires(distance, ppm, anchor), "{ppm} {anchor} {side:?}");
+                assert!(
+                    !fires(distance - 1, ppm, anchor),
+                    "{ppm} {anchor} {side:?}: one paisa nearer must not fire"
+                );
+                assert_eq!(super::paisa_ceil_of(ppm, anchor), distance);
+            }
+            let target = super::Level {
+                kind: super::Resting::Target,
+                ppm,
+            };
+            assert_eq!(
+                super::level_price(target, anchor, Side::Long) - anchor,
+                super::paisa_of(ppm, anchor)
+            );
+        }
+        assert_eq!(
+            super::level_price(
+                super::Level {
+                    kind: super::Resting::Stop,
+                    ppm: 87
+                },
+                2_502_006,
+                Side::Long
+            ),
+            2_502_006 - 218
+        );
+    }
+
     #[test]
     fn every_fixed_order_prices_the_open_before_a_same_bar_retrace() {
         let fills = super::EntryPrices {
@@ -9037,6 +9344,76 @@ mod tests {
             "the target is still a reachable fill on that bar"
         );
         assert_eq!(targeted.ambiguous_bars, 1, "two attributions share the bar");
+    }
+
+    /// D-4500. A path whose data, or whose 15:09 proof, ended before its
+    /// deadline has its time exit one PAST its last held bar, where the walk
+    /// locates the hole. On that path a level-less variant has no price at all
+    /// -- the data's last minute is not a square-off -- and a target touched on
+    /// the last held bar is priced as the target alone: no time exit is due on
+    /// that bar to stand beside it as a pessimistic attribution. The same bars
+    /// with the time exit ON bar 2 book the time exit pessimistically, as the
+    /// test above proves.
+    #[test]
+    fn a_path_cut_before_its_deadline_has_no_time_exit_on_its_last_bar() {
+        let bars = vec![
+            candle(0, 100_000, 100_000, 100_000, 100_000),
+            candle(1, 100_000, 100_400, 99_600, 100_000),
+            candle(2, 100_000, 106_000, 99_000, 100_000),
+        ];
+        let fixed = crate::excursion::Ladder::new(vec![50_000]).expect("one rung");
+        let trails = crate::excursion::Ladder::default();
+        let ladders = crate::excursion::Ladders {
+            stops: &fixed,
+            targets: &fixed,
+            trails: &trails,
+        };
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+        let path = |hole| super::Candidate {
+            signal: 0,
+            entry: 0,
+            time_exit: 2,
+            block_only: false,
+            hole,
+            cross: crate::excursion::crossings(&bars, 0, 2, 100_000, Side::Long, ladders),
+            entry_pess,
+            entry_opt,
+        };
+        // A hole AT or before the last held bar leaves `timed_at` the span.
+        for hole in [None, Some(0), Some(1), Some(2)] {
+            assert_eq!(path(hole).timed_at(), 2, "{hole:?}");
+        }
+        assert_eq!(path(Some(3)).timed_at(), 3, "one past the last held bar");
+        let rungs = (fixed.rungs(), fixed.rungs(), trails.rungs());
+        let variant = |target| super::Variant {
+            stop: None,
+            target,
+            tsl: None,
+            ttp: None,
+        };
+        let candidates = vec![path(Some(3))];
+        let baseline =
+            super::one_variant(&bars, &candidates, rungs, variant(None), Side::Long, None);
+        assert_eq!(
+            (baseline.trades, baseline.pessimistic),
+            (0, 0),
+            "a level-less variant on a cut path has no exit price"
+        );
+        let targeted = super::one_variant(
+            &bars,
+            &candidates,
+            rungs,
+            variant(Some(0)),
+            Side::Long,
+            None,
+        );
+        assert_eq!(targeted.trades, 1, "the target before the hole is priced");
+        assert_eq!(
+            (targeted.pessimistic, targeted.optimistic),
+            (5_000, 5_000),
+            "no time exit is due on the last held bar, so the target is the only fill"
+        );
+        assert_eq!(targeted.ambiguous_bars, 0, "one attribution on the bar");
     }
 
     #[test]
@@ -10264,6 +10641,46 @@ mod tests {
                 trades - 1
             );
             previous = bound;
+        }
+    }
+
+    /// THE TABLE THE BROWSER'S COPY OF THIS BOUND IS HELD TO (P19-03, D-2562).
+    ///
+    /// `web/src/lib/frontier-analytics.js` re-derives `meets.assurance` from
+    /// `wins` and `trades` and refuses the whole frontier when its answer and
+    /// this one disagree. Its test, `web/tests/frontier-analytics.test.js`,
+    /// checks that copy against the SAME rows pinned here, so a drift on either
+    /// side fails a build. The rows sit where a drifted copy moves: `z = 1.96`
+    /// moves 3/3 and 4/4 by one basis point, rounding instead of truncating
+    /// moves 1/4, 7/9, 2/3, 19/20 and 1000/1000.
+    #[test]
+    fn the_wilson_table_the_browser_copy_is_checked_against() {
+        for (wins, trades, expected) in [
+            (0_u64, 1_u64, 0_i64),
+            (1, 1, 2_065),
+            (1, 2, 945),
+            (2, 3, 2_076),
+            (3, 3, 4_385),
+            (1, 4, 455),
+            (3, 4, 3_006),
+            (4, 4, 5_101),
+            (7, 9, 4_525),
+            (19, 20, 7_638),
+            (50, 100, 4_038),
+            (99, 100, 9_455),
+            (100, 100, 9_630),
+            (1_000, 1_000, 9_961),
+        ] {
+            let cell = Cell {
+                trades,
+                wins,
+                ..Cell::default()
+            };
+            assert_eq!(
+                cell.assurance_bp(),
+                expected,
+                "{wins}/{trades}: the browser's table says {expected}"
+            );
         }
     }
 }

@@ -2404,11 +2404,23 @@ pub(crate) fn equity_note(key: &InstrumentKey) -> String {
 /// threshold, because D-0018 names none. A stock whose bars hold fewer than
 /// two sessions says so; an index or a contract gets nothing, as it gets no
 /// [`equity_note`].
-pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle]) -> String {
+///
+/// # The overnight INTO the span is measured too (p16num-1, D-2546)
+///
+/// `daily` is the context the same door already loaded, warm-up month
+/// included, and the anchored previous-session families read the session
+/// before the span out of it. So the move from that session's close to the
+/// span's first open is the one a split effective on the first signal day
+/// shows up as, and it was never measured: the line named an in-span date
+/// while `gap_down_day` and every previous-day level moved on the first day.
+/// [`prior_session_record`] hands that session to
+/// [`runner::audit::largest_overnight_move_after`].
+pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle], daily: &DailyContext) -> String {
     if key.kind != Kind::Equity {
         return String::new();
     }
-    runner::audit::largest_overnight_move(bars).map_or_else(
+    let prior = prior_session_record(daily, bars);
+    runner::audit::largest_overnight_move_after(prior, bars).map_or_else(
         || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
         |found| {
             let date = u32::try_from(found.day)
@@ -2418,6 +2430,30 @@ pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle]) -> String {
             runner::audit::overnight_line(&found, &date)
         },
     )
+}
+
+/// The last ELIGIBLE daily record strictly before the IST day of `bars`'
+/// first bar: the session whose close the span's first open is measured
+/// against. `None` when the span is empty or no eligible record precedes it.
+///
+/// An excluded record (eligibility byte `0`) is skipped, because the anchored
+/// families skip it too and the move they read is from the last eligible
+/// session. One pass over the daily records, which a month-plus context holds
+/// a few dozen of, once per report. p16num-1, D-2546.
+pub(crate) fn prior_session_record<'a>(
+    daily: &'a DailyContext,
+    bars: &[Candle],
+) -> Option<&'a Candle> {
+    let first_day = indicators::ist_day(bars.first()?.ts_micros);
+    // The LATEST such day, compared rather than assumed from the order.
+    let mut prior: Option<(i64, &Candle)> = None;
+    for (record, eligible) in daily.bars.iter().zip(daily.eligibility.iter()) {
+        let day = indicators::ist_day(record.ts_micros);
+        if *eligible == 1 && day < first_day && prior.is_none_or(|(kept, _)| day > kept) {
+            prior = Some((day, record));
+        }
+    }
+    prior.map(|(_, record)| record)
 }
 
 /// [`equity_note`] for a symbol as the operator typed it.
@@ -4395,6 +4431,67 @@ mod tests {
         assert!(!any_cash_equity(["NIFTY", "ZZQXNOTFNO", "FINNIFTY"]));
         assert!(any_cash_equity(["NIFTY", "RELIANCE"]));
         assert!(any_cash_equity(["TCS"]));
+    }
+
+    /// **The overnight INTO the first signal day is read from the daily
+    /// context the door already holds.** p16num-1, D-2546.
+    ///
+    /// A stock's span starts on the session a 1:2 split took effect; the
+    /// eligible daily record before it closed at 20,002.00 and the span opens
+    /// at 10,001.00. On the old `overnight_note`, which measured inside the
+    /// span only, the line named no -50.00% move (two flat sessions inside
+    /// the span measure 0). The prior record is the latest ELIGIBLE day before
+    /// the span, whatever the record order; an excluded record, one on the
+    /// first day itself, and an empty span each give no prior.
+    #[test]
+    fn the_overnight_note_measures_the_session_before_the_span() {
+        const DAY: i64 = 86_400_000_000;
+        const IST: i64 = 19_800_000_000;
+        let at = |day: i64, minute: i64| day * DAY + minute * 60_000_000 - IST;
+        let flat = |ts: i64, price: i64| {
+            Candle::new(ts, price, price, price, price, 1, indicators::OI_NULL)
+        };
+        let first_day = 20_003_i64;
+        let span = [
+            flat(at(first_day, 555), 1_000_100),
+            flat(at(first_day, 556), 1_000_100),
+            flat(at(first_day + 1, 555), 1_000_100),
+        ];
+        let context = |records: Vec<(i64, i64, u8)>| DailyContext {
+            bars: records
+                .iter()
+                .map(|&(day, close, _)| flat(at(day, 0), close))
+                .collect(),
+            references: Vec::new(),
+            eligibility: records.iter().map(|&(_, _, eligible)| eligible).collect(),
+            asked: 2,
+            found: 2,
+        };
+        // Out of order on purpose, with an EXCLUDED later record and one on
+        // the first day itself: the answer is day 20,002's close.
+        let daily = context(vec![
+            (first_day - 1, 2_000_200, 1),
+            (first_day - 3, 1_500_000, 1),
+            (first_day, 999, 1),
+            (first_day - 1, 7_777_777, 0),
+        ]);
+        let prior = prior_session_record(&daily, &span).expect("an eligible prior day");
+        assert_eq!(prior.close, 2_000_200);
+        assert!(prior_session_record(&daily, &[]).is_none(), "an empty span");
+        let none = context(vec![
+            (first_day, 2_000_200, 1),
+            (first_day - 1, 2_000_200, 0),
+        ]);
+        assert!(prior_session_record(&none, &span).is_none());
+
+        let cash = swept_index("RELIANCE").expect("an F&O cash equity");
+        let measured = overnight_note(&cash, &span, &daily);
+        assert!(measured.contains("-50.00% into the"), "{measured}");
+        let without = overnight_note(&cash, &span, &none);
+        assert!(!without.contains("-50.0"), "{without}");
+        // An index gets nothing, with or without a prior.
+        let index = swept_index("NIFTY").expect("a swept index");
+        assert_eq!(overnight_note(&index, &span, &daily), "");
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**

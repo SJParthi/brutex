@@ -140,6 +140,7 @@ impl FixedTrainingFoldPlanV1 {
         Ok(BoundFixedTrainingFoldsV1 {
             plan: self,
             later,
+            replay: later.coordinate_replay(),
             mapping: Cow::Owned(mapping),
             sessions: Cow::Owned(sessions),
         })
@@ -174,6 +175,7 @@ impl FixedTrainingFoldPlanV1 {
         Ok(BoundFixedTrainingFoldsV1 {
             plan: self,
             later,
+            replay: later.coordinate_replay(),
             mapping: Cow::Borrowed(mapping),
             sessions: Cow::Borrowed(sessions),
         })
@@ -286,6 +288,9 @@ fn index_folds(
 pub struct BoundFixedTrainingFoldsV1<'a> {
     plan: &'a FixedTrainingFoldPlanV1,
     later: &'a EvaluatedExpressionOosV1<'a>,
+    /// One program walk for every coordinate this binding materializes
+    /// (D-1833), taken on the first.
+    replay: super::LaterCoordinateReplayV1<'a>,
     mapping: Cow<'a, [usize]>,
     sessions: Cow<'a, [u64]>,
 }
@@ -318,7 +323,7 @@ impl BoundFixedTrainingFoldsV1<'_> {
         if Chosen::from_cell(cell) != selected.coordinate() {
             return Err("fixed-training coordinate axes differ".into());
         }
-        let trades = self.later.materialize(ordinal)?;
+        let trades = self.replay.materialize(ordinal)?;
         let folds = partition(
             self.plan,
             &self.mapping,
@@ -615,7 +620,7 @@ fn validate_data(data: &ProjectionData) -> Result<Totals, String> {
 const fn day(stamp: i64) -> i64 {
     const DAY: i64 = 86_400_000_000;
     stamp.div_euclid(DAY)
-        + if stamp.rem_euclid(DAY) >= DAY - 19_800_000_000 {
+        + if stamp.rem_euclid(DAY) >= DAY - indicators::IST_OFFSET_MICROS {
             1
         } else {
             0

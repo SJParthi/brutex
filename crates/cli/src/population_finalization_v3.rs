@@ -1183,14 +1183,10 @@ impl PopulationFinalizationV3Authority {
     ///
     /// Refuses an out-of-range ordinal or any stale, replaced, corrupt,
     /// reordered or crosswired retained source.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only from tests; narrowed from a module-wide expect so a
-                      NEW dead item in this module warns (CE-95, D-1956)"
-        )
-    )]
+    // TEST-ONLY SINCE D-1845 (W2-cli11-1, W2-cli12-3): no production path
+    // reads one row this way, so the per-row whole-file cost the limit states
+    // cannot be paid outside a test.
+    #[cfg(test)]
     pub(crate) fn row_projection(
         &mut self,
         global_sequence: u64,
@@ -1978,6 +1974,21 @@ impl PopulationFinalizationV3Ledger {
             }
             if named_root_identity(&root_path)? != root_identity {
                 return Err("Finalization V3 root changed while child files opened".to_owned());
+            }
+            if writable {
+                // rnew-1, D-4460: the writer cuts a kill-torn tail under its
+                // exclusive lock. Receipt-last, so bytes past the last whole
+                // record were never acknowledged; a whole record is never cut.
+                for (file, path, stride) in [
+                    (&row_file, &row_path, POPULATION_FINALIZATION_V3_ROW_BYTES),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        POPULATION_FINALIZATION_V3_COMPLETION_BYTES,
+                    ),
+                ] {
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride as u64, &[])?;
+                }
             }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let row_generation = file_generation(&row_file, &row_path, bounds.max_row_bytes())?;
@@ -3768,6 +3779,36 @@ mod tests {
         assert_eq!(
             std::fs::read(foreign_root.path().join(ROW_FILE)).expect("reread foreign rows"),
             before
+        );
+    }
+
+    /// rnew-1, D-4460: a process killed while writing a row or the Completion
+    /// leaves a sub-record tail. A reader still refuses it; the next writer
+    /// cuts it, says so once, and keeps the committed block.
+    #[test]
+    fn a_kill_torn_tail_in_either_file_is_cut_by_the_writer_and_history_kept() {
+        let limits = bounds();
+        let root = TestRoot::new("kill-torn");
+        let value = prepared();
+        persist_population_finalization_v3(root.path(), limits, &value).expect("seed ledger");
+        let rows = root.path().join(ROW_FILE);
+        let completions = root.path().join(COMPLETION_FILE);
+        crate::fixed_tail::attack::torn_tails(
+            &[
+                (rows.as_path(), POPULATION_FINALIZATION_V3_ROW_BYTES as u64),
+                (
+                    completions.as_path(),
+                    POPULATION_FINALIZATION_V3_COMPLETION_BYTES as u64,
+                ),
+            ],
+            &mut || {
+                let opened = PopulationFinalizationV3Ledger::open_read(root.path(), limits)?;
+                Ok(format!(
+                    "{:?}",
+                    opened.reopen_structural_receipt(&value.finalization_id)?
+                ))
+            },
+            &mut || PopulationFinalizationV3Ledger::open_write(root.path(), limits).map(drop),
         );
     }
 

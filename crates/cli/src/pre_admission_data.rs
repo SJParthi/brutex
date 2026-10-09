@@ -42,7 +42,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -3524,17 +3524,25 @@ fn header() -> Result<[u8; HEADER_BYTES], PreAdmissionDataRefusal> {
     Ok(raw)
 }
 
+/// The shared writer header rule (conc5-1, D-2644), then a directory barrier
+/// for a file this writer just initialised (conc11-1, D-2645). `true` when
+/// this call wrote the header.
+fn init_header(
+    file: &mut File,
+    path: &Path,
+    header: &[u8],
+) -> Result<bool, PreAdmissionDataRefusal> {
+    let init = crate::fixed_tail::init_or_heal_header(file, path, header, File::sync_data)
+        .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    if init == crate::fixed_tail::HeaderInit::Written {
+        crate::fixed_tail::sync_parent_directory(path)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn ensure_header(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRefusal> {
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        let bytes = header()?;
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    if init_header(file, path, &header()?)? {
         return Ok(());
     }
     verify_header(file, path)?;
@@ -3810,16 +3818,7 @@ fn header_v2() -> Result<[u8; HEADER_BYTES_V2], PreAdmissionDataRefusal> {
 }
 
 fn ensure_header_v2(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRefusal> {
-    let len = file
-        .metadata()
-        .map_err(|why| format!("cannot stat {}: {why}", path.display()))?
-        .len();
-    if len == 0 {
-        let bytes = header_v2()?;
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
+    if init_header(file, path, &header_v2()?)? {
         return Ok(());
     }
     verify_header_v2(file, path)?;
@@ -4024,6 +4023,7 @@ mod tests {
     }
 
     use super::*;
+    use std::io::Write as _;
 
     type TestResult<T = ()> = Result<T, String>;
 

@@ -125,6 +125,12 @@ const _: () = assert!(DAYS == 2_469);
 /// Minute-of-day a standard NSE equity session opens: **09:15**.
 pub const OPEN_MINUTE: u16 = 9 * 60 + 15;
 
+// The calendar's copy of `session::SESSION_OPEN_MINUTE`, at the width its
+// windows use. Pinned to the literal, as `session` pins its own, because a
+// `u16` and a `u32` compare only through a cast this crate refuses;
+// `crates/cli/tests/one_session_open.rs` compares the two (D-3518).
+const _: () = assert!(OPEN_MINUTE == 555);
+
 /// Minute-of-day a standard session's LAST bar opens: **15:29**.
 ///
 /// The close is exclusive — 15:30 is `AtOrAfterSessionClose` in
@@ -441,6 +447,46 @@ pub fn expected_bars(epoch_day: i64) -> Option<u16> {
     }
 }
 
+/// The latest epoch day in `first ..= last` this calendar does NOT report
+/// [`DayKind::Closed`], or `None` when every day in the range is closed or the
+/// range is empty (conc12-1, D-2535).
+///
+/// # Why a month's span ends here and not at its calendar end
+///
+/// The autopilot and the F&O work list asked each month through its CALENDAR
+/// end. A month whose last day is a weekend or a holiday can never hold a bar
+/// there, so a store holding every session of it still read as behind, and
+/// every restart re-asked it — about 765 instruments × two dry rounds × two
+/// rungs for each such month. Clamped to the last day that is not `Closed`, a
+/// month held through its last session is done.
+///
+/// `Open`, `OpenLengthUnmeasured` and `Unmeasured` all stop the walk: only a
+/// day this calendar MEASURED as closed is stepped over, so a day outside the
+/// measured window is still asked for, as before.
+///
+/// # Cost
+///
+/// One O(1) [`kind_of`] per closed day walked back over, so linear in the
+/// trailing closed run and never more than `last - first + 1` calls. Both
+/// callers pass one month's span, so at most 31; in the measured window the
+/// longest trailing closure is a weekend beside a holiday. NOT constant in the
+/// range: `docs/06-limits.md` names it (D-2535). The bound is argued, not
+/// timed — UNVERIFIED as a measurement; the walk's answers are held by
+/// `pull::calendar::tests::a_span_ends_on_its_last_day_that_is_not_closed`.
+#[must_use]
+pub fn last_not_closed(first: i64, last: i64) -> Option<i64> {
+    let mut day = last;
+    while day >= first {
+        if !matches!(kind_of(day), DayKind::Closed) {
+            return Some(day);
+        }
+        // `day` is inside the measured window here (only it holds `Closed`),
+        // so this cannot underflow.
+        day -= 1;
+    }
+    None
+}
+
 /// Trading days in `first ..= last`, or `None` if any part is unmeasured.
 ///
 /// **Refuses a partially-measured range rather than under-counting it.** A
@@ -472,6 +518,63 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// **A MONTH'S SPAN ENDS ON ITS LAST DAY THAT IS NOT CLOSED (conc12-1,
+    /// D-2535).**
+    ///
+    /// `last_not_closed` is new, so the old code has nothing to call; the
+    /// defect it closes is pinned in `pull::fnowork` and `api::autopilot`,
+    /// whose spans ended on the calendar day. Walked: a range ending on a
+    /// Sunday (2020-05-31 → Friday 2020-05-29), one ending on an open day, an
+    /// all-closed weekend, an empty range, the window's edges, a range wholly
+    /// unmeasured, a Muhurat of unmeasured length, and `i64::MIN`/`MAX`.
+    #[test]
+    fn a_span_ends_on_its_last_day_that_is_not_closed() {
+        let epoch = |y: u16, m: u8, d: u8| {
+            i64::from(
+                crate::session::Day::new(y, m, d)
+                    .expect("a real date")
+                    .days_from_epoch(),
+            )
+        };
+        let (first, friday, saturday, sunday) = (
+            epoch(2020, 5, 1),
+            epoch(2020, 5, 29),
+            epoch(2020, 5, 30),
+            epoch(2020, 5, 31),
+        );
+        assert_eq!(kind_of(sunday), DayKind::Closed, "the premise: a Sunday");
+        assert_eq!(kind_of(saturday), DayKind::Closed, "and a Saturday");
+        assert_eq!(kind_of(friday), DayKind::Open(Session::full()));
+        assert_eq!(last_not_closed(first, sunday), Some(friday));
+        assert_eq!(last_not_closed(first, friday), Some(friday), "already open");
+        assert_eq!(
+            last_not_closed(friday, friday),
+            Some(friday),
+            "one open day"
+        );
+        assert_eq!(
+            last_not_closed(saturday, sunday),
+            None,
+            "a closed weekend alone"
+        );
+        assert_eq!(last_not_closed(sunday, saturday), None, "an empty range");
+        assert_eq!(last_not_closed(sunday, sunday), None, "one closed day");
+        // UNMEASURED IS NOT CLOSED: past the window the day is still asked.
+        assert_eq!(
+            last_not_closed(LAST_DAY + 1, LAST_DAY + 9),
+            Some(LAST_DAY + 9)
+        );
+        assert_eq!(
+            last_not_closed(FIRST_DAY - 9, FIRST_DAY - 1),
+            Some(FIRST_DAY - 1)
+        );
+        // A MUHURAT OF UNMEASURED LENGTH traded, so a span may end on it.
+        assert_eq!(last_not_closed(20_028, 20_028), Some(20_028));
+        assert_eq!(last_not_closed(i64::MIN, i64::MAX), Some(i64::MAX));
+        assert_eq!(last_not_closed(i64::MAX, i64::MIN), None);
+        assert_eq!(last_not_closed(i64::MIN, i64::MIN), Some(i64::MIN));
+    }
 
     /// audit-20261003 attackdata-6 (D-1532). A Muhurat whose LENGTH was never
     /// measured is still a day the exchange traded, so it is a session in the

@@ -67,3 +67,21 @@ test('a failed shared HEAD is released and the same feed can recover on the next
   assert.deepEqual(await readFeedHeader('zerodha', request), { cells: 148222, bars: 282845758 });
   assert.equal(calls, 2);
 });
+
+// W2 (OBSV-13, D-3212): a census HEAD that answers 503 because the counter is
+// unreadable carries the reason in `x-brutex-census-note`; the survey printed
+// the status alone.
+test('an unreadable census HEAD names the census note, not just the status (W2)', async () => {
+  const damaged = new Response(null, { status: 503, headers: {
+    'x-brutex-census-state': 'unreadable', 'x-brutex-census-degraded': '',
+    'x-brutex-census-note': 'zerodha: UNREADABLE ? manifest checksum failed at generation 12'
+  } });
+  assert.throws(() => readFeedSummary('zerodha', damaged), {
+    message: 'Feed zerodha: census HEAD answered HTTP 503: the store census is unreadable: zerodha: UNREADABLE ? manifest checksum failed at generation 12'
+  });
+  assert.throws(() => readFeedSummary('zerodha', new Response(null, { status: 429 })),
+    { message: 'Feed zerodha: census HEAD answered HTTP 429 and named no reason' });
+  /** @type {import('../src/lib/ask.js').ask} */
+  const request = async () => damaged;
+  await assert.rejects(readFeedHeader('zerodha', request), /UNREADABLE \? manifest checksum failed/);
+});

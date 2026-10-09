@@ -559,7 +559,7 @@ impl AdmissionAuthorityLedger {
     }
 
     fn lock_path(root: &Path) -> PathBuf {
-        root.join("results").join("population-write.lock")
+        crate::population::population_write_lock(root)
     }
 
     /// Opens existing sidecars without creating any path.

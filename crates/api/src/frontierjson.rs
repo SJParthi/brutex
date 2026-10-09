@@ -46,7 +46,15 @@
 //! `grid::Cell::worst_mae`, which a row does not store — calling `Rules::admits`
 //! here would have reported the stop rule PASSED on every row on the strength of
 //! a defaulted zero. `stop_unchecked` is `true` and the threshold is echoed, so
-//! the page can say *"not checked"* where a tick would have been a lie.
+//! the page can say *"not checked"* where a tick would have been a lie. The
+//! protective-exit and fill-headroom rules are named the same way.
+//!
+//! **The rule names are served, not restated (D-1810).** `meets` is written
+//! from `cli::frontier::Verdict::checked` and `unchecked`, and the envelope's
+//! `admission` member lists `cli::frontier::VERDICT_CHECKED` and
+//! `VERDICT_UNCHECKED`. The browser checks `meets.all` against that list and
+//! recomputes no rule, as `/vocab.json` lets it decode masks without a copy of
+//! the vocabulary (D-0288).
 //!
 //! # `mask_words` are decimal STRINGS
 //!
@@ -136,10 +144,17 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     // instrument, so a RELIANCE run's frontier carries the gross label and the
     // corporate-action sentence `cli top` prints over the same rows. Decided
     // from this one snapshot; an index run's payload gains no key. AF-19.
-    let note = crate::detail::equity_note_member(
-        committed
-            .as_ref()
-            .map(|committed| committed.underlying.as_str()),
+    // AND EVERY RECORDED RUN'S ROWS ARE IN SAMPLE, validation unrecorded.
+    // Carried in the same member string so every body that names the note
+    // names this too. D-2792 (CE-93).
+    let note = format!(
+        r#"{},"in_sample":{}"#,
+        crate::detail::equity_note_member(
+            committed
+                .as_ref()
+                .map(|committed| committed.underlying.as_str()),
+        ),
+        crate::render::json_string(cli::LEDGER_IN_SAMPLE)
     );
     let receipt = committed.map(|committed| committed.receipt);
     if let Some(committed) = receipt
@@ -398,7 +413,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
         let _ = std::fmt::Write::write_fmt(
             &mut *out,
             format_args!(
-                r#"{{"rank":{},"direction":"{}","mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{},"protective_exits_unchecked":{}}}}}"#,
+                r#"{{"rank":{},"direction":"{}","mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"#,
                 row.rank,
                 row.direction.as_str(),
                 row.mask_words[0],
@@ -411,7 +426,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
                 row.n,
                 row.mean_milli_paisa,
                 row.t_milli,
-                row.payoff_bp,
+                payoff_on_wire(row.n, row.payoff_bp),
                 row.wins,
                 d.priced,
                 row.trades,
@@ -428,18 +443,54 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
                 d.avg_loss,
                 row.gross_win,
                 row.gross_loss,
-                v.win_rate,
-                v.reward_to_risk,
-                v.return_over_drawdown,
-                v.trades,
-                v.assurance,
-                v.admitted,
-                v.stop_unchecked,
-                v.protective_exits_unchecked,
             ),
         );
+        write_meets(out, &v);
     }
     admitted
+}
+
+/// One row's `meets` object, written from the verdict's own named lists.
+///
+/// THE NAMES ARE `cli`'s, NOT THIS FILE'S (D-1810). Each answered rule is
+/// `cli::frontier::Verdict::checked`'s name and value, then `all`, then each
+/// unanswerable rule as `<name>_unchecked`. A rule added to the verdict
+/// reaches the wire, and the envelope's `admission` list, without an edit
+/// here, which is what keeps the browser from carrying a copy of the rule
+/// set (W2-cli5-4). Nine names and one conjunction per row, a fixed count
+/// read from the source; UNVERIFIED as a timed bound (see the D-1810 entry
+/// in `docs/06-limits.md`).
+fn write_meets(out: &mut String, v: &cli::frontier::Verdict) {
+    for (name, holds) in v.checked() {
+        let _ = std::fmt::Write::write_fmt(&mut *out, format_args!(r#""{name}":{holds},"#));
+    }
+    let _ = std::fmt::Write::write_fmt(&mut *out, format_args!(r#""all":{}"#, v.admitted));
+    for (name, unchecked) in v.unchecked() {
+        let _ = std::fmt::Write::write_fmt(
+            &mut *out,
+            format_args!(r#","{name}_unchecked":{unchecked}"#),
+        );
+    }
+    out.push_str("}}");
+}
+
+/// The envelope's `admission` member: which rules `meets.all` conjoins and
+/// which it cannot answer, from `cli::frontier::VERDICT_CHECKED` and
+/// `VERDICT_UNCHECKED`. Served once per response so the browser verifies
+/// `all` against this list rather than a list of its own (D-1810).
+fn admission_json() -> String {
+    let quoted = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!(r#""{name}""#))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        r#"{{"checked":[{}],"unchecked":[{}]}}"#,
+        quoted(&cli::frontier::VERDICT_CHECKED),
+        quoted(&cli::frontier::VERDICT_UNCHECKED)
+    )
 }
 
 /// The envelope: how many rows, how many passed, what they were judged against.
@@ -486,11 +537,12 @@ fn envelope(
         let _ = std::fmt::Write::write_fmt(
             &mut *out,
             format_args!(
-                r#"],"count":{},"total_count":{},"admitted":{},"total_admitted":{},"rules":null,"page":{},"limit":{},"page_complete":true,"complete":{},"next_page":{},"refusal":{}}}"#,
+                r#"],"count":{},"total_count":{},"admitted":{},"total_admitted":{},"rules":null,"admission":{},"page":{},"limit":{},"page_complete":true,"complete":{},"next_page":{},"refusal":{}}}"#,
                 count,
                 total_count,
                 admitted,
                 total_admitted,
+                admission_json(),
                 page.number,
                 page.limit,
                 window.complete,
@@ -503,7 +555,7 @@ fn envelope(
     let _ = std::fmt::Write::write_fmt(
         &mut *out,
         format_args!(
-            r#"],"count":{},"total_count":{},"admitted":{},"total_admitted":{},"rules":{{"min_win_rate_bp":{},"min_rr_bp":{},"min_ret_over_dd_bp":{},"min_trades":{},"min_assurance_bp":{},"max_mae_ppm":{},"top":{}}},"page":{},"limit":{},"page_complete":true,"complete":{},"next_page":{},"refusal":{}}}"#,
+            r#"],"count":{},"total_count":{},"admitted":{},"total_admitted":{},"rules":{{"min_win_rate_bp":{},"min_rr_bp":{},"min_ret_over_dd_bp":{},"min_trades":{},"min_assurance_bp":{},"max_mae_ppm":{},"min_avg_rr_bp":{},"min_fill_headroom_bp":{},"top":{}}},"admission":{},"page":{},"limit":{},"page_complete":true,"complete":{},"next_page":{},"refusal":{}}}"#,
             count,
             total_count,
             admitted,
@@ -514,7 +566,10 @@ fn envelope(
             rules.min_trades,
             rules.min_assurance_bp,
             rules.max_mae_ppm,
+            rules.min_avg_rr_bp,
+            rules.min_fill_headroom_bp,
             rules.top,
+            admission_json(),
             page.number,
             page.limit,
             window.complete,
@@ -550,6 +605,30 @@ fn measurable(value: i64) -> String {
         "null".to_owned()
     } else {
         value.to_string()
+    }
+}
+
+/// `payoff_bp` as the wire carries it: `null` for each of its two absences
+/// that the row can name exactly (p5num-5, D-2568).
+///
+/// `runner::outcome::Edge::payoff_bp` answers [`i64::MAX`] for a combination
+/// that never gave anything back and `0` for fewer than two observations. Both
+/// went out raw. The first is `2^63 - 1`, which `JSON.parse` rounds to `2^63`,
+/// so `web/src/lib/frontier-analytics.js` refused the WHOLE frontier for one
+/// honest unbounded row; the second is a refusal that read as a measured zero.
+/// `n` is on the row, so "fewer than two observations" is decided here exactly.
+///
+/// What it cannot decide: the method's third absence -- no observation moved in
+/// the position's favour -- is also stored as `0`, and the stored row keeps no
+/// count that separates it from a payoff that truncated to zero. Telling those
+/// apart needs the refusal persisted beside the value, which is a frontier
+/// file-format change and is left to an owner decision rather than guessed at.
+#[must_use]
+pub(crate) fn payoff_on_wire(n: u64, payoff_bp: i64) -> String {
+    if n < 2 {
+        "null".to_owned()
+    } else {
+        measurable(payoff_bp)
     }
 }
 
@@ -695,6 +774,57 @@ mod tests {
             min_win: 295,
             gross_win: 900,
             gross_loss: -273_649,
+        }
+    }
+
+    /// p5num-5 (D-2568): the payoff's two nameable absences are `null`, and
+    /// every other value passes through unchanged. Exhaustive over the
+    /// boundaries of both inputs, including values the method never produces,
+    /// so the rule is pinned rather than the method's current range.
+    #[test]
+    fn an_unbounded_or_refused_payoff_is_null_on_the_wire() {
+        for n in [0_u64, 1, 2, 3, u64::MAX] {
+            for payoff in [i64::MIN, -1, 0, 1, 129, i64::MAX - 1, i64::MAX] {
+                let expected = if n < 2 || payoff == i64::MAX {
+                    "null".to_owned()
+                } else {
+                    payoff.to_string()
+                };
+                assert_eq!(
+                    super::payoff_on_wire(n, payoff),
+                    expected,
+                    "n {n} payoff {payoff}"
+                );
+            }
+        }
+    }
+
+    /// p5num-5 (D-2568): the rendered row, not just the helper. Before the fix
+    /// the unbounded row carried a bare `9223372036854775807`, which the
+    /// browser cannot hold exactly and which refused the whole frontier, and
+    /// the one-observation row carried a measured-looking `0`.
+    #[test]
+    fn a_rendered_frontier_row_carries_a_null_payoff_where_the_method_has_none() {
+        let identity = [0x5e_u8; 32];
+        for (n, payoff, expected) in [
+            (868_u64, 129_i64, r#""payoff_bp":129,"#),
+            (868, i64::MAX, r#""payoff_bp":null,"#),
+            (868, i64::MAX - 1, r#""payoff_bp":9223372036854775806,"#),
+            (2, 0, r#""payoff_bp":0,"#),
+            (1, 0, r#""payoff_bp":null,"#),
+            (0, 0, r#""payoff_bp":null,"#),
+        ] {
+            let mut row = verdict_row(identity, 1);
+            row.n = n;
+            row.payoff_bp = payoff;
+            let mut out = String::new();
+            let admitted = super::write_rows(&mut out, &[row], &row.rules);
+            assert!(admitted <= 1, "one row admits at most once: {out}");
+            assert!(out.contains(expected), "n {n} payoff {payoff}: {out}");
+            assert!(
+                !out.contains("9223372036854775807"),
+                "no bare i64::MAX reaches the wire: {out}"
+            );
         }
     }
 
@@ -866,6 +996,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// W2-cli5-4, D-1810: a row that clears the five rules the page used to
+    /// show but not the average-payoff floor is served as NOT admitted, and
+    /// the envelope names, from `cli`, exactly which rules `all` conjoins.
+    ///
+    /// Before D-1810 this row was served `"all":true`, with no `avg_payoff`
+    /// member, no `fill_headroom_unchecked` flag and no `min_avg_rr_bp`
+    /// threshold, while `cli::Rules::admits` refused it.
+    #[test]
+    fn a_row_failing_only_average_payoff_is_not_served_as_admitted() {
+        let rules_at = |min_avg_rr_bp: i64| cli::Rules {
+            max_mae_ppm: 1,
+            min_rr_bp: 100,
+            min_win_rate_bp: 5_000,
+            min_trades: 10,
+            min_assurance_bp: 0,
+            min_weakest_bp: 0,
+            min_ret_over_dd_bp: 100,
+            require_protective_exits: true,
+            min_fill_headroom_bp: 150,
+            min_avg_rr_bp,
+            top: 25,
+        };
+        // 60 wins averaging 200, 40 losses averaging 100: average payoff 2.00.
+        let row_at = |identity: [u8; 32], min_avg_rr_bp: i64| cli::frontier::Row {
+            rules: rules_at(min_avg_rr_bp),
+            trades: 100,
+            cell_wins: 60,
+            gross_win: 12_000,
+            gross_loss: -4_000,
+            pessimistic: 8_000,
+            min_win: 150,
+            worst_trade: -100,
+            max_drawdown: 500,
+            ..verdict_row(identity, 1)
+        };
+        for (floor, admitted, byte) in [
+            (300_i64, false, 0x6a_u8),
+            (200, true, 0x6b),
+            (100, true, 0x6c),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "brutex-api-frontier-avg-payoff-{floor}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let identity = [byte; 32];
+            cli::frontier::Frontier::open(&dir)
+                .expect("a fresh frontier opens")
+                .append_all(&[row_at(identity, floor)])
+                .expect("one row appends");
+            commit_frontier_fixture(&dir, identity, 1);
+            let hex = format!("{byte:02x}").repeat(32);
+            let (status, _, body) = respond(Ok(dir.clone()), &format!("identity={hex}"));
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            let meets = format!(
+                r#""meets":{{"win_rate":true,"reward_to_risk":true,"return_over_drawdown":true,"trades":true,"assurance":true,"avg_payoff":{admitted},"all":{admitted},"stop_unchecked":true,"protective_exits_unchecked":true,"fill_headroom_unchecked":true}}}}"#
+            );
+            assert!(body.contains(&meets), "floor {floor}: {body}");
+            assert!(
+                body.contains(&format!(
+                    r#""admitted":{},"total_admitted":{}"#,
+                    u8::from(admitted),
+                    u8::from(admitted)
+                )),
+                "floor {floor}: {body}"
+            );
+            assert!(
+                body.contains(&format!(
+                    r#""max_mae_ppm":1,"min_avg_rr_bp":{floor},"min_fill_headroom_bp":150,"top":25}}"#
+                )),
+                "every threshold `all` or an unchecked flag speaks for is echoed: {body}"
+            );
+            assert!(
+                body.contains(r#""admission":{"checked":["win_rate","reward_to_risk","return_over_drawdown","trades","assurance","avg_payoff"],"unchecked":["stop","protective_exits","fill_headroom"]}"#),
+                "the rule list is served from cli: {body}"
+            );
+            assert_eq!(
+                row_at(identity, floor).verdict(&rules_at(floor)).admitted,
+                admitted,
+                "the wire says what cli's verdict says"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// **A stock run's ranked combinations say what their figures are made
     /// of; an index run's are the bytes they were.** AF-19.
     ///
@@ -903,6 +1119,13 @@ mod tests {
             respond(Ok(dir.clone()), &format!("identity={}", "96".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{index_body}");
         assert!(!index_body.contains("equity_note"), "{index_body}");
+        // CE-93 / D-2792: every recorded run's rows say they are in sample
+        // and that their validation is not recorded, index or stock.
+        let in_sample = format!(
+            r#","in_sample":{}"#,
+            crate::render::json_string(cli::LEDGER_IN_SAMPLE)
+        );
+        assert!(index_body.contains(&in_sample), "{index_body}");
         let (status, _, stock_body) =
             respond(Ok(dir.clone()), &format!("identity={}", "97".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{stock_body}");
@@ -910,7 +1133,7 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&stock_body).expect("valid JSON");
         assert!(
             stock_body.starts_with(&format!(
-                r#"{{"identity":"{}"{member},"rows":[{{"rank":1,"#,
+                r#"{{"identity":"{}"{member}{in_sample},"rows":[{{"rank":1,"#,
                 "97".repeat(32)
             )),
             "beside the identity, before the ranked rows: {stock_body}"
@@ -934,7 +1157,7 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         assert!(
             body.starts_with(&format!(
-                r#"{{"identity":"{}"{member},"rows":[],"#,
+                r#"{{"identity":"{}"{member}{in_sample},"rows":[],"#,
                 "98".repeat(32)
             )),
             "{body}"

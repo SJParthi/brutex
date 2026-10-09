@@ -40,7 +40,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brutex_core::instrument::{Exchange, Segment};
+use brutex_core::instrument::{Exchange, InstrumentKey, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use pull::manifest::{ENTRY_STRIDE, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest, manifest_path};
@@ -303,7 +303,46 @@ impl VendorCensus {
 #[must_use]
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     let path = manifest_path(root, vendor);
-    let state = match sized(&path) {
+    let state = state_read_twice_if_degraded(&path, vendor, sized);
+    note_read(vendor, &path, &state);
+    VendorCensus {
+        vendor,
+        path,
+        state,
+    }
+}
+
+/// One read of the manifest, and ONE more when the first loaded degraded
+/// (pull2-5, D-2536).
+///
+/// This read takes no lock, so it can overlap a writer's slot commit: the
+/// newest slot then fails its checksum, the manifest loads from the older one
+/// and reports `degraded_reason`, and since D-1786 the browser refuses any
+/// non-empty `x-brutex-census-degraded` — so one overlapping read blanked the
+/// selected-feed page for a census that was whole a moment later. A degraded
+/// first read is read once more and the second kept when it is NOT degraded;
+/// a census still degraded on the second read is genuinely damaged and is
+/// reported exactly as before. At most two reads, so the extra cost is one
+/// bounded manifest read, and only on a degraded census
+/// (`docs/06-limits.md`, D-2536).
+fn state_read_twice_if_degraded(
+    path: &Path,
+    vendor: Vendor,
+    mut read: impl FnMut(&Path) -> std::io::Result<Result<Vec<u8>, String>>,
+) -> Census {
+    let degraded = |state: &Census| matches!(state, Census::Held { manifest } if manifest.degraded_reason().is_some());
+    let first = state_of(read(path), vendor);
+    if !degraded(&first) {
+        return first;
+    }
+    let second = state_of(read(path), vendor);
+    let whole = matches!(second, Census::Held { .. }) && !degraded(&second);
+    if whole { second } else { first }
+}
+
+/// What one read of the manifest's bytes says the census is.
+fn state_of(read: std::io::Result<Result<Vec<u8>, String>>, vendor: Vendor) -> Census {
+    match read {
         Err(e) => Census::of_io_error(&e),
         Ok(Err(reason)) => Census::Unreadable {
             reason,
@@ -328,7 +367,11 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
                 },
             }
         }
-    };
+    }
+}
+
+/// The `api.census read` line for one vendor's census.
+fn note_read(vendor: Vendor, path: &Path, state: &Census) {
     // THE COUNTER'S OWN STATE, NAMED — held, absent, or unreadable.
     //
     // These three are not interchangeable and the difference decides what the
@@ -382,11 +425,6 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
         "state" => telemetry::Value::Str(said),
         "path" => telemetry::Value::Str(&path.display().to_string()),
     );
-    VendorCensus {
-        vendor,
-        path,
-        state,
-    }
 }
 
 /// The bytes at `path`, if this reader may hold them.
@@ -795,11 +833,14 @@ pub fn grid_rows(series: usize) -> usize {
 ///   unreadable contributes nothing and says so elsewhere — [`VendorCensus::note`]
 ///   is already loud about it, and inventing rows for it here would be a
 ///   different lie from the one just fixed.
-/// * **Swept.** `NSE-INDEX-NIFTY` and `NSE-INDEX-BANKNIFTY`, always. `CLAUDE.md`
-///   §1 fixes the engine surface at exactly these two, so their absence is the
-///   single most important thing this page can report. Before the first ingest
-///   there is nothing held at all, and a blank grid would say nothing where
-///   "two rows, neither held" says what to do next.
+/// * **Swept.** Every key `InstrumentKey::swept_surface` names, always: the two
+///   indices and the 208 F&O shares `CLAUDE.md` §1 puts on the engine surface
+///   (D-0506, D-0682, D-3507). Their absence is the single most important
+///   thing this page can report. Before the first ingest there is nothing held
+///   at all, and a blank grid would say nothing where "210 rows, none held"
+///   says what to do next. (This said §1 fixed the surface "at exactly" the two
+///   indices until D-2570, and then that only the two were seeded, which
+///   D-3507 ended; D-4656.)
 ///
 /// # Cost
 ///
@@ -916,7 +957,7 @@ pub fn held_entries(censuses: &[VendorCensus]) -> Vec<(Series, YearMonth)> {
 /// unfiltered page is the same page it always was and a filter can only ever
 /// remove rows. That is what makes the count honest: `showing N of M` is a
 /// statement about this filter, not about the store.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct StoreFilter {
     /// Index, cash or F&O. `None` is all three.
     pub segment: Option<Segment>,
@@ -1074,20 +1115,24 @@ pub fn held_page(
         .collect()
 }
 
-/// The two series the engine sweeps, as the store spells them.
+/// The series the engine sweeps, as the store spells them, in
+/// `swept_surface` order; [`held_series`] sorts the axis they join.
 ///
-/// `CLAUDE.md` §1 fixes the surface at exactly these two. They are always on the
-/// axis, held or not, so an empty store still names what it is missing.
+/// `InstrumentKey::swept_surface` is the one enumeration of the surface
+/// (D-3507): the two indices and the 208 F&O shares. This listed the two
+/// indices by hand until then, so a swept share the store did not hold had no
+/// row on `/store`. They are always on the axis, held or not, so an empty store
+/// still names what it is missing. (Z1-slice12-F2, D-2570, had called seeding
+/// all 210 a product choice the page had not made; D-3507 made it, and D-4656
+/// records the merge that kept D-3507's code.)
 #[must_use]
 pub fn swept_series() -> Vec<Series> {
-    ["BANKNIFTY", "NIFTY"]
-        .into_iter()
-        .filter_map(|s| Symbol::new(s).ok())
-        .map(|symbol| Series {
+    InstrumentKey::swept_surface()
+        .map(|key| Series {
             contract: None,
-            exchange: Exchange::Nse,
-            segment: Segment::Index,
-            symbol,
+            exchange: key.exchange,
+            segment: key.segment,
+            symbol: key.underlying,
             timeframe: Timeframe::MINUTE_1,
         })
         .collect()
@@ -1107,6 +1152,44 @@ mod tests {
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).expect("a real date")
+    }
+
+    /// Z1-slice12-F2, D-2570: the `held_series` and `swept_series` docs said
+    /// `CLAUDE.md` §1 fixed the engine surface "at exactly these" two indices (quoted split, so this doc does not match itself),
+    /// which D-0506 made false. On the old source the needle is present twice
+    /// and this fails; the needle is split so this test does not match itself.
+    /// The second half pins what the docs now say the function does: 210
+    /// always-on rows, the two spot indices and the 208 F&O shares, every one
+    /// NSE and no contract. It pinned two rows and no equity until D-3507
+    /// seeded the shares; the merge that kept D-3507's code kept this test's
+    /// first half and moved its second to the surface D-3507 names (D-4662).
+    #[test]
+    fn the_axis_docs_do_not_say_the_surface_is_two_indices() {
+        let source = include_str!("census.rs");
+        let needle = concat!("exactly these", " two");
+        assert_eq!(
+            source.matches(needle).count(),
+            0,
+            "a stale surface claim is back"
+        );
+        let stale = concat!("fixes the surface", " at exactly");
+        assert_eq!(source.matches(stale).count(), 0);
+        let swept = swept_series();
+        assert_eq!(swept.len(), 210);
+        for s in &swept {
+            assert_eq!(s.exchange, Exchange::Nse);
+            assert!(s.contract.is_none());
+        }
+        let indices = swept.iter().filter(|s| s.segment == Segment::Index).count();
+        let shares = swept.iter().filter(|s| s.segment == Segment::Cash).count();
+        assert_eq!((indices, shares), (2, 208));
+        assert!(swept.contains(&nifty()));
+        assert!(swept.contains(&series(Segment::Index, "BANKNIFTY")));
+        // An empty census list still yields exactly the always-on rows, in
+        // the axis's sorted order rather than `swept_surface`'s.
+        let mut axis = swept;
+        axis.sort_unstable();
+        assert_eq!(held_series(&[]), axis);
     }
 
     /// The spot index series, as the store spells it.
@@ -1442,6 +1525,79 @@ mod tests {
         assert!(note.contains(&why), "the refusal itself is carried: {note}");
     }
 
+    /// **ONE READ THAT OVERLAPPED A SLOT COMMIT IS READ AGAIN, NOT SERVED AS
+    /// DEGRADED (pull2-5, D-2536).**
+    ///
+    /// The reader is injected: its first answer is a census whose newest slot
+    /// fails its checksum (the torn moment of a commit), its second the same
+    /// census whole. On the old code `read_vendor` read once, so the census
+    /// came back degraded and the first assertion failed. Walked: torn then
+    /// whole (whole kept), torn both times (degraded kept, two reads), whole
+    /// first (one read), torn then unreadable and torn then absent (the
+    /// degraded first read kept, never a worse second).
+    #[test]
+    fn a_census_torn_on_one_read_is_read_again_and_whole_is_kept() {
+        type Answer = std::io::Result<Result<Vec<u8>, String>>;
+        let good = ManifestHeader {
+            generation: 1,
+            ..ManifestHeader::genesis(Vendor::Groww)
+        }
+        .image();
+        let image = |slot0: &[u8; 64]| {
+            let mut bytes = vec![0u8; HEADER_LEN_USIZE];
+            bytes.get_mut(..64).expect("room").copy_from_slice(slot0);
+            bytes
+                .get_mut(16_384..16_448)
+                .expect("room")
+                .copy_from_slice(&good);
+            bytes
+        };
+        let mut damaged = ManifestHeader::genesis(Vendor::Groww).image();
+        damaged[16] ^= 0xFF;
+        let torn = image(&damaged);
+        let whole = image(&ManifestHeader::genesis(Vendor::Groww).image());
+        let path = Path::new("UNUSED.man");
+        let run = |answers: Vec<Answer>| {
+            let mut answers = answers.into_iter();
+            let mut reads = 0_usize;
+            let state = state_read_twice_if_degraded(path, Vendor::Groww, |_| {
+                reads += 1;
+                answers.next().expect("asked at most as often as scripted")
+            });
+            (state, reads)
+        };
+        let degraded_of = |state: &Census| match state {
+            Census::Held { manifest } => manifest.degraded_reason().map(|why| why.to_string()),
+            Census::Absent | Census::Unreadable { .. } => None,
+        };
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(matches!(state, Census::Held { .. }), "{}", state.name());
+        assert_eq!(degraded_of(&state), None, "the whole second read is kept");
+
+        let (state, reads) = run(vec![Ok(Ok(torn.clone())), Ok(Ok(torn.clone()))]);
+        assert_eq!(reads, 2);
+        assert!(degraded_of(&state).is_some(), "damaged twice is damaged");
+
+        let (state, reads) = run(vec![Ok(Ok(whole.clone()))]);
+        assert_eq!(reads, 1, "a whole census is read once");
+        assert_eq!(degraded_of(&state), None);
+
+        for worse in [
+            Ok(Err("REFUSED".to_owned())),
+            Err(std::io::ErrorKind::NotFound.into()),
+        ] {
+            let (state, reads) = run(vec![Ok(Ok(torn.clone())), worse]);
+            assert_eq!(reads, 2);
+            assert!(
+                degraded_of(&state).is_some(),
+                "the degraded first read stands: {}",
+                state.name()
+            );
+        }
+    }
+
     #[test]
     fn a_manifest_path_that_cannot_be_read_at_all_is_unreadable_not_absent() {
         // A directory where a file should be. Not `NotFound`, so it must not be
@@ -1597,15 +1753,34 @@ mod tests {
         std::fs::remove_file(file).expect("cleanup");
     }
 
+    /// D-3507 (ONEAUTH-08). D-0048 makes the axis the union of what is held
+    /// and what the engine sweeps, and D-0506 widened the sweep to the 208 F&O
+    /// shares. The axis kept the two indices only, so a swept share the store
+    /// did not hold had no row anywhere on `/store`.
+    #[test]
+    fn an_empty_store_names_every_swept_instrument_it_is_missing() {
+        let axis = held_series(&[]);
+        assert_eq!(axis.len(), 210, "two indices and 208 shares");
+        assert!(axis.contains(&series(Segment::Cash, "RELIANCE")));
+        assert!(axis.contains(&series(Segment::Index, "NIFTY")));
+        for index in brutex_core::universe::FNO_INDEX_UNDERLYINGS {
+            assert!(!axis.contains(&series(Segment::Cash, index)), "{index}");
+        }
+        assert!(!axis.contains(&series(Segment::Index, "FINNIFTY")));
+    }
+
     #[test]
     fn the_grid_is_addressed_by_arithmetic_and_pages_without_building_the_rest() {
         let dir = root("grid");
         let census = vec![read_vendor(&dir, Vendor::Groww)];
-        let two = swept_series();
-        assert_eq!(two.len(), 2, "the engine surface is exactly two");
-        assert_eq!(two[0].symbol.as_str(), "BANKNIFTY");
-        assert_eq!(two[1].symbol.as_str(), "NIFTY");
+        // The arithmetic is checked on a two-series axis; the swept axis is
+        // 210 series (D-3507) and is addressed by the same arithmetic.
+        let two = vec![
+            series(Segment::Index, "BANKNIFTY"),
+            series(Segment::Index, "NIFTY"),
+        ];
         assert_eq!(grid_rows(two.len()), 2 * GRID_MONTHS);
+        assert_eq!(grid_rows(swept_series().len()), 210 * GRID_MONTHS);
         assert_eq!(grid_rows(0), 0);
 
         let today = day(2026, 8, 7);
@@ -1670,21 +1845,24 @@ mod tests {
             "a held future must be on the axis: {axis:?}"
         );
         assert!(axis.contains(&voltas));
-        // And the two swept series are still named, held or not, so a fresh
+        // And the 210 swept series are still named, held or not, so a fresh
         // install says what it is missing rather than showing nothing.
         assert!(axis.contains(&nifty()));
         assert!(axis.contains(&series(Segment::Index, "BANKNIFTY")));
-        assert_eq!(axis.len(), 4);
+        assert!(axis.contains(&series(Segment::Cash, "RELIANCE")));
+        assert_eq!(axis.len(), 2 + 210);
         assert!(axis.windows(2).all(|w| w[0] < w[1]), "sorted: {axis:?}");
 
         // THE CONTRADICTION, ASSERTED AWAY. Rows held and cells held must agree
         // about whether this store has anything in it.
+        // The whole axis: the two futures sort after the 210 swept series'
+        // 7,560 rows (D-3507), past any first page.
         let grid = coverage_page(
             &axis,
             std::slice::from_ref(&census),
             day(2026, 7, 15),
             0,
-            200,
+            grid_rows(axis.len()),
         );
         let filled = grid.iter().filter(|c| c.is_held()).count();
         assert_eq!(
@@ -1719,8 +1897,10 @@ mod tests {
         let dir = root("axisabsent");
         let absent = read_vendor(&dir, Vendor::Groww);
         assert_eq!(absent.state.name(), "absent");
-        assert_eq!(held_series(&[absent]), swept_series());
-        assert_eq!(held_series(&[]), swept_series(), "and no census at all");
+        let swept: std::collections::BTreeSet<Series> = swept_series().into_iter().collect();
+        let set = |axis: Vec<Series>| axis.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(set(held_series(&[absent])), swept);
+        assert_eq!(set(held_series(&[])), swept, "and no census at all");
         // Two vendors holding the same series contribute one row, not two.
         let month = YearMonth::new(2026, 7).expect("valid");
         let shared = series(Segment::Fno, "ABB-III");
@@ -1728,7 +1908,7 @@ mod tests {
         let b = census_of(&root("axisb"), Vendor::Dhan, &[(shared, month, 7)]);
         let axis = held_series(&[a, b]);
         assert_eq!(axis.iter().filter(|s| **s == shared).count(), 1);
-        assert_eq!(axis.len(), 3, "the shared series plus the swept pair");
+        assert_eq!(axis.len(), 1 + 210, "the shared series plus the swept 210");
     }
 
     /// A series renders as the store path with its separators changed, and the
@@ -1783,7 +1963,13 @@ mod tests {
         );
 
         let axis = held_series(&[a, b]);
-        let names: Vec<String> = axis.iter().map(ToString::to_string).collect();
+        // The swept shares sort among the cash series; the index rows are the
+        // ones this fixture interleaves (D-3507).
+        let names: Vec<String> = axis
+            .iter()
+            .filter(|s| s.segment == Segment::Index)
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(
             names,
             [

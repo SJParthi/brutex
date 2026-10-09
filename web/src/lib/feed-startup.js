@@ -1,5 +1,6 @@
 import { pickDefaultFeed } from './pick.js';
 import { surveyFeedHeaders } from './feed-summary.js';
+import { refusalFrom } from './refusal.js';
 
 export const FEED_PREFERENCE_KEY = 'brutex.feed.v1';
 
@@ -56,7 +57,9 @@ export function createFeedStartup(state, request, storage) {
     const revision = selectionRevision;
     try {
       const response = await request('/feeds.json');
-      if (!response.ok) throw new Error(`HTTP ${response.status} from /feeds.json`);
+      // The body's reason, not the status alone: a request-bounds or
+      // cross-site refusal is plain text that names its cause (F4, D-3221).
+      if (!response.ok) throw new Error(await refusalFrom('/feeds.json', response));
       const list = await response.json();
       if (!Array.isArray(list) || list.some((feed) =>
         !feed || typeof feed.wire !== 'string' || feed.wire.length === 0 ||

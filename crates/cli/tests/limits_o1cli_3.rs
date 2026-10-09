@@ -48,21 +48,17 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-const STORED: &str = include_str!("../src/stored.rs");
-
-/// THE REPEATED ONE-MINUTE READS ACROSS PARALLEL RUNGS ARE STATED, AND STILL
-/// PAID.
+/// THE RUNGS OF ONE COMMAND READ THE SHARED SPANS ONCE. D-1840, re-applied
+/// onto D-1781 and D-1701 by D-1843.
 #[test]
-fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
+fn the_rungs_of_one_command_read_the_shared_spans_once() {
     let limit = limit("## Parallel rungs each re-read the same one-minute span (audit o1cli-3)");
     for sentence in [
-        "`sweep_rungs` runs every rung through `one_rung`, one rung at a time in input order",
-        "the execution series `audit_range_kernel` loads",
-        "one per attempt of every column build",
-        "one per attempt of `exact_minute_withholding_unsourceable_days`",
-        "at least three reads of that rung's one-minute span, four when the support is derived",
-        "some 24 to 32 reads of identical minutes per command",
-        "up to 64 attempts",
+        "Fixed by D-1840",
+        "Re-applied by D-1843",
+        "`sweep_rungs` hands every rung one `SpanShare`",
+        "three reads per command",
+        "`rungs_share_their_reads_and_build_their_column_once`",
     ] {
         assert!(
             limit.contains(sentence),
@@ -70,46 +66,20 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
         );
     }
     let sweep = body("\nfn sweep_rungs(");
-    // One rung at a time since D-1701 (GAP13-13): the reads are the same
-    // count, paid in sequence rather than at once.
-    assert!(
-        sweep.contains("in_input_order(")
-            && sweep.contains("one_rung(")
-            && !sweep.contains("par_iter")
-    );
-    let exact = STORED
-        .split_once("pub fn load_exact_minute_context(")
-        .and_then(|(_, rest)| rest.split_once("\n}\n"))
-        .expect("`load_exact_minute_context` is in stored.rs")
-        .0;
-    assert!(
-        exact.contains("load_span(root, vendor, underlying, \"1min\""),
-        "the exact-minute context no longer reads the minute span: update the limit"
-    );
+    // One rung at a time since D-1701 (GAP13-13).
+    assert!(sweep.contains("in_input_order(") && sweep.contains("one_rung_cached("));
+    assert!(sweep.contains("SpanShare::default()") && sweep.contains("AuditCache::sharing("));
     let build = body("\nfn column_withholding_at_build(");
-    let retried = build
+    let (before, retried) = build
         .split_once("for _ in 0..ATTEMPTS")
-        .expect("the retry loop")
-        .1;
-    assert!(retried.contains("load_exact_minute_context("));
-    assert!(build.contains("const ATTEMPTS: usize = 64;"));
-    let withholding = body("\nfn exact_minute_withholding_unsourceable_days(");
-    let retried = withholding
-        .split_once("for _ in 0..ATTEMPTS")
-        .expect("its retry loop")
-        .1;
-    assert!(retried.contains("load_exact_minute_context("));
-    // D-1557: the kernel's loads moved into its cached loader.
+        .expect("the retry loop");
+    assert!(before.contains("share.span(at(\"1day\"))"));
+    assert!(retried.contains("share.span(at(\"1min\"))") && !retried.contains("stored::load_"));
     let kernel = body("\nfn load_audit_inputs(");
-    for call in [
-        "stored::load_span(root, vendor, underlying, EXECUTION_RUNG",
-        "column_withholding_at_build(",
-        "exact_minute_withholding_unsourceable_days(",
-    ] {
-        assert!(
-            kernel.contains(call),
-            "the kernel no longer calls {call}: update the limit"
-        );
-    }
-    assert!(body("\nfn one_rung_cached(").contains("column_withholding_unsourceable_days("));
+    assert!(kernel.contains("match share.span(minutes) {"));
+    assert!(!kernel.contains("stored::load_span(root, vendor, underlying, EXECUTION_RUNG"));
+    assert!(!LIB.contains("exact_minute_withholding_unsourceable_days("));
+    let share = body("\nimpl SpanShare {");
+    assert!(share.contains("if *key == at {") && share.contains("held.push("));
+    assert!(share.contains("if held.len() < SPAN_SHARE_KEYS {"));
 }

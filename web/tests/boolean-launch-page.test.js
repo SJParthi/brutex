@@ -6,6 +6,7 @@ import { INDEX_STOP_COMMAND } from '../src/lib/index-stop-launch.js';
 import { BOOLEAN_SEARCH_COMMAND } from '../src/lib/boolean-launch.js';
 import { sweepOutcome as realSweepOutcome } from '../src/lib/sweep.js';
 import { sweepAdmission } from '../src/lib/sweep-admission.js';
+import { refusalFrom } from '../src/lib/refusal.js';
 
 // Execute the page's real routing functions. Payload validation and transport
 // ownership are exercised separately by boolean-launch.test.js.
@@ -239,4 +240,75 @@ test('the actual index launch readiness refuses older servers without the new po
   assert.equal(why({ phase: 'ready', body: { ready: true } }, ['RELIANCE']), '');
   assert.match(why({ phase: 'ready', body: { ready: false, refusal: 'Input preparation unavailable', index_consistency_policy: {} } }, ['NIFTY']), /Input preparation unavailable/);
   assert.match(launchSource, /disabled=\{[^}]*serverWhy/);
+});
+
+// W6 (OBSV-17, D-3216): a 503 from `/backtest/run.json` names its cause in
+// `running.why`; the page's three readers of that route printed the status.
+test('an unreadable execution status names the server reason on all three page readers (W6)', async () => {
+  const why = 'external sweep status is unavailable: Saturated; no idle or successful completion is inferred';
+  const body = { running: { where: 'cli', status: 'unknown', in_flight: false, why, refusal: null, report: null } };
+  const names = ['observedRunning', 'adoptIndexStop', 'adoptBoolean', 'adoptRunning', 'pollSweep', 'refreshCurrentAdmission'];
+  const functions = names.map(name => {
+    const node = ast.instance?.content.body.find((/** @type {any} */ row) => row.type === 'FunctionDeclaration' && row.id?.name === name);
+    assert.ok(node, `The actual ${name} function must remain available.`);
+    return page.slice(node.start, node.end);
+  }).join('\n');
+  const create = new Function('refusalFrom', 'sweepAdmission', 'realSweepOutcome', 'reply', `
+    let sweep = { phase: 'idle', run: null, why: '' }, adoptWhy = '', indexStopBusy = false, booleanBusy = false;
+    let initialIndexStopRun = null, initialBooleanRun = null, sweepMode = 'ordinary';
+    let launchAdmission = { available: true, why: '' }, unconfirmedSubmission = false, submittedAttempt = '';
+    const statusRequests = { cancel: () => {}, schedule: () => {} };
+    const invalidateLive = () => {}, fetchLive = () => {}, fetchLiveTop = () => {}, fetchLedger = () => {}, liveRunKey = () => '';
+    const BOOLEAN_SEARCH_COMMAND = 'b', INDEX_STOP_COMMAND = 'i', sweepOutcome = realSweepOutcome;
+    const ask_ = async () => reply();
+    ${functions}
+    return { adoptRunning, pollSweep, refreshCurrentAdmission, state: () => ({ sweep, adoptWhy, launchAdmission }) };
+  `);
+  const ticket = { signal: new AbortController().signal, current: () => true };
+  const reason = `/backtest/run.json answered HTTP 503: ${why}`;
+  const adopt = create(refusalFrom, sweepAdmission, realSweepOutcome, () => Response.json(body, { status: 503 }));
+  await adopt.adoptRunning(ticket);
+  assert.equal(adopt.state().sweep.phase, 'unknown');
+  assert.equal(adopt.state().sweep.why, `${reason}. This page cannot say whether a sweep is running; retrying.`);
+  assert.equal(adopt.state().launchAdmission.available, false);
+  const poll = create(refusalFrom, sweepAdmission, realSweepOutcome, () => Response.json(body, { status: 503 }));
+  await poll.pollSweep(ticket);
+  assert.equal(poll.state().sweep.why, `${reason}. Execution state is unknown; retrying.`);
+  const refresh = create(refusalFrom, sweepAdmission, realSweepOutcome, () => Response.json(body, { status: 503 }));
+  await refresh.refreshCurrentAdmission(ticket);
+  assert.equal(refresh.state().launchAdmission.available, false);
+  assert.equal(refresh.state().launchAdmission.why, `The execution check failed: ${reason}`);
+  for (const method of ['adoptRunning', 'pollSweep']) {
+    let asked = 0;
+    const stale = create(refusalFrom, sweepAdmission, realSweepOutcome, () => Response.json(body, { status: 503 }));
+    await stale[method]({ signal: new AbortController().signal, current: () => ++asked === 1 });
+    assert.equal(asked, 2, `${method} asks again after reading the reason`);
+    assert.equal(stale.state().sweep.phase, 'idle', `${method}: a ticket replaced during the body read publishes nothing`);
+    assert.equal(stale.state().launchAdmission.available, true);
+  }
+});
+
+// W7 (OBSV-18, D-3217): `/engine/boolean-launch.json` refuses with
+// `{"ready":false,"refusal":…}` (`crates/api/src/booleanlaunch.rs` `metadata`);
+// the panel printed the status alone. The harness is index-stop-launch.test.js's.
+test('a refused Boolean configuration read names the server refusal; no launch is attempted (W7)', async () => {
+  const node = launchAst.instance?.content.body.find((/** @type {any} */ row) => row.type === 'FunctionDeclaration' && row.id?.name === 'readConfiguration');
+  assert.ok(node);
+  const fields = variable(launchAst, 'fields').init;
+  const mount = new Function('ask', 'refusalFrom', `
+    let config = { phase: 'idle', body: null, why: '' }, configGeneration = 0, configAbort = null;
+    const settings = { horizonBars: '', maxPoints: '', batchPrograms: '', nodeAllowance: '', batchAllowance: '' };
+    const fields = ${launchSource.slice(fields.start, fields.end)}, onTimeframes = () => {};
+    const validateBooleanLaunchMetadata = () => { throw new Error('a refusal is not metadata'); };
+    ${launchSource.slice(node.start, node.end)}
+    return { readConfiguration, config: () => config };
+  `);
+  const refusal = 'bounded configuration read unavailable: Saturated';
+  const app = mount(async () => Response.json({ schema_version: 1, model: 'boolean-qualified-search-launch', ready: false, refusal }, { status: 503 }), refusalFrom);
+  await app.readConfiguration();
+  assert.equal(app.config().phase, 'failed');
+  assert.equal(app.config().why, `/engine/boolean-launch.json answered HTTP 503: ${refusal}. No launch was attempted.`);
+  const silent = mount(async () => new Response('', { status: 404 }), refusalFrom);
+  await silent.readConfiguration();
+  assert.equal(silent.config().why, '/engine/boolean-launch.json answered HTTP 404 and named no reason. No launch was attempted.');
 });

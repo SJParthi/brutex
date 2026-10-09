@@ -16,7 +16,7 @@
 //! |---|---|
 //! | [`BarFile::open_or_create`] on a **new** month | the whole 32768-byte header region, and the file's *name* in its directory — both `fsync`ed, the directory one included |
 //! | [`BarFile::open_or_create`] on an **existing** month | nothing new; it only reads |
-//! | [`BarFile::open_existing`] | nothing, ever — it creates no directory, no bar file and no lock, and a month that is absent is [`StoreError::Missing`] naming the path |
+//! | [`BarFile::open_existing`] | no directory and no bar file — an absent `.lock` beside an existing month is created empty so a later writer is excluded (D-2551), and a month that is absent is [`StoreError::Missing`] naming the path |
 //! | [`BarFile::append`] returning [`Appended::Committed`] | every appended record **and** the header slot that publishes them, in that order, with an `fsync` after each |
 //! | [`BarFile::append`] returning [`Appended::AlreadyPresent`] | nothing was written; the month already held every offered bar, byte for byte, at the index the answer names |
 //! | [`BarFile::read_record`] | nothing; it writes nothing |
@@ -51,10 +51,12 @@
 //!
 //! [`BarFile::open_existing`] takes that lock **shared** instead, so any number
 //! of readers coexist and no reader blocks another, while a writer holding it
-//! exclusively still refuses them all. A reader also never *creates* the lock
-//! file: a bar file with no lock beside it has had no writer since it was
-//! written, so there is nothing to wait for, and conjuring the file into being
-//! to hold a lock on it would be the very write that door exists to avoid.
+//! exclusively still refuses them all. A bar file with no lock beside it has
+//! had no writer since it was written, but a writer can still arrive while a
+//! reader holds it, so a reader that finds the lock absent creates it, empty
+//! and with `create_new`, and holds it shared like any other (store1-1,
+//! D-2551). That empty file is the one write a read makes. Only a read-only
+//! filesystem, where no writer can append either, reads without a lock.
 //!
 //! **What the lock does not protect against, stated rather than implied away:**
 //!
@@ -382,6 +384,13 @@ pub enum StoreError {
     },
     /// Another writer holds this month's advisory lock.
     Locked {
+        /// The lock file.
+        path: PathBuf,
+    },
+    /// A writer was refused because READERS hold this month's lock shared
+    /// (barflow-1, D-2552). Not a second writer: the readers will close, and
+    /// the write can be asked again.
+    ReaderHolds {
         /// The lock file.
         path: PathBuf,
     },
@@ -1016,6 +1025,7 @@ impl fmt::Display for StoreError {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
             Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
+            Self::ReaderHolds { path } => write_reader_holds(f, path),
             Self::DiskFull { path, action } => write!(f, "disk full {action} {}", path.display()),
             Self::Denied { path, action } => {
                 write!(f, "permission denied {action} {}", path.display())
@@ -1503,7 +1513,7 @@ impl BarFile {
             writer_open(open_rw(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
-        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        .map_err(|refusal| writer_lock_fault(&lock_path, refusal))?;
 
         // Whether the month file was THERE before this open. Only a file that
         // existed can have been truncated or zeroed; one this open creates was
@@ -1670,17 +1680,20 @@ impl BarFile {
         // and refuses anything `fstat` does not call a regular file. D-1432.
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
 
-        // The lock is opened read-only and never created. A bar file with no
-        // lock beside it has had no writer since it was made, so there is
-        // nothing to wait for and `None` is the honest answer; inventing the
-        // file to hold a lock on would be the very write this function exists
-        // to avoid.
+        // The lock is opened read-only when it exists. A bar file with no lock
+        // beside it has had no writer since it was made, but that says nothing
+        // about a writer that arrives LATER: `open_or_create` would create the
+        // lock, take it exclusively against nobody, and append under this
+        // reader's live handle (store1-1, D-2551). So an absent lock is
+        // created, empty and exclusively by name, and held shared like any
+        // other. Only a read-only filesystem, where no writer can exist,
+        // reads without one; any other refusal is named.
         let lock = match open_read(&lock_path) {
             Ok(handle) => Some(
                 Flock::try_lock_shared(handle, lock_path.clone())
                     .map_err(|refusal| lock_fault(&lock_path, refusal))?,
             ),
-            Err(why) if why.is_absent() => None,
+            Err(why) if why.is_absent() => reader_lock(&lock_path)?,
             Err(why) => return Err(why.refusal(&lock_path)),
         };
 
@@ -2193,6 +2206,18 @@ impl BarFile {
         barrier(crc, &self.bars_path)
     }
 
+    /// Writes a header slot's previous bytes back after its barrier failed,
+    /// and makes that durable (store1-2, D-2559).
+    ///
+    /// # Errors
+    ///
+    /// The write or the barrier that failed; the barrier failure is not
+    /// remembered a second time, the month is already barred.
+    fn restore_slot(&self, offset: u64, previous: &[u8]) -> Result<(), StoreError> {
+        write_fully(&self.bars, &self.bars_path, offset, previous)?;
+        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)
+    }
+
     /// Verifies the old tail block's committed prefix against its existing
     /// sidecar entry, when the next append will re-seal that block.
     ///
@@ -2238,6 +2263,85 @@ impl BarFile {
         let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
         cache.block = NO_BLOCK;
         self.verify_block_of(sidecar, self.layout.block_of(last), at, image, &mut cache)
+    }
+
+    /// Refuses when the header's `last_ts_micros` is not the stamp of the last
+    /// record it counts. D-3140.
+    ///
+    /// # Why the writer asks before every append
+    ///
+    /// Every decision `append` makes about where a batch belongs — follows,
+    /// already present, resumes a held tail, conflicts — partitions on
+    /// `last_ts_micros`, a header field, and `Header::validate` checks only
+    /// that the advertised range does not run backwards. A slot whose checksum
+    /// is good and whose range is wrong (a damaged writer, a hand-edited
+    /// header) therefore admitted a bar stamped BEHIND records the month
+    /// holds, and committed it: measured, a month of minutes 0..=9 whose slot
+    /// said its last stamp was minute 0 accepted minute 6 at index 10. The
+    /// file was then out of order for good, and the bisection every lookup
+    /// rests on answered a neighbour. `attack_store::a_header_whose_last_stamp
+    /// _disagrees_with_its_last_record_cannot_steer_an_append`.
+    ///
+    /// # Why the read is NOT the verified one
+    ///
+    /// The bytes read here are never served and never sealed: they can only
+    /// REFUSE. Reading them through the block verify would make a rotted FULL
+    /// tail block refuse every following append, which D-0910 deliberately does
+    /// not do — that block is not re-sealed, so the damage stays where a reader
+    /// finds it (`only_a_partially_covered_old_tail_block_is_verified_before_a
+    /// _following_append`). A record whose stamp is the header's agrees with it
+    /// whatever else rotted in it; one whose stamp is not is refused by name.
+    ///
+    /// # Cost
+    ///
+    /// One positional read of one record, of record `n_valid - 1`, into a stack
+    /// buffer. Constant per append, never a walk. A month with no record has no
+    /// last stamp to disagree with.
+    fn last_stamp_is_the_headers<R: Row>(&self) -> Result<(), StoreError> {
+        let Some(last) = self.header.n_valid.checked_sub(1) else {
+            return Ok(());
+        };
+        let at = refused(self.layout.offset_of(last), &self.bars_path)?;
+        let mut image = [0u8; MAX_ROW_LEN];
+        let image = image.get_mut(..R::LEN).ok_or(StoreError::NotCommitted {
+            index: last,
+            n_valid: self.header.n_valid,
+        })?;
+        read_fully(&self.bars, &self.bars_path, at, image)?;
+        let record = refused(R::read_from(image), &self.bars_path)?.stamp();
+        if record == self.header.last_ts_micros {
+            return Ok(());
+        }
+        // THE RECORD MAY BE THE ONE THAT IS WRONG (D-3181). A disagreement is
+        // either a header that lies or a record that rotted, and the sidecar
+        // can tell them apart: the record's block is verified HERE, on the
+        // refusal path only, so a rotted stamp is refused as the
+        // `BlockChecksum` it is rather than sending an operator to a header
+        // slot that is right. A block that verifies leaves the header as the
+        // liar. Reached only when the stamps already disagree, so D-0910's
+        // "a full tail block is not read by a following append" is unchanged
+        // for every append that would have committed.
+        if let Some(sidecar) = self.crc_path.as_deref() {
+            let (from, end) = refused(self.layout.record_byte_range(last), &self.bars_path)?;
+            let mut whole = [0u8; MAX_ROW_LEN];
+            let whole = usize::try_from(end.saturating_sub(from))
+                .ok()
+                .and_then(|width| whole.get_mut(..width))
+                .ok_or(StoreError::NotCommitted {
+                    index: last,
+                    n_valid: self.header.n_valid,
+                })?;
+            let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
+            cache.block = NO_BLOCK;
+            self.verify_block_of(sidecar, self.layout.block_of(last), from, whole, &mut cache)?;
+        }
+        Err(StoreError::Format {
+            path: self.bars_path.clone(),
+            source: FormatError::LastStampDisagrees {
+                header: self.header.last_ts_micros,
+                record,
+            },
+        })
     }
 
     /// The committed header, as the file's own bytes describe it.
@@ -2354,7 +2458,9 @@ impl BarFile {
     /// committed range with different bars, a stamp the month never held, or a
     /// gap over a held one (D-1525). [`StoreError::Format`] carrying
     /// [`FormatError::CounterOverflow`] and
-    /// [`FormatError::GenerationExhausted`] at the counters' ends. Anything
+    /// [`FormatError::GenerationExhausted`] at the counters' ends, and
+    /// [`FormatError::LastStampDisagrees`] when the committed header's last
+    /// stamp is not the stamp of the last record it counts (D-3140). Anything
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
     /// [`StoreError::Denied`], [`StoreError::Io`].
     pub fn append<R: Row>(&mut self, batch: &[R]) -> Result<Appended, StoreError> {
@@ -2461,6 +2567,11 @@ impl BarFile {
                 }));
             }
         };
+        // THE HEADER SAID THE BATCH FOLLOWS; THE LAST RECORD MUST AGREE. Only
+        // this branch writes on the strength of `last_ts_micros` alone — the
+        // overlap branches above compare against the records themselves.
+        // D-3140.
+        self.last_stamp_is_the_headers::<R>()?;
         let commit = refused(next.commit(), &self.bars_path)?;
         let first_index = self.header.n_valid;
         let at = refused(self.layout.offset_of(first_index), &self.bars_path)?;
@@ -2518,14 +2629,40 @@ impl BarFile {
         // missing from the index; a crash here leaves entries AHEAD of the
         // commit, which `time_index::resume` masks off and the next append
         // overwrites. D-2329.
-        if let Some((bucket, entries)) = &indexed {
+        if let Some((bucket, entries, repaired)) = &indexed {
             self.write_entries(*bucket, entries)?;
+            // A REPAIR IS SAID ONCE IT IS ON DISK, not when it was computed
+            // (D-3135): an append refused or retired between the two would
+            // otherwise log an entry that was never written.
+            if *repaired && let Some(tix) = self.tix.as_ref() {
+                note_index_built(
+                    &tix.path,
+                    &Why::Entry { bucket: *bucket },
+                    self.header.n_valid,
+                    1,
+                    "one torn entry",
+                );
+            }
         }
 
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
+        //
+        // THE SLOT'S PREVIOUS BYTES ARE KEPT, because a failed barrier on it
+        // would otherwise leave a commit in the page cache that never reached
+        // the device: every reader in this boot would take it as the newest
+        // commit and name records nobody can prove durable (store1-2,
+        // D-2559). On a failed barrier the slot is written back and synced,
+        // so the previous commit is the newest one again.
+        let mut previous = commit.bytes;
+        read_fully(&self.bars, &self.bars_path, commit.offset, &mut previous)?;
         write_fully(&self.bars, &self.bars_path, commit.offset, &commit.bytes)?;
-        barrier(&self.bars, &self.bars_path)?;
+        if let Err(failed) = barrier(&self.bars, &self.bars_path) {
+            return Err(self
+                .restore_slot(commit.offset, &previous)
+                .err()
+                .unwrap_or(failed));
+        }
 
         self.header = commit.header;
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
@@ -2701,11 +2838,36 @@ impl BarFile {
                     return bisecting(&tix.path, Why::Unreadable(why.refusal(&tix.path)));
                 }
             };
+            // THE INDEX IS BOUND TO THE BARS THIS HANDLE HOLDS, NOT TO A PATH
+            // (satk-2, D-4416). A reader opens its `.tix` lazily, by path, at
+            // its first lookup. A month replaced in between — `.bin`, `.crc`
+            // and `.tix` renamed in — left this handle the OLD bars and handed
+            // it the NEW index, and when both began and ended in the same slots
+            // at the same rows `confirm_index` accepted the pair and lookups
+            // returned wrong rows with no error. So the path's file must still
+            // be the file held. Asked AFTER the `.tix` is open: a swap that
+            // renames the `.bin` first and the `.tix` second cannot hand this
+            // handle a new index and an unchanged `.bin` path. Two `stat`s,
+            // once per handle.
+            if !self.holds_the_named_bars() {
+                return bisecting(&tix.path, Why::Replaced);
+            }
             match self.confirm_index(&index, tix) {
                 Ok(()) => TixState::Ready(index),
                 Err(why) => bisecting(&tix.path, why),
             }
         })
+    }
+
+    /// Whether the file at this month's `.bin` path is still the one this
+    /// handle holds: same device, same inode. `false` when either `stat` is
+    /// refused, because then nothing says the path names these bars.
+    fn holds_the_named_bars(&self) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        match (self.bars.metadata(), fs::metadata(&self.bars_path)) {
+            (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+            _ => false,
+        }
     }
 
     /// Whether `index` is this month's index and describes its committed bars:
@@ -2803,7 +2965,13 @@ impl BarFile {
         match built {
             Ok(entries) => {
                 write_index(&index, tix, &entries)?;
-                note_index_built(&tix.path, why, held.n_valid, len_u64(entries.len()));
+                note_index_built(
+                    &tix.path,
+                    why,
+                    held.n_valid,
+                    len_u64(entries.len()),
+                    "whole index",
+                );
                 Ok(TixState::Ready(index))
             }
             Err(cannot) => {
@@ -2818,12 +2986,13 @@ impl BarFile {
     /// at — `None` when this handle keeps no index.
     ///
     /// One entry read (`time_index::resume`) and one pass over the batch. An
-    /// entry that no longer puts the last committed bar where the header does
-    /// — a torn write from an append that failed on this handle — rebuilds
-    /// the index first, loudly, and is asked again. **That rebuild is
-    /// O(`n_valid`) inside this append**: every committed record is read
-    /// through the verified path, about 80 ms at 10^6 one-second bars
-    /// measured on a 4-core cloud box (D-3302, `docs/06-limits.md`).
+    /// entry torn by an append that failed on this handle is rebuilt alone
+    /// from at most 65 bar reads (`Self::repair_torn_entry`, D-3134), loudly.
+    /// Only an index those bars cannot vouch for, or one that no longer puts
+    /// the last committed bar where the header does, rebuilds the whole index
+    /// first, loudly, and is asked again: O(`n_valid`), the residue
+    /// `docs/06-limits.md` names, about 80 ms at 10^6 one-second bars measured
+    /// on a 4-core cloud box (D-3302, D-4600).
     ///
     /// A bar in the slot of the bar before it — a second daily bar on one IST
     /// day, which the daily rung admits (D-0915) — is not refused: the append
@@ -2839,7 +3008,7 @@ impl BarFile {
     fn index_batch<R: Row>(
         &mut self,
         batch: &[R],
-    ) -> Result<Option<(u64, Vec<Entry>)>, StoreError> {
+    ) -> Result<Option<(u64, Vec<Entry>, bool)>, StoreError> {
         let held = Held::of(&self.header);
         let resumed = match self.tix.as_ref() {
             Some(tix) => match tix.state.get() {
@@ -2852,8 +3021,18 @@ impl BarFile {
             },
             None => return Ok(None),
         };
+        let mut repaired = false;
         let (bucket, start) = match resumed {
             Ok(found) => found,
+            // ONE TORN ENTRY IS REBUILT ALONE, NOT THE MONTH (D-3134). A
+            // failed append on this handle can tear only the entry of the last
+            // committed bar's bucket; `time_index::recover` rebuilds it from
+            // at most 65 bar reads. Anything it cannot prove falls through to
+            // the whole rebuild below, loudly, as before.
+            Err(why) if let Some(found) = self.repair_torn_entry(&why) => {
+                repaired = true;
+                found
+            }
             Err(why) => {
                 self.reindex(&why)?;
                 let Some(tix) = self.tix.as_ref() else {
@@ -2877,7 +3056,7 @@ impl BarFile {
         let extended =
             crate::time_index::extend(&tix.geometry, bucket, start, held.n_valid, stamps);
         match extended {
-            Ok(entries) => Ok(Some((bucket, entries))),
+            Ok(entries) => Ok(Some((bucket, entries, repaired))),
             Err(why @ Why::SharedSlot { .. }) => {
                 self.retire_index(why)?;
                 Ok(None)
@@ -2894,6 +3073,42 @@ impl BarFile {
             }),
             Err(other) => Err(index_refused(&tix.path, &other)),
         }
+    }
+
+    /// The entry an append resumes from, rebuilt from the bars of its own
+    /// bucket when `why` says THAT entry is torn — `None` for any other reason,
+    /// or when the bars do not prove it, and the caller rebuilds the whole
+    /// index instead. At most 65 bar reads (`time_index::recover`), and the
+    /// rebuilt entry reaches disk with the append's own entries, before the
+    /// header slot that commits them. Logged as `store.tix` "time index
+    /// rebuilt from the bars" with scope `one torn entry` by `append`, after
+    /// that write and only if it happened (D-3135). D-3134.
+    ///
+    /// A TORN ENTRY IS PRESENT; A CUT ONE IS NOT (D-4611). An append that
+    /// failed on this handle wrote over its entries in place and never left
+    /// the file ending before them (`put_entries`), so an index that no longer
+    /// reaches past this entry was cut from outside, and every entry before it
+    /// may be gone with it: `None`, and the caller rebuilds the whole index
+    /// (D-2077). One `fstat`.
+    fn repair_torn_entry(&self, why: &Why) -> Option<(u64, Entry)> {
+        let Why::Entry { bucket } = why else {
+            return None;
+        };
+        let tix = self.tix.as_ref()?;
+        let Some(TixState::Ready(index)) = tix.state.get() else {
+            return None;
+        };
+        let reaches =
+            crate::time_index::entry_offset(*bucket).saturating_add(crate::time_index::ENTRY_LEN);
+        if index.metadata().ok()?.len() < reaches {
+            return None;
+        }
+        let held = Held::of(&self.header);
+        let (found, entry) = crate::time_index::recover(&tix.geometry, held, |row| {
+            self.read_row::<Bar>(row).map(|bar| bar.ts_micros)
+        })
+        .ok()?;
+        (found == *bucket).then_some((found, entry))
     }
 
     /// Stops indexing this month, because `why`: the handle bisects from now
@@ -3782,13 +3997,14 @@ fn note_lookup_bisects(path: &Path, why: &Why) {
 
 /// `store.tix`, INFO: a writer rebuilt this month's time index from its bars,
 /// and why it had to.
-fn note_index_built(path: &Path, why: &Why, n_valid: u64, entries: u64) {
+fn note_index_built(path: &Path, why: &Why, n_valid: u64, entries: u64, scope: &str) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("store.tix", "time index rebuilt from the bars")
             .with("file", telemetry::Value::Str(&path.display().to_string()))
             .with("reason", telemetry::Value::Str(&why.to_string()))
             .with("n_valid", telemetry::Value::Uint(n_valid))
-            .with("entries", telemetry::Value::Uint(entries)),
+            .with("entries", telemetry::Value::Uint(entries))
+            .with("scope", telemetry::Value::Str(scope)),
     );
 }
 
@@ -4279,6 +4495,43 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
     }
 }
 
+/// A writer's refused month lock, with its holder named.
+///
+/// The exclusive lock is refused by a reader's SHARED lock as much as by a
+/// writer's, and the refusal used to say "another writer holds" either way: a
+/// browser chart, a `cli` load or a ledger guard reading the month read as a
+/// second writer, and the ingest gave up on a write the reader would have let
+/// through a moment later (barflow-1, D-2552). A shared probe on a second
+/// description tells the two apart: it is granted beside readers and refused
+/// beside a writer. The probe is released at once and holds nothing.
+fn writer_lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
+    match refusal {
+        TryLockError::WouldBlock if held_by_readers(path) => StoreError::ReaderHolds {
+            path: path.to_path_buf(),
+        },
+        other => lock_fault(path, other),
+    }
+}
+
+/// Whether the month lock at `path` is held by readers only: a shared lock
+/// on a second read-only description is granted. Any failure to ask answers
+/// `false`, so the refusal keeps the stricter "another writer" wording.
+fn held_by_readers(path: &Path) -> bool {
+    open_read(path)
+        .ok()
+        .and_then(|handle| Flock::try_lock_shared(handle, path.to_path_buf()).ok())
+        .is_some()
+}
+
+/// [`StoreError::ReaderHolds`]'s sentence.
+fn write_reader_holds(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "a reader holds {} shared, so this write must wait for it to close the month",
+        path.display()
+    )
+}
+
 /// [`StoreError::Symlinked`]'s sentence.
 fn write_symlinked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
     write!(
@@ -4288,6 +4541,32 @@ fn write_symlinked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
          Nothing was opened through it",
         path.display()
     )
+}
+
+/// The shared lock a reader holds on a month whose `.lock` is absent
+/// (store1-1, D-2551).
+///
+/// The lock is created with `create_new`, so an existing name (a FIFO, or a
+/// lock a writer created a moment ago) is never opened through this call: a
+/// lost creation race goes back to the ordinary read-only open. A read-only
+/// filesystem answers `None`, because no writer can append there either.
+fn reader_lock(lock_path: &Path) -> Result<Option<Flock<File>>, StoreError> {
+    let created = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(lock_path);
+    let handle = match created {
+        Ok(handle) => handle,
+        Err(why) if why.kind() == ErrorKind::ReadOnlyFilesystem => return Ok(None),
+        Err(why) if why.kind() == ErrorKind::AlreadyExists => {
+            open_read(lock_path).map_err(|why| why.refusal(lock_path))?
+        }
+        Err(why) => return Err(classify(lock_path, Action::Open, &why)),
+    };
+    Flock::try_lock_shared(handle, lock_path.to_path_buf())
+        .map(Some)
+        .map_err(|refusal| lock_fault(lock_path, refusal))
 }
 
 /// [`StoreError::BarrierFailed`]'s sentence.
@@ -4404,7 +4683,37 @@ mod tests {
         })
     }
 
-    /// store1-2, D-1907: a failed append barrier is never confirmed. The
+    /// STO-1, D-2607: an overlay with a negative spot or a negative IV is
+    /// refused at the write boundary before a byte is written; the absent
+    /// marker and zero are legal readings.
+    #[test]
+    fn an_overlay_with_a_negative_spot_or_iv_is_refused_before_a_byte_is_written() {
+        use crate::format::{OI_NULL, Overlay};
+        let at = |spot: i64, iv_micros: i64| Overlay {
+            ts_micros: 1_000_000,
+            spot,
+            iv_micros,
+        };
+        for bad in [
+            at(-5, 125_000),
+            at(2_500_000, -125_000),
+            at(-5, -125_000),
+            at(i64::MIN + 1, OI_NULL),
+        ] {
+            assert!(
+                matches!(
+                    super::survey(&[bad]),
+                    Err(super::StoreError::ImpossibleBar { at: 0 })
+                ),
+                "{bad:?}"
+            );
+        }
+        for good in [at(OI_NULL, OI_NULL), at(0, 0), at(2_500_000, 125_000)] {
+            assert!(super::survey(&[good]).is_ok(), "{good:?}");
+        }
+    }
+
+    /// store1-2, D-1907, D-2559: a failed append barrier is never confirmed. The
     /// same handle, a reopened handle, and the duplicate check all refuse the
     /// month by name rather than "committing" or answering `AlreadyPresent`
     /// from a page cache whose barrier failed.
@@ -4431,6 +4740,14 @@ mod tests {
             assert_eq!(file.append(&batch), barred, "the same handle");
             drop(file);
             let mut reopened = reopen(&path).expect("the month reopens");
+            // store1-2, D-2559: a header slot whose barrier failed is written
+            // back, so no reader in this boot sees a commit the device may
+            // not hold.
+            assert_eq!(
+                reopened.header().n_valid,
+                0,
+                "barrier {skip}: no unproven commit is visible"
+            );
             assert_eq!(reopened.append(&batch), barred, "a reopened handle");
             assert_eq!(reopened.append(&[bar(3)]), barred, "any later append");
             assert!(

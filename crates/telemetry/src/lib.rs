@@ -59,10 +59,12 @@
 //!   works** — each file at most its bound, or one line past it when a single
 //!   line is wider than the bound itself (a 1 KiB `MIN_FILE_BYTES` file and a
 //!   41 KB line).
-//! * **Not forever.** The first failed roll stops rotation for the life of
-//!   the sink (`Sink`'s `rotation_broken`, which keeps the retained files from
-//!   being emptied one per event), and from then on the current file grows
-//!   without a bound until the process restarts. That is counted in
+//! * **Not forever.** A failed roll pauses rotation (`Sink`'s
+//!   `rotation_broken`, which keeps the retained files from being emptied one
+//!   per event), and the current file grows past its bound. It is retried once
+//!   per further bound when a probe shows the directory accepts writes, at
+//!   most `keep_files` failed attempts, and never after an attempt that had
+//!   already moved a file (D-2509); past those the file grows until restart. That is counted in
 //!   [`Health::rotation_failures`], visible in [`Health::current_bytes`] and
 //!   makes [`Health::is_loud`] true. This line used to say "at most 64 MiB,
 //!   forever", which no path in `sink` enforces. D-1324.
@@ -126,7 +128,10 @@ mod encode;
 mod event;
 mod json;
 mod level;
+mod loss;
 mod record;
+mod say;
+mod scope;
 mod sink;
 mod tail;
 mod value;
@@ -137,7 +142,10 @@ pub use crate::event::{
 };
 pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
+pub use crate::loss::LEDGER_NAME;
 pub use crate::record::Record;
+pub use crate::say::{stderr_line, unprinted};
+pub use crate::scope::{Entered, InRun, current_run, enter, in_run, inherit};
 pub use crate::sink::{
     BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
     Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
@@ -292,6 +300,18 @@ pub fn emit(event: &Event<'_>) -> Emitted {
 #[must_use]
 pub fn emit_for_run(run: u64, event: &Event<'_>) -> Emitted {
     global().map_or(Emitted::NotInstalled, |sink| sink.emit_for_run(run, event))
+}
+
+/// Makes everything the process-wide sink has written durable: the current
+/// file, the loss ledger and the directory. The call a `main` makes at a clean
+/// exit, after its last event (sobs-13, D-4411).
+///
+/// [`None`] when nothing is installed; otherwise [`Sink::sync`]'s answer, whose
+/// failure is already in [`Sink::health`] and on stderr once — a caller that
+/// only wants the barrier may ignore it.
+#[must_use]
+pub fn sync() -> Option<Result<(), String>> {
+    global().map(Sink::sync)
 }
 
 /// Reserves a non-zero correlation id from the process-wide log sequence.
@@ -568,6 +588,8 @@ mod tests {
         let found = tail(&dir, sink.keep_files(), &Query::last(10));
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.records[0].message, "through the global");
+        // THE CLEAN-EXIT BARRIER reaches the installed sink (sobs-13, D-4411).
+        assert_eq!(super::sync(), Some(Ok(())));
 
         let first = super::reserve_run_id().expect("installed sink reserves a run");
         let second = super::reserve_run_id().expect("next reservation is distinct");

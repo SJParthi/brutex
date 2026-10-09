@@ -464,10 +464,19 @@ fn span_of(cell: &ContractCell, window: (Day, Day)) -> Option<(Day, Day)> {
     let first = opens.max(from);
     let through = opens.end_of_month().min(to).min(expiry);
     if through < first {
-        None
-    } else {
-        Some((first, through))
+        return None;
     }
+    // THE LAST DAY THAT IS NOT CLOSED, NOT THE CALENDAR END (conc12-1,
+    // D-2535). A cell whose month ends on a weekend or holiday could never be
+    // held through `through`, and the F&O press has no dry retirement, so it
+    // was re-asked on every press. A day the calendar has not measured is
+    // still asked.
+    let open = crate::calendar::last_not_closed(
+        i64::from(first.days_from_epoch()),
+        i64::from(through.days_from_epoch()),
+    )?;
+    let through = Day::from_days(u32::try_from(open).ok()?).ok()?;
+    Some((first, through))
 }
 
 /// The IST day a stored stamp falls in.
@@ -773,6 +782,61 @@ mod tests {
         });
         assert_eq!(out.resume.len(), 1);
         assert_eq!(out.resume[0].from, day(2026, 1, 12));
+    }
+
+    /// **A MONTH THAT ENDS ON A CLOSED DAY IS OWED ONLY THROUGH ITS LAST
+    /// SESSION (conc12-1, D-2535).**
+    ///
+    /// 2025-11 ends on Sunday the 30th and 2020-02 on Saturday the 29th. On the
+    /// old code `span_of` ended at the calendar day, so a cell held through
+    /// Friday 2025-11-28 still owed the 29th–30th — the `is_complete` below
+    /// failed — and was re-asked on every press for days no vendor can send.
+    /// Walked: held through the last session (complete), held one session
+    /// short (owed only to that session), nothing held (owed through it), and
+    /// a window holding only the closed weekend (nothing fetchable).
+    #[test]
+    fn a_month_ending_on_a_closed_day_is_owed_only_through_its_last_session() {
+        for (m, last_session, closed) in [
+            (
+                month(2025, 11),
+                day(2025, 11, 28),
+                (day(2025, 11, 29), day(2025, 11, 30)),
+            ),
+            (
+                month(2020, 2),
+                day(2020, 2, 28),
+                (day(2020, 2, 29), day(2020, 2, 29)),
+            ),
+        ] {
+            let cells = cells(&[found("NIFTY", 29, 2_600_000)], &[m], Timeframe::MINUTE_1);
+            let window = (day(2020, 1, 1), day(2026, 1, 31));
+
+            let out = owed(&cells.cells, window, |_| Some(stamp(last_session)));
+            assert!(
+                out.is_complete(),
+                "{m}: held through its last session is held"
+            );
+
+            let out = owed(&cells.cells, window, |_| None);
+            assert_eq!(out.resume.len(), 1);
+            assert_eq!(
+                out.resume[0].through, last_session,
+                "{m}: the last session, not the calendar end"
+            );
+
+            let short = last_session
+                .days_from_epoch()
+                .checked_sub(1)
+                .and_then(|d| Day::from_days(d).ok())
+                .expect("the day before");
+            let out = owed(&cells.cells, window, |_| Some(stamp(short)));
+            assert_eq!(out.resume.len(), 1, "{m}: one session short is short");
+            assert_eq!(out.resume[0].through, last_session);
+
+            let out = owed(&cells.cells, closed, |_| None);
+            assert!(out.is_complete(), "{m}: a closed weekend owes nothing");
+            assert_eq!(out.outside_window, 1);
+        }
     }
 
     /// A cell the window and the expiry leave no day in owes nothing.

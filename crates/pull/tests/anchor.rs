@@ -594,10 +594,39 @@ fn a_negative_snapshot_volume_and_a_bucket_wider_than_a_day_are_refused() {
     assert_eq!(Bucket::of_secs(86_401), None, "wider than a day");
     assert_eq!(Bucket::of_secs(u32::MAX), None, "wider than a day");
     assert_eq!(
-        Bucket::of_secs(7).map(Bucket::secs),
-        Some(7),
-        "any width up to a day"
+        Bucket::of_secs(50).map(Bucket::secs),
+        Some(50),
+        "widths that divide a day"
     );
+    assert_eq!(
+        Bucket::of_secs(90).map(Bucket::secs),
+        Some(90),
+        "any width up to a day that divides it"
+    );
+}
+
+/// pul-1, D-2608: a width that does not divide one day is refused, because
+/// the open-anchored grid drifts off 09:15 by `(day * 86,400) mod width` and
+/// would open most sessions with a short bar stamped before the open. Every
+/// width that divides a day still puts the first bar of every day at 09:15.
+#[test]
+fn a_width_that_does_not_divide_a_day_is_refused_and_every_divisor_opens_at_0915() {
+    for secs in [7_u32, 420, 660, 3_607, 25_200] {
+        assert_eq!(Bucket::of_secs(secs), None, "{secs}s drifts off the open");
+    }
+    for secs in [1_u32, 45, 90, 120, 160, 300, 900, 2_700, 3_600, 14_400] {
+        let bucket = Bucket::of_secs(secs).expect("a divisor of one day");
+        for day in [0_i64, 20_727, 20_728, 20_729] {
+            let open = (day * 86_400 - 19_800 + 555 * 60) * 1_000_000;
+            let snapshots = [minute(open / 1_000_000)];
+            let out = pull::fold::fold_from_snapshots(&snapshots, bucket).expect("folds");
+            assert_eq!(
+                out.first().map(|bar| bar.ts_micros),
+                Some(open),
+                "{secs}s on day {day} opens at 09:15"
+            );
+        }
+    }
 }
 
 /// **A BUCKET'S VOLUME THAT LEAVES `i64` IS REFUSED, NOT CAPPED.**

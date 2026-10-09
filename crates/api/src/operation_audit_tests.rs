@@ -381,6 +381,37 @@ async fn failed_audit_start_never_polls_the_handler() {
     assert_eq!(body["handler_completed"], false);
 }
 
+/// One poll of a journal a blocking-pool writer may be appending to.
+enum Polled {
+    /// The read answered: the record, or `None` when it is not written yet.
+    Read(Option<Record>),
+    /// The read met the append: BUSY by design ("retry the read"), and the
+    /// race the poll waits out.
+    Busy,
+}
+
+impl Polled {
+    /// The record of a poll that answered, which must exist by then.
+    fn written(self) -> Option<Record> {
+        match self {
+            Self::Read(record) => Some(record.expect("the record is written")),
+            Self::Busy => None,
+        }
+    }
+}
+
+/// Reads `id` once. Any refusal but BUSY fails the test. CI run 1288 failed
+/// the test below on exactly that BUSY, through an `unwrap` (D-4622).
+fn poll(root: &std::path::Path, id: u64) -> Polled {
+    match journal::read(root, id) {
+        Ok(record) => Polled::Read(record),
+        Err(why) => {
+            assert!(journal::is_busy(&why), "{why}");
+            Polled::Busy
+        }
+    }
+}
+
 #[tokio::test]
 async fn cancelled_request_records_cancellation_and_never_completed() {
     // `request_audited` journals through a detail slot, so this is kept apart
@@ -403,10 +434,19 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
         .unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert_eq!(
-        journal::read(&root.0, ID_BASE + 1).unwrap().unwrap().phase,
-        Phase::Cancelled
-    );
+    // The `Cancelled` write now runs on the blocking pool (log-2, D-2577), so
+    // it is awaited rather than assumed to have happened inside the abort.
+    let mut phase = None;
+    for _ in 0..500 {
+        if let Polled::Read(seen) = poll(&root.0, ID_BASE + 1) {
+            phase = seen.map(|record| record.phase);
+        }
+        if phase.is_some_and(Phase::terminal) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(phase, Some(Phase::Cancelled));
 }
 
 /// P3-01-03, D-1973. A write route whose client goes away keeps running to its
@@ -437,8 +477,9 @@ async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
     release.notify_one();
     let mut record = None;
     for _ in 0..500 {
-        let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
-        if seen.phase.terminal() {
+        if let Some(seen) = poll(&root.0, ID_BASE + 1).written()
+            && seen.phase.terminal()
+        {
             record = Some(seen);
             break;
         }
@@ -447,6 +488,90 @@ async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
     let record = record.expect("the handler's terminal was recorded");
     assert_eq!(record.phase, Phase::Completed);
     assert_eq!(record.response_status, 202);
+}
+
+/// resources-3, D-2598. A READ stays bound to its connection, so its client
+/// going away drops the handler; the terminal it then owes is still
+/// `Cancelled` (the truth for a read), and it is now settled by the
+/// `OwedTerminal` guard on the blocking pool rather than written and synced by
+/// the attempt's `Drop` on the async worker. The outcome is driven end to end;
+/// where it runs is pinned off the source, because a terminal's thread is not
+/// observable from the journal (on the old code the guard does not exist).
+#[tokio::test]
+async fn a_read_whose_client_goes_away_writes_cancelled_off_the_async_worker() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let notify = Arc::clone(&entered);
+    let path = root.0.clone();
+    let connection = tokio::spawn(async move {
+        super::request_audited(path, "GET /backtest.json".to_owned(), async move {
+            notify.notify_one();
+            std::future::pending::<()>().await;
+            StatusCode::OK.into_response()
+        })
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    connection.abort();
+    assert!(connection.await.unwrap_err().is_cancelled());
+    let mut record = None;
+    for _ in 0..500 {
+        if let Some(seen) = poll(&root.0, ID_BASE + 1).written()
+            && seen.phase.terminal()
+        {
+            record = Some(seen);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let record = record.expect("the read's terminal was recorded");
+    assert_eq!(record.phase, Phase::Cancelled);
+    assert_eq!(record.response_status, 0);
+
+    let source = include_str!("operation_audit.rs");
+    let body = source
+        .split_once("pub(crate) async fn request_audited(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    let guarded = body.find("OwedTerminal(Some(attempt))").expect("guarded");
+    let awaited = body.find("handler.await").expect("awaited");
+    assert!(
+        guarded < awaited,
+        "the attempt is guarded across the handler"
+    );
+    let guard = source
+        .split_once("impl Drop for OwedTerminal {")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    assert!(
+        guard.contains("spawn_blocking(move || drop(attempt))"),
+        "{guard}"
+    );
+    assert!(guard.contains("std::thread::panicking()"), "{guard}");
+}
+
+/// resources-3, D-2598: a guard taken back owes nothing, and one dropped
+/// outside any runtime settles in place.
+#[test]
+fn an_owed_terminal_taken_back_or_dropped_outside_a_runtime_settles_once() {
+    let root = Scratch::new();
+    let attempt = journal::begin(&root.0, Origin::Http, "GET /backtest.json").unwrap();
+    let mut owed = super::OwedTerminal(Some(attempt));
+    let mut taken = owed.take().expect("the attempt");
+    assert!(owed.take().is_none(), "a second take is empty");
+    drop(owed);
+    taken.finish(Phase::Completed, 200).unwrap();
+    drop(taken);
+    let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
+    assert_eq!(seen.phase, Phase::Completed);
+
+    let attempt = journal::begin(&root.0, Origin::Http, "GET /backtest.json").unwrap();
+    drop(super::OwedTerminal(Some(attempt)));
+    let seen = journal::read(&root.0, ID_BASE + 2).unwrap().unwrap();
+    assert_eq!(seen.phase, Phase::Cancelled, "dropped in place, no runtime");
 }
 
 #[tokio::test]
@@ -782,6 +907,10 @@ fn the_journals_per_request_growth_is_stated_in_the_limits() {
         "directory's entry count",
         "run_owed",
         "not bounded by `max_concurrent`",
+        "d-4441",
+        "p99",
+        "a proxy",
+        "latency_audit_begin_and_terminal_by_directory_size",
     ] {
         assert!(section.contains(phrase), "missing {phrase:?}");
     }
@@ -807,4 +936,51 @@ fn the_backtest_page_is_not_a_registered_route_and_its_json_is() {
         !routes.iter().any(|route| route == "/backtest"),
         "`/backtest` belongs to the front end's fallback: {routes:?}"
     );
+}
+
+/// **What one audited request's `begin` and terminal cost as the flat journal
+/// directory grows.** W1-api3-0, D-4441.
+///
+/// The journal is filled with REAL finished invocations to 10^2, 10^3 and
+/// 10^4, and 200 more `begin` + `finish` pairs are timed at each size. A last
+/// row pads the same directory with 90,000 plain empty files that are not
+/// journal entries, which is a proxy for a 10^5-entry directory and is
+/// labelled so: filling it with real invocations costs four `fsync`s each.
+/// A measurement, run on purpose; the numbers are in `docs/06-limits.md`.
+#[test]
+#[ignore = "a latency measurement, run on purpose: see crate::latency"]
+fn latency_audit_begin_and_terminal_by_directory_size() -> Result<(), String> {
+    let root = Scratch::new();
+    let request = |label: &str| -> Result<(), String> {
+        let mut attempt = journal::begin(&root.0, Origin::Http, label)?;
+        attempt.finish(Phase::Completed, 200)
+    };
+    let mut held = 0_usize;
+    for size in [100_usize, 1_000, 10_000] {
+        while held < size {
+            request("/live.json")?;
+            held += 1;
+        }
+        let timed = crate::latency::Timed::run(200, || request("/live.json"))?;
+        held += 200;
+        println!(
+            "{}",
+            timed.line(&format!(
+                "audited request's begin + terminal, {size} real invocations already held"
+            ))
+        );
+    }
+    let base = root.0.join("audit/invocations-v1");
+    for n in 0..90_000_u32 {
+        std::fs::File::create(base.join(format!("padding-{n:06}")))
+            .map_err(|why| why.to_string())?;
+    }
+    let timed = crate::latency::Timed::run(200, || request("/live.json"))?;
+    println!(
+        "{}",
+        timed.line(&format!(
+            "audited request's begin + terminal, {held} real + 90000 padding names (proxy for 10^5)"
+        ))
+    );
+    Ok(())
 }

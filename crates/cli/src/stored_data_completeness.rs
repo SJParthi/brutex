@@ -1440,7 +1440,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
         ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v2,
+        printed_ohlcv_cost_model_id_v3,
     };
     use runner::identity::{DailyReferenceBinding, ReferenceIntegrity};
     use runner::outcome::Horizon;
@@ -1727,7 +1727,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("wide ratio limits"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v2(),
+            printed_ohlcv_cost_model_id_v3(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
@@ -2031,6 +2031,26 @@ mod tests {
         )
         .expect_err("a different evidence population cannot borrow complete data authority");
         assert!(why.contains("another evidence population"));
+        // D-1835: the per-population binding reconciles the same data authority
+        // once and carries its verdict to every cell.
+        let bound = crate::institutional_evidence::BoundPopulationCompletenessV1::bind(
+            &population_authority,
+            DataCompletenessSourceV1::Complete(&data_authority),
+        )
+        .expect("matching durable authority binds");
+        assert_eq!(bound.population_id(), fixture.population_id);
+        let mut foreign_identities = fixture.identities;
+        foreign_identities.run_identity[0] ^= 1;
+        let foreign = fixture.authority_with_identities(&foreign_identities);
+        let why = crate::institutional_evidence::BoundPopulationCompletenessV1::bind(
+            &foreign,
+            DataCompletenessSourceV1::Complete(&data_authority),
+        )
+        .expect_err("a data authority of another population does not bind");
+        assert!(
+            why.contains("stored-data completeness authority refused"),
+            "{why}"
+        );
     }
 
     #[test]

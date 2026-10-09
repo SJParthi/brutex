@@ -1,4 +1,5 @@
 import { sweepOutcome } from './sweep.js';
+import { commandReply, refusalFrom, refusalSentence } from './refusal.js';
 
 // This bounds browser bookkeeping, not the engine's search or support policy.
 export const MAX_RECEIPT_JOBS = 4096;
@@ -117,7 +118,8 @@ export function createReceiptBatch({ request, changed, wait = () => new Promise(
     if (!attempt) throw new Error('An exact accepted attempt is required before checking status.');
     const response = await request(`/backtest/run.json?attempt=${encodeURIComponent(attempt)}`, { cache: 'no-store' });
     if (disposed) return;
-    if (!response.ok) throw new Error(`Attempt status is unavailable (HTTP ${response.status}). No other job will start.`);
+    // THE SERVER'S `running.why`, NOT THE STATUS ALONE (W6, D-3216).
+    if (!response.ok) throw new Error(`Attempt status is unavailable: ${await refusalFrom('/backtest/run.json', response)}. No other job will start.`);
     const body = await response.json();
     if (disposed) return;
     const outcome = receiptObservation(body.running, job);
@@ -156,15 +158,16 @@ export function createReceiptBatch({ request, changed, wait = () => new Promise(
               method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(job.request)
             });
             if (disposed) return;
-            const body = await response.json();
+            // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222).
+            const { body, reason } = await commandReply(response);
             if (disposed) return;
-            if (!response.ok || body.accepted !== true) {
-              if (body.accepted === false && typeof body.refusal === 'string' && body.refusal.length > 0) {
+            if (!response.ok || body?.accepted !== true) {
+              if (body?.accepted === false && typeof body.refusal === 'string' && body.refusal.length > 0) {
                 job.phase = 'failed'; job.why = body.refusal;
                 state.phase = 'failed'; state.why = body.refusal;
                 stopRequested = true; stopQueued(); publish(); break;
               }
-              throw new Error(`The server did not confirm acceptance or refusal (HTTP ${response.status}). The request may have started; it will not be resent.`);
+              throw new Error(`The server did not confirm acceptance or refusal (${refusalSentence('/engine/command', response.status, reason)}). The request may have started; it will not be resent.`);
             }
             job.attempt = positiveU64(body.attempt);
             if (!job.attempt) throw new Error('The server accepted the request without an exact attempt string. The request will not be resent; update the server before submitting another batch.');

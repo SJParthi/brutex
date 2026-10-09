@@ -376,6 +376,7 @@ fn sweep_under(
     for row in &rows {
         tally.fold(row);
     }
+    note_tally(&tally);
     at_least_one_filed(&holdings.census, tally.offered, &rows)?;
 
     // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
@@ -395,6 +396,53 @@ fn sweep_under(
         &tally,
         &rows,
     ))
+}
+
+/// The walk's own tally, at Warn when any month refused (conc13-7, D-2643).
+///
+/// Only swept months emitted anything (`stored month swept`, Info), so a walk
+/// with refused months logged nothing but its successes and the refused count
+/// lived in stdout alone. Emitted here, after the sequential fold, once per
+/// walk -- never from a worker and never inside a month.
+///
+/// Each refused month's own Warn is [`note_refused`]'s (OBSV-06, D-3205),
+/// written as the month is folded. This wrote a second "stored month refused"
+/// for the same month until the merge of the two branches that each added one
+/// left one writer (D-4661).
+fn note_tally(tally: &Tally) {
+    let walked = if tally.refused > 0 {
+        telemetry::Event::warn("cli.sweep", "stored walk tallied")
+    } else {
+        telemetry::Event::info("cli.sweep", "stored walk tallied")
+    };
+    crate::note(
+        &walked
+            .with("offered", tally.offered)
+            .with("swept", tally.swept)
+            .with("refused", tally.refused),
+    );
+}
+
+/// How many months a rendered `sweep-all` page's tally line says refused
+/// (conc13-7, D-2643): the column-zero `N swept · M refused · ...` line
+/// [`render`] prints. Month rows are indented and their names escaped, so no
+/// stored name can forge one. Zero when the page carries no tally.
+pub(crate) fn refused_months(text: &str) -> u64 {
+    for line in text.lines() {
+        let Some((swept, rest)) = line.split_once(" swept · ") else {
+            continue;
+        };
+        if swept.is_empty() || !swept.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Some((refused, _)) = rest.split_once(" refused · ") else {
+            continue;
+        };
+        if let Ok(count) = refused.parse::<u64>() {
+            return count;
+        }
+    }
+    0
 }
 
 /// Nothing, when a month was swept and filed or none was offered; the run's
@@ -575,13 +623,41 @@ fn sweep_chunk(root: &std::path::Path, chunk: &[&Held], min_hits: u64, commit: &
             sweep_prepared(p, attempt)
         })
         .collect();
+    // `swept` is in input order and one entry per month of `chunk`, so the
+    // zip pairs each row with the month it reports on.
     swept
         .into_iter()
-        .map(|swept| match swept {
-            Ok(swept) => file_swept(root, swept, min_hits),
-            Err(row) => row,
+        .zip(chunk)
+        .map(|(swept, held)| {
+            let row = match swept {
+                Ok(swept) => file_swept(root, swept, min_hits),
+                Err(row) => row,
+            };
+            note_refused(held, &row);
+            row
         })
         .collect()
+}
+
+/// One `Warn` per refused instrument-month, with its reason (OBSV-06, D-3205).
+///
+/// The report's `REFUSED` row was the only trace: the log held "stored month
+/// swept" for a month whose filing then failed, and nothing at all for a month
+/// refused before its sweep, so `/logs` could not show, or be searched for, the
+/// refusals D-0226 named. At the same per-month boundary "stored month swept"
+/// uses, in input order, never inside a sweep.
+fn note_refused(held: &Held, row: &Row) {
+    let Some(reason) = row.refused.as_deref() else {
+        return;
+    };
+    crate::note(
+        &telemetry::Event::warn("cli.sweep", "stored month refused")
+            .with("feed", held.vendor.as_str())
+            .with("label", row.label.as_str())
+            .with("identity", row.identity.as_deref().unwrap_or(""))
+            .with("swept", row.ran)
+            .with("reason", reason),
+    );
 }
 
 /// One instrument-month through all four phases of [`sweep_chunk`]: the
@@ -1218,6 +1294,102 @@ mod tests {
         assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
     }
 
+    /// Every `cli.sweep` record from sequence `from` onward carrying `message`,
+    /// read back through the shipped reader on the shared test sink.
+    fn swept_events(from: u64, message: &str) -> Vec<telemetry::Record> {
+        let sink = crate::ledger_all::tests::sink();
+        let dir = sink
+            .path()
+            .parent()
+            .expect("the sink writes its file inside a directory")
+            .to_path_buf();
+        let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("cli.sweep");
+        telemetry::tail(&dir, sink.keep_files(), &query)
+            .records
+            .into_iter()
+            .filter(|record| record.seq >= from && record.message == message)
+            .collect()
+    }
+
+    /// OBSV-06 (D-3205): **a month refused before its sweep is one Warn event
+    /// with its reason.** The report printed a `REFUSED` row; the log, which
+    /// is what `/logs` and an operator searching by label read, held nothing
+    /// of it -- D-0226 named "not a refusal" as a thing the sweep failed to
+    /// log, and this half was never closed.
+    #[test]
+    fn a_month_refused_before_sweeping_is_logged_with_its_reason() {
+        let root = scratch("refused-logged");
+        for rel in [
+            "groww/NSE/INDEX/NIFTY/1min/2026-08.bin",
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let from = crate::ledger_all::tests::mark();
+        let _refused = sweep_under(&root, "groww", "1min", 100, "deadbeef");
+        let _ = std::fs::remove_dir_all(&root);
+        let events = swept_events(from, "stored month refused");
+        let mine: Vec<&telemetry::Record> = events
+            .iter()
+            .filter(|e| {
+                ["groww NIFTY 1min 2026-08", "groww RELIANCE 1min 2026-08"]
+                    .iter()
+                    .any(|label| crate::ledger_all::tests::says(e, "label", label))
+            })
+            .collect();
+        assert_eq!(mine.len(), 2, "one event per refused month: {events:?}");
+        for event in mine {
+            assert_eq!(event.level, telemetry::Level::Warn);
+            assert!(
+                crate::ledger_all::tests::says(event, "feed", "groww"),
+                "{event:?}"
+            );
+            assert!(
+                crate::ledger_all::tests::says(event, "reason", "could not be read from the store"),
+                "the month's own reason: {event:?}"
+            );
+            assert_eq!(
+                event
+                    .field("swept")
+                    .and_then(telemetry::OwnedValue::as_bool),
+                Some(false),
+                "refused BEFORE sweeping: {event:?}"
+            );
+        }
+    }
+
+    /// OBSV-07 (D-3206): **`sweep-stored`'s refusal is one Warn event with its
+    /// reason.** The verb printed `refused: …` and the log held only the
+    /// generic "command finished" with `phase=refused` and no reason, so
+    /// `/logs` could not say why a single-month sweep refused.
+    #[test]
+    fn a_refused_sweep_stored_is_logged_with_its_reason() {
+        let from = crate::ledger_all::tests::mark();
+        let text = crate::sweep_stored("groww", "NIFTY", "2min", 2026, 3, 100);
+        assert!(text.starts_with("refused: "), "{text}");
+        let events: Vec<telemetry::Record> = swept_events(from, "stored month refused")
+            .into_iter()
+            .filter(|e| crate::ledger_all::tests::says(e, "label", "groww NIFTY 2min 2026-03"))
+            .collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event = events.first().expect("one");
+        assert_eq!(event.level, telemetry::Level::Warn);
+        assert!(
+            crate::ledger_all::tests::says(event, "feed", "groww"),
+            "{event:?}"
+        );
+        let reason = text
+            .trim_end()
+            .strip_prefix("refused: ")
+            .expect("the printed reason");
+        assert!(
+            crate::ledger_all::tests::says(event, "reason", reason.get(..60).unwrap_or(reason)),
+            "the same reason the operator was shown: {event:?} vs {text}"
+        );
+    }
+
     /// **A walk whose one swept month could not be filed says it swept, and
     /// names why it was not filed.** D-0696.
     ///
@@ -1231,6 +1403,7 @@ mod tests {
     fn a_walk_whose_swept_month_could_not_be_filed_says_it_swept() {
         let _knobs = crate::knobs::serially();
         crate::knobs::clear_all();
+        let from = crate::ledger_all::tests::mark();
         let (ledger, why) = crate::audited_stored::with_warmed_store(|root| {
             let full = root.join("bars/zerodha/NSE/INDEX/BANKNIFTY/1min/2025-05.bin");
             std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
@@ -1268,6 +1441,29 @@ mod tests {
                 "{label} is named: {why}"
             );
         }
+        // OBSV-06: the month that swept and could not be filed says so in the
+        // log too -- after its "stored month swept", not instead of it.
+        let unfiled: Vec<telemetry::Record> = swept_events(from, "stored month refused")
+            .into_iter()
+            .filter(|e| crate::ledger_all::tests::says(e, "label", "zerodha NIFTY 1min 2025-05"))
+            .collect();
+        assert_eq!(unfiled.len(), 1, "{unfiled:?}");
+        let unfiled = unfiled.first().expect("one");
+        assert!(
+            crate::ledger_all::tests::says(unfiled, "reason", "not recorded: "),
+            "{unfiled:?}"
+        );
+        assert_eq!(
+            unfiled
+                .field("swept")
+                .and_then(telemetry::OwnedValue::as_bool),
+            Some(true),
+            "it swept, then refused while being filed: {unfiled:?}"
+        );
+        assert!(
+            crate::ledger_all::tests::says(unfiled, "identity", ""),
+            "the identity it swept under is named: {unfiled:?}"
+        );
         // April's own reason says its month was not swept; the run's line
         // says no such thing of the run.
         assert!(

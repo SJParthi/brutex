@@ -43,6 +43,7 @@
   import Picker from '$lib/Picker.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
+  import { IST_OFFSET_MS, SESSION_MINUTES } from '$lib/ist.js';
   // `untrack`, because one effect on this page must react to a FEED CHANGE and
   // to nothing else — see the rung-drop effect for why an effect that reacts to
   // its own write is a hazard rather than a nicety.
@@ -81,6 +82,7 @@
   import { ask as request } from '$lib/ask.js';
   import { createPageRequests, watchVisible } from '$lib/page-requests.js';
   import { exact } from '$lib/money.js';
+  import { commandReply, headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
   // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
@@ -498,7 +500,7 @@
   /** @type {Rung[]} */
   const RUNGS = [
     { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
-    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
+    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: SESSION_MINUTES },
     { dir: '1day', label: '1 day', phrase: 'one day', stored: true, per: 1 }
   ];
 
@@ -934,7 +936,6 @@
   // remove: `01/07/2025` is 1 July here and 7 January in half the world.
 
   const DAY_MS = 86_400_000;
-  const IST_OFFSET_MS = 19_800_000; // +05:30, and India has no daylight saving.
 
   /** The IST date of a moment, as `YYYY-MM-DD`. */
   function istDay(ms = Date.now()) {
@@ -1597,14 +1598,14 @@
     // route can parse and keeps whichever answer; a feed that has neither says
     // so in the server's words, and a third segment is a row on this list.
     readFolder(wire)
-      .then(({ ok, data, segment }) => {
+      .then(({ ok, data, segment, why }) => {
         if (!live) return;
         // A HALT IS KEPT AS A HALT. `ok` is false for every refusal the server
         // makes, and the body carries `path` on the ones that have one — so
         // the page can name the folder rather than saying "nothing found".
         folderReach = ok
           ? { wire, state: 'read', body: data, why: null, segment }
-          : { wire, state: 'halted', body: data, why: data?.refused ?? 'refused', segment };
+          : { wire, state: 'halted', body: data, why, segment };
       })
       .catch((why) => {
         if (!live) return;
@@ -1661,10 +1662,24 @@
   /** @param {string} wire */
   async function readFolder(wire) {
     /** @param {string | null} segment */
+    // A REFUSAL IS READ AS TEXT AND NAMED (F4, D-3221). `r.json()` on a
+    // plain-text request-bounds or cross-site refusal threw a parse error that
+    // replaced the reason; a JSON one was shown as its bare `refused`. `why`
+    // carries route, status and reason; `data` stays the parsed body (or null)
+    // so a halt can still name its folder. A 200 that is not JSON still throws.
     const ask = async (segment) => {
       const at = segment ? `&segment=${segment}` : '';
       const r = await request(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
-      return { ok: r.ok, data: await r.json(), segment };
+      if (r.ok) return { ok: true, data: await r.json(), segment, why: null };
+      const text = await r.text();
+      /** @type {any} */
+      let data = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // Not JSON: the reason is the text itself, quoted by `reasonOfText`.
+      }
+      return { ok: false, data, segment, why: refusalSentence('/folder.json', r.status, reasonOfText(text)) };
     };
     const first = await ask(null);
     if (first.ok || !AMBIGUOUS.test(String(first.data?.refused ?? ''))) return first;
@@ -4021,8 +4036,11 @@
       const answers = await Promise.all(
         list.map((f) =>
           request(`/instruments.json?feed=${encodeURIComponent(f.wire)}`)
-            .then((r) => {
-              if (!r.ok) throw new Error(`${f.display}: /instruments.json answered HTTP ${r.status}`);
+            .then(async (r) => {
+              // THE SERVER'S REASON, NOT ITS STATUS ALONE (W2, D-3212): an
+              // unreadable census is stamped in the headers, an unknown feed
+              // names itself in the body.
+              if (!r.ok) throw new Error(`${f.display}: ${await headerRefusalFrom('/instruments.json', r)}`);
               return r.json();
             })
             .then((rows) => ({ feed: f, rows }))
@@ -5448,6 +5466,9 @@
   let live = $state(/** @type {StoreFold | null} */ (null));
   /** @type {string | null} */
   let pollError = $state(null);
+  /** A stop the server took but could not record durably. Its own state, so
+   *  a poll's `pollError = null` cannot wipe it (OBSV-09, D-3208). */
+  let stopWarning = $state('');
   let lastGrowthAt = $state(0);
   /** {t, units, rows} samples, newest last. Bounded — only the tail is kept. */
   /** @type {{ t: number, units: number, rows: number }[]} */
@@ -5463,9 +5484,13 @@
   const rowsGained = $derived(
     baseline && live ? Math.max(0, live.rows - baseline.rows) : 0
   );
-  const unitsLeft = $derived(Math.max(0, expectedUnits - (baseline?.units ?? 0) - unitsDone));
+  // NULL WITHOUT A BASELINE, NOT 0 (F6, D-3223). A run picked up on load
+  // whose "before" reading failed has nothing to subtract from: this read
+  // `baseline?.units ?? 0`, so the card drew "0% · 0/N", said nothing had
+  // landed, and extrapolated an ETA over every unit as if none were done.
+  const unitsLeft = $derived(baseline ? Math.max(0, expectedUnits - baseline.units - unitsDone) : null);
   const share = $derived(
-    expectedUnits > 0 ? Math.min(1, (baseline ? baseline.units + unitsDone : 0) / expectedUnits) : 0
+    expectedUnits > 0 ? (baseline ? Math.min(1, (baseline.units + unitsDone) / expectedUnits) : null) : 0
   );
 
   /**
@@ -5483,7 +5508,7 @@
     return gained / secs;
   });
 
-  const etaSecs = $derived(rate && unitsLeft > 0 ? Math.round(unitsLeft / rate) : null);
+  const etaSecs = $derived(rate && unitsLeft !== null && unitsLeft > 0 ? Math.round(unitsLeft / rate) : null);
 
   /**
    * THE GOVERNOR IS NOT VISIBLE FROM HERE, and this is the closest honest thing
@@ -6563,14 +6588,19 @@
     try {
       const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
       if (!ticket.current()) return;
-      if (!r.ok) return;
+      if (!r.ok) throw new Error(await refusalFrom('/pull/run.json', r));
       doc = await r.json();
       if (!ticket.current()) return;
-    } catch {
+    } catch (why) {
       /* A status this page could not read is not a run this page may claim.
          The Pull button stays offered; the server refuses it by name if a run
          really is going, which is a better answer than a page that locked
-         itself out on one failed read. */
+         itself out on one failed read.
+         BUT IT IS SAID (F4, D-3221). This returned silently on a non-2xx and
+         on a throw alike, so a page that could not tell whether a run was
+         going looked exactly like one that had checked and found none. */
+      if (!ticket.current()) return;
+      pollError = `Whether a pull run is already going could not be read: ${why instanceof Error ? why.message : String(why)}. Pull stays offered; the server refuses a second run by name.`;
       return;
     }
     if (doc?.running !== true) return;
@@ -6684,7 +6714,9 @@
         body: form,
         signal: controller.signal
       });
-      const answer = await r.json();
+      // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222): a plain-text
+      // request-bounds refusal was a JSON parse error here.
+      const { body: answer, reason } = await commandReply(r);
       if (!r.ok || answer?.started !== true) {
         /* REFUSED, AND THE SERVER SAID WHY. A refusal here is a decision — a
            run already in flight, or a leg that could not be read — not a
@@ -6692,7 +6724,9 @@
            rather than looping. */
         netError =
           answer?.why ??
-          `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
+          (r.ok
+            ? `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`
+            : refusalSentence('/pull/run', r.status, reason));
         phase = 'done';
         finishedAt = Date.now();
         releaseWatch?.();
@@ -6744,7 +6778,8 @@
       try {
         const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
         if (!ticket.current()) return;
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        // The body's reason, not the status alone (F4, D-3221).
+        if (!r.ok) throw new Error(await refusalFrom('/pull/run.json', r));
         doc = await r.json();
         if (!ticket.current()) return;
         if (!doc || typeof doc.running !== 'boolean' || !Array.isArray(doc.feeds) ||
@@ -7109,11 +7144,38 @@
        answer is a control the operator presses again. */
     stopAsked = true;
     aborted = true;
+    stopWarning = '';
     let said;
+    let unpersisted = '';
     try {
       const r = await request('/pull/run/stop', { ms: 10_000, method: 'POST' });
-      if (!r.ok) throw new Error(`the server answered HTTP ${r.status}`);
-      said = await r.json();
+      if (!r.ok) {
+        /* A 503 CAN STILL BE A STOP THAT WAS TAKEN. The server sets the
+           in-memory flag first and answers `stopping:true,
+           stop_persisted:false` when it could not record the STOP durably:
+           the run winds down, and the STOP will not survive a restart. That
+           is a delivered stop with a durability warning, not an undelivered
+           one -- and the warning is the operator's to read (OBSV-09, D-3208).
+           Any other failure is still undelivered.
+           READ AS TEXT, ONCE. Origin admission and the form check refuse a
+           POST in text/plain before this handler runs, so a JSON-only read
+           dropped the one sentence that said why the stop did not land. The
+           undelivered branch names the route, the status and that reason
+           (OBSV-26, D-3224). */
+        const text = await r.text().catch(() => '');
+        /** @type {any} */ let body = null;
+        try { body = JSON.parse(text); } catch { body = null; }
+        if (body?.stopping === true && body?.stop_persisted === false) {
+          said = body;
+          unpersisted = typeof body.error === 'string' && body.error.trim() !== ''
+            ? body.error.trim()
+            : 'The STOP was not durably recorded.';
+        } else {
+          throw new Error(refusalSentence('/pull/run/stop', r.status, reasonOfText(text)));
+        }
+      } else {
+        said = await r.json();
+      }
     } catch (why) {
       stopAsked = false;
       // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
@@ -7133,6 +7195,9 @@
         'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
     }
+    if (unpersisted) {
+      stopWarning = `Stop taken, but not saved: ${unpersisted} The run is winding down now; after a server restart it may not stay stopped.`;
+    }
     controller?.abort();
   }
 
@@ -7148,6 +7213,7 @@
     askedKeys = new Set();
     netError = null;
     pollError = null;
+    stopWarning = '';
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
@@ -8587,6 +8653,9 @@
             {#if netError}
               <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
             {/if}
+            {#if stopWarning}
+              <p class="note wrap warn" role="alert" data-run-error="stop">{stopWarning}</p>
+            {/if}
             {#if pollError}
               <p class="note wrap warn" role="alert" data-run-error="poll">
                 {#if phase === 'running'}The progress shown is the last reading this page took. {/if}{pollError}
@@ -8645,14 +8714,28 @@
                        LENGTH. The bar is read at a glance and the figures are
                        read when the glance raises a question; neither is
                        sufficient alone, and they are the same division. -->
-                  <span
-                    class="prog-n mono"
-                    title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
-                  >
-                    <b>{n(Math.round(share * 100))}%</b>
-                    · {n((baseline?.units ?? 0) + unitsDone)}/{n(expectedUnits)}
-                  </span>
+                  {#if share === null}
+                    <span class="prog-n mono warn">progress not measured</span>
+                  {:else}
+                    <span
+                      class="prog-n mono"
+                      title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
+                    >
+                      <b>{n(Math.round(share * 100))}%</b>
+                      · {n((baseline?.units ?? Number.NaN) + unitsDone)}/{n(expectedUnits)}
+                    </span>
+                  {/if}
                 </div>
+                {#if share === null}
+                  <!-- F6, D-3223: no baseline, so no fraction, no meter and no
+                       "nothing landed yet" -- each would be a difference
+                       against a reading that was never taken. -->
+                  <p class="prog-f warn" role="status">
+                    Progress is not measured: the store could not be read when this page picked the run
+                    up, so there is no before-reading to subtract from. The run's own status above is
+                    still the server's.
+                  </p>
+                {:else}
                 <div
                   class="meter tall"
                   role="progressbar"
@@ -8703,6 +8786,7 @@
                     >
                   {/if}
                 </div>
+                {/if}
               </div>
             {/if}
             <!-- WHAT THE MULTI-PASS RUN DID, AND WHY IT STOPPED.

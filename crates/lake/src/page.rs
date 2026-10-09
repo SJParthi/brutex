@@ -150,6 +150,16 @@ pub(crate) struct LakePageReader {
     total_values: i64,
     codec: Codec,
     stranded: Arc<AtomicUsize>,
+    /// Whether this chunk has handed out a dictionary page yet.
+    ///
+    /// `parquet`'s value decoder `expect`s a dictionary before the first
+    /// dictionary-encoded data page — "Decoder for dict should have been set",
+    /// `parquet` 59.2 `src/column/reader/decoder.rs:213` — and the release
+    /// profile turns that panic into an abort. One corrupt footer byte that
+    /// drops `dictionary_page_offset` starts the chunk at its data page, past
+    /// the dictionary, and reached it (satk-9, D-4415). So this reader refuses
+    /// such a page by name before `parquet` can see it.
+    dictionary: bool,
 }
 
 impl LakePageReader {
@@ -162,6 +172,7 @@ impl LakePageReader {
             total_values,
             codec,
             stranded: Arc::new(AtomicUsize::new(0)),
+            dictionary: false,
         }
     }
 
@@ -489,6 +500,7 @@ impl PageReader for LakePageReader {
                         ParquetError::General("dictionary page carries no header".to_owned())
                     })?;
                     let buf = self.decompress(body, uncompressed)?;
+                    self.dictionary = true;
                     return Ok(Some(Page::DictionaryPage {
                         buf,
                         num_values: u32::try_from(d.num_values).map_err(|_| {
@@ -504,6 +516,20 @@ impl PageReader for LakePageReader {
                     let d = header.data_page_header.as_ref().ok_or_else(|| {
                         ParquetError::General("data page carries no header".to_owned())
                     })?;
+                    let values = encoding(d.encoding)?;
+                    // A DICTIONARY-ENCODED PAGE WITH NO DICTIONARY BEFORE IT IS
+                    // REFUSED HERE, where it is a sentence, rather than handed
+                    // to `parquet`, where it is a panic. See `dictionary`.
+                    if matches!(
+                        values,
+                        Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY
+                    ) && !self.dictionary
+                    {
+                        return Err(ParquetError::General(format!(
+                            "a {values} data page with no dictionary page before it in its \
+                             column chunk; the footer's dictionary offset is missing or wrong"
+                        )));
+                    }
                     self.values_read += i64::from(d.num_values);
                     let buf = self.decompress(body, uncompressed)?;
                     return Ok(Some(Page::DataPage {
@@ -511,7 +537,7 @@ impl PageReader for LakePageReader {
                         num_values: u32::try_from(d.num_values).map_err(|_| {
                             ParquetError::General("data page value count is negative".to_owned())
                         })?,
-                        encoding: encoding(d.encoding)?,
+                        encoding: values,
                         def_level_encoding: encoding(d.definition_level_encoding)?,
                         rep_level_encoding: encoding(d.repetition_level_encoding)?,
                         statistics: None,

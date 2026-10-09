@@ -331,20 +331,46 @@ impl AllRungSelectionV5SuccessorSetV1 {
     /// winner, selected-exit join or exact 25-row count differs. A callback
     /// error halts the already-authorized visit and is returned with its rung
     /// and rank context; the consumed capability cannot be retried.
-    pub(crate) fn visit_canonical<F>(mut self, mut visit: F) -> Result<(), String>
+    pub(crate) fn visit_canonical<F>(self, visit: F) -> Result<(), String>
+    where
+        F: FnMut(SelectionV5SuccessorWinnerV1) -> Result<(), String>,
+    {
+        self.visit(Arity::ExactlyTwentyFive, visit)
+    }
+
+    /// The same reauthenticated visit for a REPORT of what each rung
+    /// committed: a rung may hold fewer than 25 winners, because Selection V5
+    /// commits `min(eligible, 25)` (ledgerall-2, D-2627). Every other check
+    /// `visit_canonical` makes is made here. Global Replay keeps
+    /// `visit_canonical`, whose 8×25 cohort is its contract.
+    ///
+    /// # Errors
+    ///
+    /// As `visit_canonical`, except that a rung with fewer than 25 winners is
+    /// visited rather than refused; more than 25 is still refused.
+    pub(crate) fn visit_committed<F>(self, visit: F) -> Result<(), String>
+    where
+        F: FnMut(SelectionV5SuccessorWinnerV1) -> Result<(), String>,
+    {
+        self.visit(Arity::AtMostTwentyFive, visit)
+    }
+
+    fn visit<F>(mut self, arity: Arity, mut visit: F) -> Result<(), String>
     where
         F: FnMut(SelectionV5SuccessorWinnerV1) -> Result<(), String>,
     {
         self.topology
             .require_same("before all-rung Selection V5 successor preflight")?;
-        let one_minute = preflight_successor_rung(&mut self.one_minute, 60, "1min")?;
-        let two_minute = preflight_successor_rung(&mut self.two_minute, 120, "2min")?;
-        let three_minute = preflight_successor_rung(&mut self.three_minute, 180, "3min")?;
-        let five_minute = preflight_successor_rung(&mut self.five_minute, 300, "5min")?;
-        let ten_minute = preflight_successor_rung(&mut self.ten_minute, 600, "10min")?;
-        let fifteen_minute = preflight_successor_rung(&mut self.fifteen_minute, 900, "15min")?;
-        let thirty_minute = preflight_successor_rung(&mut self.thirty_minute, 1_800, "30min")?;
-        let sixty_minute = preflight_successor_rung(&mut self.sixty_minute, 3_600, "60min")?;
+        let one_minute = preflight_successor_rung(&mut self.one_minute, 60, "1min", arity)?;
+        let two_minute = preflight_successor_rung(&mut self.two_minute, 120, "2min", arity)?;
+        let three_minute = preflight_successor_rung(&mut self.three_minute, 180, "3min", arity)?;
+        let five_minute = preflight_successor_rung(&mut self.five_minute, 300, "5min", arity)?;
+        let ten_minute = preflight_successor_rung(&mut self.ten_minute, 600, "10min", arity)?;
+        let fifteen_minute =
+            preflight_successor_rung(&mut self.fifteen_minute, 900, "15min", arity)?;
+        let thirty_minute =
+            preflight_successor_rung(&mut self.thirty_minute, 1_800, "30min", arity)?;
+        let sixty_minute = preflight_successor_rung(&mut self.sixty_minute, 3_600, "60min", arity)?;
         self.topology
             .require_same("after all-rung Selection V5 successor preflight")?;
 
@@ -359,15 +385,31 @@ impl AllRungSelectionV5SuccessorSetV1 {
     }
 }
 
+/// How many winners a rung's successor visit admits (ledgerall-2, D-2627).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arity {
+    /// Global Replay's 8×25 cohort: exactly 25.
+    ExactlyTwentyFive,
+    /// A report of what was committed: `min(eligible, 25)`, so 0..=25.
+    AtMostTwentyFive,
+}
+
 fn preflight_successor_rung(
     selection: &mut CommittedStoredSelectionV5,
     expected_rung: u32,
     rung_name: &str,
+    arity: Arity,
 ) -> Result<Vec<SelectionV5SuccessorWinnerV1>, String> {
     let winners = selection.successor_winners()?;
-    if winners.len() != MAX_WINNERS_USIZE {
+    if arity == Arity::ExactlyTwentyFive && winners.len() != MAX_WINNERS_USIZE {
         return Err(format!(
             "all-rung {rung_name} successor requires exactly 25 winners, observed {}",
+            winners.len()
+        ));
+    }
+    if winners.len() > MAX_WINNERS_USIZE {
+        return Err(format!(
+            "all-rung {rung_name} successor admits at most 25 winners, observed {}",
             winners.len()
         ));
     }

@@ -51,6 +51,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import Picker from '$lib/Picker.svelte';
   import DayField from '$lib/DayField.svelte';
+  import StoreScrub from '$lib/StoreScrub.svelte';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
      `loadCatalogue(feeds.active)` on every feed change, so the universe rung
      costs this page NO request — it is a join against a list the layout has
@@ -79,6 +80,7 @@
      from the 2nd to the 31st from one held on the 2nd alone; the window says
      which, in the `02 Sep 2024` form this product uses everywhere. */
   import { MON, dayLabel, monthLabel, stampLabel, timeLabel } from '$lib/dates.js';
+  import { IST_OFFSET_MS, SESSION_MINUTES } from '$lib/ist.js';
   import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
   // THE COMPLETENESS ARITHMETIC, OUT OF THE MARKUP AND UNDER A TEST. Two
   // defects lived in these expressions — a denominator taken from whichever
@@ -96,6 +98,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { refusalFrom } from '$lib/refusal.js';
 
   /* ======================================================================
      THE SHAPES, NAMED ONCE — imported where they already exist
@@ -395,7 +398,7 @@
    * continuous session ends at 15:29. Stated because a completeness figure with
    * an unstated denominator is a number nobody can check.
    */
-  const BARS_PER_SESSION = 375;
+  const BARS_PER_SESSION = SESSION_MINUTES; /* `$lib/ist.js`, D-3516 */
 
   /**
    * Bars one session holds **at the rung the row is stored at**.
@@ -4532,6 +4535,11 @@
     try {
       signal.throwIfAborted();
       const res = await ask(`/bars.json?${q}`, { signal });
+      // THE STATUS BEFORE THE BODY (F4, D-3221): the route's `error` and a
+      // plain-text request-bounds refusal are both named, with the status.
+      if (!res.ok) {
+        return { key: r.key, row: r, bars: [], faults: null, error: await refusalFrom('/bars.json', res) };
+      }
       let body = null;
       try {
         body = await res.json();
@@ -4550,9 +4558,6 @@
          the logs. */
       if (body && typeof body === 'object' && !Array.isArray(body) && body.error) {
         return { key: r.key, row: r, bars: [], faults: null, error: String(body.error) };
-      }
-      if (!res.ok && res.status !== 206) {
-        return { key: r.key, row: r, bars: [], faults: null, error: `HTTP ${res.status}` };
       }
       /* A PARTIAL read answers 206 with `{bars, faults}`. Both shapes are
          handled and a faulty record is surfaced, never silently dropped - a
@@ -4650,11 +4655,12 @@
       });
       try {
         const res = await ask(`/bars/window.json?${q}`, { signal });
-        const body = await res.json();
-        if (!res.ok && !body?.bars) {
+        // The status before the body (F4, D-3221).
+        if (!res.ok) {
           return { key: `${first.key}|window`, row: first, bars: [], faults: null,
-                   error: body?.error ?? `HTTP ${res.status}` };
+                   error: await refusalFrom('/bars/window.json', res) };
         }
+        const body = await res.json();
         return {
           key: `${first.key}|window`,
           row: first,
@@ -4755,8 +4761,6 @@
      keystroke: the comparator below runs O(n log n) times and must compare
      plain fields, exactly as the census comparator does.
      --------------------------------------------------------------------- */
-  const IST_OFFSET_MS = 19800000; /* +05:30, and India keeps no DST */
-
   /**
    * The IST calendar day an epoch-millisecond instant falls on, as the
    * `YYYY-MM-DD` KEY form and never a label. It is subtracted from an
@@ -4883,6 +4887,10 @@
     oi_null_before:
       'the previous bar carries no open interest, so there is nothing to measure this one against.',
     previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.',
+    previous_close_negative:
+      'the previous close is stored as a NEGATIVE number of paisa, which no price can be: that stored value is corrupt, and no change is measured against it.',
+    previous_oi_negative:
+      'the previous open interest is stored as a negative number that is not the null sentinel: that stored value is corrupt, and no change is measured against it.',
     previous_unreadable:
       'the bar before this one failed its checksum and was not read, so there is no trusted value to measure this one against. Its own value is shown; only the change is withheld.',
     overflow:
@@ -10043,6 +10051,9 @@
          have gone anyway. -->
     </div>
   {/if}
+  <!-- THE SCRUB (sobs-10, D-4454): the one check that opens the bar files
+       this page's census counts. On request only; never polled. -->
+  {#if feeds.active}<StoreScrub feed={feeds.active} />{/if}
 </div>
 
 <!-- ======================================================================

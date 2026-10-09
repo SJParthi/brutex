@@ -135,9 +135,11 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    honest limits; describing either historical defect as current would now be a
    second documentation defect.
 
-   *Mask evaluation* is O(1) per bar in the production
-   `engine::column::Column::support` path. The owned column is row-major and
-   folds exactly one fixed-six-word `vocab::ConditionMask::hits` call per bar,
+   *Mask evaluation* is O(1) per bar per candidate in the production
+   `engine::column::Column::support_each` path, which counts a whole batch of
+   candidates against each 512-row block of the column before the next
+   (D-4481, D-4487). The owned column is row-major and every (bar, candidate)
+   pair folds exactly one fixed-six-word `vocab::ConditionMask::hits` call,
    independent of candidate width and of whether the row matches. The former
    vertical implementation did one bitmap intersection per named condition and
    was Θ(k); `C-E-02b` retains that failed measurement, while `C-E-02`,
@@ -249,9 +251,12 @@ only after their manifests took them. `cli`'s `pull` and `vocab` arrows, both
 declared on 2026-09-01, were missing here until D-0683: D-0453 drew `pull` in
 `AGENTS.md` and `docs/01-architecture.md` but not in this file, and its own list
 left out `vocab`. Gates 9 and 9b pin one arrow each, and `core/tests/graph.rs`
-checks the table in `docs/01-architecture.md` against all thirteen manifests;
-**nothing parses this block as a whole**, so check it against that gate and the
-manifests rather than trusting it.
+checks the table in `docs/01-architecture.md` against all thirteen manifests.
+**Since D-3502 the same file parses this block, and `AGENTS.md`'s copy, as a
+whole** (`the_law_pictures_of_the_graph_are_the_manifests`): every member and
+every arrow, both ways. Redraw the block when a manifest changes, or the build
+is red; the diagram above `docs/01-architecture.md`'s table is still checked by
+nothing.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
 of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot

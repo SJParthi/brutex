@@ -59,6 +59,33 @@ pub const MAX_STORE_READ_CONCURRENT: usize = 8;
 /// D-2327.
 pub const MAX_LOG_READ_CONCURRENT: usize = 4;
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a reader cache's mutex was free when this thread reached its
+    /// cold open, as [`note_slot_free`] last saw it. Test builds only.
+    /// expr-3, cand-2, D-2576.
+    pub(crate) static SLOT_FREE_AT_OPEN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Records whether `slot` can be locked right now, from the cold-open point
+/// of a reader cache (expr-3, cand-2, D-2576). A cache that still held its own
+/// guard there would park every other detail permit behind one cold open; the
+/// probe retries briefly, so a different thread's momentary take or put-back
+/// is not mistaken for this thread's own hold. Test builds only.
+#[cfg(test)]
+pub(crate) fn note_slot_free<T>(slot: &std::sync::Mutex<T>) {
+    let mut free = false;
+    for _ in 0..10_000 {
+        if !matches!(slot.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+            free = true;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    SLOT_FREE_AT_OPEN.with(|cell| cell.set(Some(free)));
+}
+
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static STORE_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
@@ -202,8 +229,14 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    // THE CALLER'S LOG RUN CROSSES TO THE BLOCKING THREAD (sobs-14, D-4451).
+    // The scope is a thread-local set while a future is polled, and the work
+    // runs on another thread, so an event written inside it would otherwise
+    // lose the run of the request that asked for it.
+    let run = telemetry::current_run();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _scope = run.map(telemetry::enter);
         work()
     })
     .await
@@ -230,13 +263,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Permit::owed();
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        work()
-    })
-    .await
-    .map_err(|why| RunError::Join(why.to_string()))
+    admitted(Permit::owed(), work).await
 }
 
 /// Refuses a detail query before any parser allocates from an unbounded URI.
@@ -556,6 +583,19 @@ pub(crate) fn take_every_log_read_slot(
     _apart: &tokio::sync::MutexGuard<'static, ()>,
 ) -> Vec<Permit> {
     std::iter::from_fn(|| Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT))
+        .collect()
+}
+
+/// Takes every store-read slot that is free, for a test that must see a
+/// store-reading route refused at admission (resources-4, P1-04-01, D-2593).
+/// Asks for the serial guard so it cannot race [`hold_every_slot`] or the
+/// other pool-holding tests; it takes what is free rather than exactly
+/// [`MAX_STORE_READ_CONCURRENT`], and the caller asserts what it got.
+#[cfg(test)]
+pub(crate) fn take_every_store_read_slot(
+    _apart: &tokio::sync::MutexGuard<'static, ()>,
+) -> Vec<Permit> {
+    std::iter::from_fn(|| Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT))
         .collect()
 }
 
@@ -1550,5 +1590,29 @@ mod tests {
             .await
             .expect("admitted blocking task");
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+    }
+
+    /// sobs-14, D-4451: BLOCKING WORK KEEPS THE LOG RUN OF THE REQUEST THAT
+    /// ASKED FOR IT, through each admission (`run`, `run_store_read`,
+    /// `run_owed`), and work asked for outside any run carries none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_work_keeps_the_callers_log_run() {
+        let _serial = super::TEST_SERIAL.lock().await;
+        let inside = telemetry::in_run(4_454_001, run(telemetry::current_run))
+            .await
+            .expect("admitted blocking task");
+        assert_eq!(inside, Some(4_454_001));
+        let read = telemetry::in_run(4_454_002, run_store_read(telemetry::current_run))
+            .await
+            .expect("admitted store read");
+        assert_eq!(read, Some(4_454_002));
+        let owed = telemetry::in_run(4_454_003, super::run_owed(telemetry::current_run))
+            .await
+            .expect("owed blocking task");
+        assert_eq!(owed, Some(4_454_003));
+        let outside = run(telemetry::current_run)
+            .await
+            .expect("admitted blocking task");
+        assert_eq!(outside, None);
     }
 }

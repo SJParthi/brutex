@@ -337,26 +337,30 @@ pub const SOURCES: [Source; 4] = [
 /// Teaching it JSON would give the catalogue two readers that must agree
 /// forever; converting at the boundary leaves it one.
 ///
-/// # It refuses rather than emits, in four ways
+/// # It refuses rather than emits, in five ways
 ///
 /// A document that is not an object, an object that names one category twice
-/// (two lists for one category, CE-58), a conversion that yields **no rows**,
-/// and any name or category carrying a comma or a newline — which would
-/// produce a CSV whose columns do not line up with its header and which
+/// (two lists for one category, CE-58, D-2682), an object whose values are not
+/// arrays of strings (one such value, or one element that is not a string,
+/// refuses the whole document -- nothing is skipped), a conversion that yields
+/// **no rows**, and any name or category carrying a comma or a newline — which
+/// would produce a CSV whose columns do not line up with its header and which
 /// `Published::read` would then mis-split. Every one is a refusal naming the
-/// cause, because the alternative is a catalogue that parses into the wrong
-/// names.
+/// cause, because the alternative is a catalogue that parses into the wrong names.
 ///
-/// # And it skips, loudly, in two
-///
-/// A category whose value is not a list and a list element that is not a
-/// string are skipped rather than refused (MR-04): one malformed element must
-/// not cost every index NSE publishes. Each skip is counted and the skipped
-/// categories are named at `Warn` and on stderr (D-2682).
+/// Until D-3158 the second of these was only true on paper: this doc said
+/// "refuses" while the code skipped such values and elements without counting
+/// them, so a reshaped document converted to a shorter catalogue that looked
+/// complete. A refusal costs nothing already held -- `land` writes nothing on
+/// `Err`, so the previous catalogue stays on disk. D-2682 had meanwhile made
+/// the same skips loud (a `Warn` line naming each skipped category) on the
+/// other branch; the merge keeps D-3158's refusal and D-2682's repeated-key
+/// refusal, and drops the skip counter that no longer has a skip to count
+/// (D-3128).
 ///
 /// # Errors
 ///
-/// A sentence for each of the four refusals.
+/// A sentence for each of the five refusals.
 pub fn nse_index_csv(body: &str) -> Result<String, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|why| format!("the index list is not JSON — {why}"))?;
@@ -381,23 +385,31 @@ pub fn nse_index_csv(body: &str) -> Result<String, String> {
 
     let mut out = String::from("index_name,category\n");
     let mut rows = 0_usize;
-    // WHAT MR-04 SKIPS IS COUNTED AND NAMED (CE-58, D-2682). A category whose
-    // value is not a list, and a list element that is not a name, are still
-    // skipped rather than costing the whole catalogue, but no longer silently:
-    // `note_index_skips` reports both counts and every skipped category's name.
-    let mut skipped = IndexSkips::default();
     for (category, names) in groups {
+        // A VALUE THAT IS NOT A LIST OF NAMES IS REFUSED, NOT SKIPPED. D-3158.
+        //
+        // Both arms used to `continue`, counting nothing and saying nothing, so a
+        // document whose shape had changed converted to a SHORTER catalogue that
+        // looked complete -- the fallback that hides a failure `CLAUDE.md` §4
+        // bans. The skip was defended as keeping the good names, but a refusal
+        // here loses none: `land` writes nothing on `Err`, so the catalogue
+        // already on disk stays whole and the run says why it was not replaced.
         let Some(list) = names.as_array() else {
-            skipped.categories.push(category.as_str());
-            continue;
+            return Err(format!(
+                "category `{category}` holds {} rather than a list of index \
+                 names, so the document is not the category-to-names map this \
+                 conversion reads",
+                json_kind(names)
+            ));
         };
         for name in list {
             let Some(name) = name.as_str() else {
-                skipped.elements = skipped.elements.saturating_add(1);
-                if skipped.categories_with_elements.last() != Some(&category.as_str()) {
-                    skipped.categories_with_elements.push(category.as_str());
-                }
-                continue;
+                return Err(format!(
+                    "category `{category}` lists {}, which is not an index \
+                     name; converting the rest would publish a catalogue that \
+                     silently lacks it",
+                    json_kind(name)
+                ));
             };
             // A COMMA IN A FIELD IS A COLUMN THIS FILE DOES NOT HAVE. Quoting
             // it would be the other choice and a worse one: `Published::read`
@@ -425,54 +437,23 @@ pub fn nse_index_csv(body: &str) -> Result<String, String> {
                 .to_owned(),
         );
     }
-    note_index_skips(&skipped);
     Ok(out)
 }
 
-/// What [`nse_index_csv`] skipped under MR-04, by name. CE-58, D-2682.
-#[derive(Debug, Default)]
-struct IndexSkips<'a> {
-    /// Categories whose value is not a list of names, every one by name.
-    categories: Vec<&'a str>,
-    /// List elements that are not strings, across every category.
-    elements: u64,
-    /// The categories those elements sat in, each once.
-    categories_with_elements: Vec<&'a str>,
-}
-
-/// One `Warn` line and one `eprintln!` when the conversion skipped anything,
-/// and nothing when it skipped nothing. The line carries both counts and the
-/// first skipped category; the stderr sentence names every one, so a category
-/// NSE reshaped is visible on a default run rather than missing from
-/// `nse_indices.csv` with the master reported `Written`. CE-58, D-2682.
-fn note_index_skips(skipped: &IndexSkips<'_>) {
-    if skipped.categories.is_empty() && skipped.elements == 0 {
-        return;
+/// What kind of JSON value this is, for a refusal that must not quote the value.
+///
+/// A refusal names the KIND rather than echoing the value because the value is
+/// vendor-supplied and unbounded: an object nested in the document would
+/// otherwise be copied whole into an error line. D-3158.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "an object",
     }
-    let first = skipped
-        .categories
-        .first()
-        .or_else(|| skipped.categories_with_elements.first())
-        .copied()
-        .unwrap_or_default();
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn("pull.masters", "index entries skipped")
-            .with(
-                "categories",
-                telemetry::Value::Uint(u64::try_from(skipped.categories.len()).unwrap_or(u64::MAX)),
-            )
-            .with("elements", telemetry::Value::Uint(skipped.elements))
-            .with("category", telemetry::Value::Str(first)),
-    );
-    eprintln!(
-        "brutex: the NSE index list carried {} categor(ies) that are not a list \
-         of names ({:?}) and {} list element(s) that are not a name (in {:?}); \
-         those were skipped and every other name converted (MR-04)",
-        skipped.categories.len(),
-        skipped.categories,
-        skipped.elements,
-        skipped.categories_with_elements
-    );
 }
 
 /// Which kind of transport a fetch is going out on.
@@ -1956,7 +1937,10 @@ mod tests {
         for (body, expect) in [
             ("not json at all", "not JSON"),
             (r#"["NIFTY 50"]"#, "not an object"),
-            (r#"{"Broad Market Indices": "NIFTY 50"}"#, "no index at all"),
+            (
+                r#"{"Broad Market Indices": "NIFTY 50"}"#,
+                "rather than a list",
+            ),
             (r"{}", "no index at all"),
         ] {
             let why = super::nse_index_csv(body).expect_err("an unexpected shape must refuse");
@@ -2988,29 +2972,30 @@ mod tests {
     }
 
     #[test]
-    fn an_index_document_with_a_non_string_name_skips_it_rather_than_refusing() {
-        // A CATEGORY WHOSE LIST HOLDS A NUMBER, AND ONE WHOSE VALUE IS NOT A
-        // LIST AT ALL. Neither is a name, and neither is a reason to discard
-        // the names that ARE there -- `Published::read` wants every index NSE
-        // publishes, and refusing the document over one malformed element
-        // would cost all of them.
-        let json = r#"{
-            "Broad Market Indices": ["NIFTY 50", 42, null, "NIFTY NEXT 50"],
-            "Not A List": "NIFTY BANK"
-        }"#;
-        let csv = super::nse_index_csv(json).expect("the good names still convert");
-
-        assert!(csv.contains("NIFTY 50,Broad Market Indices\n"), "{csv}");
-        assert!(
-            csv.contains("NIFTY NEXT 50,Broad Market Indices\n"),
-            "{csv}"
-        );
-        assert!(!csv.contains("42"), "a number is not an index name: {csv}");
-        assert!(
-            !csv.contains("NIFTY BANK"),
-            "a category whose value is not a list contributes nothing: {csv}"
-        );
-        assert_eq!(csv.lines().count(), 3, "header plus two names: {csv}");
+    fn an_index_document_with_a_non_string_name_or_a_non_list_value_refuses() {
+        // THIS TEST USED TO ASSERT THE SKIP, AND THE SKIP WAS THE DEFECT (D-3158).
+        // It asserted that a number, a null and a non-list category were dropped
+        // with nothing counted and the remaining names converted -- a shorter
+        // catalogue that looked complete. Each is now a refusal that names the
+        // category and the KIND of value, and `land` keeps the old catalogue.
+        for (json, kind) in [
+            (
+                r#"{"Broad": ["NIFTY 50", 42, "NIFTY NEXT 50"]}"#,
+                "a number",
+            ),
+            (r#"{"Broad": ["NIFTY 50", null]}"#, "null"),
+            (r#"{"Broad": [["NIFTY 50"]]}"#, "a list"),
+            (
+                r#"{"Broad": ["NIFTY 50"], "Not A List": "NIFTY BANK"}"#,
+                "a string",
+            ),
+            (r#"{"Broad": ["NIFTY 50"], "Meta": {"v": 1}}"#, "an object"),
+            (r#"{"Broad": ["NIFTY 50"], "Flag": true}"#, "a boolean"),
+        ] {
+            let why = super::nse_index_csv(json).expect_err("a malformed element must refuse");
+            assert!(why.contains(kind), "expected {kind:?} named: {why}");
+            assert!(why.contains("category `"), "the category is named: {why}");
+        }
     }
 
     #[test]

@@ -59,7 +59,7 @@ use runner::portfolio::{
 use runner::topn::RankingPolicyV1;
 
 use crate::admission_store::{AdmissionCompletionReceiptV1, AdmissionDecisionRecordV1};
-use crate::execution_capability::exact_execution_law_digest_v1;
+use crate::execution_capability::{TrainingAttestationsV1, exact_execution_law_digest_v1};
 use crate::execution_disposition_v2::{
     ExecutionDispositionLedgerV2, ExecutionDispositionTagV2, ReclassifiedExecutionDispositionV2,
 };
@@ -3095,6 +3095,8 @@ pub fn prepare_global_replay_v2(
     streams
         .try_reserve_exact(MAX_STREAMS)
         .map_err(|why| format!("global replay V2 stream allocation refused: {why}"))?;
+    // One TRAINING attestation per shared slice, not per stream (D-1838).
+    let mut attestations = TrainingAttestationsV1::new();
     for (selection_index, selection_authority) in selection_authorities.iter_mut().enumerate() {
         let selection = selection_authority.receipt().clone();
         for (rank_zero, entry) in selection.top_twenty_five().iter().copied().enumerate() {
@@ -3127,6 +3129,7 @@ pub fn prepare_global_replay_v2(
                 execution,
                 &manifest,
                 selection_authority,
+                &mut attestations,
             )?);
         }
     }
@@ -3143,16 +3146,17 @@ pub fn prepare_global_replay_v2(
     clippy::too_many_lines,
     reason = "every argument is a separately checked Selection V4 or Execution V2 authority term"
 )]
-fn reconstruct_stream_v2(
+fn reconstruct_stream_v2<'w>(
     selection_index: usize,
     selection: &SelectionReceiptV4,
     rank: u16,
     entry: SelectedEntryV1,
     stream_ordinal: u16,
-    witness: &SelectedReplayWitnessV2<'_>,
+    witness: &SelectedReplayWitnessV2<'w>,
     execution: &mut ExecutionDispositionLedgerV2,
     manifest: &GlobalReplayManifestV2,
     selection_authority: &mut ReplaySelectionAuthorityV2,
+    attestations: &mut TrainingAttestationsV1<'w>,
 ) -> Result<VerifiedReplayStreamV2, GlobalReplayRefusalV2> {
     let live_joined = selection_authority.joined_row(entry.family(), entry.row_sequence())?;
     if live_joined != witness.joined_row {
@@ -3242,8 +3246,9 @@ fn reconstruct_stream_v2(
     }
     parameters.require_column(witness.training_column)?;
     let resolved = parameters.reconstruct_grid(witness.training_series)?;
-    let evaluated = resolved
-        .evaluate_training_grid_attested(
+    let evaluated = attestations
+        .evaluate(
+            &resolved,
             witness.training_series,
             witness.training_column,
             parameters.horizon(),
@@ -3374,9 +3379,9 @@ fn schedule_streams(
         let schedule = scheduler
             .schedule_minute(entry_micros, &intents)
             .map_err(|why| format!("global replay V2 minute {entry_micros} refused: {why:?}"))?;
+        let offered = crate::global_replay::OfferedIndex::new(&intents, &offered_streams)?;
         for decision in schedule.decisions() {
-            let stream_index =
-                find_offered_stream(&streams, &offered_streams, decision.constituent)?;
+            let stream_index = find_offered_stream(&offered, decision.constituent)?;
             let stream = streams
                 .get_mut(stream_index)
                 .ok_or_else(|| "global replay V2 scheduled stream disappeared".to_owned())?;
@@ -3490,24 +3495,22 @@ fn offered_for_minute(
     Ok((intents, indexes))
 }
 
+/// One probe of the minute's index, built once per minute (rep-1, D-2640),
+/// in place of a rescan that rebuilt every offered constituent per decision.
 fn find_offered_stream(
-    streams: &[VerifiedReplayStreamV2],
-    indexes: &[usize],
+    offered: &crate::global_replay::OfferedIndex,
     constituent: Constituent,
 ) -> Result<usize, GlobalReplayRefusalV2> {
-    let mut found = None;
-    for index in indexes.iter().copied() {
-        let stream = streams
-            .get(index)
-            .ok_or_else(|| "global replay V2 offered stream index is invalid".to_owned())?;
-        if constituent_of(stream)? == constituent {
-            if found.is_some() {
-                return Err("global replay V2 scheduler constituent aliases streams".to_owned());
-            }
-            found = Some(index);
+    use crate::global_replay::OfferedStream;
+    match offered.find(constituent) {
+        OfferedStream::Found(index) => Ok(index),
+        OfferedStream::Aliased => {
+            Err("global replay V2 scheduler constituent aliases streams".to_owned())
+        }
+        OfferedStream::Unoffered => {
+            Err("global replay V2 scheduler returned an unoffered constituent".to_owned())
         }
     }
-    found.ok_or_else(|| "global replay V2 scheduler returned an unoffered constituent".to_owned())
 }
 
 fn constituent_of(stream: &VerifiedReplayStreamV2) -> Result<Constituent, GlobalReplayRefusalV2> {

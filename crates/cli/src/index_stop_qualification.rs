@@ -184,6 +184,13 @@ pub struct Request<'a> {
     pub allocation: Allocation,
     /// Complete-family physical admission.
     pub bounds: Bounds,
+    /// The record bound recovery re-verifies this qualification with
+    /// (`index_stop_search_checkpoint::recover` passes `capture.records` to
+    /// `verify_search_slot_bounded`). Publication opens its own result under
+    /// the SAME bound, so a qualification recovery would refuse is refused
+    /// here instead of acknowledged (Z1-slice19-F1, D-2622). Not a `Bounds`
+    /// field, so the qualification identity is unchanged.
+    pub records: u64,
 }
 
 /// Exact immutable candidate ancestor.
@@ -692,11 +699,15 @@ fn publish(request: &Request<'_>, facts: &Facts, identity: [u8; 32]) -> Result<R
         request.bounds.bytes,
         || current(request),
     )?;
+    // The fourth argument is `max_records`. It was `request.bounds.bytes`, a
+    // byte bound four times the capture's bytes, so a qualification between
+    // the two bounds was published and acknowledged here and then refused on
+    // every `recover` (Z1-slice19-F1, D-2622).
     Reader::open(
         request.root,
         identity,
         request.bounds.bytes,
-        request.bounds.bytes,
+        request.records,
     )
 }
 fn current(request: &Request<'_>) -> Result<(), String> {

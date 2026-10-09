@@ -277,8 +277,40 @@ impl Summary {
 }
 
 /// One run's live top-N, on disk.
+///
+/// Dropped without [`Live::finish`] -- an early return, a refused rung, a
+/// failed permanent append, an unwinding panic -- it removes its own file
+/// (conc17-1, CE-20, D-2641). Only a process that never runs its destructors
+/// (SIGKILL, power loss) still leaves one behind.
 pub struct Live {
     path: PathBuf,
+    /// Set by [`Live::finish`], which has already removed the file and
+    /// reported a refusal; `Drop` then has nothing left to do.
+    finished: bool,
+}
+
+impl Drop for Live {
+    /// Removes the file of a run that ended without [`Live::finish`].
+    ///
+    /// Every such run used to leave its file for good, and `/live.json`
+    /// served it as a run still in flight; past [`LIVE_RUN_LIMIT`] distinct
+    /// leftovers every refresh refused for the life of the store, healthy runs
+    /// included (conc17-1). A drop cannot return a refusal, so one that fails
+    /// for any reason but absence is logged by name, never swallowed.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => crate::note(
+                &telemetry::Event::warn("cli.live", "abandoned live file not removed")
+                    .with("path", self.path.display().to_string().as_str())
+                    .with("why", why.to_string().as_str()),
+            ),
+        }
+    }
 }
 
 impl Live {
@@ -321,6 +353,7 @@ impl Live {
             .map_err(|why| format!("the live directory could not be made: {why}"))?;
         let mut live = Self {
             path: Self::path(root, identity),
+            finished: false,
         };
         // AN EMPTY PUBLISH RATHER THAN A HAND-WRITTEN HEADER, so the file is
         // born through the same atomic path every later update takes. The first
@@ -423,18 +456,22 @@ impl Live {
     /// and the trades. A live file that outlives its run is a claim that a search
     /// is still going when it is not.
     ///
-    /// # It is the ONLY remover, and it runs only on the success path
+    /// # It is the success-path remover; `Drop` is every other in-process one
     ///
-    /// There is no `Drop` impl on [`Live`], so a run ended by SIGTERM, SIGKILL
-    /// or a closed terminal never reaches this method and leaves its file
-    /// behind permanently. MEASURED on 2026-09-01: a 6,840-byte file -- 25 rows,
-    /// written at 21:41 -- was still served as an in-flight run hours later.
+    /// This was the ONLY remover, so an in-process early return (a refused
+    /// rung, an evaluator error, a failed `record_all`) left its file behind
+    /// permanently (conc17-1). `Drop` now removes it on every such path
+    /// (D-2641). A run ended by SIGKILL, a power cut or a closed terminal that
+    /// kills without unwinding still never reaches either, and leaves its file.
+    /// MEASURED on 2026-09-01: a 6,840-byte file -- 25 rows, written at 21:41
+    /// -- was still served as an in-flight run hours later.
     ///
     /// [`census`] dates what it reads and [`Freshness`] reports it, which is a
     /// half-answer and is documented as one on [`STALE_AFTER_SECS`]: the file is
     /// published once and then sits untouched for the 87.6% of a run the exit
-    /// grid occupies, so mtime cannot tell a killed run from a pricing one. This
-    /// method staying the only remover is why that half-answer is needed at all.
+    /// grid occupies, so mtime cannot tell a killed run from a pricing one.
+    /// Reclaiming a killed run's file needs a lease the census can probe, which
+    /// is not built (CE-20's second half, left to its owner).
     ///
     /// # Errors
     ///
@@ -442,7 +479,8 @@ impl Live {
     /// the run stands — the same rule `record_all` follows, because detail about
     /// a completed run must not turn that run into a failure.
     #[must_use]
-    pub fn finish(self) -> String {
+    pub fn finish(mut self) -> String {
+        self.finished = true;
         match std::fs::remove_file(&self.path) {
             Ok(()) => String::new(),
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -1415,14 +1453,25 @@ mod tests {
     fn bounded_live_cache_refuses_row_run_and_directory_limits() {
         let root = tempdir();
         let mut cache = super::CensusCache::default();
-        for byte in 0..=u8::try_from(super::LIVE_RUN_LIMIT).expect("bound fits byte") {
-            Live::open(root.path(), &[byte; 32]).expect("empty named run");
-        }
+        // HELD, because a dropped `Live` now removes its file (conc17-1,
+        // D-2641): the ceiling is about runs still writing.
+        let held: Vec<Live> = (0..=u8::try_from(super::LIVE_RUN_LIMIT).expect("bound fits byte"))
+            .map(|byte| Live::open(root.path(), &[byte; 32]).expect("empty named run"))
+            .collect();
         assert!(
             cache
                 .refresh(root.path())
                 .expect_err("run ceiling")
                 .contains("runs")
+        );
+        drop(held);
+        assert!(
+            cache
+                .refresh(root.path())
+                .expect("every dropped run removed its file")
+                .runs
+                .is_empty(),
+            "dropped runs never count against the ceiling"
         );
         let root = tempdir();
         let identity = [95_u8; 32];
@@ -1922,6 +1971,58 @@ mod tests {
             10,
             "fewer candidates than the heap holds means every one is a rewrite"
         );
+    }
+
+    /// conc17-1, CE-20 (D-2641): a live view dropped without `finish` -- the
+    /// shape of every in-process early return -- removes its file, so it is
+    /// never served as a run in flight and never counts against
+    /// `LIVE_RUN_LIMIT`. `finish` still removes it and reports nothing, and a
+    /// drop after `finish` touches nothing (a same-identity successor's file
+    /// survives it). On the old code there was no `Drop`, so the file stayed.
+    #[test]
+    fn a_live_view_dropped_without_finish_removes_its_file() {
+        let root = tempdir();
+        let identity = [0x5e_u8; 32];
+        let path = Live::path(root.path(), &identity);
+
+        // Opened, published, dropped: gone.
+        let mut live = Live::open(root.path(), &identity).expect("writable");
+        live.publish(&[row(identity, 1, 1_000)], Summary::default())
+            .expect("published");
+        assert!(path.exists());
+        assert_eq!(current(root.path()).len(), 1);
+        drop(live);
+        assert!(!path.exists(), "a dropped live view removes its file");
+        assert!(current(root.path()).is_empty());
+
+        // Opened and dropped with nothing published beyond the empty file.
+        drop(Live::open(root.path(), &identity).expect("writable"));
+        assert!(!path.exists());
+
+        // An early return inside a function drops it the same way.
+        let refused = || -> Result<(), String> {
+            let mut live = Live::open(root.path(), &identity)?;
+            live.publish(&[row(identity, 1, 2_000)], Summary::default())?;
+            Err("the rung was refused after its live view opened".to_owned())
+        };
+        assert!(refused().is_err());
+        assert!(!path.exists(), "an early return leaves no live file");
+
+        // Finished: removed, nothing reported, and the drop after it does not
+        // remove a successor that reopened the same name.
+        let live = Live::open(root.path(), &identity).expect("writable");
+        assert!(live.finish().is_empty());
+        assert!(!path.exists());
+        let successor = Live::open(root.path(), &identity).expect("writable");
+        assert!(path.exists());
+        drop(successor);
+        assert!(!path.exists());
+
+        // The file already gone (removed by hand): the drop is quiet.
+        let live = Live::open(root.path(), &identity).expect("writable");
+        std::fs::remove_file(&path).expect("removed by hand");
+        drop(live);
+        assert!(!path.exists());
     }
 
     /// A scratch directory that removes itself.

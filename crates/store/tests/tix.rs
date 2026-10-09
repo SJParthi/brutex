@@ -589,3 +589,122 @@ fn an_index_damaged_under_a_live_writer_is_rebuilt_before_its_append() {
         assert_eq!(reader.first_at_or_after(bar.ts_micros), Ok(row as u64));
     }
 }
+
+#[test]
+fn a_torn_entry_under_a_live_writer_is_rebuilt_alone_and_the_answers_stay_exact() {
+    // D-3134. A failed append can tear only the entry of the last committed
+    // bar's bucket; the next append rebuilds THAT entry from its own bars, in
+    // a bounded number of reads, rather than the whole month (D-3302's
+    // O(n_valid)). Proved by an unrelated earlier entry, damaged on purpose,
+    // that the repair does not touch: a whole rebuild rewrites it clean.
+    let tf = Timeframe::MINUTE_1;
+    let bars = month_of(3, 375, 60);
+    let root = Root::new();
+    write(&root, tf, &bars, 375);
+    let mut writer = root.writer(tf);
+    assert_eq!(writer.time_lookup(), TimeLookup::Indexed);
+
+    let entry_at = |ts: i64| {
+        let slot = (ts - JUNE_START) / (60 * MICROS);
+        64 + usize::try_from(slot / 64).unwrap() * 16
+    };
+    let mut raw = fs::read(root.tix(tf)).unwrap();
+    let torn = entry_at(bars.last().unwrap().ts_micros);
+    raw[torn + 3] ^= 0x5A;
+    let untouched = 64; // bucket 0: June 1, 00:00 to 01:04 IST, holds no bar
+    raw[untouched] ^= 0xFF;
+    write_in_place(&root.tix(tf), &raw);
+    let damaged_early = raw[untouched..untouched + 16].to_vec();
+
+    let more: Vec<Bar> = (0..30).map(|k| bar(at(9, k * 60))).collect();
+    assert!(matches!(
+        writer.append(&more),
+        Ok(Appended::Committed { .. })
+    ));
+    drop(writer);
+
+    let after = fs::read(root.tix(tf)).unwrap();
+    assert_eq!(
+        after[untouched..untouched + 16],
+        damaged_early[..],
+        "only the torn entry and the append's own entries were written"
+    );
+    assert_ne!(
+        after[torn..torn + 16],
+        raw[torn..torn + 16],
+        "the torn entry was rewritten"
+    );
+
+    let mut now = bars.clone();
+    now.extend(more);
+    let reader = root.reader(tf);
+    assert_eq!(reader.time_lookup(), TimeLookup::Indexed);
+    for ts in probes(&now).into_iter().filter(|&ts| ts > now[0].ts_micros) {
+        let truth = now.partition_point(|b| b.ts_micros < ts) as u64;
+        assert_eq!(reader.first_at_or_after(ts), Ok(truth), "ts={ts}");
+    }
+}
+
+/// A READER OPENED BEFORE ITS MONTH WAS REPLACED NEVER PAIRS ITS OLD BARS WITH
+/// THE NEW INDEX. satk-2, D-4416.
+///
+/// The audit's probe P07, kept. The held month has minutes 0, 1, 2 and 4..=10;
+/// the replacement has 0..=7, 9 and 10. Both hold ten bars, begin at minute 0
+/// and end at minute 10, so the new `.tix` passes every check that compares it
+/// with the held header — and a reader that opened its index by path at its
+/// first lookup answered minute 4 with row 4, which in the bars it holds is
+/// minute 5. The month is replaced the way a consistent swap does it: `.bin`,
+/// then `.crc`, then `.tix`, each renamed in whole.
+#[test]
+fn a_reader_opened_before_its_month_was_replaced_never_pairs_old_bars_with_the_new_index() {
+    let minute = |m: i64| at(0, m * 60);
+    let held: Vec<Bar> = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10]
+        .map(|m| bar(minute(m)))
+        .to_vec();
+    let replacement: Vec<Bar> = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+        .map(|m| bar(minute(m)))
+        .to_vec();
+    let root = Root::new();
+    let other = Root::new();
+    write(&root, Timeframe::MINUTE_1, &held, 4);
+    write(&other, Timeframe::MINUTE_1, &replacement, 4);
+
+    let reader = root.reader(Timeframe::MINUTE_1);
+    for kind in [FileKind::Bars, FileKind::Checksums, FileKind::TimeIndex] {
+        let file = |at: &Root| path(Timeframe::MINUTE_1).with_file(kind).to_path_buf(&at.0);
+        fs::rename(file(&other), file(&root)).unwrap();
+    }
+
+    assert_eq!(
+        reader.time_lookup(),
+        TimeLookup::Bisection(Why::Replaced),
+        "the path no longer names the bars this handle holds, and it says so"
+    );
+    for (m, want) in [(3, 3), (4, 3), (6, 5), (8, 7), (10, 9), (11, 10)] {
+        let row = reader.first_at_or_after(minute(m)).unwrap();
+        assert_eq!(row, want, "minute {m} in the HELD bars");
+        if row < 10 {
+            assert_eq!(
+                reader.read_record(row).unwrap().ts_micros,
+                held[usize::try_from(row).unwrap()].ts_micros
+            );
+        }
+    }
+
+    // A reader opened after the swap holds the new bars, and the new index
+    // describes them: it is used.
+    let fresh = root.reader(Timeframe::MINUTE_1);
+    assert_eq!(fresh.time_lookup(), TimeLookup::Indexed);
+    assert_eq!(fresh.first_at_or_after(minute(4)).unwrap(), 4);
+    assert_eq!(fresh.first_at_or_after(minute(8)).unwrap(), 8);
+
+    // A `.bin` path that names nothing at all says nothing about the held
+    // bars either: the index beside it is not trusted, and the held bars
+    // still answer.
+    let gone = Root::new();
+    write(&gone, Timeframe::MINUTE_1, &held, 10);
+    let orphan = gone.reader(Timeframe::MINUTE_1);
+    fs::remove_file(path(Timeframe::MINUTE_1).to_path_buf(&gone.0)).unwrap();
+    assert_eq!(orphan.time_lookup(), TimeLookup::Bisection(Why::Replaced));
+    assert_eq!(orphan.first_at_or_after(minute(4)).unwrap(), 3);
+}

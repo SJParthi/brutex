@@ -99,16 +99,27 @@ fn nonempty_lines(s: &str) -> usize {
 
 // --------------------------------------------- probe: is there a crate? --
 
+/// The output line the probe writes for `n` tracked crate manifests. Its own
+/// function so a test pins it (P15-03, D-2514): every toolchain step of the
+/// build job runs under `if: steps.probe.outputs.has_crates == 'true'`, so
+/// a mutated comparison here would switch them all off with only a warning.
+fn has_crates_line(n: usize) -> &'static str {
+    if n == 0 {
+        "has_crates=false"
+    } else {
+        "has_crates=true"
+    }
+}
+
 /// The build job's probe. Writes `has_crates` to `$GITHUB_OUTPUT`.
 fn probe() -> Verdict {
     let n = tracked("crates/*/Cargo.toml")?.len();
+    append_to_env_file("GITHUB_OUTPUT", has_crates_line(n))?;
     if n == 0 {
-        append_to_env_file("GITHUB_OUTPUT", "has_crates=false")?;
         println!(
             "::warning title=No crate exists yet::The toolchain gates (fmt, build, clippy, deny, test) compiled NOTHING on this commit because the workspace has no members. This is not a passing build — it is an empty one. It stops being possible as soon as crates/core is merged."
         );
     } else {
-        append_to_env_file("GITHUB_OUTPUT", "has_crates=true")?;
         println!("{n} crate manifest(s) tracked — the toolchain gates apply.");
     }
     Ok(())
@@ -441,26 +452,212 @@ fn tools() -> Verdict {
 /// own decision entry.
 const UNSAFE_CEILING: usize = 3;
 
-/// Every `allow` or `expect` attribute opening on `unsafe_code` and closing
-/// or continuing right after it, in `src`: the bare form, the form with a
-/// `reason`, and the `expect` form alike (D-1610), one count per occurrence.
+/// Every `unsafe_code` named, as a whole word, anywhere inside the list of an
+/// `allow(`, `expect(` or `warn(` in `src`: the bare form, the form with a
+/// `reason`, the `expect` form (D-1610), and since P15-01 (D-2512) a lint
+/// that is not first in the list (`allow(unused, unsafe_code)`), one after a
+/// space, and a list split over lines. One count per occurrence, each with
+/// the line it is on. The old rule required `unsafe_code` to follow the
+/// parenthesis directly, so the second lint of a list counted nothing.
 fn unsafe_exceptions(src: &str) -> Vec<(usize, &str)> {
-    let mut out = Vec::new();
-    for (n, line) in records(src).into_iter().enumerate() {
-        let needle = "unsafe_code";
+    let needle = "unsafe_code";
+    // Byte offsets of every counted `unsafe_code`. The old reading, on the
+    // raw text, still counts inside a string or a comment as grep did.
+    let mut at: BTreeSet<usize> = BTreeSet::new();
+    let mut offset = 0;
+    for line in src.split('\n') {
         let mut from = 0;
-        while let Some(at) = line[from..].find(needle) {
-            let start = from + at;
+        while let Some(p) = line[from..].find(needle) {
+            let start = from + p;
             let end = start + needle.len();
             let before = &line[..start];
             let opened = before.ends_with("allow(") || before.ends_with("expect(");
             if opened && line[end..].starts_with([',', ')']) {
-                out.push((n + 1, line));
+                at.insert(offset + start);
             }
             from = end;
         }
+        offset += line.len() + 1;
     }
-    out
+    // The list reading, on code only: comments and strings are blanked
+    // byte for byte, so an offset here is an offset in `src`, and a quote
+    // in a string cannot misalign the walk of a list.
+    let code = blank_comments_and_strings(src);
+    let b = code.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    for opener in ["allow(", "expect(", "warn("] {
+        for (open, _) in code.match_indices(opener) {
+            if open > 0 && word(b[open - 1]) {
+                continue;
+            }
+            let body = open + opener.len();
+            let close = list_end(b, body);
+            let mut from = body;
+            while let Some(p) = code[from..close].find(needle) {
+                let start = from + p;
+                let end = start + needle.len();
+                if !word(b[start - 1]) && !b.get(end).is_some_and(|c| word(*c)) {
+                    at.insert(start);
+                }
+                from = end;
+            }
+        }
+    }
+    let lines = records(src);
+    at.into_iter()
+        .map(|o| {
+            let n = src[..o].matches('\n').count();
+            (n + 1, lines.get(n).copied().unwrap_or(""))
+        })
+        .collect()
+}
+
+/// The index of the `)` closing a list whose body starts at `from` in code
+/// with its strings blanked, nested parentheses skipped. A `]`, `;`, `{` or
+/// `}` ends the list too: none belongs inside an attribute's lint list, so
+/// an unclosed `allow(` cannot run on through the rest of the file.
+fn list_end(b: &[u8], from: usize) -> usize {
+    let mut depth = 0usize;
+    for (j, &c) in b.iter().enumerate().skip(from) {
+        match c {
+            b']' | b';' | b'{' | b'}' => return j,
+            b'(' => depth += 1,
+            b')' if depth == 0 => return j,
+            b')' => depth -= 1,
+            _ => {}
+        }
+    }
+    b.len()
+}
+
+/// The end of the string literal whose body starts at `from` (just past its
+/// opening quote): the index past the closing quote, or the end of `b`.
+fn string_end(b: &[u8], from: usize) -> usize {
+    let mut j = from;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    b.len()
+}
+
+/// A raw string opening at `i` (`r`, any `#`s, `"`): the index past its
+/// closing quote and hashes, or the end of `b`. `None` when `i` opens none.
+fn raw_string_end(b: &[u8], i: usize) -> Option<usize> {
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let prefix_ok = i == 0 || !word(b[i - 1]) || (b[i - 1] == b'b' && (i < 2 || !word(b[i - 2])));
+    if b.get(i) != Some(&b'r') || !prefix_ok {
+        return None;
+    }
+    let mut j = i + 1;
+    while b.get(j) == Some(&b'#') {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'"') {
+        return None;
+    }
+    let hashes = j - i - 1;
+    let mut k = j + 1;
+    while k < b.len() {
+        if b[k] == b'"'
+            && b[k + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|c| **c == b'#')
+                .count()
+                == hashes
+        {
+            return Some(k + 1 + hashes);
+        }
+        k += 1;
+    }
+    Some(b.len())
+}
+
+/// Past a character literal at `i` (a `'`), or `i + 1` when it is a
+/// lifetime: a `'"'` must not open a string.
+fn past_char(b: &[u8], i: usize) -> usize {
+    if b.get(i + 1) == Some(&b'\\') {
+        let mut j = i + 3;
+        while j < b.len() && b[j] != b'\'' {
+            j += 1;
+        }
+        return (j + 1).min(b.len());
+    }
+    let width = match b.get(i + 1) {
+        Some(&c) if c < 0x80 => 1,
+        Some(&c) if c < 0xe0 => 2,
+        Some(&c) if c < 0xf0 => 3,
+        Some(_) => 4,
+        None => return i + 1,
+    };
+    if b.get(i + 1 + width) == Some(&b'\'') {
+        i + 2 + width
+    } else {
+        i + 1
+    }
+}
+
+/// `src` with every comment (line, block, nested block) and every string
+/// literal (plain, byte, raw) replaced by spaces, newlines kept: the same
+/// walk as `gates_runtime`'s (P15-01, D-2512). A comment or string that
+/// never closes runs to the end of the file.
+fn blank_comments_and_strings(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        let next = b.get(i + 1).copied();
+        let end = match (b[i], next) {
+            (b'/', Some(b'/')) => src[i..].find('\n').map_or(b.len(), |p| i + p),
+            (b'/', Some(b'*')) => {
+                let (mut depth, mut j) = (0usize, i);
+                loop {
+                    if j >= b.len() {
+                        break b.len();
+                    }
+                    if b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
+                        depth += 1;
+                        j += 2;
+                    } else if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
+                        depth -= 1;
+                        j += 2;
+                        if depth == 0 {
+                            break j;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            (b'"', _) => string_end(b, i + 1),
+            (b'\'', _) => {
+                i = past_char(b, i);
+                continue;
+            }
+            (b'r', _) => match raw_string_end(b, i) {
+                Some(e) => e,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        for c in &mut out[i..end] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+        i = end;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn gate_5(files: &[(String, String)]) -> Verdict {
@@ -1673,8 +1870,14 @@ mod tests {
             concat!("al", "low( unsafe_code)")
         );
         let hits = unsafe_exceptions(&src);
-        assert_eq!(hits.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [1, 2, 2]);
-        let one = vec![("a.rs".to_owned(), src.clone())];
+        // P15-01, D-2512: `allow( unsafe_code)` on line 5 is an exception
+        // rustc honours; the old rule counted only `allow(unsafe_code`.
+        assert_eq!(
+            hits.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            [1, 2, 2, 5]
+        );
+        let three = src.replacen(concat!("al", "low( unsafe_code)"), "", 1);
+        let one = vec![("a.rs".to_owned(), three)];
         assert!(gate_5(&one).is_ok());
         let two = vec![
             ("a.rs".to_owned(), src.clone()),
@@ -1690,6 +1893,81 @@ mod tests {
             format!("// {allow}\nlet s = \"{expect}{expect}{expect}\";\n"),
         )];
         assert!(gate_5(&quoted).is_err());
+    }
+
+    /// P15-01, D-2512. Every form below enables unsafe code and counted
+    /// nothing under the old rule, which required `unsafe_code` directly
+    /// after the parenthesis. Each literal is split or carries its lint
+    /// second, so this file adds nothing to the real count.
+    #[test]
+    fn gate_5_counts_unsafe_code_anywhere_in_a_lint_list() {
+        for src in [
+            "#[allow(unused, unsafe_code)]\nfn f() {}\n",
+            "#![expect(dead_code, unsafe_code, reason = \"x\")]\n",
+            "#![warn(unsafe_code)]\n",
+            "#![allow(\n    unused,\n    unsafe_code,\n)]\n",
+            "#[cfg_attr(all(), allow(unused, unsafe_code))]\n",
+            "#[allow(clippy::x, unsafe_code)] #[allow(y)]\n",
+            "#[allow(unused,unsafe_code)]\n",
+            "#[allow(f(x), unsafe_code)]\n",
+            "#[allow(unused, /* note */ unsafe_code)]\n",
+            "#[allow(unused, // note\n unsafe_code)]\n",
+        ] {
+            assert_eq!(unsafe_exceptions(src).len(), 1, "{src}");
+        }
+        // The line reported is the line the lint is on.
+        assert_eq!(
+            unsafe_exceptions("x\n#![allow(\n    unused,\n    unsafe_code,\n)]\n"),
+            vec![(4, "    unsafe_code,")]
+        );
+        for src in [
+            "#[allow(unused)] fn f() { let unsafe_code = 1; }\n",
+            "#[allow(unused, unsafe_codes)]\n",
+            "#[allow(unused, xunsafe_code)]\n",
+            "#[deny(unused, unsafe_code)]\n",
+            "#![forbid(missing_docs, unsafe_code)]\n",
+            "#[disallow(unused, unsafe_code)]\n",
+            "// #[allow(unused, unsafe_code)]\n",
+            "/* #[allow(unused, unsafe_code)] */\n",
+            "let s = \"#[allow(unused, unsafe_code)]\";\n",
+            "let s = r#\"#[allow(unused, unsafe_code)]\"#;\n",
+            "#[allow(unused]\nunsafe_code\n",
+            "#[allow(unused;\nunsafe_code\n",
+            "#[allow(unused {\nunsafe_code\n",
+            "#[allow(unused\n",
+            "",
+        ] {
+            assert!(unsafe_exceptions(src).is_empty(), "{src}");
+        }
+        // Four list-form exceptions breach the ceiling.
+        let four = vec![(
+            "a.rs".to_owned(),
+            "#[allow(unused, unsafe_code)]\n".repeat(4),
+        )];
+        assert!(
+            gate_5(&four)
+                .unwrap_err()
+                .contains("More than 3 unsafe exceptions")
+        );
+        let three = vec![(
+            "a.rs".to_owned(),
+            "#[allow(unused, unsafe_code)]\n".repeat(3),
+        )];
+        assert!(gate_5(&three).is_ok());
+        assert_eq!(list_end(b"a)b", 0), 1);
+        assert_eq!(list_end(b"(a)b)", 0), 4);
+        assert_eq!(list_end(b"ab", 0), 2);
+        assert_eq!(list_end(b"", 0), 0);
+    }
+
+    /// P15-03, D-2514. `probe()` had no test: a mutated `n == 0` switched
+    /// off every build-job step guarded by the probe with only a warning.
+    #[test]
+    fn the_probe_reports_crates_when_any_manifest_is_tracked() {
+        assert_eq!(has_crates_line(0), "has_crates=false");
+        for n in [1, 2, 13, usize::MAX] {
+            assert_eq!(has_crates_line(n), "has_crates=true", "{n}");
+        }
     }
 
     fn art(name: &str, files: &str) -> String {

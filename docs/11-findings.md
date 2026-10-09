@@ -1072,3 +1072,288 @@ stays IN PROGRESS naming its branch commit until the squash merge to `main`.
 - **`F-8D5073`** (`gap`) — The vocabulary documents stated counts and kinds the table does not hold: void Near rows marked untoleranced, sixteen void names for thirteen, 70 free positions for 14, and a group table stopping at 273. Where: `docs/03-vocabulary.md` (rows 235–271, crossings section); `docs/04-invariants.md` CX-04, CX-05; `crates/vocab/src/table.rs:14-29`; `crates/vocab/src/lib.rs`. Disposition: IN PROGRESS — fixed on `attack/permutations` 3c5c237d (D-3406, XPERM-06); lands with the squash merge to `main`.
 - **`F-0486DA`** (`wrong`) — worst_reward_risk_bp scored a single observation i64::MAX, above payoff_bp, so one lucky move topped the asymmetry ranking. Where: `crates/runner/src/outcome.rs` (`Edge::worst_reward_risk_bp`); `crates/runner/src/rank.rs` (`ByAsymmetry`). Disposition: IN PROGRESS — fixed on `attack/permutations` 24c7e3a (D-3407, XPERM-07); lands with the squash merge to `main`.
 - **`F-1D5275`** (`wrong`) — trades_needed_for documented measured values its ceiling-rounded record does not return, and a monotone threshold it does not have. Where: `crates/runner/src/grid.rs` (`trades_needed_for` doc, `Cell::at_rate`). Disposition: IN PROGRESS — fixed on `attack/permutations` bc1e1f45 (D-3408, XPERM-08); lands with the squash merge to `main`.
+
+### Data-path attack, round 1 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above. Each finding was shown by
+a test failing on the unmodified code before it was fixed; the tests are the
+`attack_*` files named in `docs/04-invariants.md` rows DPG, DPP, DPI, DPF,
+DPS and DPD.
+
+- **Greeks:** on-grid strikes refused at huge level/interval ratios (D-3100);
+  IV uncertainty understated at subnormal scale (D-3101). Fixed.
+- **Pricing and spot match:** two spot closes at one stamp resolved by arrival
+  order (D-3110); one refusal class hid another (D-3111); a signed expiry
+  field read as a date (D-3112); the vendor-volatility path priced premiums
+  the solver refuses (D-3114, D-3117); exchange token ignored (D-3115); one
+  contract filed under two spellings (D-3116). Fixed. A Saturday expiry is
+  accepted until a sourced trading calendar exists (D-3113): open, UNVERIFIED.
+- **Zerodha ingest:** a refused month uncounted the months already written
+  (D-3120); an unplaceable stamp filed as "before the window" (D-3121);
+  decoder-skipped candles missing from a balanced receipt (D-3122). Fixed.
+- **Timeframe fold:** widths not dividing a day opened before 09:15 (D-3130);
+  repeated and off-grid source bars merged silently (D-3131); a day folded
+  from a grid that straddles midnight (D-3132). Fixed.
+- **Store:** a header whose last stamp disagreed with its last record steered
+  an out-of-order append (D-3140). Fixed. Lookup by time remains a bisection,
+  owned by the O(1) sweep.
+- **Name and price decoders:** non-positive strikes rendered (D-3150); contract
+  text with several spellings (D-3151, D-3155, D-3157); case-sensitive marker
+  and alias (D-3152, D-3153); unchecked underlying (D-3156); a drifted index
+  document partly skipped (D-3158). Fixed.
+
+Rounds 2 and 3 (2026-10-04 and 2026-10-05) attacked the round 1 fixes and how
+they meet. Each finding failed a test on the commit before it was fixed; the
+tests are named in `docs/04-invariants.md` rows DPR.
+
+- **Receipts and the journal (round 2):** a balanced spot receipt printed a
+  false equation that left out decoder skips, and the journal note did the
+  same (D-3180). Fixed.
+- **Store (round 2):** a rotted last record was blamed on the header (D-3181).
+  Fixed.
+- **Round 2 open items, closed in round 3:** the F&O chain receipt dropped
+  decoder skips (D-3182); a refused cash schedule under-counted the vendor's
+  rows (D-3183); the ingest attack fixture stored every bar x100 and no
+  assertion noticed (D-3184, test only). Fixed.
+- **Static gates (round 3):** undeclared test literals (D-3185), a refused month
+  with no log event (D-3186), a cost claim with no proof (D-3187), MR-04 naming
+  a renamed test (D-3188), and undeclared gate 11 sites (D-3189). Fixed.
+- **Interactions (round 3):** chain pricing called a contradicted index stamp
+  "no index bar" (D-3123); the receipt deduplicated pricing reasons by sentence
+  across contract-months, so one kind hid another (D-3124); a CSV row skipped
+  for negative volume was on no line of a balanced receipt (D-3125); a monthly
+  vendor name listed under two expiries was filed as two contracts (D-3126).
+  Fixed.
+- **Round 3 open item, closed 2026-10-06:** the rolling-option walk kept
+  run-failure reasons with no de-duplication, so one cause repeated across runs
+  filled every slot and a later, different cause was counted and never named
+  (D-3127, DPM-01, DPM-02). Fixed. The Groww chain receipt's verbatim reason
+  list is the same class and stays open, unrecorded until a round owns it.
+- **Gate 18 pre-run on the data-path diff (2026-10-06):** three greeks
+  survivors. `from_ladder`'s `level_to_interval` bound had no test exactly at
+  the bound, and `SUBNORMAL_GAP` was a product no test observed (D-3129,
+  DPM-03). Killed.
+- **Round 4 (2026-10-06):** a CSV row skipped for a negative open interest was
+  on no line of a balanced receipt (D-3133, DPM-04). Fixed. Two candidates are
+  recorded OPEN, both needing a decision rather than a test:
+  (a) chain pricing measures tenor from the bar's open stamp
+  (`Tenor::between(bar.ts_micros, ..)` in `api::server`) while it prices the
+  bar's close, so the last minute before expiry is priced at 60 s. When a close
+  premium is observed inside its bar is not a sourced fact, and
+  `tenor.rs`'s own test pins the stamp convention.
+  (b) `fold::complete_minutes_with_calendar` names a withheld observed-day
+  tail only when the next day begins, so the batch's last day never gets the
+  diagnostic, and `cli fold_audit` under-counts it. Flushing it would also
+  flag a day still in progress as needing a store repair; whether such a day
+  can reach the fold is unsettled.
+- **Round 5 (2026-10-06):** two defects in D-3134's own repair: its log line
+  fired before the entry reached disk, and the walk did not check row 0 against
+  the header's first stamp (D-3135, DPM-07). Fixed. One candidate recorded
+  OPEN, low confidence: `gaps::classify_with_subject` passes over stored bars
+  on a `Closed` or `Unmeasured` day, and bars on an open day at a minute the
+  session does not expect, without counting or naming them. Ingest drops both
+  (D-2673), so this needs a calendar that changed after ingest, or a store
+  written by another path. Whether the gap ledger should carry an
+  "unexpected" count is a design decision.
+- **Round 6 (2026-10-06), all on the Dhan rolling path:**
+  - A contract run across a month end was refused on every run; `from_rows`
+    now files month by month (D-3136, DPM-08).
+  - Its greeks went to the chunk's first month and were refused (D-3137,
+    DPM-09).
+  - A request side word other than `CALL` was filed as a put. Latent: no
+    shipped spec has such a word (D-3138, DPM-10).
+  All three fixed. OPEN, low: the rolling receipt prints rows read and bars
+  stored with no balance line, and discards the session and window drop
+  census. It makes no false claim, but the gap between the two numbers is
+  unexplained.
+- **Round 7 (2026-10-06):** three defects, two of them in round 6's own
+  multi-month fixes, all fixed:
+  - greeks were filed for a month whose bars were refused (D-3139, DPM-12);
+  - a refused greek month uncounted the month already written (D-3139,
+    DPM-13);
+  - an address-stage refusal lacked its origin (D-3700, DPM-14).
+  Also from the gap audit: the census decoded v2 entries with v3 meaning and
+  read an unreadable contract as the spot key (D-3680, DPM-11), fixed. Its
+  #1, a zero or leading-zero strike, was refuted on this branch.
+  Latent, not fixed: `from_rows` does not check that every overlay was
+  consumed by a month. No caller produces an overlay without a bar today.
+
+### Fix group G3 (runner, indicators, costs) — dispositions — 2026-10-06
+
+- **Z1-slice00-F1** (winners' mean MAE called a stop level): fixed. D-2537, ZX-70.
+- **Z1-slice10-F1** (`Rates::new` public, bypassing the dated refusal): fixed. D-2538, ZX-71.
+- **Z1-slice10-F2** (realized slippage counted the sell floor's upward push as adverse): fixed. D-2539, ZX-72.
+- **Z1-slice08-F1** (separating lines fired on same-colour bars): fixed. D-2540, ZX-73.
+- **Z1-slice08-F2** (reprojected census said "left alone" while `offered` is replaced): documented. D-2541, ZX-74.
+- **Z1-slice08-F3** (positivity refusal tested `low` alone): fixed. D-2542, ZX-75.
+- **Z1-slice08-F4** (gap reference source named for three bars): renamed. D-2543, ZX-76.
+- **p9num-3** (same-bar fill refused an unused sub-tick leg): fixed. D-2544, ZX-77.
+- **p18num-1** (`purged_folds` purged `h`, a trade spans `h + 1`): fixed. D-2545, ZX-78.
+- **p16num-1** (overnight into the first signal day never measured): fixed. D-2546, ZX-79.
+- **P9-02** (lot sizes, strike steps, expiry weekdays unsourced): recorded UNVERIFIED. D-2547. Sourcing is the operator's.
+- **p9num-1** (order touched inside the time-exit bar owns the exit): open, owner decision. Fixing it reverses D-1541's optimistic-target allowance.
+- **p4num-2** (flat trades dilute the average-loss cap): open, owner decision. It needs a stored-evidence record version (Population V2 checks `losses == trades − wins`).
+
+### Observability lens L1 (attack/observability) — dispositions — 2026-10-06
+
+Narrative only. No row is added to the table above. Each id is `F-` and the
+first six hex digits of the SHA-256 of the title as written here. Each fix is
+`IN PROGRESS` on `attack/observability` until it merges to `main`; each has a
+test recorded failing against the pre-fix code.
+
+- **F-ECBE65** `wrong` — The merged /logs page claimed reached_oldest after its
+  limit cut read records. `crates/api/src/logs.rs` `merged`. IN PROGRESS.
+  D-3200, OBSV-01.
+- **F-24EDBD** `law` — /masters/status.json reported an unreadable master as
+  absent (§4 fallback). `crates/api/src/mastersrun.rs` `status_rows`.
+  IN PROGRESS. D-3201, OBSV-02.
+- **F-8AEE77** `wrong` — A cash-session cache reinstall reported durable on the
+  strength of a read. `crates/pull/src/cash_session_cache.rs`
+  `install_and_read`. IN PROGRESS. D-3202, OBSV-03.
+- **F-08BBA7** `wrong` — A failed census append named the requested entry
+  count, not the landed one. `crates/pull/src/ingest.rs` `append_locked`.
+  IN PROGRESS. D-3203, OBSV-04.
+- **F-6EF086** `wrong` — Live sweep progress refused on log history older than
+  the run. `web/src/lib/live-progress.ts`, `crates/api/src/logs.rs` `asked`.
+  IN PROGRESS. D-3204, OBSV-05.
+- **F-C27563** `gap` — A sweep-all month refused before or while filing left no
+  log event. `crates/cli/src/batch.rs` `sweep_chunk`. IN PROGRESS. D-3205,
+  OBSV-06.
+- **F-B26F07** `gap` — A refused sweep-stored left no reason in the log.
+  `crates/cli/src/lib.rs` `sweep_stored`. IN PROGRESS. D-3206, OBSV-07.
+- **F-E995C5** `gap` — A refused command's command finished event carried no
+  reason. `crates/cli/src/lib.rs` `run_with_sink`. IN PROGRESS. D-3207,
+  OBSV-08.
+- **F-21160A** `wrong` — The ingest page called a stop taken but not persisted
+  undelivered and dropped its warning. `web/src/routes/ingest/+page.svelte`
+  `stopWatching`. IN PROGRESS. D-3208, OBSV-09 (front-end test
+  `web/tests/ingest-errors.test.js`).
+- **F-FC80BC** `wrong` — The audit page counted an older page it could not read
+  as held and never showed why. `web/src/routes/audit/+page.svelte`
+  `readOlder`. IN PROGRESS. D-3209, OBSV-10 (front-end test
+  `web/tests/audit-pages.test.js`).
+- **F-DC087B** `wrong` — One refused census row dropped every other row of a
+  rolling batch. `crates/pull/src/ingest.rs` `record_all`. IN PROGRESS.
+  D-3210, OBSV-11.
+- REFUTED in round 2: a `BarFile` genesis re-initialised without a log line
+  (such a file provably holds no record, D-1521); `/universe/resolve` leaving no
+  Info line on success (it writes nothing; failures are logged); the masters
+  directory's parent never synced (a lost directory is a refetch).
+- REFUTED in round 1, with reasons: a pull refused at 400/409 before the pull
+  journal (the handler's "a refusal is recorded too" covers parse refusals
+  only, and `note_request` logs the 4xx); `Attempt::finish` returning its error
+  rather than emitting (callers surface it; a start without a terminal is
+  documented as unconfirmed); a leftover `.man.writing` (never read, truncated
+  by the next install); the cash-cache root's parent never synced (a lost
+  root is a refetch); unknown `/logs` parameters not named (D-1765's scope is
+  narrowings the route offers); the pull, autopilot and resolve routes having
+  no invocation-journal row (EXEMPT under D-0568, and autopilot pause/resume
+  emit their own events).
+
+### Observability lens L1, round 3 web refusals (audit/fx-w) — dispositions — 2026-10-09
+
+Narrative only. No row is added to the table above. Each id is `F-` and the
+first six hex digits of the SHA-256 of the title as written here. W1 to W7 are
+the seven round-3 web survivors the refuter upheld; F1 to F7 are further
+instances of the same two shapes (a non-2xx whose server reason is dropped, an
+unknown rendered as zero) found by searching the rest of `web/src`. Each fix is
+`IN PROGRESS` on `audit/fx-w` until it merges to `main`, and each has a node
+test recorded failing against the pre-fix code.
+
+- **F-9BFA4E** `wrong` (W1) — The backtest page read an uncounted swept surface as 0 of N swept. `web/src/routes/backtest/+page.svelte` `loadSurface`, `coverNote`. IN PROGRESS. D-3211, OBSV-12.
+- **F-8B1759** `wrong` (W2) — A census-unreadable refusal was shown as a master message. `web/src/lib/catalogue-loader.js`, `web/src/lib/feed-summary.js`, `web/src/routes/ingest/+page.svelte` (`headerRefusal` in `web/src/lib/refusal.js`). IN PROGRESS. D-3212, OBSV-13.
+- **F-69930F** `gap` (W3) — A refused frontier page dropped the server's refusal. `web/src/lib/frontier-pages.js`. IN PROGRESS. D-3213, OBSV-14.
+- **F-B97AEA** `gap` (W4) — A refused live heap read dropped the server's refusal. `web/src/routes/backtest/+page.svelte` `fetchLiveTop`. IN PROGRESS. D-3214, OBSV-15.
+- **F-9A3F5E** `gap` (W5) — A refused saved-evidence read dropped the server's refusal. `web/src/lib/sweep-evidence.js`. IN PROGRESS. D-3215, OBSV-16.
+- **F-78AF26** `gap` (W6) — An unreadable run status dropped its running.why. `web/src/lib/refusal.js` `refusalOf`; `receipt-batch.js`, `boolean-launch.js`, `index-stop-launch.js`, backtest `pollSweep`. IN PROGRESS. D-3216, OBSV-17.
+- **F-F0E6D7** `gap` (W7) — A refused launch-configuration read dropped the server's refusal. `web/src/lib/BooleanLaunch.svelte`, `web/src/lib/IndexStopLaunch.svelte`. IN PROGRESS. D-3217, OBSV-18.
+- **F-ABD0CC** `gap` (F1) — The audit layer's own refusal envelope was read by no detail reader. `web/src/lib/refusal.js` `auditRefusal`, `web/src/lib/detail-refusal.js`, `web/src/lib/invocation-audit.js`. IN PROGRESS. D-3218, OBSV-19.
+- **F-A7BE22** `wrong` (F3) — An undated live heap and an unheld census generation were read as zero. `web/src/routes/backtest/+page.svelte` `liveFreshness`; `web/src/lib/audit-pages.js` `generationOf`, `generationStep`; `web/src/routes/audit/+page.svelte`. IN PROGRESS. D-3219, OBSV-20, OBSV-21.
+- **F-5FB2F6** `gap` (F2) — The backtest page's own readers dropped the server's reason on a refusal. `web/src/routes/backtest/+page.svelte` trades, top, ledger, vocabulary, series, benchmark and rung readers. IN PROGRESS. D-3220, OBSV-22.
+- **F-3B9ADD** `gap` (F4) — Thirteen readers dropped a plain-text or JSON refusal. feed startup, runtime inspection, database pages, terminal, layout probe, autopilot, markets, db, mapping and ingest readers. IN PROGRESS. D-3221, OBSV-23.
+- **F-6A39ED** `gap` (F5) — An unconfirmed command answer dropped the server's reason. `web/src/lib/refusal.js` `commandReply`; sweep admission, receipt batch, boolean and index-stop launch, ingest `/pull/run`. IN PROGRESS. D-3222, OBSV-24.
+- **F-F5B9CC** `wrong` (F6) — A resumed pull run with no before-reading drew 0 percent progress. `web/src/routes/ingest/+page.svelte` `share`, `unitsLeft`, `etaSecs`. IN PROGRESS. D-3223, OBSV-25.
+- **F-131178** `gap` (F7) — A refused Stop on the ingest page dropped the server's reason. `web/src/routes/ingest/+page.svelte` `stopWatching`. IN PROGRESS. D-3224, OBSV-26.
+- NEEDS OWNER, not fixed: the `/ingest` `POST /pull/run` catch says nothing
+  was asked of any vendor and nothing was written even when the request timed
+  out or the answer was lost and the run may have started; the audit
+  envelope's `handler_completed:false` is kept as an unknown outcome (never
+  resent) rather than read as a refusal. Both are policy, not a dropped
+  reason.
+- REFUTED, with reasons: `detailRefusal` does not echo an audit envelope that
+  fails validation (pinned by `web/tests/invocation-audit.test.js`, *malformed
+  or oversized refusal details remain failures without echoing arbitrary
+  response bodies*, deliberate); the gaps and audit readers already carry the
+  server text; `?? 0` on count maps and chart scale maxima is arithmetic over
+  held rows, not an unknown shown as zero; markets skew and autopilot
+  `census.at` are guarded before render.
+
+### One-authority lens L4 (attack/one-authority) — dispositions — 2026-10-06
+
+Narrative only. No row is added to the table above.
+
+- **`F-589ABF`** `unguarded` — Gate 0 spawn scan misses the constructor
+  reached by another spelling: fixed. D-3500, ONEAUTH-01.
+- **`F-B96DC3`** `wrong` — Pull manifest comments claim ring is linked after
+  D-0211 removed it: fixed. D-3501, ONEAUTH-02.
+- **`F-AD043C`** `unguarded` — CLAUDE.md and AGENTS.md crate-graph pictures
+  are checked by nothing: fixed. D-3502, ONEAUTH-03.
+- **`F-9082AA`** `unguarded` — Invariant ids sharing their cell with the claim
+  are invisible to gates 10b and 27: fixed. D-3503, ONEAUTH-04.
+- **`F-F0AAB3`** `unguarded` — Cited decision numbers and invariant ids that
+  resolve to nothing (an invariants heading citing 2710, a range ending at 1619, invariant I-41): fixed. D-3504, ONEAUTH-05.
+- **`F-B082CC`** `wrong` — shift_six rounds a negative tie away from zero
+  while claiming core's rule: fixed. D-3505, ONEAUTH-06.
+- **`F-624E08`** `unguarded` — The population write lock path is built in six
+  places and the ledger path in two: fixed. D-3506, ONEAUTH-07.
+- **`F-64A53E`** `wrong` — The /store axis names two swept instruments of 210,
+  and core has no surface enumeration: fixed. D-3507, ONEAUTH-08.
+- **REFUTED** (recorded so the next pass does not repeat them): `pull::csv::paisa`
+  vs core's text parser (deliberate strictness, D-1494, refuses loudly);
+  `api::recovery`'s index list and `runner::research_family`'s Total Market gate
+  (D-0682 keeps both as independent checks, identical answers today);
+  `CLAUDE.md` §10's count of 25 (correct).
+- **`F-67659A`** `unguarded` — A committed cargo-mutants marker passes every static gate: fixed. D-3508, ONEAUTH-09.
+- **`F-E739E5`** `unguarded` — CLAUDE.md section 10 is compared with the docs directory by nothing: fixed. D-3509, ONEAUTH-10.
+- **`F-D47132`** `unguarded` — A nightly toolchain and the manifest keys it
+  unlocks pass every gate: fixed. D-3510, ONEAUTH-11.
+- **`F-F95A6F`** `unguarded` — Gate 0 misses programs run through sed, make,
+  git, find, env and xargs: fixed. D-3511, ONEAUTH-12.
+- **`F-384764`** `unguarded` — The IST offset is re-typed as a literal in seven
+  production places: fixed. D-3512, ONEAUTH-13.
+- **`F-E960DF`** `unguarded` — pull ssm carries an untested private civil date
+  with a false justification: fixed. D-3513, ONEAUTH-14.
+- **`F-5741E4`** `wrong` — The backtest month presets use the 555-minute open
+  as the session length: fixed. D-3514.
+- **Round 2 REFUTED or latent:** the three 09:15 constants (each pinned to
+  555, cross-checked at run time by `pull::fold`); `cli::stored`'s
+  `NSE_OPEN_MINUTE_V2` (a frozen wire constant pinned by its digest test); the
+  hand-encoded index family (every disk decoder refuses an unknown code); the
+  web forced-exit copies (pinned by `FORCED_EXIT_MINUTE == 910`); the
+  auto-merge CODEOWNERS parse (latent, recorded in `docs/06-limits.md`).
+- **`F-616724`** `unguarded` — The lens's own gates leak: spawn spellings, sed and git forms, quoted cargo +, unread id cells, a blind IST reader: fixed. D-3515, ONEAUTH-01/04/11/12/13/15.
+
+### One-authority lens L4, round 4 (fixer `fxl4`) — dispositions — 2026-10-09
+
+Narrative only. No row is added to the table above, and no `F-` id was
+filed: these were found while finishing the lens, not through the ledger.
+
+- `wrong` — The markets page derived 2-, 10-, 30- and 60-minute candles from
+  IST midnight while `pull::fold` files every intraday rung from 09:15; the
+  offset was typed twelve times in ten web files and the session length in
+  three: fixed. D-3516, ONEAUTH-16, ONEAUTH-17.
+- `unguarded` — The IST-offset reader missed the offset as 330 minutes
+  (`runner::synthetic`) and read test-only module files, a `pub(super)` test
+  module and a commented test-module header as production: fixed.
+  D-3517, ONEAUTH-18, ONEAUTH-21.
+- `unguarded` — Four private copies of the 09:15 open (`indicators::orb`,
+  `runner::resample`, `runner::synthetic`, test-only `runner::exit_grid_policy`)
+  tied to nothing: fixed. D-3518, ONEAUTH-19, ONEAUTH-20.
+- `unguarded` — The web campaign rung list and fallback charge list held to
+  no Rust source: fixed. D-3519, ONEAUTH-22.
+- `unguarded` — Decision citations in `web/`, the handovers and the tool
+  configurations resolved by nothing: fixed. D-3520, ONEAUTH-24.
+- `unguarded` — Five civil-date copies compared by nothing: fixed. D-3521,
+  ONEAUTH-23.
+- **Round 4 REFUTED or not measured:** recorded in D-3522. D-3510 (auto-merge
+  sensitive paths) is left to the owner.

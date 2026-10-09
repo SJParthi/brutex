@@ -474,10 +474,16 @@ impl SessionState {
             // narrowing could only refuse on a state that cannot exist — a region no
             // input can reach and no test can cover.
             let mid = prev.close.midpoint(day_open);
-            if close > i128::from(mid) {
+            // EXACT, NOT ROUNDED (ind1-2, D-2613): `2·close` against
+            // `prev_close + today_open`, both in `i128`, so a close half a paisa
+            // below a fractional midpoint is below it rather than "on" its
+            // rounded value. `mid` still anchors the near band (68).
+            let doubled = close.saturating_mul(2);
+            let span = prev_close.saturating_add(today_open);
+            if doubled > span {
                 mask = set(mask, 66);
             }
-            if close < i128::from(mid) {
+            if doubled < span {
                 mask = set(mask, 67);
             }
             let gap = (today_open - prev_close).abs();
@@ -1296,6 +1302,37 @@ mod tests {
             "a close 7,000 paisa from the midpoint, against a band of 100, set it anyway"
         );
         assert!(mask.get(66), "a close above the midpoint was not reported");
+    }
+
+    /// ind1-2 / D-2613: the gap-mid sides are decided on `2·close` against
+    /// `prev_close + today_open`, so a close on the ROUNDED midpoint of an
+    /// odd-sum gap is below the true half-paisa midpoint, not "on" it; half a
+    /// paisa above it is above.
+    #[test]
+    fn a_close_on_a_rounded_gap_midpoint_is_judged_against_the_exact_one() {
+        let prev = PreviousSession {
+            high: 2_520_000,
+            low: 2_480_000,
+            close: 2_500_000,
+        };
+        // The gap runs 2_500_000..2_510_001: its midpoint is 2_505_000.5.
+        for (close, above, below) in [
+            (2_505_000, false, true),
+            (2_505_001, true, false),
+            (2_504_999, false, true),
+        ] {
+            let mut state = SessionState::default();
+            let mask = ok(
+                &mut state,
+                &at(0, 2_510_001, 2_512_000, 2_504_000, close),
+                Some(prev),
+            );
+            assert_eq!(
+                (mask.get(66), mask.get(67)),
+                (above, below),
+                "close {close} against the exact midpoint 2_505_000.5"
+            );
+        }
     }
 
     /// A gap wider than `i64` drops the band rather than wrapping.

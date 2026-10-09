@@ -914,6 +914,15 @@ impl<'a> Prepared<'a> {
         identity.update(&column_digest_v1(&execution_column));
         // The older execution-column digest predates three-valued known bits.
         // Bind the exact availability column explicitly in this new namespace.
+        //
+        // STAYS ON V1 AFTER D-1812, ON PURPOSE. `column_digest_v2` would bind
+        // the signal column's `known()` a second time, and the execution
+        // column is `reproject_checked` of that column over bars this hash
+        // already binds, so V2 adds no coverage here -- while it would re-key
+        // every stored index-stop catalog's source id. This namespace is the
+        // one place a V1 column digest is still taken for a new identity.
+        // `runner::exit_grid_policy::tests::column_digest_v1_never_moves_and_v2_binds_known`
+        // pins V1, so this hash cannot drift with it.
         for known in source.signal_column.known() {
             for word in known.words() {
                 identity.update(&word.to_le_bytes());
