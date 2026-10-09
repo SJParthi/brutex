@@ -12534,13 +12534,21 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49). The cold open's O(trades) part is not timed: the fixture's
   candidates trade nothing.
 - **`/engine/top.json` repeats its cold walk on every request while a refusal
-  persists (W1-api6-3).** `topjson::report` uses `SELECTION.with_verified`,
-  which drops the handle when a refresh refuses and does not cache the
-  refusal. The next request runs `Selection::open` again: the cold index walk
-  of the results ledger and the seal-verified re-reads up to the bad record,
-  O(history) bounded by `MAX_SCAN_BYTES`, then the same 503. Nothing is cached
-  across the damage on purpose: a cached refusal would keep refusing after the
-  operator repaired the file.
+  persists, until D-4433 (W1-api6-3).** `topjson::report` used
+  `SELECTION.with_verified`, which dropped the handle when a refresh refused,
+  so the next request ran `Selection::open` again: the cold index walk of the
+  results ledger and the seal-verified re-reads up to the bad record,
+  O(history) bounded by `MAX_SCAN_BYTES`, then the same 503. **Since D-4433
+  the fold stops at the damaged record and keeps the handle**, with the
+  refusal in `Selection::stalled`: each later request refreshes the handle
+  (constant metadata checks on an unchanged file) and reads that one record
+  again, so the refusal is re-proven from the bytes at one record read per
+  request, never served from a cache. A repair moves the file's generation,
+  the refresh refuses and the next request opens cold and is served.
+  `a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`
+  counts zero cold opens over the persistent refusal and one after the
+  repair. Not timed: the one read is a `BarFile`-class record read, the same
+  operation the D-2290 table times.
 
 ## The cold bar lookup is measured, and it has its own budget — D-0914, 2 October 2026
 
@@ -16367,7 +16375,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W1-pull1-0 | `prepare_observed_with` revalidates each day's receipt per body, O(D x B) | Per-day receipt revalidation is D-0519's guarantee; a body is accepted only against receipts proven for that body | not timed here |
 | W1-api1-6 | O(C) currency checks per page, C linked catalogs | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | not timed here |
 | W1-api2-3 | eight trade-reader slots since D-4434; a ninth candidate in rotation re-reads its trades | Any bounded cache can be made to miss by rotating keys; warm pages are O(page) | warm page 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); cold open, fixed part 70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49) (D-4434) |
-| W1-api6-3 | a persisting `/engine/top.json` refusal repeats its cold walk | A cached refusal would keep refusing after a repair that leaves the file's generation where it was | not timed here |
+| W1-api6-3 | since D-4433 a persisting `/engine/top.json` refusal costs one record read, not its cold walk | A cached refusal would keep refusing after a repair; re-reading the one damaged record is the proof, and a repair moves the generation | one record read, the class the rows above time; counted, not timed (D-4433) |
 | W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | not timed here |
 | o1api-4 | `param` scans the query once per field | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | not timed here |
 | W3-engine1-0, ET-o1-proof-coverage-2 | the subset prune is Θ(k) per candidate | Apriori's prune must test the k-2 subsets that are not the join's two parents; C-E-12 times one probe | C-E-12 (engine bench) |

@@ -5663,7 +5663,7 @@ old line regex the same input and watched it pass.
 | JR-04 | **The qualified campaign route's uncached O(H) history walk is stated.** W1-api1-4, D-1444 | `api::booleancampaignjson::tests::the_qualified_campaign_history_walk_per_request_is_stated` | ✓ |
 | JR-05 | **A candidate page's five whole-catalog reads are counted off the source and stated.** W1-api2-2, D-1444 | `api::candidatejson::tests::a_candidate_pages_catalog_reads_are_counted_and_stated` | ✓ |
 | JR-06 | **The trade page keeps eight readers, least recent evicted, and a cold re-read is O(trades of the candidate).** W1-api2-3, D-1444, D-4434 | `api::candidatejson::tests::trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent` | ✓ |
-| JR-07 | **A persistent refusal in `/engine/top.json` costs one cold open per request (100 of 100), and the first request after a repair is served.** W1-api6-3, D-1444 | `api::topjson::tests::a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated` | ✓ |
+| JR-07 | **A persistent refusal in `/engine/top.json` costs one record read per request and no cold open, and the first request after a repair is served.** W1-api6-3, D-1444, D-4433 | `api::topjson::tests::a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen` | ✓ |
 
 ### Execution V3 replay memo — D-0994
 
@@ -7121,5 +7121,6 @@ old line regex the same input and watched it pass.
 | FXB1-01 | The server opens a browser only when `BRUTEX_OPEN` is exactly `1`; `BRUTEX_NO_OPEN` refuses even an ask; every decline names the variable, and the banner prints the address with why it was not opened (D-4430) | `the_browser_is_opened_only_when_the_operator_asked_for_it` and `the_serve_banner_lines_say_what_happened` in `crates/api/src/server.rs` | ✓ |
 | FXB1-02 | An index catalogue larger than `MAX_CATALOGUE_BYTES` is refused for its size even when the cut falls inside a multi-byte character (D-4431) | `an_oversized_catalogue_cut_inside_a_character_is_refused_by_size` in `crates/api/src/indexmap.rs` | ✓ |
 | FXB1-03 | `/bars.json` with `from` past the header's `last_ts_micros` answers `[]` after reading one record, and a disagreeing last record falls through to the bisection (D-4432) | `bars_json_past_the_headers_last_stamp_reads_one_record` in `crates/api/src/server.rs` | ✓ |
+| FXB1-04 | A damaged results-ledger record makes `/engine/top.json` refuse at one record read per request, with no cold reopen, and the first request after a repair is served (D-4433) | `a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen` in `crates/api/src/topjson.rs` | ✓ |
 | FXB1-05 | The trade page keeps at most eight readers, serves a kept one only for its exact key, evicts the least recent, and drops one whose page refuses (D-4434) | `trade_readers_keep_eight_candidates_warm_and_evict_the_least_recent` in `crates/api/src/candidatejson.rs` | ✓ |
 | FXB1-06 | The latency harness reports nearest-rank p50 and p99 over sorted timings and refuses a run of no calls (D-4434) | `quantiles_are_nearest_rank_over_the_sorted_timings` in `crates/api/src/latency.rs` | ✓ |

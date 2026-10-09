@@ -66506,6 +66506,22 @@ existing bisection, so a damaged tail is still found by the path that found
 it before. Proved by
 `bars_json_past_the_headers_last_stamp_reads_one_record`. FXB1-03.
 
+### D-4433 — A persistent `/engine/top.json` refusal costs one record read, not a cold walk — 2026-10-09
+
+**What was observed.** W1-api6-3: a damaged results-ledger record made
+`Selection::refresh` refuse, `with_verified` dropped the handle, and every
+following request ran `Selection::open` again: an O(history) cold walk to the
+same 503.
+
+**Decided.** The fold stops at the first record that will not read and keeps
+the handle with the refusal in `Selection::stalled`. Every later request
+refreshes the handle (constant metadata checks) and reads that one record
+again, so the refusal is re-proven from the bytes each time. A repair moves
+the file's generation, the refresh refuses and the next request opens cold,
+so a repair is seen at once. No refusal is cached as an answer. Proved by
+`a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`.
+FXB1-04.
+
 ### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
 
 **What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page
