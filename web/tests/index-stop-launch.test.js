@@ -5,7 +5,7 @@ import {parse} from 'svelte/compiler';
 import {refusalFrom} from '../src/lib/refusal.js';
 import {validateIndexStopMetadata,indexStopLaunchPlan,indexStopLaunchObservation,indexStopServerMonth,indexStopSplitProposal,indexStopContextMonth,indexStopRewardRiskCaption,createIndexStopLaunch,indexStopQualificationHref} from '../src/lib/index-stop-launch.js';
 import {hex,RUNGS,ATTEMPT,metadata,researchPolicy,input,plan,running,saved,deferred,tick} from './index-stop-fixture.js';
-const reply=(/** @type {any} */ body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
+const reply=(/** @type {any} */ body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body,text:async()=>JSON.stringify(body)});
 
 test('native metadata fixes both directions and fills, single stop, daily rule and configuration-only readiness',()=>{
  const value=validateIndexStopMetadata(metadata());assert.equal(value.ready,true);assert.match(value.readiness_scope,/configuration-only/);assert.deepEqual(value.execution_rules.readings,['pessimistic','optimistic']);assert.deepEqual(value.execution_rules.directions,['long','short']);assert.equal(value.policy.values.length,39);assert.equal(value.work_model.estimated_seconds,null);
@@ -224,4 +224,23 @@ test('a refused single-stop configuration read names the server refusal; no swee
  const old=mount(async()=>new Response('',{status:404}),refusalFrom);
  await old.readConfiguration();
  assert.equal(old.config().why,'/engine/index-stop-launch.json answered HTTP 404 and named no reason. No sweep was submitted.');
+});
+
+// F5 (OBSV-24, D-3222): the unconfirmed launch message dropped the body.
+test('an unconfirmed single-stop launch answer names the server reason and is never resent (F5)',async()=>{
+ const audit={schema_version:1,refusal:'bounded request audit capacity is full; retry this exact request',code:'invocation_audit_unavailable',handler_completed:false,why:'The handler was not dispatched because its required audit start was unavailable.'};
+ for(const [answer,said] of /** @type {[()=>any,RegExp][]} */([
+  [()=>reply(audit,429),/\(\/engine\/command answered HTTP 429: bounded request audit capacity is full; retry this exact request The handler was not dispatched/],
+  [()=>new Response('REFUSED — the request headers are 70000 bytes. Nothing was read or run.\n',{status:431}),/\(\/engine\/command answered HTTP 431: REFUSED — the request headers are 70000 bytes\. Nothing was read or run\.\)/]
+ ])){
+  const p=plan(),states=/** @type {any[]} */([]),calls=/** @type {any[]} */([]);
+  const ctl=createIndexStopLaunch({changed:s=>states.push(s),listen:()=>()=>{},interval:100000,request:async(url,options)=>{calls.push({url,options});return answer();}});
+  try{
+   await ctl.start(p);
+   assert.equal(states.at(-1).phase,'unknown');
+   assert.match(states.at(-1).why,said);
+   assert.match(states.at(-1).why,/no duplicate request will be sent/);
+   assert.equal(calls.length,1);
+  }finally{ctl.dispose();}
+ }
 });

@@ -1,5 +1,5 @@
 import { sweepOutcome } from './sweep.js';
-import { refusalFrom } from './refusal.js';
+import { commandReply, refusalFrom, refusalSentence } from './refusal.js';
 
 // This bounds browser bookkeeping, not the engine's search or support policy.
 export const MAX_RECEIPT_JOBS = 4096;
@@ -158,15 +158,16 @@ export function createReceiptBatch({ request, changed, wait = () => new Promise(
               method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(job.request)
             });
             if (disposed) return;
-            const body = await response.json();
+            // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222).
+            const { body, reason } = await commandReply(response);
             if (disposed) return;
-            if (!response.ok || body.accepted !== true) {
-              if (body.accepted === false && typeof body.refusal === 'string' && body.refusal.length > 0) {
+            if (!response.ok || body?.accepted !== true) {
+              if (body?.accepted === false && typeof body.refusal === 'string' && body.refusal.length > 0) {
                 job.phase = 'failed'; job.why = body.refusal;
                 state.phase = 'failed'; state.why = body.refusal;
                 stopRequested = true; stopQueued(); publish(); break;
               }
-              throw new Error(`The server did not confirm acceptance or refusal (HTTP ${response.status}). The request may have started; it will not be resent.`);
+              throw new Error(`The server did not confirm acceptance or refusal (${refusalSentence('/engine/command', response.status, reason)}). The request may have started; it will not be resent.`);
             }
             job.attempt = positiveU64(body.attempt);
             if (!job.attempt) throw new Error('The server accepted the request without an exact attempt string. The request will not be resent; update the server before submitting another batch.');

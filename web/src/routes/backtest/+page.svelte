@@ -83,7 +83,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
   import { censusFailure } from '$lib/store-census.js';
-  import { headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
+  import { commandReply, headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
   import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
@@ -2711,7 +2711,9 @@
           ...engineKnobs
         })
       });
-      applySweepSubmission(response.status, await response.json().catch(() => null));
+      // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222).
+      const { body, reason } = await commandReply(response);
+      applySweepSubmission('/backtest/run', response.status, body, reason);
     } catch (error) {
       sweep = {
         phase: 'unknown',
@@ -2722,9 +2724,9 @@
     }
   }
 
-  /** @param {number} status @param {any} body */
-  function applySweepSubmission(status, body) {
-    const outcome = sweepSubmission(status, body);
+  /** @param {string} route @param {number} status @param {any} body @param {string | null} reason */
+  function applySweepSubmission(route, status, body, reason) {
+    const outcome = sweepSubmission(status, body, reason, route);
     unconfirmedSubmission = !outcome.confirmed;
     submittedAttempt = outcome.attempt;
     sweep = { phase: /** @type {'running'|'failed'|'unknown'} */ (outcome.phase), run: null, why: outcome.why };
@@ -2991,7 +2993,8 @@
           top: listRows
         })
       });
-      applySweepSubmission(response.status, await response.json().catch(() => null));
+      const { body, reason } = await commandReply(response);
+      applySweepSubmission('/backtest/descend', response.status, body, reason);
     } catch (error) {
       sweep = {
         phase: 'unknown',

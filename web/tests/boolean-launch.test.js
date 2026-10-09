@@ -771,3 +771,21 @@ test('an unreadable exact attempt names the server reason and is not resent (W6)
   assert.equal(testRun.latest().why, `Exact attempt status is unavailable: /backtest/run.json answered HTTP 503: ${why}. The launch will not be resent.`);
   assert.equal(testRun.calls.filter(call => call.body).length, 1);
 });
+
+// F5 (OBSV-24, D-3222): the unconfirmed launch message dropped the body.
+test('an unconfirmed Boolean launch answer names the server reason and is never resent (F5)', async () => {
+  const audit = { schema_version: 1, refusal: 'bounded request audit capacity is full; retry this exact request',
+    code: 'invocation_audit_unavailable', handler_completed: false,
+    why: 'The handler was not dispatched because its required audit start was unavailable.' };
+  const plan = planFor();
+  for (const [answer, said] of /** @type {[() => Response, RegExp][]} */ ([
+    [() => Response.json(audit, { status: 429 }), /\(\/engine\/command answered HTTP 429: bounded request audit capacity is full; retry this exact request The handler was not dispatched/],
+    [() => new Response('REFUSED — the request headers are 70000 bytes. Nothing was read or run.\n', { status: 431 }), /\(\/engine\/command answered HTTP 431: REFUSED — the request headers are 70000 bytes\. Nothing was read or run\.\)/]
+  ])) {
+    const testRun = driver(answer); await testRun.launch.start(plan);
+    assert.equal(testRun.latest().phase, 'unknown');
+    assert.match(testRun.latest().why, said);
+    assert.match(testRun.latest().why, /will not be resent/);
+    await testRun.launch.recheck(); assert.equal(testRun.calls.length, 1);
+  }
+});

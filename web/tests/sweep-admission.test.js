@@ -78,7 +78,8 @@ test('page keeps research selection usable and separates full-width settings fro
   assert.match(page, /Descend is unavailable:<\/b> \{launchStop\}/);
   assert.match(page, /\/backtest\/run\.json\?attempt=\$\{submittedAttempt\}/);
   assert.equal((page.match(/if \(launchStop\) return;/g) ?? []).length, 2);
-  assert.equal((page.match(/applySweepSubmission\(response.status, await response.json\(\).catch\(\(\) => null\)\)/g) ?? []).length, 2);
+  // Both launch POSTs read their reply once through `commandReply` (F5, D-3222).
+  assert.equal((page.match(/applySweepSubmission\('\/backtest\/(run|descend)', response\.status, body, reason\)/g) ?? []).length, 2);
 });
 
 test('a reloaded child finishing refreshes admission without re-adopting or rerunning its old command', async () => {
@@ -110,4 +111,26 @@ test('a reloaded child finishing refreshes admission without re-adopting or reru
     app.setResearchBusy(child, false);
     assert.equal(calls.length, 2, 'repeated idle notification schedules no duplicate read');
   }
+});
+
+// F5 (OBSV-24, D-3222): an unconfirmed `/backtest/run` or `/backtest/descend`
+// answer dropped the body. The audit layer's refusal (these are audited
+// routes) and a plain-text request-bounds refusal are named.
+test('an unconfirmed sweep submission names the route, status and reason (F5)', async () => {
+  const audit = { schema_version: 1, refusal: 'bounded request audit capacity is full', code: 'invocation_audit_unavailable',
+    handler_completed: false, why: 'The handler was not dispatched because its required audit start was unavailable.' };
+  const unknown = sweepSubmission(429, audit, undefined, '/backtest/descend');
+  assert.equal(unknown.phase, 'unknown'); assert.equal(unknown.confirmed, false);
+  assert.equal(unknown.why, `The launch response did not confirm acceptance or refusal (/backtest/descend answered HTTP 429: ${audit.refusal} ${audit.why}). It may have started; do not submit it again.`);
+  assert.equal(sweepSubmission(431, null, 'REFUSED — the request headers are 70000 bytes.').why,
+    'The launch response did not confirm acceptance or refusal (/backtest/run answered HTTP 431: REFUSED — the request headers are 70000 bytes.). It may have started; do not submit it again.');
+  assert.equal(sweepSubmission(202, null).why,
+    'The launch response did not confirm acceptance or refusal (/backtest/run answered HTTP 202 and named no reason). It may have started; do not submit it again.');
+  const page = readFileSync(new URL('../src/routes/backtest/+page.svelte', import.meta.url), 'utf8');
+  assert.equal((page.match(/const \{ body, reason \} = await commandReply\(response\);/g) ?? []).length, 2, 'both launch POSTs read their reply once');
+  assert.match(page, /applySweepSubmission\('\/backtest\/run', response\.status, body, reason\)/);
+  assert.match(page, /applySweepSubmission\('\/backtest\/descend', response\.status, body, reason\)/);
+  const ingest = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
+  assert.match(ingest, /const \{ body: answer, reason \} = await commandReply\(r\);/);
+  assert.match(ingest, /answer\?\.why \?\?\s*\(r\.ok\s*\? `The run was refused and gave no reason, which is itself the fault: HTTP \$\{r\.status\}\.`\s*: refusalSentence\('\/pull\/run', r\.status, reason\)\)/);
 });

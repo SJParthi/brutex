@@ -66724,3 +66724,36 @@ is read.
   JSON still fails loudly.
 
 OBSV-23.
+
+### D-3222 — An unconfirmed command answer names the server's reason and is still never resent — 2026-10-09
+
+**What was observed.** Five POST readers handled an answer that neither
+confirmed nor refused by printing a fixed sentence, or the status alone. They
+dropped whatever the body said:
+
+- `receipt-batch.js`, `boolean-launch.js` and `index-stop-launch.js`
+  (`/engine/command`)
+- the backtest page's `/backtest/run` and `/backtest/descend`, through
+  `sweep-admission.js` `sweepSubmission`
+- the ingest page's `/pull/run`
+
+All of these routes but `/pull/run` are audited. The audit layer's 429 or 503
+names its refusal and says whether the handler was dispatched
+(`operation_audit.rs` `failure`), and that was the sentence lost. A
+plain-text request-bounds refusal was parsed as JSON first. For the backtest
+page that meant a null body; for the other readers it meant a parse error.
+
+**Decided.** One reader, `refusal.js` `commandReply`, reads the reply once and
+never throws.
+- A 2xx is parsed as JSON, or is null when it is not JSON.
+- A non-2xx is read as text. Its JSON body is kept, and its reason is named
+  through `reasonOfText`. For the audit envelope that is the refusal and the
+  why (D-3218).
+
+Each reader's unconfirmed message now carries `refusalSentence(route, status,
+reason)`. `sweepSubmission` takes the reason and the route.
+
+No phase or resend rule moved. Every unconfirmed answer stays `unknown`, and
+nothing is resent, including an audit refusal that says the handler was not
+dispatched. Treating that answer as a refusal would allow a resend, which is a
+decision for the owner and is not made here. OBSV-24.

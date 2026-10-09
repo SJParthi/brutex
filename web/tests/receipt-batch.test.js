@@ -231,3 +231,24 @@ test('an unreadable exact attempt names the server reason and starts nothing els
   assert.equal(testRun.latest().why, `Attempt status is unavailable: /backtest/run.json answered HTTP 503: ${why}. No other job will start.`);
   assert.equal(testRun.calls.filter(call => call.body).length, 1);
 });
+
+// F5 (OBSV-24, D-3222): an unconfirmed `/engine/command` answer printed
+// "(HTTP 429)" and dropped the body. The audit layer's refusal says whether the
+// handler was dispatched, and a request-bounds refusal is plain text.
+test('an unconfirmed command answer names the server reason and is still never resent (F5)', async () => {
+  const audit = { schema_version: 1, refusal: 'bounded request audit capacity is full; retry this exact request',
+    code: 'invocation_audit_unavailable', handler_completed: false,
+    why: 'The handler was not dispatched because its required audit start was unavailable.' };
+  for (const [answer, said] of /** @type {[() => Response, RegExp][]} */ ([
+    [() => Response.json(audit, { status: 429 }), /\(\/engine\/command answered HTTP 429: bounded request audit capacity is full; retry this exact request The handler was not dispatched/],
+    [() => new Response('REFUSED — the request headers are 70000 bytes. Nothing was read or run.\n', { status: 431 }), /\(\/engine\/command answered HTTP 431: REFUSED — the request headers are 70000 bytes\. Nothing was read or run\.\)/],
+    [() => response({ refusal: 'unknown shape' }, 500), /\(\/engine\/command answered HTTP 500: unknown shape\)/]
+  ])) {
+    const testRun = driver(answer);
+    await testRun.batch.start(receiptPlan(input()));
+    assert.equal(testRun.latest().phase, 'unknown');
+    assert.match(testRun.latest().why, said);
+    assert.match(testRun.latest().why, /will not be resent/);
+    assert.equal(testRun.calls.length, 1);
+  }
+});

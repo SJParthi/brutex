@@ -134,3 +134,20 @@ test('an audit-layer envelope is read for its refusal and its why, and only a va
   assert.equal(auditRefusal({ ...read, why: 'w'.repeat(4097) }), null);
   for (const bad of [null, [], 'text', {}]) assert.equal(auditRefusal(bad), null);
 });
+
+// F5 (OBSV-24, D-3222): a command POST's reply is read once. A 2xx is parsed
+// as JSON (null when it is not); a non-2xx is read as text, so a plain-text
+// refusal keeps its sentence and a JSON one its body.
+test('a command reply keeps a non-2xx reason, plain or JSON, and never throws (F5)', async () => {
+  const { commandReply } = /** @type {any} */ (await import('../src/lib/refusal.js'));
+  assert.deepEqual(await commandReply(Response.json({ accepted: true, attempt: '1' }, { status: 202 })), { body: { accepted: true, attempt: '1' }, reason: null });
+  assert.deepEqual(await commandReply(new Response('{', { status: 202 })), { body: null, reason: null });
+  const audit = { schema_version: 1, refusal: 'bounded request audit capacity is full', code: 'invocation_audit_unavailable',
+    handler_completed: false, why: 'The handler was not dispatched because its required audit start was unavailable.' };
+  assert.deepEqual(await commandReply(Response.json(audit, { status: 429 })), { body: audit, reason: `${audit.refusal} ${audit.why}` });
+  assert.deepEqual(await commandReply(new Response('REFUSED — the request target is 9000 bytes. Nothing was read or run.\n', { status: 414 })),
+    { body: null, reason: 'REFUSED — the request target is 9000 bytes. Nothing was read or run.' });
+  assert.deepEqual(await commandReply(/** @type {any} */ ({ ok: false, status: 502, text: async () => { throw new Error('reset'); } })), { body: null, reason: null });
+  assert.deepEqual(await commandReply(/** @type {any} */ ({ ok: true, status: 202, json: async () => ({ accepted: true }) })), { body: { accepted: true }, reason: null },
+    'a 2xx is read through json() alone');
+});

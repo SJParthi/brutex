@@ -81,7 +81,7 @@
   import { ask as request } from '$lib/ask.js';
   import { createPageRequests, watchVisible } from '$lib/page-requests.js';
   import { exact } from '$lib/money.js';
-  import { headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
+  import { commandReply, headerRefusalFrom, reasonOfText, refusalFrom, refusalSentence } from '$lib/refusal.js';
   // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
@@ -6710,7 +6710,9 @@
         body: form,
         signal: controller.signal
       });
-      const answer = await r.json();
+      // READ ONCE, AND A NON-2XX KEEPS ITS REASON (F5, D-3222): a plain-text
+      // request-bounds refusal was a JSON parse error here.
+      const { body: answer, reason } = await commandReply(r);
       if (!r.ok || answer?.started !== true) {
         /* REFUSED, AND THE SERVER SAID WHY. A refusal here is a decision — a
            run already in flight, or a leg that could not be read — not a
@@ -6718,7 +6720,9 @@
            rather than looping. */
         netError =
           answer?.why ??
-          `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
+          (r.ok
+            ? `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`
+            : refusalSentence('/pull/run', r.status, reason));
         phase = 'done';
         finishedAt = Date.now();
         releaseWatch?.();

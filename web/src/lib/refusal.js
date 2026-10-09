@@ -186,3 +186,37 @@ export function headerRefusal(headers) {
 export async function headerRefusalFrom(route, response) {
   return refusalSentence(route, response.status, headerRefusal(response.headers) ?? (await reasonOf(response)));
 }
+
+/**
+ * A command POST's reply, read once (F5, D-3222). A 2xx is parsed as JSON, or
+ * is `null` when it is not JSON, so an unparseable acceptance stays
+ * unconfirmed rather than becoming a parse error. A non-2xx is read as text:
+ * its JSON body is kept, and its reason is named, plain text included. A
+ * launch that cannot be confirmed is never resent; this only says why.
+ * Never throws.
+ * @param {Response} response
+ * @returns {Promise<{ body: any, reason: string | null }>}
+ */
+export async function commandReply(response) {
+  if (response.ok) {
+    try {
+      return { body: await response.json(), reason: null };
+    } catch {
+      return { body: null, reason: null };
+    }
+  }
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {
+    return { body: null, reason: null };
+  }
+  /** @type {unknown} */
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Not JSON: the text itself is the reason.
+  }
+  return { body, reason: reasonOfText(text) };
+}
