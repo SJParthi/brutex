@@ -2898,4 +2898,54 @@ mod tests {
             "regular non-symlink",
         );
     }
+
+    /// **An append that would hold one pair more than the explicit bound is
+    /// refused before any byte is written, and the pair already inside the
+    /// bound is still reused.** R1286-cli-10, D-4100.
+    ///
+    /// A one-pair ledger takes its first pair. A second, different pair would
+    /// make two: it is refused with the bound's own sentence, naming both
+    /// counts, and both files keep their exact lengths -- the fresh reopen's
+    /// physical bound would only have refused AFTER the bytes were down. The
+    /// first pair's exact retry is reused at the bound, not refused by it.
+    #[test]
+    fn an_append_past_the_pair_bound_is_refused_before_any_byte_is_written() {
+        let root = TestRoot::new("pair-bound");
+        let one_pair = AnchoredSearchLineageV4Bounds::new(
+            1,
+            2 * ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64,
+            ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES as u64,
+        )
+        .expect("a one-pair bound is valid");
+        let (nifty, banknifty) = projections();
+        assert!(
+            matches!(
+                persist_anchored_search_lineage_v4(root.path(), one_pair, &nifty, &banknifty),
+                Ok(AnchoredSearchLineageV4AuthenticatedCommit::Written(_))
+            ),
+            "the first pair is written and fills the bound"
+        );
+        let full = lengths(root.path());
+        let (other_nifty, other_banknifty) = zero_population_projections();
+        let refused = persist_anchored_search_lineage_v4(
+            root.path(),
+            one_pair,
+            &other_nifty,
+            &other_banknifty,
+        )
+        .err()
+        .expect("a second pair exceeds the one-pair bound");
+        assert_eq!(
+            refused,
+            "search-lineage V4 append reaches 2 pairs above explicit maximum 1"
+        );
+        assert_eq!(lengths(root.path()), full, "no byte of the refused pair");
+        assert!(
+            matches!(
+                persist_anchored_search_lineage_v4(root.path(), one_pair, &nifty, &banknifty),
+                Ok(AnchoredSearchLineageV4AuthenticatedCommit::Reused(_))
+            ),
+            "the pair inside the bound is reused at the bound"
+        );
+    }
 }
