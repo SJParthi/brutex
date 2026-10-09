@@ -59,10 +59,12 @@
 //!   works** — each file at most its bound, or one line past it when a single
 //!   line is wider than the bound itself (a 1 KiB `MIN_FILE_BYTES` file and a
 //!   41 KB line).
-//! * **Not forever.** The first failed roll stops rotation for the life of
-//!   the sink (`Sink`'s `rotation_broken`, which keeps the retained files from
-//!   being emptied one per event), and from then on the current file grows
-//!   without a bound until the process restarts. That is counted in
+//! * **Not forever.** A failed roll pauses rotation (`Sink`'s
+//!   `rotation_broken`, which keeps the retained files from being emptied one
+//!   per event), and the current file grows past its bound. It is retried once
+//!   per further bound when a probe shows the directory accepts writes, at
+//!   most `keep_files` failed attempts, and never after an attempt that had
+//!   already moved a file (D-2509); past those the file grows until restart. That is counted in
 //!   [`Health::rotation_failures`], visible in [`Health::current_bytes`] and
 //!   makes [`Health::is_loud`] true. This line used to say "at most 64 MiB,
 //!   forever", which no path in `sink` enforces. D-1324.

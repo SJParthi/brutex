@@ -157,6 +157,43 @@ pub(crate) async fn request_audited_detached(
     }
 }
 
+/// An armed invocation attempt whose terminal is owed while its handler runs.
+///
+/// resources-3, D-2598. Taken back with [`OwedTerminal::take`] when the
+/// handler returns. If the future holding it is dropped first (a read's client
+/// went away), `Drop` hands the attempt to the blocking pool, where the
+/// attempt's own `Drop` writes `Cancelled` and syncs it: the same truth as
+/// before, off the async worker. Outside a runtime it is dropped in place.
+pub(crate) struct OwedTerminal(Option<journal::Attempt>);
+
+impl OwedTerminal {
+    /// The attempt, for the caller that settles it itself. `None` only after a
+    /// first take.
+    pub(crate) fn take(&mut self) -> Option<journal::Attempt> {
+        self.0.take()
+    }
+}
+
+impl Drop for OwedTerminal {
+    fn drop(&mut self) {
+        if let Some(attempt) = self.0.take() {
+            // A PANIC SETTLES IN PLACE: the attempt's `Drop` reads
+            // `thread::panicking()` to record `Failed`, which a blocking
+            // thread would not see, and would record `Cancelled` instead.
+            if std::thread::panicking() {
+                drop(attempt);
+                return;
+            }
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    let _settles_off_the_worker = runtime.spawn_blocking(move || drop(attempt));
+                }
+                Err(_) => drop(attempt),
+            }
+        }
+    }
+}
+
 /// [`note_request`]'s journal around one handler, with the route label already
 /// chosen.
 ///
@@ -198,6 +235,12 @@ pub(crate) async fn request_audited(
         }
     };
     let id = attempt.id();
+    // HELD IN A GUARD ACROSS THE HANDLER. A read stays bound to its
+    // connection, so a client that goes away drops this future mid-handler;
+    // the armed attempt's own `Drop` then wrote `Cancelled` and synced it ON
+    // THIS TOKIO WORKER. The guard keeps that truth and moves the write and
+    // its fsync to the blocking pool. resources-3, D-2598.
+    let mut owed = OwedTerminal(Some(attempt));
     let mut response = handler.await;
     let status = response.status();
     let phase = if status.is_server_error() {
@@ -207,14 +250,15 @@ pub(crate) async fn request_audited(
     } else {
         Phase::Completed
     };
+    let attempt = owed.take();
     // THE TERMINAL IS OWED, NOT ADMITTED. The handler has already run, so a
     // full detail pool must not refuse this write: refusing dropped the armed
     // attempt, whose `Drop` then wrote `Cancelled`/0 synchronously on this
     // Tokio worker and replaced the handler's real answer with a 503. The owed
     // slot still counts against new detail work. D-1445.
-    match crate::detail::run_owed(move || {
-        let mut attempt = attempt;
-        attempt.finish(phase, status.as_u16())
+    match crate::detail::run_owed(move || match attempt {
+        Some(mut attempt) => attempt.finish(phase, status.as_u16()),
+        None => Err("the invocation attempt was already settled".to_owned()),
     })
     .await
     {

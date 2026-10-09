@@ -458,3 +458,90 @@ fn a_symbolic_link_to_the_held_file_is_refused_by_name() {
         "the file itself passes"
     );
 }
+
+/// replay-3 (D-2635): a complete receipt left by a publisher killed before its
+/// barrier is synced before the fast path vouches for it. On the old code the
+/// fast path returned `Ok` with no barrier, so the armed fault never fired and
+/// `expect_err` failed.
+#[test]
+fn the_receipt_fast_path_still_syncs() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let fixture = Fixture::new(1);
+    let expected = [0x5a_u8; BYTES];
+    let mut wrong = expected;
+    wrong[BYTES - 1] ^= 1;
+    // Exact length, wrong bytes: refused before any barrier is attempted.
+    let path = fixture.root.join("fast-path-wrong.bin");
+    fs::write(&path, wrong).expect("complete but foreign bytes");
+    {
+        let _armed = Armed::arm("fast-path-wrong.bin", Kind::Sync);
+        assert!(publish(&path, &expected).is_err());
+        assert!(
+            Armed::pending(),
+            "no barrier runs for bytes that do not match"
+        );
+    }
+    assert_eq!(fs::read(&path).expect("never overwritten"), wrong);
+    // A fault armed on another name does not fire: the barrier is this file's.
+    let path = fixture.root.join("fast-path-exact.bin");
+    fs::write(&path, expected).expect("complete bytes with no barrier");
+    {
+        let _armed = Armed::arm("some-other-receipt.bin", Kind::Sync);
+        publish(&path, &expected).expect("exact receipt synced and vouched for");
+        assert!(Armed::pending());
+    }
+    // The barrier on the fast path is real: a failure is named and remembered.
+    let path = fixture.root.join("fast-path-unsynced.bin");
+    fs::write(&path, expected).expect("complete bytes with no barrier");
+    {
+        let _armed = Armed::arm("fast-path-unsynced.bin", Kind::Sync);
+        let refused = publish(&path, &expected).expect_err("the fast path runs a barrier");
+        assert!(refused.contains("injected sync fault"), "{refused}");
+        assert!(refused.contains("could not be made durable"), "{refused}");
+        assert!(!Armed::pending(), "the fault fired on this receipt");
+    }
+    let again = publish(&path, &expected).expect_err("a failed barrier is never confirmed");
+    assert!(again.contains("already failed in this process"), "{again}");
+    assert_eq!(fs::read(&path).expect("bytes untouched"), expected);
+}
+
+/// replay-4 (D-2635): a creating call syncs the root even when the namespace
+/// already exists, so an entry whose first barrier never ran is made durable
+/// by the next caller. On the old code the `AlreadyExists` arm synced nothing,
+/// so the armed fault never fired and the call returned `Ok`.
+#[test]
+fn namespace_directory_syncs_root_on_every_create_call() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let fixture = Fixture::new(1);
+    let name = fixture
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("scratch root name")
+        .to_owned();
+    let base = namespace_directory(&fixture.root, "replay-4-namespace", true).expect("created");
+    assert!(base.is_dir());
+    // Already exists: the root is still synced.
+    {
+        let _armed = Armed::arm(&name, Kind::Sync);
+        let refused = namespace_directory(&fixture.root, "replay-4-namespace", true)
+            .expect_err("the existing namespace's root is synced again");
+        assert!(refused.contains("injected sync fault"), "{refused}");
+        assert!(!Armed::pending());
+    }
+    // A reading call writes nothing and syncs nothing.
+    {
+        let _armed = Armed::arm(&name, Kind::Sync);
+        namespace_directory(&fixture.root, "replay-4-namespace", false).expect("read door");
+        assert!(Armed::pending(), "a read never runs a barrier");
+    }
+    // A missing namespace on the read door is refused, not created.
+    assert!(namespace_directory(&fixture.root, "replay-4-absent", false).is_err());
+    assert!(!fixture.root.join("replay-4-absent").exists());
+    // A first creating call whose barrier fails is refused, and a retry syncs.
+    {
+        let _armed = Armed::arm(&name, Kind::Sync);
+        assert!(namespace_directory(&fixture.root, "replay-4-fresh", true).is_err());
+    }
+    namespace_directory(&fixture.root, "replay-4-fresh", true).expect("retry syncs");
+}

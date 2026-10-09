@@ -2028,6 +2028,27 @@ fn refused(why: &Refusal) -> (axum::http::StatusCode, JsonHeaders, String) {
     )
 }
 
+/// [`refused`], said first: one `api.sweep` Warn event carrying `message` and
+/// the refusal's own sentence as `why`.
+///
+/// conc13-3, D-2595. The refusals at the budget environment, the stamp of a
+/// descent or command, the busy slot of a descent or command, the execution
+/// lease, the invocation journal, a command's launch preparation and the
+/// start marker returned [`refused`] with no event, so `/logs` held only the
+/// middleware's `served ... 503` with no reason, while the page told the
+/// operator to read the logs. Every refusal arm of the three routes now says
+/// why, once, at the route's own boundary (gate 17 does not cover `api`).
+fn refuse_logged(
+    message: &'static str,
+    why: &Refusal,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(telemetry::Level::Warn, "api.sweep", message)
+            .with("why", telemetry::Value::Str(why.why())),
+    );
+    refused(why)
+}
+
 /// The same physical store is claimed before the start audit and before spawn.
 /// A positive GET snapshot never substitutes for this atomic POST admission.
 fn claim_execution(
@@ -2118,7 +2139,7 @@ pub(crate) fn run_with(
     // BEFORE THE SLOT FOR THE SAME REASON: a budget in the server's own
     // environment refuses every rung this run could sweep. D-0685.
     if let Some(why) = environment_budget_refusal() {
-        return refused(&why);
+        return refuse_logged("a sweep was refused by this server's environment", &why);
     }
 
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
@@ -2138,8 +2159,10 @@ pub(crate) fn run_with(
         refused(&Refusal::Busy(why))
     };
     let admitted = admit(site, busy, || {
-        let lease = claim_execution(site, true).map_err(|why| refused(&why))?;
-        let mut audit = reserve_invocation(site, "sweep").map_err(|why| refused(&why))?;
+        let lease = claim_execution(site, true)
+            .map_err(|why| refuse_logged("a sweep was refused at its execution lease", &why))?;
+        let mut audit = reserve_invocation(site, "sweep")
+            .map_err(|why| refuse_logged("a sweep was refused at its invocation journal", &why))?;
         let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
@@ -2153,7 +2176,10 @@ pub(crate) fn run_with(
         );
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return Err(refused(&why));
+            return Err(refuse_logged(
+                "a sweep was refused because its start could not be recorded",
+                &why,
+            ));
         }
         Ok((accepted, (started, attempt, audit, lease)))
     });
@@ -2272,26 +2298,35 @@ pub(crate) fn descend_with(
     };
 
     if let Some(why) = stamp_refusal(stamp) {
-        return refused(&why);
+        return refuse_logged(
+            "a descent was refused because this build carries no commit stamp",
+            &why,
+        );
     }
     // A descent's first step is `cli::one_rung`, which refuses a server budget;
     // refused here instead, before the slot, as `run_with` does. D-0685.
     if let Some(why) = environment_budget_refusal() {
-        return refused(&why);
+        return refuse_logged("a descent was refused by this server's environment", &why);
     }
 
     let busy = || {
-        refused(&Refusal::Busy(
-            "a sweep or descent is already running in this process. \
-             Both append to the same append-only ledger, and two of \
-             them finishing together can interleave two records, so \
-             the second press is refused rather than queued."
-                .to_owned(),
-        ))
+        refuse_logged(
+            "a descent was refused while a run was in flight",
+            &Refusal::Busy(
+                "a sweep or descent is already running in this process. \
+                 Both append to the same append-only ledger, and two of \
+                 them finishing together can interleave two records, so \
+                 the second press is refused rather than queued."
+                    .to_owned(),
+            ),
+        )
     };
     let admitted = admit(site, busy, || {
-        let lease = claim_execution(site, true).map_err(|why| refused(&why))?;
-        let mut audit = reserve_invocation(site, "descent").map_err(|why| refused(&why))?;
+        let lease = claim_execution(site, true)
+            .map_err(|why| refuse_logged("a descent was refused at its execution lease", &why))?;
+        let mut audit = reserve_invocation(site, "descent").map_err(|why| {
+            refuse_logged("a descent was refused at its invocation journal", &why)
+        })?;
         let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
@@ -2306,7 +2341,10 @@ pub(crate) fn descend_with(
         .of_kind(Kind::Descent);
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return Err(refused(&why));
+            return Err(refuse_logged(
+                "a descent was refused because its start could not be recorded",
+                &why,
+            ));
         }
         Ok((accepted, (started, attempt, audit, lease)))
     });
@@ -3474,14 +3512,17 @@ fn command_with_configuration(
     };
 
     if let Some(why) = stamp_refusal(stamp) {
-        return refused(&why);
+        return refuse_logged(
+            "a command was refused because this build carries no commit stamp",
+            &why,
+        );
     }
     // Only the words whose run prices the screen; the strict word refuses the
     // budget at every value through `validate_runtime` below. D-0685.
     if asked.prices_a_screen()
         && let Some(why) = environment_budget_refusal()
     {
-        return refused(&why);
+        return refuse_logged("a command was refused by this server's environment", &why);
     }
 
     // Resolve only the explicit strict command, once, before claiming a slot or
@@ -3499,13 +3540,16 @@ fn command_with_configuration(
     };
 
     let busy = || {
-        refused(&Refusal::Busy(
-            "a sweep, descent or command is already running in this \
-             process. All of them append to the same append-only ledger, \
-             and two finishing together can interleave two records, so the \
-             second press is refused rather than queued."
-                .to_owned(),
-        ))
+        refuse_logged(
+            "a command was refused while a run was in flight",
+            &Refusal::Busy(
+                "a sweep, descent or command is already running in this \
+                 process. All of them append to the same append-only ledger, \
+                 and two finishing together can interleave two records, so the \
+                 second press is refused rather than queued."
+                    .to_owned(),
+            ),
+        )
     };
     let admitted = admit(site, busy, || {
         let uses_configured_store = !matches!(
@@ -3514,7 +3558,8 @@ fn command_with_configuration(
                 | Command::BooleanQualifiedSearch { .. }
                 | Command::IndexStopQualifiedSearch { .. }
         );
-        let lease = claim_execution(site, uses_configured_store).map_err(|why| refused(&why))?;
+        let lease = claim_execution(site, uses_configured_store)
+            .map_err(|why| refuse_logged("a command was refused at its execution lease", &why))?;
         let launch = match &asked {
             Command::BooleanQualifiedSearch { request } => {
                 crate::booleanlaunch::prepare(request, &site.store_root)
@@ -3526,9 +3571,16 @@ fn command_with_configuration(
             }
             _ => Ok(None),
         }
-        .map_err(|why| refused(&Refusal::Unobservable(why)))?;
+        .map_err(|why| {
+            refuse_logged(
+                "a command was refused while preparing its launch",
+                &Refusal::Unobservable(why),
+            )
+        })?;
         let (from, to) = asked.window();
-        let mut audit = reserve_invocation(site, asked.word()).map_err(|why| refused(&why))?;
+        let mut audit = reserve_invocation(site, asked.word()).map_err(|why| {
+            refuse_logged("a command was refused at its invocation journal", &why)
+        })?;
         let attempt = audit.id();
         let started = now_micros();
         let mut accepted = Progress::started(
@@ -3549,7 +3601,10 @@ fn command_with_configuration(
         }
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return Err(refused(&why));
+            return Err(refuse_logged(
+                "a command was refused because its start could not be recorded",
+                &why,
+            ));
         }
         Ok((accepted, (started, attempt, audit, launch, lease)))
     });
@@ -7304,5 +7359,73 @@ mod tests {
             elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// conc13-3, D-2595. On the old code a sweep refused at its execution
+    /// lease answered 409/503 with no event at all: `/logs` held only the
+    /// middleware's `served` line. The lease is held here (and the CLI's own
+    /// store differs from this scratch store too), so the press is refused at
+    /// `claim_execution` whichever check fires, and one `api.sweep` Warn
+    /// carrying the same sentence as the body must land. No run can start.
+    #[test]
+    fn a_lease_refusal_is_logged_with_its_reason() {
+        const STAMP: &str = "0123456789abcdef0123456789abcdef01234567";
+        let _sink = crate::emitted::sink();
+        let site = finisher_site("conc13-3-lease");
+        std::fs::create_dir_all(&site.store_root).expect("private store");
+        let _held = cli::execution_lease::Lease::acquire(&site.store_root)
+            .expect("the test owns this private store's lease");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"rungs":["5min"]}}"#);
+        let from = crate::emitted::mark();
+        let (status, _, body) = super::run_with(&site, &run, Some(STAMP));
+        assert_ne!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+        assert!(body.contains(r#""accepted":false"#), "{body}");
+        assert!(site.sweep.lock().expect("slot").is_none(), "no run started");
+        // Other tests in this binary may press concurrently, so the event is
+        // found by its sentence, which is this press's own body.
+        let said = crate::emitted::landed(
+            from,
+            "api.sweep",
+            "a sweep was refused at its execution lease",
+        );
+        let mut ours = 0;
+        for record in &said {
+            let why = record
+                .field("why")
+                .and_then(telemetry::OwnedValue::as_str)
+                .unwrap_or("");
+            if !why.is_empty() && body.contains(&crate::render::json_string(why)) {
+                ours += 1;
+                assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
+            }
+        }
+        assert!(
+            ours >= 1,
+            "the refusal is logged with its reason: {said:?} / {body}"
+        );
+        // And the helper itself, for every refusal class: one Warn, its
+        // sentence, and the same answer `refused` gives.
+        for why in [
+            Refusal::Malformed("m".to_owned()),
+            Refusal::Span("s".to_owned()),
+            Refusal::Busy("b".to_owned()),
+            Refusal::Unstamped("u".to_owned()),
+            Refusal::Unobservable("o".to_owned()),
+            Refusal::Environment("e".to_owned()),
+        ] {
+            let from = crate::emitted::mark();
+            let logged = super::refuse_logged("conc13-3 helper probe", &why);
+            assert_eq!(logged, super::refused(&why));
+            let said = crate::emitted::landed(from, "api.sweep", "conc13-3 helper probe");
+            let mut matched = 0;
+            for record in &said {
+                if crate::emitted::says(record, "why", why.why()) {
+                    matched += 1;
+                    assert_eq!(record.level, telemetry::Level::Warn, "{why:?}");
+                }
+            }
+            assert_eq!(matched, 1, "{why:?}: {said:?}");
+        }
+        let _ = std::fs::remove_dir_all(&site.store_root);
     }
 }

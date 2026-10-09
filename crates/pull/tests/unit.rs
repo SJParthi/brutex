@@ -1115,6 +1115,8 @@ fn every_secret_error_prints_something_distinct() {
         SecretError::NotFound,
         SecretError::Empty,
         SecretError::Unreachable,
+        // P1-19-01, D-2525.
+        SecretError::Padded,
     ];
     let rendered: HashSet<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(rendered.len(), errors.len());

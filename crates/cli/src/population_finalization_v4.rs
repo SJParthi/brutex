@@ -2270,20 +2270,37 @@ impl PopulationFinalizationV4Ledger {
             // an empty file or a strict prefix of the constant header. Only
             // the writer, under the exclusive lock, rewrites that; a reader
             // and any other short content still refuse in `verify_header`.
-            let data_created = created || (writable && holds_torn_header(&mut data_file)?);
-            if data_created {
-                data_file
-                    .seek(SeekFrom::Start(0))
-                    .and_then(|_| data_file.write_all(&header()))
-                    .and_then(|()| data_file.sync_all())
-                    .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?;
-            }
+            //
+            // ONE HEADER RULE (conc5-1, D-2644), as Admission V4.
+            let torn = created || (writable && holds_torn_header(&mut data_file)?);
+            let data_created = (writable
+                && crate::fixed_tail::init_or_heal_header(
+                    &mut data_file,
+                    &data_path,
+                    &header(),
+                    File::sync_all,
+                )
+                .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?
+                    == crate::fixed_tail::HeaderInit::Written)
+                || torn;
             if lock_created || data_created {
                 root_file
                     .sync_all()
                     .map_err(|why| format!("cannot sync Finalization V4 root: {why}"))?;
             }
             verify_header(&mut data_file)?;
+            // pop2-3, D-2625 (extends D-1910): the WRITER, under the exclusive
+            // lock taken above, cuts bytes past the last whole record, which
+            // were never acknowledged; a reader keeps refusing them as ragged.
+            if writable {
+                crate::fixed_tail::heal_torn_tail(
+                    &data_file,
+                    &data_path,
+                    POPULATION_FINALIZATION_V4_HEADER_BYTES,
+                    POPULATION_FINALIZATION_V4_RECORD_BYTES,
+                    &header(),
+                )?;
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, 0)?;
             let data_generation = file_generation(&data_file, &data_path, bounds.file_bytes)?;
             let mut ledger = Self {
@@ -3442,8 +3459,13 @@ mod tests {
                 0,
                 "case {case} ends on a whole record"
             );
-            PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
-                .expect("the cut ledger opens read-only");
+            // A fault on the header's own barrier (hooked since conc5-1,
+            // D-2644) cuts a fresh file to nothing, which a reader refuses as
+            // no ledger; any longer cut ledger still opens read-only.
+            if len > 0 {
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .expect("the cut ledger opens read-only");
+            }
             assert!(matches!(
                 commit_population_finalization_v4(finalization_root.path(), bounds(), source())
                     .expect("the exact rerun commits"),
@@ -3550,11 +3572,19 @@ mod tests {
             HEADER_BYTES as u64 + 6 * RECORD_BYTES as u64
         );
 
+        // pop2-3, D-2625: a sub-record tail is a kill's residue. A reader
+        // still refuses it; the writer cuts it under its lock and commits.
         let ragged = TestRoot::new("ragged");
+        File::create(ragged.path().join(LOCK_FILE)).expect("create ragged lock");
         let mut file = File::create(ragged.path().join(DATA_FILE)).expect("create ragged data");
         file.write_all(&header()).expect("write ragged header");
         file.write_all(&[1]).expect("write ragged byte");
         file.sync_all().expect("sync ragged file");
+        drop(file);
+        let why = PopulationFinalizationV4Ledger::open_read(ragged.path(), bounds())
+            .err()
+            .unwrap_or_default();
+        assert!(why.contains("ragged"), "{why}");
         let ragged_admission_root = TestRoot::new("ragged-admission");
         let ragged_source = admission(
             ragged_admission_root.path(),
@@ -3562,7 +3592,61 @@ mod tests {
             AdmissionV4FamilyTerminal::NaturallyExtinct,
             44,
         );
-        assert!(commit_population_finalization_v4(ragged.path(), bounds(), ragged_source).is_err());
+        assert!(matches!(
+            commit_population_finalization_v4(ragged.path(), bounds(), ragged_source)
+                .expect("the writer cuts the torn tail and commits"),
+            PopulationFinalizationV4Commit::Written(_)
+        ));
+        let len = std::fs::metadata(ragged.path().join(DATA_FILE))
+            .expect("stat healed Finalization data")
+            .len();
+        assert_eq!((len - HEADER_BYTES as u64) % RECORD_BYTES as u64, 0);
+    }
+
+    /// pop2-3, D-2625: every stray length from 1 to one byte short of a
+    /// record past a committed block is cut by the writer alone, back to the
+    /// exact committed bytes; a whole trailing record that fails its seal is
+    /// never cut. On the old code `scan` refused the writer as "ragged".
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        for stray in [1, 64, RECORD_BYTES / 2, RECORD_BYTES - 1, RECORD_BYTES] {
+            let admission_root = TestRoot::new("torn-admission");
+            let finalization_root = TestRoot::new("torn-finalization");
+            let source = admission(
+                admission_root.path(),
+                AdmissionV4FamilyTerminal::Evaluated,
+                AdmissionV4FamilyTerminal::NaturallyExtinct,
+                45,
+            );
+            commit_population_finalization_v4(finalization_root.path(), bounds(), source)
+                .expect("committed fixture");
+            let path = finalization_root.path().join(DATA_FILE);
+            let whole = std::fs::read(&path).expect("whole bytes");
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for the torn append");
+            file.write_all(&vec![0x5a; stray]).expect("torn bytes");
+            drop(file);
+            assert!(
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .is_err(),
+                "{stray}: a reader refuses"
+            );
+            let opened =
+                PopulationFinalizationV4Ledger::open_write(finalization_root.path(), bounds());
+            if stray == RECORD_BYTES {
+                assert!(opened.is_err(), "a whole bad record is refused");
+                assert_eq!(
+                    std::fs::metadata(&path).expect("stat").len(),
+                    whole.len() as u64 + stray as u64,
+                    "a whole record is never cut"
+                );
+            } else {
+                drop(opened.unwrap_or_else(|why| panic!("{stray}: the writer heals: {why}")));
+                assert_eq!(std::fs::read(&path).expect("healed bytes"), whole);
+            }
+        }
     }
 
     #[test]

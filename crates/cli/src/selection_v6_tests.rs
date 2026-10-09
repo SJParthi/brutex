@@ -38,6 +38,19 @@ fn frame(seed: u8) -> Block {
     block
 }
 
+/// Where an abandoned tail at `offset` holding `tail` is set aside (D-2554).
+fn quarantine(root: &Path, offset: impl std::fmt::Display, tail: &[u8]) -> PathBuf {
+    let hex =
+        brutex_core::blake3::hash(tail)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+    root.join(format!("{FILE_NAME}.abandoned-{offset}-{hex}"))
+}
+
 fn bounds(records: u64) -> SelectionV6Bounds {
     SelectionV6Bounds::new(records, records * BLOCK_BYTES).expect("finite bounds")
 }
@@ -129,6 +142,11 @@ fn incomplete_prefix_is_never_authority_and_a_foreign_one_is_set_aside() {
         quarantined(&scratch.0, 0),
         vec![foreign[..4096].to_vec()],
         "preserved foreign prefix"
+    );
+    assert_eq!(
+        std::fs::read(quarantine(&scratch.0, 0, &foreign[..4096]))
+            .expect("preserved foreign prefix"),
+        &foreign[..4096]
     );
 }
 
@@ -311,6 +329,11 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
         vec![foreign[..4096].to_vec()],
         "abandoned bytes kept aside"
     );
+    let quarantine = quarantine(&scratch.0, SELECTION_V6_BLOCK_BYTES, &foreign[..4096]);
+    assert_eq!(
+        std::fs::read(&quarantine).expect("abandoned bytes kept aside"),
+        &foreign[..4096]
+    );
     require_committed(&scratch.0, bounds(3), &first).expect("first retained");
     require_committed(&scratch.0, bounds(3), &second).expect("second committed");
     // Exact reuse behind a tail also clears the tail aside, then reuses.
@@ -324,27 +347,33 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
     );
 }
 
-/// **CE-65. AN EXISTING QUARANTINE THAT IS NOT A REGULAR FILE IS REFUSED, AND
-/// A FIFO THERE NEVER HOLDS THE REPAIR.** The comparison read the
-/// `.abandoned-<n>` name whole with `fs::read`, so a FIFO blocked the ledger's
-/// repair under its exclusive lock and a device was read without a bound. Its
-/// only legal content is shorter than one block, the tail it is compared with.
+/// **CE-65. A FIFO AT THE QUARANTINE'S SCRATCH NAME NEVER HOLDS THE REPAIR.**
+/// The comparison read the `.abandoned-<n>` name whole with `fs::read`, so a
+/// FIFO there blocked the ledger's repair under its exclusive lock. Since
+/// conc4-1 (D-2554) the copy is written under a `.writing` scratch name and
+/// renamed to a content-keyed one; a stale scratch is unlinked, never opened,
+/// so a FIFO there (or at the final name, which the rename replaces) neither
+/// waits nor is read, and the repair completes.
 #[test]
-fn an_abandoned_tail_quarantine_that_is_not_a_regular_file_is_refused_and_never_waits() {
+fn a_fifo_at_the_quarantine_names_never_holds_the_repair() {
     let expected = frame(7);
     let scratch = Scratch::new();
     let path = scratch.0.join(FILE_NAME);
-    std::fs::write(&path, &frame(8)[..4096]).expect("foreign prefix");
+    let foreign = frame(8);
+    std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
     // The name the repair will reach for: offset 0 and this tail's digest
-    // (D-2790), so the FIFO sits exactly where the comparison reads.
-    let quarantine = quarantine_path(&scratch.0, 0, &frame(8)[..4096]);
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&quarantine)
-            .status()
-            .expect("mkfifo runs")
-            .success()
-    );
+    // (D-2790, D-2554), so the FIFO sits exactly where the copy lands.
+    let aside = quarantine(&scratch.0, 0, &foreign[..4096]);
+    let writing = PathBuf::from(format!("{}.writing", aside.display()));
+    for fifo in [&aside, &writing] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+    }
     let (sent, answer) = std::sync::mpsc::channel();
     let repair = {
         let root = scratch.0.clone();
@@ -354,18 +383,23 @@ fn an_abandoned_tail_quarantine_that_is_not_a_regular_file_is_refused_and_never_
     };
     let repaired = answer.recv_timeout(std::time::Duration::from_secs(2));
     if repaired.is_err() {
-        let _ = std::fs::OpenOptions::new().write(true).open(&quarantine);
+        for fifo in [&aside, &writing] {
+            let _ = std::fs::OpenOptions::new().write(true).open(fifo);
+        }
     }
     let _ = repair.join();
-    let why = repaired
-        .expect("a FIFO at the quarantine must not hold the repair")
-        .expect_err("refused, nothing repaired");
-    assert!(why.contains("not a regular file"), "{why}");
-    assert_eq!(
-        std::fs::read(&path).expect("ledger").len(),
-        4096,
-        "the ledger is not cut"
+    assert!(
+        repaired
+            .expect("a FIFO at a quarantine name must not hold the repair")
+            .expect("the tail is set aside"),
+        "the block was written"
     );
+    assert_eq!(std::fs::read(&path).expect("ledger"), expected);
+    assert_eq!(
+        std::fs::read(&aside).expect("a regular file now"),
+        &foreign[..4096]
+    );
+    assert!(!writing.exists(), "no scratch is left");
 }
 
 /// Every quarantine set aside at `offset`, in name order.
@@ -614,8 +648,12 @@ fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_famil
 
 /// Exact reuse with no tail sets nothing aside; the record ceiling binds even
 /// when the byte ceiling has room; an existing quarantine holding exactly the
-/// abandoned bytes is accepted and one holding other bytes refuses. D-1569.
-/// G18-cli-b-19, D-2027.
+/// abandoned bytes is accepted. D-1569. G18-cli-b-19, D-2027.
+///
+/// Re-taken on merge for conc4-1 (D-2554, D-4603): the quarantine is named by
+/// the tail's offset AND content, so a file of other bytes at the old
+/// offset-only name no longer refuses the repair. It is left untouched, and an
+/// earlier repair's identical copy under the content name is accepted.
 #[test]
 fn reuse_sets_nothing_aside_records_bind_and_an_identical_quarantine_is_accepted() {
     let quarantines = |root: &Path| {
@@ -657,27 +695,23 @@ fn reuse_sets_nothing_aside_records_bind_and_an_identical_quarantine_is_accepted
     let expected = frame(23);
     let foreign = frame(24);
     let path = scratch.0.join(FILE_NAME);
-    let quarantine = scratch.0.join(format!("{FILE_NAME}.abandoned-0"));
+    let offset_only = scratch.0.join(format!("{FILE_NAME}.abandoned-0"));
+    let quarantine = quarantine(&scratch.0, 0, &foreign[..4096]);
     std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
     let mut other = foreign[..4096].to_vec();
     other[0] ^= 1;
-    std::fs::write(&quarantine, &other).expect("a same-length quarantine of other bytes");
-    let refusal = persist(&scratch.0, bounds(1), &expected).expect_err("other bytes refuse");
-    assert!(
-        refusal.contains("already holds different bytes"),
-        "{refusal}"
-    );
-    assert_eq!(
-        std::fs::read(&path).expect("ledger").len(),
-        4096,
-        "nothing repaired"
-    );
+    std::fs::write(&offset_only, &other).expect("other bytes at the offset-only name");
     std::fs::write(&quarantine, &foreign[..4096]).expect("an earlier repair's identical copy");
     assert!(
         persist(&scratch.0, bounds(1), &expected).expect("the identical quarantine is accepted")
     );
     assert_eq!(std::fs::read(&path).expect("completed"), expected);
     assert_eq!(std::fs::read(&quarantine).expect("kept"), &foreign[..4096]);
+    assert_eq!(
+        std::fs::read(&offset_only).expect("untouched"),
+        other,
+        "a file at the old offset-only name is neither compared nor replaced"
+    );
 }
 
 /// A quarantine that cannot be created (here `ENAMETOOLONG`, not `AlreadyExists`)
@@ -689,7 +723,8 @@ fn a_quarantine_that_cannot_be_created_refuses_with_the_create_error() {
     let scratch = Scratch::new();
     let mut root = std::fs::canonicalize(&scratch.0).expect("scratch resolves");
     // root + '/' + FILE_NAME = 4,090 bytes: the ledger opens under the
-    // 4,096-byte PATH_MAX, and the quarantine name, 12 bytes longer, does not.
+    // 4,096-byte PATH_MAX, and the quarantine's scratch name, 85 bytes longer
+    // (`.abandoned-0-`, 64 hex digits, `.writing`; D-2554), does not.
     let target = 4_089 - FILE_NAME.len();
     while target - root.as_os_str().len() > 255 {
         root.push("d".repeat(128));
@@ -701,10 +736,13 @@ fn a_quarantine_that_cannot_be_created_refuses_with_the_create_error() {
     let path = root.join(FILE_NAME);
     std::fs::write(&path, &frame(26)[..4096]).expect("foreign prefix");
     let why = persist(&root, bounds(1), &frame(25)).expect_err("the quarantine cannot be created");
+    // The refusal names the quarantine and says the ledger was not changed
+    // (D-2554's wording, re-taken on merge, D-4603).
     assert!(
-        why.starts_with("Selection V6 abandoned tail quarantine: "),
+        why.starts_with("Selection V6 abandoned tail quarantine "),
         "{why}"
     );
+    assert!(why.contains("the ledger was not changed"), "{why}");
     assert!(!why.contains("nothing repaired"), "{why}");
     assert_eq!(
         std::fs::read(&path).expect("ledger").len(),
@@ -807,4 +845,42 @@ fn an_uninspectable_rung_path_is_refused_not_reported_absent() {
         }
     }
     assert_eq!(refused, 1);
+}
+
+/// conc4-1, D-2554: a quarantine copy that fails part way leaves no file under
+/// any name and the ledger unchanged, so the rerun sets the tail aside; and a
+/// second abandoned tail at the SAME offset gets its own quarantine instead of
+/// refusing every later persist on the rung.
+#[test]
+fn a_failed_or_repeated_quarantine_never_wedges_the_rung() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let scratch = Scratch::new();
+    let path = scratch.0.join(FILE_NAME);
+    let (first, second, own) = (frame(21), frame(22), frame(23));
+    std::fs::write(&path, &first[..4096]).expect("first abandoned prefix");
+    {
+        let _armed = Armed::arm("abandoned", Kind::Write { keep: 100 });
+        assert!(persist(&scratch.0, bounds(1), &own).is_err());
+    }
+    let left: Vec<_> = std::fs::read_dir(&scratch.0)
+        .expect("list")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        left,
+        [std::ffi::OsString::from(FILE_NAME)],
+        "no partial copy"
+    );
+    assert_eq!(std::fs::read(&path).expect("ledger"), &first[..4096]);
+    assert!(persist(&scratch.0, bounds(2), &own).expect("the rerun sets it aside"));
+    // A second source abandons a tail at the same offset after a cut.
+    std::fs::write(&path, &second[..300]).expect("second abandoned prefix");
+    assert!(persist(&scratch.0, bounds(2), &own).expect("own block again"));
+    assert_eq!(std::fs::read(&path).expect("ledger"), own);
+    for tail in [&first[..4096], &second[..300]] {
+        assert_eq!(
+            std::fs::read(quarantine(&scratch.0, 0, tail)).expect("both kept"),
+            tail
+        );
+    }
 }

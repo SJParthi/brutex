@@ -217,17 +217,26 @@ fn run(
         direction: Direction::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&crate::span_policy(
-            crate::policy_of(&span.bars, rules, lens, validate, horizon, rungs),
-            request.from,
-            request.to,
+        params: Params::of(ladder).with_policy(&crate::with_fold_support(
+            crate::span_policy(
+                crate::policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+                request.from,
+                request.to,
+            ),
+            runner::validate::FoldSupport::Scaled,
         )),
         data_digest: digest,
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header =
-        crate::span_banner(&span, request.underlying, request.from, request.to, commit);
+    let mut header = crate::span_banner(
+        &span,
+        &daily,
+        request.underlying,
+        request.from,
+        request.to,
+        commit,
+    );
     header.push_str(&guard.note());
     header.push_str(&crate::daily_reference_note(&daily, &exact_minute));
     let check = || {
@@ -241,6 +250,7 @@ fn run(
         min_hits,
         Some(&id),
         crate::AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: Some(column),
             replay: Some(replay),
             execution,

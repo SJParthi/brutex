@@ -126,6 +126,26 @@ pub enum Finding {
         /// Where.
         path: String,
     },
+    /// The file has GROWN past the counter, and the part the counter describes
+    /// is exactly what it says (conc14-1, D-2532).
+    ///
+    /// Neither agreement nor disagreement, like [`Self::Busy`]. `/verify.json`
+    /// checks every month against ONE census snapshot taken before its walk,
+    /// so a month a live pull appended to during the walk — or one committed
+    /// to its bar file before the census that counts it was installed — holds
+    /// more bars than the snapshot says. That is a sound append-only superset,
+    /// and it was reported as [`Self::Rows`], "the counter is not describing
+    /// this file", which `api::verify` turns into "the disk says otherwise".
+    /// It is only this when the counted prefix's first and last record carry
+    /// the counted instants; any other growth is still [`Self::Rows`].
+    Ahead {
+        /// Where.
+        path: String,
+        /// What the counter claims.
+        counted: u64,
+        /// What the file's own committed header says, more than `counted`.
+        held: u64,
+    },
     /// The file could not be read, and this is the host's reason verbatim.
     Unreadable {
         /// Where.
@@ -169,6 +189,16 @@ impl Finding {
             Self::Busy { path } => format!(
                 "{path} is held by a writer right now, so it was not checked. \
                  That is not a disagreement: scrub again once the pull finishes."
+            ),
+            Self::Ahead {
+                path,
+                counted,
+                held,
+            } => format!(
+                "{path} holds {held} bar(s), more than the {counted} the counter \
+                 says, and its first {counted} are exactly the ones counted: the \
+                 file has grown past the counter. That is not a disagreement: \
+                 scrub again after the pull finishes."
             ),
             Self::Unreadable { path, why } => {
                 format!("{path} could not be read: {why}")
@@ -242,6 +272,22 @@ pub fn one(entry: &Entry, root: &Path, vendor: Vendor, symbol_id: u32) -> Findin
 
     let held = file.records();
     if held != entry.rows {
+        // A FILE AHEAD OF ITS COUNTER IS NOT LYING ABOUT IT (conc14-1,
+        // D-2532). Two more record reads, at computed offsets, only on this
+        // arm: still O(1) per entry.
+        if held > entry.rows {
+            match counted_prefix_holds(&file, entry) {
+                Ok(true) => {
+                    return Finding::Ahead {
+                        path: shown,
+                        counted: entry.rows,
+                        held,
+                    };
+                }
+                Ok(false) => {}
+                Err(why) => return Finding::Unreadable { path: shown, why },
+            }
+        }
         return Finding::Rows {
             counted: entry.rows,
             held,
@@ -280,6 +326,23 @@ pub fn one(entry: &Entry, root: &Path, vendor: Vendor, symbol_id: u32) -> Findin
     }
 }
 
+/// Whether the first `entry.rows` records of `file` start and end at the
+/// instants the entry counts (conc14-1, D-2532).
+///
+/// An entry counting no rows has no prefix to contradict, so it holds.
+///
+/// # Errors
+///
+/// The record read's refusal, in the store's words.
+fn counted_prefix_holds(file: &BarFile, entry: &Entry) -> Result<bool, String> {
+    let Some(last) = entry.rows.checked_sub(1) else {
+        return Ok(true);
+    };
+    let first = file.read_record(0).map_err(|why| why.to_string())?;
+    let end = file.read_record(last).map_err(|why| why.to_string())?;
+    Ok(first.ts_micros == entry.first_ts_micros && end.ts_micros == entry.last_ts_micros)
+}
+
 /// What a scrub of many entries found, without holding any of them.
 ///
 /// # Why this counts rather than collects
@@ -300,7 +363,9 @@ pub struct Tally {
     pub bounds: u64,
     /// Entries that could not be read at all.
     pub unreadable: u64,
-    /// Entries a writer held, so not checked (D-1501).
+    /// Entries a writer held, so not checked (D-1501), and entries whose file
+    /// had grown past the counter over a matching prefix (conc14-1, D-2532):
+    /// both mean "scrub again after the pull", neither is a disagreement.
     pub busy: u64,
 }
 
@@ -318,7 +383,7 @@ impl Tally {
             Finding::Rows { .. } => self.rows += 1,
             Finding::Bounds { .. } => self.bounds += 1,
             Finding::Unreadable { .. } => self.unreadable += 1,
-            Finding::Busy { .. } => self.busy += 1,
+            Finding::Busy { .. } | Finding::Ahead { .. } => self.busy += 1,
         }
     }
 
@@ -532,6 +597,148 @@ mod tests {
         assert_eq!(one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
         assert_eq!(fs::read(at)?, original);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// **A MONTH GROWN PAST ITS CENSUS IS AHEAD, NOT LYING (conc14-1, D-2532).**
+    ///
+    /// Three bars are written and counted; then more are appended without the
+    /// counter moving, which is what a live pull or a not-yet-installed census
+    /// leaves. On the old code every `held > counted` case was `Rows` -- "the
+    /// counter is not describing this file" -- so the first `Ahead` assertion
+    /// failed. Walked: growth by 1 and by many, a counted prefix whose first or
+    /// last instant does not match (still `Rows`), a file SHORTER than the
+    /// counter (still `Rows`), and an entry counting zero rows.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of grown, prefixed, shorter and empty months against one census, conc14-1"
+    )]
+    fn a_month_grown_past_its_census_is_ahead_not_lying() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-scrub-Ahead-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ignored = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let day = |d: u8| -> Result<i64, Box<dyn std::error::Error>> {
+            Ok(
+                i64::from(crate::session::Day::new(2025, 5, d)?.days_from_epoch()) * 86_400_000_000
+                    + 21_600_000_000,
+            )
+        };
+        let bar = |ts: i64| Bar {
+            ts_micros: ts,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: OI_NULL,
+        };
+        let entry = Entry {
+            key: crate::manifest::EntryKey {
+                contract: None,
+                exchange: Exchange::Nse,
+                segment: Segment::Index,
+                symbol: Symbol::new("NIFTY")?,
+                timeframe: Timeframe::DAY_1,
+                month: YearMonth::new(2025, 5)?,
+            },
+            rows: 3,
+            first_ts_micros: day(2)?,
+            last_ts_micros: day(6)?,
+        };
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::DAY_1,
+            month: entry.key.month,
+            file: FileKind::Bars,
+        })?;
+        let shown = path.to_path_buf(&root).display().to_string();
+        let mut writer = BarFile::open_or_create(&root, path, 7)?;
+        writer.append(&[bar(day(2)?), bar(day(5)?), bar(day(6)?)])?;
+        drop(writer);
+        assert_eq!(one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
+
+        // GROWN BY ONE: ahead.
+        let mut writer = BarFile::open_or_create(&root, path, 7)?;
+        writer.append(&[bar(day(7)?)])?;
+        drop(writer);
+        let ahead = one(&entry, &root, Vendor::Dhan, 7);
+        assert_eq!(
+            ahead,
+            Finding::Ahead {
+                path: shown.clone(),
+                counted: 3,
+                held: 4
+            }
+        );
+        assert!(!ahead.agrees());
+        assert!(
+            ahead.say().contains("grown past the counter"),
+            "{}",
+            ahead.say()
+        );
+        let mut tally = Tally::default();
+        tally.count(&ahead);
+        assert_eq!((tally.busy, tally.rows, tally.disagreed()), (1, 0, 0));
+        assert!(!tally.clean(), "a month not checked whole is not clean");
+
+        // GROWN BY MANY: still ahead.
+        let mut writer = BarFile::open_or_create(&root, path, 7)?;
+        writer.append(&[bar(day(8)?), bar(day(9)?), bar(day(12)?)])?;
+        drop(writer);
+        assert!(matches!(
+            one(&entry, &root, Vendor::Dhan, 7),
+            Finding::Ahead {
+                counted: 3,
+                held: 7,
+                ..
+            }
+        ));
+
+        // A PREFIX THAT DOES NOT MATCH at either end is still a disagreement.
+        for (first, last) in [(day(1)?, day(6)?), (day(2)?, day(7)?)] {
+            let wrong = Entry {
+                first_ts_micros: first,
+                last_ts_micros: last,
+                ..entry
+            };
+            assert_eq!(
+                one(&wrong, &root, Vendor::Dhan, 7),
+                Finding::Rows {
+                    counted: 3,
+                    held: 7
+                }
+            );
+        }
+        // FEWER ON DISK THAN COUNTED is never ahead.
+        let over = Entry { rows: 8, ..entry };
+        assert_eq!(
+            one(&over, &root, Vendor::Dhan, 7),
+            Finding::Rows {
+                counted: 8,
+                held: 7
+            }
+        );
+        // AN ENTRY COUNTING NOTHING has no prefix to contradict.
+        let none = Entry { rows: 0, ..entry };
+        assert!(matches!(
+            one(&none, &root, Vendor::Dhan, 7),
+            Finding::Ahead {
+                counted: 0,
+                held: 7,
+                ..
+            }
+        ));
+        fs::remove_dir_all(&root)?;
         Ok(())
     }
 

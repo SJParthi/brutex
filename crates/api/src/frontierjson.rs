@@ -418,7 +418,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
                 row.n,
                 row.mean_milli_paisa,
                 row.t_milli,
-                row.payoff_bp,
+                payoff_on_wire(row.n, row.payoff_bp),
                 row.wins,
                 d.priced,
                 row.trades,
@@ -557,6 +557,30 @@ fn measurable(value: i64) -> String {
         "null".to_owned()
     } else {
         value.to_string()
+    }
+}
+
+/// `payoff_bp` as the wire carries it: `null` for each of its two absences
+/// that the row can name exactly (p5num-5, D-2568).
+///
+/// `runner::outcome::Edge::payoff_bp` answers [`i64::MAX`] for a combination
+/// that never gave anything back and `0` for fewer than two observations. Both
+/// went out raw. The first is `2^63 - 1`, which `JSON.parse` rounds to `2^63`,
+/// so `web/src/lib/frontier-analytics.js` refused the WHOLE frontier for one
+/// honest unbounded row; the second is a refusal that read as a measured zero.
+/// `n` is on the row, so "fewer than two observations" is decided here exactly.
+///
+/// What it cannot decide: the method's third absence -- no observation moved in
+/// the position's favour -- is also stored as `0`, and the stored row keeps no
+/// count that separates it from a payoff that truncated to zero. Telling those
+/// apart needs the refusal persisted beside the value, which is a frontier
+/// file-format change and is left to an owner decision rather than guessed at.
+#[must_use]
+pub(crate) fn payoff_on_wire(n: u64, payoff_bp: i64) -> String {
+    if n < 2 {
+        "null".to_owned()
+    } else {
+        measurable(payoff_bp)
     }
 }
 
@@ -702,6 +726,57 @@ mod tests {
             min_win: 295,
             gross_win: 900,
             gross_loss: -273_649,
+        }
+    }
+
+    /// p5num-5 (D-2568): the payoff's two nameable absences are `null`, and
+    /// every other value passes through unchanged. Exhaustive over the
+    /// boundaries of both inputs, including values the method never produces,
+    /// so the rule is pinned rather than the method's current range.
+    #[test]
+    fn an_unbounded_or_refused_payoff_is_null_on_the_wire() {
+        for n in [0_u64, 1, 2, 3, u64::MAX] {
+            for payoff in [i64::MIN, -1, 0, 1, 129, i64::MAX - 1, i64::MAX] {
+                let expected = if n < 2 || payoff == i64::MAX {
+                    "null".to_owned()
+                } else {
+                    payoff.to_string()
+                };
+                assert_eq!(
+                    super::payoff_on_wire(n, payoff),
+                    expected,
+                    "n {n} payoff {payoff}"
+                );
+            }
+        }
+    }
+
+    /// p5num-5 (D-2568): the rendered row, not just the helper. Before the fix
+    /// the unbounded row carried a bare `9223372036854775807`, which the
+    /// browser cannot hold exactly and which refused the whole frontier, and
+    /// the one-observation row carried a measured-looking `0`.
+    #[test]
+    fn a_rendered_frontier_row_carries_a_null_payoff_where_the_method_has_none() {
+        let identity = [0x5e_u8; 32];
+        for (n, payoff, expected) in [
+            (868_u64, 129_i64, r#""payoff_bp":129,"#),
+            (868, i64::MAX, r#""payoff_bp":null,"#),
+            (868, i64::MAX - 1, r#""payoff_bp":9223372036854775806,"#),
+            (2, 0, r#""payoff_bp":0,"#),
+            (1, 0, r#""payoff_bp":null,"#),
+            (0, 0, r#""payoff_bp":null,"#),
+        ] {
+            let mut row = verdict_row(identity, 1);
+            row.n = n;
+            row.payoff_bp = payoff;
+            let mut out = String::new();
+            let admitted = super::write_rows(&mut out, &[row], &row.rules);
+            assert!(admitted <= 1, "one row admits at most once: {out}");
+            assert!(out.contains(expected), "n {n} payoff {payoff}: {out}");
+            assert!(
+                !out.contains("9223372036854775807"),
+                "no bare i64::MAX reaches the wire: {out}"
+            );
         }
     }
 

@@ -886,16 +886,25 @@ fn serialized_resource_tags_preserve_terminal_refusal_and_reject_contradictions(
             .expect("roundtrip named halt");
         assert_eq!(encoded, tagged);
         let mut calls = 0;
-        let resumed = ladder
-            .resume_checkpointed(&column, &POSITIONS, IDENTITY, checkpoint, &mut |view| {
+        let resumed =
+            ladder.resume_checkpointed(&column, &POSITIONS, IDENTITY, checkpoint, &mut |view| {
                 calls += 1;
                 assert!(view.terminal());
                 assert_eq!(view.halted().expect("named halt").breach, expected);
                 Ok(())
-            })
-            .expect("terminal checkpoint");
-        assert_eq!(calls, 1);
-        assert!(!resumed.completed());
+            });
+        if expected == Breach::Pairs {
+            assert_eq!(calls, 1);
+            assert!(!resumed.expect("terminal checkpoint").completed());
+        } else {
+            // engine-1, D-2614: a host halt saved before the walk stopped
+            // saving them decodes, but is never replayed as the run's answer.
+            assert_eq!(calls, 0, "{expected:?} reached the callback");
+            assert!(
+                matches!(resumed, Err(Error::Invalid(why)) if why.contains("host Memory or Workers halt")),
+                "{expected:?}"
+            );
+        }
     }
     for (offset, value) in [
         (112, 2),

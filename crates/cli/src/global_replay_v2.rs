@@ -3374,9 +3374,9 @@ fn schedule_streams(
         let schedule = scheduler
             .schedule_minute(entry_micros, &intents)
             .map_err(|why| format!("global replay V2 minute {entry_micros} refused: {why:?}"))?;
+        let offered = crate::global_replay::OfferedIndex::new(&intents, &offered_streams)?;
         for decision in schedule.decisions() {
-            let stream_index =
-                find_offered_stream(&streams, &offered_streams, decision.constituent)?;
+            let stream_index = find_offered_stream(&offered, decision.constituent)?;
             let stream = streams
                 .get_mut(stream_index)
                 .ok_or_else(|| "global replay V2 scheduled stream disappeared".to_owned())?;
@@ -3490,24 +3490,22 @@ fn offered_for_minute(
     Ok((intents, indexes))
 }
 
+/// One probe of the minute's index, built once per minute (rep-1, D-2640),
+/// in place of a rescan that rebuilt every offered constituent per decision.
 fn find_offered_stream(
-    streams: &[VerifiedReplayStreamV2],
-    indexes: &[usize],
+    offered: &crate::global_replay::OfferedIndex,
     constituent: Constituent,
 ) -> Result<usize, GlobalReplayRefusalV2> {
-    let mut found = None;
-    for index in indexes.iter().copied() {
-        let stream = streams
-            .get(index)
-            .ok_or_else(|| "global replay V2 offered stream index is invalid".to_owned())?;
-        if constituent_of(stream)? == constituent {
-            if found.is_some() {
-                return Err("global replay V2 scheduler constituent aliases streams".to_owned());
-            }
-            found = Some(index);
+    use crate::global_replay::OfferedStream;
+    match offered.find(constituent) {
+        OfferedStream::Found(index) => Ok(index),
+        OfferedStream::Aliased => {
+            Err("global replay V2 scheduler constituent aliases streams".to_owned())
+        }
+        OfferedStream::Unoffered => {
+            Err("global replay V2 scheduler returned an unoffered constituent".to_owned())
         }
     }
-    found.ok_or_else(|| "global replay V2 scheduler returned an unoffered constituent".to_owned())
 }
 
 fn constituent_of(stream: &VerifiedReplayStreamV2) -> Result<Constituent, GlobalReplayRefusalV2> {

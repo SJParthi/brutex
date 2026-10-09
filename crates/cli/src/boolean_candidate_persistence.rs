@@ -107,11 +107,25 @@ pub(crate) fn prepare_in_namespace(
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(display(why)),
     }
-    let owner = Flock::try_lock(
-        crate::readonly_file::open(&owner_path).map_err(display)?,
-        owner_path.clone(),
-    )
-    .map_err(|why| format!("{OWNER_REFUSED}: {why}"))?;
+    // A READER IS NOT ANOTHER PUBLISHER (expr-2, indexstop-2, D-2620). A
+    // dashboard's `ReadLease` holds this lock shared for one projection, and
+    // one `try_lock` let it refuse the re-publication of a content-addressed
+    // child a resumed rung or an index-stop invocation needed, after every
+    // source was loaded. The lock is asked again for a bounded second through
+    // a `try_clone` of one open description; a publisher or reader that holds
+    // it past that is still refused, by the same `OWNER_REFUSED` prefix so
+    // `lost_owner_race` reads it unchanged.
+    let opened = crate::readonly_file::open(&owner_path).map_err(display)?;
+    let owner = crate::lock_wait::patiently(|| {
+        Flock::try_lock(
+            opened.try_clone().map_err(std::fs::TryLockError::Error)?,
+            owner_path.clone(),
+        )
+    })
+    .map_err(|why| {
+        format!("{OWNER_REFUSED}: {why}; busy (a reader or another publisher held it past the one-second wait); retry")
+    })?;
+    drop(opened);
     let generation = crate::result_set::file_generation(&owner, &owner_path)?;
     if owner.metadata().map_err(display)?.len() != 0 {
         return Err("Boolean candidate owner contains unexpected bytes".to_owned());

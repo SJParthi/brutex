@@ -196,12 +196,16 @@ struct RungRoots {
 /// inside a directory whose own entry was lost is not there after a restart.
 /// O(depth) syncs, once per rung root per run, never per record.
 /// conc:ledgerv6-3, D-2799.
+///
+/// The chain itself is made by the durable walker, which also syncs each NEW
+/// level's parent, above `root` included (ledgerv6-3, D-2623); the walk below
+/// then syncs every level up to `root`, new or not (D-2799).
 fn create_durably(
     root: &Path,
     path: &Path,
     mut sync: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(path)
+    crate::durable_dir::create_all(path)
         .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
     let mut at = path;
     while at != root {
@@ -235,6 +239,8 @@ impl RungRoots {
         let mut made = Vec::with_capacity(ROUTE_STAGES.len() + 2);
         for stage in ROUTE_STAGES.into_iter().chain(["execution", "selection"]) {
             let path = root.join(stage).join(rung);
+            // Durable level by level: the stage ledgers sync only their own
+            // leaf (ledgerv6-3, D-2623, D-2799).
             create_durably(root, &path, sync_dir)?;
             made.push(path);
         }
@@ -294,7 +300,12 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     // nobody started.
     crate::note(&run_started_event(LEDGER_V6_VERB, request));
 
-    match run_route(request, &mut out) {
+    // `drop`, not kept (ledgerv6-1, D-2629): this verb reports only how many
+    // rungs committed, and a retained Selection V6 holds its Population V6
+    // strict inputs -- an open, shared-locked descriptor per source month --
+    // for the rest of the run, which refused every ingest write to those
+    // months and grew with every rung. Each is released as its rung ends.
+    match run_route(request, &mut out, drop) {
         Ok(selections) => {
             let rungs = selections.len();
             let _ = writeln!(
@@ -331,15 +342,21 @@ fn preloaded_for<T>(underlying: &str, sized: &mut Option<T>) -> Option<T> {
 /// to the NIFTY family commit, and BANKNIFTY loads its own, so eight rungs
 /// make sixteen strict loads, not twenty-four (D-1683).
 ///
+/// `keep` decides what of each committed rung outlives it: the replay route
+/// keeps the whole Selection V6 (Global Replay needs all eight live), and
+/// `ledger-v6` keeps nothing, so each rung's source guards are released as
+/// the rung ends (ledgerv6-1, D-2629).
+///
 /// # Errors
 ///
 /// Names the rung and the stage that refused. There is no arm that continues
 /// past one: a partially committed rung reported as a success would be the
 /// failure wearing a success's clothes `CLAUDE.md` §4 bans.
-fn run_route(
+fn run_route<T>(
     request: &LedgerAllRequest<'_>,
     out: &mut String,
-) -> Result<Vec<crate::selection_v6::CommittedStoredSelectionV6>, String> {
+    mut keep: impl FnMut(crate::selection_v6::CommittedStoredSelectionV6) -> T,
+) -> Result<Vec<T>, String> {
     let vendor = crate::parse_vendor(request.vendor)?;
     // Policy depends only on the request and its explicit knobs. Resolve it
     // before sizing loads all eight market spans, so unavailable data cannot
@@ -451,7 +468,7 @@ fn run_route(
                 ));
             })?;
         sizing_inputs.require_current()?;
-        committed.push(selection);
+        committed.push(keep(selection));
         render_route_summary(rung, &summary, out);
     }
     Ok(committed)
@@ -758,11 +775,12 @@ fn replay_route(
         loads.minute_records,
         loads.daily_records,
     )?;
-    let selected: [_; 8] = run_route(request, out)?
+    let selected: [_; 8] = run_route(request, out, std::convert::identity)?
         .try_into()
         .map_err(|_| "Global Replay V4 requires all eight canonical Selection V6 authorities")?;
     let selected = crate::all_rung_selection_v6::AllRungSelectionV6::new(selected)?;
     let root = request.root.join("global-replay-v4");
+    // ledgerv6-3, D-2623: durable level by level, as `RungRoots::create`.
     create_durably(request.root, &root, sync_dir)?;
     let bounds = crate::global_replay_v4::GlobalReplayV4Bounds::new(
         CEILING_BYTES / crate::global_replay_v4::GLOBAL_REPLAY_V4_RECORD_BYTES,
@@ -1283,5 +1301,70 @@ mod tests {
             .expect_err("a path outside the root is refused");
         assert!(outside.contains("is not beneath"), "{outside}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ledgerv6-1, D-2629: `ledger-v6` releases each rung's Selection V6 —
+    /// and with it the Population V6 strict inputs, one shared-locked
+    /// descriptor per source month — as the rung ends, and only the replay
+    /// route, which hands all eight to Global Replay, keeps them. Measured on
+    /// the source because the full eight-rung strict route is not a unit
+    /// fixture; on the old code `run_route` pushed every selection into the
+    /// returned vector for both verbs, so the first assertion failed.
+    #[test]
+    fn ledger_v6_releases_a_rungs_source_locks_after_its_selection() {
+        let source = include_str!("ledger_v6.rs");
+        let production = source
+            .split_once("\nmod tests {")
+            .map_or(source, |(before, _)| before);
+        let (_, verb) = production
+            .split_once("pub(crate) fn ledger_v6(")
+            .expect("the verb exists");
+        let verb = verb.split_once("\n}\n").map_or(verb, |(body, _)| body);
+        assert!(
+            verb.contains("run_route(request, &mut out, drop)"),
+            "{verb}"
+        );
+        let (_, replay) = production
+            .split_once("pub(crate) fn ledger_v6_replay(")
+            .expect("the replay verb exists");
+        assert!(replay.contains("run_route(request, out, std::convert::identity)"));
+        assert!(production.contains("committed.push(keep(selection));"));
+        assert!(!production.contains("committed.push(selection);"));
+    }
+
+    /// ledgerv6-3, D-2623: every ledger directory chain `ledger-v6` and
+    /// `ledger-all` lay out is created by the durable walker, which syncs each
+    /// new level's parent, and never by `create_dir_all`, which syncs none.
+    /// Measured on the source because a lost directory entry cannot be
+    /// produced without a power cut; on the old code `RungRoots::create`,
+    /// `replay_route` and `LedgerTree::create` all called `create_dir_all`, so
+    /// the first assertion failed. The behavioural half: a fresh ROOT three
+    /// levels deep is laid out whole.
+    #[test]
+    fn rung_roots_are_created_durably() {
+        for (name, source) in [
+            ("ledger_v6.rs", include_str!("ledger_v6.rs")),
+            ("ledger_all.rs", include_str!("ledger_all.rs")),
+        ] {
+            let production = source
+                .split_once("\nmod tests {")
+                .or_else(|| source.split_once("\npub(crate) mod tests {"))
+                .map_or(source, |(before, _)| before);
+            assert!(!production.contains("create_dir_all("), "{name}");
+            assert!(
+                production.contains("crate::durable_dir::create_all("),
+                "{name}"
+            );
+        }
+        // Its own scratch name: the D-2799 test above, run in parallel in
+        // this process, owns `brutex-ledger-v6-durable-<pid>`.
+        let temp =
+            std::env::temp_dir().join(format!("brutex-ledger-v6-deep-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let deep = temp.join("a").join("b");
+        let roots = RungRoots::create(&deep, "5min").expect("a fresh deep ROOT is laid out");
+        assert!(roots.selection.is_dir());
+        assert!(roots.observation.is_dir());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

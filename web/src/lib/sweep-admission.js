@@ -33,6 +33,16 @@ export function sweepSubmission(status, body) {
       !Object.hasOwn(body, 'attempt_key') && body.started !== true) {
     return { phase: 'failed', attempt: '', why: body.refusal, confirmed: true };
   }
+  // THE AUDIT START REFUSED BEFORE DISPATCH (log-1, D-2501). The api names it
+  // exactly: `invocation_audit_unavailable` with `handler_completed: false`,
+  // so no handler ran and nothing can have started. Read as unknown, it locked
+  // Run for the session over a request the server says it never dispatched.
+  if (status === 503 && body?.schema_version === 1 && body.code === 'invocation_audit_unavailable' &&
+      body.handler_completed === false && typeof body.refusal === 'string' && body.refusal.trim() &&
+      body.refusal.length <= 4096 && !Object.hasOwn(body, 'attempt') &&
+      !Object.hasOwn(body, 'attempt_key') && body.started !== true) {
+    return { phase: 'failed', attempt: '', why: body.refusal, confirmed: true };
+  }
   const attempt = body?.attempt;
   if (status === 202 && body?.accepted === true && body.refusal === null &&
       typeof attempt === 'string' && /^[1-9]\d{0,19}$/.test(attempt) &&

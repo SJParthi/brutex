@@ -946,6 +946,13 @@ impl Frontier {
     /// synced. So the writer cuts it, says so, and carries on. Read-only opens
     /// still refuse it.
     fn index_locked(&mut self) -> Result<(), Refusal> {
+        // An all-zero or torn header the writer's own failure left is cut to
+        // nothing and written again below (conc5-1, D-2644).
+        crate::fixed_tail::heal_interrupted_header(
+            &self.file,
+            &self.path,
+            &crate::fixed_tail::sixteen_byte_header(MAGIC, VERSION),
+        )?;
         crate::fixed_tail::heal_torn_tail(
             &self.file,
             &self.path,
@@ -1811,9 +1818,17 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
         .get_mut(8..12)
         .ok_or_else(|| "the header is shorter than its version".to_owned())?
         .copy_from_slice(&VERSION.to_le_bytes());
-    file.write_all(&header)
-        .map_err(|why| format!("the header could not be written: {why}"))?;
-    file.sync_all()
+    // A failed write or barrier is cut back to nothing, and a failed barrier
+    // remembered (conc5-1, D-2644), so the next open writes it again.
+    file.write_all(&header).map_err(|why| {
+        crate::fixed_tail::roll_back(
+            file,
+            &path.display(),
+            0,
+            &format!("the header could not be written: {why}"),
+        )
+    })?;
+    crate::fixed_tail::sync_all_or_roll_back(file, path, 0)
         .map_err(|why| format!("the header could not be flushed: {why}"))?;
     // READ BACK, because a successful write is not proof that anything was
     // stored — the same check `crate::results::write_fresh_header` makes and for

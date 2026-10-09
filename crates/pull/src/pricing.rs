@@ -300,6 +300,19 @@ pub const MIN_PLAUSIBLE_RATE: f64 = -1.0;
 // else. Checked on the bit pattern, which needs no float arithmetic.
 const _: () = assert!(MIN_PLAUSIBLE_RATE.to_bits() == MAX_PLAUSIBLE_RATE.to_bits() ^ (1 << 63));
 
+/// The vendor volatility below which the figure is read as a decimal.
+///
+/// **A unit screen, not a market view** (grk-1, D-2603). The one real Dhan IV
+/// the charter records (`docs/00-charter.md` §4b) is in PERCENT
+/// (`11.939…`, `9.789…`), and nothing records the unit of the rolling overlay's
+/// `iv`, so the unit is UNVERIFIED. A value in `[1, 10]` is ambiguous: `9.79`
+/// is a 9.79 % percent figure or a 979 % decimal one, and the model accepts
+/// both. A value below one is unambiguous: an index option at under 1 %
+/// implied volatility is not a quote. So a figure at or above one is refused
+/// by name rather than guessed, and a decimal volatility of 100 % or more is
+/// refused with it until a recorded source settles the unit.
+pub const MAX_UNAMBIGUOUS_VENDOR_VOLATILITY: f64 = 1.0;
+
 /// One option, at one bar, in paisa.
 ///
 /// Every price is a paisa integer straight off the store — see the module
@@ -523,6 +536,14 @@ pub enum PricingError {
         /// The contradicted stamp.
         ts_micros: i64,
     },
+    /// A vendor volatility whose unit cannot be told from its value.
+    ///
+    /// See [`MAX_UNAMBIGUOUS_VENDOR_VOLATILITY`] (grk-1, D-2603). Also the arm
+    /// for a non-finite or non-positive figure, which has no unit at all.
+    VendorVolatilityUnitAmbiguous {
+        /// The figure the vendor sent.
+        sent: f64,
+    },
     /// The model itself refused, with its own reason kept intact.
     ///
     /// Wrapped rather than flattened: `greeks` distinguishes a price below
@@ -586,6 +607,15 @@ impl std::fmt::Display for PricingError {
                  the underlying level at this stamp is unknown. Nothing was \
                  priced rather than one of the two being picked by the order \
                  it arrived in"
+            ),
+            Self::VendorVolatilityUnitAmbiguous { sent } => write!(
+                f,
+                "the vendor sent an implied volatility of {sent}, which is not \
+                 a positive figure below {MAX_UNAMBIGUOUS_VENDOR_VOLATILITY}. \
+                 The only recorded Dhan IV is in percent and the rolling \
+                 overlay's unit is UNVERIFIED, so this figure could be a \
+                 percent read as a decimal (9.79 read as 979 %). Refused by \
+                 name rather than guessed"
             ),
             Self::Model(why) => write!(f, "the model refused this quote: {why}"),
         }
@@ -834,7 +864,10 @@ pub fn price(
     let (volatility, vol_from) = if let Some(sent) = volatility {
         // THE VENDOR'S OWN NUMBER, UNCHANGED. Dhan's `iv` off the rolling
         // overlay, which makes this a CHECK of the vendor rather than a
-        // substitute for it.
+        // substitute for it. Its unit is screened first (grk-1, D-2603).
+        if sent.is_nan() || sent <= 0.0 || sent >= MAX_UNAMBIGUOUS_VENDOR_VOLATILITY {
+            return Err(PricingError::VendorVolatilityUnitAmbiguous { sent });
+        }
         (sent, VolSource::Vendor(quote.vendor))
     } else {
         {
@@ -1494,6 +1527,47 @@ mod tests {
             (solved - sent).abs() > 1e-6,
             "the two routes must be distinguishable for this unit to mean \
              anything: solved {solved}, sent {sent}"
+        );
+    }
+
+    /// grk-1, D-2603: a vendor volatility whose unit cannot be told from its
+    /// value is refused by name. The charter's own Dhan sample `9.789…` is a
+    /// percent figure that the model would accept as 979 % volatility; it, the
+    /// sample's `11.939…`, a decimal at or above one, zero, a negative and a
+    /// NaN are all refused, while a decimal below one passes through.
+    #[test]
+    fn a_vendor_volatility_of_ambiguous_unit_is_refused_by_name() {
+        for sent in [
+            9.789_193_798_280_868,
+            11.939_337_251_984_934,
+            MAX_UNAMBIGUOUS_VENDOR_VOLATILITY,
+            0.0,
+            -0.15,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            let refused = price(atm_call(), Some(sent), test_rate(), YearBasis::Calendar365);
+            assert!(
+                matches!(
+                    refused,
+                    Err(PricingError::VendorVolatilityUnitAmbiguous { sent: got })
+                        if got.to_bits() == sent.to_bits()
+                ),
+                "{sent}: {refused:?}"
+            );
+        }
+        let kept = price(
+            atm_call(),
+            Some(0.097_891_937_982_808_68),
+            test_rate(),
+            YearBasis::Calendar365,
+        )
+        .expect("a decimal below one is unambiguous");
+        assert!(matches!(kept.vol_from, VolSource::Vendor(_)));
+        let message = PricingError::VendorVolatilityUnitAmbiguous { sent: 9.79 }.to_string();
+        assert!(
+            message.contains("UNVERIFIED") && message.contains("9.79"),
+            "{message}"
         );
     }
 

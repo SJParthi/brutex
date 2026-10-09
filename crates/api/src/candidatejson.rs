@@ -300,11 +300,20 @@ fn trade_page(
     limit: usize,
 ) -> Result<(Candidate, Vec<cli::trades::Row>), String> {
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
-    let mut cached = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|_| "candidate trade reader cache poisoned")?;
-    page_through(&mut cached, root, summary, key, offset, limit)
+    // THE READER IS TAKEN OUT, AND THE LOCK RELEASED, BEFORE ANY FILE IS READ
+    // (cand-2, D-2576). The guard used to be held across `page_through`, whose
+    // cold `TradeReader::open` reads and verifies every trade of a candidate up
+    // to `MAX_SCAN_BYTES`. Every other trade-page request then blocked on this
+    // mutex INSIDE `detail::run`, each holding one of the four detail permits,
+    // so one cold open answered 429 to every other detail route. Now a second
+    // request finds the slot empty and opens its own reader; whichever finishes
+    // last puts its reader back (`detail::Checkout`, the index-stop caches'
+    // shape since D-1912). A reader that refused stays out (D-2763).
+    let slot = CACHE.get_or_init(|| Mutex::new(None));
+    let mut held = crate::detail::Checkout::take(slot);
+    #[cfg(test)]
+    crate::detail::note_slot_free(slot);
+    page_through(&mut held, root, summary, key, offset, limit)
 }
 /// One page through the slot, opening a reader when the slot holds another.
 ///
@@ -902,6 +911,47 @@ mod tests {
         ] {
             assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
         }
+    }
+
+    /// cand-2, D-2576: a trade page's cold open runs with the cache's mutex
+    /// FREE, so no other detail request parks on it holding a permit. The
+    /// first page is a cold open (the probe records the slot as it found it);
+    /// the second is warm and answers the same rows. On the old `trade_page`
+    /// the guard was held across `TradeReader::open`, so the slot could never
+    /// be locked from the open point and the probe recorded `false`.
+    #[test]
+    fn a_cold_trade_reader_does_not_park_detail_permits() -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-cold-unlocked");
+        let _ = std::fs::remove_dir_all(&root);
+        let query = and_capture(&root, [78; 32], true)?;
+        let asked = Asked::parse(&query)?;
+        let summary = candidate_trades::read_model(
+            &root,
+            asked.identity,
+            asked.attempt,
+            asked.model,
+            crate::detail::MAX_SCAN_BYTES,
+        )?
+        .ok_or("the capture is sealed")?;
+        let key = Key {
+            tier: 0,
+            rank: 1,
+            direction: Direction::Long,
+        };
+        crate::detail::SLOT_FREE_AT_OPEN.with(|cell| cell.set(None));
+        let (_, cold) = trade_page(&root, &summary, key, 0, 16)?;
+        assert_eq!(
+            crate::detail::SLOT_FREE_AT_OPEN.with(std::cell::Cell::get),
+            Some(true),
+            "the reader was opened with the cache locked"
+        );
+        let (_, warm) = trade_page(&root, &summary, key, 0, 16)?;
+        // The fixture's first candidate may page no trades; what this proves
+        // is the free slot above, and that the warm page answers what the
+        // cold one did.
+        assert_eq!(cold.len(), warm.len());
+        std::fs::remove_dir_all(root).map_err(|why| why.to_string())?;
+        Ok(())
     }
 
     /// **The trade page keeps one reader, so a change of candidate re-reads

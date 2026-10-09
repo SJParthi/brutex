@@ -24,6 +24,13 @@
 //! crate-private and every table in this crate is a `const` item this crate
 //! owns. `CLAUDE.md` §4: degrade loudly and name the reason, or refuse.
 //!
+//! **One public value is not from a `Rate::Verified` row: `BpsX100::ZERO`,
+//! a measured zero.** Holding it outside this crate is harmless only because
+//! nothing outside this crate can build a [`trip::Rates`] from it:
+//! `Rates::new` is crate-private and [`trip::Rates::resolve`], a dated lookup
+//! that refuses, is the one public constructor. Until Z1-slice10-F1 (D-2538)
+//! `Rates::new` was public and this paragraph's "no fall-back" had one.
+//!
 //! # Constant per-operation cost
 //!
 //! Every lookup here is O(1) **by construction**, and the construction is the

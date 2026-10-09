@@ -668,7 +668,13 @@ jobs:
           f=crates/core/Cargo.toml
           work=$(mktemp -d)
           st=0; "$scan" deps "$f" > "$work/deps" || st=$?
-          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9 "$f" "$work/deps" "$st"
+          # P15-11, D-2518: the module closure of every core root. A
+          # `#[path]` or `include!` reaching another crate's source declares
+          # nothing in the manifest; the verdict refuses any file outside
+          # crates/core/, an unresolved module, and a closure without lib.rs.
+          git ls-files -z > "$work/tracked"
+          st_c=0; git ls-files -z -- crates/core/src/lib.rs crates/core/build.rs 'crates/core/tests/*.rs' 'crates/core/benches/*.rs' 'crates/core/examples/*.rs' | xargs -0 -r "$scan" closure "$work/tracked" > "$work/closure" || st_c=$?
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9 "$f" "$work/deps" "$st" "$work/closure" "$st_c"
           # WHAT THIS STILL CANNOT SEE, because a gate that oversells itself is
           # worse than no gate: a `[patch]` or `[replace]` in the WORKSPACE root
           # that redirects a crate core does not name is not core's declaration
@@ -746,7 +752,11 @@ jobs:
           f=crates/greeks/Cargo.toml
           work=$(mktemp -d)
           st=0; "$scan" deps "$f" > "$work/deps" || st=$?
-          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9b "$f" "$work/deps" "$st"
+          # P15-11, D-2518: as gate 9, every file the greeks roots compile
+          # must lie under crates/greeks/.
+          git ls-files -z > "$work/tracked"
+          st_c=0; git ls-files -z -- crates/greeks/src/lib.rs crates/greeks/build.rs 'crates/greeks/tests/*.rs' 'crates/greeks/benches/*.rs' 'crates/greeks/examples/*.rs' | xargs -0 -r "$scan" closure "$work/tracked" > "$work/closure" || st_c=$?
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9b "$f" "$work/deps" "$st" "$work/closure" "$st_c"
 
       - name: Gate 10b — no invariant identifier means two things
         run: |
@@ -2101,11 +2111,21 @@ jobs:
           # non-blocking `flock` on it, so two sinks cannot write one event
           # stream. It writes no byte, reads none, and names no path outside
           # the sink's own directory. D-1458.
-          declared='sink.rs:std::fs::OpenOptions::new:3
+          #
+          # D-2509 (CE-41) adds four, all inside the sink's own directory. A
+          # failed roll is retried only when `directory_accepts_a_roll` can
+          # create, rename and unlink a probe file of its own
+          # (`<dir>/.roll-probe`, then `.roll-probe.moved`): one more
+          # `OpenOptions::new`, `rename` and `remove_file`. The roll itself
+          # asks `symlink_metadata` whether a rotated file is present, so a
+          # failure after a file was moved ends retries for good. None reads
+          # or writes an event byte.
+          declared='sink.rs:std::fs::OpenOptions::new:4
           sink.rs:std::fs::create_dir_all:1
           sink.rs:std::fs::metadata:1
-          sink.rs:std::fs::remove_file:1
-          sink.rs:std::fs::rename:1
+          sink.rs:std::fs::remove_file:2
+          sink.rs:std::fs::rename:2
+          sink.rs:std::fs::symlink_metadata:1
           tail.rs:std::fs::File::open:2'
 
           # D-2312: clauses A and B are `gates_runtime gate21`.
@@ -2525,6 +2545,11 @@ jobs:
           #     own name defeats it exactly as a rename defeats gate 13.
           #   * Whether the call happens BEFORE the builder on the executed
           #     path. It counts occurrences in a file, not order.
+          #   * A client type renamed by `use .. as`, or a spelling other than
+          #     the five it counts (`Client::builder()`, `Client::new()`,
+          #     `ClientBuilder::new(`, `reqwest::get(`, `blocking::get(`).
+          #     Comments and string literals are blanked before counting, so
+          #     a commented-out guard is no guard (P15-15, D-2520).
           # Both are the conservative direction: it can miss, it cannot
           # falsely accuse.
           #

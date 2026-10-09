@@ -150,6 +150,51 @@ fn busy_index_refuses_without_reserving_or_dispatching_an_invocation() {
     );
 }
 
+/// cli1-2, D-2620: a READER of the index — `read`'s shared lock, which the
+/// browser's audited GET routes take on every poll — is waited for, so a
+/// sweep starting while a page polls is admitted rather than FAILED. On the
+/// old code `begin` took one `try_lock` and refused BUSY at once, so the
+/// first `begin` below failed. A shared holder and an exclusive holder that
+/// outlast the bound are both still BUSY, and nothing was reserved by either
+/// refusal.
+#[test]
+fn a_reader_polling_the_index_is_waited_for_and_one_outlasting_the_bound_is_busy() {
+    let root = Scratch::new();
+    drop(begin(&root.0, Origin::Cli, "range-all").unwrap());
+    let index = File::open(base(&root.0).join("index.bin")).unwrap();
+    index.try_lock_shared().unwrap();
+    let admitted = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            index.unlock().unwrap();
+        });
+        let admitted = begin(&root.0, Origin::Cli, "range-all");
+        reader.join().unwrap();
+        admitted
+    });
+    assert_eq!(admitted.unwrap().id(), ID_BASE + 2);
+    for exclusive in [false, true] {
+        let holder = File::open(base(&root.0).join("index.bin")).unwrap();
+        if exclusive {
+            holder.try_lock().unwrap();
+        } else {
+            holder.try_lock_shared().unwrap();
+        }
+        let started = std::time::Instant::now();
+        match begin(&root.0, Origin::Cli, "range-all") {
+            Err(why) => assert!(is_busy(&why), "{why}"),
+            Ok(_) => panic!("a holder past the bound must still refuse"),
+        }
+        assert!(started.elapsed() >= crate::lock_wait::WAIT * crate::lock_wait::WAITS);
+        assert_eq!(holder.metadata().unwrap().len(), 2 * STRIDE);
+        holder.unlock().unwrap();
+    }
+    assert_eq!(
+        begin(&root.0, Origin::Cli, "range-all").unwrap().id(),
+        ID_BASE + 3
+    );
+}
+
 #[test]
 fn busy_or_changed_detail_poisons_the_writer_without_a_success_fallback() {
     let root = Scratch::new();

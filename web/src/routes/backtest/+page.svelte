@@ -2363,7 +2363,20 @@
   let unconfirmedSubmission = $state(false);
   let submittedAttempt = $state('');
   const launchStop = $derived(sweepLaunchStop(sweep, launchAdmission, unconfirmedSubmission));
-  const statusRequests = createPageRequests();
+  // A HIDDEN TAB DOES NOT POLL (conc17-2, D-2567). Every running tick of this
+  // owner reads `/backtest/run.json` and `/live.json`, and the server journals
+  // each as one audited invocation -- so a background tab left open through an
+  // hours-long sweep wrote two journal files every two seconds for nobody. A
+  // timer that comes due while hidden now parks its read, and the first
+  // `visibilitychange` back to visible runs it at once. `ssr = false`
+  // (`routes/+layout.js`), so `document` exists when this runs.
+  const statusRequests = createPageRequests({
+    visible: () => document.visibilityState === 'visible',
+    listen: (wake) => {
+      document.addEventListener('visibilitychange', wake);
+      return () => document.removeEventListener('visibilitychange', wake);
+    }
+  });
 
   /**
    * `YYYY-MM` as the two numbers the route wants, or null.

@@ -1031,7 +1031,7 @@ pub fn path_in(root: &Path) -> PathBuf {
 pub fn read(root: &Path, limit: usize) -> Ledger {
     let path = path_in(root);
     match File::open(&path) {
-        Ok(mut file) => read_from(path, &mut file, limit),
+        Ok(file) => read_locked(path, file, limit),
         // NOT AN ERROR, AND THE SENTENCE SAYS SO. A store that has never been
         // swept has no ledger, and rendering that as a failure would teach an
         // operator to distrust a correct answer. Separated from every other
@@ -1048,6 +1048,41 @@ pub fn read(root: &Path, limit: usize) -> Ledger {
         Err(why) => Ledger::refused(
             path.clone(),
             format!("{} could not be opened: {why}", path.display()),
+        ),
+    }
+}
+
+/// [`read_from`] under a SHARED `flock` on the ledger, released explicitly.
+///
+/// # Why a reader locks (sweep-3, D-2573)
+///
+/// `cli::results` appends a record under an EXCLUSIVE lock and writes its
+/// [`STRIDE`] bytes in more than one call, and this reader took no lock at
+/// all. A refresh that landed mid-append saw `body % stride != 0` and served
+/// `partial_tail: true` — "an interrupted write" — on a ledger that was whole a
+/// millisecond later, the false alarm `cli::results::Results::read` already
+/// takes the shared lock to avoid. Shared, so any number of readers proceed
+/// together and only a writer excludes them; a reader now WAITS for an append
+/// in progress, which is why [`backtest_json`] runs this off the async workers.
+///
+/// A lock that cannot be taken, or released, is a refusal naming the file —
+/// never an unlocked read presented as a locked one.
+fn read_locked(path: PathBuf, file: File, limit: usize) -> Ledger {
+    let mut held = match store::flock::Flock::lock_shared(file, path.clone()) {
+        Ok(held) => held,
+        Err(why) => {
+            return Ledger::refused(
+                path.clone(),
+                format!("{} could not be locked for reading: {why}", path.display()),
+            );
+        }
+    };
+    let ledger = read_from(path.clone(), &mut *held, limit);
+    match held.release() {
+        Ok(()) => ledger,
+        Err(why) => Ledger::refused(
+            path,
+            format!("the ledger was read but its lock was not released: {why}"),
         ),
     }
 }
@@ -1243,8 +1278,41 @@ type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 /// so the page can never present a window as the whole ledger.
 ///
 /// The body is [`respond`], for the reason that function's header gives.
+///
+/// # Off the async workers, and admitted
+///
+/// A read is up to [`MAX_RUNS`] records and a multi-megabyte body. It ran
+/// inline on a Tokio worker with no bound on how many ran at once, so a few
+/// concurrent page loads stalled `/health`, the pull conductors and the
+/// autopilot. It now runs in the store-read pool's
+/// [`crate::detail::MAX_STORE_READ_CONCURRENT`] slots, and past them answers
+/// 429 in the body shape the page already parses. resources-4, D-2593.
 pub async fn backtest_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHeaders, String) {
-    respond(crate::server::store_dir(), uri.query().unwrap_or(""))
+    let query = uri.query().unwrap_or("").to_owned();
+    match crate::detail::run_store_read(move || respond(crate::server::store_dir(), &query)).await {
+        Ok(answered) => answered,
+        Err(why) => not_admitted(&why),
+    }
+}
+
+/// The answer when the store-read pool refused or could not join the read:
+/// 429 when saturated, 503 otherwise, with the refusal in the field the page
+/// renders (resources-4, D-2593).
+fn not_admitted(why: &crate::detail::RunError) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let (status, _) = crate::detail::admission_refused(
+        "backtest ledger read",
+        crate::detail::MAX_STORE_READ_CONCURRENT,
+        why,
+    );
+    let (_, headers, body) = respond(
+        Err(format!(
+            "the backtest ledger read was not admitted ({why:?}): at most {} store reads \
+             run at once, off the async workers; retry",
+            crate::detail::MAX_STORE_READ_CONCURRENT
+        )),
+        "",
+    );
+    (status, headers, body)
 }
 
 /// [`backtest_json`], over a store root the caller has already resolved.
@@ -2194,7 +2262,10 @@ mod tests {
     #[tokio::test]
     async fn the_handler_answers_over_the_real_environment() {
         // The only line `respond` cannot cover: reading the environment. It
-        // answers one of exactly two statuses and nothing else.
+        // answers one of exactly two statuses and nothing else. The read is
+        // admitted through the store-read pool now (resources-4, D-2593), so
+        // this keeps apart from a test that holds every slot.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let (status, _, body) = super::backtest_json(
             "/backtest.json?limit=1"
                 .parse::<axum::http::Uri>()
@@ -2204,8 +2275,106 @@ mod tests {
         assert!(
             status == axum::http::StatusCode::OK
                 || status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+                || status == axum::http::StatusCode::TOO_MANY_REQUESTS
         );
         assert!(body.contains(r#""runs":"#), "{body}");
+    }
+
+    /// sweep-3, D-2573: a refresh that lands while `cli` holds the ledger's
+    /// exclusive lock mid-append WAITS for the append, and so sees the whole
+    /// record — never half of it served as `partial_tail`. The writer thread
+    /// takes the exclusive lock, writes half a record, signals, sleeps, writes
+    /// the rest and unlocks. On the old reader (no lock) the concurrent read
+    /// returns at once over the half-written file: `partial_tail == true` and
+    /// `total == 1`, both of which fail below.
+    #[test]
+    fn a_reader_waits_for_an_in_progress_append() {
+        use std::io::Write as _;
+        let root = crate::scratch::path("sweep3-reader-waits");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("a temp root");
+        let ledger_path = path_in(&root);
+        std::fs::write(&ledger_path, file(VERSION, &[record(1, false, 11)])).expect("the ledger");
+        let (half_written, wait_for_half) = std::sync::mpsc::channel::<()>();
+        let writer_path = ledger_path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut out = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&writer_path)
+                .expect("open for append");
+            out.lock().expect("the writer's exclusive lock");
+            let next = record(2, false, 22);
+            let (first, rest) = next.split_at(STRIDE_BYTES / 2);
+            out.write_all(first).expect("half a record");
+            out.flush().expect("flushed");
+            half_written.send(()).expect("signal");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            out.write_all(rest).expect("the rest");
+            out.unlock().expect("unlock");
+        });
+        wait_for_half.recv().expect("the writer is mid-append");
+        let ledger = read(&root, 10);
+        writer.join().expect("the writer finished");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(ledger.refusal, None, "{:?}", ledger.refusal);
+        assert!(!ledger.partial_tail, "a reader saw half an append");
+        assert_eq!(ledger.total, 2, "the waited-for record is counted");
+        assert_eq!(ledger.runs.len(), 2);
+    }
+
+    /// The lock is released after every read: a reader never leaves the
+    /// ledger locked against the next writer, on success and on a refusal
+    /// (an empty file, a foreign header, a ragged tail).
+    #[test]
+    fn a_read_releases_its_lock_on_every_outcome() {
+        let root = crate::scratch::path("sweep3-releases");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("a temp root");
+        let ledger_path = path_in(&root);
+        let mut ragged = file(VERSION, &[record(1, false, 11)]);
+        ragged.extend_from_slice(&[0_u8; 7]);
+        let mut foreign = vec![0_u8; 16];
+        foreign[..8].copy_from_slice(b"NOTBRTEX");
+        for bytes in [
+            Vec::new(),
+            vec![0_u8; 4],
+            foreign,
+            header(VERSION).to_vec(),
+            file(VERSION, &[record(1, false, 11)]),
+            ragged,
+        ] {
+            std::fs::write(&ledger_path, &bytes).expect("the ledger");
+            let _ = read(&root, 10);
+            let probe = std::fs::File::open(&ledger_path).expect("reopen");
+            assert!(
+                probe.try_lock().is_ok(),
+                "the reader left the ledger locked after {} bytes",
+                bytes.len()
+            );
+            probe.unlock().expect("unlock");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A refusal from the detail pool keeps the ledger's shape and its status.
+    #[test]
+    fn an_unadmitted_read_answers_in_the_ledger_shape() {
+        for (why, status) in [
+            (
+                crate::detail::RunError::Saturated,
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                crate::detail::RunError::Join("gone".to_owned()),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let (got, headers, body) = super::not_admitted(&why);
+            assert_eq!(got, status);
+            assert_eq!(headers[0].1, "application/json; charset=utf-8");
+            assert!(body.contains(r#""runs":[]"#), "{body}");
+            assert!(body.contains("not admitted"), "{body}");
+        }
     }
 
     /* ==================== the guard rails ==================== */

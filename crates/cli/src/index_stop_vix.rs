@@ -560,7 +560,13 @@ fn load_month(
     feed: Vendor,
     month: YearMonth,
 ) -> Result<(Month, Option<VixReferenceMonth>), String> {
-    match VixReferenceMonth::open(store, feed, month) {
+    match VixReferenceMonth::open_waiting(store, feed, month) {
+        // replay-1 (D-2636): a writer holding the month is not the month's
+        // answer. It was captured as a durable `unavailable_reason` month, and
+        // the companion it sealed stayed authoritative under `committed()`
+        // (D-1760) long after the writer closed. Now nothing is published and
+        // the catalog's own retry reads the month.
+        Err(crate::vix_reference::VixOpenRefusal::Busy(reason)) => Err(reason),
         Ok(loaded) => Ok((
             Month {
                 year: month.year(),
@@ -571,7 +577,7 @@ fn load_month(
             },
             Some(loaded),
         )),
-        Err(reason) => {
+        Err(crate::vix_reference::VixOpenRefusal::Unavailable(reason)) => {
             if reason.is_empty() || reason.len() > MAX_REASON_BYTES {
                 return Err("complete VIX refusal diagnostic exceeds explicit record admission; no truncated annotation published".into());
             }

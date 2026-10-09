@@ -16,7 +16,7 @@
 //! |---|---|
 //! | [`BarFile::open_or_create`] on a **new** month | the whole 32768-byte header region, and the file's *name* in its directory — both `fsync`ed, the directory one included |
 //! | [`BarFile::open_or_create`] on an **existing** month | nothing new; it only reads |
-//! | [`BarFile::open_existing`] | nothing, ever — it creates no directory, no bar file and no lock, and a month that is absent is [`StoreError::Missing`] naming the path |
+//! | [`BarFile::open_existing`] | no directory and no bar file — an absent `.lock` beside an existing month is created empty so a later writer is excluded (D-2551), and a month that is absent is [`StoreError::Missing`] naming the path |
 //! | [`BarFile::append`] returning [`Appended::Committed`] | every appended record **and** the header slot that publishes them, in that order, with an `fsync` after each |
 //! | [`BarFile::append`] returning [`Appended::AlreadyPresent`] | nothing was written; the month already held every offered bar, byte for byte, at the index the answer names |
 //! | [`BarFile::read_record`] | nothing; it writes nothing |
@@ -51,10 +51,12 @@
 //!
 //! [`BarFile::open_existing`] takes that lock **shared** instead, so any number
 //! of readers coexist and no reader blocks another, while a writer holding it
-//! exclusively still refuses them all. A reader also never *creates* the lock
-//! file: a bar file with no lock beside it has had no writer since it was
-//! written, so there is nothing to wait for, and conjuring the file into being
-//! to hold a lock on it would be the very write that door exists to avoid.
+//! exclusively still refuses them all. A bar file with no lock beside it has
+//! had no writer since it was written, but a writer can still arrive while a
+//! reader holds it, so a reader that finds the lock absent creates it, empty
+//! and with `create_new`, and holds it shared like any other (store1-1,
+//! D-2551). That empty file is the one write a read makes. Only a read-only
+//! filesystem, where no writer can append either, reads without a lock.
 //!
 //! **What the lock does not protect against, stated rather than implied away:**
 //!
@@ -382,6 +384,13 @@ pub enum StoreError {
     },
     /// Another writer holds this month's advisory lock.
     Locked {
+        /// The lock file.
+        path: PathBuf,
+    },
+    /// A writer was refused because READERS hold this month's lock shared
+    /// (barflow-1, D-2552). Not a second writer: the readers will close, and
+    /// the write can be asked again.
+    ReaderHolds {
         /// The lock file.
         path: PathBuf,
     },
@@ -1016,6 +1025,7 @@ impl fmt::Display for StoreError {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
             Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
+            Self::ReaderHolds { path } => write_reader_holds(f, path),
             Self::DiskFull { path, action } => write!(f, "disk full {action} {}", path.display()),
             Self::Denied { path, action } => {
                 write!(f, "permission denied {action} {}", path.display())
@@ -1503,7 +1513,7 @@ impl BarFile {
             writer_open(open_rw(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
-        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        .map_err(|refusal| writer_lock_fault(&lock_path, refusal))?;
 
         // Whether the month file was THERE before this open. Only a file that
         // existed can have been truncated or zeroed; one this open creates was
@@ -1670,17 +1680,20 @@ impl BarFile {
         // and refuses anything `fstat` does not call a regular file. D-1432.
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
 
-        // The lock is opened read-only and never created. A bar file with no
-        // lock beside it has had no writer since it was made, so there is
-        // nothing to wait for and `None` is the honest answer; inventing the
-        // file to hold a lock on would be the very write this function exists
-        // to avoid.
+        // The lock is opened read-only when it exists. A bar file with no lock
+        // beside it has had no writer since it was made, but that says nothing
+        // about a writer that arrives LATER: `open_or_create` would create the
+        // lock, take it exclusively against nobody, and append under this
+        // reader's live handle (store1-1, D-2551). So an absent lock is
+        // created, empty and exclusively by name, and held shared like any
+        // other. Only a read-only filesystem, where no writer can exist,
+        // reads without one; any other refusal is named.
         let lock = match open_read(&lock_path) {
             Ok(handle) => Some(
                 Flock::try_lock_shared(handle, lock_path.clone())
                     .map_err(|refusal| lock_fault(&lock_path, refusal))?,
             ),
-            Err(why) if why.is_absent() => None,
+            Err(why) if why.is_absent() => reader_lock(&lock_path)?,
             Err(why) => return Err(why.refusal(&lock_path)),
         };
 
@@ -2193,6 +2206,18 @@ impl BarFile {
         barrier(crc, &self.bars_path)
     }
 
+    /// Writes a header slot's previous bytes back after its barrier failed,
+    /// and makes that durable (store1-2, D-2559).
+    ///
+    /// # Errors
+    ///
+    /// The write or the barrier that failed; the barrier failure is not
+    /// remembered a second time, the month is already barred.
+    fn restore_slot(&self, offset: u64, previous: &[u8]) -> Result<(), StoreError> {
+        write_fully(&self.bars, &self.bars_path, offset, previous)?;
+        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)
+    }
+
     /// Verifies the old tail block's committed prefix against its existing
     /// sidecar entry, when the next append will re-seal that block.
     ///
@@ -2622,8 +2647,22 @@ impl BarFile {
 
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
+        //
+        // THE SLOT'S PREVIOUS BYTES ARE KEPT, because a failed barrier on it
+        // would otherwise leave a commit in the page cache that never reached
+        // the device: every reader in this boot would take it as the newest
+        // commit and name records nobody can prove durable (store1-2,
+        // D-2559). On a failed barrier the slot is written back and synced,
+        // so the previous commit is the newest one again.
+        let mut previous = commit.bytes;
+        read_fully(&self.bars, &self.bars_path, commit.offset, &mut previous)?;
         write_fully(&self.bars, &self.bars_path, commit.offset, &commit.bytes)?;
-        barrier(&self.bars, &self.bars_path)?;
+        if let Err(failed) = barrier(&self.bars, &self.bars_path) {
+            return Err(self
+                .restore_slot(commit.offset, &previous)
+                .err()
+                .unwrap_or(failed));
+        }
 
         self.header = commit.header;
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
@@ -4416,6 +4455,43 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
     }
 }
 
+/// A writer's refused month lock, with its holder named.
+///
+/// The exclusive lock is refused by a reader's SHARED lock as much as by a
+/// writer's, and the refusal used to say "another writer holds" either way: a
+/// browser chart, a `cli` load or a ledger guard reading the month read as a
+/// second writer, and the ingest gave up on a write the reader would have let
+/// through a moment later (barflow-1, D-2552). A shared probe on a second
+/// description tells the two apart: it is granted beside readers and refused
+/// beside a writer. The probe is released at once and holds nothing.
+fn writer_lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
+    match refusal {
+        TryLockError::WouldBlock if held_by_readers(path) => StoreError::ReaderHolds {
+            path: path.to_path_buf(),
+        },
+        other => lock_fault(path, other),
+    }
+}
+
+/// Whether the month lock at `path` is held by readers only: a shared lock
+/// on a second read-only description is granted. Any failure to ask answers
+/// `false`, so the refusal keeps the stricter "another writer" wording.
+fn held_by_readers(path: &Path) -> bool {
+    open_read(path)
+        .ok()
+        .and_then(|handle| Flock::try_lock_shared(handle, path.to_path_buf()).ok())
+        .is_some()
+}
+
+/// [`StoreError::ReaderHolds`]'s sentence.
+fn write_reader_holds(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "a reader holds {} shared, so this write must wait for it to close the month",
+        path.display()
+    )
+}
+
 /// [`StoreError::Symlinked`]'s sentence.
 fn write_symlinked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
     write!(
@@ -4425,6 +4501,32 @@ fn write_symlinked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
          Nothing was opened through it",
         path.display()
     )
+}
+
+/// The shared lock a reader holds on a month whose `.lock` is absent
+/// (store1-1, D-2551).
+///
+/// The lock is created with `create_new`, so an existing name (a FIFO, or a
+/// lock a writer created a moment ago) is never opened through this call: a
+/// lost creation race goes back to the ordinary read-only open. A read-only
+/// filesystem answers `None`, because no writer can append there either.
+fn reader_lock(lock_path: &Path) -> Result<Option<Flock<File>>, StoreError> {
+    let created = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(lock_path);
+    let handle = match created {
+        Ok(handle) => handle,
+        Err(why) if why.kind() == ErrorKind::ReadOnlyFilesystem => return Ok(None),
+        Err(why) if why.kind() == ErrorKind::AlreadyExists => {
+            open_read(lock_path).map_err(|why| why.refusal(lock_path))?
+        }
+        Err(why) => return Err(classify(lock_path, Action::Open, &why)),
+    };
+    Flock::try_lock_shared(handle, lock_path.to_path_buf())
+        .map(Some)
+        .map_err(|refusal| lock_fault(lock_path, refusal))
 }
 
 /// [`StoreError::BarrierFailed`]'s sentence.
@@ -4541,7 +4643,37 @@ mod tests {
         })
     }
 
-    /// store1-2, D-1907: a failed append barrier is never confirmed. The
+    /// STO-1, D-2607: an overlay with a negative spot or a negative IV is
+    /// refused at the write boundary before a byte is written; the absent
+    /// marker and zero are legal readings.
+    #[test]
+    fn an_overlay_with_a_negative_spot_or_iv_is_refused_before_a_byte_is_written() {
+        use crate::format::{OI_NULL, Overlay};
+        let at = |spot: i64, iv_micros: i64| Overlay {
+            ts_micros: 1_000_000,
+            spot,
+            iv_micros,
+        };
+        for bad in [
+            at(-5, 125_000),
+            at(2_500_000, -125_000),
+            at(-5, -125_000),
+            at(i64::MIN + 1, OI_NULL),
+        ] {
+            assert!(
+                matches!(
+                    super::survey(&[bad]),
+                    Err(super::StoreError::ImpossibleBar { at: 0 })
+                ),
+                "{bad:?}"
+            );
+        }
+        for good in [at(OI_NULL, OI_NULL), at(0, 0), at(2_500_000, 125_000)] {
+            assert!(super::survey(&[good]).is_ok(), "{good:?}");
+        }
+    }
+
+    /// store1-2, D-1907, D-2559: a failed append barrier is never confirmed. The
     /// same handle, a reopened handle, and the duplicate check all refuse the
     /// month by name rather than "committing" or answering `AlreadyPresent`
     /// from a page cache whose barrier failed.
@@ -4568,6 +4700,14 @@ mod tests {
             assert_eq!(file.append(&batch), barred, "the same handle");
             drop(file);
             let mut reopened = reopen(&path).expect("the month reopens");
+            // store1-2, D-2559: a header slot whose barrier failed is written
+            // back, so no reader in this boot sees a commit the device may
+            // not hold.
+            assert_eq!(
+                reopened.header().n_valid,
+                0,
+                "barrier {skip}: no unproven commit is visible"
+            );
             assert_eq!(reopened.append(&batch), barred, "a reopened handle");
             assert_eq!(reopened.append(&[bar(3)]), barred, "any later append");
             assert!(

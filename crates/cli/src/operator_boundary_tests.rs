@@ -177,8 +177,14 @@ fn the_launch_configuration_states_what_build_rs_actually_stamps() -> std::io::R
         text.contains("a build from a CLEAN tree records sweeps"),
         "{text}"
     );
+    // P13-03, D-2511: cargo is the program, not an argument to a shell.
+    assert!(text.contains("\"runtimeExecutable\": \"cargo\""), "{text}");
+    assert!(!text.contains("\"runtimeExecutable\": \"sh\""), "{text}");
+    assert!(!text.contains("\"-c\""), "{text}");
     assert!(
-        text.contains("\"exec cargo run --release -p api -- serve\""),
+        text.contains(
+            "\"runtimeArgs\": [\n        \"run\",\n        \"--release\",\n        \"-p\",\n        \"api\",\n        \"--\",\n        \"serve\"\n      ]"
+        ),
         "{text}"
     );
     Ok(())
@@ -280,7 +286,24 @@ fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrent
     }
     assert_eq!(fs::read(marker)?, b"keep these bytes");
 
-    let first = crate::verification_scratch()?;
+    // A LOCAL COUNTER AND TAG (P16-03, D-2646). This test predicts which
+    // serials the next claims take, and it predicted the process-wide
+    // counter every other test in this binary also draws on: a concurrent
+    // caller could take a pre-claimed serial or push the counter past the
+    // window. The prediction is now about a counter only this test holds,
+    // while other threads keep drawing on the shared one below.
+    let next = std::sync::atomic::AtomicU64::new(0);
+    let claim = || crate::verification_scratch_from(&next, "p16-03-");
+    let noise: Vec<std::thread::JoinHandle<Vec<std::path::PathBuf>>> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..8)
+                    .filter_map(|_| crate::verification_scratch().ok())
+                    .collect()
+            })
+        })
+        .collect();
+    let first = claim()?;
     let _first = ScratchCleanup(first.clone());
     let name = first
         .file_name()
@@ -298,14 +321,25 @@ fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrent
         collisions.push(ScratchCleanup(path.clone()));
         fs::write(path.join("owner"), b"already held")?;
     }
-    let refused = crate::ledger_round_trip();
+    let refused = crate::ledger_round_trip_in(claim());
     assert!(!refused.held);
     assert!(refused.evidence.contains("16 collisions"));
     for held in &collisions {
         assert_eq!(fs::read(held.0.join("owner"))?, b"already held");
     }
-    let recovered = crate::ledger_round_trip();
+    let recovered = crate::ledger_round_trip_in(claim());
     assert!(recovered.held, "{}", recovered.evidence);
+    // The shared door still works beside it, and never took a tagged name.
+    for handle in noise {
+        let claimed = handle.join().map_err(|_| "noise thread panicked")?;
+        for path in claimed {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(!name.contains("p16-03-"), "{name}");
+            let _cleanup = ScratchCleanup(path);
+        }
+    }
+    let shared = crate::ledger_round_trip();
+    assert!(shared.held, "{}", shared.evidence);
     Ok(())
 }
 

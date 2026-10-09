@@ -388,12 +388,26 @@ pub fn classify(reason: &str) -> Trouble {
         "tokenexception",
         "invalid_authentication",
     ];
-    const STORE: [&str; 5] = [
+    // THE STORE'S OWN UNTYPED SPELLINGS TOO (conc11-2, D-2599). `StoreError::Io`
+    // renders "{action} {path} failed: {kind:?} (errno {code:?})", so EIO,
+    // EDQUOT, EFBIG and an ENOSPC the host reports as `StorageFull` reached
+    // here as kind names nobody listed, and `BarrierFailed` ("a durability
+    // barrier on ... already failed in this process") as a sentence nobody
+    // listed. Each fell to Transport: the "same store refusal twice" halt and
+    // its write probe never fired on a failing disk, the month was retried and
+    // stalled at vendor cost, and the feed moved on to write later months to
+    // the same device. Matched on the lowercased text, as every marker here is.
+    const STORE: [&str; 10] = [
         "disk full",
         "no space",
         "short write",
         "permission denied",
         "read-only filesystem",
+        "durability barrier",
+        "(errno some(5))",
+        "quotaexceeded",
+        "filetoolarge",
+        "storagefull",
     ];
     let lower = reason.to_ascii_lowercase();
     if CREDENTIAL.iter().any(|m| lower.contains(m)) {
@@ -502,6 +516,29 @@ pub fn credential_fault_in_page(html: &str) -> bool {
     VENDOR_SPELLINGS.iter().any(|m| lower.contains(m))
 }
 
+/// Whole seconds on this process's monotonic clock, counted from one at the
+/// first call.
+///
+/// # Why the autopilot's waits are not measured on the wall clock (clock-3, D-2579)
+///
+/// The stall re-check ([`STALL_RECHECK_SECS`], AU-08) and the store-probe
+/// schedule ([`probe_secs`], eight probes over 2 h 03 m) are ELAPSED times. They
+/// were stamped and compared in epoch seconds, so an NTP step forward spent them
+/// at once — every allowance consumed in one pass — and a step back postponed
+/// them by the size of the step. `Instant` does not step. The wall clock still
+/// stamps what the PAGE shows (`Status::due_unix`); only the comparisons moved.
+///
+/// Never zero: zero is a [`Stall`]'s "never stamped" and a [`Probe`]'s "due at
+/// once", and neither may be confused with a real reading.
+#[must_use]
+pub fn steady_secs() -> i64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let origin = *ORIGIN.get_or_init(std::time::Instant::now);
+    i64::try_from(origin.elapsed().as_secs())
+        .unwrap_or(i64::MAX)
+        .saturating_add(1)
+}
+
 /// The wait before store probe number `made + 1`: 60 s, 120 s, 240 s … capped
 /// at one hour.
 ///
@@ -523,7 +560,7 @@ pub const fn probe_secs(made: u32) -> u64 {
 
 /// Whether a store-halted feed may probe its disk again, right now.
 ///
-/// Pure over `(probe, now_unix)`. `None` for the probe is a feed that never
+/// Pure over `(probe, now_secs)`. `None` for the probe is a feed that never
 /// armed one — a feed halted for a class that has no probe, or one not halted
 /// at all — and it answers [`Due::Spent`] with a sentence saying exactly that,
 /// so a caller cannot read "no probe" as "probe now".
@@ -532,7 +569,7 @@ pub const fn probe_secs(made: u32) -> u64 {
 ///
 /// Two integer comparisons. Nothing here opens a file.
 #[must_use]
-pub fn store_due(probe: Option<&Probe>, now_unix: i64) -> Due {
+pub fn store_due(probe: Option<&Probe>, now_secs: i64) -> Due {
     let Some(probe) = probe else {
         return Due::Spent {
             saying: String::from(
@@ -557,13 +594,17 @@ pub fn store_due(probe: Option<&Probe>, now_unix: i64) -> Due {
     // the step -- months, for a clock once a season ahead -- while the page said
     // "the next probe is in 60s". A probe is a few bytes, so a stepped clock
     // probes now rather than wait for real time to catch up. D-2756 (CE-84).
+    //
+    // The production caller passes [`steady_secs`] since clock-3 (D-2579),
+    // which does not step, so this is the pure function's own guard for any
+    // `now_secs` it is handed. Kept beside D-2579 in the zero/next merge.
     let armed_wait = i64::try_from(probe_secs(probe.made.saturating_sub(1))).unwrap_or(i64::MAX);
-    if probe.due_unix.saturating_sub(now_unix) > armed_wait {
+    if probe.due_secs.saturating_sub(now_secs) > armed_wait {
         return Due::Now { made: probe.made };
     }
-    if now_unix < probe.due_unix {
+    if now_secs < probe.due_secs {
         return Due::Later {
-            due_unix: probe.due_unix,
+            due_secs: probe.due_secs,
         };
     }
     Due::Now { made: probe.made }
@@ -711,14 +752,35 @@ pub fn day_of(ts_micros: i64) -> Option<Day> {
 /// clamps cross, which is a month entirely below the floor or entirely in the
 /// future.
 ///
-/// Integer comparison on three-field dates. No calendar is walked.
+/// # The span ends on its last day that is not CLOSED (conc12-1, D-2535)
+///
+/// It ended on the calendar day, so a month whose last day is a weekend or a
+/// holiday never read as held — no bar can exist there — and every restart
+/// re-asked it, since the dry-round retirement lives only in memory. `to` is
+/// now walked back to the last day `pull::calendar::kind_of` does not report
+/// `Closed`; a day the calendar has not measured is still asked, as before.
+/// `None` also when every day of the clamped span is closed.
+///
+/// # Cost
+///
+/// Integer comparison on three-field dates, then `pull::calendar::last_not_closed`
+/// over at most the month's own days: linear in the trailing closed run,
+/// named in `docs/06-limits.md` (D-2535).
 #[must_use]
 pub fn month_span(month: YearMonth, floor: Day, yesterday: Day) -> Option<(Day, Day)> {
     let first = Day::new(month.year(), month.month(), 1).ok()?;
     let last = first.end_of_month();
     let from = if first < floor { floor } else { first };
     let to = if last < yesterday { last } else { yesterday };
-    if to < from { None } else { Some((from, to)) }
+    if to < from {
+        return None;
+    }
+    let open = pull::calendar::last_not_closed(
+        i64::from(from.days_from_epoch()),
+        i64::from(to.days_from_epoch()),
+    )?;
+    let to = Day::from_days(u32::try_from(open).ok()?).ok()?;
+    Some((from, to))
 }
 
 /// What one month-tick will ask for, derived from the store alone.
@@ -888,13 +950,18 @@ pub struct Stall {
     /// the page rather than leaving the list looking as though something is
     /// still going to happen.
     pub retried: u8,
-    /// Epoch seconds this stall was last acted on: stamped when the idle ladder
-    /// first sees it, and re-stamped on every reconsideration.
+    /// [`steady_secs`] when this stall was last acted on: stamped when the idle
+    /// ladder first sees it, and re-stamped on every reconsideration.
+    ///
+    /// A MONOTONIC second, not an epoch one (clock-3, D-2579). The re-check
+    /// interval [`STALL_RECHECK_SECS`] is an elapsed time, and measured on the
+    /// wall clock an NTP step forward spent it at once and a step back
+    /// postponed it by the size of the step. This was `at_unix`.
     ///
     /// **Zero means never stamped**, which is the state a fresh stall is pushed
     /// in — [`FeedState::observe`] reads no clock, deliberately, so that every
     /// arm of it is drivable from a test with no vendor, no store and no clock.
-    pub at_unix: i64,
+    pub at_secs: i64,
     /// Which rung of the ladder stalled at [`Self::month`].
     ///
     /// Part of the stall's key with the month: the day rung and the minute rung
@@ -968,6 +1035,37 @@ fn after_pass(
         if owed { None } else { now }
     } else {
         day_clear
+    }
+}
+
+/// The answer of a DAY pass whose survey chose nothing and reconsidered
+/// nothing, when that answer is "the minute rung is next, at once"; `None`
+/// for every other idle pass, which publishes its verdict as before.
+///
+/// conc15-1, D-2588. Since D-3000 a day pass that finds nothing owed is what
+/// proves the day rung clear and hands the loop to the minute rung. It took
+/// the common idle branch on the way: it published `Phase::Idle` with the
+/// `Settled::Complete` sentence "the store is complete through the newest
+/// finished day" while the minute rung could still owe every month, and
+/// returned [`IDLE_POLL_SECS`], so `fly` napped a minute before the first
+/// minute pass, once at startup and again on every new day or masters parse.
+/// The minute pass that follows at once publishes the real verdict.
+///
+/// A terminal feed set and an empty universe are NOT handed over: both are
+/// halts the page must show, and the minute pass would only re-derive them.
+const fn day_hand_over(
+    rung: pull::vendor::Granularity,
+    carry_on: bool,
+    terminal: bool,
+    halts: bool,
+) -> Option<Pass> {
+    if matches!(rung, pull::vendor::Granularity::Day1) && !carry_on && !terminal && !halts {
+        Some(Pass {
+            wait: 0,
+            owed: false,
+        })
+    } else {
+        None
     }
 }
 
@@ -1105,9 +1203,11 @@ impl Halt {
 pub struct Probe {
     /// How many probes have been made. Never exceeds [`STORE_PROBES`].
     pub made: u32,
-    /// Epoch seconds the next probe is due. Zero on the pass that arms it,
-    /// which makes the first probe due immediately.
-    pub due_unix: i64,
+    /// [`steady_secs`] at which the next probe is due. Zero on the pass that
+    /// arms it, which makes the first probe due immediately. Monotonic, not
+    /// epoch, so a wall-clock step neither spends nor delays the 60 s … 1 h
+    /// schedule (clock-3, D-2579). This was `due_unix`.
+    pub due_secs: i64,
 }
 
 /// Whether a store-halted feed is due for another probe.
@@ -1124,7 +1224,7 @@ pub enum Due {
     /// Not yet. The next probe is due at this epoch second.
     Later {
         /// When.
-        due_unix: i64,
+        due_secs: i64,
     },
     /// The allowance is spent and the reason says so.
     ///
@@ -1211,8 +1311,25 @@ pub struct FeedState {
     pub stalls: Vec<Stall>,
     /// The last reason this feed reported, verbatim.
     pub last_reason: Option<String>,
-    /// How many months this feed has retired since it started.
+    /// How many DISTINCT months the LIVE rung has retired since the process
+    /// started.
+    ///
+    /// conc15-6, D-2588. This was one counter for the feed, bumped by every
+    /// `Advance` on either rung, and the current month advanced again on each
+    /// new day, so it ran past `months_total` (which counts each month once).
+    /// It is now per rung, swapped by [`Self::enter`] with
+    /// [`Self::parked_months_done`], and a month counts once per rung, decided
+    /// by [`Self::retired`]. Reported beside the target's `timeframe`, which
+    /// names the live rung.
     pub months_done: u32,
+    /// The parked rung's [`Self::months_done`].
+    pub parked_months_done: u32,
+    /// Every (rung, month) this process has already counted in
+    /// `months_done`. One `insert` per `Advance` (expected-O(1), UNVERIFIED by a
+    /// measurement); bounded by
+    /// twice the months between the feed's floor and yesterday, because a
+    /// pair is never inserted twice.
+    pub retired: std::collections::HashSet<(pull::vendor::Granularity, YearMonth)>,
     /// Which rung [`Self::frontier`], [`Self::attempts`], [`Self::dry`] and
     /// [`Self::backoff`] currently belong to. One of [`RUNGS`].
     pub rung: pull::vendor::Granularity,
@@ -1242,6 +1359,8 @@ impl FeedState {
             stalls: Vec::new(),
             last_reason: None,
             months_done: 0,
+            parked_months_done: 0,
+            retired: std::collections::HashSet::new(),
             rung: pull::vendor::Granularity::Day1,
             parked: Place::at(frontier),
         }
@@ -1278,12 +1397,22 @@ impl FeedState {
         self.backoff = backoff;
         self.store_refused = store_refused;
         self.rung = rung;
+        // EACH RUNG ITS OWN COUNT (conc15-6, D-2588).
+        std::mem::swap(&mut self.months_done, &mut self.parked_months_done);
+    }
+
+    /// Count the live rung's frontier month as retired, once per rung for the
+    /// life of the process. conc15-6, D-2588.
+    fn count_retired(&mut self) {
+        if self.retired.insert((self.rung, self.frontier)) {
+            self.months_done = self.months_done.saturating_add(1);
+        }
     }
 
     /// Record that the live rung's frontier month stalled.
     ///
     /// A month already on the list for this rung is UPDATED: its attempts are
-    /// added (saturating), its reason replaced, and its `retried` and `at_unix`
+    /// added (saturating), its reason replaced, and its `retried` and `at_secs`
     /// kept. Pushing a fresh entry with `retried: 0` instead was W1-api1-8: each
     /// reconsideration that failed minted a full new allowance, so retries were
     /// unbounded and the list grew without limit.
@@ -1308,10 +1437,10 @@ impl FeedState {
             reason: why.to_owned(),
             // NEITHER FIELD IS STAMPED HERE. `observe` reads no clock,
             // deliberately — see its doc comment — so the idle ladder stamps
-            // `at_unix` the first time it sees the stall and `reconsider` is
+            // `at_secs` the first time it sees the stall and `reconsider` is
             // what moves `retried`.
             retried: 0,
-            at_unix: 0,
+            at_secs: 0,
             rung,
         });
     }
@@ -1348,7 +1477,7 @@ impl FeedState {
         self.probe = match kind {
             Halt::Store => Some(Probe {
                 made: 0,
-                due_unix: 0,
+                due_secs: 0,
             }),
             Halt::Credential | Halt::Configuration | Halt::Census => None,
         };
@@ -1362,11 +1491,22 @@ impl FeedState {
     /// write probe succeeds. Both reset the credential re-read allowance too:
     /// a feed that is being driven again is owed its one §8 re-read the same as
     /// a fresh one.
+    ///
+    /// **BOTH RUNGS' COUNTERS ARE CLEARED, NOT ONLY THE LIVE ONE'S.** A halt is
+    /// the feed's, not a rung's, and the evidence that clears it is about the
+    /// disk or the manifest, which both rungs write through. Clearing only the
+    /// live rung left the parked rung's `store_refused` set: a store halt on
+    /// the minute rung, revived on a day round after a roll-over, came back on
+    /// `enter(Minute1)` with that flag still true, and ONE new store refusal
+    /// re-halted it with the false sentence "the store refused the same write
+    /// twice". The parked frontier is kept; it is a hint, and only the
+    /// per-month counters are about the fault. conc15-3, D-2588.
     fn revive(&mut self) {
         self.halted = None;
         self.halt_kind = None;
         self.probe = None;
         self.clear_month();
+        self.parked = Place::at(self.parked.frontier);
     }
 
     /// The wait after this many consecutive backoffs: 30 s, 60 s, 120 s …
@@ -1472,7 +1612,7 @@ impl FeedState {
         if out.complete {
             self.unstall();
             self.clear_month();
-            self.months_done = self.months_done.saturating_add(1);
+            self.count_retired();
             return Next::Advance;
         }
         if out.stored > 0 {
@@ -1510,7 +1650,7 @@ impl FeedState {
         self.dry = self.dry.saturating_add(1);
         if self.dry >= DRY_ROUNDS {
             self.clear_month();
-            self.months_done = self.months_done.saturating_add(1);
+            self.count_retired();
             return Next::Advance;
         }
         Next::Retry
@@ -1551,8 +1691,8 @@ impl FeedState {
 ///
 /// # First sighting stamps, and never retries
 ///
-/// A fresh stall carries `at_unix == 0` because [`FeedState::observe`] reads no
-/// clock. The first idle pass that sees one stamps it with `now_unix` and does
+/// A fresh stall carries `at_secs == 0` because [`FeedState::observe`] reads no
+/// clock. The first idle pass that sees one stamps it with `now_secs` and does
 /// **not** reconsider it — `now - now` is zero, which is below the threshold. So
 /// the wait is always at least [`STALL_RECHECK_SECS`] and never less.
 ///
@@ -1560,13 +1700,13 @@ impl FeedState {
 ///
 /// One pass over the stall list of every non-terminal feed. Nothing here reads
 /// the store, opens a socket or takes a lock.
-pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
+pub fn reconsider(feeds: &mut [FeedState], now_secs: i64) -> Option<String> {
     // FIRST SIGHTING. Stamping is separate from choosing so that a stall
     // recorded this second cannot also be retried this second.
     for state in feeds.iter_mut() {
         for stall in &mut state.stalls {
-            if stall.at_unix == 0 {
-                stall.at_unix = now_unix;
+            if stall.at_secs == 0 {
+                stall.at_secs = now_secs;
             }
         }
     }
@@ -1582,9 +1722,10 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
             // fast RTC corrected since) used to hold the recheck until real
             // time caught up, which for a clock once ahead is months. It is
             // due now, still within the finite `STALL_RETRIES` allowance, and
-            // the sentence says the clock stepped. D-2756 (CE-84).
-            let due = now_unix < stall.at_unix
-                || now_unix.saturating_sub(stall.at_unix) >= STALL_RECHECK_SECS;
+            // the sentence says the clock stepped. D-2756 (CE-84). The
+            // production caller passes [`steady_secs`] (clock-3, D-2579).
+            let due = now_secs < stall.at_secs
+                || now_secs.saturating_sub(stall.at_secs) >= STALL_RECHECK_SECS;
             if stall.retried >= STALL_RETRIES || !due {
                 continue;
             }
@@ -1598,9 +1739,9 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
     let state = feeds.get_mut(slot)?;
     let feed = state.feed.display().to_owned();
     let stall = state.stalls.get_mut(nth)?;
-    let stepped = now_unix < stall.at_unix;
+    let stepped = now_secs < stall.at_secs;
     stall.retried = stall.retried.saturating_add(1);
-    stall.at_unix = now_unix;
+    stall.at_secs = now_secs;
     let month = stall.month;
     let rung = stall.rung;
     let retried = stall.retried;
@@ -1701,20 +1842,40 @@ pub struct Status {
     pub failures: Vec<Failed>,
     /// Where the run journal is, so an operator can go and read it.
     pub journal: String,
-    /// Why the last tick's record did not reach that journal. Empty when every
-    /// record this process wrote landed.
+    /// Why the LAST tick's record did not reach that journal: current state,
+    /// empty when the last tick's record landed. It is NOT a statement about
+    /// every record this process wrote: a later tick whose record lands clears
+    /// it. [`Self::journal_lost`] is the half that is never cleared (conc15-4,
+    /// D-2588).
     ///
     /// **A path is not a proof.** `journal` said where the file is and every
     /// page read it as evidence the runs were being recorded; the append's
     /// answer was discarded at the one site that produces it. This is that
     /// answer, and `/autopilot.json` carries it as `journal_error`.
     pub journal_error: String,
+    /// How many tick records this process could not append, ever. Never
+    /// cleared in-process.
+    ///
+    /// conc15-4, D-2588. `journal_error` alone was overwritten by the next
+    /// tick, so one refused record was forgotten as soon as a later one landed
+    /// and `/autopilot.json` then read as though every record had landed while
+    /// `/audit` was missing a tick. `/autopilot.json` carries it as
+    /// `journal_lost`.
+    pub journal_lost: u64,
+    /// The first refusal counted in [`Self::journal_lost`], verbatim, or
+    /// empty. Kept for the life of the process, as `journal_first_loss`.
+    pub journal_first_loss: String,
     /// Milliseconds spent waiting between units, this process.
     pub waiting_ms: u64,
     /// Milliseconds of vendor throttling the governor absorbed, this process.
     pub absorbed_ms: u64,
     /// One report per feed.
     pub feeds: Vec<FeedReport>,
+    /// Whether [`fly`] has RETURNED: set only on its three terminal pre-loop
+    /// exits, never by the clock wait, which also publishes `Halted` with no
+    /// feed while the task is alive. [`admit_resume`] refuses on this, not on
+    /// the phase. autopilot-3, CE-46, D-2508.
+    pub task_returned: bool,
 }
 
 /// How many failures the status carries.
@@ -1740,9 +1901,12 @@ impl Default for Status {
             failures: Vec::new(),
             journal: String::new(),
             journal_error: String::new(),
+            journal_lost: 0,
+            journal_first_loss: String::new(),
             waiting_ms: 0,
             absorbed_ms: 0,
             feeds: Vec::new(),
+            task_returned: false,
         }
     }
 }
@@ -1764,7 +1928,9 @@ pub struct FeedReport {
     pub done: usize,
     /// Attempts spent on the current month.
     pub attempts: u8,
-    /// Months retired since this process started.
+    /// Distinct months the live rung (the target's `timeframe`) has retired
+    /// since this process started, each month once, so it does not run past
+    /// `months_total` over a fixed floor (conc15-6, D-2588).
     pub months_done: u32,
     /// Months between the feed's floor and yesterday.
     pub months_total: u32,
@@ -1781,6 +1947,26 @@ pub struct FeedReport {
 }
 
 impl Status {
+    /// Record one tick's journal answer: `None` when its record landed.
+    ///
+    /// `journal_error` is the current state and is replaced; `journal_lost`
+    /// and `journal_first_loss` are sticky for the life of the process, so a
+    /// refused record is never forgotten because a later one landed
+    /// (conc15-4, D-2588). One counter and at most one string move; the cost
+    /// is UNVERIFIED by a measurement.
+    pub fn note_journal(&mut self, error: Option<String>) {
+        match error {
+            None => self.journal_error.clear(),
+            Some(why) => {
+                self.journal_lost = self.journal_lost.saturating_add(1);
+                if self.journal_first_loss.is_empty() {
+                    self.journal_first_loss.clone_from(&why);
+                }
+                self.journal_error = why;
+            }
+        }
+    }
+
     /// The state word this payload will carry, which is not always the phase's
     /// own.
     ///
@@ -1850,13 +2036,15 @@ impl Status {
         let mut out = String::with_capacity(2048);
         let _ = write!(
             out,
-            r#"{{"state":{},"why":{},"pull_active":{},"cursor":{},"journal":{},"journal_error":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
+            r#"{{"state":{},"why":{},"pull_active":{},"cursor":{},"journal":{},"journal_error":{},"journal_lost":{},"journal_first_loss":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
             render::json_string(self.state()),
             render::json_string(&self.why()),
             self.now.is_some(),
             render::json_string(&self.cursor),
             render::json_string(&self.journal),
             render::json_string(&self.journal_error),
+            self.journal_lost,
+            render::json_string(&self.journal_first_loss),
             self.waiting_ms,
             self.absorbed_ms,
             render::json_string(&self.target.from),
@@ -1980,6 +2168,12 @@ pub struct Control {
     /// moved since — a run that began after the pause captures the new value
     /// and is unaffected.
     epoch: AtomicU64,
+    /// Whether the process is shutting down. Every walk reads it, a hand walk
+    /// included, while [`Self::stopped`] reaches only the autopilot's own walk:
+    /// shutdown must break a hand `/pull/spot` at its next instrument
+    /// (conc:server1-2, D-2771) and the autopilot's Stop must not (conc6-2,
+    /// D-2695). One flag per process, set once, never cleared. D-4608.
+    shutting_down: AtomicBool,
     /// The in-process pull seats — **one per feed**, not one per process.
     ///
     /// `pull::ingest`'s census lock **refuses rather than queues**, and it is
@@ -2150,6 +2344,7 @@ impl Control {
         Self {
             paused: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
             seats: AtomicU8::new(0),
             status: std::sync::Mutex::new(Status::default()),
         }
@@ -2158,13 +2353,17 @@ impl Control {
     /// Whether the operator has stopped it. One relaxed load.
     #[must_use]
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        self.paused.load(Ordering::SeqCst)
     }
 
     /// Stop, and ask any sweep in flight to stop at its next instrument.
     pub fn pause(&self) {
-        self.paused.store(true, Ordering::Relaxed);
-        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        // SEQUENTIALLY CONSISTENT, flag first and epoch second: a loop that
+        // reads the epoch and then the flag sees either the old epoch (and
+        // its run stops at the first instrument) or the pause. autopilot-1,
+        // D-2506.
+        self.paused.store(true, Ordering::SeqCst);
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst).saturating_add(1);
         // A PAUSE IS AN OPERATOR DECISION AND IT STOPS A BACKFILL. Left
         // unlogged, a run that halted because somebody pressed pause and one
         // that halted because the vendor stopped answering read the same on
@@ -2212,10 +2411,19 @@ impl Control {
         control
     }
 
+    /// Whether any feed's pull seat is held right now — an autopilot tick, a
+    /// hand pull, a press leg or a recovery request is between taking its seat
+    /// and journaling its record. One atomic load. The shutdown drain waits on
+    /// this (autopilot-4, lifecycle-1, D-2583).
+    #[must_use]
+    pub fn seats_held(&self) -> bool {
+        self.seats.load(Ordering::Acquire) != 0
+    }
+
     /// The current stop generation, captured by a run when it starts.
     #[must_use]
     pub fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Relaxed)
+        self.epoch.load(Ordering::SeqCst)
     }
 
     /// Whether a run that captured `at` has been asked to stop. One relaxed
@@ -2223,6 +2431,23 @@ impl Control {
     #[must_use]
     pub fn stopped(&self, at: u64) -> bool {
         self.epoch.load(Ordering::Relaxed) != at
+    }
+
+    /// The process is shutting down: every walk in flight, hand walks
+    /// included, stops at its next instrument. D-2771, D-4608.
+    pub fn shut_down(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a walk that captured `epoch` stops at its next instrument: the
+    /// process is shutting down (D-2771), or it is the autopilot's own walk
+    /// (`Some`) and a pause has moved the generation since it captured it
+    /// (D-2506). A hand walk carries `None`, so only the shutdown reaches it
+    /// (D-2695). One or two relaxed loads; this is the check inside the
+    /// instrument loop. D-4608.
+    #[must_use]
+    pub fn walk_stops(&self, epoch: Option<u64>) -> bool {
+        self.shutting_down.load(Ordering::Relaxed) || epoch.is_some_and(|at| self.stopped(at))
     }
 
     /// Take the one pull seat, or `None` when something else holds it.
@@ -2648,6 +2873,60 @@ pub fn drivable(yesterday: Day) -> Vec<FeedState> {
         .collect()
 }
 
+/// Appends every feed [`drivable`] answers for `yesterday` that `feeds` does
+/// not already hold, and returns how many it added. A feed already held keeps
+/// its state — frontier, attempts, backoff and halt — untouched.
+///
+/// # Why the feed set is re-derived (clock-1, D-2578)
+///
+/// `fly` derived its feeds ONCE, after the clock-wait loop, and `drivable`
+/// drops a feed whose floor cannot be reached from the clock's today. A boot
+/// clock that was valid but wrong — a year before a fixed floor — therefore
+/// dropped Groww and Zerodha for the life of the process: nothing named them on
+/// the page, and an empty set made "every feed is halted" vacuously true. The
+/// loop now calls this whenever the finished day changes, so a feed the clock
+/// once hid is admitted once the clock is right. A feed is never REMOVED here:
+/// one already driving is not dropped by a later clock step back.
+///
+/// # Cost
+///
+/// O(`FEED_COUNT`²) — five feeds — once per finished-day change, not per tick.
+pub fn admit_newly_drivable(feeds: &mut Vec<FeedState>, yesterday: Day) -> usize {
+    let mut added = 0_usize;
+    for state in drivable(yesterday) {
+        let mut held = false;
+        for have in feeds.iter() {
+            if have.feed == state.feed {
+                held = true;
+                break;
+            }
+        }
+        if !held {
+            feeds.push(state);
+            added = added.saturating_add(1);
+        }
+    }
+    added
+}
+
+/// [`admit_newly_drivable`] once per new finished day, with the event that
+/// says it admitted anything. Split from `fly` to keep it under the line
+/// ceiling. clock-1, D-2578.
+fn rederive_on_new_day(feeds: &mut Vec<FeedState>, derived_for: &mut Day, day: Day) {
+    if day == *derived_for {
+        return;
+    }
+    let admitted = admit_newly_drivable(feeds, day);
+    *derived_for = day;
+    if admitted > 0 {
+        let _noted = telemetry::emit(
+            &telemetry::Event::info("autopilot", "feeds admitted")
+                .with("count", telemetry::Value::Uint(admitted as u64))
+                .with("day", telemetry::Value::Str(&day.to_string())),
+        );
+    }
+}
+
 /// Yesterday, in IST, from a moment.
 ///
 /// **Never today.** A session still running yields a partial day the
@@ -2675,6 +2954,7 @@ pub async fn fly(site: Loaded) {
     if site.broker != Broker::Live {
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from(
                 "this process may not reach a live broker, so the autopilot will not \
                  start. Only the served binary sets Broker::Live.",
@@ -2709,6 +2989,7 @@ pub async fn fly(site: Loaded) {
                     u64::from(CLOCK_WAITS) * IDLE_POLL_SECS / 60
                 );
                 status.due_unix = 0;
+                status.task_returned = true;
             });
             return;
         };
@@ -2753,6 +3034,7 @@ pub async fn fly(site: Loaded) {
     let Some(timeframe) = granularity.store_timeframe() else {
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from("the daily rung has no directory in this store build");
         });
         return;
@@ -2760,6 +3042,8 @@ pub async fn fly(site: Loaded) {
     let mut cache = SeriesCache::default();
     let instruments = cache.get(&site, timeframe).len();
     let mut feeds = drivable(yesterday);
+    // The finished day the feed set was last derived for (clock-1, D-2578).
+    let mut derived_for = yesterday;
     // THE TARGET IS PUBLISHED BEFORE THE GRACE WINDOW, NOT AFTER THE FIRST
     // ROUND.
     //
@@ -2789,6 +3073,14 @@ pub async fn fly(site: Loaded) {
     });
     grace(&site).await;
     loop {
+        // THE STOP GENERATION BEFORE THE PAUSE CHECK. `pause` sets the flag and
+        // then bumps the epoch (both sequentially consistent), so either this
+        // read sees the old epoch and the run below stops at its first
+        // instrument, or it sees the new one and the flag read after it sees
+        // the pause. `broker_run` used to capture the epoch itself, seconds of
+        // census reading later, and a pause in that gap was absorbed into the
+        // captured value: the month was fetched anyway. autopilot-1, D-2506.
+        let at = site.autopilot.epoch();
         if site.autopilot.is_paused() {
             dwell_paused(&site.autopilot).await;
             continue;
@@ -2799,6 +3091,11 @@ pub async fn fly(site: Loaded) {
         // rung (`Place`, D-0949), which `round` swaps in.
         let now = yesterday_ist(std::time::SystemTime::now())
             .map(|day| (day, site.universe().generation));
+        // A NEW FINISHED DAY RE-DERIVES THE FEED SET, so a feed a wrong boot
+        // clock hid is admitted once the clock is right (clock-1, D-2578).
+        if let Some((day, _)) = now {
+            rederive_on_new_day(&mut feeds, &mut derived_for, day);
+        }
         let rung = rung_for(day_clear, now);
         // THE SERIES IS PER RUNG. `tracked_series` answers "which
         // instrument-months does this timeframe still owe", and the day rung
@@ -2809,7 +3106,7 @@ pub async fn fly(site: Loaded) {
             continue;
         };
         let rung_series = cache.get(&site, rung_timeframe);
-        let pass = round(&site, &mut feeds, rung_series, rung).await;
+        let pass = round(&site, &mut feeds, rung_series, rung, at).await;
         day_clear = after_pass(rung, pass.owed, day_clear, now);
         let waited = pass.wait;
         // BETWEEN UNITS, ALWAYS. The sweep itself awaits on every request, so
@@ -3063,7 +3360,8 @@ fn survey(
 /// A feed that is not store-halted costs one enum comparison.
 fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
     use std::fmt::Write as _;
-    let now = ingest::epoch_secs(std::time::SystemTime::now());
+    // ELAPSED TIME, ON THE MONOTONIC CLOCK (clock-3, D-2579).
+    let now = steady_secs();
     let mut said = String::new();
     for state in feeds.iter_mut() {
         if state.halt_kind != Some(Halt::Store) {
@@ -3091,7 +3389,7 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
                         let wait = probe_secs(made);
                         state.probe = Some(Probe {
                             made: attempt,
-                            due_unix: now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX)),
+                            due_secs: now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX)),
                         });
                         // THE LAST PROBE NAMES NO NEXT ONE. `made` reaches
                         // `STORE_PROBES` here and the next pass answers
@@ -3115,8 +3413,8 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
                     }
                 }
             }
-            Due::Later { due_unix } => {
-                let left = due_unix.saturating_sub(now).max(0);
+            Due::Later { due_secs } => {
+                let left = due_secs.saturating_sub(now).max(0);
                 let made = state.probe.map_or(0, |p| p.made);
                 let _ = write!(
                     said,
@@ -3286,11 +3584,38 @@ fn stand_off(site: &Loaded, holder: &str) -> u64 {
     SEAT_WAIT_SECS
 }
 
+/// What holds the run slot, in the words the stand-off uses, or `None`.
+///
+/// `recovery_active` is set under `site.run` by `recovery::claim` and cleared
+/// before the slot is released, and is read here in the same order, run then
+/// active (conc6-4, D-2697).
+fn run_holder(site: &Site) -> Option<&'static str> {
+    let run = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    run.as_ref()
+        .is_some_and(crate::pullrun::Progress::running)
+        .then(|| {
+            if site
+                .recovery_active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            {
+                "a recovery plan is running"
+            } else {
+                "a hand-made pull is running"
+            }
+        })
+}
+
 async fn round(
     site: &Loaded,
     feeds: &mut [FeedState],
     series: &[Series],
     granularity: pull::vendor::Granularity,
+    at: u64,
 ) -> Pass {
     // THIS RUNG'S PLACE, NOT THE OTHER ONE'S. One swap of four fields per feed;
     // see `Place` for the months the shared frontier used to skip. D-0949.
@@ -3327,14 +3652,12 @@ async fn round(
     // it means somebody's run ended abnormally; the flag is still readable, and
     // refusing to look would stand the backfill off forever on the strength of
     // one panicked request. Same position `pullrun::with_progress` takes.
-    let pressing = site
-        .run
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(crate::pullrun::Progress::running);
-    if pressing {
-        return Pass::owed(stand_off(site, "a hand-made pull is running"));
+    //
+    // AND THE HOLDER IS NAMED. Recovery claims the same slot, including a plan
+    // the server resumed by itself at boot, and this said "a hand-made pull"
+    // for both (conc6-4, D-2697).
+    if let Some(holder) = run_holder(site) {
+        return Pass::owed(stand_off(site, holder));
     }
 
     let Some(_seats) = site.autopilot.take_every_seat() else {
@@ -3369,10 +3692,16 @@ async fn round(
         let retrying = if terminal {
             None
         } else {
-            reconsider(feeds, ingest::epoch_secs(std::time::SystemTime::now()))
+            // Elapsed time, on the monotonic clock (clock-3, D-2579).
+            reconsider(feeds, steady_secs())
         };
         let note = stall_note(feeds);
         let carry_on = retrying.is_some();
+        // A CLEAR DAY PASS HANDS OVER; IT DOES NOT SAY "COMPLETE". See
+        // `day_hand_over` (conc15-1, D-2588).
+        if let Some(pass) = day_hand_over(granularity, carry_on, terminal, settled.halts()) {
+            return pass;
+        }
         // THE REPORTS WERE TAKEN BEFORE THE RECONSIDERATION, so they still hold
         // the frontier and the retry counters as they stood a moment ago. Left
         // alone, the page would carry `"retried":0` on the very stall whose
@@ -3460,16 +3789,18 @@ async fn round(
         status.feeds = reports;
     });
 
-    let out = tick(site, state, &unit, granularity, series).await;
+    let out = tick(site, state, &unit, granularity, series, at).await;
     let stored = u64::try_from(out.stored).unwrap_or(u64::MAX);
     // THE JOURNAL'S ANSWER TRAVELS WITH THE BARS. Published beside
     // `bars_stored` because it is a fact about the same tick, and cleared on a
     // tick whose record landed so the page shows the CURRENT state of the file
-    // rather than the worst one this process ever saw.
-    let journal_error = out.journal_error.clone().unwrap_or_default();
+    // rather than the worst one this process ever saw. The worst one is not
+    // lost: `note_journal` counts it in `journal_lost` and keeps the first
+    // refusal, never cleared in-process (conc15-4, D-2588).
+    let journal_error = out.journal_error.clone();
     site.autopilot.publish(move |status| {
         status.bars_stored = status.bars_stored.saturating_add(stored);
-        status.journal_error = journal_error;
+        status.note_journal(journal_error);
     });
 
     Pass::owed(settle(site, state, &out))
@@ -3482,7 +3813,15 @@ async fn round(
 /// [`FeedState::observe`] decides, and this only writes the decision down where
 /// an operator can read it.
 fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
-    match state.observe(out) {
+    let next = state.observe(out);
+    note_decision(
+        state.feed.display(),
+        state.frontier,
+        state.attempts,
+        state.last_reason.as_deref(),
+        &next,
+    );
+    match next {
         Next::Advance => {
             if let Some(next) = month_after(state.frontier) {
                 state.frontier = next;
@@ -3519,7 +3858,18 @@ fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
             0
         }
         Next::Halt { reason } => {
+            // THE FEED'S OWN REPORT IS MARKED TOO. `round` published the feeds
+            // before the tick, with this one's `halted` empty, and nothing
+            // re-published them until the next round, which never comes while
+            // paused. A Stop then let `dwell_paused` overwrite the detail, so
+            // the reason was nowhere on the page, and `admit_resume` read the
+            // stale feeds and answered "resumed" over a terminal feed
+            // (conc6-1, D-2694). One pass over a handful of feeds.
+            let feed = state.feed.display();
             site.autopilot.publish(move |status| {
+                if let Some(report) = status.feeds.iter_mut().find(|r| r.feed == feed) {
+                    report.halted.clone_from(&reason);
+                }
                 status.phase = Phase::Halted;
                 status.detail = reason;
                 status.due_unix = 0;
@@ -3527,6 +3877,51 @@ fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
             IDLE_POLL_SECS
         }
     }
+}
+
+/// One durable `autopilot` line for a decision that stops or delays a feed.
+///
+/// conc13-4, D-2595. Every halt, stall and backoff lived only in the
+/// in-memory status, overwritten by the next publish and lost on restart:
+/// nothing in `/logs` said when or why a feed stopped. `Halt` is Error
+/// ("halted"), `Stall` is Warn ("stalled"), `Wait` is Warn ("backing off"),
+/// each with the feed, the month and the reason; `Advance` and `Retry` say
+/// nothing (a decision per tick, at the tick's own boundary, never per bar).
+/// `month` and `attempts` are read after `observe`, so a stall names the month
+/// it passed over (the frontier moves only after this).
+fn note_decision(feed: &str, month: YearMonth, attempts: u8, last: Option<&str>, next: &Next) {
+    let (level, message, why, secs) = match next {
+        Next::Advance | Next::Retry => return,
+        Next::Wait { secs } => (telemetry::Level::Warn, "backing off", last, Some(*secs)),
+        Next::Stall { reason } => (
+            telemetry::Level::Warn,
+            "stalled",
+            Some(reason.as_str()),
+            None,
+        ),
+        // THE VENDOR'S OWN WORDS, NOT THE SENTENCE AROUND THEM. A halt's
+        // reason is a paragraph that quotes the verbatim cause at its END, and
+        // telemetry bounds a string field, so the cause was cut off the line.
+        // The paragraph stays on the page; the line carries the cause.
+        Next::Halt { reason } => (
+            telemetry::Level::Error,
+            "halted",
+            last.or(Some(reason.as_str())),
+            None,
+        ),
+    };
+    let month = month.to_string();
+    let mut event = telemetry::Event::new(level, "autopilot", message)
+        .with("feed", telemetry::Value::Str(feed))
+        .with("month", telemetry::Value::Str(&month))
+        .with("attempts", telemetry::Value::Uint(u64::from(attempts)));
+    if let Some(why) = why {
+        event = event.with("why", telemetry::Value::Str(why));
+    }
+    if let Some(secs) = secs {
+        event = event.with("secs", telemetry::Value::Uint(secs));
+    }
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// One unit of work: run the existing sweep, journal it, and re-probe the store
@@ -3540,6 +3935,7 @@ async fn tick(
     unit: &Unit,
     granularity: pull::vendor::Granularity,
     series: &[Series],
+    at: u64,
 ) -> TickOutcome {
     let asked = ingest::SpotRequest {
         cash_identity: ingest::CashIdentity::Isin,
@@ -3616,10 +4012,11 @@ async fn tick(
     // the census only through `ladder_refusal`, which looks up the asked
     // feed's own store vendor and no other; `read_all` read and CRC-checked
     // every vendor's whole manifest to answer that, twice a tick.
-    let run = crate::server::broker_run(
+    let run = crate::server::broker_run_at(
         &asked,
         site,
         &[census::read_vendor(&site.store_root, state.vendor)],
+        Some(at),
     )
     .await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -3702,10 +4099,21 @@ pub(crate) fn outcome_of(
     complete: bool,
     journal_error: Option<String>,
 ) -> TickOutcome {
+    // THE BREAKER'S OWN SENTENCE LEADS, when it tripped: it names the outage,
+    // where the first instrument's refusal names one 503. A stop that is not
+    // the operator's pause and not a credential stop is the breaker's, and it
+    // reaches the attempt count and the backoff like any other vendor
+    // failure (autopilot-2, D-2507; conc8-1, D-2698).
+    let breaker = run
+        .stopped
+        .as_ref()
+        .filter(|_| !run.cancelled && run.credential_stop.is_none())
+        .cloned();
     let reason = run
         .blocked
         .as_ref()
         .map(|b| b.why.clone())
+        .or(breaker)
         .or_else(|| {
             run.total
                 .failures
@@ -3728,6 +4136,11 @@ pub(crate) fn outcome_of(
         // it retried at once with no attempt counted and no backoff, hammering
         // a vendor that had just failed five instruments in a row
         // (conc:autopilot-2, D-2798).
+        //
+        // AND NEITHER IS THE VENDOR-DOWN BREAKER. Only the operator's pause
+        // (`cancelled`) is "not a failure, ask again at once"; the breaker's
+        // stop is a transport failure and is bounded by the backoff and the
+        // stall. autopilot-2, D-2507.
         stopped: run.cancelled && run.credential_stop.is_none(),
         journal_error,
         credential: run.credential_stop,
@@ -3834,7 +4247,7 @@ pub enum Admission {
 
 /// Whether a resume would change anything, read from the published status.
 ///
-/// # The three answers, and the state each one is read from
+/// # The four cases, and the state each one is read from
 ///
 /// * **Every reported feed is halted** → refused. The loop is still running and
 ///   `survey` will choose nothing for as long as that holds, so "resumed" would
@@ -3843,6 +4256,9 @@ pub enum Admission {
 ///   [`fly`]'s three pre-loop exits — no live broker, an unusable clock, a rung
 ///   the store cannot file — and in every one of them the task has *returned*.
 ///   Nothing is left to read the flag.
+/// * **Feeds have reported, none of them is halted, and the phase is
+///   `Halted`** → refused. That is `round`'s whole-autopilot halt (an empty
+///   universe), which no feed carries (conc15-5, D-2588).
 /// * **Anything else** → honoured, with any terminal feeds named.
 ///
 /// An empty feed list with a phase that is not `Halted` is the ordinary state
@@ -3864,7 +4280,11 @@ pub fn admit_resume(control: &Control) -> Admission {
                 .map(|feed| format!("{} — {}", feed.feed, feed.halted))
                 .collect();
             if status.feeds.is_empty() {
-                if status.phase == Phase::Halted {
+                // THE TASK'S OWN WORD THAT IT RETURNED, NOT THE PHASE. The
+                // clock wait publishes `Halted` with no feed while the task is
+                // alive and will resume by itself; reading the phase refused
+                // that Resume with "it has returned". autopilot-3, CE-46, D-2508.
+                if status.task_returned {
                     return Admission::Refused {
                         why: format!(
                             "{RESUME_CANNOT_CLEAR} No feed has reported at all and the \
@@ -3877,6 +4297,24 @@ pub fn admit_resume(control: &Control) -> Admission {
                     };
                 }
                 return Admission::Clear;
+            }
+            // A GLOBAL HALT WITH NO FEED HALTED IS STILL A HALT. `round`
+            // publishes `Phase::Halted` over a full feed list when the
+            // universe is empty (`Settled::halts`), with every feed report's
+            // `halted` empty. This read only the feeds, so it answered
+            // `Clear`, and `start` published "resumed … Running" over a halt
+            // no resume can clear. The halt is the round's own measurement and
+            // the next pass re-takes it, so the refusal names it verbatim.
+            // conc15-5, D-2588.
+            if status.phase == Phase::Halted && halted.is_empty() {
+                return Admission::Refused {
+                    why: format!(
+                        "{RESUME_CANNOT_CLEAR} No single feed is terminal, but the \
+                         autopilot as a whole is halted, so a resume has nothing it \
+                         could start. The reason, verbatim: {}",
+                        status.why()
+                    ),
+                };
             }
             if halted.len() == status.feeds.len() {
                 return Admission::Refused {
@@ -4499,6 +4937,119 @@ mod tests {
             )),
             "only HTTP feeds are driven"
         );
+    }
+
+    /// clock-1, D-2578: a feed the boot clock's day dropped is admitted once
+    /// the finished day is one its floor reaches, and a feed already held keeps
+    /// its state. A day before every fixed floor drops Groww and Zerodha; the
+    /// re-derivation over a 2026 day appends both after the Dhan state that was
+    /// already driving, whose attempts are not reset. On the old `fly` there
+    /// was no re-derivation: the dropped feeds stayed dropped.
+    #[test]
+    fn a_feed_dropped_by_a_wrong_boot_clock_is_admitted_once_the_clock_is_right() {
+        let wrong = Day::new(1999, 12, 31).expect("1999-12-31");
+        let right = Day::new(2026, 10, 5).expect("2026-10-05");
+        let early: Vec<pull::vendor::Feed> = drivable(wrong).into_iter().map(|f| f.feed).collect();
+        assert!(!early.contains(&pull::vendor::Feed::Groww), "{early:?}");
+        assert!(!early.contains(&pull::vendor::Feed::Zerodha), "{early:?}");
+
+        let mut dhan = drivable(right)
+            .into_iter()
+            .next()
+            .expect("Dhan is drivable on a right clock");
+        assert_eq!(dhan.feed, pull::vendor::Feed::Dhan);
+        dhan.attempts = 7;
+        let mut feeds = vec![dhan];
+        assert_eq!(admit_newly_drivable(&mut feeds, right), 2);
+        let driven: Vec<pull::vendor::Feed> = feeds.iter().map(|f| f.feed).collect();
+        assert_eq!(
+            driven,
+            vec![
+                pull::vendor::Feed::Dhan,
+                pull::vendor::Feed::Groww,
+                pull::vendor::Feed::Zerodha,
+            ]
+        );
+        assert_eq!(feeds[0].attempts, 7, "a held feed's state was replaced");
+        // Idempotent: the same day, and a later one, add nothing.
+        assert_eq!(admit_newly_drivable(&mut feeds, right), 0);
+        let later = Day::new(2026, 10, 6).expect("2026-10-06");
+        assert_eq!(admit_newly_drivable(&mut feeds, later), 0);
+        // A clock stepping BACK never removes a feed already driving.
+        assert_eq!(admit_newly_drivable(&mut feeds, wrong), 0);
+        assert_eq!(feeds.len(), 3);
+        // From nothing, the whole drivable set, in descriptor order.
+        let mut empty = Vec::new();
+        assert_eq!(admit_newly_drivable(&mut empty, right), 3);
+        // And the loop calls it: a source check on `fly`.
+        let source = include_str!("autopilot.rs");
+        let fly = source.split_once("pub async fn fly(").expect("fly").1;
+        let fly = &fly[..fly.find("\n}\n").expect("fly ends")];
+        assert!(fly.contains("rederive_on_new_day(&mut feeds, &mut derived_for, day)"));
+        // The helper only acts on a CHANGED day.
+        let mut some = Vec::new();
+        let mut derived = right;
+        rederive_on_new_day(&mut some, &mut derived, right);
+        assert!(some.is_empty(), "the same day re-derived");
+        rederive_on_new_day(&mut some, &mut derived, later);
+        assert_eq!((some.len(), derived), (3, later));
+    }
+
+    /// clock-3, D-2579: the store-probe schedule and the stall re-check are
+    /// measured on the monotonic clock. `steady_secs` is never zero and never
+    /// goes back; the two production sites that feed `store_due` and
+    /// `reconsider` read it and not the wall clock. On the old code both sites
+    /// passed `ingest::epoch_secs(SystemTime::now())`, which a clock step
+    /// moves, so the source assertions fail there. The pure functions keep
+    /// their arithmetic: a probe armed at steady second `t` is `Later` at
+    /// `t + 59` and `Now` at `t + 60`, whatever a wall clock would read.
+    #[test]
+    fn a_clock_step_neither_spends_nor_delays_the_store_probe_schedule() {
+        let first = steady_secs();
+        assert!(first >= 1, "zero is the never-stamped value");
+        let second = steady_secs();
+        assert!(second >= first, "the steady clock went back");
+
+        let armed_at = 1_000_i64;
+        let probe = Probe {
+            made: 1,
+            due_secs: armed_at.saturating_add(i64::try_from(probe_secs(0)).unwrap()),
+        };
+        assert_eq!(probe_secs(0), 60);
+        assert_eq!(
+            store_due(Some(&probe), armed_at + 59),
+            Due::Later {
+                due_secs: armed_at + 60
+            }
+        );
+        assert_eq!(store_due(Some(&probe), armed_at + 60), Due::Now { made: 1 });
+        assert_eq!(store_due(Some(&probe), i64::MAX), Due::Now { made: 1 });
+        // A `now_secs` further behind the deadline than the wait that armed
+        // it is a clock behind the arming instant, which the steady clock
+        // cannot produce and D-2756's guard answers `Now` for: kept beside
+        // D-2579, so the far past is due rather than `Later` (D-4606).
+        assert_eq!(store_due(Some(&probe), i64::MIN), Due::Now { made: 1 });
+        assert_eq!(
+            store_due(Some(&probe), armed_at),
+            Due::Later {
+                due_secs: armed_at + 60
+            },
+            "the arming instant itself is inside the armed wait"
+        );
+
+        let source = include_str!("autopilot.rs");
+        let probes = source
+            .split_once("fn probe_store_halts(")
+            .expect("probe_store_halts")
+            .1;
+        let probes = &probes[..probes.find("\n}\n").expect("ends")];
+        assert!(probes.contains("let now = steady_secs();"));
+        assert!(!probes.contains(concat!("epoch_secs(std::time::", "SystemTime::now())")));
+        assert!(source.contains("reconsider(feeds, steady_secs())"));
+        assert!(!source.contains(concat!(
+            "reconsider(feeds, ingest::epoch_secs(std::time::",
+            "SystemTime::now()))"
+        )));
     }
 
     /// **WHICH FEEDS THE PULL LOOP ACTUALLY DRIVES, BY NAME.**
@@ -5130,6 +5681,7 @@ mod tests {
         let site = empty_site("control-preloop");
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from("this process may not reach a live broker");
         });
         assert_eq!(
@@ -5149,6 +5701,35 @@ mod tests {
         assert!(
             body.contains("may not reach a live broker"),
             "the reason it stopped is what the refusal carries: {body}"
+        );
+    }
+
+    /// THE CLOCK WAIT IS ALIVE, SO ITS RESUME IS ADMITTED. autopilot-3,
+    /// CE-46, D-2508.
+    ///
+    /// While the clock is not yet usable, `fly` publishes `Halted` with no
+    /// feed and sleeps, then carries on by itself. `admit_resume` read that
+    /// shape as a returned task and refused with "it has returned", which is
+    /// false. Only `fly`'s terminal exits set `task_returned`.
+    #[test]
+    fn a_resume_during_the_clock_wait_is_admitted_and_a_returned_task_is_not() {
+        let control = Control::new();
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            status.detail = String::from("the clock is not usable yet; looking again");
+        });
+        assert_eq!(admit_resume(&control), Admission::Clear);
+        control.publish(|status| status.task_returned = true);
+        assert!(matches!(admit_resume(&control), Admission::Refused { .. }));
+        let body = include_str!("autopilot.rs")
+            .split_once("pub async fn fly(")
+            .unwrap()
+            .1;
+        let pre_loop = body.split_once("grace(&site).await;").unwrap().0;
+        assert_eq!(
+            pre_loop.matches("return;").count(),
+            pre_loop.matches("status.task_returned = true;").count(),
+            "every terminal pre-loop exit says the task returned"
         );
     }
 
@@ -5319,6 +5900,101 @@ mod tests {
         assert!(json.contains("never mints"), "{json}");
     }
 
+    /// **conc6-1: a halt `settle` publishes marks its own feed, so a Stop
+    /// cannot hide it and a Resume cannot be admitted over it.**
+    ///
+    /// `settle` wrote the phase and the detail and left `status.feeds` as the
+    /// round published it before the tick, with `halted` empty. A Stop then
+    /// let `dwell_paused` overwrite the detail, and the reason was nowhere on
+    /// the page; `admit_resume` read the stale feeds and answered `Clear`.
+    #[tokio::test]
+    async fn a_settled_halt_marks_its_feed_so_stop_and_resume_cannot_hide_it() {
+        let site = empty_site("settle-halt-feeds");
+        site.autopilot.publish(|status| {
+            status.phase = Phase::Running;
+            status.feeds = vec![FeedReport {
+                feed: pull::vendor::Feed::Groww.display().to_owned(),
+                ..FeedReport::default()
+            }];
+        });
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let dead = TickOutcome {
+            attempted: 1,
+            reached: 0,
+            stored: 0,
+            reason: Some(String::from("NIFTY: refused with status 401")),
+            complete: false,
+            stopped: false,
+            journal_error: None,
+            credential: Some(CredentialStop::SameValue),
+        };
+        assert_eq!(settle(&site, &mut state, &dead), IDLE_POLL_SECS);
+
+        // STOP, then the paused dwell overwrites the phase and the detail.
+        stop(&site.autopilot);
+        let _dwelt = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            dwell_paused(&site.autopilot),
+        )
+        .await;
+        let json = site.autopilot.json();
+        assert!(json.contains(r#""state":"paused""#), "{json}");
+        assert!(
+            json.contains("never mints"),
+            "the halt's reason is still on the page, on its feed: {json}"
+        );
+        assert!(
+            matches!(admit_resume(&site.autopilot), Admission::Refused { .. }),
+            "the only feed is terminal, so a resume changes nothing"
+        );
+    }
+
+    /// **conc6-4: the stand-off names what actually holds the run slot.**
+    ///
+    /// `site.run` is shared by the `/pull/run` press and recovery, and the
+    /// stand-off said "a hand-made pull is running" for both, including a
+    /// recovery the server resumed by itself at boot.
+    #[tokio::test]
+    async fn the_stand_off_names_a_recovery_as_a_recovery() {
+        let site = empty_site("standoff-recovery");
+        *site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::pullrun::Progress::claimed());
+        crate::recovery_control::activate(&site, [7; 32]);
+        let waited = round(
+            &site,
+            &mut [],
+            &[],
+            pull::vendor::Granularity::Day1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
+        assert_eq!(waited, SEAT_WAIT_SECS);
+        let json = site.autopilot.json();
+        assert!(json.contains("a recovery plan is running"), "{json}");
+        assert!(!json.contains("hand-made"), "{json}");
+
+        // A PRESS IS STILL NAMED A PRESS.
+        crate::recovery_control::idle(&site);
+        let _waited = round(
+            &site,
+            &mut [],
+            &[],
+            pull::vendor::Granularity::Day1,
+            site.autopilot.epoch(),
+        )
+        .await;
+        let json = site.autopilot.json();
+        assert!(json.contains("a hand-made pull is running"), "{json}");
+    }
+
     /// **A whole round runs end to end, and a refused broker degrades loudly.**
     ///
     /// Safe to drive because `broker_run` checks `Broker::Refused` before it
@@ -5337,9 +6013,15 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
-            .await
-            .wait;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
 
         // A transport-shaped refusal, so it backs off rather than halting.
         assert_eq!(waited, BACKOFF_FLOOR_SECS);
@@ -5411,9 +6093,15 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let _waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
-            .await
-            .wait;
+        let _waited = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
 
         let json = site.autopilot.json();
         assert!(
@@ -5453,9 +6141,15 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
-            .await
-            .wait;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
         assert_eq!(waited, SEAT_WAIT_SECS, "it waits rather than spinning");
         let json = site.autopilot.json();
         assert!(json.contains("holds the pull seat"), "{json}");
@@ -5468,9 +6162,15 @@ mod tests {
 
         // AND THE SEAT COMES BACK. The next round proceeds normally.
         drop(held);
-        let after = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
-            .await
-            .wait;
+        let after = round(
+            &site,
+            &mut feeds,
+            &axis,
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
         assert_ne!(
             after, SEAT_WAIT_SECS,
             "the standoff ended with the manual pull"
@@ -5683,6 +6383,42 @@ mod tests {
 
     /// A pause costs no attempt: stopping is the operator's decision, not a
     /// failure of the month.
+    /// THE VENDOR-DOWN BREAKER IS A FAILURE, NOT A PAUSE. autopilot-2, D-2507.
+    ///
+    /// `broker_run` sets `stopped` both for the operator's pause and for the
+    /// breaker (three consecutive 5xx instruments). `outcome_of` read both as
+    /// a pause, so a down vendor was asked again at once, forever, with no
+    /// attempt counted. A breaker-stopped run must cost an attempt and wait;
+    /// a cancelled one still costs nothing.
+    #[test]
+    fn a_vendor_down_breaker_stop_costs_an_attempt_and_waits() {
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let breaker = crate::server::BrokerRun {
+            attempted: 773,
+            stopped: Some("the vendor answered 5xx on 3 instruments in a row".to_owned()),
+            ..crate::server::BrokerRun::default()
+        };
+        let out = outcome_of(&breaker, false, None);
+        assert!(!out.stopped, "a breaker stop is not the operator's pause");
+        assert!(matches!(state.observe(&out), Next::Wait { .. }));
+        assert_eq!(state.attempts, 1, "the failure is counted");
+
+        let cancelled = crate::server::BrokerRun {
+            attempted: 773,
+            stopped: Some("stopped".to_owned()),
+            cancelled: true,
+            ..crate::server::BrokerRun::default()
+        };
+        let out = outcome_of(&cancelled, false, None);
+        assert!(out.stopped);
+        assert_eq!(state.observe(&out), Next::Retry);
+        assert_eq!(state.attempts, 1, "a pause costs nothing");
+    }
+
     #[test]
     fn being_stopped_by_the_operator_costs_no_attempt() {
         let mut state = FeedState::new(
@@ -5838,6 +6574,36 @@ mod tests {
             !control.stopped(started_later),
             "resuming does not cancel anything"
         );
+    }
+
+    /// **THE AUTOPILOT'S STOP REACHES ONLY ITS OWN WALK; SHUTDOWN REACHES
+    /// EVERY WALK.** The whole truth table of `walk_stops`: a pause stops a
+    /// walk that captured the old generation and no hand walk (`None`,
+    /// conc6-2, D-2695); a shutdown stops both (conc:server1-2, D-2771).
+    /// D-4608.
+    #[test]
+    fn a_pause_stops_only_the_autopilots_walk_and_a_shutdown_stops_every_walk() {
+        let control = Control::new();
+        let before = control.epoch();
+        assert!(!control.walk_stops(None), "nothing stops a fresh hand walk");
+        assert!(
+            !control.walk_stops(Some(before)),
+            "nor a fresh autopilot walk"
+        );
+        control.pause();
+        assert!(
+            control.walk_stops(Some(before)),
+            "the pause stops the autopilot's walk"
+        );
+        assert!(!control.walk_stops(None), "and never a hand walk");
+        let after = control.epoch();
+        assert!(
+            !control.walk_stops(Some(after)),
+            "nor a walk begun after it"
+        );
+        control.shut_down();
+        assert!(control.walk_stops(None), "shutdown stops a hand walk");
+        assert!(control.walk_stops(Some(after)), "and the autopilot's walk");
     }
 
     /// **THE DAY PASS RUNS OVER THE WHOLE SPAN BEFORE ANY MINUTE.** The
@@ -6260,6 +7026,7 @@ mod tests {
         let control = Control::new();
         control.publish(|status| {
             status.phase = Phase::Halted;
+            status.task_returned = true;
             status.detail = String::from("the clock is unusable");
         });
         assert!(matches!(admit_resume(&control), Admission::Refused { .. }));
@@ -6752,17 +7519,17 @@ mod tests {
             store_due(
                 Some(&Probe {
                     made: 3,
-                    due_unix: 1_000
+                    due_secs: 1_000
                 }),
                 999
             ),
-            Due::Later { due_unix: 1_000 }
+            Due::Later { due_secs: 1_000 }
         );
 
         // AND THE ALLOWANCE IS EXHAUSTED, one probe at a time, to the bound.
         let mut probe = Probe {
             made: 0,
-            due_unix: 0,
+            due_secs: 0,
         };
         let mut now = 0i64;
         for expected in 0..STORE_PROBES {
@@ -6774,7 +7541,7 @@ mod tests {
             now = now.saturating_add(i64::try_from(wait).expect("a small wait"));
             probe = Probe {
                 made: made.saturating_add(1),
-                due_unix: now,
+                due_secs: now,
             };
         }
         // THE (STORE_PROBES + 1)th IS REFUSED, AND LOUDLY.
@@ -6894,14 +7661,20 @@ mod tests {
             first.probe,
             Some(Probe {
                 made: 0,
-                due_unix: 0
+                due_secs: 0
             }),
             "a store halt arms a probe due immediately"
         );
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1)
-            .await
-            .wait;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
         assert_eq!(
             waited, IDLE_POLL_SECS,
             "nothing was fetched: the axis is empty"
@@ -6924,14 +7697,14 @@ mod tests {
 
     /// A feed carrying one stalled month, stamped as though it happened
     /// `age` seconds ago.
-    fn stalled(month_at: YearMonth, retried: u8, at_unix: i64) -> FeedState {
+    fn stalled(month_at: YearMonth, retried: u8, at_secs: i64) -> FeedState {
         FeedState {
             stalls: vec![Stall {
                 month: month_at,
                 attempts: MAX_MONTH_ATTEMPTS,
                 reason: String::from("attempted 3 times and never completed: timed out"),
                 retried,
-                at_unix,
+                at_secs,
                 rung: pull::vendor::Granularity::Day1,
             }],
             ..FeedState::new(
@@ -6952,12 +7725,12 @@ mod tests {
         let wait = i64::try_from(probe_secs(0)).expect("a small wait");
         let probe = Probe {
             made: 1,
-            due_unix: armed_at + wait,
+            due_secs: armed_at + wait,
         };
         assert_eq!(
             store_due(Some(&probe), armed_at + 1),
             Due::Later {
-                due_unix: armed_at + wait
+                due_secs: armed_at + wait
             },
             "inside the armed wait it still waits"
         );
@@ -7006,7 +7779,7 @@ mod tests {
             None,
             "the pass that first sees a stall stamps it and waits"
         );
-        assert_eq!(feeds[0].stalls[0].at_unix, now);
+        assert_eq!(feeds[0].stalls[0].at_secs, now);
         assert_eq!(feeds[0].stalls[0].retried, 0);
 
         // AND IT STAYS WAITING UNTIL THE FULL INTERVAL HAS PASSED.
@@ -7187,7 +7960,7 @@ mod tests {
                 month(2020, 5),
             );
             state.halt(Halt::Store, String::from("disk full"));
-            state.probe = Some(Probe { made, due_unix: 0 });
+            state.probe = Some(Probe { made, due_secs: 0 });
             let said = probe_store_halts(&site, std::slice::from_mut(&mut state));
             assert_eq!(state.probe.map(|probe| probe.made), Some(made + 1));
             said
@@ -7207,7 +7980,7 @@ mod tests {
             store_due(
                 Some(&Probe {
                     made: STORE_PROBES,
-                    due_unix: 0
+                    due_secs: 0
                 }),
                 0
             ),
@@ -7247,9 +8020,15 @@ mod tests {
         let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1)
-            .await
-            .wait;
+        let waited = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await
+        .wait;
         assert_eq!(waited, IDLE_POLL_SECS, "nothing to carry on to");
 
         let (phase, detail) = site
@@ -7291,7 +8070,8 @@ mod tests {
         let site = empty_site("stall-reconsider");
         let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
         let mut feeds = drivable(yesterday);
-        let now = ingest::epoch_secs(std::time::SystemTime::now());
+        // The stall schedule reads the steady clock since clock-3 (D-2579).
+        let now = steady_secs();
         let feed = feeds.first_mut().expect("a drivable feed");
         let frontier_before = feed.frontier;
         feed.stalls.push(Stall {
@@ -7299,11 +8079,18 @@ mod tests {
             attempts: MAX_MONTH_ATTEMPTS,
             reason: String::from("attempted 3 times and never completed: connection reset"),
             retried: 0,
-            at_unix: now.saturating_sub(STALL_RECHECK_SECS * 2),
+            at_secs: now.saturating_sub(STALL_RECHECK_SECS * 2),
             rung: pull::vendor::Granularity::Minute1,
         });
 
-        let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let pass = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert!(
             pass.owed,
             "a reconsidered month is still owed, so a day pass in this state keeps \
@@ -7334,7 +8121,14 @@ mod tests {
 
         // AND A SECOND ROUND DOES NOT ASK AGAIN, because the stall was stamped.
         feeds.first_mut().expect("a feed").frontier = frontier_before;
-        let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let pass = round(
+            &site,
+            &mut feeds,
+            &[],
+            pull::vendor::Granularity::Minute1,
+            site.autopilot.epoch(),
+        )
+        .await;
         assert!(
             !pass.owed,
             "nothing chosen and nothing reconsidered is the one answer that proves \
@@ -7413,6 +8207,416 @@ mod tests {
             state.revive();
             assert!(state.halted.is_none() && state.halt_kind.is_none());
             assert!(state.probe.is_none());
+        }
+    }
+
+    /// One tick outcome of each shape the G6 tests below drive.
+    fn outcome(reason: Option<&str>, complete: bool) -> TickOutcome {
+        TickOutcome {
+            attempted: 773,
+            reached: 773,
+            stored: 0,
+            reason: reason.map(str::to_owned),
+            complete,
+            stopped: false,
+            journal_error: None,
+            credential: None,
+        }
+    }
+
+    /// conc11-2, D-2599. On the old table EIO, EDQUOT, EFBIG, a `StorageFull`
+    /// ENOSPC and the store's own failed-barrier refusal were Transport, so a
+    /// failing disk was retried and stalled instead of halted. The sentences
+    /// are the store's own `Display`, so a reworded store refusal fails here.
+    #[test]
+    fn a_disk_io_error_and_a_failed_barrier_are_store_class() {
+        let path = std::path::PathBuf::from("/x/2024-06.bin");
+        let io = |kind: std::io::ErrorKind, code: Option<i32>| {
+            store::file::StoreError::Io {
+                path: path.clone(),
+                action: store::file::Action::Sync,
+                kind,
+                code,
+            }
+            .to_string()
+        };
+        let barrier = store::file::StoreError::BarrierFailed { path: path.clone() }.to_string();
+        for (reason, class) in [
+            (io(std::io::ErrorKind::Other, Some(5)), Trouble::Store),
+            (
+                io(std::io::ErrorKind::QuotaExceeded, Some(122)),
+                Trouble::Store,
+            ),
+            (
+                io(std::io::ErrorKind::FileTooLarge, Some(27)),
+                Trouble::Store,
+            ),
+            (
+                io(std::io::ErrorKind::StorageFull, Some(28)),
+                Trouble::Store,
+            ),
+            (barrier.clone(), Trouble::Store),
+            (io(std::io::ErrorKind::Other, Some(4)), Trouble::Transport),
+            (io(std::io::ErrorKind::Other, Some(55)), Trouble::Transport),
+            (io(std::io::ErrorKind::Other, None), Trouble::Transport),
+            (String::from("operation timed out"), Trouble::Transport),
+            (
+                String::from("status 401 from the vendor"),
+                Trouble::Credential,
+            ),
+            (String::new(), Trouble::Transport),
+        ] {
+            assert_eq!(classify(&reason), class, "{reason}");
+        }
+        // A disk-full refusal followed by the failed-barrier refusal it causes
+        // is the same store refusing twice: it halts, and the probe is armed.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let full = outcome(Some("NIFTY — disk full writing /store/x.bin"), false);
+        let failed_barrier = outcome(Some(&barrier), false);
+        assert!(matches!(state.observe(&full), Next::Wait { .. }));
+        assert!(matches!(state.observe(&failed_barrier), Next::Halt { .. }));
+        assert_eq!(state.halt_kind, Some(Halt::Store));
+    }
+
+    /// conc13-4, D-2595. On the old code `settle` only published to the
+    /// in-memory status: no halt, stall or backoff reached `/logs`. Each now
+    /// lands one `autopilot` event at its level, naming the feed, the month
+    /// and the reason; an advance or a retry lands none.
+    #[tokio::test]
+    async fn a_halt_a_stall_and_a_backoff_are_logged() {
+        let _sink = crate::emitted::sink();
+        let site = empty_site("conc13-4-logged");
+        let fresh = || {
+            FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2020, 5),
+            )
+        };
+        let failed = outcome(Some("conc13-4 operation timed out"), false);
+        let feed = pull::vendor::Feed::Groww.display();
+        let landed = |from: u64, message: &str, needle: &str| -> Vec<telemetry::Record> {
+            let mut ours = Vec::new();
+            for record in crate::emitted::landed(from, "autopilot", message) {
+                if crate::emitted::says(&record, "why", needle)
+                    && crate::emitted::says(&record, "feed", feed)
+                    && crate::emitted::says(&record, "month", "2020-05")
+                {
+                    ours.push(record);
+                }
+            }
+            ours
+        };
+
+        let from = crate::emitted::mark();
+        let mut state = fresh();
+        assert!(settle(&site, &mut state, &failed) > 0, "a backoff waits");
+        let said = landed(from, "backing off", "conc13-4 operation timed out");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].level, telemetry::Level::Warn);
+
+        let from = crate::emitted::mark();
+        let mut state = FeedState {
+            attempts: MAX_MONTH_ATTEMPTS.saturating_sub(1),
+            ..fresh()
+        };
+        assert_eq!(settle(&site, &mut state, &failed), 0);
+        let said = landed(from, "stalled", "conc13-4 operation timed out");
+        assert_eq!(
+            said.len(),
+            1,
+            "the stall names the month it passed: {said:?}"
+        );
+        assert_eq!(said[0].level, telemetry::Level::Warn);
+
+        let from = crate::emitted::mark();
+        let mut state = fresh();
+        let dead = TickOutcome {
+            credential: Some(CredentialStop::SameValue),
+            ..outcome(Some("conc13-4 status 401"), false)
+        };
+        assert_eq!(settle(&site, &mut state, &dead), IDLE_POLL_SECS);
+        let said = landed(from, "halted", "conc13-4 status 401");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].level, telemetry::Level::Error);
+
+        // Advance and Retry say nothing. A month no other test uses, so a
+        // concurrent test's line cannot be read as this one's.
+        let from = crate::emitted::mark();
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2033, 3),
+        );
+        assert_eq!(settle(&site, &mut state, &outcome(None, true)), 0);
+        state.frontier = month(2033, 3);
+        assert_eq!(settle(&site, &mut state, &outcome(None, false)), 0);
+        for message in ["backing off", "stalled", "halted"] {
+            for record in crate::emitted::landed(from, "autopilot", message) {
+                assert!(
+                    !crate::emitted::says(&record, "month", "2033-03"),
+                    "{message}: {record:?}"
+                );
+            }
+        }
+    }
+
+    /// conc15-3, D-2588. On the old `revive`, only the live rung's counters
+    /// were cleared: a store halt on the minute rung, revived while the day
+    /// rung was live, came back on `enter(Minute1)` with `store_refused` still
+    /// set, and ONE new disk refusal re-halted it as "the same write twice".
+    /// Both orders and both rungs are driven.
+    #[test]
+    fn a_revive_clears_both_rungs() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        let full = outcome(Some("NIFTY — disk full writing /store/x.bin"), false);
+        for (halted_on, revived_on) in [
+            (Minute1, Day1),
+            (Day1, Minute1),
+            (Minute1, Minute1),
+            (Day1, Day1),
+        ] {
+            let mut state = FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2020, 5),
+            );
+            state.enter(halted_on);
+            assert!(matches!(state.observe(&full), Next::Wait { .. }));
+            assert!(matches!(state.observe(&full), Next::Halt { .. }));
+            state.enter(revived_on);
+            state.revive();
+            for rung in [Day1, Minute1, halted_on] {
+                state.enter(rung);
+                assert!(!state.store_refused, "{halted_on}->{revived_on}: {rung}");
+                assert_eq!(state.attempts, 0, "{halted_on}->{revived_on}: {rung}");
+                assert_eq!(state.backoff, 0, "{halted_on}->{revived_on}: {rung}");
+            }
+            state.enter(halted_on);
+            assert!(
+                matches!(state.observe(&full), Next::Wait { .. }),
+                "ONE refusal after a revive is not 'twice': {halted_on}->{revived_on}"
+            );
+        }
+        // The parked frontier is a hint and survives the revive.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        state.enter(Minute1);
+        state.frontier = month(2021, 7);
+        state.enter(Day1);
+        state.revive();
+        assert_eq!(state.parked.frontier, month(2021, 7));
+    }
+
+    /// conc15-4, D-2588. On the old code `journal_error` was replaced by
+    /// every tick, so a refused record was forgotten the moment a later one
+    /// landed; there was no count. Sequences of landed (`None`) and refused
+    /// (`Some`) records are enumerated over every length up to 6.
+    #[test]
+    fn a_lost_journal_record_stays_counted() {
+        let mut status = Status::default();
+        status.note_journal(Some(String::from("disk full")));
+        status.note_journal(None);
+        assert_eq!(status.journal_error, "");
+        assert_eq!(status.journal_lost, 1);
+        assert_eq!(status.journal_first_loss, "disk full");
+        let json = status.json();
+        assert!(json.contains(r#""journal_error":"""#), "{json}");
+        assert!(json.contains(r#""journal_lost":1"#), "{json}");
+        assert!(
+            json.contains(r#""journal_first_loss":"disk full""#),
+            "{json}"
+        );
+
+        for len in 0u32..=6 {
+            for bits in 0u32..(1 << len) {
+                let mut status = Status::default();
+                let mut lost = 0u64;
+                let mut first: Option<String> = None;
+                let mut newest = String::new();
+                for at in 0..len {
+                    if (bits >> at) & 1 == 1 {
+                        let why = format!("refusal {at}");
+                        lost += 1;
+                        if first.is_none() {
+                            first = Some(why.clone());
+                        }
+                        newest.clone_from(&why);
+                        status.note_journal(Some(why));
+                    } else {
+                        newest.clear();
+                        status.note_journal(None);
+                    }
+                }
+                assert_eq!(status.journal_lost, lost, "{len}/{bits:b}");
+                assert_eq!(
+                    status.journal_first_loss,
+                    first.unwrap_or_default(),
+                    "{len}/{bits:b}"
+                );
+                assert_eq!(status.journal_error, newest, "{len}/{bits:b}");
+            }
+        }
+        let mut status = Status {
+            journal_lost: u64::MAX,
+            ..Status::default()
+        };
+        status.note_journal(Some(String::from("again")));
+        assert_eq!(status.journal_lost, u64::MAX, "saturates, never wraps");
+        assert_eq!(status.journal_first_loss, "again");
+    }
+
+    /// conc15-5, D-2588. On the old code a `Halted` phase over feeds none of
+    /// which is halted (the empty-universe halt) was `Clear`, and `start`
+    /// published "resumed" over it.
+    #[test]
+    fn resume_is_refused_over_a_global_halt() {
+        let control = Control::new();
+        let feeds = vec![
+            FeedReport {
+                feed: String::from("Dhan"),
+                ..FeedReport::default()
+            },
+            FeedReport {
+                feed: String::from("Groww"),
+                ..FeedReport::default()
+            },
+        ];
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            status.detail = String::from("NOTHING IS TRACKED: the masters are absent");
+            status.feeds.clone_from(&feeds);
+        });
+        let Admission::Refused { why } = admit_resume(&control) else {
+            panic!("a global halt is refused");
+        };
+        assert!(why.starts_with(RESUME_CANNOT_CLEAR), "{why}");
+        assert!(why.contains("NOTHING IS TRACKED"), "{why}");
+        // Every other phase over the same feeds is still admitted.
+        for phase in [
+            Phase::Starting,
+            Phase::Running,
+            Phase::Idle,
+            Phase::Backoff,
+            Phase::Paused,
+        ] {
+            control.publish(|status| status.phase = phase);
+            assert_eq!(admit_resume(&control), Admission::Clear, "{phase:?}");
+        }
+        // A halted phase WITH a halted feed keeps its partial answer.
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            if let Some(first) = status.feeds.first_mut() {
+                first.halted = String::from("the broker credential is dead");
+            }
+        });
+        assert!(matches!(admit_resume(&control), Admission::Partial { .. }));
+    }
+
+    /// conc15-1, D-2588. On the old code a day pass that found nothing owed
+    /// took the common idle branch: it published `Idle` with the "store is
+    /// complete" sentence and waited `IDLE_POLL_SECS` before the minute rung.
+    /// Every combination of the four inputs is enumerated.
+    #[test]
+    fn a_clear_day_pass_hands_over_without_a_nap() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        for rung in [Day1, Minute1] {
+            for carry_on in [false, true] {
+                for terminal in [false, true] {
+                    for halts in [false, true] {
+                        let handed = day_hand_over(rung, carry_on, terminal, halts);
+                        let expected = rung == Day1 && !carry_on && !terminal && !halts;
+                        assert_eq!(
+                            handed.is_some(),
+                            expected,
+                            "{rung} carry_on={carry_on} terminal={terminal} halts={halts}"
+                        );
+                        if let Some(pass) = handed {
+                            assert_eq!(pass.wait, 0, "no nap before the minute pass");
+                            assert!(!pass.owed, "the day rung is proven clear");
+                        }
+                    }
+                }
+            }
+        }
+        // AND `round` ASKS BEFORE IT PUBLISHES. Source text, because a round
+        // that reaches the Complete branch needs a whole held store.
+        let source = include_str!("autopilot.rs");
+        let body = source
+            .split_once("\nasync fn round(")
+            .expect("round exists")
+            .1;
+        let asked = body.find("day_hand_over(granularity").expect("asked");
+        let published = body
+            .find("AN EMPTY UNIVERSE IS HALTED, NOT IDLE")
+            .expect("the idle publish");
+        assert!(asked < published, "the hand-over precedes the idle publish");
+        // And the pass it returns makes `fly`'s next tick the minute rung.
+        let now = Some((Day::new(2026, 10, 5).expect("day"), 3));
+        let clear = after_pass(Day1, false, None, now);
+        assert_eq!(rung_for(clear, now), Minute1);
+    }
+
+    /// conc15-6, D-2588. On the old code one counter took every `Advance` on
+    /// either rung and the current month again each day, so the month 2020-05
+    /// completed on both rungs and twice more read `months_done == 4` against
+    /// one month owed.
+    #[test]
+    fn months_done_never_exceeds_months_total() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        let complete = outcome(None, true);
+        let dry = outcome(None, false);
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        for rung in [Day1, Minute1, Day1, Minute1] {
+            state.enter(rung);
+            state.frontier = month(2020, 5);
+            assert_eq!(state.observe(&complete), Next::Advance);
+            assert_eq!(state.months_done, 1, "{rung}: one month, once");
+        }
+        // A dry retirement of an already-counted month adds nothing either.
+        state.enter(Day1);
+        state.frontier = month(2020, 5);
+        assert_eq!(state.observe(&dry), Next::Retry);
+        assert_eq!(state.observe(&dry), Next::Advance);
+        assert_eq!(state.months_done, 1);
+        // A NEW month counts, on its own rung only.
+        state.frontier = month(2020, 6);
+        assert_eq!(state.observe(&complete), Next::Advance);
+        assert_eq!(state.months_done, 2, "day rung: May and June");
+        state.enter(Minute1);
+        assert_eq!(state.months_done, 1, "minute rung: May only");
+        state.frontier = month(2020, 6);
+        assert_eq!(state.observe(&dry), Next::Retry);
+        assert_eq!(state.observe(&dry), Next::Advance);
+        assert_eq!(state.months_done, 2, "minute rung: May and June");
+        assert_eq!(state.retired.len(), 4, "two months on two rungs");
+        // Over a whole span retired repeatedly on both rungs, each rung's
+        // count equals the distinct months, never more.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 1),
+        );
+        for _day in 0..3 {
+            for rung in [Day1, Minute1] {
+                state.enter(rung);
+                for m in 1u8..=12 {
+                    state.frontier = month(2020, m);
+                    assert_eq!(state.observe(&complete), Next::Advance);
+                }
+                assert_eq!(state.months_done, 12, "{rung}");
+            }
         }
     }
 }

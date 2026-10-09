@@ -340,7 +340,7 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte() 
         .chain(selection_paths.iter().cloned())
         .collect();
     let mut original = None;
-    for written in [8, 0] {
+    for (pass, written) in [(0, 8), (1, 0), (2, 0)] {
         let population = commit_all_rung_with_verified_build_v5(
             &request,
             VerifiedBuildCommitV1(FIXTURE_COMMIT),
@@ -381,6 +381,18 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte() 
             fs::write(completion, saved).map_err(|why| why.to_string())?;
             // Restoring bytes does not restore the held file's mtime/ctime
             // epoch. Drop this stale capability before the fresh retry.
+        } else if pass == 2 {
+            // ledgerall-2, D-2627: every rung legally committed
+            // `min(eligible, 25)` = 0 winners. The report renders that — its
+            // heading and no rank rows — instead of refusing a durably
+            // committed run on every rerun. On the old code `render_winners`
+            // went through `visit_canonical` and refused "requires exactly
+            // 25 winners, observed 0", so this `expect` failed.
+            let mut report = String::new();
+            crate::ledger_all::render_winners(&mut report, selection)
+                .expect("a rung with fewer than 25 winners renders what it committed");
+            assert!(report.starts_with("\nTOP 10 BY RUNG"), "{report}");
+            assert!(!report.contains("rank"), "{report}");
         } else {
             let successors = selection.into_successor_set()?;
             let mut visited = 0;

@@ -109,8 +109,8 @@ impl Bucket {
     /// **Wider than [`Self::DAY`] is refused too** (audit-20261003
     /// attackdata-5, D-1532). Such a bucket folds two trading days into one
     /// bar, no store rung is wider than a day, and a `u32::MAX` width stamped a
-    /// 2024 snapshot at 1969-12-31. Every width from one second to one day is
-    /// still accepted, which is what folding from snapshots promises.
+    /// 2024 snapshot at 1969-12-31. Every width from one second to one day that
+    /// divides it is still accepted, which is what folding from snapshots promises.
     ///
     /// **A width that does not divide a day is refused too** (attack fold
     /// round 1, D-3130). The intraday grid is counted from 09:15 IST of one
@@ -120,6 +120,14 @@ impl Bucket {
     /// the open that [`fold`]'s own comment calls a lie, on most days and for
     /// every such width. Every store rung and every whole-minute divisor of a
     /// day (thirty-six of them) is still accepted.
+    ///
+    /// The same rule was reached independently (pul-1, D-2608). The open
+    /// anchor pins ONE grid edge to 09:15 IST on 1970-01-01,
+    /// and the edge repeats at 09:15 every day only when the width divides
+    /// 86,400. Seven seconds, seven minutes or seven hours drift by
+    /// `(day * 86,400) mod width` and open most sessions with a short bar
+    /// stamped before 09:15 that `complete_minutes` then certified as whole.
+    /// Every rung in `store::path::Timeframe::KNOWN` divides a day.
     #[must_use]
     pub const fn of_secs(secs: u32) -> Option<Self> {
         if secs == 0 || secs > Self::DAY.0 || Self::DAY.0 % secs != 0 {
@@ -800,11 +808,11 @@ const _: () = assert!(matches!(LADDER[2].grain, Grain::Derived));
 const _: () = assert!(matches!(LADDER[3].segment, Segment::Futures));
 const _: () = assert!(matches!(LADDER[9].grain, Grain::Greeks));
 
-/// Folds raw snapshots at **any** width. Always exact.
+/// Folds raw snapshots at **any** width that divides one day. Always exact.
 ///
 /// A snapshot carries its own instant, so no width can misattribute it. This
 /// is the entry point a sub-minute timeframe must use, and the reason nothing
-/// about the design is locked down: 1 second, 7 seconds, 90 seconds and one
+/// about the design is locked down: 1 second, 45 seconds, 90 seconds and one
 /// day all go through here and all are correct.
 ///
 /// # Errors
@@ -1491,7 +1499,7 @@ mod guard {
     /// bar. That is why this refuses rather than approximates.
     #[test]
     fn a_sub_minute_width_from_minute_bars_is_refused_by_name() {
-        for secs in [1u32, 50, 30, 90, 100, 3_456] {
+        for secs in [1u32, 50, 30, 45, 90, 100, 160, 3_456] {
             let want = Bucket::of_secs(secs).expect("non-zero");
             assert_eq!(
                 fold_from_bars(&[], want, Bucket::MINUTE),
@@ -1516,7 +1524,7 @@ mod guard {
     /// From snapshots, EVERY width is exact. Nothing is locked down.
     #[test]
     fn any_width_at_all_is_allowed_from_snapshots() {
-        for secs in [1u32, 50, 30, 90, 100, 60, 300, 3_456, 86_400] {
+        for secs in [1u32, 50, 30, 45, 90, 100, 160, 60, 300, 3_456, 86_400] {
             let want = Bucket::of_secs(secs).expect("non-zero");
             assert!(
                 fold_from_snapshots(&[], want).is_ok(),

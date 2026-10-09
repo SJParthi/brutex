@@ -571,6 +571,12 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
     // duplicate left in a child another thread spawned would otherwise hold it
     // and report this journal busy with no writer alive (D-0693).
     let index_path = base.join("index.bin");
+    // A READER IS NOT ANOTHER OPERATION (cli1-2, D-2620). `read` holds this
+    // index shared for one record and a sync, and the browser polls it through
+    // every audited GET route; one `try_lock` turned that poll into a FAILED
+    // sweep. The lock is asked again for a bounded second (`INDEX_LOCK_WAIT`,
+    // D-2799), each attempt on its own open, so a refused attempt holds
+    // nothing, and a real writer still past the bound is BUSY as before.
     let mut index = within(INDEX_LOCK_WAIT, || {
         let file = options()
             .read(true)

@@ -635,14 +635,157 @@ fn gate27b(tree: &dyn Tree, pins: &[(&str, usize)], out: &mut Out) -> bool {
 
 // ------------------------------------------------------------ gate 26 --
 
-/// Lines of `text` containing `needle`, as `grep -c` counts them.
-fn lines_with(text: &str, needle: &str) -> usize {
-    records(text).iter().filter(|l| l.contains(needle)).count()
+/// Every spelling that builds a `reqwest` client (P15-15, D-2520). The gate
+/// counted only `Client::builder()`, so `Client::new()`, `ClientBuilder::new(`
+/// and the one-shot `get(` built one with no site to guard.
+const CLIENT_SITES: [&str; 5] = [
+    "Client::builder()",
+    "Client::new()",
+    "ClientBuilder::new(",
+    "reqwest::get(",
+    "blocking::get(",
+];
+
+/// The guard every site needs.
+const TLS_GUARD: &str = "ensure_tls_provider()";
+
+/// The end of the string literal whose body starts at `from` (just past its
+/// opening quote): the index past the closing quote, or the end of `b`.
+fn string_end(b: &[u8], from: usize) -> usize {
+    let mut j = from;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    b.len()
+}
+
+/// A raw string opening at `i` (`r`, any `#`s, `"`): the index past its
+/// closing quote and hashes, or the end of `b`. `None` when `i` opens none.
+fn raw_string_end(b: &[u8], i: usize) -> Option<usize> {
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let prefix_ok = i == 0 || !word(b[i - 1]) || (b[i - 1] == b'b' && (i < 2 || !word(b[i - 2])));
+    if b.get(i) != Some(&b'r') || !prefix_ok {
+        return None;
+    }
+    let mut j = i + 1;
+    while b.get(j) == Some(&b'#') {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'"') {
+        return None;
+    }
+    let hashes = j - i - 1;
+    let mut k = j + 1;
+    while k < b.len() {
+        if b[k] == b'"'
+            && b[k + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|c| **c == b'#')
+                .count()
+                == hashes
+        {
+            return Some(k + 1 + hashes);
+        }
+        k += 1;
+    }
+    Some(b.len())
+}
+
+/// Past a character literal at `i` (a `'`), or `i + 1` when it is a
+/// lifetime: a `'"'` must not open a string.
+fn past_char(b: &[u8], i: usize) -> usize {
+    if b.get(i + 1) == Some(&b'\\') {
+        let mut j = i + 3;
+        while j < b.len() && b[j] != b'\'' {
+            j += 1;
+        }
+        return (j + 1).min(b.len());
+    }
+    let width = match b.get(i + 1) {
+        Some(&c) if c < 0x80 => 1,
+        Some(&c) if c < 0xe0 => 2,
+        Some(&c) if c < 0xf0 => 3,
+        Some(_) => 4,
+        None => return i + 1,
+    };
+    if b.get(i + 1 + width) == Some(&b'\'') {
+        i + 2 + width
+    } else {
+        i + 1
+    }
+}
+
+/// `src` with every comment (line, block, nested block) and every string
+/// literal (plain, byte, raw) replaced by spaces, newlines kept: the same
+/// walk as `gates_runtime`'s (P15-01, D-2512). A comment or string that
+/// never closes runs to the end of the file.
+fn blank_comments_and_strings(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        let next = b.get(i + 1).copied();
+        let end = match (b[i], next) {
+            (b'/', Some(b'/')) => src[i..].find('\n').map_or(b.len(), |p| i + p),
+            (b'/', Some(b'*')) => {
+                let (mut depth, mut j) = (0usize, i);
+                loop {
+                    if j >= b.len() {
+                        break b.len();
+                    }
+                    if b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
+                        depth += 1;
+                        j += 2;
+                    } else if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
+                        depth -= 1;
+                        j += 2;
+                        if depth == 0 {
+                            break j;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            (b'"', _) => string_end(b, i + 1),
+            (b'\'', _) => {
+                i = past_char(b, i);
+                continue;
+            }
+            (b'r', _) => match raw_string_end(b, i) {
+                Some(e) => e,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        for c in &mut out[i..end] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+        i = end;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Gate 26: every file under `crates/` that builds a client calls
 /// `ensure_tls_provider()` at least as often. Per file, by occurrence count:
 /// it can miss a helper in another file, it cannot falsely accuse.
+///
+/// READ IN CODE ONLY (P15-15, D-2520): the file is counted with its comments
+/// and string literals blanked, so `// ensure_tls_provider()` is no guard and
+/// a site in prose is no site.
 fn gate26(tree: &dyn Tree, out: &mut Out) -> bool {
     let (mut bad, mut sites, mut files) = (false, 0, 0);
     for f in listed(tree, &["crates/*.rs"]) {
@@ -651,18 +794,18 @@ fn gate26(tree: &dyn Tree, out: &mut Out) -> bool {
             bad = true;
             continue;
         };
-        let text = text_of(&bytes);
-        let n = lines_with(&text, "Client::builder()");
+        let code = blank_comments_and_strings(&text_of(&bytes));
+        let n: usize = CLIENT_SITES.iter().map(|s| code.matches(s).count()).sum();
         if n == 0 {
             continue;
         }
         files += 1;
         sites += n;
-        let g = lines_with(&text, "ensure_tls_provider()");
+        let g = code.matches(TLS_GUARD).count();
         if g < n {
             say!(
                 out,
-                "UNGUARDED CLIENT  {f} — {n} Client::builder() call(s), {g} ensure_tls_provider()"
+                "UNGUARDED CLIENT  {f} — {n} client construction(s), {g} ensure_tls_provider()"
             );
             bad = true;
         } else {
@@ -1346,7 +1489,9 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/greeks/src/error.rs", 17),
     ("crates/greeks/src/solver.rs", 15),
     ("crates/greeks/src/moneyness.rs", 9),
-    ("crates/pull/src/pricing.rs", 23),
+    // 25: D-2603 adds the vendor-volatility unit screen, a statistic
+    // (MAX_UNAMBIGUOUS_VENDOR_VOLATILITY and the refusal that names it).
+    ("crates/pull/src/pricing.rs", 25),
     ("crates/pull/src/tenor.rs", 5),
     ("crates/runner/src/grid.rs", 4),
     ("crates/runner/src/significance.rs", 41),
@@ -1379,7 +1524,8 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/pull/src/manifest.rs", 1),
     ("crates/pull/src/chain.rs", 2),
     ("crates/pull/src/pricing.rs", 1),
-    ("crates/api/src/autopilot.rs", 1),
+    // +1 clock-1 (D-2578): `FeedState::retired`, one entry per (rung, month) the backfill retires, bounded by the walked calendar.
+    ("crates/api/src/autopilot.rs", 2),
     ("crates/api/src/ladder.rs", 1),
     ("crates/api/src/server.rs", 4),
     ("crates/cli/src/admission_store.rs", 5),
@@ -1393,7 +1539,8 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/cli/src/execution_v3.rs", 8),
     ("crates/cli/src/execution_v4.rs", 9),
     ("crates/cli/src/frontier.rs", 1),
-    ("crates/cli/src/global_replay.rs", 9),
+    // +1 rep-1 (D-2640): `OfferedIndex::new` sizes its map with `try_reserve(intents.len())` on the next line.
+    ("crates/cli/src/global_replay.rs", 10),
     ("crates/cli/src/global_replay_v2.rs", 10),
     ("crates/cli/src/global_replay_v3.rs", 10),
     ("crates/cli/src/institutional_statistics.rs", 2),
@@ -1480,8 +1627,10 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/census.rs", 2),
     ("crates/api/src/master.rs", 1),
     ("crates/api/src/merge.rs", 4),
-    ("crates/api/src/render.rs", 1),
-    ("crates/pull/src/archive.rs", 1),
+    // +1 determinism-1 (D-2571): the capped folder walk sorts the folders it read so the offered set does not depend on directory order; bounded by the cap.
+    ("crates/api/src/render.rs", 2),
+    // +2 determinism-2 (D-2531): the archive walk sorts each directory and its rejected list, per directory, named in docs/06-limits.md.
+    ("crates/pull/src/archive.rs", 3),
     ("crates/pull/src/manifest.rs", 1),
     ("crates/store/src/catalog.rs", 1),
     ("crates/cli/src/boolean_statistics_v1.rs", 1),
@@ -1656,7 +1805,8 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/indexstopqualificationjson.rs", 1),
     ("crates/api/src/index_consistency_projection.rs", 1),
     ("crates/cli/src/index_stop_search_reader.rs", 1),
-    ("crates/api/src/pullrun.rs", 3),
+    // +2 press-1 (D-2574): `vendors` and `out` hold at most one entry per store vendor, a compile-time handful.
+    ("crates/api/src/pullrun.rs", 5),
     ("crates/cli/src/selection_v6_source.rs", 1),
     ("crates/api/src/booleanjson.rs", 1),
     ("crates/cli/src/audited_range.rs", 1),
@@ -2673,8 +2823,54 @@ mod tests {
             ),
         ]);
         assert!(!ok);
-        assert!(text.contains("UNGUARDED CLIENT  crates/pull/src/b.rs — 2 Client::builder() call(s), 1 ensure_tls_provider()"), "{text}");
+        assert!(text.contains("UNGUARDED CLIENT  crates/pull/src/b.rs — 2 client construction(s), 1 ensure_tls_provider()"), "{text}");
         assert!(text.contains("checked 3 client construction site(s) in 2 file(s)"));
+    }
+
+    /// P15-15, D-2520. Each unguarded file below passed the old gate: the
+    /// first four build a client no `Client::builder()` names, the last
+    /// two are "guarded" by a comment or a string.
+    #[test]
+    fn gate26_counts_every_client_spelling_and_only_a_guard_in_code() {
+        for src in [
+            "let c = reqwest::Client::new();\n",
+            "let c = reqwest::blocking::Client::new();\n",
+            "let b = reqwest::ClientBuilder::new().build();\n",
+            "let r = reqwest::get(url).await;\n",
+            "let r = reqwest::blocking::get(url);\n",
+            "// ensure_tls_provider()\nlet c = Client::builder();\n",
+            "/* ensure_tls_provider() */ let c = Client::builder();\n",
+            "let s = \"ensure_tls_provider()\"; let c = Client::builder();\n",
+            "let s = r#\"ensure_tls_provider()\"#; let c = Client::new();\n",
+            "ensure_tls_provider(); let a = Client::new(); let b = Client::builder();\n",
+        ] {
+            let (ok, text) = g26(&[("crates/pull/src/x.rs", src)]);
+            assert!(!ok, "passed: {src}");
+            assert!(
+                text.contains("UNGUARDED CLIENT  crates/pull/src/x.rs"),
+                "{text}"
+            );
+        }
+        for src in [
+            "ensure_tls_provider();\nlet c = reqwest::Client::new();\n",
+            "ensure_tls_provider(); let r = reqwest::get(u);\n",
+            "ensure_tls_provider(); ensure_tls_provider(); Client::new(); ClientBuilder::new();\n",
+        ] {
+            let (ok, text) = g26(&[("crates/pull/src/x.rs", src)]);
+            assert!(ok, "refused: {src}: {text}");
+        }
+        // A site in a comment or a string is no site, so a file of prose is
+        // a silent zero, refused as one.
+        let (ok, text) = g26(&[(
+            "crates/pull/src/x.rs",
+            "// Client::builder()\nlet s = \"Client::new()\";\n",
+        )]);
+        assert!(!ok);
+        assert!(text.contains("GATE 26 FOUND NO CLIENT SITES."), "{text}");
+        assert_eq!(
+            blank_comments_and_strings("a // b\n\"c\" /* d */ e"),
+            format!("a     \n{}e", " ".repeat(12))
+        );
     }
 
     #[test]
@@ -3401,7 +3597,7 @@ mod tests {
     fn gate11_allowlists_carry_the_counts_the_merged_code_needs() {
         // D-1958, D-1932 and the zero-work counts, carried by D-1938.
         let count = |l: Allow, f: &str| l.iter().find(|(p, _)| *p == f).map(|(_, n)| *n);
-        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(23));
+        assert_eq!(count(ALLOW_FLOAT, "crates/pull/src/pricing.rs"), Some(25));
         assert_eq!(count(ALLOW_FLOAT, "crates/runner/src/report.rs"), Some(4));
         assert_eq!(
             count(ALLOW_FLOAT, "crates/runner/src/significance.rs"),

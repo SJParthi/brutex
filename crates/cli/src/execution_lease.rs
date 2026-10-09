@@ -1,6 +1,8 @@
 //! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! One nonblocking execution lease per canonical store for cooperating CLI and
 //! HTTP sweep entry points. This is admission authority, not a result receipt.
+//! `Lease::acquire` asks a held slot again for at most one second before it
+//! answers `Busy`, so a probe's brief hold is not a refusal (cli1-3, D-2620).
 //!
 //! A probe opens one fixed path and checks one OS lock. It reads no history and
 //! allocates no storage proportional to bars, candidates or previous commands.
@@ -78,6 +80,22 @@ fn lock(file: File, path: &Path) -> Result<Flock<File>, Refusal> {
     })
 }
 
+/// [`lock`] asked again for a bounded second through a `try_clone` of one
+/// open description, so a refused attempt holds nothing (cli1-3, D-2620).
+/// Only `WouldBlock` is asked again; a host refusal is `Unavailable` at once.
+fn lock_patiently(file: &File, path: &Path) -> Result<Flock<File>, Refusal> {
+    crate::lock_wait::patiently(|| {
+        Flock::try_lock(
+            file.try_clone().map_err(fs::TryLockError::Error)?,
+            path.to_path_buf(),
+        )
+    })
+    .map_err(|why| match why {
+        fs::TryLockError::WouldBlock => Refusal::Busy,
+        fs::TryLockError::Error(why) => unavailable(why),
+    })
+}
+
 fn verify(file: &File, path: &Path) -> Result<(), Refusal> {
     use std::os::unix::fs::MetadataExt as _;
     let held = file.metadata().map_err(unavailable)?;
@@ -113,19 +131,35 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// Atomically claims the one store slot. It never waits for another
-    /// writer; it may wait for one probe's look at the slot (D-2774).
+    /// Atomically claims the one store slot. A held slot is asked again for a
+    /// bounded second (`crate::lock_wait`, D-2620), then once more under the
+    /// probe gate, where it may wait for one probe's look at the slot
+    /// (D-2774), and then refused `Busy`.
+    ///
+    /// # Why it waits at all (cli1-3)
+    ///
+    /// [`probe`] takes this same exclusive lock for microseconds, and the api
+    /// probes on every `/backtest/run.json` poll. One `try_lock` made a real
+    /// launch refuse "another sweep owns this store's execution lease" while
+    /// nothing but a page owned it. A real owner holds the lease for its whole
+    /// run, minutes, so it is still `Busy`, one second later than before.
     ///
     /// # Errors
-    /// Refuses a held lease, an unavailable store, or an unsafe/nonempty lock
-    /// path. No command is queued and no existing file is repaired.
+    /// Refuses a lease held past the bound, an unavailable store, or an
+    /// unsafe/nonempty lock path. No command is queued and no existing file is
+    /// repaired.
     pub fn acquire(root: &Path) -> Result<Self, Refusal> {
         let path = path(root)?;
         // THE GATE EXISTS BEFORE THE LEASE IT GUARDS, so a probe that finds
         // the lease also finds the gate, unless the lease predates the gate.
         let gate_path = path.with_file_name(GATE);
         let gate = create(&gate_path)?;
-        match lock(create(&path)?, &path) {
+        // The bounded second is spent OUTSIDE the gate, so a refused claimant
+        // never holds the gate past one look (D-2620 inside D-2774).
+        let file = create(&path)?;
+        let first = lock_patiently(&file, &path);
+        drop(file);
+        match first {
             Ok(held) => {
                 verify(&held, &path)?;
                 return Ok(Self { _file: held });
@@ -317,6 +351,37 @@ mod tests {
         let again = Lease::acquire(&root.0).expect("and the slot can be claimed again");
         drop(again);
         drop(child);
+    }
+
+    /// cli1-3, D-2620: a probe's microsecond hold no longer refuses a real
+    /// launch. A thread holds the lease file's exclusive lock for 20 ms, as
+    /// `probe` does; `Lease::acquire` on this thread is admitted once it lets
+    /// go. On the old code `acquire` made one `try_lock` and answered `Busy`
+    /// at once, so the first assertion failed. A holder past the bound (an
+    /// owner) is still `Busy`, and only after the whole bound was waited.
+    #[test]
+    fn a_probe_holding_the_lock_briefly_does_not_refuse_a_launch() {
+        let root = Scratch::new();
+        assert!(Lease::acquire(&root.0).is_ok(), "creates the lock file");
+        let lock_path = root.0.join(NAME);
+        let prober = File::open(&lock_path).expect("the probe's own description");
+        prober.try_lock().expect("the probe's exclusive lock");
+        let admitted = std::thread::scope(|scope| {
+            let release = scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                prober.unlock().expect("the probe releases");
+            });
+            let admitted = Lease::acquire(&root.0);
+            release.join().expect("probe thread");
+            admitted
+        });
+        let lease = admitted.expect("a probe's brief hold is waited out");
+        assert_eq!(probe(&root.0), Err(Refusal::Busy), "the launch owns it");
+        let started = std::time::Instant::now();
+        assert!(matches!(Lease::acquire(&root.0), Err(Refusal::Busy)));
+        assert!(started.elapsed() >= crate::lock_wait::WAIT * crate::lock_wait::WAITS);
+        drop(lease);
+        assert_eq!(probe(&root.0), Ok(()));
     }
 
     #[test]

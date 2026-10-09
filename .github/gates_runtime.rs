@@ -1059,8 +1059,14 @@ fn word_char(c: Option<char>) -> bool {
 }
 
 /// `^#!\[forbid\([^]]*\bunsafe_code\b` on some line of `src`.
+///
+/// READ IN CODE ONLY (P15-01, D-2512). The line regex took the attribute
+/// inside a `/* ... */` block comment, or on a line of a multi-line string
+/// literal, as the attribute itself, so a crate root whose forbid was
+/// commented out passed layer 1. The lines are read from
+/// [`blank_comments_and_strings`], where neither survives.
 fn forbids_unsafe(src: &str) -> bool {
-    src.split('\n').any(|l| {
+    blank_comments_and_strings(src).split('\n').any(|l| {
         let Some(rest) = l.strip_prefix("#![forbid(") else {
             return false;
         };
@@ -1075,6 +1081,136 @@ fn forbids_unsafe(src: &str) -> bool {
             !word_char(before) && !word_char(body[p + w.len()..].chars().next())
         })
     })
+}
+
+/// The end of the string literal whose body starts at `from` (just past its
+/// opening quote): the index past the closing quote, or the end of `b`.
+fn string_end(b: &[u8], from: usize) -> usize {
+    let mut j = from;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    b.len()
+}
+
+/// A raw string opening at `i` (`r`, any `#`s, `"`): the index past its
+/// closing quote and hashes, or the end of `b`. `None` when `i` opens none.
+fn raw_string_end(b: &[u8], i: usize) -> Option<usize> {
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let prefix_ok = i == 0 || !word(b[i - 1]) || (b[i - 1] == b'b' && (i < 2 || !word(b[i - 2])));
+    if b.get(i) != Some(&b'r') || !prefix_ok {
+        return None;
+    }
+    let mut j = i + 1;
+    while b.get(j) == Some(&b'#') {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'"') {
+        return None;
+    }
+    let hashes = j - i - 1;
+    let mut k = j + 1;
+    while k < b.len() {
+        if b[k] == b'"'
+            && b[k + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|c| **c == b'#')
+                .count()
+                == hashes
+        {
+            return Some(k + 1 + hashes);
+        }
+        k += 1;
+    }
+    Some(b.len())
+}
+
+/// Past a character literal at `i` (a `'`), or `i + 1` when it is a
+/// lifetime: a `'"'` must not open a string.
+fn past_char(b: &[u8], i: usize) -> usize {
+    if b.get(i + 1) == Some(&b'\\') {
+        let mut j = i + 3;
+        while j < b.len() && b[j] != b'\'' {
+            j += 1;
+        }
+        return (j + 1).min(b.len());
+    }
+    let width = match b.get(i + 1) {
+        Some(&c) if c < 0x80 => 1,
+        Some(&c) if c < 0xe0 => 2,
+        Some(&c) if c < 0xf0 => 3,
+        Some(_) => 4,
+        None => return i + 1,
+    };
+    if b.get(i + 1 + width) == Some(&b'\'') {
+        i + 2 + width
+    } else {
+        i + 1
+    }
+}
+
+/// `src` with every comment (line, block, nested block) and every string
+/// literal (plain, byte, raw) replaced by spaces, newlines kept, so each
+/// line keeps its number and only code is left to match (P15-01, D-2512).
+/// A comment or string that never closes runs to the end of the file.
+fn blank_comments_and_strings(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        let next = b.get(i + 1).copied();
+        let end = match (b[i], next) {
+            (b'/', Some(b'/')) => src[i..].find('\n').map_or(b.len(), |p| i + p),
+            (b'/', Some(b'*')) => {
+                let (mut depth, mut j) = (0usize, i);
+                loop {
+                    if j >= b.len() {
+                        break b.len();
+                    }
+                    if b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
+                        depth += 1;
+                        j += 2;
+                    } else if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
+                        depth -= 1;
+                        j += 2;
+                        if depth == 0 {
+                            break j;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            (b'"', _) => string_end(b, i + 1),
+            (b'\'', _) => {
+                i = past_char(b, i);
+                continue;
+            }
+            (b'r', _) => match raw_string_end(b, i) {
+                Some(e) => e,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        for c in &mut out[i..end] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+        i = end;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// awk's walk of a manifest: a line beginning `[lints]` opens the table,
@@ -1317,6 +1453,26 @@ fn rooted(y: &str) -> Vec<&str> {
 const PRINTS: [&str; 5] = ["print!", "println!", "eprint!", "eprintln!", "dbg!"];
 const HANDLES: [&str; 2] = ["io::stdout", "io::stderr"];
 
+/// Paths that open a process stream through the filesystem (P15-14,
+/// D-2519): `OpenOptions::new().append(true).open` of one of these, then
+/// `writeln!`, writes to stderr naming neither [`PRINTS`] nor [`HANDLES`].
+const STREAM_PATHS: [&str; 7] = [
+    "/dev/stderr",
+    "/dev/stdout",
+    "/dev/tty",
+    "/dev/fd/",
+    "/proc/self/fd/",
+    "/dev/console",
+    "/dev/pts/",
+];
+
+/// Does one `source_scan strings` line (`FILE:LINE:literal`, escaped) carry a
+/// literal naming a process stream?
+fn names_stream(line: &str) -> bool {
+    let lit = after_tag(line);
+    STREAM_PATHS.iter().any(|p| lit.contains(p))
+}
+
 /// Gate 17's rule on a canonical path:
 /// `((telemetry|log|tracing)(::.+|!)|((std|core|alloc)::)?(e?print(ln)?|dbg)!|((std|core|alloc)::)?io::(stdout|stderr))`.
 fn logs(y: &str) -> bool {
@@ -1393,6 +1549,21 @@ fn gate17(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
         if !hits.is_empty() {
             r.refuse(format!("LOGGING INSIDE THE SWEEP: crates/{c}"));
             r.indented(0, &hits);
+        }
+        // P15-14, D-2519: a stream opened by its path is a print too.
+        let (strings, unread) = paths_of(repo, "strings", &files);
+        if !unread.is_empty() {
+            r.refuse(format!(
+                "  REFUSED  crates/{c}: a source file's strings could not be read ({})",
+                unread.join(", ")
+            ));
+        }
+        let streams: Vec<&String> = strings.iter().filter(|l| names_stream(l)).collect();
+        if !streams.is_empty() {
+            r.refuse(format!(
+                "A PROCESS STREAM OPENED BY PATH INSIDE THE SWEEP: crates/{c}"
+            ));
+            r.indented(0, &streams);
         }
     }
     if r.bad {
@@ -1527,6 +1698,20 @@ fn gate23(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
         if core.iter().any(|c| HANDLES.contains(c)) {
             *handles.entry(format!("{f}:handle")).or_default() += 1;
         }
+    }
+    // P15-14, D-2519: a literal naming a process stream by its path is a
+    // handle as surely as `io::stderr` is.
+    let (strings, unread) = paths_of(repo, "strings", &files);
+    if !unread.is_empty() {
+        r.refuse(format!(
+            "  REFUSED  a source file's strings could not be read ({})",
+            unread.join(", ")
+        ));
+    }
+    for l in strings.iter().filter(|l| names_stream(l)) {
+        let f = before_tag(l);
+        let f = f.strip_prefix("crates/").unwrap_or(f);
+        *handles.entry(format!("{f}:handle")).or_default() += 1;
     }
     let prints: Vec<String> = prints.iter().map(|(k, n)| format!("{k}:{n}")).collect();
     let handles: Vec<String> = handles.iter().map(|(k, n)| format!("{k}:{n}")).collect();
@@ -2320,7 +2505,7 @@ fn gate22(repo: &dyn Repo, o: &Opts) -> Result<Report, String> {
 
 // ------------------------------------------------------------ gate 24 --
 
-/// `MmapMut|MmapRaw|(^|[^A-Za-z0-9_])map_mut\(|(^|[^A-Za-z0-9_])map_anon(_mut)?\(|(^|[^A-Za-z0-9_])map_copy\(`.
+/// `MmapMut|MmapRaw|(^|[^A-Za-z0-9_])map_mut\(|(^|[^A-Za-z0-9_])map_anon(_mut)?\(|(^|[^A-Za-z0-9_])map_copy\(|(^|[^A-Za-z0-9_])map_raw(_read_only)?\(`.
 fn maps_writably(line: &[u8]) -> bool {
     if contains(line, b"MmapMut") || contains(line, b"MmapRaw") {
         return true;
@@ -2330,6 +2515,9 @@ fn maps_writably(line: &[u8]) -> bool {
         b"map_anon(",
         b"map_anon_mut(",
         b"map_copy(",
+        // P15-16, D-2521: a safe call returning a read-write raw mapping.
+        b"map_raw(",
+        b"map_raw_read_only(",
     ]
     .iter()
     .any(|n| {
@@ -2440,7 +2628,7 @@ mod tests {
 
     /// A tree held in memory. `scans` answers the scanner by its joined
     /// arguments; with no canned answer, `code` returns the file itself,
-    /// `paths`, `paths-prod` and `deps` return nothing for a file that
+    /// `paths`, `paths-prod`, `deps` and `strings` return nothing for a file that
     /// exists, `unsafe` finds nothing and `closure` returns its roots.
     #[derive(Default)]
     struct Fake {
@@ -2530,7 +2718,10 @@ mod tests {
                     Some(b) => answer(0, String::from_utf8_lossy(b).into_owned()),
                     None => answer(2, String::new()),
                 },
-                ["paths" | "paths-prod" | "deps" | "build-keys", f] => answer(
+                [
+                    "paths" | "paths-prod" | "deps" | "build-keys" | "strings",
+                    f,
+                ] => answer(
                     if self.files.contains_key(*f) { 0 } else { 2 },
                     String::new(),
                 ),
@@ -3129,6 +3320,59 @@ mod tests {
         assert!(!forbids_unsafe(" #![forbid(unsafe_code)]"));
         assert!(!forbids_unsafe("#![deny(unsafe_code)]"));
         assert!(!forbids_unsafe("#![forbid(unsafe_codeé)]"));
+    }
+
+    /// P15-01, D-2512. Each of these passed the line regex: the attribute
+    /// sat inside a block comment or a string literal, where it is no
+    /// attribute at all.
+    #[test]
+    fn the_forbid_inside_a_comment_or_a_string_is_no_forbid() {
+        let attr = "#![forbid(unsafe_code)]";
+        for src in [
+            format!("/*\n{attr}\n*/\n"),
+            format!("/* a\n{attr} */\n"),
+            format!("/* /* nested */\n{attr}\n*/\n"),
+            format!("/*\n{attr}\n"),
+            format!("const S: &str = \"\n{attr}\n\";\n"),
+            format!("const S: &str = r#\"\n{attr}\n\"#;\n"),
+            format!("const S: &[u8] = br##\"\n\"#\n{attr}\n\"##;\n"),
+            format!("const S: &str = \"\\\"\n{attr}\n\";\n"),
+            format!("const S: &str = \"\n{attr}"),
+        ] {
+            assert!(!forbids_unsafe(&src), "{src}");
+        }
+        for src in [
+            format!("/* x */\n{attr}\n"),
+            format!("/* /* a */ b */\n{attr}\n"),
+            format!("// /*\n{attr}\n"),
+            format!("const Q: char = '\"';\n{attr}\n"),
+            format!("const Q: u8 = b'\"';\n{attr}\n"),
+            format!("const Q: char = '\\'';\n{attr}\n"),
+            format!("const Q: char = '\\u{{22}}';\n{attr}\n"),
+            format!("fn f<'a>(x: &'a str) -> &'a str {{ x }}\n{attr}\n"),
+            format!("const S: &str = \"a\";\n{attr}\n"),
+            format!("const S: &str = r#\"\"\"#;\n{attr}\n"),
+            format!("const R: u8 = r#type;\n{attr}\n"),
+            format!("const É: &str = \"é\";\n{attr}\n"),
+            format!("{attr}\n/*"),
+        ] {
+            assert!(forbids_unsafe(&src), "{src}");
+        }
+        // Lines keep their numbers and their code.
+        assert_eq!(
+            blank_comments_and_strings("a /* b\nc */ d \"e\nf\" g // h\ni"),
+            "a     \n     d   \n   g     \ni"
+        );
+        assert_eq!(blank_comments_and_strings(""), "");
+        assert_eq!(blank_comments_and_strings("'"), "'");
+        assert_eq!(blank_comments_and_strings("r"), "r");
+        assert_eq!(blank_comments_and_strings("r#"), "r#");
+        assert_eq!(string_end(b"ab\\", 0), 3);
+        assert_eq!(raw_string_end(b"xr\"a\"", 1), None);
+        assert_eq!(raw_string_end(b"r#\"a\"#", 0), Some(6));
+        assert_eq!(raw_string_end(b"r#\"a\"", 0), Some(5));
+        assert_eq!(past_char(b"'", 0), 1);
+        assert_eq!(past_char(b"'\\", 0), 2);
         assert!(word_char(Some('é')) && !word_char(None) && !word_char(Some(']')));
     }
 
@@ -3579,6 +3823,76 @@ mod tests {
     }
 
     #[test]
+    fn gate23_counts_a_process_stream_opened_by_path_as_a_handle() {
+        // P15-14, D-2519: the gate-17 twin. The old gate counted only
+        // `io::stdout` and `io::stderr`, so this file declared nothing.
+        let f = clean23().scan(
+            "strings crates/telemetry/src/sink.rs",
+            0,
+            "crates/telemetry/src/sink.rs:5:/dev/stderr\n",
+        );
+        refused(&g23(&f), "> telemetry/src/sink.rs:handle:1");
+        passed(
+            &g23_with(
+                &f,
+                DECLARED23,
+                "api/src/server.rs:handle:1 telemetry/src/sink.rs:handle:1",
+                "\n",
+            ),
+            "OK - every print is declared",
+        );
+        let f = clean23().scan("strings crates/api/src/server.rs", 2, "");
+        refused(&g23(&f), "a source file's strings could not be read");
+    }
+
+    /// P15-14, D-2519. A swept crate writing per trial through
+    /// `OpenOptions::new().append(true).open("/dev/stderr")` and `writeln!`
+    /// names no print macro, no `io::stderr` and no logger: gate 17 passed it.
+    #[test]
+    fn gate17_refuses_a_dev_stderr_path_in_a_swept_crate() {
+        let repro = "crates/vocab/src/lib.rs:3:/dev/stderr\n";
+        let f = clean17().scan("strings crates/vocab/src/lib.rs", 0, repro);
+        let r = g17(&f, "vocab");
+        refused(
+            &r,
+            "A PROCESS STREAM OPENED BY PATH INSIDE THE SWEEP: crates/vocab",
+        );
+        refused(&r, "crates/vocab/src/lib.rs:3:/dev/stderr");
+        for lit in [
+            "/dev/stdout",
+            "/dev/tty",
+            "/dev/fd/2",
+            "/proc/self/fd/2",
+            "/dev/console",
+            "/dev/pts/0",
+            "x /dev/stderr",
+        ] {
+            let f = clean17().scan(
+                "strings crates/vocab/src/lib.rs",
+                0,
+                &format!("crates/vocab/src/lib.rs:1:{lit}\n"),
+            );
+            assert!(g17(&f, "vocab").bad, "{lit}");
+        }
+        for lit in ["/dev/null", "/dev/std", "dev/stderr", "/proc/self/exe", ""] {
+            let f = clean17().scan(
+                "strings crates/vocab/src/lib.rs",
+                0,
+                &format!("crates/vocab/src/lib.rs:1:{lit}\n"),
+            );
+            assert!(!g17(&f, "vocab").bad, "{lit}");
+        }
+        let f = clean17().scan("strings crates/vocab/src/lib.rs", 2, "");
+        refused(
+            &g17(&f, "vocab"),
+            "a source file's strings could not be read",
+        );
+        // The literal is read after its FILE:LINE: tag, never before it.
+        assert!(!names_stream("/dev/stderr:1:x"));
+        assert!(names_stream("a.rs:1:/dev/tty"));
+    }
+
+    #[test]
     fn gate23_refuses_what_it_cannot_read() {
         refused(
             &g23(&Fake::default()),
@@ -4018,6 +4332,10 @@ mod tests {
             "map_copy(",
             "MmapRaw",
             "\u{e9} map_anon(",
+            // P15-16, D-2521: passed before; names no banned type.
+            "MmapOptions::new().map_raw(f)?",
+            "map_raw(&f)",
+            "o.map_raw_read_only(&f)",
         ] {
             assert!(maps_writably(l.as_bytes()), "{l}");
         }
@@ -4025,6 +4343,9 @@ mod tests {
             "remap_mut(",
             "map_copy_read_only(",
             "_map_copy(",
+            "remap_raw(",
+            "x_map_raw(",
+            "map_raw",
             "Mmap::map(&f)",
             "map_anon",
         ] {

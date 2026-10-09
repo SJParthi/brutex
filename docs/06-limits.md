@@ -1436,6 +1436,14 @@ configured away, defaulted, or flagged off.
 **Closing them needs data, not code.** One dated row per table, with a citation,
 and the mechanism does not change.
 
+**The values INSIDE the windows are UNVERIFIED too (P9-02, D-2547).** The table
+above counts the days with no value. The days that DO get a value get it from
+`TRACK2_OPTIONS_SPEC`, a predecessor document, and not from a source
+`docs/00-charter.md` records; the charter has no row for a lot size or an
+expiry weekday. A refusal outside the window and an unsourced value inside it
+are different limits, and only the first was stated here. The bullet on
+audit-20261003 hunt-costs-5 below carries the same widening.
+
 ### The lot table follows the source's code, not its documentation
 
 The source's `lot_size_history` module docstring says "for dates before the
@@ -1959,6 +1967,13 @@ from the source for this entry; the out-of-crate probe that produced a number
 (₹61.90 for a 2019 trip) was run by the verification lens and not reproduced
 here.** `charge_stack`'s own doc comment discloses that it "resolves no date and
 cannot refuse for a citation reason"; §27 did not, and now does.
+
+**Closed by D-2538 (Z1-slice10-F1).** `Rates::new` is now `pub(crate)`, so
+`Rates::resolve` — the dated lookup that refuses — is the only public way to
+hold a `Rates`, and `charge_stack` (which stays public for the gate-8 bench)
+can only be handed a set some dated lookup admitted. A `compile_fail` doctest on
+`Rates::new` pins the closure; `BpsX100::ZERO` and the `pub const` table rows
+can still be named outside the crate and no longer reach a charge.
 
 **"Rounding CGST and SGST separately overcharges by exactly ₹1, every trade" is
 false as a generalisation.** The assertion in the test is fine — at Example 1's
@@ -6007,7 +6022,11 @@ An honest gap beats a confident wrong number.
 **What was NOT done.** `runner::audit.rs` still carries *"the tightest stop that
 keeps every winner"* as the note on `mean MAE, winners only` — the same false
 claim, demoted to a note. It was left because another session held that file
-open at the time; it is a one-line change and it is still owed.
+open at the time; it is a one-line change and it is still owed. **Paid by
+D-2537 (Z1-slice00-F1):** the note now says the row is a mean and not a stop
+level, the SHARPEST line says the same, and
+`runner::audit::tests::the_winner_mae_is_never_called_a_stop_level` refuses
+the phrase on both surfaces.
 
 **Also unaddressed and larger:** on 2024-06 the engine's own significance tests
 refused the result — White's Reality Check p = 0.9920, Hansen's SPA p = 1.0000,
@@ -7767,6 +7786,11 @@ and OOS bars and G_i resolved grid cells per selected stream, that work is at
 least O(sum(B_i + G_i)) before scheduling. The fixed 200-stream ceiling bounds
 simultaneous stream heads, not candidate history: scheduling, candidate/
 decision encoding and ordered hashing are O(C) for C reachable candidates.
+Within one minute, Global Replay V1 and V2 index the at most 200 offered
+constituents once and resolve each scheduled decision with one expected-O(1)
+hash probe; each decision used to rescan every offered stream and rebuild its
+constituent, up to 200² rebuilds per minute (rep-1, D-2640). The probe is
+expected rather than worst-case O(1), and no bench times it.
 
 Opening the five V2 files reads, decodes and hashes every record—including
 valid unreferenced orphans—then reconstructs and re-runs every completed
@@ -8511,6 +8535,15 @@ procedures. It retains O(C) Candidate rows plus procedure state. An all-extinct
 pair correctly performs no bootstrap at all; it is not a constant-time
 substitute for an evaluated family.
 
+CSCV split scores walk each Candidate's P periods ONCE into at most 64
+segment summaries (each segment's sum and running-sum extremes, CO-02 caps a
+layout at 16), and each of the S splits then folds those summaries:
+O(C·(P + S·segments)) in place of the O(C·S·P) per-period walk, in both the
+Observation V1 split rows and the Boolean numeric kernel (pst-2, p2bool-2,
+D-2639). The summaries hold at most 48 bytes per segment per Candidate. The
+outputs and every refusal, overflow included, equal the per-period walk's;
+that equality is enumerated by test, the speed is UNVERIFIED (no bench).
+
 For A admitted authorities and bounded ledger bytes B, opening and fresh reopen
 scan and authenticate O(B) bytes and retain O(A + total candidates) indexes.
 Append, exact reuse and receipt-less tail comparison validate an authority-
@@ -8771,11 +8804,15 @@ instruments and are exact. The worst trade and the smallest win are exact
 minima. The drawdown is NOT pooled: a pooled drawdown is a property of the
 merged, time-ordered sequence of every instrument's trades, and
 `runner::grid::Cell` carries per-cell aggregates, not per-trade P&L. The
-column the report prints as `dd>=` is the LARGEST single-instrument drawdown
-among the cells pooled — a lower bound on the pooled figure. It can only be
-made exact by exposing each cell's trade sequence from the grid, which is a
-change inside the pricing loop and is not made. Every report labels the
-column as a bound.
+column the report prints as `dd1max` is the LARGEST single-instrument
+drawdown among the cells pooled, and it bounds the pooled figure in NEITHER
+direction: interleaving can hide one instrument's losses behind another's
+gains (200 printed, 100 pooled), and simultaneous losses can add (100
+printed, 200 pooled). This said "a lower bound on the pooled figure" and the
+column was `dd>=`; both were false (p2misc-1, D-2648). The pooled drawdown can
+only be measured by exposing each cell's trade sequence from the grid, which
+is a change inside the pricing loop and is not made. Every report says the
+column is not the pooled figure and not a bound on it.
 
 Cost: pass 1 is I screens, one at a time in surface order (D-1701), each
 what `range-rung` costs on that instrument, with that screen's sweep and
@@ -11993,7 +12030,12 @@ rule 6); every bound is read from the source.
   `read_record` per bar), folds the change over them, and holds them all in
   memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
   `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
-  without extremes is the bounded seek path and is unchanged.
+  without extremes is the bounded seek path and is unchanged. Since D-2593 at
+  most `detail::MAX_STORE_READ_CONCURRENT` = 8 such requests run at once, so
+  the route's worst-case memory is 8 times one scan's (P1-04-01); one scan's
+  bound is the one stated here, UNVERIFIED by a measurement. Each request
+  still holds every month file of its range open for its duration
+  (resources-2, not changed).
 * **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
   from `Site::series` and its cells from `Site::censuses`, both read at boot.
   It now builds the axis with `census::held_series` over the request's fresh
@@ -12179,6 +12221,16 @@ below is timed.
   `detail::MAX_STORE_READ_CONCURRENT` = 8, and a ninth is answered 429 naming
   the bound. (This paragraph said those three still read inline on an async
   worker; D-1508 moved them.) Their wall-clock cost is not measured.
+  `/bars/window.json` (`bars::window` and its render) and `/backtest.json`
+  (the ledger read of up to `MAX_RUNS` records and its body) now run in the
+  same store-read pool and share its 8 slots, a ninth answered 429
+  (`/backtest.json` in the body shape its page parses). Until resources-4 and
+  P1-04-01 (D-2593) both ran inline on an async worker with no bound on
+  concurrency. `bars_window_and_backtest_reads_run_in_the_store_read_pool_and_answer_429_when_it_is_full`
+  in `crates/api/src/bars_window_route_tests.rs` holds the pool full and sees
+  both refused. Per request a window scan still holds up to `MAX_WINDOW_MONTHS`
+  month files and, on the scan path, every bar it reads (W1-api5-4 below); the
+  pool bounds how many such requests exist at once to 8, not what one costs.
 * **Days a month's daily rung did not prove are withheld, not closed.** A
   month inside the span that the census holds only at another rung, that it
   does not hold at all, or whose daily records failed their checks is now
@@ -14711,6 +14763,18 @@ bounds are all nonzero.
   UNVERIFIED: `docs/00-charter.md` records no source for any cost rate. Every
   rate traces to the predecessor's citations; none has been checked against a
   primary circular recorded here, and none has been invented.
+  **Widened to the contract facts (P9-02, D-2547).** The same holds for the
+  options lot sizes (`crates/costs/src/lot.rs`), the strike grid steps
+  (`crates/costs/src/strike.rs`) and the weekly and monthly expiry weekdays
+  (`crates/costs/src/expiry.rs`). Each in-window value cites
+  `TRACK2_OPTIONS_SPEC` (§8.3, §5 and §2), a predecessor document, and
+  `docs/00-charter.md` sources none of them: it has no row for a lot size or
+  an expiry weekday, and its one row on the strike intervals says "No source
+  states them" and attributes the 2021-on steps to the predecessor's
+  `STRIKE_STEP`. Under `CLAUDE.md`
+  §3 rule 1 every one of these values is UNVERIFIED. Sourcing them is the
+  operator's: a charter row per SEBI/NSE circular, retrieved and checked.
+  Nothing here is invented, and the pre-window refusals of §26 stand.
 ## crates/api audit fixes — D-1580..D-1591, 3 October 2026
 
 - **A stop is honoured at structural boundaries only (D-1551).** Engine work
@@ -14880,6 +14944,12 @@ window is refused. Every other stock surface (the pool, `range-all`,
 the Boolean research commands) still carries only D-0694's sentence, because
 their banners are written before or without the bars. The measurement is one
 pass over the bars at a once-per-report boundary, O(bars).
+
+Since D-2546 (p16num-1) it also measures the overnight INTO the span: the
+door's daily context is walked once for the latest eligible session before
+the first signal day, O(daily records) — a month-plus of one-day records —
+again once per report, never per bar or per candidate. Not timed: no bench
+covers it.
 ## Audit fixer 2 follow-ups — D-1490 onward, 3 October 2026
 
 - **The request-minute coverage audit's output is not capped (W1-pull3-4,
@@ -16139,3 +16209,127 @@ built. conc:cli3-2.
   status line is recognised, by its first bytes; a final response written in
   the same buffer after an interim would not re-arm the clock either. Hyper
   writes the interim on its own, so that case is not reached. Not measured.
+
+## A visible backtest tab still journals its status poll — D-2567, 6 October 2026
+
+conc17-2. The backtest page's status owner now issues no read while the tab is
+hidden (`web/src/lib/page-requests.js`, invariant ZX-87). That cuts the rate; it
+does not bound the store:
+
+- **While visible, the poll still writes.** Each running tick reads
+  `/backtest/run.json` and `/live.json`, and `api::operation_audit::audited_route`
+  journals both, so a visible tab adds about two invocation records every two
+  seconds plus request latency for as long as a run lasts. That is at most about
+  86,400 records a day per visible tab. This is an extrapolation from the poll
+  cadence, not a measurement; no bench covers it.
+- **The invocation journal has no retention** (D-1445), so its directory grows with the
+  number of status reads ever served, and the cost of a directory insert or
+  lookup then depends on an entry count that only grows. Not timed.
+- **Each open visible tab multiplies the rate.** Nothing coordinates polls
+  across tabs.
+- **Bounding it is an owner decision.** Dropping the two GET status reads from
+  `audited_route` also changes the cross-site admission that reads the same list
+  (D-0687); a bounded ring for reads changes what the audit records. Neither is
+  made here.
+## G2 pull costs that are not constant — D-2531, D-2535, D-2536, 6 October 2026
+
+- **An archive walk sorts each directory's listing** (D-2531, determinism-2).
+  `archive::descend` collects one `Vec<PathBuf>` per directory and sorts it,
+  O(e log e) in that directory's `e` entries, so visit order — and with it the
+  first strict refusal and the `MAX_MEMBERS` cut-off — is by path. The walk was
+  already O(members) and holds every row (D-0720 above). Unmeasured.
+- **A month's span walks back over its trailing closed days** (D-2535,
+  conc12-1). `pull::calendar::last_not_closed` calls the O(1) `kind_of` once per
+  closed day at the span's end: linear in that run, at most the month's own
+  days, reached from `api::autopilot::month_span` and `pull::fnowork::span_of`.
+  Unmeasured.
+- **A degraded census is read twice** (D-2536, pull2-5).
+  `api::census::read_vendor` reads a manifest that loads degraded once more,
+  one more bounded `MAX_MANIFEST_BYTES` read, so a genuinely damaged census
+  costs two reads on every request that misses the census cache. Unmeasured.
+## The calendar's minute counter now costs two lookups per proved day — D-2581, 6 October 2026
+
+- **What changed.** `calendar_of::derive` took a minute month's counter path
+  on one header read. It now also asks `BarFile::first_at_or_after` twice for
+  every day the daily rung proves (Z1-slice12-F1), so a month of ~22 trading
+  days costs ~44 lookups more before it is trusted.
+- **The bound.** O(1) per lookup on a month with a time index; on a legacy
+  month without one, the D-1434 bisection at `ceil(log2(n + 1))` record reads
+  per lookup. The lookups are not counted in `Report::records_read`, which
+  counts the walk's positional reads. UNVERIFIED as a measurement: no bench
+  times a derivation.
+
+## A served stop can wait twice `SHUTDOWN_GRACE` — D-2583, 6 October 2026
+
+- `server::drain_background` waits up to `SHUTDOWN_GRACE` (10 s) for a press
+  and for every pull seat to be free before the runtime ends, and
+  `end_runtime` then waits up to the same bound for blocking work. A stop
+  during a pull can therefore take up to 20 s; a stop with nothing running
+  costs one 50 ms-free pass. A recovery request holding a seat is waited on to
+  the deadline and then abandoned by name. Not timed.
+## Bounded lock waits, durable directory chains and retained ledger guards — D-2620, D-2623, D-2625, D-2628, D-2629, 6 October 2026
+
+- **A writer's lock waits up to one second.** `cli::lock_wait::patiently` asks a
+  refused `WouldBlock` again every 20 ms for at most 50 times (D-2620). The
+  invocation index, the execution lease, a search checkpoint's owner and a
+  Boolean publication's owner take their lock through it. Each attempt is a
+  syscall pair; the wait is a constant no input raises, and it is wall time,
+  not work. A real owner is refused one second later than before. A reader
+  or probe that holds the lock past one second still refuses the writer: the
+  bound narrows the window, it does not remove it. Not timed by any bench.
+- **A new directory level costs one `mkdir` and one directory `fsync`.**
+  `cli::durable_dir::create_all` (D-2623) syncs each new level's parent; at
+  most the chain's depth (four for a candidate attempt, three for a ledger
+  rung root) per call, and one `stat` per existing level. A level an older
+  `create_dir_all` made and never synced is not repaired. UNVERIFIED as a
+  measured cost.
+- **Interrupted Population writes, update to D-0916/D-0917.** The writers of
+  Admission V4, Finalization V4 and Statistics V2/V3 now cut a sub-record tail
+  under their exclusive lock (D-2625), and the Statistics V2/V3 writers
+  rewrite a strict header prefix (D-2626). Readers still refuse both. Still
+  refused on every open: Admission V3, Finalization V3 and Population V6
+  ragged tails, and an all-zero 64-byte Statistics header.
+- **range-all hashes its signal span twice per rung** to hold the sweep to the
+  bars its support was derived from (D-2628): linear in the span's bars, like
+  the load. Only the signal span is pinned; a landing that moves only the
+  one-minute execution series between the two reads is not detected.
+- **`ledger-v6-replay` keeps eight rungs' source guards for the whole run.**
+  Global Replay V4 needs all eight Selection V6 authorities live, and each
+  holds its Population V6 strict inputs: an open, shared-locked descriptor per
+  source month (D-2629). The descriptor count (~128 + 200·M at the eighth rung,
+  from the finding) is an EXTRAPOLATION, not a measurement, and no `RLIMIT`
+  is raised or checked. While the run lives, those months refuse ingest
+  writes past the ingest's one-second wait (D-2552). `ledger-v6` itself now
+  releases each rung's guards as the rung ends.
+
+## The walk-forward probes its first training window once per shape — D-3696, 6 October 2026
+
+When the range path's support came from the affordability probe, each
+walk-forward shape now runs one more `Sweeper::auto` over its anchoring
+training column (`FoldSupport::FirstTraining`). That is `log2(window)` ladder
+walks over a column the fold already built, bounded by the same probe ceiling
+as the whole-span probe. It is paid once per shape per audited rung, never per
+bar and never per candidate.
+
+Measured on `synthetic::sessions(16)`, both shapes through `cli::both_shapes`
+with the test profile, 15 runs each (p99 is the slowest of 15):
+
+| policy | p50 | p99 | max |
+|---|---:|---:|---:|
+| `Scaled` (before) | 6.75 s | 7.19 s | 7.19 s |
+| `FirstTraining` (after) | 6.12 s | 6.25 s | 6.25 s |
+
+The two runs sweep at different thresholds, so this is the whole stage
+end to end, not the probe's cost in isolation. The probe alone was not
+timed separately. Nothing was measured on a real store span, so the cost
+there is UNVERIFIED.
+
+## A stop stated in points is span-relative in sample — D-3697, 6 October 2026
+
+`BRUTEX_MAX_STOP_POINTS` converts at the whole span's reference price, so it
+is N points only at that price. Each trade applies it as ppm of its own entry:
+about 73.8 points at a 25,000 entry and 22.4 at 7,600 on the 2020-01..2026-08
+NIFTY span. A later bar moves it in sample: doubling the last bar's high of
+`synthetic::sessions(3)` moved it from 1,999 ppm to 1,332. It never reaches a
+walk-forward fold. A per-trade N-point stop needs a per-entry stop in
+`runner::grid`, which is left to the owner.

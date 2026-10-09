@@ -468,6 +468,7 @@ fn run_rung(
         procedure: config.procedure,
         allocation,
         bounds: config.qualification,
+        records: config.capture.records,
     })?;
     measured.require_current()?;
     Ok(Link {

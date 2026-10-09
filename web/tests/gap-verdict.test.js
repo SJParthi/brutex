@@ -75,9 +75,27 @@ test('optional fields accept older responses and explicit zero/null, but even an
   assert.equal(monthVerdict(clean).kind, 'ok');
   assert.equal(monthVerdict({ ...clean, evidence_error: null, invalid_timestamps: 0 }).kind, 'ok');
   for (const evidence_error of ['', ' ', 'Dated session metadata unavailable']) {
-    assert.equal(monthVerdict({ ...clean, evidence_error }).word, 'unverified');
+    // THE COLOUR AS WELL AS THE WORD (P19-04, D-2563). Missing session evidence
+    // is `absent` (grey, "not known"), never `bad` (red, "damaged"): checking
+    // only `.word` let the kind flip to 'bad' with every test green.
+    assert.deepEqual(monthVerdict({ ...clean, evidence_error }), { word: 'unverified', kind: 'absent' });
     assert.equal(isWholeAudit(answer([{ ...clean, evidence_error }])), false);
   }
+});
+
+test('missing evidence keeps its absent kind whatever arithmetic sits beside it (P19-04)', () => {
+  for (const expected of [0, 1, 375]) {
+    for (const lost_minutes of [0, 1, 375]) {
+      for (const unmeasured_minutes of [0, 1440]) {
+        const month = { ...clean, expected, lost_minutes, unmeasured_minutes, evidence_error: 'metadata missing' };
+        assert.deepEqual(monthVerdict(month), { word: 'unverified', kind: 'absent' }, JSON.stringify(month));
+      }
+    }
+  }
+  // Earlier faults still outrank it, each with its own kind.
+  assert.deepEqual(monthVerdict({ ...clean, evidence_error: 'x', absent_file: 'No file' }), { word: 'no file', kind: 'absent' });
+  assert.equal(monthVerdict({ ...clean, evidence_error: 'x', unreadable_records: 1 }).word, 'unreadable');
+  assert.equal(monthVerdict({ ...clean, evidence_error: 'x', invalid_timestamps: 1 }).word, 'invalid stamps');
 });
 
 test('missing files retain known obligations and exact gap evidence', () => {

@@ -90,6 +90,13 @@ read back and compared, and all new directory entries through the supplied root
 are synced. Only then is the completion created, written, synced, and its
 directory hierarchy synced. The revised writer lock is held through this order.
 
+The reservation is created and exclusively locked under a scratch name
+(`.reserving-v1-<pid>`) and only then hard-linked to `.reserved-v1`, and its
+publisher holds that lock until the completion is synced. A caller that finds
+the reservation still locked is told `Busy`: another caller is publishing the
+same ordinal now, and retrying the SAME ordinal later answers `Reused`. Only a
+reservation nobody holds and no completion is `Incomplete` (store2-1, D-2551).
+
 An old reader keeps its original pair throughout. A reader racing publication
 either refuses a missing/torn receipt or held writer lock, or opens the complete
 revision. It cannot observe an old `.bin` paired with a new `.crc`. Readers may

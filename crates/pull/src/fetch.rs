@@ -344,6 +344,17 @@ pub enum FetchError {
         /// booleans are the whole of what a diagnosis needs.
         given_two: bool,
     },
+    /// The assembled credential holds a byte an HTTP header cannot carry.
+    ///
+    /// Most often a newline stored with the token. Refused where the
+    /// credential arrives, before a client or a permit exists: until P1-19-01
+    /// (D-2525) it failed inside the client at send time and was reported as
+    /// [`Self::TransportFailed`], which reads as "the vendor was not reached"
+    /// and is retried like a network blip.
+    CredentialNotAHeaderValue {
+        /// The header the credential was to travel in. Never the value.
+        header: &'static str,
+    },
     /// A value resolved into a URL **path segment** cannot sit in one.
     ///
     /// # Refused, never escaped, and the reason is a real symbol
@@ -371,6 +382,17 @@ pub enum FetchError {
         /// nothing on this path can reach the token.
         value: String,
     },
+}
+
+/// [`FetchError::CredentialNotAHeaderValue`]'s sentence (P1-19-01, D-2525).
+fn write_not_a_header_value(f: &mut core::fmt::Formatter<'_>, header: &str) -> core::fmt::Result {
+    write!(
+        f,
+        "the credential for the {header} header holds a byte no HTTP \
+         header can carry, most often a newline stored with the token. \
+         Nothing was sent and no client was built. Re-store the \
+         credential without it; the value is not shown here."
+    )
 }
 
 impl core::fmt::Display for FetchError {
@@ -458,6 +480,7 @@ impl core::fmt::Display for FetchError {
                 if names_two { "two" } else { "one" },
                 if given_two { "two were" } else { "one was" }
             ),
+            Self::CredentialNotAHeaderValue { header } => write_not_a_header_value(f, header),
             Self::PathSegmentUnusable {
                 placeholder,
                 ref value,

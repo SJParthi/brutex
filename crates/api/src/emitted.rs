@@ -1648,11 +1648,30 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // a_request_still_running_after_the_signal_does_not_hold_the_server_open`.
     // 21 -> 22 when both met in the PR #74 merge (D-2779): the two lines above
     // were each written as 20 -> 21 on their own side, and both sites are driven.
-    const REACHED_IN_SERVER_TESTS: usize = 22;
+    // 21 -> 22 at D-2526 (conc13-2): `pull.http transport failed, retrying`,
+    // driven over a loopback vendor that closes its first socket unanswered and
+    // read back by `server::tests::a_retried_transport_failure_is_logged_at_warn`.
+    // 22 -> 24 at D-2575 and D-2594: `api.pull cash schedule refused`
+    // (equity-1), read back by
+    // `server::tests::cash_partial_month_replay_refuses_missing_or_corrupt_earlier_receipt`,
+    // and `api.accept accept refused` (conc11-3), read back by
+    // `server::tests::an_accept_failure_is_logged_once_per_window`.
+    // The three lines above were counted on the zero/next side, without
+    // D-2771's site; both sides' sites are driven, and the figure is re-taken
+    // after the zero/next merge.
+    const REACHED_IN_SERVER_TESTS: usize = 22; // MERGE-RETAKE
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
     const REACHED_IN_RECOVERY_TESTS: usize = 2;
+    // Three sites read back by their own module's tests (conc13-3, conc13-4,
+    // D-2595): `autopilot` halted / stalled / backing off (one site,
+    // `autopilot::note_decision`), read back by
+    // `autopilot::tests::a_halt_a_stall_and_a_backoff_are_logged`; `api.pull
+    // leg failed`, by `pullrun::tests::a_failed_leg_is_logged_at_its_level`; and
+    // the `api.sweep` lease refusal, by
+    // `sweeprun::tests::a_lease_refusal_is_logged_with_its_reason`.
+    const REACHED_IN_MODULE_TESTS: usize = 3;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1746,7 +1765,15 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// previous window`, which needs more than fifty cross-site failures and
     /// then a minute's wait — the ration it reports is proven by
     /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
-    const UNREACHABLE: usize = 10;
+    ///
+    /// AND FIVE MORE, added by the zero-findings fixes (2026-10-06), emitted
+    /// but read back by no test here: `autopilot feeds admitted` (clock-1,
+    /// D-2578), `pull.press started` (atomics-1, D-2582), `api.pull partial
+    /// day refused` (clock-2, D-2584), and `api.server background work
+    /// drained` and `api.server background work abandoned at shutdown`
+    /// (autopilot-4, lifecycle-1, D-2583), whose arms the shutdown tests drive
+    /// but which only write into the sink of a process that is ending.
+    const UNREACHABLE: usize = 15;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1778,16 +1805,31 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 65 -> 66 when both met in the PR #74 merge (D-2779): D-2771 counted its
     // WARN as 63 -> 64 on a side without D-1765's two sites.
+    //
+    // 65 -> 66 at D-2526 (conc13-2): `pull.http transport failed, retrying` in
+    // `server::note_transport_retry`, counted in `REACHED_IN_SERVER_TESTS`.
+    //
+    // 66 -> 76 by the zero-findings fixes of 2026-10-06: two read back in
+    // server tests, three in their own module's tests, five named
+    // unreachable (see the three constants).
+    //
+    // The two lines above were counted on the zero/next side, without D-2771's
+    // site; the figure is re-taken after the zero/next merge.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 66,
+        lib_sites,
+        66, // MERGE-RETAKE
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
+        SITES_HERE
+            + REACHED_IN_SERVER_TESTS
+            + REACHED_IN_RECOVERY_TESTS
+            + REACHED_IN_MODULE_TESTS
+            + UNREACHABLE,
         lib_sites,
         "every emit site is proven here, in server::tests or recovery::tests, or named above"
     );

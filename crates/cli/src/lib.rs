@@ -83,6 +83,9 @@ mod columns_tests;
 mod build_provenance;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
+/// Directory chains whose every new level is made durable before the next
+/// (D-2623; xcut-3, ledgerv6-3).
+mod durable_dir;
 #[cfg(test)]
 mod equity_statement_tests;
 /// Fixed-stride ledger tails: rollback of a failed append and the writer-side
@@ -90,6 +93,11 @@ mod equity_statement_tests;
 mod fixed_tail;
 #[cfg(test)]
 mod g18_cli_a_tests;
+/// A bounded wait for a non-blocking lock a short-lived reader or probe
+/// refuses (D-2620; cli1-2, cli1-3, expr-1, expr-2, indexstop-2).
+mod lock_wait;
+#[cfg(test)]
+mod lookahead_tests;
 #[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
@@ -1879,7 +1887,15 @@ fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> 
                 return refuse(out, &why);
             }
             let text = batch::sweep_all(vendor, rung, h);
-            let code = work_exit(&text);
+            // A WALK WITH A REFUSED MONTH IS NOT A CLEAN RUN (conc13-7,
+            // D-2643). It exited 0 and `run_durable` wrote `completed` while
+            // the tally said `N refused`; each month is still named and the
+            // rest still swept, but the exit says the walk is not whole.
+            let code = if batch::refused_months(&text) > 0 {
+                FAILED
+            } else {
+                work_exit(&text)
+            };
             out.push_str(&text);
             code
         }
@@ -2079,9 +2095,16 @@ fn range_all_arm(
 /// as a function pointer makes the two literally the same code, so a refusal
 /// reworded for one cannot drift from the other -- and it takes forty-six lines
 /// out of a dispatch table `clippy::too_many_lines` had already outgrown.
+///
+/// The exit rule travels with the command (conc13-6, D-2642): `sweep-stored`
+/// takes [`sweep_exit`], so a halted or unmeasured ladder exits [`FAILED`];
+/// `audit-stored` keeps [`work_exit`].
+/// A stored-month command and the exit rule its report is judged by.
+type MonthCommand = (fn(&str, &str, &str, u16, u8, u64) -> String, fn(&str) -> u8);
+
 fn stored_month_arm(
     out: &mut String,
-    command: fn(&str, &str, &str, u16, u8, u64) -> String,
+    (command, exit): MonthCommand,
     what: (&str, &str, &str),
     when: (&str, &str, &str),
 ) -> u8 {
@@ -2099,7 +2122,7 @@ fn stored_month_arm(
                 return refuse(out, &why);
             }
             let text = command(vendor, underlying, rung, y, m, h);
-            let code = work_exit(&text);
+            let code = exit(&text);
             out.push_str(&text);
             code
         }
@@ -2399,16 +2422,40 @@ fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sin
             .with("phase", "running"),
     );
     let code = dispatch(args, out);
-    command_event(
-        sink,
-        attempt,
-        &telemetry::Event::info("cli.lifecycle", "command finished")
-            .with("command", command)
-            .with("sweep_command", is_sweep_command(command))
-            .with("phase", if code == OK { "completed" } else { "refused" })
-            .with("exit_code", u64::from(code)),
-    );
+    command_event(sink, attempt, &finished_event(command, code, out));
     code
+}
+
+/// The `cli.lifecycle` "command finished" event for one exit.
+///
+/// conc13-1, D-2595. It was Info with no reason whatever the code, so a
+/// refused command left one Info line that `/logs?level=warn` hides, and its
+/// reason existed only on stdout while `/backtest/run.json` told the operator
+/// to inspect the logs. A non-OK exit is now Warn and carries `why`: the
+/// page's own refusal line, or a sentence saying it printed none. The
+/// telemetry encoder bounds the value's length.
+fn finished_event<'a>(command: &'a str, code: u8, page: &'a str) -> telemetry::Event<'a> {
+    let event = telemetry::Event::new(
+        if code == OK {
+            telemetry::Level::Info
+        } else {
+            telemetry::Level::Warn
+        },
+        "cli.lifecycle",
+        "command finished",
+    )
+    .with("command", command)
+    .with("sweep_command", is_sweep_command(command))
+    .with("phase", if code == OK { "completed" } else { "refused" })
+    .with("exit_code", u64::from(code));
+    if code == OK {
+        event
+    } else {
+        event.with(
+            "why",
+            refusal_reason(page).unwrap_or("the command printed no refusal line"),
+        )
+    }
 }
 
 fn command_event(
@@ -2437,12 +2484,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
                 // A sweep that walked no ladder measured nothing, and its own
                 // verdict says the answer is not trustworthy. Exiting 0 on it
                 // let `cli sweep 1 10 && <next>` proceed where `cli audit 1 10`
-                // stopped.
-                let code = if carries_refusal(&text) || nothing_measured(&text) {
-                    FAILED
-                } else {
-                    OK
-                };
+                // stopped. A ladder HALTED on a budget is the same verdict
+                // (conc13-6, D-2642): see `sweep_exit`.
+                let code = sweep_exit(&text);
                 out.push_str(&text);
                 code
             }
@@ -2459,12 +2503,18 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
                 (Err(why), _) | (_, Err(why)) => refuse(out, why),
             }
         }
-        ["sweep-stored", feed, under, rung, year, month, hits] => {
-            stored_month_arm(out, sweep_stored, (feed, under, rung), (year, month, hits))
-        }
-        ["audit-stored", feed, under, rung, year, month, hits] => {
-            stored_month_arm(out, audit_stored, (feed, under, rung), (year, month, hits))
-        }
+        ["sweep-stored", feed, under, rung, year, month, hits] => stored_month_arm(
+            out,
+            (sweep_stored, sweep_exit),
+            (feed, under, rung),
+            (year, month, hits),
+        ),
+        ["audit-stored", feed, under, rung, year, month, hits] => stored_month_arm(
+            out,
+            (audit_stored, work_exit),
+            (feed, under, rung),
+            (year, month, hits),
+        ),
         ["checksum-audit-stored", arguments @ ..] if arguments.len() == 7 => {
             command_report(out, checksum_receipts::command(arguments), "CHECKSUM AUDIT")
         }
@@ -2749,6 +2799,22 @@ pub(crate) fn fail(out: &mut String, why: &str) -> u8 {
 /// [`FAILED`] when it carries a refusal, [`OK`] otherwise (P8-03, D-2722).
 fn work_exit(text: &str) -> u8 {
     if carries_refusal(text) { FAILED } else { OK }
+}
+
+/// The exit code of a rendered `sweep` or `sweep-stored` page (conc13-6,
+/// D-2642): [`FAILED`] on a refusal, on a ladder that never walked
+/// ([`nothing_measured`]), and on one its own verdict says may not be
+/// believed ([`untrustworthy`]) -- a ladder halted on a budget prints
+/// `outcome  REFUSED  the walk stopped short`, indented and in neither
+/// spelling [`refusal_reason`] reads, and both arms exited 0 on it while the
+/// run's sweep evidence recorded `Halted`. The same rule [`auto_stored_exit`]
+/// applies (P8-01, D-2720).
+fn sweep_exit(text: &str) -> u8 {
+    if carries_refusal(text) || nothing_measured(text) || untrustworthy(text) {
+        FAILED
+    } else {
+        OK
+    }
 }
 
 /// The words of a stored request, checked before the build, the store or the
@@ -4329,7 +4395,7 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
-    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
+    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars, daily));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -4364,9 +4430,16 @@ fn stored_month_kernel(
     // and before the render, so a run killed while formatting a large report
     // still leaves its result in the log. `halted` is the field that separates
     // "the ladder went extinct" from "a budget stopped it short", which the
-    // count alone cannot say.
+    // count alone cannot say. A HALTED ladder is a Warn (conc13-6, D-2642):
+    // its own verdict says the answer is not trustworthy, and an Info line
+    // read as a healthy run on `/logs`.
+    let walked = if outcome.sweep.halted.is_some() {
+        telemetry::Event::warn("cli.sweep", "ladder walked")
+    } else {
+        telemetry::Event::info("cli.sweep", "ladder walked")
+    };
     note(
-        &telemetry::Event::info("cli.sweep", "ladder walked")
+        &walked
             .with("identity", id.hex().as_str())
             .with("feed", loaded.vendor.as_str())
             .with(
@@ -4787,7 +4860,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
-    out.push_str(&stored::overnight_note(&span.key, &span.bars));
+    out.push_str(&stored::overnight_note(&span.key, &span.bars, &daily));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -5190,8 +5263,26 @@ fn stop_ladder_ppm(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
 /// is the kind of silent wrongness `CLAUDE.md` §4 bans.
 ///
 /// `BRUTEX_MAX_STOP_POINTS` states the stop in index points and converts here,
-/// against the bars actually in hand. Fifty means fifty on every rung and every
-/// span. This is the same conversion `screen` and `elite` already do for their
+/// against the bars actually in hand. Fifty means fifty points AT THE SPAN'S
+/// [`reference_price`], on every rung, so a typed number no longer has to be
+/// re-derived per span.
+///
+/// # What it does not mean, measured (audit-find-17 #6, D-3697)
+///
+/// It is not fifty points on every trade. The converted ppm is applied to each
+/// trade as a fraction of that trade's OWN entry, so on the 2020-01..2026-08
+/// NIFTY span (reference about 1,694,272 paisa, 2,951 ppm) it is about 73.8
+/// points at a 25,000 entry and 22.4 at 7,600. And the reference is the whole
+/// span's `(min low + max high)/2`, so a later bar moves it: doubling only the
+/// last bar's high of `synthetic::sessions(3)` moved the stop from 1,999 ppm to
+/// 1,332. That is the in-sample screen's whole-span derivation, which D-1660
+/// rules in-sample by construction; no walk-forward fold reads this knob, and
+/// `a_stated_stop_is_span_relative_in_sample_and_never_reaches_a_fold` fails
+/// the build if one starts to. A stop of exactly N points per trade needs a
+/// per-entry stop in `runner::grid`, which is recorded as an owner decision,
+/// not done here.
+///
+/// This is the same conversion `screen` and `elite` already do for their
 /// `MAX_POINTS` argument via `ceiling_in_ppm`; those verbs take it positionally
 /// and the range verbs have no such argument, so the knob is how a `range-all`
 /// states it at all.
@@ -7002,7 +7093,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     );
     // D-1540: the month banner names the largest overnight move of a stock's
     // bars, where `month_banner` itself sees only their count.
-    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
+    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars, &daily));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -7037,6 +7128,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         min_hits,
         Some(&id),
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: Some(StoredReplay {
                 daily: &daily,
@@ -7213,16 +7305,19 @@ fn execution_rung_line(rung: &str) -> String {
 ///
 /// Split out of [`audit_range_inner`] to keep it under
 /// `clippy::too_many_lines`. It is one idea: what this run was over, said
-/// before any figure computed from it.
+/// before any figure computed from it. `daily` is the context the caller
+/// already loaded, so the overnight into the span's first session is measured
+/// (p16num-1, D-2546).
 fn span_banner(
     span: &stored::Span,
+    daily: &stored::DailyContext,
     underlying: &str,
     from: (u16, u8),
     to: (u16, u8),
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
-    header.push_str(&stored::overnight_note(&span.key, &span.bars));
+    header.push_str(&stored::overnight_note(&span.key, &span.bars, daily));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7443,6 +7538,8 @@ struct StoredRangeAuditRequest<'a> {
     min_hits: u64,
     attempt: Option<u64>,
     commit: &'static str,
+    /// Where each walk-forward fold's support comes from (D-3696).
+    fold_support: runner::validate::FoldSupport,
 }
 
 /// Why a range audit refuses in a build with no verified commit stamp.
@@ -7471,6 +7568,7 @@ fn audit_range_inner(
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
     audit_range_kernel(StoredRangeAuditRequest {
+        fold_support: runner::validate::FoldSupport::Scaled,
         root,
         vendor,
         underlying,
@@ -7799,6 +7897,7 @@ fn audit_range_kernel_cached(
         min_hits,
         attempt,
         commit,
+        fold_support,
     } = request;
     // BEFORE THE SPAN IS READ, as every recorded kernel does, and here it is
     // load-bearing: `column_withholding_at_build` below writes a preparation
@@ -7910,10 +8009,13 @@ fn audit_range_kernel_cached(
         // Same `policy_of` and the same argument order as
         // `screen_range_inner`'s call, so the two paths key identically and a
         // knob added to one cannot be missed by the other.
-        params: Params::of(ladder).with_policy(&span_policy(
-            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
-            from,
-            to,
+        params: Params::of(ladder).with_policy(&with_fold_support(
+            span_policy(
+                policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+                from,
+                to,
+            ),
+            fold_support,
         )),
         // ONE DATA TERM, BOTH SERIES THAT DECIDE THE ANSWER. On a coarse rung
         // `execution` names the separately loaded one-minute path used for every
@@ -7928,7 +8030,7 @@ fn audit_range_kernel_cached(
         feed: span.vendor.as_str(),
     });
 
-    let mut header = span_banner(span, underlying, from, to, commit);
+    let mut header = span_banner(span, daily, underlying, from, to, commit);
     // WITHHELD DAYS ARE NAMED, NOT COUNTED AND DROPPED.
     //
     // A sweep whose sample is smaller than the operator asked for must say so
@@ -7969,6 +8071,7 @@ fn audit_range_kernel_cached(
         min_hits,
         Some(&id),
         AuditOptions {
+            fold_support,
             prepared_column: Some(column.clone()),
             replay: Some(StoredReplay {
                 daily,
@@ -8759,7 +8862,13 @@ fn refusal_surface(vendor_word: &str, underlying: &str) -> Check {
 /// does not separate concurrent calls within that process or protect leftovers
 /// after pid reuse. No existing path is deleted to make room for this check.
 fn ledger_round_trip() -> Check {
-    let dir = match verification_scratch() {
+    ledger_round_trip_in(verification_scratch())
+}
+
+/// [`ledger_round_trip`] in a scratch directory the caller claimed, or
+/// refused with the claim's own refusal (P16-03, D-2646).
+fn ledger_round_trip_in(scratch: Result<std::path::PathBuf, String>) -> Check {
+    let dir = match scratch {
         Ok(dir) => dir,
         Err(why) => {
             return Check {
@@ -8822,15 +8931,29 @@ fn ledger_round_trip() -> Check {
     }
 }
 
+/// The process-wide serial [`verification_scratch`] claims from.
+static VERIFICATION_SCRATCH_NEXT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 fn verification_scratch() -> Result<std::path::PathBuf, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    verification_scratch_from(&VERIFICATION_SCRATCH_NEXT, "")
+}
+
+/// [`verification_scratch`] over a caller's own counter and name tag, so a
+/// test that predicts which serials are claimed owns the counter it predicts
+/// and the names it claims (P16-03, D-2646). Production passes the
+/// process-wide counter and no tag, so its names are unchanged.
+fn verification_scratch_from(
+    next: &std::sync::atomic::AtomicU64,
+    tag: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::Ordering;
     // Collisions can be old process leftovers. Only atomic create grants
     // ownership; after a fixed number of collisions the check refuses loudly.
     for _ in 0..16 {
-        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let serial = next.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "brutex-verify-ledger-{}-{serial}",
+            "brutex-verify-ledger-{tag}{}-{serial}",
             std::process::id()
         ));
         match std::fs::create_dir(&path) {
@@ -11550,6 +11673,32 @@ const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstr
 /// `latest_for` to find (conc7-1, D-2667). The span is what the record is keyed
 /// by, so it is folded into the identity, after the twenty-one policy terms; a
 /// single-month run keeps the twenty-one and its identity is unchanged.
+/// [`span_policy`] with the walk-forward support policy appended: its word, then
+/// the probe ceiling or `u64::MAX` for none, the convention `ceiling_asked`
+/// already uses. Positional and append-only; `with_policy` folds the length
+/// first, so no earlier identity is reinterpreted. D-3696.
+fn with_fold_support(policy: [u64; 23], support: runner::validate::FoldSupport) -> [u64; 25] {
+    let (word, probe) = match support {
+        runner::validate::FoldSupport::Scaled => (FOLD_SUPPORT_SCALED, u64::MAX),
+        runner::validate::FoldSupport::FirstTraining { probe, .. } => (
+            FOLD_SUPPORT_FIRST_TRAINING,
+            u64::try_from(probe.ceiling()).unwrap_or(u64::MAX),
+        ),
+    };
+    let mut out = [0_u64; 25];
+    for (slot, term) in out.iter_mut().zip(policy.into_iter().chain([word, probe])) {
+        *slot = term;
+    }
+    out
+}
+
+/// [`with_fold_support`]'s word for a count rescaled per fold.
+const FOLD_SUPPORT_SCALED: u64 = 1;
+
+/// [`with_fold_support`]'s word for a threshold probed on the first training
+/// window.
+const FOLD_SUPPORT_FIRST_TRAINING: u64 = 2;
+
 fn span_policy(policy: [u64; 21], from: (u16, u8), to: (u16, u8)) -> [u64; 23] {
     let month = |(year, month): (u16, u8)| u64::from(year) * 100 + u64::from(month);
     let mut out = [0_u64; 23];
@@ -15153,13 +15302,7 @@ fn affordable_min_hits(
     // The ratio is what keeps the probe cheap; the CONSTANT was never the
     // point. `PROBE_SHARE` holds the ratio the build assertion already pins, so
     // a bigger machine gets a proportionally bigger probe and the same safety.
-    let probe = whole_machine_ceiling()
-        .checked_div(PROBE_SHARE)
-        .unwrap_or(SEARCH_CEILING)
-        .max(SEARCH_CEILING);
-    let ladder = Ladder::with_min_hits(1)
-        .with_ceiling(probe)
-        .with_support_lanes(shared_support_lanes());
+    let ladder = probe_ladder();
     let commit = commit_stamp().ok_or_else(|| {
         "the build has no verified commit stamp; no support probe will run".to_owned()
     })?;
@@ -15172,6 +15315,19 @@ fn affordable_min_hits(
         found.outcome.sweep.halted.as_ref(),
     ))?;
     found.min_hits.ok_or_else(|| "no nonempty affordable support probe completed; the rung will not silently fall back to a deeper statistical threshold".to_owned())
+}
+
+/// The ladder [`affordable_min_hits`] probes under, and the one the walk-forward
+/// re-probes each shape's first training window under (D-3696), so both
+/// searches spend the same share of this machine.
+fn probe_ladder() -> Ladder {
+    let probe = whole_machine_ceiling()
+        .checked_div(PROBE_SHARE)
+        .unwrap_or(SEARCH_CEILING)
+        .max(SEARCH_CEILING);
+    Ladder::with_min_hits(1)
+        .with_ceiling(probe)
+        .with_support_lanes(shared_support_lanes())
 }
 
 fn one_rung(
@@ -15322,6 +15478,13 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // KEPT FOR THE SAME REASON, and it is `Copy`, so this costs a memcpy of a
     // nine-bool array and a u64 rather than a clone.
     let excluded = span.excluded;
+    // THE BARS THIS DERIVATION READ, pinned so the sweep can be held to them
+    // (rangeall-1, D-2628). `audit_range_cached` loads the span again; pulls
+    // take no lease, so a month landing between the two reads recorded a
+    // `min_hits` and a `missing` list of read #1 beside the bars and data
+    // digest of read #2, which no single store state reproduces. One digest
+    // of the span, once per rung: linear in its bars, like the load itself.
+    let derived_from = runner::identity::data_digest(&span.bars);
     // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
     //
     // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
@@ -15411,7 +15574,7 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // never sweeps can carry no hit (D-2101). `can_hit` is also what the
     // progress events report as `bars`, so their `support_ppm` is the support
     // actually asked of the sweep.
-    let (min_hits, can_hit) = if let Some(ppm) = named_ppm {
+    let (min_hits, can_hit, fold_support) = if let Some(ppm) = named_ppm {
         // THE AUDIT'S OWN COLUMN, read through the cache `audit_range_cached`
         // consults next, so it is built once either way (D-1557). An
         // unstamped build refuses in `audit_range_cached` before any load, and
@@ -15434,7 +15597,12 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
                 .map_or(retained, |inputs| inputs.column.census().swept),
             None => retained,
         };
-        (min_hits_for_swept(can_hit, ppm), can_hit)
+        // A NAMED FRACTION is decided by no bar, so each fold rescales it.
+        (
+            min_hits_for_swept(can_hit, ppm),
+            can_hit,
+            runner::validate::FoldSupport::Scaled,
+        )
     } else {
         // A NAMED SUPPORT READS ONLY THE THREE FACTS ABOVE, so a descent's held
         // span is never copied; the derivation withholds days from its own
@@ -15509,7 +15677,17 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         let can_hit = column.census().swept;
         let statistical = min_hits_for_swept(can_hit, statistical_support_floor(can_hit));
         match affordable_min_hits(&column, &root, &span, digest) {
-            Ok(affordable) => (affordable.max(statistical), can_hit),
+            // THE SCREEN'S PROBE READ EVERY TEST WINDOW, so the folds re-probe
+            // their first training window instead (audit-find-17 #5, D-3696).
+            // `statistical` reads only how many rows can hit, so it rescales.
+            Ok(affordable) => (
+                affordable.max(statistical),
+                can_hit,
+                runner::validate::FoldSupport::FirstTraining {
+                    probe: probe_ladder(),
+                    floor: statistical,
+                },
+            ),
             Err(why) => {
                 return RungRow {
                     rung,
@@ -15522,6 +15700,35 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
             }
         }
     };
+
+    // rangeall-1, D-2628: the audit's own load (built once and cached, so
+    // `audit_range_cached` reuses it) must hold the bars the support and the
+    // `missing` list were derived from. A refusal of that load is left for
+    // `audit_range_cached` to name with its own reason.
+    if let Some(commit) = store.commit
+        && let Some(moved) = span_moved_since_derivation(
+            cache,
+            AuditKey {
+                root: root.clone(),
+                vendor,
+                underlying: underlying.to_owned(),
+                rung: rung.to_owned(),
+                span: (from, to),
+                commit: commit.to_owned(),
+            },
+            || load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit),
+            derived_from,
+        )
+    {
+        return RungRow {
+            rung,
+            outcome: Err(moved),
+            missing,
+            excluded,
+            retention: None,
+            validation: None,
+        };
+    }
 
     // ENTERING THE SWEEP IS ALSO AN EVENT, AND THE SILENCE BELOW IT IS THE LONG
     // ONE.
@@ -15562,7 +15769,14 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
     // The long report is DISCARDED on purpose: nine of them is six thousand
     // lines. The row is read back from the store, which is the point of having
     // one.
-    let text = audit_range_cached(&root, vendor, store.commit, ask, min_hits, cache);
+    let text = audit_range_cached(
+        &root,
+        vendor,
+        store.commit,
+        ask,
+        (min_hits, fold_support),
+        cache,
+    );
     // LIFTED BEFORE `text` GOES OUT OF SCOPE. The two scanners below already
     // read this string for a refusal and for a not-recorded sentence; this is
     // the third question it answers and the only one nothing was asking.
@@ -15663,6 +15877,24 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         retention,
         validation,
     }
+}
+
+/// The refusal when the audit's span is not the span `one_rung_cached`
+/// derived its support from (rangeall-1, D-2628).
+const SPAN_MOVED: &str = "the stored span changed between the support derivation and the sweep (bars landed between the two reads); nothing was swept or recorded for this rung -- rerun";
+
+/// `Some(refusal)` when the audit inputs `cache` holds (loading them through
+/// `load` if needed) were folded over bars whose digest is not `derived_from`.
+/// `None` when they match, and when the load refused: that refusal belongs to
+/// `audit_range_cached`, which reads the same cached answer.
+fn span_moved_since_derivation(
+    cache: &mut AuditCache,
+    key: AuditKey,
+    load: impl FnOnce() -> Result<AuditInputs, stored::Refusal>,
+    derived_from: [u8; 32],
+) -> Option<String> {
+    let inputs = cache.inputs(key, load).ok()?;
+    (runner::identity::data_digest(&inputs.folded) != derived_from).then(|| SPAN_MOVED.to_owned())
 }
 
 /// Trading weeks a month holds, times one hundred.
@@ -18300,10 +18532,13 @@ fn screen_range_kernel_cached(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&span_policy(
-            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
-            from,
-            to,
+        params: Params::of(ladder).with_policy(&with_fold_support(
+            span_policy(
+                policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+                from,
+                to,
+            ),
+            runner::validate::FoldSupport::Scaled,
         )),
         data_digest: stored_withheld_executed_digest(
             withholding,
@@ -18314,7 +18549,7 @@ fn screen_range_kernel_cached(
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header = span_banner(span, underlying, from, to, commit);
+    let mut header = span_banner(span, daily, underlying, from, to, commit);
     if withheld > 0 {
         let dates = holed_days
             .iter()
@@ -18340,6 +18575,7 @@ fn screen_range_kernel_cached(
         min_hits,
         Some(&id),
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: column.clone(),
             replay: Some(StoredReplay {
                 daily,
@@ -18395,7 +18631,7 @@ fn audit_range_cached(
     vendor: Vendor,
     commit: Option<&'static str>,
     ask: RungAsk<'_>,
-    min_hits: u64,
+    (min_hits, fold_support): (u64, runner::validate::FoldSupport),
     cache: &mut AuditCache,
 ) -> String {
     // NO RUNG CHECK HERE: every caller's rung is one of `EVERY_RUNG`
@@ -18407,6 +18643,7 @@ fn audit_range_cached(
         .and_then(|commit| {
             audit_range_kernel_cached(
                 StoredRangeAuditRequest {
+                    fold_support,
                     root: root.to_path_buf(),
                     vendor,
                     underlying: ask.underlying,
@@ -18467,6 +18704,7 @@ fn audit_with(
         min_hits,
         None,
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: None,
             execution: None,
@@ -18595,6 +18833,12 @@ struct AuditOptions<'a> {
     /// instead of being told, as every stock audit was until this field
     /// existed, that there is no brokerage, STT, stamp or GST.
     cost: audit::CostScope,
+    /// Where each walk-forward fold's support threshold comes from. Every
+    /// caller that hands this audit a count no later bar decided passes
+    /// [`runner::validate::FoldSupport::Scaled`]; the range path whose count
+    /// came from the whole-span affordability probe passes
+    /// [`runner::validate::FoldSupport::FirstTraining`]. D-3696.
+    fold_support: runner::validate::FoldSupport,
 }
 
 /// Borrowed causal evidence for stored walk-forward column rebuilds.
@@ -20447,6 +20691,11 @@ fn ranked_with_progress(
 /// completed. `record_all` returns the `NOT_RECORDED` report and a false commit
 /// flag; command classification recognizes that exact report marker. A live
 /// view's final cleanup is separate from permanent result authority.
+///
+/// An uncommitted run's `live` is DROPPED here, and `Live`'s `Drop` removes
+/// its file (conc17-1, D-2641): a refused command is not a search still
+/// going, and its leftover was served by `/live.json` as one. A process
+/// killed between the two steps still keeps its file, as above.
 fn record_and_finish(
     recording: Option<Recording<'_>>,
     id: Option<&runner::identity::RunId>,
@@ -20690,7 +20939,7 @@ fn bootstrap_family(
 ) -> Option<(
     Option<runner::bootstrap::Verdict>,
     Option<runner::bootstrap::Verdict>,
-    usize,
+    Option<usize>,
 )> {
     // THE BOOTSTRAP, WHICH NEEDED A DIFFERENT SHAPE OF DATA FROM PBO.
     //
@@ -20792,14 +21041,18 @@ fn bootstrap_family(
     );
     // THE STEPDOWN, at the same 5% the two rows above are judged at, so one
     // report carries one alpha rather than two.
-    let named = runner::bootstrap::romano_wolf(
+    // A REFUSED STEPDOWN IS `None`, NOT ZERO (p4num-1, D-2617). `romano_wolf`
+    // answers a family too short for the block with an empty list, which the
+    // report used to print as "names 0", a stepdown that ran and rejected
+    // nothing. The receipt tells the two apart.
+    let named = runner::bootstrap::romano_wolf_receipt(
         &family,
         draws,
         BOOTSTRAP_SEED,
         runner::bootstrap::DEFAULT_BLOCK,
         BOOTSTRAP_ALPHA_PPM,
     )
-    .len();
+    .map(|receipt| receipt.rejected().len());
     let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), named));
     let _ = boot;
     if family.is_empty() {
@@ -21933,6 +22186,7 @@ fn audit_bars_work(
         ceiling,
         validate,
         cost,
+        fold_support,
     } = opts;
     let prepared_column = match (prepared_column, replay) {
         (None, Some(replay)) => match replay.column_of(&bars) {
@@ -22440,6 +22694,7 @@ fn audit_bars_work(
                 &fresh,
                 replay,
                 walk_forward_rungs(),
+                fold_support,
                 &|progress| note_validation_fold(recording, progress),
             )
         })
@@ -22664,6 +22919,8 @@ fn both_shapes(
     replay: Option<StoredReplay<'_>>,
     // A POLICY, NOT A COUNT (GAP4-46). The whole-span count read test windows.
     rungs: runner::validate::FoldRungs<'_>,
+    // AND THE SUPPORT IS A POLICY TOO (D-3696): a whole-span probe read test windows.
+    support: runner::validate::FoldSupport,
     on_fold: &(dyn Fn(runner::validate::FoldProgress) + Sync),
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
@@ -22695,6 +22952,7 @@ fn both_shapes(
             &mut builder,
             runner::split::Shape::Anchored,
             rungs,
+            support,
             on_fold,
         );
         let rolling = runner::validate::walk_forward_projected_prepared_with_rungs(
@@ -22707,6 +22965,7 @@ fn both_shapes(
             &mut builder,
             runner::split::Shape::Rolling,
             rungs,
+            support,
             on_fold,
         );
         (anchored, rolling)
@@ -22721,6 +22980,7 @@ fn both_shapes(
             &mut || *fresh,
             runner::split::Shape::Anchored,
             rungs,
+            support,
             on_fold,
         );
         let rolling = runner::validate::walk_forward_projected_with_rungs(
@@ -22733,6 +22993,7 @@ fn both_shapes(
             &mut || *fresh,
             runner::split::Shape::Rolling,
             rungs,
+            support,
             on_fold,
         );
         (anchored, rolling)
@@ -23390,6 +23651,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// conc13-1, D-2595. On the old code "command finished" was Info with no
+    /// `why` for every exit code, so a refused command was invisible at
+    /// `/logs?level=warn` and its reason lived only on stdout. Every exit code
+    /// is driven, with and without a refusal line on the page.
+    #[test]
+    fn a_refused_command_finishes_at_warn_with_its_reason() {
+        let why_of = |event: &telemetry::Event<'_>| -> Option<String> {
+            let mut found = None;
+            for (key, value) in event.fields() {
+                if *key == "why"
+                    && let telemetry::Value::Str(text) = value
+                {
+                    found = Some((*text).to_owned());
+                }
+            }
+            found
+        };
+        let refused_page =
+            "PROVENANCE\nrefused: `scrreen` is not a command this build knows\nusage";
+        for code in [super::OK, super::FAILED, MISUSED, 3, u8::MAX] {
+            for page in [refused_page, "", "a report with no refusal line"] {
+                let event = super::finished_event("screen", code, page);
+                if code == super::OK {
+                    assert_eq!(event.level(), telemetry::Level::Info, "{code} {page:?}");
+                    assert_eq!(why_of(&event), None, "{code} {page:?}");
+                } else {
+                    assert_eq!(event.level(), telemetry::Level::Warn, "{code} {page:?}");
+                    let why = why_of(&event).expect("a refused exit carries why");
+                    if page == refused_page {
+                        assert!(why.contains("`scrreen` is not a command"), "{why}");
+                    } else {
+                        assert_eq!(why, "the command printed no refusal line");
+                    }
+                }
+            }
+        }
+        // And end to end through a private sink: the refused command's
+        // finished line is Warn and names the refusal.
+        let root = std::env::temp_dir().join(format!(
+            "brutex-command-why-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&root)).expect("private sink");
+        let mut out = String::new();
+        assert_eq!(
+            super::run_with_sink(&argv(&["scrreen"]), &mut out, Some(&sink)),
+            MISUSED
+        );
+        let events = telemetry::tail(
+            &root,
+            sink.keep_files(),
+            &telemetry::Query::last(8).from_target("cli.lifecycle"),
+        )
+        .records;
+        let mut finished = 0;
+        for event in &events {
+            if event.message == "command finished" {
+                finished += 1;
+                assert_eq!(event.level, telemetry::Level::Warn, "{event:?}");
+                let why = event
+                    .field("why")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .expect("why");
+                assert!(why.contains("`scrreen` is not a command"), "{why}");
+            }
+        }
+        assert_eq!(finished, 1, "{events:?}");
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn pbo_keeps_an_empty_fold_as_explicit_unrankable_evidence() {
         assert!(
@@ -23992,6 +24326,60 @@ mod tests {
         assert!(!untrustworthy(""));
     }
 
+    /// conc13-6 (D-2642): a ladder HALTED on a budget exits `FAILED` from
+    /// `sweep-stored` (and `sweep`), as its own verdict and its sweep evidence
+    /// say; a NOTHING MEASURED page does too; a complete page exits `OK`; and
+    /// `audit-stored` keeps its rule. On the old code `stored_month_arm` read
+    /// `work_exit` alone, and the halted verdict row -- `outcome  REFUSED  the
+    /// walk stopped short`, indented -- is no refusal spelling, so the halted
+    /// fixture exited `OK`.
+    #[test]
+    fn a_halted_sweep_stored_exits_failed() {
+        use super::{stored_month_arm, sweep_exit, work_exit};
+        fn halted(_: &str, _: &str, _: &str, _: u16, _: u8, _: u64) -> String {
+            "STORED SWEEP FIXTURE\nVERDICT\n  outcome                         REFUSED  the walk stopped short\n  trustworthy as a whole answer        NO  \n".to_owned()
+        }
+        fn unmeasured(_: &str, _: &str, _: &str, _: u16, _: u8, _: u64) -> String {
+            "STORED SWEEP FIXTURE\nVERDICT\n  outcome                NOTHING MEASURED  no ladder was walked -- this is not extinction\n  trustworthy as a whole answer        NO  \n".to_owned()
+        }
+        fn complete(_: &str, _: &str, _: &str, _: u16, _: u8, _: u64) -> String {
+            "STORED SWEEP FIXTURE\nVERDICT\n  outcome                        complete  the frontier went extinct, which is the answer\n  trustworthy as a whole answer       yes  \n".to_owned()
+        }
+        let what = ("zerodha", "NIFTY", "1min");
+        let when = ("2025", "5", "1");
+        for (command, want) in [
+            (
+                halted as fn(&str, &str, &str, u16, u8, u64) -> String,
+                FAILED,
+            ),
+            (unmeasured, FAILED),
+            (complete, OK),
+        ] {
+            let mut out = String::new();
+            assert_eq!(
+                stored_month_arm(&mut out, (command, sweep_exit), what, when),
+                want,
+                "{out}"
+            );
+            assert_eq!(sweep_exit(&out), want, "{out}");
+        }
+        // The halted page carries no refusal spelling: only the verdict says so.
+        let page = halted("", "", "", 0, 0, 0);
+        assert!(!carries_refusal(&page), "{page}");
+        assert!(untrustworthy(&page), "{page}");
+        assert_eq!(work_exit(&page), OK, "audit-stored's own rule is unchanged");
+        // A refusal still fails, whatever the verdict.
+        assert_eq!(sweep_exit("refused: no bars\n"), FAILED);
+        assert_eq!(sweep_exit(""), OK);
+        // Argument refusals keep MISUSED, before any work.
+        let mut out = String::new();
+        assert_eq!(
+            stored_month_arm(&mut out, (complete, sweep_exit), what, ("2025", "x", "1")),
+            MISUSED,
+            "{out}"
+        );
+    }
+
     /// Every refusal NAMES what was wrong and prints the usage.
     ///
     /// All three spellings of a refusal are one, and a report is still a report.
@@ -24062,7 +24450,7 @@ mod tests {
         let mut report = String::new();
         let status = super::stored_month_arm(
             &mut report,
-            failed_recording,
+            (failed_recording, super::work_exit),
             ("zerodha", "NIFTY", "1min"),
             ("2025", "5", "1"),
         );
