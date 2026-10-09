@@ -1980,10 +1980,14 @@ fn descend_arm(
 /// row — indistinguishable from a rung that never started.
 ///
 /// `range_over` has taken a rung subset since it was written; it simply had no
-/// verb. Asked for ONE rung it sets `SharedBy::these(1)`, so that rung gets the
+/// verb. Asked for ONE rung, one sweep is in flight and nothing raises
+/// `SWEEPS_SHARING_THIS_MACHINE` above its resting 1, so that rung gets the
 /// full ceiling and every support lane — and a caller running the eight in
 /// sequence gets both a deeper search per rung and a row after each one, rather
-/// than eight starved rungs and nothing until they all finish.
+/// than eight starved rungs and nothing until they all finish. (This said it
+/// "sets `SharedBy::these(1)`"; no code does, and since D-1701 `sweep_rungs`
+/// runs every rung one at a time and raises no `SharedBy` at all -- D-1709,
+/// D-4706.)
 ///
 /// It takes the same `auto` token: support derived per rung from that rung's own
 /// bars, nothing typed.

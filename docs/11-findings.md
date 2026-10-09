@@ -1072,3 +1072,30 @@ stays IN PROGRESS naming its branch commit until the squash merge to `main`.
 - **`F-8D5073`** (`gap`) — The vocabulary documents stated counts and kinds the table does not hold: void Near rows marked untoleranced, sixteen void names for thirteen, 70 free positions for 14, and a group table stopping at 273. Where: `docs/03-vocabulary.md` (rows 235–271, crossings section); `docs/04-invariants.md` CX-04, CX-05; `crates/vocab/src/table.rs:14-29`; `crates/vocab/src/lib.rs`. Disposition: IN PROGRESS — fixed on `attack/permutations` 3c5c237d (D-3406, XPERM-06); lands with the squash merge to `main`.
 - **`F-0486DA`** (`wrong`) — worst_reward_risk_bp scored a single observation i64::MAX, above payoff_bp, so one lucky move topped the asymmetry ranking. Where: `crates/runner/src/outcome.rs` (`Edge::worst_reward_risk_bp`); `crates/runner/src/rank.rs` (`ByAsymmetry`). Disposition: IN PROGRESS — fixed on `attack/permutations` 24c7e3a (D-3407, XPERM-07); lands with the squash merge to `main`.
 - **`F-1D5275`** (`wrong`) — trades_needed_for documented measured values its ceiling-rounded record does not return, and a monotone threshold it does not have. Where: `crates/runner/src/grid.rs` (`trades_needed_for` doc, `Cell::at_rate`). Disposition: IN PROGRESS — fixed on `attack/permutations` bc1e1f45 (D-3408, XPERM-08); lands with the squash merge to `main`.
+
+### Correction: two ordered-write records credit superseded decisions — 2026-10-09
+
+Narrative only. No row is added to the tables above, and no row above is
+edited, because this file is append-only. D-4706 records the correction.
+
+- **audit-20261003 hunt-conc-1 (KNOWN GAP13-13)**, the table row that
+  credits **D-1564**. It credits D-1564's windowed four-phase walk and says
+  `range-all`, `pool` and the Boolean pools "are stated as
+  completion-ordered … not changed". Both halves were superseded.
+  - `sweep-all`: D-1708 kept D-1701's shape over D-1564. Chunks are one
+    month per worker. Every attempt in a chunk is begun by one `begin_many`
+    in input order, and the months are then filed one at a time in input
+    order.
+  - `range-all` and `pool` pass 1: these were changed. They run `one_rung`
+    one call at a time in input order (D-1701), and D-1709 kept that shape.
+  - The Boolean family pools write through `ordered::map` lanes (D-1556).
+- **audit-20261003 hunt-conc-1** (`range-all`, `pool` pass 1), the narrative
+  bullet that credits **D-1556**. For those two loops D-1709 superseded it
+  and kept D-1701's one-at-a-time loop over D-1556's ordered lanes. D-1556
+  still holds for the Boolean family pools (hunt-conc-2).
+- **`pool-oos` pass 1 (G1-1)** re-introduced the pre-D-1701 parallel shape
+  in a verb added after D-1701. IN PROGRESS — fixed on `final/all-fixes`
+  (D-4700); lands with the squash merge to `main`.
+- **A `sweep-all` month whose column build refused (G1-2)** still journaled
+  its Refused terminal from a rayon worker. IN PROGRESS — fixed on
+  `final/all-fixes` (D-4701); lands with the squash merge to `main`.

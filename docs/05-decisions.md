@@ -65328,3 +65328,31 @@ builds itself (`runner/src/trade.rs`), and the equality test drives that.
 **Cost.** One O(B) facts build per span instead of U. Each candidate's walk
 is unchanged: it still visits every row of the column, which is Θ(B) per
 candidate. `docs/06-limits.md` states it.
+
+### D-4706 — Two false texts about pass 1's sharing and order are corrected — 2026-10-09
+
+**What was wrong.** G1-3. Two texts stated something about pass 1 that is not
+true.
+- **`range_rung_arm`'s doc** (`crates/cli/src/lib.rs`) said that, asked for
+  one rung, it "sets `SharedBy::these(1)`". No code does that. Since D-1701,
+  `sweep_rungs` raises no `SharedBy`, and D-1709 kept that shape, so one
+  sweep is in flight and the counter stays at its resting 1. The only
+  production `SharedBy::these` is in `batch.rs`.
+- **Two places in `docs/11-findings.md`** credit superseded decisions.
+  - The table row for audit-20261003 hunt-conc-1 (KNOWN GAP13-13) credits
+    D-1564. It says `range-all`, `pool` and the Boolean pools are "stated as
+    completion-ordered … not changed".
+  - The narrative bullets credit D-1556 for `range-all` and `pool` pass 1.
+  - Both were superseded: by D-1701 and D-1708 for `sweep-all`, and by
+    D-1701 and D-1709 for `range-all` and `pool` pass 1.
+
+**Decided.**
+- The doc now states what holds and says what it claimed until this entry.
+- `docs/11-findings.md` is append-only, so no row there is edited. A
+  narrative correction at its tail names the superseding decisions. It adds
+  no `F-` row and cites no commit.
+
+`pool.rs`'s "in parallel" header, the third text G1-3 names, is corrected
+with the code under D-4700.
+
+**What changes in results.** Nothing. These are text changes only.
