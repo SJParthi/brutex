@@ -323,7 +323,9 @@ pub fn bonferroni_t(n: u64) -> f64 {
 ///
 /// The Student-t tail is always heavier than the normal one, so this never
 /// admits a row [`bonferroni_t`] would refuse; it only refuses rows the normal
-/// bar admitted across two distributions.
+/// bar admitted across two distributions. Past [`STUDENT_DF_CEILING`] degrees
+/// of freedom the tail is read at the ceiling, which is heavier still, so that
+/// direction holds at every `df` (D-4505).
 ///
 /// Fewer than two observations have no degrees of freedom and never clear. A
 /// non-finite `t` other than an infinity never clears. No trials at all is the
@@ -367,7 +369,10 @@ pub fn clears_bonferroni_milli(t_milli: i64, observations: u64, trials: u64) -> 
 /// with `df` degrees of freedom: the `|t|` at which [`clears_bonferroni`] turns.
 ///
 /// Found by bisection on [`student_t_two_sided_tail`], which is monotone in
-/// `|t|`, to well inside the two decimals a report prints. Returns 0 for no
+/// `|t|`, to well inside the two decimals a report prints. Past
+/// [`STUDENT_DF_CEILING`] degrees of freedom it is the bar AT the ceiling:
+/// never below [`bonferroni_t`] and at most `2.149e-5` above it, measured
+/// (D-4505). Returns 0 for no
 /// trials, as [`bonferroni_t`] does, and NaN for `df == 0`, where the
 /// distribution does not exist.
 #[must_use]
@@ -409,19 +414,47 @@ pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
 /// incomplete-beta tail loses digits as `df` grows: an audit measured the
 /// Student-t bar BELOW the normal bar at `df = 1e9` and `1e12`, wrong by more
 /// than a whole t-unit past `1e14`, and the tail of `t = 6` at exactly `1.0` at
-/// `df = 1e18`. At this ceiling the lost digits are about `1e-16 · (df/2) ·
-/// ln(df/2) ≈ 1e-8` of the tail, four orders below the Student-minus-normal gap
-/// they would have to cross.
+/// `df = 1e18`.
+///
+/// At this ceiling the tail's error is MEASURED, not estimated: against a
+/// four-term Fisher expansion of the Student tail, over `t` from 1.9 to 9.6 in
+/// steps of 0.001, the relative error is at most `1.4e-8` (signed `-1.38e-8`
+/// to `+4.7e-9`). The Student-minus-normal gap it would have to cross is
+/// `5.5e-7` of the tail at `t = 1.96` and wider at every larger `t`, so the
+/// margin is about forty times, not the "four orders" an estimate of
+/// `1e-16 · (df/2) · ln(df/2)` first claimed here. The same harness read the
+/// error at `1.7e-6` at `df = 1e6`, `3.9e-8` at `1e8` and `7.6e-7` at `1e9`,
+/// where the gap is `5.5e-9`: past about `1e8` the error is the larger, which
+/// is why the ceiling is not higher. Measured by a scratch harness outside
+/// this repository that runs this file's own functions (D-4505).
 ///
 /// For a fixed `|t|` the true two-sided tail FALLS as `df` grows, toward the
 /// normal tail, so the tail at the ceiling is never lighter than the true tail
-/// at any larger `df`. Reading it there can only refuse a row the exact tail
-/// would admit, never admit one it would refuse, and the bar it implies is
-/// never below the normal bar. How far above the exact bar it can sit is
-/// bounded by the gap between the bar at the ceiling and the normal bar, the
-/// Fisher expansion's `(t^3 + t) / (4 df)` to first order: MEASURED below
-/// 2.3e-5 t-units for every trial count from 1 to `u64::MAX` by
-/// `the_student_t_bar_is_monotone_and_never_below_the_normal_bar_at_any_df`.
+/// at any larger `df` by more than its own measured error above (`1.4e-8`
+/// relative, which only matters within a few hundred `df` of the ceiling,
+/// where the true tails differ by less than that). Reading it there can only
+/// refuse a row the exact tail would admit, beyond that error, and the bar it
+/// implies is never below the normal bar: its margin is at least `2.37e-7`
+/// t-units against a rounding of at most `1.711e-8`. How far above the exact
+/// bar it can sit is bounded by the gap between the bar at the ceiling and the
+/// normal bar, the Fisher expansion's `(t^3 + t) / (4 df)` to first order:
+/// MEASURED from
+/// `2.37e-7` (one trial) to `2.149e-5` t-units (`u64::MAX` trials) over every
+/// power-of-two trial count, and held under `2.2e-5` by
+/// `the_student_t_bar_is_monotone_within_its_rounding_and_never_below_the_normal_bar_at_any_df`.
+///
+/// # Monotone in `df`, to its rounding
+///
+/// Past the ceiling the tail and the bar are constant in `df`, bit for bit.
+/// Below it they are monotone only to the incomplete beta's rounding, MEASURED
+/// by the same harness: on a geometric grid of 296 `df` values from 1 to
+/// `u64::MAX` (every integer to 64, then steps of `2^(1/4)`), 43 trial counts
+/// read 12,136 bars with no rise and none at or below the normal bar, and the
+/// tail rose in 69 of 237,096 readings, every one at `t <= 1.70`, below any
+/// bar, by at most `3.4e-8` relative. Between ADJACENT `df` values the bar
+/// does rise: 28,150 of 105,000 adjacent pairs sampled at five points up to
+/// the ceiling, by at most `1.711e-8` t-units (one trial, `df` 9,998,931),
+/// six orders below the two decimals a report prints.
 pub const STUDENT_DF_CEILING: u64 = 10_000_000;
 
 /// `P(|T| >= |t|)` for Student's t with `df` degrees of freedom.
@@ -432,8 +465,9 @@ pub const STUDENT_DF_CEILING: u64 = 10_000_000;
 /// a CDF, so a tail of `1e-10` keeps its digits. NaN in, NaN out.
 ///
 /// Above [`STUDENT_DF_CEILING`] degrees of freedom the tail is the one AT the
-/// ceiling: never lighter than the exact tail, so conservative, and monotone
-/// non-increasing in `df` over every `u64` (D-4505).
+/// ceiling, so conservative to within its measured error, and constant in `df`
+/// from there to `u64::MAX`; below the ceiling it is monotone in `df` only to
+/// its rounding, measured on [`STUDENT_DF_CEILING`] (D-4505).
 #[must_use]
 pub fn student_t_two_sided_tail(t: f64, df: u64) -> f64 {
     if t.is_nan() || df == 0 {
@@ -816,9 +850,9 @@ fn upper_tail_quantile(alpha: f64) -> f64 {
 )]
 mod tests {
     use super::{
-        benjamini_hochberg, bonferroni_t, bonferroni_t_student, clears_bonferroni,
-        clears_bonferroni_milli, effective_trials, expected_max_bailey, expected_max_t,
-        inverse_normal_cdf, normal_cdf, p_value, student_t_two_sided_tail, trials,
+        STUDENT_DF_CEILING, benjamini_hochberg, bonferroni_t, bonferroni_t_student,
+        clears_bonferroni, clears_bonferroni_milli, effective_trials, expected_max_bailey,
+        expected_max_t, inverse_normal_cdf, normal_cdf, p_value, student_t_two_sided_tail, trials,
         trials_with_grid,
     };
     use engine::{Frontier, Itemset, Sweep};
@@ -1138,6 +1172,88 @@ mod tests {
         assert!(clears_bonferroni(0.0, 30, 0), "no trials is the zero bar");
         assert!(bonferroni_t_student(0, 29).abs() < f64::MIN_POSITIVE);
         assert!(bonferroni_t_student(3_689, 0).is_nan());
+    }
+
+    /// THE STUDENT-T BAR CANNOT LOSE ITS DIGITS AT LARGE DF. Audit satk-7, D-4505.
+    ///
+    /// The incomplete-beta tail loses digits as `df` grows: the audit measured
+    /// the bar BELOW the normal bar at `df = 1e9` and `1e12`, more than a
+    /// t-unit wrong past `1e14`, and the tail of `t = 6` at exactly `1.0` at
+    /// `df = 1e18`. With the tail read at [`STUDENT_DF_CEILING`] above it, for
+    /// trial counts from one to `u64::MAX` and degrees of freedom from one to
+    /// `u64::MAX`: the bar never rises as `df` grows by more than the
+    /// rounding allowance (measured largest rise between adjacent `df`,
+    /// `1.711e-8` t-units; one adjacent pair is in the list), it is never at or
+    /// below the normal bar, every `df` past the ceiling reads the ceiling's
+    /// bar and tail bit for bit, and that bar sits less than `2.2e-5` t-units
+    /// above the normal bar (measured `2.149e-5` at `u64::MAX` trials).
+    #[test]
+    fn the_student_t_bar_is_monotone_within_its_rounding_and_never_below_the_normal_bar_at_any_df()
+    {
+        const ROUNDING: f64 = 2e-8;
+        let dfs = [
+            1,
+            2,
+            5,
+            29,
+            30,
+            1_000,
+            100_000,
+            STUDENT_DF_CEILING - 1,
+            STUDENT_DF_CEILING,
+            STUDENT_DF_CEILING + 1,
+            1_000_000_000,
+            1_000_000_000_000,
+            100_000_000_000_000,
+            1_000_000_000_000_000_000,
+            u64::MAX,
+        ];
+        for trials in [1, 2, 3_689, 61_125_295, 1 << 32, 1 << 53, u64::MAX] {
+            let normal = bonferroni_t(trials);
+            let mut previous = f64::INFINITY;
+            for df in dfs {
+                let bar = bonferroni_t_student(trials, df);
+                assert!(
+                    bar <= previous + ROUNDING,
+                    "{trials} trials: the bar rose to {bar} at df {df} from {previous}"
+                );
+                assert!(
+                    bar > normal,
+                    "{trials} trials, df {df}: Student-t bar {bar} at or below the normal bar {normal}"
+                );
+                previous = bar;
+            }
+            let at_ceiling = bonferroni_t_student(trials, STUDENT_DF_CEILING);
+            assert!(
+                bonferroni_t_student(trials, 100_000) > at_ceiling + ROUNDING,
+                "{trials} trials: below the ceiling the bar still falls with df"
+            );
+            for df in [STUDENT_DF_CEILING + 1, 1_000_000_000_000, u64::MAX] {
+                assert_eq!(
+                    bonferroni_t_student(trials, df).to_bits(),
+                    at_ceiling.to_bits(),
+                    "{trials} trials, df {df}: past the ceiling the bar is the ceiling's"
+                );
+            }
+            assert!(
+                at_ceiling - normal < 2.2e-5,
+                "{trials} trials: the ceiling's bar {at_ceiling} is {} above the normal bar",
+                at_ceiling - normal
+            );
+        }
+        for t in [1.96, 4.0, 6.0, 9.5, 20.0] {
+            for df in [STUDENT_DF_CEILING + 1, 1_000_000_000_000, u64::MAX] {
+                assert_eq!(
+                    student_t_two_sided_tail(t, df).to_bits(),
+                    student_t_two_sided_tail(t, STUDENT_DF_CEILING).to_bits(),
+                    "t {t}, df {df}"
+                );
+            }
+        }
+        // The audit's tail of exactly 1.0 at t = 6 and df = 1e18: the normal
+        // two-sided tail there is about 1.97e-9.
+        let six = student_t_two_sided_tail(6.0, 1_000_000_000_000_000_000);
+        assert!(six > 1.9e-9 && six < 2.1e-9, "{six}");
     }
 
     #[test]

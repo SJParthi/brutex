@@ -135,9 +135,11 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    honest limits; describing either historical defect as current would now be a
    second documentation defect.
 
-   *Mask evaluation* is O(1) per bar in the production
-   `engine::column::Column::support` path. The owned column is row-major and
-   folds exactly one fixed-six-word `vocab::ConditionMask::hits` call per bar,
+   *Mask evaluation* is O(1) per bar per candidate in the production
+   `engine::column::Column::support_each` path, which counts a whole batch of
+   candidates against each 512-row block of the column before the next
+   (D-4481, D-4487). The owned column is row-major and every (bar, candidate)
+   pair folds exactly one fixed-six-word `vocab::ConditionMask::hits` call,
    independent of candidate width and of whether the row matches. The former
    vertical implementation did one bitmap intersection per named condition and
    was Θ(k); `C-E-02b` retains that failed measurement, while `C-E-02`,

@@ -1339,7 +1339,10 @@ struct Allowlists {
 }
 
 /// Rule 1. docs/07 layer 4: never `binary_search`.
-const ALLOW_SEARCH: Allow = &[("crates/store/src/file.rs", 1)];
+const ALLOW_SEARCH: Allow = &[
+    ("crates/store/src/file.rs", 1),
+    ("crates/runner/src/trade.rs", 1),
+];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
 const ALLOW_FLOAT: Allow = &[
@@ -1358,7 +1361,7 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/runner/src/admission.rs", 4),
     ("crates/runner/src/bootstrap.rs", 52),
     ("crates/runner/src/bootstrap_family_pass.rs", 17),
-    ("crates/runner/src/outcome.rs", 26),
+    ("crates/runner/src/outcome.rs", 27),
     ("crates/runner/src/report.rs", 4),
     ("crates/runner/src/validate.rs", 1),
     ("crates/store/src/format.rs", 14),

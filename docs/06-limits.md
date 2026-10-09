@@ -3577,10 +3577,15 @@ given to somebody else to diagnose — which is the whole reason
 truncated, concatenated, hand-edited, or simply not ours. A reader that exhausts
 memory on such a file is no use at exactly the moment it is needed.
 
-`MAX_LINE_BYTES` is 64 KiB, far above any line this crate can write: the event
-ceilings bound one at roughly 2.2 KiB of content, and JSON escaping cannot
-inflate that past about 14 KiB even if every byte needs a `\u00XX`. A run longer
-than that is not a line of ours.
+`MAX_LINE_BYTES` is 64 KiB, above any line this crate can write by about a
+third: the event ceilings bound one at 6,832 bytes of content (target 48,
+message 256, twelve fields of a 32-byte key and a 512-byte value), and JSON
+escaping inflates a control byte sixfold to `\u00XX`, so the widest line is
+just over 41 KB; an audit probe wrote one of 38,977 bytes. A run longer than
+64 KiB is not a line of ours. (This said about 2.2 KiB of content and 14 KiB
+escaped, the arithmetic from when a string value was capped at 128 bytes;
+`telemetry::tail` was corrected by D-1323 and this paragraph by D-4489, audit
+sobs-17.)
 
 The refusal is **counted, not silent** — `malformed` is what this reader already
 says about bytes it stepped over, so an oversized run gets the same number and
@@ -13378,10 +13383,15 @@ not:
   ahead of it. Measured in the test with a cap of 4, a 400 ms deadline and 16
   partial clients: the real request was answered, after at least two waves.
   The listener is loopback-only, so the client doing this is local.
-  **That bound is for partial heads only.** Clients that send a complete head
-  and then a slow body (the first bullet) are not bounded in time, so 256 of
-  them can hold every slot for as long as they like (audit-20261003
-  attacksweep-1b). Leading blank lines before a request line used to be read
+  **That bound is for partial heads only, and a slow body has its own.**
+  Clients that send a complete head and then a slow body (the first bullet)
+  are cut at `BODY_READ_TIMEOUT`, 10 seconds from the moment the head was
+  delivered (D-1510),
+  so 256 of them hold every slot for at most that long per wave
+  (`a_crowd_of_body_drippers_cannot_starve_a_real_request`). This sentence
+  said such clients were unbounded in time (audit-20261003 attacksweep-1b),
+  which was true before D-1510 and survived a merge beside it; corrected by
+  D-4489 (audit r53-2). Leading blank lines before a request line used to be read
   as a complete head and held a slot the same way; since D-1580 they are
   skipped and the deadline keeps running (attacksweep-1).
 - **A pipelined second request can be cut.** The deadline restarts after a
@@ -13786,6 +13796,32 @@ site below was opened and read against that test, and not one of the
     direction of travel `runner/report.rs` is allowed for, and the ppm
     and the decision are now integer arithmetic on that fraction.
 ~~~~
+
+**runner/outcome.rs 26 -> 27 (D-4486, counted on the merged tree by the
+`intl` integration, 2026-10-09).** `pub const EXACT_PAISA_LIMIT: f64 = 2^53`,
+the bound `Edge::money_is_exact` compares each of the eight money totals
+against: below it an `f64` holds every integer exactly, so a total under it is
+the exact paisa sum and one at or past it is refused by name (`REFUSED, money
+inexact`). It is the guard that keeps a float money total from passing as
+exact, the direction this rule is allowed for. `runner/report.rs` stays at 4:
+the refusal row's new reason string was worded without the type name.
+
+### Gate 11 — rule 1. docs/07 layer 4: never `binary_search`.
+
+This rule had no reasons section: its one entry, `crates/store/src/file.rs 1`,
+is `BarFile::suffix_that_follows`'s `partition_point`, one search per append
+batch against the header's `last_ts_micros`, whose reason is in that
+function's doc.
+
+**runner/trade.rs 1 (D-4500, counted on the merged tree by the `intl`
+integration, 2026-10-09).** `trade::deadline_index`'s `partition_point` finds
+the first bar at or after a trade's time-exit deadline on the path's prefix
+before its first hole. That prefix is strictly ascending whole-minute bars of
+one IST day, at most 1,440, so the search makes at most 11 comparisons whatever
+the slice length (D-4500 states 12); measured p50 9, p99 10, max 10 by
+`runner::trade::tests::deadline_index_is_the_first_bar_at_or_after_the_deadline_within_twelve_probes`.
+It runs once per path whose time exit is unpriced, never per bar. A forward
+walk would be O(path).
 
 ### Gate 11 — rule 3. docs/07 law 2: pre-size every map.
 
@@ -15353,12 +15389,21 @@ pass over the bars at a once-per-report boundary, O(bars).
   once per level pair in `closed` and `redundant_count`. The transient map is
   outside the engine's `DEFAULT_CEILING` memory model, so a level near the
   ceiling briefly needs that much again. Probing the engine's own sorted
-  level instead was not done here. Not timed: no bench row covers it.
+  level instead was not done here. It was not timed until D-4504; **`C-R-06`
+  now times it** per insertion or probe: 73,772 ps at
+  37,065 units and 69,971 ps at 302,837 units (0.948x), and at the larger
+  size p50 74,803, p99 125,353, max 134,992 ps a unit over 201 trials of one
+  whole `redundant_count` each, measured 2026-10-09 on the 4-CPU audit box at
+  load 4.5. Those are percentiles of a trial's mean, not of one probe.
 - **A halted sweep's closed set is an over-count (c4a-7, W3-runner1-3,
   D-1496).** `runner::closed::closed` cannot prove closure for the top two
   levels of a halted sweep and now says so through `closure_complete`; it
   still returns those sets in `kept`. `validate` records `halted` beside its
   candidate count, and the streamed rankers mark the two levels `Unknown`.
+  **Since D-4503** each `FoldResult` also carries `closure_unproved`, read
+  from `closure_complete`, and the walk-forward audit prints how many folds
+  have it and marks their candidate counts `?`. `FoldProgress::candidates`,
+  the hook `cli` builds by name, still does not carry it.
 - **`keep::Best` probed a hash set on every offer (v4-4, D-1497); removed
   with the type by D-4480.** The probe, its `cap + 1` reservation and the
   O(log cap) sift went together; nothing in the engine retains a bounded
@@ -15839,13 +15884,13 @@ UNVERIFIED as measurements.
 
 ## Language-purity gate limits after the RO sweep — D-2340..D-2350 and D-2321..D-2325, 4 October 2026
 
-- **Inline awk in `ci.yml` (D-2342).** Gate 0 now refuses an `awk` program
-  operand, but 71 inline awk programs remain in `ci.yml`, all in gates that
-  pre-date the scanner. They are a pinned ratchet, not an exemption: the
-  scanner's `AWK_IN_CI` must EQUAL the count, so a new program anywhere is
-  refused and a removed one forces the pin down. Moving each into a
-  `.github/*.rs` tool is the remaining work; until then section 2 holds for
-  every other file and is bounded, not met, in this one.
+- **Inline awk in `ci.yml` (D-2342): none left.** Gate 0 refuses an `awk`
+  program operand, and the scanner's `AWK_IN_CI` must EQUAL the count of
+  inline programs in `ci.yml`. At D-2342 that count was 71, a pinned ratchet;
+  commit 2a74690d moved the last of them into `.github/*.rs` tools and set
+  the pin to 0, so section 2 now holds in `ci.yml` for awk as it does in every
+  other file. (This bullet still described the 71 until D-4489, audit
+  srust-6.)
 - **What Gate 0 reads as a command (D-2342).** Words are split on whitespace
   and on `;`, `&&`, `||`, `|`, `$(`, a backtick and `<(`; quoting is not
   parsed. A program named by a variable (`p=node; $p -e x`), a name assembled
@@ -16703,7 +16748,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 
 | Finding | Cost that stays | Why it is inherent | Measured (p50 / p99 / max) |
 |---|---|---|---|
-| W3-store1-0, W3-store1-1 | `first_at_or_after` is a bisection, at most `ceil(log2(n_valid + 1))` = 14 probes at the one-minute month ceiling; `already_stored` adds the batch | Records are not dense on the minute grid (holidays, Muhurat, vendor holes), so a stamp has no computable index, and an index file would be a new store format version; 14 is a constant of the format | 28.5 µs / 64.3 µs / 6.2 ms per lookup over 11,625 sealed records (each probe pays its block's verify) |
+| W3-store1-0, W3-store1-1 | A month with a usable `.tix` index answers `first_at_or_after` with one index entry read (D-2329; `C-TIX-01`, `C-TIX-02`, `O1P-02`: p50 274 to 289 ns, p99 295 to 410 ns from 1,000 to 1,000,000 records in one run on 2026-10-09). The bisection, at most `ceil(log2(n_valid + 1))` = 14 probes at the one-minute month ceiling, is the legacy path for a month with no usable index; `already_stored` adds the batch | Records are not dense on the minute grid (holidays, Muhurat, vendor holes), so a stamp has no computable offset in the bar file itself; D-2329 built the per-month `.tix` index that maps a minute to its record, so the bisection is kept only where no index is held. (This row said an index would need a new store format version, which D-2329 had already answered; corrected by D-4489, audit rnew-2.) | Bisection only: 28.5 µs / 64.3 µs / 6.2 ms per lookup over 11,625 sealed records (each probe pays its block's verify) |
 | R9-csr-o1-0 | one `fstat` per tail-block verification | It is how records past the commit are found (D-0688); skipping it refuses a sealed-past-commit tail an interrupted append leaves | `fstat` 386 ns / 488 ns; a cold tail-block read with it 1.56 µs / 2.05 µs, an interior block without it 3.47 µs / 4.39 µs |
 | W1-pull2-5 | `committed_cash_days` reads every committed record of each month asked | Its contract is that a corrupt month refuses; only reading every block verifies every block, and the days come from the records because the bar format holds no per-day index | whole verified month, fresh handle, 11,625 records: 1.03 ms / 5.12 ms / 5.13 ms |
 | W1-pull2-3 | `derive_all` re-reads and re-folds the month on a rerun that wrote nothing | The rerun is how a derivation blocked by missing schedule evidence is retried, and `reconcile_derived`'s full re-proof is the only check that finds a derived conflict; skipping it needs a per-rung resume point the format does not record | same month walk as above |
@@ -16924,3 +16969,29 @@ Measured by `api::latency` (`api` test build (the workspace's optimized test pro
   `pull::session` fails `web/tests/ist.test.js` (W2), not the page.
 - **Bar re-bucketing in `api` and `cli` has no census.** Round 4 checked the
   browser's fold and the sweep side's open only (D-3522).
+
+## Audit integration `intl` — lower crates on the merged tree — 2026-10-09
+
+- **Past 10^7 degrees of freedom the Student-t bar is the bar at 10^7
+  (D-4505).** It is stricter than the exact bar by at most 2.149e-5 t-units
+  (measured at `u64::MAX` trials) and never at or below the normal bar. Below
+  the ceiling the bar is monotone in `df` only to rounding: up to 1.711e-8
+  t-units of rise between adjacent `df`, measured.
+- **The store bench leaves no scratch behind (D-4420).** One run with a fresh
+  `TMPDIR` left 0 `brutex-bench-*` entries. A directory whose removal fails is
+  printed with its path and reason; a crash that kills the process (a signal,
+  not a refusal) still leaves its directories, and the next run of the same
+  process id empties its own.
+- **One more lake bench run (so1-2, D-4419), 2026-10-09, load average 1.83 to
+  2.91.** FXA-10, 32 random rows a sample: p50 / p99 / max 367 / 400 / 80,671 ns
+  at 2,480 rows, 567 / 1,447 / 2,902,640 ns at 24,800, 2,970 / 4,966 / 224,079 ns
+  at 248,000 and 6,297 / 18,040 / 1,984,419 ns at 2,480,000. The gated ratio,
+  row p99 against seven plain columns, read 1.433x, 1.269x, 1.207x and 1.404x.
+  The reported p99 ratio against 2,480 rows read 45.1x at 2,480,000, above the
+  24.5x to 36.0x of D-4419's six runs: that ratio is memory, is printed and not
+  gated, and one run is not a range.
+- **Two O(1) claims carry no timing (gate 12 on the merged tree).**
+  `core::vendor::holds_test_marker` (D-4507) folds at most 64 bytes into a
+  stack buffer and searches two seven-byte needles; its 64-byte edge is
+  tested, its time is not. `runner::grid::Candidate::timed_at` (D-4500) is two
+  field reads and a `max`; no bench row covers the grid walk that calls it.

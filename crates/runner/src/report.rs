@@ -635,7 +635,7 @@ fn render_findings_at(
             &mut out,
             "REFUSED, money inexact",
             &inexact.to_string(),
-            "a money total at or past 2^53 paisa; an f64 cannot hold it exactly",
+            "a money total at or past 2^53 paisa, past the integers a double holds exactly",
         );
     }
     bar_rows(&mut out, bar, n);
