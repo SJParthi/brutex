@@ -7793,13 +7793,16 @@ async fn land_spot(
                 )
             })),
             Err(why) => {
+                // THE VENDOR'S COUNT ON THE REFUSED BRANCH TOO (D-3183).
+                let (rows_read, decoder_skips) = vendor_count(bodies);
                 let _noted = telemetry::emit(
                     &telemetry::Event::error("api.pull", "cash schedule refused")
                         .with("why", telemetry::Value::Str(&why)),
                 );
                 done.absorb(pull::ingest::Ingested {
                     members: bodies.len(),
-                    rows_read: bodies.iter().map(|(_, body)| body.rows.len()).sum(),
+                    rows_read,
+                    decoder_skips,
                     failures: vec![pull::ingest::Failure {
                         instrument: instrument.underlying.to_string(),
                         why,
@@ -7810,6 +7813,24 @@ async fn land_spot(
         }
     }
     done
+}
+
+/// The candles a vendor sent across these bodies: the rows the decoder kept
+/// plus the ones it skipped, and the skips by reason — exactly as
+/// `pull::ingest::from_window` counts them (D-3122). A branch that refuses
+/// before landing reports the same count the landing would have (D-3183).
+fn vendor_count(
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+) -> (usize, pull::fetch::DecodeSkips) {
+    let mut decoder_skips = pull::fetch::DecodeSkips::default();
+    let mut rows_read = 0usize;
+    for (_, body) in bodies {
+        decoder_skips.absorb(body.skipped);
+        rows_read = rows_read
+            .saturating_add(body.rows.len())
+            .saturating_add(body.skipped.total());
+    }
+    (rows_read, decoder_skips)
 }
 
 fn note_cash_schedule_verified(days: usize, instruments: usize) {
@@ -10877,6 +10898,14 @@ fn landed_answer(
     facts.push(("Rows folded into an open bar", done.rows_folded.to_string()));
     facts.push(("Slices the census counted", done.counted.to_string()));
     facts.push(("Rows dropped", done.census.total().to_string()));
+    // THE CANDLES THE DECODER DECLINED, ON THE PAGE AS WELL AS IN THE SUM
+    // (D-3180). `rows_read` counts them since D-3122 and `balances` accounts
+    // for them; a receipt that printed neither said "3 read = 2 stored + 0
+    // folded + 0 dropped", an equation that is false.
+    facts.push((
+        "Candles the decoder skipped",
+        decoder_skips_said(done.decoder_skips),
+    ));
     // One instrument can generate several coverage/derivation diagnostics;
     // this list also contains run-level failures, so it is not a member count.
     facts.push(("Failure diagnostics", done.failures.len().to_string()));
@@ -10887,19 +10916,22 @@ fn landed_answer(
         "Balances",
         if done.balances() {
             format!(
-                "yes — {} read = {} stored + {} folded + {} dropped",
-                done.rows_read,
-                done.bars_stored,
-                done.rows_folded,
-                done.census.total()
-            )
-        } else {
-            format!(
-                "NO — {} rows read, {} stored, {} folded, {} dropped, {} failure diagnostics",
+                "yes — {} read = {} stored + {} folded + {} dropped + {} skipped by the decoder",
                 done.rows_read,
                 done.bars_stored,
                 done.rows_folded,
                 done.census.total(),
+                done.decoder_skips.total()
+            )
+        } else {
+            format!(
+                "NO — {} rows read, {} stored, {} folded, {} dropped, {} skipped by the \
+                 decoder, {} failure diagnostics",
+                done.rows_read,
+                done.bars_stored,
+                done.rows_folded,
+                done.census.total(),
+                done.decoder_skips.total(),
                 done.failures.len()
             )
         },
@@ -10933,6 +10965,28 @@ fn landed_answer(
         axum::http::StatusCode::OK,
         stored_html("Spot pull", verdict, reason, &facts),
     )
+}
+
+/// The decoder's skips as one receipt cell: the total, then each reason that
+/// fired. D-3180.
+fn decoder_skips_said(skips: pull::fetch::DecodeSkips) -> String {
+    let mut said = skips.total().to_string();
+    let mut reasons = Vec::new();
+    for (count, reason) in [
+        (skips.null_price, "null price"),
+        (skips.negative_volume, "negative volume"),
+        (skips.negative_open_interest, "negative open interest"),
+        (skips.impossible_ohlc, "impossible OHLC"),
+    ] {
+        if count > 0 {
+            reasons.push(format!("{count} {reason}"));
+        }
+    }
+    if !reasons.is_empty() {
+        said.push_str(" — ");
+        said.push_str(&reasons.join(", "));
+    }
+    said
 }
 
 /// One local-archive run, from the folder to the receipt.
@@ -11768,8 +11822,15 @@ struct Wire {
 // and is compared only in assertions. Nothing keys a map on this.
 #[derive(Debug, Default, PartialEq)]
 struct FnoLanded {
-    /// Successfully decoded rows, including chunks abandoned by a later fault.
+    /// Candles the vendor sent: the rows the decoder kept plus the ones it
+    /// skipped, including chunks abandoned by a later fault. The vendor's
+    /// count, as `pull::ingest::Ingested::rows_read` is on the spot path
+    /// (D-3122, D-3182).
     rows_read: usize,
+    /// The candles the decoder skipped, by reason, out of [`Self::rows_read`].
+    /// On the page as its own row so the gap between rows read and bars
+    /// stored is never unexplained (D-3182).
+    decoder_skips: pull::fetch::DecodeSkips,
     /// Bars written to disk by this run.
     stored: usize,
     /// Contracts that asked for bars and did not get them.
@@ -12024,6 +12085,7 @@ async fn fno_land(
 
         let fetched = fetch_chain_chunks(found, &chunks, asked, site, wire).await;
         out.rows_read = out.rows_read.saturating_add(fetched.rows_read);
+        out.decoder_skips.absorb(fetched.decoder_skips);
         let bodies = match fetched.result {
             Fetched::Bodies(bodies) => bodies,
             Fetched::ContractRefused(refusal) => {
@@ -12204,7 +12266,10 @@ enum Fetched {
 
 /// A later chunk refusal cannot erase the rows decoded from earlier answers.
 struct FetchedBatch {
+    /// Candles the vendor sent: kept rows plus decoder skips (D-3182).
     rows_read: usize,
+    /// The decoder's skips out of `rows_read`, by reason (D-3182).
+    decoder_skips: pull::fetch::DecodeSkips,
     result: Fetched,
 }
 
@@ -12259,10 +12324,12 @@ async fn fetch_chain_chunks(
 ) -> FetchedBatch {
     let mut bodies = Vec::with_capacity(chunks.len());
     let mut rows_read = 0usize;
+    let mut decoder_skips = pull::fetch::DecodeSkips::default();
     for chunk in chunks {
         if let Err(halt) = await_budget(asked.feed, site).await {
             return FetchedBatch {
                 rows_read,
+                decoder_skips,
                 result: Fetched::RunHalted(halt),
             };
         }
@@ -12272,7 +12339,13 @@ async fn fetch_chain_chunks(
             // spot path carries it — a body filed under the whole range would
             // claim months it does not hold.
             Ok(body) => {
-                rows_read = rows_read.saturating_add(body.rows.len());
+                // THE VENDOR'S COUNT, NOT THE DECODER'S (D-3182): a candle the
+                // decoder skipped was sent, and is counted and named here as
+                // the spot path has done since D-3122.
+                rows_read = rows_read
+                    .saturating_add(body.rows.len())
+                    .saturating_add(body.skipped.total());
+                decoder_skips.absorb(body.skipped);
                 bodies.push((*chunk, body));
             }
             Err(refusal) => {
@@ -12284,6 +12357,7 @@ async fn fetch_chain_chunks(
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
                     rows_read,
+                    decoder_skips,
                     result: Fetched::ContractRefused(format!(
                         "{}{}: {refusal}",
                         if dead { CREDENTIAL_DEAD } else { "" },
@@ -12295,6 +12369,7 @@ async fn fetch_chain_chunks(
     }
     FetchedBatch {
         rows_read,
+        decoder_skips,
         result: Fetched::Bodies(bodies),
     }
 }
@@ -12367,15 +12442,39 @@ fn chain_quotes(
         if day < from || day > to {
             continue;
         }
-        let Some(spot) = book.at(bar.ts_micros) else {
-            out.refused = out.refused.saturating_add(1);
-            note_price_refusal(
-                out,
-                "no index bar is stored at this option bar's stamp, so it has \
-                 no underlying level to price against. Nothing was borrowed \
-                 from a neighbouring minute",
-            );
-            continue;
+        // `lookup`, NOT `at` (D-3123): a stamp two index bars contradict
+        // (D-3110) is a different refusal from a stamp with no index bar, and
+        // calling it missing sends the operator to fetch a minute already held.
+        let spot = match book.lookup(bar.ts_micros) {
+            Ok(spot) => spot,
+            Err(pull::pricing::PricingError::NoSpotAtStamp { .. }) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(
+                    out,
+                    "no index bar is stored at this option bar's stamp, so it has \
+                     no underlying level to price against. Nothing was borrowed \
+                     from a neighbouring minute",
+                );
+                continue;
+            }
+            // One fixed sentence, not `why`'s Display: that carries the stamp,
+            // so a month of contradicted minutes would fill every reason slot
+            // with one class of refusal (the D-3111 defect, one layer up).
+            Err(pull::pricing::PricingError::SpotAmbiguous { .. }) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(
+                    out,
+                    "two index bars stored at this option bar's stamp disagree \
+                     on the close, so the underlying level is unknown. Nothing \
+                     was priced rather than one of the two being picked",
+                );
+                continue;
+            }
+            Err(why) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(out, &why.to_string());
+                continue;
+            }
         };
         let Ok(tenor) = pull::tenor::Tenor::between(bar.ts_micros, month_of.inputs.expiry) else {
             out.refused = out.refused.saturating_add(1);
@@ -12531,14 +12630,8 @@ fn price_chain_month(
 
     let records = greek_records(&out);
     if !records.is_empty()
-        && let Some(why) = file_the_greeks(
-            &records,
-            month_of.found.contract,
-            asked,
-            site,
-            wire,
-            month_of.chunk,
-        )
+        && let (_, Some(why)) =
+            file_the_greeks(&records, month_of.found.contract, asked, site, wire)
     {
         // COUNTED AS REFUSED, NOT SILENT. The rows were computed and could not
         // be filed, which is a different fact from "could not be computed" and
@@ -13126,7 +13219,7 @@ async fn roll_one(
             Err(why) => {
                 // The reply was decoded even when a contract cannot be named.
                 // Keep its read count and any earlier acknowledged groups.
-                note_run_failure(&mut failed, &mut why_not, why);
+                note_run_failure(&mut failed, &mut why_not, &why);
                 // SKIP THE UNNAMED RUN, NOT THE REST OF THE ANSWER. A holiday
                 // week's contract is refused by name (CE-14) and counted once
                 // above; the contracts after it in the same chunk are real and
@@ -13187,7 +13280,7 @@ async fn roll_one(
         let named = match name_the_contract(expiry_day, strike, option_type, &label) {
             Ok(named) => named,
             Err(why) => {
-                note_run_failure(&mut failed, &mut why_not, why);
+                note_run_failure(&mut failed, &mut why_not, &why);
                 at = end;
                 continue;
             }
@@ -13239,7 +13332,7 @@ async fn roll_one(
         ) {
             Ok(landed) => landed,
             Err(why) => {
-                note_run_failure(&mut failed, &mut why_not, why);
+                note_run_failure(&mut failed, &mut why_not, &why);
                 at = end;
                 continue;
             }
@@ -13251,7 +13344,7 @@ async fn roll_one(
         // travel; the reason travels too rather than being swallowed by the
         // success. `CLAUDE.md` §4 — degrade loudly and name the reason.
         if let Some(why) = trouble {
-            note_run_failure(&mut failed, &mut why_not, why);
+            note_run_failure(&mut failed, &mut why_not, &why);
         }
         // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
         //
@@ -13265,12 +13358,19 @@ async fn roll_one(
         // are true and neither implies killing the other 251 runs.** The
         // consequence is scoped to THIS contract-month; scoping the reaction to
         // the whole walk was the same conflation the two `?` above made.
+        // ONLY THE MONTHS WHOSE BARS LANDED (D-3139). Since D-3136 a group
+        // can land June and refuse July; July's greeks would have no bar
+        // behind them, so they are not filed. July's refusal is already on
+        // the receipt through `trouble`.
+        let records = in_landed_months(records, &pending);
         if !records.is_empty() {
-            match file_the_greeks(&records, contract, asked, site, wire, window) {
-                Some(why) => {
-                    note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
-                }
-                None => priced.filed = priced.filed.saturating_add(records.len()),
+            // WHAT LANDED IS COUNTED EVEN WHEN A LATER MONTH REFUSES (D-3139),
+            // the rule D-3120 gave the bars.
+            let (greeks_filed, greeks_refused) =
+                file_the_greeks(&records, contract, asked, site, wire);
+            priced.filed = priced.filed.saturating_add(greeks_filed);
+            if let Some(why) = greeks_refused {
+                note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
             }
         }
         // COLLECTED, NOT WRITTEN PER GROUP.
@@ -13281,7 +13381,7 @@ async fn roll_one(
     // ONE CENSUS CYCLE FOR THE WHOLE ANSWER — see `record_held`'s own note.
     if let Some(why) = pull::ingest::record_held(&site.store_root, wire.store_vendor, &census_rows)
     {
-        note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
+        note_run_failure(&mut failed, &mut why_not, &format!("{label}: {why}"));
     }
     Ok(Rolled {
         rows_read: rows.len(),
@@ -13411,10 +13511,21 @@ fn name_the_contract(
         expiry_day.day(),
     )
     .map_err(|why| format!("{label}: {why}"))?;
-    let side = if option_type == "CALL" {
-        brutex_core::instrument::OptionSide::Call
-    } else {
-        brutex_core::instrument::OptionSide::Put
+    // TWO KNOWN WORDS, AND A REFUSAL FOR ANY OTHER (D-3138). This was
+    // `if option_type == "CALL" { Call } else { Put }`, so a vendor spelling
+    // its sides `CE`/`PE` would have had every call filed under the put's
+    // contract, a directory append-only history cannot rename. D-0346 said such
+    // a vendor needs no edit here; that was not true of this line. It is
+    // refused by name instead, so the new spelling is added here on purpose.
+    let side = match option_type {
+        "CALL" => brutex_core::instrument::OptionSide::Call,
+        "PUT" => brutex_core::instrument::OptionSide::Put,
+        other => {
+            return Err(format!(
+                "{label}: the request side {other:?} names no option side this build \
+                 knows (CALL or PUT); refused rather than filed under a guessed side"
+            ));
+        }
     };
     let contract = brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
         expiry,
@@ -13563,11 +13674,18 @@ fn spot_book_for(
 /// both `?` until D-0220, which abandoned every remaining run; two hand-written
 /// copies of the replacement would be two chances for one of them to drift back
 /// toward ending the walk.
-fn note_run_failure(failed: &mut usize, why_not: &mut Vec<String>, why: String) {
+///
+/// # One reason per kind (D-3127)
+///
+/// Every failure is counted; a reason is KEPT only when no kept reason has its
+/// shape — the rule `keep_reason` gives pricing refusals (D-3124). A rolling
+/// walk is up to 252 runs, and one cause repeated across them, each sentence
+/// differing only in the run's strike offset and dates, used to fill every
+/// slot so that a later run failing for a different cause was counted and
+/// never named.
+fn note_run_failure(failed: &mut usize, why_not: &mut Vec<String>, why: &str) {
     *failed = failed.saturating_add(1);
-    if why_not.len() < pull::pricing::REASONS_KEPT {
-        why_not.push(why);
-    }
+    keep_reason(why_not, why);
 }
 
 /// Where the run starting at `at` ends, and the key every row in it shares.
@@ -13690,16 +13808,21 @@ fn greek_records(done: &pull::pricing::PricedAll) -> Vec<store::format::Greek> {
 
 /// Files one contract-month's greeks beside its bars.
 ///
-/// Returns the reason on failure rather than a `Result`, matching every other
-/// filing step on this path — the caller turns it into the run's error with the
-/// contract's label attached, which a bare store error does not carry.
+/// Returns how many records it filed and the first refusal, rather than a
+/// `Result`, matching every other filing step on this path — the caller turns
+/// the refusal into the run's error with the contract's label attached, which a
+/// bare store error does not carry. A refused month does not stop or uncount
+/// the others (D-3139).
 ///
-/// # Why the month comes from the WINDOW
+/// # Why the month comes from each RECORD, not the window (D-3137)
 ///
-/// `pull::session::split_window` never lets a chunk cross a month boundary, so
-/// one chunk is one month and its first day names it. Taking the month from a
-/// bar's stamp instead would be right for every row and wrong for an empty
-/// batch, which this function is never handed.
+/// This took the month from the chunk's first day, on the premise that
+/// `pull::session::split_window` never lets a chunk cross a month. It has
+/// since D-0320 and D-1370: a capped rolling chunk may, so a greek stamped in
+/// its second month was offered to the first month's file and refused as
+/// outside it. The records are in stamp order, so each run of one IST month
+/// goes to that month's file, exactly as `ingest::from_rows` files the bars
+/// they price (D-3136). An empty batch files nothing.
 ///
 /// # Cost
 ///
@@ -13716,15 +13839,83 @@ fn file_the_greeks(
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
-    window: pull::session::Window,
-) -> Option<String> {
+) -> (usize, Option<String>) {
     let Some(timeframe) = asked.granularity.store_timeframe() else {
-        return Some("the requested granularity has no Greek-file timeframe".to_owned());
+        return (
+            0,
+            Some("the requested granularity has no Greek-file timeframe".to_owned()),
+        );
     };
-    let month = match window.from().year_month() {
-        Ok(month) => month,
-        Err(why) => return Some(format!("the Greek-file month could not be named: {why}")),
-    };
+    let mut filed = 0usize;
+    let mut refused: Option<String> = None;
+    let mut rest = records;
+    while let Some(first) = rest.first() {
+        let month = match greek_month(first.ts_micros) {
+            Ok(month) => month,
+            Err(why) => {
+                let why = format!("the Greek-file month could not be named: {why}");
+                return (filed, refused.or(Some(why)));
+            }
+        };
+        let run = rest
+            .iter()
+            .take_while(|row| greek_month(row.ts_micros).is_ok_and(|at| at == month))
+            .count();
+        let (these, after) = rest.split_at(run);
+        rest = after;
+        // A REFUSED MONTH DOES NOT UNCOUNT THE MONTHS ALREADY WRITTEN, and
+        // does not stop the ones after it (D-3139; D-3120 for the bars).
+        match file_greek_month(these, contract, asked, site, wire, timeframe, month) {
+            None => filed = filed.saturating_add(these.len()),
+            Some(why) => refused = refused.or(Some(why)),
+        }
+    }
+    (filed, refused)
+}
+
+/// The greeks among `records` whose IST month's bars landed, as `pending`
+/// (one census row per landed month, D-3136) names them. Both are in time
+/// order, so one merge walk decides each record: O(records + months), with no
+/// membership scan. D-3139.
+fn in_landed_months(
+    records: Vec<store::format::Greek>,
+    pending: &[pull::manifest::Held],
+) -> Vec<store::format::Greek> {
+    let mut months = pending.iter().map(|held| held.entry.key.month).peekable();
+    let mut kept = Vec::with_capacity(records.len());
+    for record in records {
+        // A stamp with no IST month cannot be in a month whose bars landed:
+        // its bar was refused at the address stage and is on the receipt.
+        let Ok(month) = greek_month(record.ts_micros) else {
+            continue;
+        };
+        while months.next_if(|landed| *landed < month).is_some() {}
+        if months.peek() == Some(&month) {
+            kept.push(record);
+        }
+    }
+    kept
+}
+
+/// The IST month a greek's stamp falls in, which names its file. D-3137.
+fn greek_month(ts_micros: i64) -> Result<store::path::YearMonth, String> {
+    pull::session::IstMoment::from_epoch_secs(ts_micros.div_euclid(1_000_000))
+        .map_err(|why| why.to_string())?
+        .day()
+        .year_month()
+        .map_err(|why| why.to_string())
+}
+
+/// One IST month's run of greeks, into that month's file.
+fn file_greek_month(
+    records: &[store::format::Greek],
+    contract: brutex_core::instrument::Contract,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    timeframe: store::path::Timeframe,
+    month: store::path::YearMonth,
+) -> Option<String> {
     pull::ingest::write_greeks(
         records,
         pull::ingest::GreekTarget {
@@ -13888,9 +14079,67 @@ fn millionths_to_decimal(millionths: i64) -> f64 {
 /// de-duplication are `pull::pricing::price_all`'s own rule, applied to the
 /// refusals this function raises before a quote could even be built.
 fn note_price_refusal(out: &mut pull::pricing::PricedAll, why: &str) {
-    if out.why.len() < pull::pricing::REASONS_KEPT && !out.why.iter().any(|kept| kept == why) {
-        out.why.push(why.to_owned());
+    keep_reason(&mut out.why, why);
+}
+
+/// Keeps `why` when there is room and no kept reason has its SHAPE.
+///
+/// # A reason is its shape, not its sentence (D-3124)
+///
+/// D-3111 made `price_all` keep one sentence per class of refusal, because a
+/// sentence carries the row's own numbers. This module then folded one
+/// `PricedAll` per contract-month into the receipt deduplicating by the whole
+/// sentence again, so five months refused below intrinsic — five sentences
+/// differing only in their intrinsic value — filled every slot, and a month
+/// refused for a different reason was counted and never named. The class
+/// itself does not survive into the text, so the receipt compares the
+/// sentence with every number in it erased: the words of a refusal are its
+/// kind, the numbers are the row's. The first sentence of each shape is kept
+/// verbatim.
+///
+/// # Cost
+///
+/// Bounded by `REASONS_KEPT` shapes of at most a few hundred bytes each, per
+/// reason offered — never by rows, contracts or months.
+fn keep_reason(kept: &mut Vec<String>, why: &str) {
+    if kept.len() >= pull::pricing::REASONS_KEPT {
+        return;
     }
+    let shape = reason_shape(why);
+    for held in kept.iter() {
+        if reason_shape(held) == shape {
+            return;
+        }
+    }
+    kept.push(why.to_owned());
+}
+
+/// `why` with every number replaced by `#`: a maximal run of digits, `.`,
+/// `e`, `E`, `+` and `-` that holds at least one digit. `price 100 is at or
+/// below the discounted intrinsic value 112885.1497` and the same sentence
+/// at `122885.1497` have one shape; words, including hyphenated ones, are
+/// untouched.
+fn reason_shape(why: &str) -> String {
+    let mut out = String::with_capacity(why.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.bytes().any(|b| b.is_ascii_digit()) {
+            out.push('#');
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in why.chars() {
+        if c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-') {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 /// What one rolling-option run did, as counts an operator can add up.
@@ -13913,7 +14162,8 @@ struct Rolled {
     /// 252 runs, so one bad strike discarded 251 good ones. See the two `match`
     /// arms in [`roll_one`] for the measurement and D-0220 for the class.
     failed: usize,
-    /// The first few reasons, verbatim, capped at `pull::pricing::REASONS_KEPT`.
+    /// The first reason of each kind, verbatim, capped at
+    /// `pull::pricing::REASONS_KEPT` (D-3127).
     why: Vec<String>,
     /// What pricing produced, or all zeroes when no rate was supplied.
     priced: PricedCount,
@@ -13941,10 +14191,9 @@ impl Rolled {
                 // trade a run that died loudly for one that succeeds quietly
                 // while having lost groups.
                 self.failed = self.failed.saturating_add(done.failed);
-                for said in done.why {
-                    if self.why.len() < pull::pricing::REASONS_KEPT {
-                        self.why.push(said);
-                    }
+                // BY SHAPE, NOT BY SENTENCE (D-3127). See `note_run_failure`.
+                for said in &done.why {
+                    keep_reason(&mut self.why, said);
                 }
                 false
             }
@@ -13953,7 +14202,7 @@ impl Rolled {
                 note_run_failure(
                     &mut self.failed,
                     &mut self.why,
-                    said.trim_start_matches(CREDENTIAL_DEAD).to_owned(),
+                    said.trim_start_matches(CREDENTIAL_DEAD),
                 );
                 dead
             }
@@ -14004,10 +14253,9 @@ impl PricedCount {
         self.refused = self.refused.saturating_add(from.refused);
         self.solved = self.solved.saturating_add(from.solved());
         self.below_band = self.below_band.saturating_add(from.below_validated_band());
+        // BY SHAPE, NOT BY SENTENCE (D-3124). See `keep_reason`.
         for why in &from.why {
-            if self.why.len() < pull::pricing::REASONS_KEPT && !self.why.contains(why) {
-                self.why.push(why.clone());
-            }
+            keep_reason(&mut self.why, why);
         }
     }
 
@@ -14019,9 +14267,7 @@ impl PricedCount {
         self.solved = self.solved.saturating_add(from.solved);
         self.below_band = self.below_band.saturating_add(from.below_band);
         for why in &from.why {
-            if self.why.len() < pull::pricing::REASONS_KEPT && !self.why.contains(why) {
-                self.why.push(why.clone());
-            }
+            keep_reason(&mut self.why, why);
         }
     }
 
@@ -14365,7 +14611,7 @@ fn land_rolling_group(
     endpoint: &str,
     window: pull::session::Window,
     label: &str,
-) -> Result<(usize, Option<pull::manifest::Held>, Option<String>), String> {
+) -> Result<(usize, Vec<pull::manifest::Held>, Option<String>), String> {
     let bars: Vec<store::format::Bar> = group.iter().map(|r| r.bar).collect();
     // ONLY THE OVERLAYS THAT STATE SOMETHING. A contract whose vendor sent
     // neither a spot nor a volatility has nothing to overlay, and a file of
@@ -14425,9 +14671,9 @@ fn land_rolling_group(
     // `/store.json` and `fnowork::owed` read it as absent, and vendor quota is
     // spent on it for ever.
     //
-    // `pending.is_none()` is the honest test for "nothing landed": `from_rows`
-    // returns early without setting it when the BAR write fails, and sets it
-    // only once the bars are on disk. So the row is published either way and
+    // `pending.is_empty()` is the honest test for "nothing landed": `from_rows`
+    // adds a month's row only once that month's bars are on disk (D-3136), and
+    // leaves it empty when no bar write landed. So rows are published either way and
     // the reason travels beside it — which is what the spot path already does,
     // naming *"holds N bar(s) the census does not count"*. It is also the rule
     // this file states one screen up for the greeks: a failure here is this
@@ -14437,7 +14683,7 @@ fn land_rolling_group(
         .first()
         .map(|first| format!("{label}: {}", first.why));
     if let Some(why) = trouble.clone()
-        && done.pending.is_none()
+        && done.pending.is_empty()
     {
         return Err(why);
     }
@@ -14666,7 +14912,7 @@ async fn roll_every(
         }
     }
     let credential_stop = watch.stop().map(|(stop, why)| {
-        note_run_failure(&mut out.failed, &mut out.why, why.clone());
+        note_run_failure(&mut out.failed, &mut out.why, why);
         *stop
     });
     say_walk_finished(asked, out.stored, out.failed, out.declined, planned);
@@ -15240,6 +15486,7 @@ async fn fno_report(
     // fetches what they did and files it.
     let FnoLanded {
         rows_read,
+        decoder_skips,
         stored,
         failed,
         settled,
@@ -15248,6 +15495,13 @@ async fn fno_report(
         credential_stop,
     } = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
+    // THE SAME ROW THE SPOT RECEIPT CARRIES (D-3180), on the chain receipt
+    // (D-3182): the journal's `rows_read` counts these candles, so the page
+    // names them rather than leaving the gap to bars stored unexplained.
+    facts.push((
+        "Candles the decoder skipped",
+        decoder_skips_said(decoder_skips),
+    ));
     credential_stop_facts(&mut facts, credential_stop);
     // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
     // that resumes stores fewer bars than one that starts cold, and without
@@ -20738,7 +20992,7 @@ mod tests {
         );
         assert!(page.contains("<th>Members read</th><td>1</td>"));
         assert!(page.contains("<th>Failure diagnostics</th><td>2</td>"));
-        assert!(page.contains("0 dropped, 2 failure diagnostics"));
+        assert!(page.contains("0 dropped, 0 skipped by the decoder, 2 failure diagnostics"));
         assert!(page.contains("PARTIAL OR FAILED"));
         assert!(page.contains("missing minute"));
         assert!(page.contains("derived bucket withheld"));
@@ -21298,7 +21552,17 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                super::observed_cash_days(&[(window, RawWindow { rows })], encoding).unwrap(),
+                super::observed_cash_days(
+                    &[(
+                        window,
+                        RawWindow {
+                            rows,
+                            skipped: pull::fetch::DecodeSkips::default()
+                        }
+                    )],
+                    encoding
+                )
+                .unwrap(),
                 vec![first, last]
             );
         }
@@ -21307,6 +21571,7 @@ mod tests {
                 &[(
                     window,
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(i64::MIN)]
                     }
                 )],
@@ -21319,6 +21584,7 @@ mod tests {
                 &[(
                     window,
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(i64::MAX)]
                     }
                 )],
@@ -21332,6 +21598,7 @@ mod tests {
                 .is_empty()
         );
         let outside_hours = RawWindow {
+            skipped: pull::fetch::DecodeSkips::default(),
             rows: vec![row(utc(day(2026, 8, 23)) - 60)],
         };
         assert!(
@@ -21385,12 +21652,14 @@ mod tests {
                 (
                     Window::new(before, before).unwrap(),
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(before)],
                     },
                 ),
                 (
                     Window::new(after, after).unwrap(),
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(after)],
                     },
                 ),
@@ -21458,6 +21727,7 @@ mod tests {
                 bodies: vec![(
                     window,
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(midnight)],
                     },
                 )],
@@ -21470,6 +21740,7 @@ mod tests {
             landed.bodies = vec![(
                 window,
                 RawWindow {
+                    skipped: pull::fetch::DecodeSkips::default(),
                     rows: (0..375)
                         .map(|minute| row(midnight + (555 + minute) * 60))
                         .collect(),
@@ -21552,6 +21823,7 @@ mod tests {
             bodies: vec![(
                 window,
                 RawWindow {
+                    skipped: pull::fetch::DecodeSkips::default(),
                     rows: vec![RawRow {
                         timestamp: midnight,
                         open: 100,
@@ -21640,6 +21912,7 @@ mod tests {
             bodies: vec![(
                 first,
                 RawWindow {
+                    skipped: pull::fetch::DecodeSkips::default(),
                     rows: vec![row(midnight(days[0]))],
                 },
             )],
@@ -21655,6 +21928,7 @@ mod tests {
                 (
                     Window::new(date, date).unwrap(),
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: (0..375)
                             .map(|minute| row(midnight(date) + (555 + minute) * 60))
                             .collect(),
@@ -21663,7 +21937,10 @@ mod tests {
             })
             .chain(std::iter::once((
                 Window::new(day(2026, 9, 5), day(2026, 9, 5)).unwrap(),
-                RawWindow { rows: Vec::new() },
+                RawWindow {
+                    rows: Vec::new(),
+                    skipped: pull::fetch::DecodeSkips::default(),
+                },
             )))
             .collect();
         let key = brutex_core::instrument::InstrumentKey::index(
@@ -21751,7 +22028,13 @@ mod tests {
             store_vendor: Vendor::Zerodha,
             window,
             granularity: Granularity::Minute1,
-            bodies: vec![(window, RawWindow { rows })],
+            bodies: vec![(
+                window,
+                RawWindow {
+                    rows,
+                    skipped: pull::fetch::DecodeSkips::default(),
+                },
+            )],
         };
         // Seed each actual date independently: missing intervening source days
         // are not needed as fixture evidence and must not be synthesized.
@@ -21770,7 +22053,13 @@ mod tests {
                         == date
                 })
                 .collect();
-            let bodies = [(span, RawWindow { rows })];
+            let bodies = [(
+                span,
+                RawWindow {
+                    rows,
+                    skipped: pull::fetch::DecodeSkips::default(),
+                },
+            )];
             let schedule = super::prepare_cash_schedule(&landed, &bodies, &key, &site, &mut dated)
                 .await
                 .unwrap();
@@ -22230,6 +22519,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ROUND 3, D-3183: a refused cash schedule counted `body.rows.len()` as
+    /// the rows read and left `decoder_skips` zero, so candles the vendor sent
+    /// and the decoder skipped vanished from the receipt on exactly the branch
+    /// that already says the run failed. The vendor's count is decoded plus
+    /// skipped, by reason, on every branch.
+    #[tokio::test]
+    async fn a_refused_cash_schedule_still_counts_the_candles_the_decoder_skipped() {
+        let (site, mut landed, key) = cash_month_replay_fixture("cash-month-skips").await;
+        let mut dated = std::collections::HashMap::new();
+        super::prepare_cash_schedule(&landed, &landed.bodies, &key, &site, &mut dated)
+            .await
+            .unwrap();
+        let receipt = site
+            .store_root
+            .join("session-masters/NSE_CM_security_03082026.csv.gz.receipt");
+        std::fs::remove_file(&receipt).unwrap();
+        landed.bodies[0].1.skipped = pull::fetch::DecodeSkips {
+            null_price: 2,
+            negative_volume: 0,
+            negative_open_interest: 0,
+            impossible_ohlc: 3,
+        };
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.bars_committed, 0);
+        assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+        assert_eq!(
+            done.rows_read, 365,
+            "360 decoded + 5 skipped by the decoder"
+        );
+        assert_eq!(done.decoder_skips, landed.bodies[0].1.skipped);
+        // THE REFUSED BODY IS STILL A MEMBER OF THE RUN: the receipt's member
+        // count must include the body whose schedule was refused. Gate 18
+        // pre-run survivor, "delete field members" in `land_spot`.
+        assert_eq!(done.members, landed.bodies.len());
     }
 
     #[test]
@@ -36368,3 +36693,15 @@ mod calendar_identity {
 #[cfg(test)]
 #[path = "http_admission_tests.rs"]
 mod http_admission_tests;
+
+#[cfg(test)]
+#[path = "attack_r2_receipt_tests.rs"]
+mod attack_r2_receipt_tests;
+
+#[cfg(test)]
+#[path = "attack_r3_tests.rs"]
+mod attack_r3_tests;
+
+#[cfg(test)]
+#[path = "attack_r4_tests.rs"]
+mod attack_r4_tests;

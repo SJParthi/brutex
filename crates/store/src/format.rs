@@ -1204,6 +1204,20 @@ pub enum FormatError {
         /// The timestamp that did not follow it.
         next: i64,
     },
+    /// The committed header's `last_ts_micros` is not the stamp of the last
+    /// record it counts.
+    ///
+    /// `append` decides whether a batch FOLLOWS the month from that one header
+    /// field. A slot whose checksum is good but whose range is wrong steered a
+    /// bar stamped behind held records into the file as a commit, leaving the
+    /// month out of order and every later bisection answering a neighbour.
+    /// Refused before anything is written. audit-20261004 store-1, D-3140.
+    LastStampDisagrees {
+        /// What the header advertises.
+        header: i64,
+        /// What record `n_valid - 1` actually carries.
+        record: i64,
+    },
     /// A slot's stored checksum does not match its bytes.
     SlotChecksum {
         /// The checksum the slot carries.
@@ -1343,6 +1357,10 @@ impl std::fmt::Display for FormatError {
             Self::TimestampsOutOfOrder { previous, next } => {
                 write!(f, "timestamp {next} does not follow {previous}")
             }
+            Self::LastStampDisagrees { header, record } => write!(
+                f,
+                "header last timestamp {header} is not its last record's {record}"
+            ),
             Self::SlotChecksum { stored, computed } => {
                 write!(f, "header slot checksum {stored:#010x} != {computed:#010x}")
             }

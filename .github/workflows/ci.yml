@@ -1751,15 +1751,16 @@ jobs:
           cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
-          # TWO MORE, one kind (D-1933): the stderr half of a degraded decode,
+          # ONE MORE (two until D-3128), one kind (D-1933): the stderr half of a
+          # degraded decode,
           # each written beside a `telemetry::emit` of the same counts.
           # `pull/src/csv.rs` names unreadable and negative volume and open
-          # interest a CSV decode stored or skipped (CE-57, D-2681), and
-          # `pull/src/masters.rs` names NSE index categories and elements the
-          # conversion skipped (CE-58, D-2682). Both print only when something
-          # was degraded, so a clean run prints nothing.
-          declared="$declared pull/src/csv.rs:eprintln!:1
-          pull/src/masters.rs:eprintln!:1"
+          # interest a CSV decode stored or skipped (CE-57, D-2681). It prints
+          # only when something was degraded, so a clean run prints nothing.
+          # `pull/src/masters.rs` printed the NSE index entries it skipped
+          # (CE-58, D-2682) until D-3158 refused them instead; the print went
+          # with the skip (D-3128).
+          declared="$declared pull/src/csv.rs:eprintln!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

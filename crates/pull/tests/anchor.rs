@@ -594,9 +594,9 @@ fn a_negative_snapshot_volume_and_a_bucket_wider_than_a_day_are_refused() {
     assert_eq!(Bucket::of_secs(86_401), None, "wider than a day");
     assert_eq!(Bucket::of_secs(u32::MAX), None, "wider than a day");
     assert_eq!(
-        Bucket::of_secs(7).map(Bucket::secs),
-        Some(7),
-        "any width up to a day"
+        Bucket::of_secs(50).map(Bucket::secs),
+        Some(50),
+        "widths that divide a day"
     );
 }
 

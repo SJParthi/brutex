@@ -630,9 +630,10 @@ handle naming the reason (`BarFile::time_lookup` reports it). A read door
 never writes a `.tix`. The writer door — `BarFile::open_or_create` — rebuilds
 one from the committed bars when it finds none it can confirm: O(`n_valid`)
 verified record reads, logged as a `store.tix` info line — once per month at
-open, and again inside an append whose resume entry no longer agrees with the
-header (a torn index write from an append that failed on the same handle,
-D-3302). That
+open, and again inside an append whose index the bars do not vouch for
+(D-3302). A resume entry torn by an append that failed on the same handle, in
+the last committed bar's bucket, is rebuilt alone from at most 65 bar reads
+instead (`time_index::recover`, D-3134, D-4600). That
 open IS the explicit migration path for existing months. When the bars cannot
 be indexed (a block that fails its checksum, two bars in one slot, an intraday
 bar off the grid, a bar outside the month) the writer leaves no `.tix`, the

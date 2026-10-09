@@ -1134,8 +1134,17 @@ fn decode_value(
                 note_negative_volume_bars(decided.negative_volume, keep.len());
                 note_negative_interest_bars(decided.negative_open_interest, keep.len());
                 let mut arrays = arrays;
-                note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
-                RawWindow::decode(&arrays)
+                // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+                finish(
+                    &mut arrays,
+                    keep.len(),
+                    crate::fetch::DecodeSkips {
+                        null_price: decided.null_bars,
+                        negative_volume: decided.negative_volume,
+                        negative_open_interest: decided.negative_open_interest,
+                        impossible_ohlc: 0,
+                    },
+                )
             })()
         }
         // ONE OBJECT PER BAR — the shape `crate::vendor`'s Groww row declares.
@@ -1273,9 +1282,7 @@ fn decode_objects(
         open_interest: Vec::new(),
     };
 
-    let mut null_bars = 0usize;
-    let mut negative = 0usize;
-    let mut interest = 0usize;
+    let mut skipped = crate::fetch::DecodeSkips::default();
     for (i, item) in items.iter().enumerate() {
         // A field missing from ONE object is refused naming both the field and
         // which bar it was, because "the vendor sent 400 bars and one of them
@@ -1299,7 +1306,7 @@ fn decode_objects(
         // that had no trade, and this store cannot tell an invented zero from a
         // real one afterwards.
         //
-        // Skipped rather than silent: `null_bars` is counted and travels with
+        // Skipped rather than silent: `skipped.null_price` is counted and travels with
         // the window, so a run that dropped half its bars says so. `CLAUDE.md`
         // §4 — degrade loudly and name the reason.
         //
@@ -1312,7 +1319,7 @@ fn decode_objects(
             .iter()
             .any(|name| one(name).is_ok_and(serde_json::Value::is_null))
         {
-            null_bars += 1;
+            skipped.null_price += 1;
             continue;
         }
         // THE SAME COUNT RULE AS THE COLUMNAR SHAPE (c4a-1, c4a-2, D-1490).
@@ -1323,11 +1330,11 @@ fn decode_objects(
         ) {
             CountVerdict::Keep => {}
             CountVerdict::NegativeVolume => {
-                negative = negative.saturating_add(1);
+                skipped.negative_volume = skipped.negative_volume.saturating_add(1);
                 continue;
             }
             CountVerdict::NegativeInterest => {
-                interest = interest.saturating_add(1);
+                skipped.negative_open_interest = skipped.negative_open_interest.saturating_add(1);
                 continue;
             }
         }
@@ -1356,7 +1363,7 @@ fn decode_objects(
     // window an operator has to know about — it is not an error, and it is not
     // a full answer either. Emitted once per window rather than once per bar,
     // because 375 lines of "skipped" is noise and one count is information.
-    if null_bars > 0 {
+    if skipped.null_price > 0 {
         // BOTH, and the event is the load-bearing one. `eprintln!` reaches the
         // operator watching a terminal; the event reaches the log FILE, which is
         // the thing handed to somebody diagnosing a run that already finished.
@@ -1368,25 +1375,29 @@ fn decode_objects(
                 "pull.decode",
                 "bars carried a null price and were skipped",
             )
-            .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
+            .with(
+                "skipped",
+                u64::try_from(skipped.null_price).unwrap_or(u64::MAX),
+            )
             .with("bars", u64::try_from(items.len()).unwrap_or(u64::MAX)),
         );
         eprintln!(
-            "brutex: {null_bars} of {} bars carried a null price and were \
+            "brutex: {} of {} bars carried a null price and were \
              skipped — the vendor reported no trade in those minutes",
+            skipped.null_price,
             items.len()
         );
     }
 
-    note_negative_volume_bars(negative, items.len());
-    note_negative_interest_bars(interest, items.len());
+    note_negative_volume_bars(skipped.negative_volume, items.len());
+    note_negative_interest_bars(skipped.negative_open_interest, items.len());
 
     // THE THIRD DOOR GETS THE RULE AT THE SAME TIME AS THE FIRST. Three
     // separate rules in this decoder reached two of the three shapes and missed
     // the same one; this one is applied at every `RawWindow::decode` in the
     // file, so a shape cannot be forgotten without deleting the call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), items.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(&mut arrays, items.len(), skipped)
 }
 
 /// The unit [`decode_body`] leaves prices in, whatever the vendor quoted.
@@ -1789,6 +1800,27 @@ fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
          and is never below zero. `i64::MIN` is NOT counted here: that is the \
          null sentinel and is refused by name."
     );
+}
+
+/// Drops the impossible bars (counted and logged by [`note_impossible_bars`]),
+/// decodes the arrays, and attaches every skip to the window — or the refusal
+/// as it was.
+///
+/// One site for all three shapes, so a shape cannot attach the rows and forget
+/// the count — which is how the count was forgotten in the first place: each
+/// skip was logged and never reached the window, so the receipt balanced over
+/// candles that were not on it (D-3122).
+fn finish(
+    arrays: &mut ParallelArrays,
+    bars: usize,
+    mut skipped: crate::fetch::DecodeSkips,
+) -> Result<RawWindow, FetchError> {
+    skipped.impossible_ohlc = drop_impossible_bars(arrays);
+    note_impossible_bars(skipped.impossible_ohlc, bars);
+    RawWindow::decode(arrays).map(|mut window| {
+        window.skipped = skipped;
+        window
+    })
 }
 
 /// One event per WINDOW for rows whose four prices cannot be a bar.
@@ -3552,8 +3584,17 @@ fn decode_positional(
     note_negative_volume_bars(negative, rows.len());
     note_negative_interest_bars(interest, rows.len());
     // AND THE SECOND DOOR. See the note on the object shape's call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(
+        &mut arrays,
+        rows.len(),
+        crate::fetch::DecodeSkips {
+            null_price: null_bars,
+            negative_volume: negative,
+            negative_open_interest: interest,
+            impossible_ohlc: 0,
+        },
+    )
 }
 
 /// One timestamp cell, in whichever spelling this feed uses.

@@ -729,6 +729,27 @@ fn note_refused(columns: Columns, tally: Tally, why: &CsvError) {
 /// # Ok::<(), pull::csv::CsvError>(())
 /// ```
 pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
+    decode_counted(body, columns).map(|(rows, _skipped)| rows)
+}
+
+/// [`decode`], and the rows it skipped, by reason.
+///
+/// A row whose volume parses negative is skipped rather than refused or
+/// zeroed (see the volume read in the row pass). It is still a row the file
+/// OFFERED, so the receipt must count it: [`crate::archive::read_dir`] carries
+/// these into [`crate::archive::Member::skipped`], and `ingest` adds them to
+/// `Ingested::rows_read` and `Ingested::decoder_skips` exactly as the HTTP
+/// decoders' skips have been since D-3122. Before this the count reached only
+/// a log event and a run balanced over rows that were on no line of its
+/// receipt. D-3125.
+///
+/// # Errors
+///
+/// Those of [`decode`].
+pub fn decode_counted(
+    body: &str,
+    columns: Columns,
+) -> Result<(Vec<RawRow>, crate::fetch::DecodeSkips), CsvError> {
     let mut tally = Tally {
         lines: 0,
         skipped: 0,
@@ -745,7 +766,16 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
     match decode_rows(body, columns, &mut tally) {
         Ok(rows) => {
             note_decoded(columns, tally, rows.len());
-            Ok(rows)
+            // BOTH ROW SKIPS, NOT ONE (D-3133). A negative open interest
+            // skips its row exactly as a negative volume does (D-2683); only
+            // the volume reached the receipt until D-3133.
+            let skipped = crate::fetch::DecodeSkips {
+                negative_volume: usize::try_from(tally.negative_volume).unwrap_or(usize::MAX),
+                negative_open_interest: usize::try_from(tally.negative_open_interest)
+                    .unwrap_or(usize::MAX),
+                ..crate::fetch::DecodeSkips::default()
+            };
+            Ok((rows, skipped))
         }
         Err(why) => {
             note_refused(columns, tally, &why);

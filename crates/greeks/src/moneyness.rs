@@ -37,7 +37,25 @@ pub const MAX_STEPS: i32 = 1_000_000;
 
 /// How far from a whole number the step count may fall before the strike is
 /// declared off the grid.
+///
+/// This is the floor. Where the strike and the at-the-money level are large
+/// against the interval, the tolerance widens to their representational slack
+/// -- [`REPRESENTATION_ULPS`] units in the last place of the larger, in steps
+/// -- because a narrower one refuses strikes built on the grid. D-3100.
 pub const STEP_TOLERANCE: f64 = 1.0e-6;
+
+/// Units in the last place of the larger operand that the step count may
+/// carry: one each from rounding the strike, the at-the-money level and the
+/// subtraction, plus one for the division. D-3100.
+pub const REPRESENTATION_ULPS: f64 = 4.0;
+
+/// The largest ratio of price level to strike interval a ladder may have.
+///
+/// At this ratio the representational slack is a quarter of a step; past it,
+/// two neighbouring rungs are no longer reliably distinguishable in `f64`,
+/// and an answer would be a guess. Refused by name as `level_to_interval`.
+/// D-3100.
+pub const MAX_LEVEL_TO_INTERVAL: f64 = 0.25 / (REPRESENTATION_ULPS * f64::EPSILON);
 
 /// Where the strike stands relative to the money, for the side being priced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,7 +92,9 @@ impl Moneyness {
     ///
     /// [`GreeksError::NotFinite`], [`GreeksError::NotPositive`] or
     /// [`GreeksError::OutOfRange`] for a malformed strike, at-the-money level
-    /// or interval; [`GreeksError::OffGrid`] for a strike that is not a whole
+    /// or interval; [`GreeksError::OutOfRange`] on `level_to_interval` for a
+    /// ladder finer than [`MAX_LEVEL_TO_INTERVAL`] allows;
+    /// [`GreeksError::OffGrid`] for a strike that is not a whole
     /// number of steps from the money; and [`GreeksError::OutOfRange`] on
     /// `steps` for one further away than [`MAX_STEPS`].
     ///
@@ -101,12 +121,32 @@ impl Moneyness {
         let at_the_money = positive_bounded(at_the_money, "at_the_money", MAX_UNDERLYING)?;
         let interval = positive_bounded(interval, "interval", MAX_UNDERLYING)?;
 
+        // The step count carries the rounding of the strike, of the
+        // at-the-money level and of the subtraction -- each at most one unit in
+        // the last place of the larger operand -- divided by the interval. A
+        // fixed tolerance narrower than that slack refused strikes that a
+        // caller built ON the grid (`atm + k * interval`) whenever the level
+        // was large against the interval: measured, 19,200 of 40,001 on-grid
+        // strikes at a level of 1e9 and an interval of 0.03. The tolerance is
+        // therefore the wider of the stated one and that representational
+        // slack, and a ladder whose slack reaches a quarter step is refused by
+        // name, because no `f64` strike can then be placed on one rung rather
+        // than its neighbour. D-3100.
+        let ratio = strike.max(at_the_money) / interval;
+        if ratio > MAX_LEVEL_TO_INTERVAL {
+            return Err(GreeksError::OutOfRange {
+                field: "level_to_interval",
+                value: ratio,
+                bound: MAX_LEVEL_TO_INTERVAL,
+            });
+        }
+        let tolerance = STEP_TOLERANCE.max(REPRESENTATION_ULPS * f64::EPSILON * ratio);
         let exact = (strike - at_the_money) / interval;
         let rounded = exact.round();
-        if (exact - rounded).abs() > STEP_TOLERANCE {
+        if (exact - rounded).abs() > tolerance {
             return Err(GreeksError::OffGrid {
                 steps: exact,
-                tolerance: STEP_TOLERANCE,
+                tolerance,
             });
         }
         if rounded.abs() > f64::from(MAX_STEPS) {

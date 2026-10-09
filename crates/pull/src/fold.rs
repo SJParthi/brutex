@@ -111,9 +111,18 @@ impl Bucket {
     /// bar, no store rung is wider than a day, and a `u32::MAX` width stamped a
     /// 2024 snapshot at 1969-12-31. Every width from one second to one day is
     /// still accepted, which is what folding from snapshots promises.
+    ///
+    /// **A width that does not divide a day is refused too** (attack fold
+    /// round 1, D-3130). The intraday grid is counted from 09:15 IST of one
+    /// fixed day and runs on; it lands on every LATER day's open only when the
+    /// width divides 86,400. A 420-second bucket over the 2025-07-01 session
+    /// opened at 09:11 holding three minutes: the leading stub stamped before
+    /// the open that [`fold`]'s own comment calls a lie, on most days and for
+    /// every such width. Every store rung and every whole-minute divisor of a
+    /// day (thirty-six of them) is still accepted.
     #[must_use]
     pub const fn of_secs(secs: u32) -> Option<Self> {
-        if secs == 0 || secs > Self::DAY.0 {
+        if secs == 0 || secs > Self::DAY.0 || Self::DAY.0 % secs != 0 {
             None
         } else {
             Some(Self(secs))
@@ -462,6 +471,36 @@ pub enum FoldError {
         /// Its volume as offered.
         volume: i64,
     },
+    /// Two bars at the source width share one stamp. attack fold round 1,
+    /// D-3131.
+    ///
+    /// Snapshots may share a second and are merged by design; a BAR repeated at
+    /// its own width is one interval offered twice, and merging it would sum
+    /// its volume twice into a plausible bucket.
+    RepeatedBar {
+        /// Zero-based position of the repeat.
+        at: usize,
+        /// The shared stamp.
+        ts_micros: i64,
+    },
+    /// A bar whose stamp is not on its own width's grid. attack fold round 1,
+    /// D-3131.
+    OffSourceGrid {
+        /// Zero-based position of the bar.
+        at: usize,
+        /// Its stamp.
+        ts_micros: i64,
+        /// The width it was declared to carry, in seconds.
+        source_secs: u32,
+    },
+    /// A day bucket asked of an intraday source whose grid does not land on IST
+    /// midnight. attack fold round 1, D-3132.
+    GridMisaligned {
+        /// The width asked for, in seconds.
+        want_secs: u32,
+        /// The source width, in seconds.
+        source_secs: u32,
+    },
     /// A snapshot's timestamp precedes the one before it.
     ///
     /// Refused rather than sorted. Rows sharing a second carry no tiebreaker,
@@ -516,6 +555,34 @@ impl core::fmt::Display for FoldError {
                 "snapshot {at} carries a negative volume of {volume}. A count of \
                  trades cannot be below zero, and summed into its bucket it \
                  would hide as a smaller plausible volume."
+            ),
+            Self::RepeatedBar { at, ts_micros } => write!(
+                f,
+                "bar {at} repeats the stamp {ts_micros} at its own width. A bar \
+                 offered twice is not two snapshots: merged, its volume would be \
+                 summed twice into a plausible bucket. Refused; remove the \
+                 repeated bar at the source."
+            ),
+            Self::OffSourceGrid {
+                at,
+                ts_micros,
+                source_secs,
+            } => write!(
+                f,
+                "bar {at} is stamped {ts_micros}, which is not on the \
+                 {source_secs}s grid it was declared to carry. Folding it would \
+                 file its whole interval under whichever bucket the stamp falls \
+                 in. Refused; fold from the raw snapshots instead."
+            ),
+            Self::GridMisaligned {
+                want_secs,
+                source_secs,
+            } => write!(
+                f,
+                "a {want_secs}s bucket cannot be built from {source_secs}s bars: \
+                 the {source_secs}s grid is counted from 09:15 IST and does not \
+                 land on IST midnight, so the day edge falls inside a source \
+                 bar. Fold the day from one-minute bars or from the snapshots."
             ),
             Self::OutOfOrder {
                 at,
@@ -783,13 +850,81 @@ pub fn fold_from_bars(bars: &[Bar], bucket: Bucket, source: Bucket) -> Result<Ve
     // NARROWER IN THE ONLY sense that matters: some bucket edge falls inside a
     // source bar, and that bar cannot be split because the information to split
     // it was discarded when it was made.
-    if !bucket.secs().is_multiple_of(source.secs()) {
-        return Err(FoldError::NarrowerThanSource {
+    check_widths(bucket, source)?;
+    // A DAY FROM AN INTRADAY SOURCE NEEDS THE TWO GRIDS TO SHARE MIDNIGHT
+    // (attack fold round 1, D-3132). The intraday grid is counted from 09:15
+    // and the day's from IST midnight, 555 minutes earlier, so a source edge
+    // lands on midnight only where the source width divides 555 minutes. At 2,
+    // 10, 30 and 60 minutes midnight falls INSIDE a source bar -- the 60-minute
+    // bar stamped 23:15 covers 00:00-00:15 of the next day -- which is the very
+    // edge-inside-a-source-bar case `NarrowerThanSource` refuses.
+    let to_open = i64::from(store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT) * 60;
+    if bucket.secs() >= Bucket::DAY.secs()
+        && source.secs() < Bucket::DAY.secs()
+        && to_open % i64::from(source.secs()) != 0
+    {
+        return Err(FoldError::GridMisaligned {
             want_secs: bucket.secs(),
             source_secs: source.secs(),
         });
     }
+    // THE INPUT MUST BE BARS AT `source` WIDTH (attack fold round 1, D-3131).
+    // `fold` merges rows that share a bucket because snapshots legitimately
+    // share a second; two BARS sharing a stamp at their own width are one bar
+    // repeated, and merging them sums its volume twice. A bar off the source
+    // grid is not a bar of that width, and folding it attributes the whole
+    // source interval to whichever bucket its stamp falls in. Both refused by
+    // row, O(1) per bar. `complete_minutes_with_calendar` does NOT come through
+    // here: it withholds such a bucket with a diagnostic instead of refusing
+    // the whole batch, which is its documented contract.
+    let width = i64::from(source.secs()) * 1_000_000;
+    let anchor = grid_anchor(source);
+    let mut previous: Option<i64> = None;
+    for (at, bar) in bars.iter().enumerate() {
+        if previous == Some(bar.ts_micros) {
+            return Err(FoldError::RepeatedBar {
+                at,
+                ts_micros: bar.ts_micros,
+            });
+        }
+        previous = Some(bar.ts_micros);
+        let on_grid = bar
+            .ts_micros
+            .checked_add(anchor)
+            .is_some_and(|shifted| shifted.rem_euclid(width) == 0);
+        if !on_grid {
+            return Err(FoldError::OffSourceGrid {
+                at,
+                ts_micros: bar.ts_micros,
+                source_secs: source.secs(),
+            });
+        }
+    }
     fold(bars, bucket)
+}
+
+/// The width rule both bar folds share: the target is a whole multiple of the
+/// source.
+const fn check_widths(bucket: Bucket, source: Bucket) -> Result<(), FoldError> {
+    if bucket.secs().is_multiple_of(source.secs()) {
+        Ok(())
+    } else {
+        Err(FoldError::NarrowerThanSource {
+            want_secs: bucket.secs(),
+            source_secs: source.secs(),
+        })
+    }
+}
+
+/// The anchor [`fold`] counts a width's grid from, in micros: IST midnight for
+/// the day, 09:15 IST for anything narrower.
+fn grid_anchor(bucket: Bucket) -> i64 {
+    let ist = crate::session::IST_OFFSET_SECS * 1_000_000;
+    if bucket.secs() >= Bucket::DAY.secs() {
+        ist
+    } else {
+        ist - i64::from(store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT) * 60 * 1_000_000
+    }
 }
 
 /// Fold minute candles only when every scheduled minute in a bucket exists.
@@ -863,7 +998,10 @@ pub fn complete_minutes_with_calendar(
     runtime: crate::calendar::Runtime<'_>,
 ) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
     const MINUTE: i64 = 60_000_000;
-    let candidates = fold_from_bars(bars, bucket, Bucket::MINUTE)?;
+    // The width rule only: duplicate and off-grid minutes are withheld per
+    // bucket below with a diagnostic, not refused for the whole batch.
+    check_widths(bucket, Bucket::MINUTE)?;
+    let candidates = fold(bars, bucket)?;
     let mut complete = Vec::with_capacity(candidates.len());
     let mut diagnostics = Vec::new();
     let mut cursor = 0;
@@ -1353,7 +1491,7 @@ mod guard {
     /// bar. That is why this refuses rather than approximates.
     #[test]
     fn a_sub_minute_width_from_minute_bars_is_refused_by_name() {
-        for secs in [1u32, 7, 30, 90, 100, 3_607] {
+        for secs in [1u32, 50, 30, 90, 100, 3_456] {
             let want = Bucket::of_secs(secs).expect("non-zero");
             assert_eq!(
                 fold_from_bars(&[], want, Bucket::MINUTE),
@@ -1378,7 +1516,7 @@ mod guard {
     /// From snapshots, EVERY width is exact. Nothing is locked down.
     #[test]
     fn any_width_at_all_is_allowed_from_snapshots() {
-        for secs in [1u32, 7, 30, 90, 100, 60, 300, 3_607, 86_400] {
+        for secs in [1u32, 50, 30, 90, 100, 60, 300, 3_456, 86_400] {
             let want = Bucket::of_secs(secs).expect("non-zero");
             assert!(
                 fold_from_snapshots(&[], want).is_ok(),

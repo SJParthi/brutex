@@ -268,6 +268,11 @@ pub struct Member {
     /// snapshots with two to four rows sharing a second and no tiebreaker, so
     /// any re-sort destroys arrival order that was never written down.
     pub rows: Vec<RawRow>,
+    /// Rows the file offered that the decoder skipped, by reason. Not in
+    /// [`Self::rows`]; counted into the receipt's `rows_read` and
+    /// `decoder_skips` by `ingest` so a skipped row is never unaccounted for
+    /// (D-3125, the archive door of D-3122).
+    pub skipped: crate::fetch::DecodeSkips,
 }
 
 /// The instrument a member file names, with the strike decimal intact.
@@ -797,8 +802,8 @@ fn descend(
             .map_err(|_| ArchiveError::MemberNotText { path: path.clone() })?;
         // THE ONE REFUSAL THE CENSUS TURNS INTO A FINDING. `Refuse` is
         // byte-for-byte what this line did before the parameter existed.
-        let rows = match csv::decode(&text, columns) {
-            Ok(rows) => rows,
+        let (rows, skipped) = match csv::decode_counted(&text, columns) {
+            Ok(decoded) => decoded,
             Err(why) => match on_malformed {
                 Malformed::Refuse => {
                     return Err(ArchiveError::MemberMalformed { path, why });
@@ -819,6 +824,7 @@ fn descend(
             path,
             instrument,
             rows,
+            skipped,
         });
     }
 

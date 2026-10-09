@@ -88,11 +88,66 @@ pub struct RawRow {
     pub open_interest: Option<i64>,
 }
 
-/// A decoded window: rows, and nothing decided about them.
+/// Candles the vendor SENT that the decoder declined to turn into a row, by
+/// reason (D-3122).
+///
+/// # Why this travels with the window
+///
+/// `crate::http`'s decoders skip a candle with a null price, a negative volume
+/// on a traded listing, a negative open interest other than the sentinel, or
+/// OHLC that cannot have happened. Each skip was counted into a telemetry
+/// warning and then forgotten: [`RawWindow`] carried only the rows that
+/// survived, so `ingest::from_window` read a short `rows` as the whole answer
+/// and `Ingested::balances` said every offered candle was accounted for while
+/// one of them was nowhere on the receipt. On a minute index/cash pull the
+/// request-minute audit happened to name the hole; on a day pull, a contract
+/// pull, or any feed the audit does not cover, nothing did.
+///
+/// Counted here, carried in the window, summed into
+/// `ingest::Ingested::decoder_skips`, and part of the balance — so the vendor's
+/// count is `written + folded + dropped + skipped`, each by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct DecodeSkips {
+    /// A price cell was `null`: the vendor reported no trade in that interval.
+    pub null_price: usize,
+    /// A volume below zero on a listing that trades.
+    pub negative_volume: usize,
+    /// An open interest below zero that is not the null sentinel.
+    pub negative_open_interest: usize,
+    /// OHLC that cannot have happened: an ordering violation or a negative.
+    pub impossible_ohlc: usize,
+}
+
+impl DecodeSkips {
+    /// Every skipped candle, across the four reasons.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.null_price
+            .saturating_add(self.negative_volume)
+            .saturating_add(self.negative_open_interest)
+            .saturating_add(self.impossible_ohlc)
+    }
+
+    /// Adds another window's skips to these, reason by reason.
+    pub const fn absorb(&mut self, other: Self) {
+        self.null_price = self.null_price.saturating_add(other.null_price);
+        self.negative_volume = self.negative_volume.saturating_add(other.negative_volume);
+        self.negative_open_interest = self
+            .negative_open_interest
+            .saturating_add(other.negative_open_interest);
+        self.impossible_ohlc = self.impossible_ohlc.saturating_add(other.impossible_ohlc);
+    }
+}
+
+/// A decoded window: rows, and nothing decided about them — plus the count of
+/// candles the decoder declined, so the receipt can still name every one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RawWindow {
     /// The rows, in the order the vendor sent them.
     pub rows: Vec<RawRow>,
+    /// Candles the vendor sent that never became a row, by reason. See
+    /// [`DecodeSkips`].
+    pub skipped: DecodeSkips,
 }
 
 /// The seven parallel arrays, as a vendor sends them.
@@ -530,7 +585,10 @@ impl RawWindow {
                 open_interest: a.open_interest.get(i).copied(),
             });
         }
-        Ok(Self { rows })
+        Ok(Self {
+            rows,
+            skipped: DecodeSkips::default(),
+        })
     }
 }
 
@@ -613,7 +671,10 @@ impl FakeSource {
     #[must_use]
     pub fn returning(rows: Vec<RawRow>) -> Self {
         Self {
-            answer: Ok(RawWindow { rows }),
+            answer: Ok(RawWindow {
+                rows,
+                skipped: DecodeSkips::default(),
+            }),
         }
     }
 

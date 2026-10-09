@@ -65025,3 +65025,742 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-3100 — An on-grid strike at any level is placed, and a ladder too fine for f64 is refused by name — 2026-10-04
+
+**Finding (data-path attack, round 1).** `Moneyness::from_ladder` compared
+the step count against a fixed 1e-6. The count carries the rounding of the
+strike, the at-the-money level and their difference, about one ulp of the
+larger operand over the interval. At level 1e9 and interval 0.03, 19,200 of
+40,001 strikes built as `atm + k*interval` were refused as `OffGrid`. At
+level 1e12 and interval 1e-3 it answered ATM although no rung can be told
+from its neighbour there.
+
+**Decision.** The tolerance is `max(STEP_TOLERANCE, REPRESENTATION_ULPS *
+EPSILON * max(strike, atm) / interval)`, exactly 1e-6 at ordinary levels.
+Above `MAX_LEVEL_TO_INTERVAL` (about 2.8e14) the ladder is refused as
+`OutOfRange { field: "level_to_interval" }`. DPG-01, DPG-02.
+
+### D-3101 — The implied-volatility uncertainty floors at the subnormal gap — 2026-10-04
+
+**Finding.** `uncertainty` was `price_scale * EPSILON / vega`. Below
+`f64::MIN_POSITIVE` doubles are spaced 2^-1074 apart, so at S = K =
+`MIN_POSITIVE` the solver reported 1.55e-10 while its answer was off by 8.6e-9.
+
+**Decision.** The numerator is `max(scale * EPSILON, 2^-1074)` (`SUBNORMAL_GAP`).
+Identical at every normal scale; neither term can be NaN. DPG-03.
+
+### D-3110 — A stamp with two different spot closes answers nothing — 2026-10-04
+
+**Finding.** `SpotBook::of` let the later bar at a repeated stamp replace the
+earlier, so an option was priced against whichever close arrived last.
+
+**Decision.** A stamp whose bars disagree is dropped and counted
+(`ambiguous()`); `at` answers `None` and `lookup` refuses `SpotAmbiguous`. An
+exact repeat still answers. The unit test that pinned last-wins was changed.
+DPP-01.
+
+### D-3111 — price_all keeps one sentence per kind of refusal — 2026-10-04
+
+**Finding.** Refusal sentences were deduplicated whole, and each carried the
+row's numbers, so five premiums below intrinsic filled every kept slot and a
+different reason later in the run was counted but never named.
+
+**Decision.** Rows are grouped by the error arm (and wrapped arm and field);
+the first sentence of each group is kept verbatim. Counts unchanged. DPP-02.
+
+### D-3112 — chain::iso_expiry requires ASCII digits — 2026-10-04
+
+**Finding.** `"2024-+1-25"` read as 2024-01-25, because `str::parse` accepts a
+leading `+`.
+
+**Decision.** Every byte other than positions 4 and 7 must be a digit. DPP-03.
+
+### D-3114 — The vendor-volatility path refuses a premium below intrinsic as the solver does — 2026-10-04
+
+**Finding.** A quote priced with a vendor's volatility never read its premium,
+so a premium at or below the discounted intrinsic value was priced while the
+solved path refused the same quote.
+
+**Decision.** The vendor path refuses it with the solver's arm and numbers.
+DPP-04.
+
+### D-3115 — A contract name on another exchange than the ask is refused — 2026-10-04
+
+**Finding.** `read_contract` ignored the exchange token and `chain::month`
+compared only the underlying, so `BSE-NIFTY-...` answering an NSE ask would be
+filed as NSE NIFTY.
+
+**Decision.** The exchange token is compared with the ask and a mismatch is
+refused by name. DPP-05.
+
+### D-3116 — The chain deduplicates by decoded contract, not by spelling — 2026-10-04
+
+**Finding.** Two spellings of one contract (`04JAN24` and `04Jan24`, `77.5`
+and `77.50`) would be filed twice.
+
+**Decision.** The second spelling of a contract already filed is not filed and
+is named. DPP-06.
+
+### D-3117 — The vendor path and the solver share one premium screen — 2026-10-04
+
+**Finding.** D-3114 copied the intrinsic bound into `pull`, a second authority
+for one fact, and the vendor path still priced a premium at or above the
+no-arbitrage maximum (a call worth the spot) that the solver refuses.
+
+**Decision.** `greeks::Contract::screen_premium` is the solver's own screen
+(finite price, below-intrinsic, above-maximum), public; the solver calls it
+and the vendor path calls it. The copy in `pull` is deleted. DPP-07.
+
+### D-3120 — A month the store refuses does not uncount the months already written — 2026-10-04
+
+**Finding.** A multi-month batch whose later month the store refused returned
+through `?`, dropping the census rows of months already appended and fsynced:
+bars on disk with no census row.
+
+**Decision.** The refused month is named in `failures`; every other month is
+written and counted on its own. DPI-01.
+
+### D-3121 — A stamp the calendar cannot place is refused, not called "before the window" — 2026-10-04
+
+**Finding.** `from_rows` counted an unplaceable timestamp (`i64::MAX`, a day
+with unverified venue hours) as `BeforeWindow`: a named reason, and the wrong
+one.
+
+**Decision.** The batch is refused with the stamp and the calendar's words,
+the same rule `fetch::land` applies. DPI-02.
+
+### D-3122 — Candles the decoder skips stay on the receipt — 2026-10-04
+
+**Finding.** The Kite decoders skip a candle with a null price, a negative
+volume, a negative open interest or impossible OHLC, warn, and forget it.
+`RawWindow` carried only survivors, so `Ingested::balances` held while a
+candle the vendor sent was nowhere on the receipt. Only the minute audit for
+index and cash would notice; a day pull or a contract pull would not.
+
+**Decision.** `fetch::DecodeSkips` counts each reason, travels in
+`RawWindow::skipped`, is summed into `Ingested::decoder_skips` and is part of
+the balance. The telemetry warning stays. DPI-03.
+
+### D-3130 — A fold width must divide a day — 2026-10-04
+
+**Finding.** The intraday grid is counted from 09:15 IST on 1970-01-01, so it
+lands on a later day's 09:15 only when the width divides 86,400. A 420 s
+bucket on 2025-07-01 opened at 09:11 holding three minutes.
+
+**Decision.** `Bucket::of_secs` refuses a width that does not divide 86,400.
+Every `Timeframe::KNOWN` width still builds. `anchor.rs` pinned width 7; it now
+pins 50. DPF-01, DPF-02.
+
+### D-3131 — fold_from_bars refuses a repeated or off-grid source bar — 2026-10-04
+
+**Finding.** `fold_from_bars` handed bars to `fold`, which merges rows sharing
+a bucket. A bar repeated at its own width had its volume counted twice, and a
+bar off the source grid went silently into whichever bucket held its stamp.
+
+**Decision.** Refused as `RepeatedBar` and `OffSourceGrid`, one O(1) check per
+bar. `complete_minutes_with_calendar` keeps withholding only the affected
+bucket. DPF-03.
+
+### D-3132 — A day is folded only from a source grid that lands on midnight — 2026-10-04
+
+**Finding.** At 2, 10, 30 and 60 minutes IST midnight falls inside a source
+bar (the 60 m bar stamped 23:15 covers 00:00-00:15), yet 60 m to day was
+accepted.
+
+**Decision.** Refused as `GridMisaligned`; a day from 1, 3, 5 or 15 minutes is
+still allowed. DPF-04.
+
+### D-3140 — An append refuses when the header's last stamp is not its last record's — 2026-10-04
+
+**Finding.** `append` decides that a batch FOLLOWS the month from the header's
+`last_ts_micros` alone. A header slot with a good checksum and a wrong range
+admitted a bar stamped behind held records: a month of minutes 0..=9 whose
+slot said minute 0 accepted minute 6 at index 10, leaving the file out of
+order and every later bisection answering a neighbour.
+
+**Decision.** Before that branch writes, one positional read of record
+`n_valid - 1` must carry the header's stamp, or the append is refused as
+`FormatError::LastStampDisagrees`. O(1) per append. DPS-01.
+
+### D-3150 — A non-positive strike has no contract segment — 2026-10-04
+
+**Finding.** `Contract::of` rendered `2025-09-30-0-CE` and `...--500-PE`, and
+`read_contract` filed `NSE-NIFTY-04Jan24-0-CE` as a real contract.
+
+**Decision.** `render` returns `None` for a strike at or below zero. DPD-01.
+
+### D-3151 — Contract text has exactly one spelling — 2026-10-04
+
+**Finding.** `Contract::parse` checked only the allowed characters, so `FUT`,
+24 `A`s, `2025-9-30-FUT`, `2025-02-30-FUT` and leading-zero strikes parsed,
+each a second store directory for one series.
+
+**Decision.** `parse` decodes, renders again, and accepts only a byte-equal
+round trip. DPD-02.
+
+### D-3152 — The test-instrument marker is matched in any case — 2026-10-04
+
+**Finding.** `NSETEST` was matched case-sensitively before the symbol was
+uppercased, so `031nsetest` was kept as `031NSETEST`.
+
+**Decision.** The marker match ignores ASCII case. DPD-03.
+
+### D-3153 — The Zerodha index alias does not depend on case — 2026-10-04
+
+**Finding.** `Nifty 50` missed the alias and was kept as a second index
+`NIFTY50`.
+
+**Decision.** The name is uppercased before the alias lookup. DPD-04.
+
+### D-3155 — read_contract's expiry token is a fixed byte pattern — 2026-10-04
+
+**Finding.** The token check used `str::parse`, which accepts `+`, so
+`+4Jan24` and `Jan+4` matched.
+
+**Decision.** A fixed byte-pattern match with every digit checked. DPD-05.
+
+### D-3156 — read_contract's underlying must already be a valid symbol — 2026-10-04
+
+**Finding.** The underlying was checked only for emptiness: a 1,000-byte,
+lowercase or spaced underlying was read and copied out.
+
+**Decision.** It must be a valid uppercase symbol as written. DPD-06.
+
+### D-3157 — A leading-zero strike is a second spelling and is refused — 2026-10-04
+
+**Finding.** `019200` and `00.05` named the same contract as `19200` and
+`0.05`, and the chain deduplicated by name.
+
+**Decision.** Refused. DPD-07.
+
+### D-3158 — A drifted NSE index document is refused, not partly skipped — 2026-10-04
+
+**Finding.** `masters::nse_index_csv` skipped a category value that was not a
+list and an element that was not a string, counting nothing, while its doc
+said it refused them.
+
+**Decision.** Either refuses the whole document naming the category and the
+kind of value; the landed catalogue stays byte-identical. Refusal over a count
+because no caller reads a count. DPD-08.
+
+### D-3113 — An expiry on a non-trading day stays accepted until a sourced rule exists — 2026-10-04
+
+**Finding.** `Venue::hours_on` is a table of hours by date, not a trading
+calendar, so a Saturday expiry gets a 15:40 close and two extra days of tenor.
+
+**Decision.** Not changed. Refusing needs a charter-sourced trading calendar;
+NSE has held Saturday special sessions, and `calendar::kind_of`'s Closed is
+observed, not proven. Pinned in `dpp_tenor_edges` so a change is visible.
+UNVERIFIED until a source is recorded.
+
+### D-3180 — The receipt and the journal name the candles the decoder skipped — 2026-10-04
+
+**Finding.** D-3122 counted decoder-skipped candles into `Ingested::rows_read`
+and made `balances` account for them, but the spot receipt
+(`api::server::landed_answer`) still printed `yes — R read = S stored + F
+folded + D dropped` with no skip term, so a balanced run with skips printed a
+false equation (measured: `480 read = 466 stored + 0 folded + 0 dropped`). The
+journal note from `audit::Record::of_run` said every row was "stored, folded
+or dropped" over a candle that was none of those.
+
+**Decision.** The receipt has a "Candles the decoder skipped" row (the total
+and each reason that fired), and both Balances lines carry `+ N skipped by
+the decoder`. The 256-byte record has no spare field, so a balanced run with
+skips gets the note `every row accounted for; N skipped by the decoder`, which
+fits `NOTE_CAPACITY` for any count. One existing assertion
+(`several_diagnostics_for_one_instrument_are_not_failed_member_counts`) was
+updated to the new wording. DPR-01, DPR-02.
+
+### D-3181 — A rotted last stamp is refused as rot, not as a lying header — 2026-10-04
+
+**Finding.** D-3140 compared the header's `last_ts_micros` with record
+`n_valid - 1`, read without the block verify, and refused a mismatch as
+`LastStampDisagrees`. When the record had rotted and the header was right,
+that named the wrong culprit, and it ran before D-0910's verify of a partly
+covered tail block, so a flipped stamp bit answered "header" in all 320 cases
+tried.
+
+**Decision.** On a mismatch only, the record's block is verified against the
+sidecar first: a failure is `BlockChecksum`, and `LastStampDisagrees` is
+returned only when the block verifies. The extra read is on the refusal path
+only, so for every append that would have committed D-0910's "a full tail
+block is not read" still holds. DPR-03, DPR-04.
+
+### D-3182 — The F&O chain receipt counts and names the candles the decoder skipped — 2026-10-05
+
+**Finding.** `fetch_chain_chunks` summed `body.rows.len()` into
+`FetchedBatch::rows_read`, so the chain receipt and its journal record counted
+only the rows the decoder kept. A contract window with three null candles read
+`rows_read 385` where the vendor sent 388, and the page named no skip. This is
+the class D-3122 and D-3180 closed on the spot path, left open on the chain
+path (round 2 open item 1).
+
+**Decision.** `FetchedBatch` and `FnoLanded` carry the vendor's count (kept
+rows plus skips) and the skips by reason, including for chunks answered before
+a later refusal abandoned the contract. The chain receipt carries the same
+"Candles the decoder skipped" row as the spot receipt. DPR-11, DPR-12.
+
+### D-3183 — A refused cash schedule still counts the candles the decoder skipped — 2026-10-05
+
+**Finding.** When `prepare_cash_schedule` refused, `land_spot` reported
+`rows_read` as the sum of `body.rows.len()` and left `decoder_skips` at zero.
+No receipt claimed balance there, because a failure is pushed, but the
+vendor's row count was low (measured: 360 for 365 offered).
+
+**Decision.** That branch counts through `vendor_count`, kept rows plus skips
+and the skips by reason, the same count `pull::ingest::from_window` makes.
+DPR-13.
+
+### D-3184 — The ingest attack fixture scales prices once — 2026-10-05
+
+**Finding.** `crates/pull/tests/attack_ingest.rs::plan` passed
+`PriceScale::Rupees` over decoder output that is already paisa, so every bar
+those tests stored was x100 (measured: 240000500 stored for a 24000.05 open).
+Every assertion in the file was relative, so all of them passed. Test defect
+only: production uses `pull::http::DECODED_PRICE_SCALE`.
+
+**Decision.** The fixture uses `pull::http::DECODED_PRICE_SCALE`, and
+`the_session_edges_are_kept_or_dropped_by_name_and_the_tally_balances` asserts
+the exact paisa of the 09:15 bar, so the double scale fails a test. DPR-14.
+
+### D-3185 — The attack tests' literals are declared to gate 1d — 2026-10-05
+
+**Finding.** Gate 1d refused 55 segment-shaped literals that arrived with the
+round 1 and round 2 attack tests and two in a `#[cfg(test)]` module of
+`chain.rs`.
+
+**Decision.** Each was read where it sits and declared in
+`.github/gates_tree.rs` as group `ATTACK_LITERAL`, with the reason per kind:
+malformed contract names, hostile price and volume cells, malformed dates,
+scratch names, and assertion substrings. None is a path segment.
+
+### D-3186 — A month the store refuses is logged beside its failure — 2026-10-05
+
+**Finding.** Gate 19: D-3120's per-month refusal in `pull::ingest` pushed a
+`Failure` and emitted no event, so `/logs` was quiet for a month that did not
+land.
+
+**Decision.** The refusal calls `note_not_filed` at `Error` with stage `month
+append` before the failure is pushed.
+
+### D-3187 — The fold cost test names its own file as proof — 2026-10-05
+
+**Finding.** Gate 12: `fold_cost_per_input_bar_is_flat` makes a cost claim
+("flat") and named no proof.
+
+**Decision.** The doc names `crates/pull/tests/attack_fold.rs`, the
+measurement itself.
+
+### D-3188 — MR-04 is restated as reversed by D-3158 — 2026-10-05
+
+**Finding.** Gate 10: invariant MR-04 named
+`an_index_document_with_a_non_string_name_skips_it_rather_than_refusing`,
+which D-3158 renamed when it reversed the behaviour.
+
+**Decision.** The row is kept with its old statement struck through, the
+reversal stated, and the proof pointed at
+`an_index_document_with_a_non_string_name_or_a_non_list_value_refuses`. No row
+was deleted.
+
+### D-3189 — Gate 11's allowlists declare the round 1 and round 2 sites — 2026-10-05
+
+**Finding.** Gate 11 refused five new float sites in `greeks` (bsm 37,
+moneyness 9, solver 15), two in `pull::pricing` (24), two unsized maps
+(`chain.rs` `filed`, `pricing.rs` `ambiguous`), two hash-probe membership
+tests in `pricing.rs`, and warned that `fno.rs`'s rule 6 entry was loose.
+
+**Decision.** `pull::pricing::price` widens the premium once for both paths,
+so that file stays at 22. The greeks counts are raised, each site read as a
+statistic or a dimensionless ratio and never a price. `filed` (and D-3126's
+`named`) reserve per expiry answer; `ambiguous` stays unsized because it is
+empty on every well-formed month. The member count for `pricing.rs` is raised
+to 4 for the two hash probes. The `fno.rs` rule 6 entry is removed, since
+D-3155 removed its scan. Each reason is in `docs/06-limits.md` under the
+rule's heading.
+
+### D-3123 — A contradicted index stamp is refused as a disagreement, not as a missing bar — 2026-10-05
+
+**Finding.** D-3110 made `SpotBook` answer nothing at a stamp where two index
+bars disagree and gave `SpotBook::lookup` a refusal that says so. The only
+production consumer, `api::server::chain_quotes`, called `SpotBook::at` and
+reported every `None` as "no index bar is stored at this option bar's stamp",
+which is false when two are stored there. Round 2 recorded that the ambiguity
+reached the receipt through `SpotAmbiguous`; it did not.
+
+**Decision.** `chain_quotes` calls `lookup`. A missing stamp keeps its
+sentence; a contradicted stamp gets one fixed sentence naming the
+disagreement. The sentence is fixed rather than the error's Display, which
+carries the stamp and would fill every reason slot with one class. DPR-15.
+
+### D-3124 — The receipt keeps one reason per shape across contract-months — 2026-10-05
+
+**Finding.** D-3111 made `price_all` keep one sentence per class of refusal.
+`PricedCount::absorb` and `absorb_count` then folded one `PricedAll` per
+contract-month, deduplicating by whole sentence again, so five months refused
+below intrinsic (five sentences differing only in the intrinsic value) filled
+every slot, and a later month refused for another reason was counted and never
+named. Measured: six below-intrinsic months kept five reasons and dropped the
+`supremum` refusal.
+
+**Decision.** `keep_reason` compares sentences by shape: every number (a run of
+digits, `.`, `e`, `E`, `+`, `-` holding a digit) is erased before comparing.
+The first sentence of each shape is kept verbatim. `note_price_refusal` uses it
+too. The cost is bounded by `REASONS_KEPT` shapes per offered reason. DPR-16.
+
+### D-3125 — A CSV row the decoder skips is on the receipt — 2026-10-05
+
+**Finding.** `csv::decode` skips a row whose volume parses negative and counted
+it only into one log event. The archive member reached `from_members` short,
+`rows_read` was the decoded count, and the run balanced over a row that was on
+no line of the receipt (measured: 378 offered, `rows_read 375`, `balances()`
+true). This is D-3122's defect on the local-archive door, which round 1 did
+not walk.
+
+**Decision.** `csv::decode_counted` returns the skips with the rows,
+`archive::Member` carries them as `skipped`, and `ingest::from_members` (and
+`refused_whole`) add them to `rows_read` and `decoder_skips`. `from_window`
+builds its member with no skips because it already counts `raw.skipped`
+itself, so nothing is counted twice. DPR-17.
+
+### D-3126 — One vendor name is filed once across the chain walk — 2026-10-05
+
+**Finding.** `chain::month` deduplicated a repeated name within one expiry's
+answer and a second spelling of one decoded contract (D-3116). Its comment said
+the same name under a second expiry is refused by `read_contract`'s token
+check. That holds for a dated name. A monthly name (`Mar25`) carries no day, so
+listed beside 2025-03-26 and 2025-03-27 it decoded to two contracts: the same
+series would be fetched twice and one copy stored under an expiry that is not
+its own.
+
+**Decision.** The walk keeps `named`, each filed vendor name with the expiry it
+was first listed under. A later listing of the same name is refused by name,
+naming both expiries. A dated name under the wrong expiry is still refused by
+`read_contract`. DPR-18.
+
+### D-3127 — The rolling walk keeps one run-failure reason per shape — 2026-10-06
+
+**Finding.** Recorded open after data-path round 3: `Rolled::absorb` and
+`note_run_failure` kept the first five run-failure sentences verbatim, with no
+de-duplication at all. A rolling walk is up to 252 runs, and one cause repeated
+across them (each sentence differing only in the run's strike offset and dates)
+filled every slot, so a later run failing for a different cause was counted in
+`failed` and never named. Measured on 0368dbb: twenty runs refused for one
+cause and a twenty-first for another kept five copies of the first cause and
+dropped the second; the same through the `Ok` arm (runs that partly failed).
+
+**Decision.** Both sites keep a reason through `keep_reason`, the shape rule
+D-3124 gave pricing refusals: a sentence is kept only when no kept sentence has
+its shape (every number erased), the first of each shape verbatim, still capped
+at `pull::pricing::REASONS_KEPT`. Every failure is still counted. The cost is
+bounded by `REASONS_KEPT` shape comparisons per reason offered, never by runs.
+`rolling_reason_limits_do_not_truncate_failures_or_committed_counts` asserted
+five copies of one obstruction on the receipt; it now asserts the two shapes
+(`ATM` and `ATM+n`, which differ by the `+` that survives erasure) and that the
+other five sentences are counted, not repeated. The Groww chain receipt's
+`FnoLanded::record_refusal`/`record_landing` keep five verbatim sentences the
+same way; that is the same class, was not recorded as open, and is left for a
+round that owns it. DPM-01, DPM-02.
+
+### D-3128 — Merging final/all-fixes into the data-path branch: the index skip is refused, not counted — 2026-10-06
+
+**Finding.** Merging `origin/final/all-fixes` (969493e1) into
+`claude/attack-data-pipeline-hgxmw9` conflicted in code in three places.
+
+- `pull::masters::nse_index_csv`. This branch's D-3158 refuses a category
+  whose value is not a list and a list element that is not a name. The base's
+  D-2682 (CE-58) kept MR-04's skip and made it loud: a `Warn` event and an
+  `eprintln!` naming each skipped category, plus a refusal of a category named
+  twice.
+- `api::server` rolling walk. The base (D-2650) skips an unnameable run and
+  continues where this branch broke out of the loop. D-3127 changed the
+  signature of `note_run_failure` to take `&str`.
+- `.github/gates_ledger.rs` gate 11 float counts, and `.github/gates_tree.rs`
+  declared groups.
+
+**Decision.**
+
+- D-3158's refusal stands and D-2682's repeated-key refusal is kept with it.
+  Both dated 2026-10-04. The refusal costs nothing already held (`land`
+  writes nothing on `Err`) and `CLAUDE.md` §4 allows "or refuse". The merged
+  MR-04 row already recorded D-3158's reversal.
+- With nothing left to skip, `IndexSkips`, `note_index_skips`, its emit-site
+  row in `pull::emit_sites`, and gate 23's declared
+  `pull/src/masters.rs:eprintln!:1` are removed. ZX-32 is restated with its
+  skip half struck and its proof repointed at
+  `an_index_document_with_a_non_string_name_or_a_non_list_value_refuses`.
+  The doc comment now lists five refusals.
+- The rolling walk takes the base's skip-and-continue with D-3127's `&why`.
+- Gate 11 floats as measured on the merged tree, exact: `pricing.rs` 23
+  (the base's named rate constant on top of round 3's hoist), `solver.rs` 15,
+  `moneyness.rs` 9, `bsm.rs` 37 (this branch's D-3189). The base's
+  `gate11_allowlists_carry_the_counts_the_merged_code_needs` (23) holds
+  unchanged.
+- Gate 1d: the base's D-2660 splits joined literals on `/`, so chain.rs's
+  D-3116 fixture `2024/01/25` now yields `25`. It is declared in
+  `ATTACK_LITERAL`, after the base's groups (`DECLARED` 55).
+- Docs tails of 04, 05, 06 and 11 keep both sides, base first.
+- The journal notes fit record version 2. The base's D-2673 cut
+  `audit::NOTE_CAPACITY` from 68 to 60 bytes. The clean-run note `every row
+  accounted for: stored, folded into an open bar, or dropped` is 68 bytes, so
+  on the base alone every clean run's note was stored as `... an open bar,
+  or`. D-3180's skip note was sized for 68 and no longer fit for a wide count.
+  `the_journal_note_of_a_run_with_decoder_skips_names_them` failed on the merged
+  tree, measured as `left: "every row accounted for: stored, folded into an
+  open bar, or"`. The notes are now `every row accounted for: stored, folded or
+  dropped` (50 bytes) and `every row accounted for; N decoder skips` (at most
+  59 bytes for `usize::MAX`). The test asserts both, plus the widest count,
+  against `NOTE_CAPACITY`. DPR-02 is restated.
+
+### D-3129 — Gate 18 pre-run on the data-path branch: the greeks survivors are killed — 2026-10-06
+
+**Finding.** `cargo mutants --in-diff` over this branch's own diff against
+`origin/final/all-fixes` (`--baseline skip --in-place --timeout 900
+--cap-lints true`, nextest, one crate at a time, in a separate worktree) left
+three greeks survivors:
+
+- `moneyness.rs` `Moneyness::from_ladder`, `>` replaced with `>=` on the
+  `level_to_interval` bound. No test placed a ladder exactly at the bound.
+- `solver.rs` `SUBNORMAL_GAP`, `*` replaced with `+` and with `/`. Nothing
+  observed the constant's exact value.
+
+**Decision.**
+
+- `a_ladder_exactly_at_the_resolution_bound_is_placed_and_one_ulp_past_it_is_not`
+  places a strike at exactly `MAX_LEVEL_TO_INTERVAL`, which is `2^48`
+  (`2^39` over `2^-9`, no rounding), and refuses one ulp finer. On the `>=`
+  mutant it fails with "at the bound" refused.
+- `SUBNORMAL_GAP` is written as `f64::from_bits(1)`, the same double, and
+  `the_subnormal_gap_is_the_old_product` asserts it equals the old product.
+  No arithmetic is left to mutate, and nothing about the solver changes.
+  The assertion is a unit test rather than a `const` item, because gate 11
+  counts an `f64` token on that line in production code.
+
+DPM-03.
+
+### D-3133 — A CSV row skipped for negative open interest is on the receipt — 2026-10-06
+
+**Finding (data-path round 4).** D-3125 carried the CSV rows `csv::decode`
+skips for a negative volume into `DecodeSkips`, so the archive door's receipt
+counts them. A row with a negative open interest is skipped by the same pass
+(D-2683), but `decode_counted` built its `DecodeSkips` from the volume count
+alone. The negative-open-interest count reached only the "file decoded" log
+line. Measured on 8b851eb: a `TrueDataFno` member of two rows, one with open
+interest `-5`, gave `negative_open_interest 0` and `total() 0`, so
+`rows_read` was 1 of 2 offered and the run balanced over a row that appeared
+on no line of its receipt.
+
+**Decision.** `decode_counted` carries both counts. `ingest::from_members`
+already adds `DecodeSkips::total()` to `rows_read` and `decoder_skips`, and
+the receipt already names every reason that fired, so nothing else changes.
+GDFL quote rows (`Tally::quote_rows`, D-2688) are left as they are: D-2688
+rules them "not a degrade", and they are not skips. DPM-04.
+
+### D-3134 — A torn `.tix` entry is rebuilt alone, so the append that finds it stays O(1) — 2026-10-06
+
+**Finding (F-054F53, D-3302 on attack/o1-p99).** `BarFile::index_batch`
+rebuilt the whole time index whenever the entry it resumes from failed. That
+follows a torn index write from an append that failed on the same handle. The
+rebuild reads every committed bar, so that one append was O(`n_valid`).
+Measured on this box with the repair disabled, by the ignored
+`tix_repair_latency`: p50 28 / 28 / 32 / 124 ms and p99 32 / 32 / 44 / 164 ms
+at 10^3 / 10^4 / 10^5 / 10^6 bars.
+
+**Decision.** A failed append can tear only the entry of the last committed
+bar's bucket. Entries are written from that bucket onward and synced before
+the header slot, so every earlier entry was synced ahead of a header that
+committed. Committed stamps rise strictly slot by slot, so the bars in that
+bucket are the trailing run of at most 64 rows. `time_index::recover`
+rebuilds the entry from that run and the row before it, which is at most 65
+bar reads whatever the month holds. It refuses anything it cannot prove: a
+last row not stamped where the header says, a shared slot, an off-grid,
+outside or unreadable bar. `BarFile::repair_torn_entry` uses it only for
+`Why::Entry` at exactly that bucket. Every other reason, and every refusal,
+still takes the whole rebuild, loudly. The repair is logged on the existing
+`store.tix` "time index rebuilt from the bars" line, which now carries
+`scope` (`whole index` or `one torn entry`) and `entries` 1. No new emit site.
+
+The rebuilt entry reaches disk with the append's own entries, before the
+header slot, so the crash ordering of `docs/02-store-format.md` §5 is
+unchanged.
+
+**Measured after**, same test and box: p50 16 / 16 / 15 / 16 ms and p99
+20 / 20 / 20 / 20 ms at 10^3 / 10^4 / 10^5 / 10^6 bars. Flat; the append's
+fsyncs are the cost. The read bound is asserted, not timed, by
+`recover_rebuilds_the_last_entry_exactly_from_at_most_65_reads`: 65 reads at
+10^6 bars.
+
+**What stays O(`n_valid`).** The whole rebuild at writer open, and on an
+append whose index the bars do not vouch for (`Why::Stale`, a header refusal,
+an entry torn outside the last bucket). Those are an index damaged by
+something other than this writer's failed append, and `docs/06-limits.md`
+names them. When attack/o1-p99 merges, this supersedes the "An append can
+pay it too" bullet of its D-3302 section for the torn-write case. DPM-05,
+DPM-06.
+
+### D-3135 — A repaired `.tix` entry is logged only once it is on disk, and the repair checks row 0 — 2026-10-06
+
+**Finding (data-path round 5, against D-3134).** Two defects in D-3134's own
+code:
+
+- **Logged too early.** `repair_torn_entry` wrote the `store.tix` "time index
+  rebuilt from the bars" line (scope `one torn entry`) inside `index_batch`,
+  before any byte was written. An append retired after the repair (a second
+  daily bar on one IST day, D-2330) or refused after it logged a repair that
+  never reached disk. Measured: a daily month, its entry torn, then a
+  same-day bar. The append committed, the index was retired, and the log held
+  one "repaired" line. `rebuild_index` logs only after `write_index`, and
+  `append` itself refuses to log ahead of durability.
+- **Row 0 unchecked.** When the walk reached row 0 (a month whose bars all
+  lie in the last bucket), `recover` did not compare row 0 with the header's
+  `first_ts`, which the whole rebuild's `confirm` does. Measured: a header
+  whose `first_ts` is one minute after row 0 was repaired as `Ok`.
+
+**Decision.** `index_batch` returns whether it repaired, and `append` logs the
+repair after `write_entries` has synced it, and only then. `recover` refuses
+`Why::Stale` when the walk reaches row 0 and its stamp is not the header's
+`first_ts`. The caller then rebuilds the whole index, loudly, which refuses
+the same header through `confirm`. DPM-07; DPM-05's refusal test gains the
+case.
+
+### D-3136 — The decoded-bar door files a batch that crosses a month, one month per file — 2026-10-06
+
+**Finding (data-path round 6).** `split_window` caps a rolling-option chunk at
+45 days. Since D-0320 and D-1370 such a chunk may cross a month boundary on
+purpose, and a constant-strike contract run inside it with it. The spot door
+files such a batch one month per file (`months_in`). The decoded door
+`ingest::from_rows`, which the rolling walk lands through, addressed ONE month
+from the first and last bar and refused a batch spanning two: "bars span
+2025-06 to 2025-07; the store addresses one month per file and splitting is
+the caller's decision". The caller, `land_rolling_group`, never split, so the
+run never landed and every rerun refused it the same way. Measured on 5012e5e:
+two bars, 2025-06-30 15:29 and 2025-07-01 09:15 IST, gave that one failure
+and stored nothing.
+
+**Decision.** `from_rows` walks `months_in(bars)` and files each month's bars,
+and its run of overlays, to that month's file. Each month hands back its own
+census row, so `Ingested::pending` is now a `Vec` (it was an `Option`), and
+`roll_one` records them all in its one census cycle as before. A month whose
+bar write fails is that month's failure; the other months still land, and the
+caller still returns `Err` only when nothing landed (D-0343, now
+`pending.is_empty()`). `counted` stays per member. `month_of`, whose only job
+was the span refusal, is removed. `emit_sites`' "not filed" drive used that
+refusal to reach its line; it now reaches it through D-0017's NSE-only
+refusal, a plan naming BSE, at the same `address` stage. DPM-08.
+
+### D-3137 — A rolling run's greeks are filed under their own months, not the chunk's first — 2026-10-06
+
+**Finding (data-path round 6).** `api::server::file_the_greeks` named its Greek
+file from `window.from()`. Its own doc gave the reason: "`split_window` never
+lets a chunk cross a month boundary". That has been false since D-0320 and
+D-1370. A greek stamped in a capped chunk's second month was offered to the
+first month's file and refused. Measured: greeks at 2025-06-30 15:29 and
+2025-07-01 09:15 IST, chunk from 2025-06-20, refused with "batch record 1 is
+stamped 1751341500000000, outside the IST month 2025-06 its file is named
+for". The rolling run counted it as a failure on every rerun.
+
+**Decision.** The records are in stamp order. Each run of one IST month goes
+to that month's file (`greek_month`, `file_greek_month`), as `from_rows` files
+the bars they price (D-3136). The window parameter is gone. The chain path,
+whose chunks are one month, files exactly as before. DPM-09.
+
+### D-3138 — A rolling request side word this build does not know is refused, never filed as a put — 2026-10-06
+
+**Finding (data-path round 6, latent).** `name_the_contract` read
+`if option_type == "CALL" { Call } else { Put }`. D-0346 moved the answer key
+into `RollingSpec::sides` and stated that a vendor spelling its sides
+`CE`/`PE` "needs no edit in `server.rs`". This line was the exception: such a
+vendor's calls would be filed under the put's contract, which append-only
+history cannot rename. The one shipped spec (`CALL`, `PUT`) is unaffected.
+
+**Decision.** `CALL` is a call and `PUT` is a put. Any other word is refused
+by name with the run's label, so a new spelling is a deliberate edit here and
+never a silent misfiling. D-0346's sentence stands corrected by this entry.
+DPM-10.
+
+### D-3680 — The census decodes each entry by its own version, and refuses a contract field it cannot read — 2026-10-06
+
+**Finding (gap audit 17, #16; verified with failing tests on e16ded7).**
+`Layout::decode_entry` chose its decoder by geometry alone, and versions 2 and
+3 share one. So a version-2 entry was read with version-3 contract meaning:
+bytes 16..60 of its closes half, reserved at version 2, became a contract.
+Measured: a checksum-valid image carrying contract text, read at `Layout::V2`,
+returned `Some(2025-07-31-2500000-CE)`. At version 3, `read_contract`
+answered `None`, the spot key, for a length past the field or text that is not
+a contract. Such a derivative row loaded as its underlying's spot month and,
+newest-wins, replaced that month's count. Measured: both decoded `Ok`. The
+reserved tail 41..60 was never checked.
+
+**Decision.** Version 2 decodes through `Held::decode_v2` and reads no
+contract. Version 3 refuses `EntryFault::ContractUnreadable { len }` for a
+length past the field or unparseable text. It refuses
+`EntryFault::ReservedNotZero { offset }` for a nonzero byte in 41..60, or a
+text byte past the stated length. A zero length with zero text is still the
+spot key. No writer emits these bytes: every case needs a resealed second
+half, the D-1353/D-1354 class. DPM-11.
+
+Finding #1 of the same audit (fno.rs accepting a zero strike or a
+leading-zero spelling) is refuted on this branch: D-3150 and D-3157 refuse
+both. `a_zero_strike_and_a_leading_zero_strike_are_refused_by_the_http_reader`
+in `crates/pull/tests/attack_decoder.rs` passes unchanged. Trailing-zero
+fractions stay a vendor-evidence question (D-3116 files one contract once).
+
+### D-3139 — A rolling group's greeks are filed only for months whose bars landed, and each filed month is counted — 2026-10-06
+
+**Finding (data-path round 7, against D-3136 and D-3137).**
+
+- **Greeks with no bar.** After D-3136, `from_rows` can land June and refuse
+  July. `land_rolling_group` returns `Ok` when anything landed, and `roll_one`
+  then filed the greeks of the whole group, July's included. That breaks the
+  rule at that call site: every stamp a greeks row joins on has a bar behind
+  it.
+- **Under-counted.** After D-3137, `file_the_greeks` returned at July's
+  refusal after June's greeks were written, and `roll_one` counted `filed` 0.
+  The receipt said no Greek rows were written while June's were on disk.
+  Measured with July's Greek path blocked: 0 counted, 1 written.
+
+**Decision.** `roll_one` keeps only the greeks whose IST month has a census
+row in `pending`, one per landed month (`in_landed_months`). That is a merge
+walk over two time-ordered lists, with no membership scan. `file_the_greeks`
+returns `(filed, first refusal)` and continues past a refused month, the rule
+D-3120 gave the bars. The chain path, one month per chunk, keeps its
+all-or-nothing refusal. DPM-12, DPM-13.
+
+### D-3700 — A decoded-door refusal at the address stage names its origin — 2026-10-06
+
+**Finding (data-path round 7, low).** `from_rows`' address-stage refusal
+returned before `name_the_origin`, so its receipt line lacked "(from
+<endpoint>)", which every other refusal on that door carries. Measured: a plan
+naming BSE gave a failure with no origin.
+
+**Decision.** That refusal names its origin too. DPM-14.
+
+### D-4600 — The data-path branch is merged onto PR #74, and D-3134's one-entry `.tix` repair narrows D-3302's append-time rebuild — 2026-10-09
+
+**What was merged.** `claude/attack-data-pipeline-hgxmw9` at 66eb9ebc
+(data-path attack rounds 1 to 7, D-3100 onward and D-3700) into
+`final/all-fixes` at fbdabaec, with a merge commit. Seven files conflicted.
+
+- `crates/pull/src/emit_sites.rs`: the base registered two `note_index_skips`
+  sites (the second, "elements only", added for G18-rest-16 by D-2076). The
+  branch removed `note_index_skips` itself when D-3158 made a non-list
+  category or a non-name element refuse the whole document (D-3128), so both
+  sites and their drives go with it. There is no skip left to count.
+- `crates/store/src/file.rs`: one doc comment. The branch's text is kept
+  (D-3134 repairs a torn entry alone) and D-3302's measured cost of the
+  residue rebuild, about 80 ms at 10^6 bars, is kept beside it.
+- `crates/store/tests/tix.rs`: both sides added tests at the same place
+  (G18-rest-24..26 from D-2077, and D-3134's one-entry repair). All are kept.
+- `docs/04`, `docs/05`, `docs/06`, `docs/11`: tails, both sides, base first.
+
+**The one conflict of substance.** D-3302 (on `attack/o1-p99`, already in
+the base) measured the append-time `.tix` rebuild as O(`n_valid`) and
+rejected repairing only the torn entry. D-3134 (on this branch) implemented
+exactly that repair, bounded at 65 bar reads, and said it supersedes D-3302's
+"An append can pay it too" bullet for the torn-write case once both meet.
+They meet here, so D-3134 stands. D-3302's measurement still describes what
+it measured: the whole rebuild, which a writer open and the residue (an index
+the bars do not vouch for) still pay. `docs/06-limits.md` "What an append
+pays" and D-3302's section, and `docs/02-store-format.md`'s writer-door
+paragraph, now say which append pays which. Both decisions stay in this
+ledger unedited.

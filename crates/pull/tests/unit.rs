@@ -5567,7 +5567,10 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
         volume: 1,
         open_interest: None,
     };
-    let raw = RawWindow { rows: vec![row] };
+    let raw = RawWindow {
+        rows: vec![row],
+        skipped: pull::fetch::DecodeSkips::default(),
+    };
     let day = Day::new(2026, 8, 7).expect("a real date");
     let mut schedule = pull::cash_auction::Schedule::default();
     schedule
@@ -5632,6 +5635,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
     let at = ist(day, 9, 15, 0);
 
     let cheap = RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: at,
             open: 250,
@@ -5657,6 +5661,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
     );
 
     let huge = RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: at,
             open: i64::MAX,
@@ -5752,7 +5757,10 @@ fn every_row_is_either_a_bar_or_a_counted_drop() {
         .collect();
 
     let landed = land(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Paisa,

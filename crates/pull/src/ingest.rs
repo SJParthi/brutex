@@ -214,7 +214,7 @@ pub struct Ingested {
     /// filing several contracts from one vendor answer collects these and calls
     /// [`record_held`] once — see `record_all`'s cost note for what paying it
     /// per contract cost.
-    pub pending: Option<crate::manifest::Held>,
+    pub pending: Vec<crate::manifest::Held>,
     /// Bars this run actually WROTE — `Appended::Committed` only.
     ///
     /// Zero on a re-run of a month already held, which is the number that makes
@@ -257,6 +257,14 @@ pub struct Ingested {
     pub counted: usize,
     /// Every row that did not become a bar, by reason.
     pub census: DropCensus,
+    /// Candles the vendor SENT that the decoder declined, by reason (D-3122).
+    ///
+    /// They are in [`Self::rows_read`] — the vendor's count, not the decoder's
+    /// — and [`Self::balances`] accounts for them here. Before this, a skipped
+    /// candle was in neither, so a day window of three candles with one
+    /// impossible bar read `rows_read 2, bars_stored 2` and balanced. See
+    /// [`crate::fetch::DecodeSkips`].
+    pub decoder_skips: crate::fetch::DecodeSkips,
     /// Members that failed, named. The run continued past each.
     pub failures: Vec<Failure>,
 }
@@ -283,19 +291,25 @@ impl Ingested {
         self.rows_folded += other.rows_folded;
         self.counted += other.counted;
         self.census.absorb(other.census);
+        self.decoder_skips.absorb(other.decoder_skips);
         self.failures.extend(other.failures);
     }
 
     /// Whether every row is accounted for: stored, folded into a bar that was
-    /// already open, dropped, or in a member that failed.
+    /// already open, dropped, skipped by the decoder under a named reason, or
+    /// in a member that failed.
     ///
-    /// A row that vanished without landing in one of those four is
+    /// A row that vanished without landing in one of those five is
     /// indistinguishable from a row the vendor never sent, which is the
     /// failure this whole pipeline is shaped to prevent.
     #[must_use]
     pub fn balances(&self) -> bool {
         self.failures.is_empty()
-            && self.rows_read == self.bars_stored + self.rows_folded + self.census.total() as usize
+            && self.rows_read
+                == self.bars_stored
+                    + self.rows_folded
+                    + self.census.total() as usize
+                    + self.decoder_skips.total()
     }
 }
 
@@ -841,7 +855,11 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
     let mut appends: Vec<Append> = Vec::new();
 
     for member in members {
-        done.rows_read += member.rows.len();
+        // THE ROWS THE FILE OFFERED, NOT ONLY THE ONES THAT DECODED (D-3125):
+        // a row the CSV decoder skipped is read and named by reason, as the
+        // HTTP doors' skips have been since D-3122.
+        done.rows_read += member.rows.len() + member.skipped.total();
+        done.decoder_skips.absorb(member.skipped);
         match one(member, store_root, plan) {
             Ok(landed) => {
                 // ONE EVENT PER MEMBER, WHICH IS THE GRANULARITY THAT WAS
@@ -957,7 +975,14 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
 /// perfectly. Three arms of [`from_members`] end this way and they were three
 /// copies of it, which is three places for one of them to start reporting zero.
 fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
-    let rows_read = members.iter().map(|member| member.rows.len()).sum();
+    let mut decoder_skips = crate::fetch::DecodeSkips::default();
+    let mut rows_read = 0usize;
+    for member in members {
+        decoder_skips.absorb(member.skipped);
+        rows_read = rows_read
+            .saturating_add(member.rows.len())
+            .saturating_add(member.skipped.total());
+    }
     // THE WHOLE RUN REFUSED, AND UNTIL NOW THE LOG SAID NOTHING.
     //
     // The receipt carried this and the log did not, so an operator reading
@@ -977,6 +1002,7 @@ fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
     Ingested {
         members: members.len(),
         rows_read,
+        decoder_skips,
         failures: vec![Failure {
             instrument: about.display().to_string(),
             why,
@@ -1066,7 +1092,8 @@ pub fn from_window(
             );
             return Ingested {
                 members: 1,
-                rows_read: raw.rows.len(),
+                rows_read: raw.rows.len() + raw.skipped.total(),
+                decoder_skips: raw.skipped,
                 failures: vec![Failure {
                     instrument: instrument.to_owned(),
                     why: format!(
@@ -1088,7 +1115,8 @@ pub fn from_window(
                 );
                 return Ingested {
                     members: 1,
-                    rows_read: raw.rows.len(),
+                    rows_read: raw.rows.len() + raw.skipped.total(),
+                    decoder_skips: raw.skipped,
                     failures: vec![Failure {
                         instrument: instrument.to_owned(),
                         why: format!(
@@ -1108,6 +1136,10 @@ pub fn from_window(
         path: std::path::PathBuf::from(origin),
         instrument: instrument.to_owned(),
         rows,
+        // ADDED BELOW, NOT HERE: this function counts `raw.skipped` itself
+        // after `from_members`, beside the duplicates, so the member carries
+        // none and nothing is counted twice.
+        skipped: crate::fetch::DecodeSkips::default(),
     };
     let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
     // THE ONE EVENT PER GAP (OD-2, D-2371): `request_minutes` no longer logs,
@@ -1125,6 +1157,11 @@ pub fn from_window(
         });
     }
     done.rows_read += duplicates;
+    // THE CANDLES THE DECODER DECLINED ARE THE VENDOR'S ROWS TOO (D-3122).
+    // Read, and accounted for by reason, so `balances` cannot say every
+    // offered candle is on the receipt while one of them is nowhere.
+    done.rows_read += raw.skipped.total();
+    done.decoder_skips.absorb(raw.skipped);
     done.rows_folded += duplicates;
     if duplicates > 0 {
         let _dropped_when_filtered = telemetry::emit(
@@ -1316,25 +1353,38 @@ pub fn from_rows(
     };
     // THE WINDOW AND THE SESSION, WHICH THIS PATH NEVER APPLIED AT ALL.
     // See [`keep_in_session`] for what that cost.
-    let (bars, overlays, census) = keep_in_session(bars, overlays, &plan);
+    let (bars, overlays, census) = match keep_in_session(bars, overlays, &plan) {
+        Ok(kept) => kept,
+        Err(why) => {
+            note_not_filed(instrument, "timestamp", &why);
+            done.failures.push(Failure {
+                instrument: instrument.to_owned(),
+                why,
+            });
+            name_the_origin(&mut done, origin);
+            return done;
+        }
+    };
     done.census = census;
     let (bars, overlays) = (bars.as_slice(), overlays.as_slice());
     if bars.is_empty() {
         return done;
     }
-    let Some((first, last)) = bars.first().zip(bars.last()) else {
-        return done;
-    };
-    let addressed = month_of(first, last).and_then(|ym| {
+    // ONE FILE PER MONTH, AS THE SPOT DOOR FILES (D-3136). A capped rolling
+    // chunk may cross a month boundary on purpose (D-0320, D-1370), and a
+    // contract run inside it with it. This addressed ONE month from the
+    // first and last bar and refused a batch spanning two, so such a run never
+    // landed and every rerun refused it again.
+    let addressed = months_in(bars).and_then(|months| {
         plan.timeframe().and_then(|timeframe| {
             identify(instrument, plan.exchange, plan.segment)
-                .map(|identity| (ym, timeframe, identity))
+                .map(|identity| (months, timeframe, identity))
         })
     });
     // THREE REFUSALS, ONE ARM. Each was its own `match` with an identical
     // four-line error branch, which is three chances to get the recording
     // wrong and, in this function, three copies of the same paragraph.
-    let (ym, timeframe, identity) = match addressed {
+    let (months, timeframe, identity) = match addressed {
         Ok(three) => three,
         Err(why) => {
             note_not_filed(instrument, "address", &why);
@@ -1342,6 +1392,8 @@ pub fn from_rows(
                 instrument: instrument.to_owned(),
                 why,
             });
+            // NAMED LIKE EVERY OTHER REFUSAL ON THIS DOOR (D-3700).
+            name_the_origin(&mut done, origin);
             return done;
         }
     };
@@ -1352,89 +1404,81 @@ pub fn from_rows(
         symbol_id,
     } = identity;
 
-    let parts = PathParts {
-        vendor: plan.vendor,
-        exchange: exchange.as_str(),
-        segment: segment.as_str(),
-        symbol: symbol.as_str(),
-        contract: plan.contract,
-        timeframe,
-        month: ym,
-        file: FileKind::Bars,
-    };
-    let held = write_and_count(
-        bars,
-        store_root,
-        symbol_id,
-        parts,
-        EntryKey {
+    let mut overlay_at = 0usize;
+    for (ym, month_bars) in months {
+        let parts = PathParts {
+            vendor: plan.vendor,
+            exchange: exchange.as_str(),
+            segment: segment.as_str(),
+            symbol: symbol.as_str(),
             contract: plan.contract,
-            exchange,
-            segment,
-            symbol,
             timeframe,
             month: ym,
-        },
-    );
-    let one = match held {
-        Ok((one, committed)) => {
-            done.bars_stored = bars.len();
-            done.bars_committed = committed;
-            one
+            file: FileKind::Bars,
+        };
+        let month_overlays = overlays_in(overlays, &mut overlay_at, ym);
+        let held = write_and_count(
+            month_bars,
+            store_root,
+            symbol_id,
+            parts,
+            EntryKey {
+                contract: plan.contract,
+                exchange,
+                segment,
+                symbol,
+                timeframe,
+                month: ym,
+            },
+        );
+        match held {
+            Ok((one, committed)) => {
+                done.bars_stored = done.bars_stored.saturating_add(month_bars.len());
+                done.bars_committed = done.bars_committed.saturating_add(committed);
+                // THE CENSUS ROW IS HANDED BACK, NOT WRITTEN HERE.
+                //
+                // A caller filing SEVERAL contracts from one vendor answer —
+                // which is every rolling answer, since one spans four or five
+                // weekly contracts and steps strike with spot — would
+                // otherwise pay a full census cycle per contract. `roll_one`
+                // collects every month's row and records them once.
+                done.pending.push(one);
+            }
+            Err(why) => {
+                note_not_filed(instrument, "bars", &why);
+                done.failures.push(Failure {
+                    instrument: instrument.to_owned(),
+                    why,
+                });
+                continue;
+            }
         }
-        Err(why) => {
-            note_not_filed(instrument, "bars", &why);
+        // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails
+        // there is nothing for an overlay row to be a column of, and a sidecar
+        // describing bars that are not there is worse than no sidecar: the
+        // next reader joins on a stamp that has no bar.
+        if let Err(why) = write_overlay(month_overlays, store_root, symbol_id, parts) {
+            note_not_filed(instrument, "overlay", &why);
             done.failures.push(Failure {
                 instrument: instrument.to_owned(),
                 why,
             });
-            return done;
         }
-    };
-
-    // THE CENSUS ROW IS HANDED BACK, NOT WRITTEN HERE.
-    //
-    // A caller filing SEVERAL contracts from one vendor answer — which is every
-    // rolling answer, since one spans four or five weekly contracts and steps
-    // strike with spot — would otherwise pay a full census cycle per contract:
-    // lock, read the whole manifest, decode every entry, install, fsync. Thirty
-    // groups is thirty walks, against 252 requests a month, while the manifest
-    // grows by that same count. `from_rows` below records the one entry it has;
-    // `roll_one` collects and records once.
-    done.pending = Some(one);
-    // COUNTED, BECAUSE IT WILL BE — **and the reason given here was wrong.**
-    //
-    // This said: *"the caller returns an error if the batch cannot be
-    // published, so there is no path where this reports counted and the census
-    // does not hold it."* The overlay write below WAS that path. It runs after
-    // `pending` and `counted` are set; its failure went into `failures`; and
-    // `land_rolling_group` returned `Err` on any failure, so the caller's `Err`
-    // arm skipped `census_rows.extend(pending)` entirely. Bars on disk, census
-    // row dropped, `counted: 1` a lie — and every retry repeated it, because
-    // the bars come back `AlreadyPresent` and the overlay refuses again.
-    //
-    // The property holds now, and it holds because the CALLER was fixed rather
-    // than because this line was right: `land_rolling_group` returns `Err` only
-    // when `pending.is_none()` — which is the honest test for "nothing landed",
-    // since the early return above leaves it unset when the BAR write fails —
-    // and otherwise publishes the row with the reason travelling beside it.
-    // D-0343.
-    done.counted = 1;
-
-    // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails there is
-    // nothing for an overlay row to be a column of, and a sidecar describing
-    // bars that are not there is worse than no sidecar: the next reader joins
-    // on a stamp that has no bar.
-    if let Err(why) = write_overlay(overlays, store_root, symbol_id, parts) {
-        note_not_filed(instrument, "overlay", &why);
-        done.failures.push(Failure {
-            instrument: instrument.to_owned(),
-            why,
-        });
     }
+    // COUNTED WHEN ANY MONTH'S ROW IS HANDED BACK: the caller publishes every
+    // row and returns `Err` only when `pending` is empty (D-0343).
+    done.counted = usize::from(!done.pending.is_empty());
     name_the_origin(&mut done, origin);
     done
 }
+
+/// What [`keep_in_session`] hands back: the bars and overlays it kept, and the
+/// census of what it declined.
+type Kept = (
+    Vec<store::format::Bar>,
+    Vec<store::format::Overlay>,
+    DropCensus,
+);
 
 /// Drops the bars this engine declines, and counts why.
 ///
@@ -1480,11 +1524,7 @@ fn keep_in_session(
     bars: &[store::format::Bar],
     overlays: &[store::format::Overlay],
     plan: &Plan<'_>,
-) -> (
-    Vec<store::format::Bar>,
-    Vec<store::format::Overlay>,
-    DropCensus,
-) {
+) -> Result<Kept, String> {
     let mut census = DropCensus::default();
     let cadence = plan.request.granularity.cadence();
     let venue = plan.request.listing.venue();
@@ -1495,12 +1535,17 @@ fn keep_in_session(
     };
 
     let mut kept = Vec::with_capacity(bars.len());
-    for bar in bars {
-        // A TIMESTAMP THE CALENDAR CANNOT READ IS A DROP, NOT A HALT. `land`
-        // refuses one because it is decoding the vendor and a stamp it cannot
-        // read means the DECODER is wrong. Here the bar is already built, so
-        // the same value is a bar this engine declines — counted, never stored,
-        // and never silently kept.
+    for (at, bar) in bars.iter().enumerate() {
+        // A TIMESTAMP THE CALENDAR CANNOT READ IS REFUSED, NOT DROPPED — and
+        // it was dropped under a reason that was false (D-3121). This counted
+        // it as `BeforeWindow`, so a bar stamped `i64::MAX`, or one on a day
+        // whose venue hours are UNVERIFIED, reached the receipt as "before the
+        // requested window": a named reason, and the wrong one, which is worse
+        // than none because the operator goes to look at the chunking. There
+        // is no `DropReason` for "this instant cannot be placed", because it
+        // is not a decline — it is the decoder or the vendor being wrong, the
+        // case `fetch::land` refuses as `TimestampRefused`. Same rule here,
+        // same whole-batch refusal, with the stamp and the calendar's words.
         match verdict(bar.ts_micros) {
             Ok(None) => {
                 // Kept on a day the calendar cannot classify: counted by name
@@ -1511,7 +1556,14 @@ fn keep_in_session(
                 kept.push(*bar);
             }
             Ok(Some(reason)) => census.count(reason),
-            Err(_) => census.count(crate::session::DropReason::BeforeWindow),
+            Err(why) => {
+                return Err(format!(
+                    "decoded bar {at} is stamped {} epoch microseconds, which \
+                     this build's calendar cannot place ({why}); the batch is \
+                     refused rather than counted under a drop reason it is not",
+                    bar.ts_micros
+                ));
+            }
         }
     }
     let overlays = overlays
@@ -1519,7 +1571,7 @@ fn keep_in_session(
         .filter(|o| matches!(verdict(o.ts_micros), Ok(None)))
         .copied()
         .collect();
-    (kept, overlays, census)
+    Ok((kept, overlays, census))
 }
 
 /// Puts the endpoint that produced these rows onto every refusal they caused.
@@ -1715,6 +1767,16 @@ fn nothing_landed(census: DropCensus, folded: usize, outside_session: u32) -> La
     }
 }
 
+/// One month of a member that the store refused, named by instrument and month.
+/// The other months of the batch are written and counted on their own
+/// (D-3120).
+fn month_refused(member: &Member, ym: store::path::YearMonth, why: &str) -> Failure {
+    Failure {
+        instrument: member.instrument.clone(),
+        why: format!("{} {ym}: {why}", member.instrument),
+    }
+}
+
 fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, String> {
     let Plan {
         request,
@@ -1789,6 +1851,9 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let mut entries = Vec::new();
     let mut committed = 0usize;
     let mut months_written = 0usize;
+    // Bars OFFERED to a month file that accepted them; a refused month's bars
+    // are not stored and must not be reported as stored.
+    let mut stored = 0usize;
     let mut failures = Vec::new();
     for (ym, slice) in &by_month {
         let parts = PathParts {
@@ -1801,7 +1866,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             month: *ym,
             file: FileKind::Bars,
         };
-        let (pulled, wrote) = write_and_count(
+        let written = write_and_count(
             slice,
             store_root,
             symbol_id,
@@ -1814,10 +1879,28 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
                 timeframe,
                 month: *ym,
             },
-        )
-        .map_err(|why| format!("{}: {why}", member.instrument))?;
+        );
+        // A MONTH THE STORE REFUSES DOES NOT UNCOUNT THE MONTHS ALREADY
+        // WRITTEN (D-3120). This was `?`: the refusal of month k returned
+        // through it and dropped `entries`, so months 1..k-1 — appended,
+        // fsynced and derived — reached the disk with no census row. That is
+        // the outcome this module's header calls worse than refusing outright.
+        // The refused month is named in `failures`; every other month is
+        // written and counted on its own, because each is its own file.
+        //
+        // LOGGED AS WELL AS RECEIPTED (gate 19, D-3186): the refused month is
+        // on `/logs` at `Error` beside the failure, so an operator reading the
+        // log after the run does not see a quiet file for a month that did not
+        // land.
+        let Ok((pulled, wrote)) = written.map_err(|why| {
+            note_not_filed(&member.instrument, "month append", &why);
+            failures.push(month_refused(member, *ym, &why));
+        }) else {
+            continue;
+        };
         entries.push(pulled);
         months_written = months_written.saturating_add(1);
+        stored = stored.saturating_add(slice.len());
         // SUMMED ACROSS MONTHS, because it is a COUNT of bars written and not
         // a flag. `Ingested::bars_stored` reads it, and a batch of eighty
         // months reporting one month's figure would under-report the run by
@@ -1871,7 +1954,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         derived_count_in(plan.contract, timeframe).saturating_mul(months_written);
     Ok(Landed {
         failures,
-        bars: landed.bars.len(),
+        bars: stored,
         // WRITTEN, AS DISTINCT FROM OFFERED. See `Ingested::bars_stored`.
         committed,
         folded,
@@ -1930,7 +2013,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
 ///
 /// # Errors
 ///
-/// A timestamp that is not a moment on the IST calendar, from [`month_of`].
+/// A timestamp that is not a moment on the IST calendar, from [`month_at`].
 fn months_in(
     bars: &[store::format::Bar],
 ) -> Result<Vec<(store::path::YearMonth, &[store::format::Bar])>, String> {
@@ -1957,7 +2040,7 @@ fn months_in(
 
 /// The month ONE bar falls in.
 ///
-/// # Why this is separate from [`month_of`], which takes two
+/// # Why this is not the two-ended `month_of` it replaced
 ///
 /// `months_in` groups a batch by month and asked `month_of(bar, bar)` for every
 /// bar in it. That function exists to check a SPAN — it converts both ends and
@@ -1971,39 +2054,43 @@ fn months_in(
 /// `store::file::read_row`, and invisible to the same gates for the same
 /// reason — a ratio cannot see work that is doubled uniformly.
 ///
-/// [`month_of`] keeps the span check, which is a real refusal and has real
-/// callers: a batch straddling a month boundary needs two files and splitting
-/// it is the caller's decision.
+/// `month_of` kept a span check for `from_rows`, which refused a batch
+/// straddling a month boundary. That door now splits by month itself, as this
+/// one's callers do, and `month_of` is gone (D-3136).
 ///
 /// # Errors
 ///
 /// A timestamp outside the range [`crate::session::IstMoment`] can name, or a
 /// day with no month in the store's addressing.
 fn month_at(bar: &store::format::Bar) -> Result<store::path::YearMonth, String> {
-    crate::session::IstMoment::from_epoch_secs(bar.ts_micros.div_euclid(1_000_000))
+    month_at_micros(bar.ts_micros)
+}
+
+/// The run of `overlays` from `*at` that falls in `ym`, advancing `*at` past
+/// it. The overlays are in stamp order with the bars; one the month file does
+/// not admit is refused there, loudly, never filed under the wrong month.
+/// D-3136.
+fn overlays_in<'a>(
+    overlays: &'a [store::format::Overlay],
+    at: &mut usize,
+    ym: store::path::YearMonth,
+) -> &'a [store::format::Overlay] {
+    let from = *at;
+    while let Some(row) = overlays.get(*at)
+        && month_at_micros(row.ts_micros).is_ok_and(|month| month == ym)
+    {
+        *at = at.saturating_add(1);
+    }
+    overlays.get(from..*at).unwrap_or_default()
+}
+
+/// The IST month the instant `ts_micros` falls in.
+fn month_at_micros(ts_micros: i64) -> Result<store::path::YearMonth, String> {
+    crate::session::IstMoment::from_epoch_secs(ts_micros.div_euclid(1_000_000))
         .map_err(|why| why.to_string())?
         .day()
         .year_month()
         .map_err(|why| why.to_string())
-}
-
-fn month_of(
-    first: &store::format::Bar,
-    last: &store::format::Bar,
-) -> Result<store::path::YearMonth, String> {
-    let at = crate::session::IstMoment::from_epoch_secs(first.ts_micros.div_euclid(1_000_000))
-        .map_err(|why| why.to_string())?;
-    let ym = at.day().year_month().map_err(|why| why.to_string())?;
-    let end = crate::session::IstMoment::from_epoch_secs(last.ts_micros.div_euclid(1_000_000))
-        .map_err(|why| why.to_string())?;
-    let end_ym = end.day().year_month().map_err(|why| why.to_string())?;
-    if end_ym != ym {
-        return Err(format!(
-            "bars span {ym} to {end_ym}; the store addresses one month per \
-             file and splitting is the caller's decision, not this one's"
-        ));
-    }
-    Ok(ym)
 }
 
 /// A member's identity, parsed once and used by every file it writes.

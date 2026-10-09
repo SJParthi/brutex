@@ -367,23 +367,49 @@ pub struct Quote {
 #[derive(Debug, Clone, Default)]
 pub struct SpotBook {
     by_stamp: HashMap<i64, i64>,
+    /// Stamps two bars claimed with DIFFERENT closes. Answered by nobody.
+    ambiguous: std::collections::HashSet<i64>,
 }
 
 impl SpotBook {
     /// Indexes one month of index bars by their stamp.
     ///
-    /// A later bar at a stamp already seen REPLACES the earlier one, which
-    /// cannot arise from a well-formed month — `store::file::BarFile` keeps its
-    /// rows strictly ascending — and is chosen over keeping the first so that
-    /// a malformed input behaves the same way twice rather than depending on
-    /// which duplicate arrived.
+    /// **Two bars at one stamp with different closes leave that stamp
+    /// unanswered**, and [`Self::ambiguous`] counts it. Until D-3110 the later
+    /// bar silently replaced the earlier one: deterministic, but a definite
+    /// level for a minute whose level the book could not know, picked by
+    /// arrival order — the fallback that hides a failure `CLAUDE.md` §4 bans.
+    /// `store::file::BarFile` keeps its rows strictly ascending, so a
+    /// well-formed month never reaches this; a malformed one now refuses those
+    /// stamps instead of guessing. An EXACT repeat (same stamp, same close) is
+    /// one witness said twice and still answers.
+    ///
+    /// O(bars) to build, one probe and at most one insert per bar; the order
+    /// of the slice does not change the result.
     #[must_use]
     pub fn of(bars: &[store::format::Bar]) -> Self {
-        let mut by_stamp = HashMap::with_capacity(bars.len());
+        let mut by_stamp: HashMap<i64, i64> = HashMap::with_capacity(bars.len());
+        let mut ambiguous = std::collections::HashSet::new();
         for bar in bars {
-            by_stamp.insert(bar.ts_micros, bar.close);
+            if ambiguous.contains(&bar.ts_micros) {
+                continue;
+            }
+            match by_stamp.entry(bar.ts_micros) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(bar.close);
+                }
+                std::collections::hash_map::Entry::Occupied(seen) => {
+                    if *seen.get() != bar.close {
+                        seen.remove();
+                        ambiguous.insert(bar.ts_micros);
+                    }
+                }
+            }
         }
-        Self { by_stamp }
+        Self {
+            by_stamp,
+            ambiguous,
+        }
     }
 
     /// The underlying's close at that stamp, or `None`.
@@ -392,16 +418,39 @@ impl SpotBook {
     /// minute: an option that printed in a minute the index did not is a row
     /// this build cannot price, and pricing it against the previous minute's
     /// level would be an invented spot that no report could later tell from a
-    /// real one.
+    /// real one. A stamp two bars contradicted is also `None`; [`Self::lookup`]
+    /// says which of the two refusals it was.
     #[must_use]
     pub fn at(&self, ts_micros: i64) -> Option<i64> {
         self.by_stamp.get(&ts_micros).copied()
     }
 
-    /// How many stamps this book holds.
+    /// The close at that stamp, or the named reason there is none.
+    ///
+    /// # Errors
+    ///
+    /// [`PricingError::SpotAmbiguous`] when bars disagreed at that stamp, and
+    /// [`PricingError::NoSpotAtStamp`] when no bar was there at all.
+    pub fn lookup(&self, ts_micros: i64) -> Result<i64, PricingError> {
+        if let Some(close) = self.at(ts_micros) {
+            return Ok(close);
+        }
+        if self.ambiguous.contains(&ts_micros) {
+            return Err(PricingError::SpotAmbiguous { ts_micros });
+        }
+        Err(PricingError::NoSpotAtStamp { ts_micros })
+    }
+
+    /// How many stamps this book answers.
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_stamp.len()
+    }
+
+    /// How many stamps were declined because their bars disagreed.
+    #[must_use]
+    pub fn ambiguous(&self) -> usize {
+        self.ambiguous.len()
     }
 
     /// Whether the book holds nothing.
@@ -469,6 +518,11 @@ pub enum PricingError {
         /// The stamp that found nothing.
         ts_micros: i64,
     },
+    /// Two index bars at this stamp carried different closes. D-3110.
+    SpotAmbiguous {
+        /// The contradicted stamp.
+        ts_micros: i64,
+    },
     /// The model itself refused, with its own reason kept intact.
     ///
     /// Wrapped rather than flattened: `greeks` distinguishes a price below
@@ -525,6 +579,13 @@ impl std::fmt::Display for PricingError {
                  no underlying level to price against. Nothing was priced \
                  rather than the previous minute's level being borrowed, which \
                  no later report could tell from a real one"
+            ),
+            Self::SpotAmbiguous { ts_micros } => write!(
+                f,
+                "two index bars stored at {ts_micros} disagree on the close, so \
+                 the underlying level at this stamp is unknown. Nothing was \
+                 priced rather than one of the two being picked by the order \
+                 it arrived in"
             ),
             Self::Model(why) => write!(f, "the model refused this quote: {why}"),
         }
@@ -734,12 +795,12 @@ pub struct Priced {
 /// # Cost
 ///
 /// **O(1) time, O(1) space, no allocation.** One dated table lookup bounded by a
-///
-/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
-/// property of the shape, not a timing.
 /// compile-time constant, one closed-form at-the-money rounding, one closed-form
 /// greeks evaluation, and — only when solving — an iteration count bounded by
 /// `greeks::solver::MAX_ITERATIONS` and returned so the bound is observable.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 pub fn price(
     quote: Quote,
     volatility: Option<f64>,
@@ -762,6 +823,14 @@ pub fn price(
             }
         })?;
 
+    // ONE WIDENING FOR BOTH PATHS: the solver reads the premium, and the vendor
+    // path screens it (D-3117). Two copies of this cast were two copies of one
+    // fact, and gate 11 rule 2 counted both (D-3189).
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "see contract_of — paisa is exact in f64 at this magnitude"
+    )]
+    let premium = quote.premium as f64;
     let (volatility, vol_from) = if let Some(sent) = volatility {
         // THE VENDOR'S OWN NUMBER, UNCHANGED. Dhan's `iv` off the rolling
         // overlay, which makes this a CHECK of the vendor rather than a
@@ -769,11 +838,6 @@ pub fn price(
         (sent, VolSource::Vendor(quote.vendor))
     } else {
         {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "see contract_of — paisa is exact in f64 at this magnitude"
-            )]
-            let premium = quote.premium as f64;
             let solved = contract.implied_volatility(premium, kind)?;
             (
                 solved.volatility,
@@ -786,6 +850,14 @@ pub fn price(
     };
 
     let greeks = contract.greeks(volatility, kind)?;
+    // ONE FACT, ONE ANSWER. The solved path refuses a premium at or below the
+    // discounted intrinsic value or at or above the no-arbitrage maximum;
+    // until D-3114 the vendor path priced the same premium, because it never
+    // read it. Refused here by the solver's own screen (D-3117), so the two
+    // paths cannot hold two copies of one bound.
+    if matches!(vol_from, VolSource::Vendor(_)) {
+        contract.screen_premium(premium, kind)?;
+    }
 
     #[expect(
         clippy::cast_precision_loss,
@@ -895,21 +967,64 @@ pub fn price_all(
         refused: 0,
         why: Vec::new(),
     };
+    // The CLASS of each kept sentence, parallel to `out.why`. At most
+    // `REASONS_KEPT` entries, so the membership probe below is bounded by a
+    // constant rather than by the rows.
+    let mut kept: Vec<ReasonClass> = Vec::with_capacity(REASONS_KEPT);
     for quote in quotes {
         match price(*quote, volatility(quote.ts_micros), rate, basis) {
             Ok(row) => out.rows.push(row),
             Err(why) => {
                 out.refused = out.refused.saturating_add(1);
-                let sentence = why.to_string();
-                // ONE COPY OF EACH DISTINCT REASON. Five thousand rows refused
-                // for one reason is one fact, not five thousand.
-                if out.why.len() < REASONS_KEPT && !out.why.contains(&sentence) {
-                    out.why.push(sentence);
+                // ONE COPY OF EACH DISTINCT REASON, and a reason is its CLASS,
+                // not its sentence. A sentence carries the row's own numbers,
+                // so until D-3111 five rows below intrinsic at five premiums
+                // were five "distinct reasons", filled every slot, and a later
+                // row refused for a different reason was counted and never
+                // named. The first sentence of each class is kept verbatim.
+                let class = ReasonClass::of(&why);
+                if kept.len() < REASONS_KEPT && !kept.contains(&class) {
+                    kept.push(class);
+                    out.why.push(why.to_string());
                 }
             }
         }
     }
     out
+}
+
+/// What makes two refusals "the same reason" for [`price_all`]'s dedupe: the
+/// arm of [`PricingError`], the arm of a wrapped [`GreeksError`], and the
+/// named field where an arm carries one — a zero spot and a zero premium are
+/// two reasons, a premium of 1 and a premium of 2 below intrinsic are one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReasonClass {
+    arm: std::mem::Discriminant<PricingError>,
+    model: Option<std::mem::Discriminant<GreeksError>>,
+    field: &'static str,
+}
+
+impl ReasonClass {
+    fn of(why: &PricingError) -> Self {
+        let (model, field) = match why {
+            PricingError::NotPositive { field, .. } => (None, *field),
+            PricingError::Model(inner) => (
+                Some(std::mem::discriminant(inner)),
+                match inner {
+                    GreeksError::NotFinite { field }
+                    | GreeksError::NotPositive { field, .. }
+                    | GreeksError::OutOfRange { field, .. } => field,
+                    _ => "",
+                },
+            ),
+            _ => (None, ""),
+        };
+        Self {
+            arm: std::mem::discriminant(why),
+            model,
+            field,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1470,16 +1585,23 @@ mod tests {
         assert_eq!(empty.at(stamp()), None);
     }
 
-    /// A duplicate stamp resolves the same way twice.
+    /// A contradicted stamp answers nothing, whichever copy arrived first.
     ///
-    /// It cannot arise from a well-formed month, and the point is that a
-    /// malformed one behaves deterministically rather than depending on which
-    /// copy arrived first.
+    /// It cannot arise from a well-formed month. This test used to pin
+    /// last-wins (`Some(2_600_000)`), which was the defect D-3110 removes: a
+    /// level picked by arrival order is a guess no report can tell from a spot.
     #[test]
     fn a_repeated_stamp_resolves_deterministically() {
         let bars = [bar(stamp(), 2_500_000), bar(stamp(), 2_600_000)];
-        assert_eq!(SpotBook::of(&bars).at(stamp()), Some(2_600_000));
-        assert_eq!(SpotBook::of(&bars).len(), 1, "one stamp, one entry");
+        assert_eq!(SpotBook::of(&bars).at(stamp()), None);
+        assert_eq!(
+            SpotBook::of(&bars).len(),
+            0,
+            "a contradicted stamp is not held"
+        );
+        assert_eq!(SpotBook::of(&bars).ambiguous(), 1, "and it is counted");
+        let same = [bar(stamp(), 2_500_000), bar(stamp(), 2_500_000)];
+        assert_eq!(SpotBook::of(&same).at(stamp()), Some(2_500_000));
     }
 
     /// **ONE BAD ROW DOES NOT DISCARD THE MONTH**, and the reasons do not

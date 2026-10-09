@@ -472,8 +472,18 @@ impl Contract {
     /// Refused rather than truncated: a truncated
     /// strike names a DIFFERENT contract and would merge two series into one
     /// file, which is the exact failure this type exists to prevent.
+    ///
+    /// `None` as well for a strike of zero or below (D-3150). No option has
+    /// one, the vendor-master path already refuses one, and a negative strike
+    /// rendered `2025-09-30--500-PE`: a doubled hyphen that the lax reader this
+    /// type used to have accepted back as an option.
     fn render(expiry: Expiry, option: Option<(Paisa, OptionSide)>) -> Option<Self> {
         use std::fmt::Write as _;
+        if let Some((strike, _)) = option
+            && strike <= Paisa::ZERO
+        {
+            return None;
+        }
         let mut text = String::with_capacity(CONTRACT_CAPACITY);
         // `write!` to a String cannot fail; the capacity check below is the
         // real bound and it is checked explicitly rather than trusted.
@@ -519,6 +529,18 @@ impl Contract {
     /// Refuses anything over [`CONTRACT_CAPACITY`] or holding a byte a path
     /// segment may not — a `/` here would escape the directory it names, and a
     /// truncated contract is a DIFFERENT contract, so neither is repaired.
+    ///
+    /// # Only what [`Self::of`] renders (D-3151)
+    ///
+    /// This used to check the byte alphabet and nothing else, so `FUT`, 24
+    /// `A`s, `2025-9-30-FUT` (a second spelling of `2025-09-30-FUT`),
+    /// `2025-02-30-FUT` (no such day) and `2025-09-30-0002465000-CE` (a second
+    /// spelling of a strike) were all contracts, and [`Self::is_option`]
+    /// answered `true` for every one that did not end `-FUT`. A second
+    /// spelling of one contract is a second directory for one series. The text
+    /// is now read into the [`Kind`] it names, rendered again, and accepted
+    /// only if the rendering is byte-identical — so the one grammar is the
+    /// renderer's, and there is no second one here to drift from it.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         if text.is_empty() || text.len() > CONTRACT_CAPACITY {
@@ -530,14 +552,29 @@ impl Contract {
         {
             return None;
         }
-        let mut bytes = [0u8; CONTRACT_CAPACITY];
-        bytes
-            .get_mut(..text.len())?
-            .copy_from_slice(text.as_bytes());
-        Some(Self {
-            bytes,
-            len: u8::try_from(text.len()).ok()?,
-        })
+        // The alphabet above admits no `+`, so `str::parse` sees digits only
+        // and any shape it reads leniently is caught by the comparison below.
+        let mut parts = text.splitn(4, '-');
+        let (year, month, day, rest) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        let expiry =
+            Expiry::new(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?).ok()?;
+        let kind = if rest == "FUT" {
+            Kind::Future { expiry }
+        } else {
+            let (strike, side) = rest.split_once('-')?;
+            let side = match side {
+                "CE" => OptionSide::Call,
+                "PE" => OptionSide::Put,
+                _ => return None,
+            };
+            Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(strike.parse().ok()?),
+                side,
+            }
+        };
+        let rendered = Self::of(kind)?;
+        (rendered.as_str() == text).then_some(rendered)
     }
 
     /// Whether this names a FUTURES contract.
@@ -627,11 +664,19 @@ mod tests {
     fn a_contract_refuses_what_it_cannot_hold_and_what_a_path_may_not_carry() {
         // AT THE BOUND, and one past it. `parse` is the inverse of `as_str`,
         // so the two must agree about exactly where the edge is.
-        let at = "A".repeat(CONTRACT_CAPACITY);
+        // A legal contract at exactly the bound. This used to be 24 `A`s, which
+        // names no contract at all and was accepted only because the reader
+        // checked the alphabet and not the grammar (D-3151).
+        let at = "2025-09-30-9999999999-CE";
         assert_eq!(
-            Contract::parse(&at).map(|c| c.as_str().len()),
+            Contract::parse(at).map(|c| c.as_str().len()),
             Some(CONTRACT_CAPACITY),
             "{CONTRACT_CAPACITY} bytes is inside"
+        );
+        assert_eq!(
+            Contract::parse(&"A".repeat(CONTRACT_CAPACITY)),
+            None,
+            "the right length and alphabet is not a contract"
         );
         assert_eq!(
             Contract::parse(&"A".repeat(CONTRACT_CAPACITY + 1)),

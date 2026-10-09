@@ -12504,13 +12504,17 @@ buckets the batch reaches: a gap of `g` empty slots costs `g / 64` sixteen-byte
 entries. An overnight gap on the one-second rung is about 64,000 slots, so
 about 1,000 entries, 16 KB, once per session. Then one `fsync` of the `.tix`,
 before the header slot (`docs/02-store-format.md` §5 step 3b). The extra
-`fsync` per append is measured by nothing. **One append pays O(`n_valid`)**
-(D-3302): when the entry it resumes from no longer agrees with the header —
-a torn index write from an append that failed on the same handle —
-`index_batch` rebuilds the whole index before it writes, the same rebuild a
-writer open pays. This paragraph and `docs/02-store-format.md` placed the
-rebuild only at open, "once per month", until D-3302; see "The `.tix`
-rebuild, measured" below.
+`fsync` per append is measured by nothing. **An append whose resume entry
+was torn by a failed append on the same handle rebuilds that one entry from at
+most 65 bar reads** (D-3134), so it stays O(1). It paid O(`n_valid`) until
+D-3134 (D-3302 measured that). **One append still pays O(`n_valid`)** when
+the index is damaged by something other than this writer's own failed append
+(`Why::Stale`, a refused header, an entry torn outside the last committed
+bucket): `index_batch` then rebuilds the whole index before it writes, the
+same rebuild a writer open pays. This paragraph and
+`docs/02-store-format.md` placed the rebuild only at open, "once per month",
+until D-3302; see "The `.tix` rebuild, measured" and "A torn `.tix` entry no
+longer costs an append O(`n_valid`)" below (D-4600).
 
 **Measured — `x86_64` shared host, 4 cores, load average 5 to 7 from other
 builds, release profile, 2026-10-04.** `crates/store/tests/tix_latency.rs`
@@ -13291,6 +13295,29 @@ site below was opened and read against that test, and not one of the
     2^53. The float is again the input discarded for an integer, the
     direction of travel `runner/report.rs` is allowed for, and the ppm
     and the decision are now integer arithmetic on that fraction.
+  DATA-PATH ATTACK, ROUNDS 1 AND 2 (D-3100..D-3181), DECLARED IN ROUND 3
+  (D-3189). Five float sites arrived with those fixes and the counts were
+  not raised with them; each was read against the same price-or-statistic
+  test:
+    greeks/bsm.rs 36 -> 37 -- `Checked::screen_premium(market_price: f64,
+      kind)`, the no-arbitrage premium screen the vendor path and the
+      solver now share (D-3117). Its input is the same Black-Scholes
+      market price `implied_volatility` already takes as `f64`, widened
+      once from paisa at `pull::pricing`'s boundary; nothing is stored.
+    greeks/moneyness.rs 6 -> 9 -- `REPRESENTATION_ULPS`,
+      `MAX_LEVEL_TO_INTERVAL` and the scaled step tolerance (D-3100): a
+      count of ULPs and two dimensionless RATIOS of a level to a strike
+      interval that decide whether a strike is on its grid. No paisa
+      figure is produced.
+    greeks/solver.rs 14 -> 15 -- `SUBNORMAL_GAP`, the floor of the
+      implied-volatility uncertainty (D-3101). A volatility uncertainty is
+      a statistic with no paisa representation.
+    pull/pricing.rs stays 22 -- D-3117 had added two more copies of the
+      `quote.premium as f64` widening (and its `#[expect]` reason), and
+      round 3 hoisted them into one shared by both paths, so the count is
+      back where it was rather than raised. Merged with final/all-fixes it
+      is 23 (D-3128): the base had meanwhile raised it 22 -> 23 for the
+      named rate constant above, and the two changes are independent.
 ~~~~
 
 ### Gate 11 — rule 3. docs/07 law 2: pre-size every map.
@@ -13498,6 +13525,23 @@ per vendor answer, after `serde_json` has already parsed the same body,
 over a body capped at `MAX_RESPONSE_BYTES`; every set together holds at
 most every key of that body once, so growth is amortised O(1) per key
 and bounded by the response cap, never by the store.
+DATA-PATH ATTACK, DECLARED IN ROUND 3 (D-3189). Two maps arrived with the
+round-1 fixes unsized, and neither can be sized where it is built:
+  pull/chain.rs 1 -> 2 -- `filed` in `month` (D-3116), one entry per
+  decoded contract across the whole chain walk, and `named` (D-3126), one
+  entry per vendor name filed, with the expiry it was first listed under.
+  The contract count is known one expiry at a time, so both maps start
+  empty and `reserve(names.len())` grows each once per expiry answer before
+  any insert of that answer: no insert reallocates, and the total is
+  bounded by the vendor's chain, each answer capped at
+  `MAX_RESPONSE_BYTES`, never by the store.
+  pull/pricing.rs 1 -- `ambiguous` in `SpotBook::of` (D-3110), the stamps
+  where two index bars disagree. `store::file::BarFile` keeps a month
+  strictly ascending, so on every well-formed month the set stays empty
+  and an empty `HashSet::new()` never allocates; sizing it for the worst
+  case (half the month's bars) would allocate on every month for a set
+  that is empty on all of them. On a malformed month it holds at most
+  bars/2 stamps, built once per month in O(bars), amortised O(1) per insert.
 ~~~~
 
 ### Gate 11 — rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -14271,7 +14315,10 @@ exception is a per-bar, per-candidate or per-cell lookup:
     which is why it is declared rather than respelt.
   pull/vendor.rs -- `rung_routes`, `layouts` and the granularity rows
     are the descriptor's own `&'static` arrays, units long.
-  pull/fno.rs -- `MONTHS`, twelve.
+  pull/fno.rs -- `MONTHS`, twelve. REMOVED FROM THE LIST in round 3
+    (D-3189): D-3155 rewrote the contract token reader as fixed byte
+    places, so the `MONTHS.iter().position` scan is gone, the file no
+    longer matches rule 6, and CI warned the entry was loose. A loose allowance is room for a scan nobody has read.
   pull/manifest.rs -- the NUL terminator inside a FIXED-WIDTH field;
     the bound is the field, a compile-time constant.
   pull/ssm.rs -- `AWS_FAULTS`, a `const` table.
@@ -14606,6 +14653,16 @@ bounds are all nonzero.
     no day is withheld. The window bounds were first written with two
     `partition_point` searches, which rule 1 refuses; they are a forward
     pass now.
+
+  pull/pricing.rs 2 -> 4 (D-3189, declaring D-3110 and D-3111). The two
+    added are HASH PROBES: `ambiguous.contains(&bar.ts_micros)` in
+    `SpotBook::of` and `self.ambiguous.contains(&ts_micros)` in
+    `SpotBook::lookup`, each one probe of a `HashSet<i64>`. The bounded
+    `Vec` scan this list already named moved: it is now
+    `!kept.contains(&class)` in `price_all`, a scan of the reason CLASSES
+    kept so far, still guarded by `kept.len() < REASONS_KEPT` on the same
+    line, so it can never exceed five. The fourth is the rate band, a
+    `RangeInclusive`.
 ~~~~
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
@@ -15764,6 +15821,10 @@ month", and as "timed by nothing". Two corrections:
   entry it resumes from no longer agrees with the header. That happens after a
   torn index write from an append that failed on the same handle. That one
   append is O(`n_valid`). The healthy path is still one entry read.
+  **Narrowed by D-3134 on merge (D-4600):** a torn entry in the last committed
+  bar's bucket is now rebuilt alone from at most 65 bar reads; only the
+  residue named in "A torn `.tix` entry no longer costs an append
+  O(`n_valid`)" below still pays this rebuild.
 - **Measured** by `store`'s ignored `index_rebuild_cost_grows_with_the_month`
   in `tests/tix_latency.rs`. The test times a writer open with the `.tix`
   removed, 7 samples per size, over two runs:
@@ -15967,3 +16028,26 @@ on every request. D-0904 names the same directory walk for three other
 routes; this one was named only in D-1445's list of audited routes. The second
 open is the freshness check, and it is kept. **No timing was taken. The cost
 is UNVERIFIED as a measurement.**
+
+### A torn `.tix` entry no longer costs an append O(`n_valid`) (D-3134)
+
+An append whose resume entry was torn by a failed append on the same handle
+rebuilds that one entry from at most 65 bar reads (`time_index::recover`).
+Measured by the ignored `store` test `tix_repair_latency` on a 4-core cloud
+box, while a mutation run shared the CPU. Before is with the repair disabled.
+
+| Bars | before p50 / p99 | after p50 / p99 / max |
+|---|---|---|
+| 1,000 | 28 / 32 ms | 16 / 20 / 33 ms |
+| 10,000 | 28 / 32 ms | 16 / 20 / 64 ms |
+| 100,000 | 32 / 44 ms | 15 / 20 / 21 ms |
+| 1,000,000 | 124 / 164 ms | 16 / 20 / 20 ms |
+
+The after column is flat: the append's fsyncs are its cost. The two `max`
+spikes at the smaller sizes are single samples on a shared host, not growth.
+**Still O(`n_valid`)**, by construction, and named: the whole rebuild at
+writer open, and on an append whose index the bars do not vouch for
+(`Why::Stale`, a refused header, an entry torn outside the last committed
+bucket). Each is an index damaged by something other than this writer's own
+failed append. Proving every entry would itself be the O(n) audit the index
+exists to avoid.
