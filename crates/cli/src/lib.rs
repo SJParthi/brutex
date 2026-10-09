@@ -72,7 +72,7 @@ mod columns_tests;
 mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
 mod gdfl_import_command;
-/// `cli tix-rebuild`: registered for WP-15, refuses until built (D-3340).
+/// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuild;
 // THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
 // compiled only into `build.rs` and an integration test, and cargo-mutants
@@ -487,9 +487,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli gdfl-dayflags ARGS...
                                    registered for WP-11b (D-3335); refuses,
                                    reading and writing nothing, until built.
-       cli tix-rebuild ARGS...
-                                   registered for WP-15 (D-3340); refuses,
-                                   reading and writing nothing, until built.
+       cli tix-rebuild VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG FROM TO [--dry-run]
+                                   build the .tix time index of every named
+                                   month of one spot series (FROM, TO are
+                                   YYYY-MM) through the store's writer-open
+                                   index step; bars and checksums never change,
+                                   a month not held is not created, a month
+                                   another process holds is refused. --dry-run
+                                   writes nothing (D-3340).
        cli top          [VENDOR UNDERLYING]
                                    the ranked TOP COMBINATIONS of the best
                                    complete recorded run, read back from the

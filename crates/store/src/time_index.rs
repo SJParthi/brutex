@@ -328,8 +328,10 @@ impl Entry {
 /// Why a month's time lookup is NOT served by its index — said, never hidden.
 ///
 /// Every value is a reason a caller can print. The lookup still answers, by
-/// the D-1434 bisection, and the handle writes one `store.tix` warning naming
-/// this reason (`CLAUDE.md` §4: degrade loudly and name the reason).
+/// the D-1434 bisection, and the process writes one `store.tix` warning naming
+/// this reason (`CLAUDE.md` §4: degrade loudly and name the reason) — once
+/// per month and variant, not once per handle, so a month every request opens
+/// does not flood the log (D-3340).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Why {
