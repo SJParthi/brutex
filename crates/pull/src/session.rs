@@ -173,8 +173,11 @@ pub enum SessionError {
     },
     /// A minute bar falls on a day the exchange calendar records as traded
     /// but whose session length was never measured
-    /// ([`crate::calendar::DayKind::OpenLengthUnmeasured`], the five Muhurat
-    /// sessions before 2025).
+    /// ([`crate::calendar::DayKind::OpenLengthUnmeasured`]) and for which
+    /// `calendar::SPECIAL_SESSIONS` records no window. Since D-3319 every
+    /// Muhurat from 2018 to 2024 has one ([`with_recorded_window`]), so no
+    /// day of the calendar reaches this today; a new special session does
+    /// until its window is recorded.
     ///
     /// A REFUSAL, named, rather than a drop against the regular hours or a keep
     /// against them: either would be a claim about which minutes that session
@@ -1140,7 +1143,8 @@ impl Window {
     /// wrong.
     ///
     /// [`SessionError::SessionLengthUnmeasured`] for a minute bar on a day the
-    /// exchange calendar records as a session of unmeasured length, and
+    /// exchange calendar records as a session of unmeasured length with no
+    /// recorded window, and
     /// [`SessionError::VenueHoursUnknown`] for a day the venue's table carries
     /// no verified hours for.
     ///
@@ -1148,9 +1152,11 @@ impl Window {
     ///
     /// On a day [`crate::calendar::kind_of`] records as an irregular session
     /// (the 2021-02-24 outage day, the two disaster-recovery Saturdays, the
-    /// 2025 Muhurat hour) the calendar's own windows, on every venue. On every
-    /// other day the venue's dated table. One session authority, so ingest
-    /// never drops a minute the gap audit then calls a vendor hole. D-2670.
+    /// 2025 Muhurat hour), or as a Muhurat whose window
+    /// `calendar::SPECIAL_SESSIONS` records ([`with_recorded_window`], D-3319),
+    /// the calendar's own windows, on every venue. On every other day the
+    /// venue's dated table. One session authority, so ingest never drops a
+    /// minute the gap audit then calls a vendor hole. D-2670.
     pub fn verdict(
         self,
         epoch_secs: i64,
@@ -1175,7 +1181,13 @@ impl Window {
         // day has none. A day outside the calendar's measured range is not
         // `Closed` and is not dropped; `on_unclassified_day` lets a caller
         // count it by name.
-        let kind = crate::calendar::kind_of(i64::from(day));
+        // A SPECIAL SESSION IS JUDGED AGAINST ITS RECORDED WINDOW (D-3319,
+        // WP-13b). `kind_of` stays the run-identity calendar and still
+        // answers the Muhurats of 2020-2024 unsized and those of 2018-2019
+        // unmeasured; the windows `calendar::SPECIAL_SESSIONS` records stand
+        // in for those two answers here, and only there. See
+        // [`with_recorded_window`].
+        let kind = with_recorded_window(i64::from(day), crate::calendar::kind_of(i64::from(day)));
         if matches!(kind, crate::calendar::DayKind::Closed) {
             return Ok(Some(DropReason::OnClosedDay));
         }
@@ -1286,11 +1298,55 @@ fn irregular_verdict(session: crate::calendar::Session, minute: u32) -> Option<D
 #[must_use]
 pub fn on_unclassified_day(epoch_secs: i64) -> bool {
     IstMoment::from_epoch_secs(epoch_secs).is_ok_and(|at| {
+        let day = i64::from(at.day().days_from_epoch());
         matches!(
-            crate::calendar::kind_of(i64::from(at.day().days_from_epoch())),
+            with_recorded_window(day, crate::calendar::kind_of(day)),
             crate::calendar::DayKind::Unmeasured
         )
     })
+}
+
+/// `kind`, with a special session's recorded window in place of an answer
+/// that leaves the session unsized or unmeasured (D-3319, WP-13b).
+///
+/// # The one change, and where it stops
+///
+/// `calendar::kind_of` is hashed into every stored run's identity, so it
+/// keeps answering the five Muhurats of 2020-2024
+/// [`crate::calendar::DayKind::OpenLengthUnmeasured`] and the two of 2018 and
+/// 2019 (before its measured window) [`crate::calendar::DayKind::Unmeasured`];
+/// `calendar::sourced_kind_of`, the ingest calendar's, answers all seven
+/// unsized. D-2670 named the remedy for both — "measure the session and
+/// record it in the calendar's irregular table" — and WP-14 recorded every
+/// one of the seven windows in `calendar::SPECIAL_SESSIONS` (the charter's
+/// Muhurat table, measured from GDFL ticks on 9 Oct 2026). This substitutes
+/// that window for those two answers, and for nothing else:
+///
+/// - a day `kind` already answers `Open`, `Closed`, or `Unmeasured` without
+///   a recorded special session, is returned unchanged, so no sourced-span
+///   day changes its drop authority (D-3346's reason) and the four Budget
+///   and weekend full sessions, which `kind_of` already answers, keep it;
+/// - a day the table records no window for stays unsized and is still
+///   refused or withheld by name.
+///
+/// The landing ([`Window::verdict`]), the request audit and the derive fold
+/// read the same answer through this one function, so ingest never keeps a
+/// minute the audit then calls a hole or the fold withholds (D-2670's rule).
+///
+/// # Cost
+///
+/// Only for an unsized or unmeasured answer, one walk of the fifteen-entry
+/// `SPECIAL_SESSIONS`, a compile-time constant. O(1), no allocation.
+#[must_use]
+pub fn with_recorded_window(day: i64, kind: crate::calendar::DayKind) -> crate::calendar::DayKind {
+    use crate::calendar::DayKind;
+    match kind {
+        DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => {
+            crate::calendar::special_session(day)
+                .map_or(kind, |special| DayKind::Open(special.session))
+        }
+        DayKind::Open(_) | DayKind::Closed => kind,
+    }
 }
 
 impl fmt::Display for Window {
@@ -1462,7 +1518,10 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
 /// This paragraph sat above `split_window` and rendered as the first lines of
 /// THAT function's documentation (D-1370).
 mod tests {
-    use super::{Cadence, Day, DropCensus, DropReason, SessionError, Window};
+    use super::{
+        Cadence, Day, DropCensus, DropReason, SessionError, Window, on_unclassified_day,
+        with_recorded_window,
+    };
 
     /// A counter at the ceiling stops there. It never wraps to a number
     /// smaller than the truth, which is the one direction a census must never
@@ -1652,27 +1711,55 @@ mod tests {
         );
     }
 
-    /// A Muhurat whose session length was never measured is REFUSED by name,
-    /// never silently dropped against the regular hours and never admitted
-    /// against them: nobody knows which minutes that session owed.
+    /// **EVERY MUHURAT IS JUDGED AGAINST ITS RECORDED WINDOW (D-3319, WP-13b).**
+    ///
+    /// The five of 2020-2024 were refused whole until D-3344 and by the day
+    /// after it, and the two of 2018 and 2019 fell to the regular hours, so
+    /// their evening minutes were dropped as after the close. Each window is
+    /// now recorded (`calendar::SPECIAL_SESSIONS`), and on every venue the
+    /// verdict keeps exactly that window's sixty minutes and drops every other
+    /// minute of the day as out of session, while `kind_of`, the run-identity
+    /// calendar, keeps its answer.
     #[test]
-    fn an_unmeasured_muhurat_minute_is_refused_by_name_not_dropped() {
-        for epoch_day in [18_580_i64, 18_935, 19_289, 19_673, 20_028] {
+    fn every_muhurat_minute_is_judged_against_its_recorded_window() {
+        use crate::calendar::DayKind;
+        let muhurats = [
+            (17_842_i64, DayKind::Unmeasured, 1_050_u16), // 2018-11-07, 17:30
+            (18_196, DayKind::Unmeasured, 1_095),         // 2019-10-27, 18:15
+            (18_580, DayKind::OpenLengthUnmeasured, 1_095), // 2020-11-14
+            (18_935, DayKind::OpenLengthUnmeasured, 1_095), // 2021-11-04
+            (19_289, DayKind::OpenLengthUnmeasured, 1_095), // 2022-10-24
+            (19_673, DayKind::OpenLengthUnmeasured, 1_095), // 2023-11-12
+            (20_028, DayKind::OpenLengthUnmeasured, 1_080), // 2024-11-01, 18:00
+        ];
+        for (epoch_day, identity_answer, open) in muhurats {
             assert_eq!(
                 crate::calendar::kind_of(epoch_day),
-                crate::calendar::DayKind::OpenLengthUnmeasured
+                identity_answer,
+                "the run-identity calendar is unchanged on {epoch_day}"
             );
-            for minute in [600_i64, 1_095] {
-                for venue in crate::vendor::Venue::ALL {
-                    assert_eq!(
-                        minute_verdict(epoch_day, minute, venue),
-                        Err(SessionError::SessionLengthUnmeasured {
-                            days: u32::try_from(epoch_day).unwrap(),
-                        }),
-                        "{venue} {epoch_day} {minute}"
-                    );
+            let DayKind::Open(window) = with_recorded_window(epoch_day, identity_answer) else {
+                panic!("{epoch_day}: a recorded window");
+            };
+            assert_eq!(window.bars(), 60, "{epoch_day}");
+            for venue in crate::vendor::Venue::ALL {
+                let mut kept = 0_u16;
+                for minute in 0..1_440_u16 {
+                    let verdict = minute_verdict(epoch_day, i64::from(minute), venue)
+                        .expect("a recorded window is never refused");
+                    let inside = (open..open + 60).contains(&minute);
+                    assert_eq!(verdict.is_none(), inside, "{venue} {epoch_day} {minute}");
+                    if minute < open {
+                        assert_eq!(verdict, Some(DropReason::BeforeSessionOpen));
+                    } else if !inside {
+                        assert_eq!(verdict, Some(DropReason::AtOrAfterSessionClose));
+                    }
+                    kept += u16::from(inside);
                 }
+                assert_eq!(kept, 60, "{venue} {epoch_day}");
             }
+            // Classified now: a kept minute is not counted as unclassified.
+            assert!(!on_unclassified_day(at(epoch_day, i64::from(open))));
             // A daily bar has no intraday time and stays exempt.
             let day = Day::from_days(u32::try_from(epoch_day).unwrap()).unwrap();
             assert_eq!(
@@ -1684,6 +1771,37 @@ mod tests {
                 Ok(None)
             );
         }
+    }
+
+    /// **A DAY WITH NO RECORDED WINDOW KEEPS ITS ANSWER.** Every other answer
+    /// passes [`with_recorded_window`] untouched: a regular day, a closed day,
+    /// a sourced-span weekday `kind_of` leaves unmeasured (2018-01-05), and an
+    /// unsized day the table records no window for, which [`Window::verdict`]
+    /// still refuses by name. No such day exists in the calendar today, so the
+    /// arm is held by the function and the refusal's text.
+    #[test]
+    fn a_day_with_no_recorded_window_keeps_its_answer() {
+        use crate::calendar::{DayKind, Session};
+        let regular = DayKind::Open(Session::full());
+        assert_eq!(with_recorded_window(20_000, regular), regular);
+        assert_eq!(
+            with_recorded_window(20_000, DayKind::Closed),
+            DayKind::Closed
+        );
+        let sourced_weekday = i64::from(Day::new(2018, 1, 5).unwrap().days_from_epoch());
+        assert_eq!(
+            crate::calendar::kind_of(sourced_weekday),
+            DayKind::Unmeasured
+        );
+        assert_eq!(
+            with_recorded_window(sourced_weekday, DayKind::Unmeasured),
+            DayKind::Unmeasured
+        );
+        assert!(on_unclassified_day(at(sourced_weekday, 600)));
+        assert_eq!(
+            with_recorded_window(sourced_weekday, DayKind::OpenLengthUnmeasured),
+            DayKind::OpenLengthUnmeasured
+        );
         let text = SessionError::SessionLengthUnmeasured { days: 18_935 }.to_string();
         assert!(text.contains("18935") && text.contains("length"), "{text}");
     }

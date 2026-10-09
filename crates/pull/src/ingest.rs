@@ -1110,20 +1110,10 @@ pub fn from_window(
         rows,
     };
     let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
-    // THE ONE EVENT PER GAP (OD-2, D-2371): `request_minutes` no longer logs,
-    // so this is the only line, at `Error` because the gap is a receipt
-    // failure and the removed `pull.file` duplicate carried that level.
-    for why in request_minutes::audit(&member.rows, plan) {
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
-                .with("instrument", telemetry::Value::Str(instrument))
-                .with("reason", telemetry::Value::Str(&why)),
-        );
-        done.failures.push(Failure {
-            instrument: instrument.to_owned(),
-            why,
-        });
-    }
+    // ONE EVENT AND ONE FAILURE PER (MONTH, REASON), AND ONE LEDGER LINE PER
+    // DAY (D-3335, D-3341, WP-13b). It was one event and one failure per gap
+    // (OD-2, D-2371), and each failure one `pull.spot` line besides.
+    request_minutes::report(&member.rows, instrument, store_root, plan, &mut done);
     done.rows_read += duplicates;
     done.rows_folded += duplicates;
     if duplicates > 0 {
@@ -2354,6 +2344,7 @@ fn derive_all(
         check_day(minutes, instrument, store_root, symbol_id, &into);
     }
     let source_bars = history.as_deref().unwrap_or(source_bars);
+    let mut ledger: Vec<String> = Vec::with_capacity(derived_count(source)); // D-3335
     for rung in derived_from(source) {
         let parts = PathParts {
             vendor: into.vendor,
@@ -2404,8 +2395,9 @@ fn derive_all(
             parts,
             (key, into.cash_schedule, into.calendar),
         ) {
-            Ok((held, diagnostics)) => {
+            Ok((held, diagnostics, line)) => {
                 entries.push(held);
+                ledger.extend(line);
                 failures.extend(diagnostics.into_iter().map(|why| Failure {
                     instrument: instrument.to_owned(),
                     why: format!("{}: {why}", rung.as_str()),
@@ -2420,6 +2412,13 @@ fn derive_all(
             }
         }
     }
+    failures.extend(request_minutes::record_derived(
+        store_root,
+        into.vendor,
+        instrument,
+        into.month,
+        &ledger,
+    ));
     failures
 }
 
@@ -2747,7 +2746,7 @@ fn derive(
         Option<&crate::cash_auction::Schedule>,
         crate::calendar::Runtime<'_>,
     ),
-) -> Result<(Held, Vec<String>), String> {
+) -> Result<(Held, Vec<String>, Option<String>), String> {
     let (key, cash_schedule, calendar) = context;
     // A coarse source cannot prove that every underlying minute existed.
     // Keep the paid-for source, but never publish an unchecked derived copy.
@@ -2768,14 +2767,15 @@ fn derive(
             parts.exchange, parts.segment
         )
     })?;
-    let (mut bars, mut diagnostics) = crate::fold::complete_minutes_with_calendar(
-        minutes,
-        bucket,
-        venue,
-        cash_schedule,
-        calendar,
-    )
-    .map_err(|why| why.to_string())?;
+    // THE FOLD COUNTS ITS NOTES INSTEAD OF REPEATING THEM (D-3341, WP-13b):
+    // one diagnostic per reason, so one `pull.derive` line and one receipt
+    // failure per reason per rung-month, and the counts go to the ledger.
+    let crate::fold::Derived {
+        mut bars,
+        tally,
+        mut diagnostics,
+    } = crate::fold::derive_minutes(minutes, bucket, venue, cash_schedule, calendar)
+        .map_err(|why| why.to_string())?;
     for why in &mut diagnostics {
         // The fold knows source coverage, not whether a complete candidate is
         // missing behind a stored tail. Classify store remedies below instead.
@@ -2795,6 +2795,7 @@ fn derive(
             format!("{why}; {}", diagnostics.join("; "))
         }
     })?;
+    let behind = !historical.is_empty();
     diagnostics.extend(historical);
     if bars.is_empty() {
         return Err(format!(
@@ -2807,7 +2808,14 @@ fn derive(
     // separately — the receipt's `derived` line already says how many rungs
     // landed, and a second number for the same fact would be a second thing to
     // keep in step.
-    write_and_count(&bars, store_root, symbol_id, parts, key).map(|(held, _)| (held, diagnostics))
+    write_and_count(&bars, store_root, symbol_id, parts, key).map(|(held, written)| {
+        // THE MONTH'S `derive` LINE (D-3321 item 3, D-3335), when the month
+        // changed or still owes something: a re-derive that wrote nothing and
+        // withheld nothing has nothing new to say.
+        let line = (written > 0 || tally.withheld > 0 || behind)
+            .then(|| request_minutes::derive_line(&parts, tally));
+        (held, diagnostics, line)
+    })
 }
 
 /// Compare historical derived bytes at the monthly boundary, O(source + held).
@@ -2832,15 +2840,17 @@ fn reconcile_derived(
     let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| why.to_string())?;
     let mut candidates = bars.iter().peekable();
     let mut last = None;
+    // COUNTED, NOT REPEATED (D-3341, WP-13b): one line for every candidate
+    // behind the tail, where there was one line each.
+    let mut gaps = 0_u64;
+    let mut first_gap: Option<i64> = None;
+    let mut last_gap = 0_i64;
     for index in 0..file.header().n_valid {
         let held = file.read_record(index).map_err(|why| why.to_string())?;
         while let Some(candidate) = candidates.peek().filter(|b| b.ts_micros < held.ts_micros) {
-            let why = format!(
-                "historical derived gap at {}: complete source candidate is absent from stored history behind the tail; cannot be refilled append-only; versioned gapfill required; bytes preserved",
-                candidate.ts_micros
-            );
-            note_not_derived(parts.symbol, parts.timeframe, &why);
-            diagnostics.push(why);
+            gaps = gaps.saturating_add(1);
+            first_gap = first_gap.or(Some(candidate.ts_micros));
+            last_gap = candidate.ts_micros;
             candidates.next();
         }
         let matching = candidates
@@ -2860,6 +2870,19 @@ fn reconcile_derived(
         }
         candidates.next();
         last = Some(held);
+    }
+    if let Some(first) = first_gap {
+        let why = if gaps == 1 {
+            format!(
+                "historical derived gap at {first}: complete source candidate is absent from stored history behind the tail; cannot be refilled append-only; versioned gapfill required; bytes preserved"
+            )
+        } else {
+            format!(
+                "historical derived gap at {first}: {gaps} folded source candidates from {first} to {last_gap} are absent from stored history behind the tail; cannot be refilled append-only; versioned gapfill required; bytes preserved"
+            )
+        };
+        note_not_derived(parts.symbol, parts.timeframe, &why);
+        diagnostics.push(why);
     }
     if let Some(last) = last {
         bars.retain(|bar| bar.ts_micros > last.ts_micros);

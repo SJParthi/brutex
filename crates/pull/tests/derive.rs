@@ -575,23 +575,44 @@ fn a_window_past_the_calendar_names_each_day_once_per_rung() {
             refusal.why.len(),
             refusal.why.get(..300)
         );
+        // ONE CLAUSE FOR THE FIVE DAYS, COUNTED (D-3341, WP-13b): it was one
+        // clause per day, and each a `pull.derive` line and a failure.
         assert_eq!(
             refusal.why.matches("UNVERIFIED").count(),
-            5,
-            "one clause per day: {}",
+            1,
+            "one counted clause: {}",
             refusal.why
         );
-        assert!(refusal.why.len() < 2_000, "{} bytes", refusal.why.len());
+        assert!(
+            refusal
+                .why
+                .contains("withheld on 5 day(s), 2026-10-05..2026-10-09"),
+            "{}",
+            refusal.why
+        );
+        assert!(refusal.why.len() < 1_000, "{} bytes", refusal.why.len());
     }
 }
 
 #[test]
 fn request_minutes_skip_closed_days_but_name_unverified_sessions() {
     use pull::session::{Day, Window};
-    for (tag, day, unverified) in [
-        ("request-holiday", Day::new(2025, 8, 15).unwrap(), false),
-        ("request-exception", Day::new(2021, 2, 24).unwrap(), true),
-        ("request-unmeasured", Day::new(2030, 1, 1).unwrap(), true),
+    // 2021-02-24 is audited against its two recorded windows since D-3319
+    // (WP-13b): an empty answer is one counted gap of both, not UNVERIFIED.
+    for (tag, day, named) in [
+        ("request-holiday", Day::new(2025, 8, 15).unwrap(), None),
+        (
+            "request-exception",
+            Day::new(2021, 2, 24).unwrap(),
+            Some(
+                "request minute coverage gap in 2021-02: 2 run(s) of missing scheduled minutes on 1 day(s), 2021-02-24..2021-02-24, 220 minute(s)",
+            ),
+        ),
+        (
+            "request-unmeasured",
+            Day::new(2030, 1, 1).unwrap(),
+            Some("request minute coverage UNVERIFIED"),
+        ),
     ] {
         let scratch = Scratch::new(tag);
         let mut req = request();
@@ -611,12 +632,16 @@ fn request_minutes_skip_closed_days_but_name_unverified_sessions() {
             .collect();
         assert_eq!(
             reports.len(),
-            usize::from(unverified),
+            usize::from(named.is_some()),
             "{tag}: {:?}",
             done.failures
         );
-        if unverified {
-            assert!(reports[0].why.contains("UNVERIFIED"));
+        if let Some(named) = named {
+            assert!(
+                reports[0].why.starts_with(named),
+                "{tag}: {}",
+                reports[0].why
+            );
         }
     }
 }
@@ -660,15 +685,22 @@ fn runtime_observations_cannot_authorize_a_new_session_or_close_an_absent_day() 
         .iter()
         .filter(|f| f.why.starts_with("request minute coverage"))
         .collect();
-    assert_eq!(audit.len(), 3);
-    assert!(audit[0].why.contains("observed trading does not attest"));
+    // ONE FAILURE PER (MONTH, REASON), COUNTED (D-3341, WP-13b): the two
+    // observed days share a reason and a line, the absent one has its own.
+    assert_eq!(audit.len(), 2, "{audit:?}");
+    assert!(
+        audit[0].why.starts_with(
+            "request minute coverage UNVERIFIED in 2026-10: 2 finding(s) on 2 day(s), 2026-10-07..2026-10-09"
+        ) && audit[0].why.contains("observed trading does not attest"),
+        "{}",
+        audit[0].why
+    );
     assert!(
         audit[1].why.contains("2026-10-08")
             && audit[1]
                 .why
                 .contains("absent observations do not prove closure")
     );
-    assert!(audit[2].why.contains("observed trading does not attest"));
     assert!(
         done.failures
             .iter()
@@ -785,11 +817,24 @@ fn request_minutes_report_month_end_absent_days_and_final_tail_without_weekend_g
         .filter(|f| f.why.starts_with("request minute coverage gap"))
         .map(|f| f.why.as_str())
         .collect();
-    assert_eq!(gaps.len(), 3, "{:?}", done.failures);
+    // One failure per month (D-3341, WP-13b): July's one gap is its own
+    // sentence, August's two are one line counting them, and every day is a
+    // line of the vendor's gap ledger (D-3335).
+    assert_eq!(gaps.len(), 2, "{:?}", done.failures);
     assert!(gaps[0].contains("2025-07-31: 15:15–15:30"));
+    assert!(
+        gaps[1].starts_with("request minute coverage gap in 2025-08: 2 run(s) of missing scheduled minutes on 2 day(s), 2025-08-01..2025-08-04, 390 minute(s) in all"),
+        "{}",
+        gaps[1]
+    );
     assert!(gaps[1].contains("2025-08-01: 09:15–15:30"));
     assert!(gaps[1].contains("375 missing"));
-    assert!(gaps[2].contains("2025-08-04: 15:15–15:30"));
+    let ledger = fs::read_to_string(scratch.0.join("audit/truedata.gaps")).unwrap();
+    let days: Vec<&str> = ledger.lines().filter(|l| l.starts_with("gap ")).collect();
+    assert_eq!(days.len(), 3, "{ledger}");
+    assert!(days[0].starts_with("gap NSE-INDEX-NIFTY 2025-07-31 v=1 rung=1min owed=375 held=360 missing=15 first_missing=15:15 runs=1 longest=15 longest_at=15:15 why=vendor_empty run="), "{}", days[0]);
+    assert!(days[1].starts_with("gap NSE-INDEX-NIFTY 2025-08-01 v=1 rung=1min owed=375 held=0 missing=375 first_missing=09:15"), "{}", days[1]);
+    assert!(days[2].contains(" 2025-08-04 "), "{}", days[2]);
 }
 
 #[test]
@@ -815,9 +860,31 @@ fn request_minutes_aggregate_opening_and_interior_gaps_and_report_empty_requests
         .iter()
         .filter(|f| f.why.starts_with("request minute coverage gap"))
         .collect();
-    assert_eq!(gaps.len(), 2);
+    // Two runs on one day: one failure that counts them (D-3341), and one
+    // ledger line with both runs and the longest (D-3335).
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(
+        gaps[0]
+            .why
+            .contains("2 run(s) of missing scheduled minutes on 1 day(s)")
+    );
+    assert!(gaps[0].why.contains("20 minute(s) in all"));
     assert!(gaps[0].why.contains("09:15–09:20"));
-    assert!(gaps[1].why.contains("10:15–10:30"));
+    let ledger = fs::read_to_string(scratch.0.join("audit/truedata.gaps")).unwrap();
+    let days: Vec<&str> = ledger.lines().filter(|l| l.starts_with("gap ")).collect();
+    assert_eq!(days.len(), 1, "{ledger}");
+    assert!(
+        days[0].starts_with("gap NSE-INDEX-NIFTY 2025-07-01 v=1 rung=1min owed=375 held=355 missing=20 first_missing=09:15 runs=2 longest=15 longest_at=10:15 why=vendor_empty run="),
+        "{ledger}"
+    );
+    // The derive's lines name each rung's month and its four counts: the
+    // five-minute rung withheld the four buckets the gaps touch.
+    assert!(
+        ledger.contains(
+            "derive NSE-INDEX-NIFTY 5min 2025-07 v=1 days=1 buckets=71 withheld=4 partial=0 run="
+        ),
+        "{ledger}"
+    );
     let empty = Scratch::new("request-empty");
     let done = pull::ingest::from_window(
         &pull::fetch::RawWindow { rows: Vec::new() },
@@ -1385,8 +1452,10 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
         derive_all.contains("for rung in derived_from(source)"),
         "and folded per rung"
     );
+    // `derive_minutes` is `complete_minutes_with_calendar`'s fold with its
+    // notes counted (D-3341, WP-13b): the same whole-month fold per rung.
     assert!(
-        item(INGEST, "fn derive(").contains("complete_minutes_with_calendar("),
+        item(INGEST, "fn derive(").contains("derive_minutes("),
         "each rung folds the whole month it is handed"
     );
     assert!(
@@ -1556,18 +1625,19 @@ fn a_sourced_span_session_derives_every_rung_and_audits_clean() {
     }
 }
 
-/// **A MUHURAT BAR REFUSES ITS DAY, NEVER THE WINDOW (D-3344).**
+/// **A MUHURAT LANDS INSIDE ITS RECORDED WINDOW, AND THE WINDOW AROUND IT
+/// LANDS WHOLE (D-3319, D-3344, WP-13b; DB-012, DB-G33).**
 ///
-/// 2020-11-14 is a Muhurat whose session length the calendar never measured.
-/// A Zerodha minute answer covers 60 days, and one bar on that day used to
-/// refuse the whole answer: on the operator's store, 41 sessions of every
-/// instrument around each of five such days, six months absent outright. Here
-/// the sessions either side land, all seven rungs are derived from them, the
-/// Muhurat's own rows are refused and named once with their count, and the
-/// request audit names that day once more as UNVERIFIED. Nothing else fails,
-/// and a re-run writes nothing.
+/// 2020-11-14 is a Muhurat the run-identity calendar still answers unsized. A
+/// Zerodha minute answer covers 60 days, and one bar on that day used to
+/// refuse the whole answer (41 sessions of every instrument around each of
+/// five such days); D-3344 narrowed that to the day. Its window, 18:15-19:14,
+/// is now recorded, so the day lands too: the sixty evening minutes are
+/// stored, a stray afternoon row is dropped as before the session and
+/// counted, all seven rungs derive the evening, the request audit owes it
+/// sixty minutes and finds them, and nothing fails. A re-run writes nothing.
 #[test]
-fn a_muhurat_minute_refuses_its_day_and_never_the_window() {
+fn a_muhurat_lands_inside_its_recorded_window_and_the_window_lands_whole() {
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("MUHURAT-DAY");
     let friday = Day::new(2020, 11, 13).unwrap();
@@ -1577,27 +1647,32 @@ fn a_muhurat_minute_refuses_its_day_and_never_the_window() {
     assert_eq!(
         pull::calendar::kind_of(i64::from(muhurat.days_from_epoch())),
         pull::calendar::DayKind::OpenLengthUnmeasured,
-        "the premise"
+        "the premise: run identity's calendar is unchanged"
     );
+    let midnight = i64::from(muhurat.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
     let mut rows = sessions_on(&[friday]);
-    // Sixty evening minutes on the Muhurat, 18:15 to 19:14 IST.
-    let evening =
-        i64::from(muhurat.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + (18 * 60 + 15) * 60;
-    rows.extend((0..60).map(|m| RawRow {
-        timestamp: evening + m * 60,
+    // One stray row at 15:00, before the session, then the sixty evening
+    // minutes, 18:15 to 19:14 IST.
+    let stray = RawRow {
+        timestamp: midnight + 900 * 60,
         open: 2_550_000,
         high: 2_550_100,
         low: 2_549_900,
         close: 2_550_000,
         volume: 7,
         open_interest: None,
+    };
+    rows.push(stray);
+    let evening = midnight + (18 * 60 + 15) * 60;
+    rows.extend((0..60).map(|m| RawRow {
+        timestamp: evening + m * 60,
+        ..stray
     }));
     rows.extend(sessions_on(&[tuesday]));
     let mut req = request();
     req.window = Window::new(friday, tuesday).unwrap();
     let raw = pull::fetch::RawWindow { rows };
 
-    // The landing alone: the day is reported, nothing is an error.
     let landed = pull::fetch::land_rows(
         &raw.rows,
         &req,
@@ -1605,65 +1680,74 @@ fn a_muhurat_minute_refuses_its_day_and_never_the_window() {
         pull::vendor::PriceScale::Paisa,
         None,
     )
-    .expect("one Muhurat bar no longer refuses the window");
-    assert_eq!(landed.bars.len(), 750);
+    .expect("the window lands");
     assert_eq!(
-        landed.refused_days,
-        vec![pull::fetch::RefusedDay {
-            day: muhurat.days_from_epoch(),
-            rows: 60
-        }]
+        landed.bars.len(),
+        810,
+        "two sessions and the Muhurat's hour"
     );
-    assert_eq!(landed.census.total(), 0, "refused rows are not drops");
+    assert!(landed.refused_days.is_empty(), "no day refused");
+    assert_eq!(landed.census.total(), 1, "the stray row is a counted drop");
+    assert_eq!(landed.outside_session, 1);
 
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
-    assert_eq!(done.bars_committed, 750, "both regular sessions land");
-    assert_eq!(done.derived_files, 7, "and every rung is derived from them");
-    let refused: Vec<_> = done
-        .failures
-        .iter()
-        .filter(|f| f.why.starts_with("2020-11-14: 60 minute row(s) refused"))
-        .collect();
-    assert_eq!(refused.len(), 1, "{:?}", done.failures);
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(done.bars_committed, 810);
+    assert_eq!(done.derived_files, 7, "and every rung is derived");
+    // The evening is in every derived rung: 12 five-minute bars, one hour bar.
+    let five = month_bars(&scratch.0, "NIFTY", Timeframe::MINUTE_5, (2020, 11));
+    assert_eq!(five.len(), 75 * 2 + 12);
+    let hour = month_bars(&scratch.0, "NIFTY", Timeframe::MINUTE_60, (2020, 11));
     assert!(
-        refused[0].why.contains("this day only"),
-        "{}",
-        refused[0].why
+        hour.iter().any(|b| b.ts_micros == evening * 1_000_000),
+        "{hour:?}"
     );
-    let audit: Vec<_> = done
-        .failures
-        .iter()
-        .filter(|f| f.why.starts_with("request minute coverage"))
-        .collect();
-    assert_eq!(audit.len(), 1, "{:?}", done.failures);
-    assert!(audit[0].why.contains("2020-11-14"), "{}", audit[0].why);
-    assert_eq!(done.failures.len(), 2, "{:?}", done.failures);
+    // A whole answer writes no gap line; each derived rung of the month its
+    // one `derive` line (D-3335), the evening's day counted among its days.
+    let ledger = scratch.0.join("audit/truedata.gaps");
+    let text = fs::read_to_string(&ledger).unwrap();
+    assert!(!text.contains("gap "), "{text}");
+    assert_eq!(text.lines().count(), 7, "{text}");
+    assert!(
+        text.contains(
+            "derive NSE-INDEX-NIFTY 5min 2020-11 v=1 days=3 buckets=162 withheld=0 partial=0 run="
+        ),
+        "{text}"
+    );
 
     let again = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
     assert_eq!(again.bars_committed, 0);
     assert_eq!(again.failures, done.failures);
-
-    // A window holding nothing but the Muhurat still says why it stored nothing.
-    let only = Scratch::new("MUHURAT-ONLY");
-    let mut req = request();
-    req.window = Window::new(muhurat, muhurat).unwrap();
-    let raw = pull::fetch::RawWindow {
-        rows: raw
-            .rows
-            .iter()
-            .copied()
-            .filter(|row| (row.timestamp - evening).abs() < 3_600)
-            .collect(),
-    };
-    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &only.0, plan(&req));
-    assert_eq!(done.bars_committed, 0);
-    assert!(
-        done.failures
-            .iter()
-            .any(|f| f.why.starts_with("2020-11-14: 60 minute row(s) refused")),
-        "{:?}",
-        done.failures
+    assert_eq!(
+        fs::read_to_string(&ledger).unwrap(),
+        text,
+        "a re-run that changed nothing and withheld nothing writes nothing"
     );
+}
+
+/// Every bar of one month file of `symbol` at `tf`, read through the store.
+fn month_bars(
+    root: &Path,
+    symbol: &str,
+    tf: Timeframe,
+    (year, mon): (u16, u8),
+) -> Vec<store::format::Bar> {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: brutex_core::vendor::Vendor::TrueData,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol,
+        contract: None,
+        timeframe: tf,
+        month: store::path::YearMonth::new(year, mon).unwrap(),
+        file: store::path::FileKind::Bars,
+    })
+    .unwrap();
+    let id = u32::try_from(brutex_core::universe::fnv1a(symbol) & u64::from(u32::MAX)).unwrap();
+    let file = store::file::BarFile::open_existing(root, path, id).unwrap();
+    (0..file.header().n_valid)
+        .map(|i| file.read_record(i).unwrap())
+        .collect()
 }
 
 /// **A REFUSED MONTH IS THAT MONTH'S ALONE; THE OTHERS LAND AND ARE COUNTED
