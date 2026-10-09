@@ -286,13 +286,34 @@ fn without_test_items(source: &str) -> Vec<&str> {
 #[test]
 fn production_code_in_server_rs_prints_through_the_panic_free_writers() {
     let source = include_str!("server.rs");
-    let production = without_test_items(source);
-    for late in ["async fn vocab_json(", "async fn calendar_json("] {
+    let mut production = without_test_items(source);
+    for late in ["async fn vocab_json(", "fn census_holds("] {
         assert!(
             production.iter().any(|line| line.starts_with(late)),
             "`{late}` is production code after the test modules and must be scanned"
         );
     }
+    // THE HANDLERS WP-01 MOVED OUT are still this file's production code: each
+    // is a child module of it, mounted by `#[path]`. Scanned the same way, so a
+    // print in a moved route is found exactly as it was before the move.
+    for moved in [
+        include_str!("census_cache.rs"),
+        include_str!("store_route.rs"),
+        include_str!("instruments_route.rs"),
+        include_str!("feeds_route.rs"),
+        include_str!("bars_route.rs"),
+        include_str!("month_change.rs"),
+        include_str!("calendar_route.rs"),
+        include_str!("gaps_route.rs"),
+    ] {
+        production.extend(without_test_items(moved));
+    }
+    assert!(
+        production
+            .iter()
+            .any(|line| line.starts_with("pub(super) async fn calendar_json(")),
+        "a moved handler is in what is scanned"
+    );
     assert!(
         !production
             .iter()

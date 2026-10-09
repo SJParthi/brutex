@@ -263,7 +263,11 @@ async fn calendar_refuses_a_symbol_held_under_multiple_identities() {
 /// the source, because what is claimed is where the call sits.
 #[test]
 fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
-    let source = include_str!("server.rs");
+    // Both handlers left `server.rs` for their own modules in WP-01.
+    let source = concat!(
+        include_str!("calendar_route.rs"),
+        include_str!("gaps_route.rs")
+    );
     let body_of = |head: &str| {
         let at = source.find(head).expect("the handler exists");
         let rest = &source[at..];
@@ -317,6 +321,8 @@ fn a_refused_calendar_admission_names_why_and_the_bound() {
 #[test]
 fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
     let server = include_str!("server.rs");
+    // `gaps_json` and `audit_span` left `server.rs` for `gaps_route.rs` in WP-01.
+    let gaps_route = include_str!("gaps_route.rs");
     let folder = include_str!("folder.rs");
     let body_of = |source: &str, head: &str| {
         let at = source.find(head).expect("the handler exists");
@@ -324,7 +330,7 @@ fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
         rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
     };
 
-    let handler = body_of(server, "async fn gaps_json(");
+    let handler = body_of(gaps_route, "async fn gaps_json(");
     assert!(
         handler.contains("audit_span(&site, asked, span.clone(), peers).await"),
         "/gaps.json audits its span through the admitted helper:\n{handler}"
@@ -332,7 +338,7 @@ fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
     for call in ["audit_one(", "audit_cash_schedule("] {
         assert!(!handler.contains(call), "and calls no {call} inline");
     }
-    let gaps = body_of(server, "async fn audit_span(");
+    let gaps = body_of(gaps_route, "async fn audit_span(");
     let pool = gaps
         .rfind("crate::detail::run_calendar(move ||")
         .expect("the audits are admitted to the calendar pool");

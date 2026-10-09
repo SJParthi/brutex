@@ -1463,7 +1463,16 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/coverage.rs", 1),
     ("crates/api/src/indexmap.rs", 1),
     ("crates/api/src/pullrun.rs", 1),
-    ("crates/api/src/server.rs", 12),
+    // 12 until the WP-01 seam moved five of these sorts out of server.rs
+    // verbatim, with the routes that make them, and the count with them:
+    // `calendar_route.rs` 3 (`spot_months_by_identity`'s months and
+    // `calendar_json_reading`'s keys and months), `gaps_route.rs` 1
+    // (`peer_calendar_reading`'s keys) and `instruments_route.rs` 1
+    // (`instruments_json`'s listing). The total is unchanged.
+    ("crates/api/src/server.rs", 7),
+    ("crates/api/src/calendar_route.rs", 3),
+    ("crates/api/src/gaps_route.rs", 1),
+    ("crates/api/src/instruments_route.rs", 1),
     // 8 since D-1728: `first_accepted_in_order` sorts only each selected
     // window of `top` keys, never the whole input (D-2105 carried the count
     // over from the shell allowlist the sweep replaced).
@@ -1548,8 +1557,18 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/pullrun.rs", 1),
     // D-3313: `leading_hollow` and `store_holds_nothing_in`, request-bounded
     // scans over one window's chunks and the floor-to-first-bar months
-    // (`docs/06-limits.md`, the before-first-bar section).
-    ("crates/api/src/server.rs", 11),
+    // (`docs/06-limits.md`, the before-first-bar section). 11 until the WP-01
+    // seam moved six of them out of server.rs verbatim, with the routes that
+    // make them; each is a `find` for one feed's row over the per-vendor
+    // census read, bounded by `Vendor::ALL`: `calendar_route.rs` 1,
+    // `instruments_route.rs` 2 and `store_route.rs` 2, and `census_cache.rs` 1,
+    // the one `verify_json` made, now behind `VendorCensusNow::census`. The
+    // total is unchanged.
+    ("crates/api/src/server.rs", 5),
+    ("crates/api/src/calendar_route.rs", 1),
+    ("crates/api/src/census_cache.rs", 1),
+    ("crates/api/src/instruments_route.rs", 2),
+    ("crates/api/src/store_route.rs", 2),
     ("crates/api/src/store_wire.rs", 1),
     ("crates/cli/src/boolean_campaign_codec.rs", 2),
     ("crates/cli/src/boolean_qualification_reader.rs", 1),
