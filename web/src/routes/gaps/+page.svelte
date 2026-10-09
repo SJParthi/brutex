@@ -64,7 +64,7 @@
   import { createPageRequests } from '$lib/page-requests.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
-  import { monthVerdict, isWholeAudit, unreadablePeers } from '$lib/gap-verdict.js';
+  import { monthVerdict, isWholeAudit, unreadablePeers, auditRung } from '$lib/gap-verdict.js';
 
   /** @typedef {{ day: number, from: number, to: number, minutes: number, reason: string }} Run */
   /**
@@ -96,7 +96,7 @@
    *     first: string | null,
    *     last: string | null,
    *     days: number,
-   *     source: 'peers' | 'table',
+   *     source: 'peers' | 'table' | 'record',
    *     stale: boolean,
    *     covers_span: boolean,
    *     voted_by: string[],
@@ -109,9 +109,15 @@
   /* The instrument and span are seeded from the census. A hardcoded
      default span once threw away 40 of 121 months and reported 81/81 with no
      hole — the answer looked complete because the question was small.
-     The endpoint audits only source minutes, so its timeframe is fixed. */
+     The endpoint audits only source minutes, so the rung is the census's,
+     never the operator's: the series' own 1min months when it holds any, else
+     its 1s months, which the server folds to minutes (D-3336 §4; GDFL holds
+     nothing else). A coarser rung cannot prove its source minutes and is never
+     offered. */
   let symbol = $state('');
-  const rung = '1min';
+  const rung = $derived(
+    store.feed === feeds.active ? (auditRung(store.rows ?? [], symbol) ?? '1min') : '1min'
+  );
   let from = $state('');
   let to = $state('');
 
@@ -317,7 +323,7 @@
   <header class="head">
     <h1>Completeness</h1>
     <p class="sub">
-      Whether a stored <b>1min</b> series is whole against the available dated session evidence.
+      Whether a stored <b>{rung}</b> series is whole against the available dated session evidence.
       <code>/db</code> compares each instrument-month to the fullest peer, which cannot see a gap
       shared by every instrument. Here, missing means an expected minute is absent; it does not
       prove provider fault. NSE cash needs the exact stock's dated closing-auction eligibility.
@@ -336,7 +342,7 @@
     <label class="f">
       <span class="fk">Rung</span>
       <select value={rung} disabled aria-describedby="minute-audit-note">
-        <option value="1min">1min</option>
+        <option value={rung}>{rung}</option>
       </select>
     </label>
     <label class="f">
@@ -358,7 +364,8 @@
   </div>
 
   <p class="whence" id="minute-audit-note">
-    This is a source-minute audit. Daily and coarser bars cannot prove their source minutes.
+    This is a source-minute audit. One-second bars are finer and are folded to minutes first;
+    daily and coarser bars cannot prove their source minutes.
   </p>
 
   {#if !hasMinuteSource}
@@ -368,8 +375,9 @@
       {:else if !feeds.active || store.feed !== feeds.active}
         Waiting for the selected feed's store census before a minute audit can be offered.
       {:else if symbol}
-        No 1min source is recorded for {symbol} in this feed's store census. Audit is disabled;
-        select a series with stored 1min bars. Other timeframes cannot substitute for them.
+        No 1min or 1s source is recorded for {symbol} in this feed's store census. Audit is
+        disabled; select a series with stored 1min or 1s bars. Coarser timeframes cannot
+        substitute for them.
       {:else}
         No stored series is available to select for a minute audit.
       {/if}
@@ -419,6 +427,9 @@
         {b.calendar.first} to {b.calendar.last}. The series being audited is not among them: a
         calendar derived from it would read every hole as the edge of a trading window and answer
         <em>no losses</em> for any input.
+      {:else if b.calendar?.source === 'record'}
+        the <b>calendar of record</b> (sourced sessions, special-session windows and halts),
+        {b.calendar.first} to {b.calendar.last}. No stored series votes on it.
       {:else}
         the <b>typed calendar table</b>, {b.calendar?.first} to {b.calendar?.last}.
       {/if}

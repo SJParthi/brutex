@@ -150,13 +150,16 @@ test('the page uses the tested month and summary verdicts for green styling', ()
 });
 
 test('the minute audit cannot select or submit a coarser rung, and an absent source disables it', async () => {
-  assert.match(page, /const rung = '1min';/);
+  // THE RUNG IS THE CENSUS'S (D-3336 §4): 1min when held, else 1s, never
+  // coarser and never the operator's choice.
+  assert.match(page, /const rung = \$derived\(/);
+  assert.match(page, /auditRung\(store\.rows \?\? \[\], symbol\) \?\? '1min'/);
   assert.match(page, /if \(row\.timeframe !== rung\) continue;/);
   assert.match(page, /if \(store\.feed !== feeds\.active\) return \{ lo, hi \};/);
-  assert.match(page, /<select value=\{rung\} disabled[^>]*>\s*<option value="1min">1min<\/option>\s*<\/select>/);
+  assert.match(page, /<select value=\{rung\} disabled[^>]*>\s*<option value=\{rung\}>\{rung\}<\/option>\s*<\/select>/);
   assert.match(page, /timeframe=\$\{encodeURIComponent\(rung\)\}/);
   assert.match(page, /<button[\s\S]*?disabled=\{[^}]*!hasMinuteSource[^}]*\}/);
-  assert.match(page, /No 1min source is recorded/);
+  assert.match(page, /No 1min or 1s source is recorded/);
   assert.doesNotMatch(page, /bind:value=\{rung\}|rungs\[0\]/);
 
   // Execute the actual button entry point and owned request reader together.
@@ -222,4 +225,19 @@ test('an unreadable peer blocks the whole verdict and is named on the page (CE-8
   assert.match(page, /unreadablePeers\(b\.calendar\)/);
   assert.match(page, /Peers that could not be read/);
   assert.match(page, /Peer readings unknown/);
+});
+
+test('a series is audited at its own minutes, else at its seconds, never coarser', async () => {
+  const { auditRung } = await import('../src/lib/gap-verdict.js');
+  const rows = [
+    { instrument: 'NSE-INDEX-NIFTY', timeframe: '1day' },
+    { instrument: 'NSE-INDEX-NIFTY', timeframe: '1s' },
+    { instrument: 'NSE-INDEX-NIFTY', timeframe: '1min' },
+    { instrument: 'NSE-INDEX-BANKNIFTY', timeframe: '1s' },
+    { instrument: 'NSE-CASH-RELIANCE', timeframe: '1day' }
+  ];
+  assert.equal(auditRung(rows, 'NSE-INDEX-NIFTY'), '1min', 'minutes first when held');
+  assert.equal(auditRung(rows, 'NSE-INDEX-BANKNIFTY'), '1s', 'GDFL holds only seconds');
+  assert.equal(auditRung(rows, 'NSE-CASH-RELIANCE'), null, 'a daily rung proves no minute');
+  assert.equal(auditRung([], 'NSE-INDEX-NIFTY'), null);
 });

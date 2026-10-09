@@ -246,13 +246,23 @@ fn w1_api5_5_the_calendar_route_sorts_its_feed_per_request_and_its_doc_says_so()
             "corrected",
         ],
     );
+    // D-3336 (WP-35) REMOVED THE PER-REQUEST SORT: a request is answered from
+    // the answer kept under the feed's manifest stamp, and only a miss walks
+    // the census, once over its keys with no sort and no copy (`held_series`).
+    // The D-1446 bullet above still prices the old cost; WP-99 rewrites it.
     let route = item(CALENDAR_ROUTE, "pub(super) fn calendar_json_reading(");
-    assert_eq!(
-        route
-            .matches("census::held_entries(std::slice::from_ref(")
-            .count(),
-        2,
-        "both branches collect and sort the feed's entries: {route}"
+    assert!(
+        !route.contains("census::held_entries("),
+        "no request collects and sorts the feed's entries: {route}"
+    );
+    assert!(
+        route.contains("site.calendars.answer(&key, at)"),
+        "a request asks the kept answer first: {route}"
+    );
+    let walk = item(CALENDAR_ROUTE, "fn held_series(");
+    assert!(
+        walk.contains("manifest.held_keys()") && !walk.contains("held_entries"),
+        "a miss walks the census's keys once: {walk}"
     );
     assert!(
         SERVER.contains(

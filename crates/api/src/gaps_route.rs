@@ -1,15 +1,25 @@
 //! `/gaps.json` -- whether one stored series is complete across a range of
-//! months, judged against a calendar its peers vote for.
+//! months, judged against the calendar of record (D-3336), or against a
+//! calendar its peers vote for when `calendar=peers` asks for one.
 //!
-//! # Moved, not rewritten
+//! # Where it lives
 //!
-//! Every item below was cut out of `server.rs` verbatim by the WP-01 seam and
-//! is mounted there as a child module, so it reads that file's private
-//! helpers through `super::` exactly as it did when it lived in it, and
-//! `server.rs` imports each name back. The only edits are visibility
-//! qualifiers (`pub(super)`) on items another module now has to reach, and
-//! the path an intra-doc link now needs to name a `server.rs` item that is no
-//! longer in scope here. No route answers differently because of the move.
+//! Cut out of `server.rs` by the WP-01 seam and mounted there as a child
+//! module, so it reads that file's private helpers through `super::` and
+//! `server.rs` imports each name back.
+//!
+//! # What D-3336 changed (WP-35)
+//!
+//! - The default denominator is the calendar of record, which no stored bar
+//!   moves: the peer union read a hole every index shares as "full" (Zerodha
+//!   NIFTY 1min 2020-12: `lost 0` beside 15,840 unmeasured minutes before,
+//!   4,125 lost minutes named after, on a shadow of the operator's store).
+//! - `timeframe=1s` is audited (DB-073): folded to minutes with `pull::fold`,
+//!   an index's seconds audited against the 22,500 a session owes, and a
+//!   trade-driven share or option measured by the sessions it printed on.
+//! - A halt's minutes are counted apart, a contract's minutes after its expiry
+//!   are neither owed nor lost, and a series named without its exchange and
+//!   segment is found in the census or refused by name.
 
 use super::{
     Addressed, CensusNow, CensusStamps, Loaded, Site, audit_cash_schedule_window,
@@ -82,9 +92,16 @@ pub(super) async fn gaps_json(
         )
     };
 
-    let mut asked = match Addressed::parse(query) {
+    let asked = match Addressed::parse(query) {
         Ok(asked) => asked,
         Err(why) => return refuse(why),
+    };
+    // A SERIES NAMED WITHOUT ITS EXCHANGE AND SEGMENT IS FOUND IN THE CENSUS,
+    // or refused by name: see `inferred`.
+    let (mut asked, inferred) = match inferred(&site, asked).await {
+        Ok(Ok(found)) => found,
+        Ok(Err(why)) => return refuse(why),
+        Err(why) => return calendar_admission_refused(&why),
     };
     // AN ADDRESS THE STORE REFUSES IS A 400, NOT AN ABSENT MONTH (probeapi-2,
     // D-1200). `audit_one` folds every `open` refusal into `absent_file`, so an
@@ -95,94 +112,44 @@ pub(super) async fn gaps_json(
     if let Err(why) = asked.store_path_is_valid() {
         return refuse(why);
     }
-    // `to` IS OPTIONAL AND DEFAULTS TO `month`, so the single-month question
-    // stays a single-month question and the range is opt-in. An unparseable
-    // `to` REFUSES rather than collapsing to one month: a range that silently
-    // becomes narrower answers a different question than the one asked, and
-    // reports the months it never looked at as absent from the answer.
-    let last_month = if param(query, "to").is_empty() {
-        asked.month
-    } else {
-        match month_param(query, "to") {
-            Ok(month) => month,
-            Err(why) => return refuse(why),
-        }
-    };
-    if last_month < asked.month {
+    // ONE MINUTE OR ONE SECOND, AND THE REFUSAL SAYS WHICH WAY IS WHICH.
+    //
+    // This refused `1s` with "coarser bars cannot prove their source minutes":
+    // one second is FINER than a minute, and GDFL holds nothing else (D-2802),
+    // so none of its series could be audited at all (DB-073). A `1s` month is
+    // now folded to minutes with `pull::fold`, the one fold authority, and
+    // audited second by second where seconds are owed (D-3336 §4).
+    let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
+    if asked.timeframe != store::path::Timeframe::MINUTE_1 && !one_second {
         return refuse(format!(
-            "the range runs backwards: {} is before {}",
-            last_month, asked.month
+            "minute coverage requires timeframe=1min or timeframe=1s; {} bars are coarser \
+             than a minute and cannot prove their source minutes (1s is finer, and is folded \
+             to minutes with pull::fold)",
+            asked.timeframe.as_str()
         ));
     }
+    let (mode, min_run, span, truncated_range) = match asked_range(query, &asked, one_second) {
+        Ok(parsed) => parsed,
+        Err(why) => return refuse(why),
+    };
 
-    // THE SPAN, WALKED ONCE, AND THE CALENDAR DERIVED FROM IT ONCE.
-    //
-    // Collected before the audit rather than during it, because
-    // `calendar_of::derive` reads the whole span's daily rung to decide which
-    // days traded — asking it per month would re-derive the same answer once
-    // per month and, worse, would give each month a calendar built from its own
-    // data alone.
-    let mut span = Vec::new();
-    let mut cursor = asked.month;
-    let mut truncated_range = false;
-    loop {
-        if span.len() >= MAX_AUDIT_MONTHS {
-            // NEVER A SILENT `take(N)`. A ceiling that stopped quietly would
-            // report the months it never reached as no news, which is the
-            // direction that reads as health.
-            truncated_range = true;
-            break;
-        }
-        span.push(cursor);
-        if cursor >= last_month {
-            break;
-        }
-        let Some(next) = next_month(cursor) else {
-            break;
-        };
-        cursor = next;
-    }
-
-    // THE CALENDAR MUST NOT COME FROM THE SERIES BEING AUDITED, AND THE FIRST
-    // DRAFT OF THIS ROUTE TOOK IT FROM EXACTLY THERE.
-    //
-    // The problem being solved is real: `pull::calendar`'s typed table ends at
-    // `LAST_DAY = 2026-08-21`, and on 2026-08-29 this route answered
-    // `expected 5,625, held 7,500, lost 0` for NIFTY at one minute in 2026-08 —
-    // twenty trading days of bars against fifteen the table could vouch for.
-    // Every day past the table falls to `Unmeasured`.
-    //
-    // The obvious repair was `calendar_of::cached` for THIS series, which never
-    // goes stale. **It is also completely circular, and a test proved it in one
-    // run.** `calendar_of` derives each session's LENGTH from the first and
-    // last minute bar and its WINDOWS from contiguous runs of them, so a
-    // missing minute does not read as a hole — it reads as the edge of a
-    // window. Measured: with one minute deleted mid-session, the answer was
-    // `expected 8,249, held 8,249, lost 0` and the gap list carried
-    // `{"day":19738,"from":556,"to":556,"reason":"outside-window"}`. The hole
-    // became a fact about the exchange.
-    //
-    // `calendar_of::agree`'s own doc names this: *"A shorter reading is that
-    // instrument's hole, not a shorter exchange day — the opposite rule would
-    // let one vendor's missing morning shorten the calendar for everything
-    // else, which is how an expected-bar count becomes quietly too small and a
-    // real loss stops being reported."*
-    //
-    // So the readings are the PEERS — every other feed's copy of a spot series
-    // on this exchange and segment — agreed by union, and the audited series is
-    // excluded from its own denominator. A bar is proof the exchange traded;
-    // silence is not proof that it did not.
-    if asked.timeframe != store::path::Timeframe::MINUTE_1 {
-        return refuse("minute coverage requires timeframe=1min; coarser bars cannot prove their source minutes".to_owned());
-    }
-    let peers = if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
-        // A peer's auction eligibility is not this stock's eligibility. No
-        // peer is consulted, so none can be named as unreadable either.
-        PeerCalendar {
-            calendar: None,
-            from: Vec::new(),
-            unreadable: Vec::new(),
-        }
+    // THE DENOMINATOR, ONCE FOR THE SPAN — never the series being audited. A
+    // calendar derived from the audited bars reads a hole as a window edge
+    // (measured: one minute deleted mid-session answered `lost 0`). The
+    // calendar of record is independent of every bar in the store, so it is
+    // the default (D-3336); the union of peers stays one parameter away, and
+    // an NSE cash stock consults neither, because a peer's auction
+    // eligibility is not this stock's.
+    // A ONE-SECOND SHARE IS TRADE-DRIVEN AND OWES NO COUNT (D-3336 §2), so its
+    // auction eligibility decides nothing and the record is its calendar.
+    let cash = asked.exchange == "NSE"
+        && asked.segment == "CASH"
+        && asked.contract.is_none()
+        && !one_second;
+    let denominator = if cash {
+        Denominator::table()
+    } else if mode == Mode::Record {
+        Denominator::record(&span)
     } else {
         // OFF THE ASYNC WORKERS, AND ADMITTED: the peer vote derives one
         // calendar per peer series on a miss. W1-api2-11, D-1443.
@@ -195,21 +162,428 @@ pub(super) async fn gaps_json(
         {
             Ok((back, peers)) => {
                 asked = back;
-                peers
+                Denominator::peers(peers)
             }
             Err(why) => return calendar_admission_refused(&why),
         }
     };
-    let (months, peers) = match audit_span(&site, asked, span.clone(), peers).await {
-        Ok(done) => done,
-        Err(why) => return calendar_admission_refused(&why),
-    };
+    let (months, denominator) =
+        match audit_span(&site, asked, span.clone(), denominator, min_run).await {
+            Ok(done) => done,
+            Err(why) => return calendar_admission_refused(&why),
+        };
 
     (
         axum::http::StatusCode::OK,
         json(),
-        gaps_body(&months, &span, &peers, truncated_range),
+        gaps_body(&months, &span, &denominator, truncated_range, &inferred),
     )
+}
+
+/// The identity a `/gaps.json` answer audited, rendered: the address the
+/// request named, or the one [`inferred`] found for it, and which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Identity {
+    /// The rendered `identity` member, without its leading comma.
+    json: String,
+    /// Whether the audit is at one second.
+    one_second: bool,
+}
+
+/// `asked`, with its exchange and segment found in the feed's census when the
+/// request named neither, and the identity the answer will name.
+///
+/// # Why a request may leave them out
+///
+/// `/gaps.json?feed=gdfl&symbol=NIFTY&timeframe=1s&month=2018-09` names one
+/// series: GDFL holds NIFTY's one-second spot bars under exactly one exchange
+/// and segment. Refusing it for an empty `segment` (probeapi-2, D-1200) was
+/// right while the alternative was auditing a path that can never exist; the
+/// census can say instead which path does. So a request naming neither
+/// `exchange` nor `segment` is answered for the ONE identity the feed's census
+/// holds for the symbol, the contract and the rung at the first month asked,
+/// found by probing the six exchange-and-segment pairs: six hash probes, no
+/// walk. The answer says it was inferred.
+///
+/// **Never a guess.** No identity held is refused, and so is more than one
+/// (`NIFTY` as an index and as a share would be two series): the request is
+/// told which to name. A request naming either word is taken as written, and
+/// an empty one there is still refused by the store path.
+///
+/// The census is read on the calendar pool, off the async workers
+/// (W1-api2-11, D-1443).
+///
+/// # Errors
+///
+/// The pool's refusal; inside it, the refusal sentence for an identity that
+/// cannot be found.
+async fn inferred(
+    site: &Loaded,
+    asked: Addressed,
+) -> Result<Result<(Addressed, Identity), String>, crate::detail::RunError> {
+    let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
+    let rendered = move |asked: &Addressed, inferred: bool| Identity {
+        json: format!(
+            r#""identity":{{"exchange":{},"segment":{},"symbol":{},"contract":{},"inferred":{inferred}}}"#,
+            render::json_string(&asked.exchange),
+            render::json_string(&asked.segment),
+            render::json_string(&asked.symbol),
+            asked.contract.as_ref().map_or_else(
+                || "null".to_owned(),
+                |contract| render::json_string(contract.as_str())
+            ),
+        ),
+        one_second,
+    };
+    if !asked.exchange.is_empty() || !asked.segment.is_empty() || asked.symbol.is_empty() {
+        let identity = rendered(&asked, false);
+        return Ok(Ok((asked, identity)));
+    }
+    let probe = std::sync::Arc::clone(site);
+    crate::detail::run_calendar(move || {
+        let mut asked = asked;
+        let (exchange, segment) = identity_in_census(&probe, &asked, census_now_stamped)?;
+        exchange.as_str().clone_into(&mut asked.exchange);
+        segment.as_str().clone_into(&mut asked.segment);
+        let identity = rendered(&asked, true);
+        Ok((asked, identity))
+    })
+    .await
+}
+
+/// The one exchange and segment the feed's census holds `asked` under at its
+/// first month and rung. See [`inferred`].
+///
+/// # Errors
+///
+/// The refusal sentence: a symbol the store cannot name, none held, or more
+/// than one.
+fn identity_in_census(
+    site: &Site,
+    asked: &Addressed,
+    census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
+) -> Result<
+    (
+        brutex_core::instrument::Exchange,
+        brutex_core::instrument::Segment,
+    ),
+    String,
+> {
+    use brutex_core::instrument::{Exchange, Segment};
+    let symbol = brutex_core::symbol::Symbol::new(&asked.symbol).map_err(|why| {
+        format!(
+            "{:?} is not a symbol the store can name ({why:?}); name exchange and segment \
+             with it",
+            asked.symbol
+        )
+    })?;
+    let (_, (fresh, _)) = census(site);
+    let own = fresh.iter().find(|row| row.vendor == asked.vendor);
+    let mut held = Vec::new();
+    for exchange in [Exchange::Nse, Exchange::Bse] {
+        for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
+            let key = census::Series {
+                contract: asked.contract,
+                exchange,
+                segment,
+                symbol,
+                timeframe: asked.timeframe,
+            }
+            .at(asked.month);
+            if own.is_some_and(|row| row.rows_for(&key).is_some()) {
+                held.push((exchange, segment));
+            }
+        }
+    }
+    let what = format!(
+        "{}{} {} {}",
+        asked.symbol,
+        asked
+            .contract
+            .as_ref()
+            .map_or_else(String::new, |contract| format!("/{}", contract.as_str())),
+        asked.timeframe.as_str(),
+        asked.month,
+    );
+    match held.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(format!(
+            "exchange and segment were not named, and {}'s census holds no {what} to find \
+             them by; name both (e.g. exchange=NSE&segment=INDEX)",
+            asked.vendor.as_str()
+        )),
+        many => Err(format!(
+            "exchange and segment were not named, and {}'s census holds {what} as {} series \
+             ({}); name which",
+            asked.vendor.as_str(),
+            many.len(),
+            many.iter()
+                .map(|(exchange, segment)| format!("{}/{}", exchange.as_str(), segment.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The denominator, the listing bound and the span a `/gaps.json` request
+/// names, and whether the span's ceiling stopped it.
+///
+/// `to` IS OPTIONAL AND DEFAULTS TO `month`, so the single-month question
+/// stays a single-month question and the range is opt-in. An unparseable `to`
+/// REFUSES rather than collapsing to one month: a range that silently becomes
+/// narrower answers a different question than the one asked, and reports the
+/// months it never looked at as absent from the answer.
+///
+/// # Errors
+///
+/// The refusal sentence for the first parameter that is wrong.
+fn asked_range(
+    query: &str,
+    asked: &Addressed,
+    one_second: bool,
+) -> Result<(Mode, u32, Vec<store::path::YearMonth>, bool), String> {
+    let mode = match param(query, "calendar").as_str() {
+        "" | "record" => Mode::Record,
+        "peers" => Mode::Peers,
+        other => {
+            return Err(format!(
+                "calendar={other:?} is not a denominator this route knows: calendar=record \
+                 (the default: the calendar of record, D-3336) or calendar=peers (every other \
+                 stored series on this exchange and segment, agreed by union)"
+            ));
+        }
+    };
+    let min_run = min_run_param(query)?;
+    let last_month = if param(query, "to").is_empty() {
+        asked.month
+    } else {
+        month_param(query, "to")?
+    };
+    if last_month < asked.month {
+        return Err(format!(
+            "the range runs backwards: {} is before {}",
+            last_month, asked.month
+        ));
+    }
+    let (span, truncated) = span_of(
+        asked.month,
+        last_month,
+        if one_second {
+            MAX_AUDIT_MONTHS_1S
+        } else {
+            MAX_AUDIT_MONTHS
+        },
+    );
+    Ok((mode, min_run, span, truncated))
+}
+
+/// Which denominator a `/gaps.json` request asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The calendar of record. The default (D-3336).
+    Record,
+    /// The union of every other stored series' calendar on the asked exchange
+    /// and segment.
+    Peers,
+}
+
+/// The shortest second-level run of missing seconds a `1s` audit lists by
+/// default, in seconds.
+///
+/// A display bound, CHOSEN and not sourced: every missing second is counted
+/// whatever the bound, and the longest run of each day is named whatever its
+/// length. On GDFL's NIFTY 50 an isolated missing second is common (up to
+/// about 900 runs on one day of 2018-09) and a 34-second stretch is rare, so
+/// ten seconds lists the stretches without listing every isolated second.
+const MIN_RUN_DEFAULT: u32 = 10;
+
+/// The `min_run` a request names, or [`MIN_RUN_DEFAULT`].
+///
+/// # Errors
+///
+/// A value that is not a whole number of seconds from 1 to 3,600.
+fn min_run_param(query: &str) -> Result<u32, String> {
+    let raw = param(query, "min_run");
+    if raw.is_empty() {
+        return Ok(MIN_RUN_DEFAULT);
+    }
+    raw.parse::<u32>()
+        .ok()
+        .filter(|seconds| (1..=3_600).contains(seconds))
+        .ok_or_else(|| format!("min_run={raw:?} is not a whole number of seconds from 1 to 3600"))
+}
+
+/// The months `first..=last`, at most `ceiling` of them, and whether the
+/// ceiling stopped the walk.
+///
+/// NEVER A SILENT `take(N)`. A ceiling that stopped quietly would report the
+/// months it never reached as no news, which is the direction that reads as
+/// health.
+fn span_of(
+    first: store::path::YearMonth,
+    last: store::path::YearMonth,
+    ceiling: usize,
+) -> (Vec<store::path::YearMonth>, bool) {
+    let mut span = Vec::new();
+    let mut cursor = first;
+    loop {
+        if span.len() >= ceiling {
+            return (span, true);
+        }
+        span.push(cursor);
+        if cursor >= last {
+            return (span, false);
+        }
+        let Some(next) = next_month(cursor) else {
+            return (span, false);
+        };
+        cursor = next;
+    }
+}
+
+/// The calendar a `/gaps.json` audit counts against, and where it came from.
+pub(super) struct Denominator {
+    /// The calendar, or `None` where the typed table answers inside
+    /// `pull::gaps` (an NSE cash stock, or a peer vote nobody cast).
+    calendar: Option<pull::calendar::Calendar>,
+    /// `record`, `peers` or `table`.
+    source: &'static str,
+    /// The first and last day the source can vouch for.
+    bounds: (i64, i64),
+    /// The `feed:symbol` readings that voted, for `peers`.
+    from: Vec<String>,
+    /// Every feed or peer that could not be read, for `peers`.
+    unreadable: Vec<String>,
+}
+
+impl Denominator {
+    /// The typed table inside `pull::gaps`: [`pull::calendar::kind_of`].
+    const fn table() -> Self {
+        Self {
+            calendar: None,
+            source: "table",
+            bounds: (pull::calendar::FIRST_DAY, pull::calendar::LAST_DAY),
+            from: Vec::new(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// The calendar of record over `span`'s days. D-3336.
+    fn record(span: &[store::path::YearMonth]) -> Self {
+        let day = |month: &store::path::YearMonth| {
+            pull::session::Day::new(month.year(), month.month(), 1).ok()
+        };
+        let first = span
+            .first()
+            .and_then(day)
+            .map_or(0, |d| i64::from(d.days_from_epoch()));
+        let last = span
+            .last()
+            .and_then(day)
+            .map_or(0, |d| i64::from(d.end_of_month().days_from_epoch()));
+        Self {
+            calendar: Some(record_calendar(first, last)),
+            source: "record",
+            bounds: (
+                pull::calendar::SOURCED_FIRST_DAY,
+                pull::calendar::SOURCED_LAST_DAY,
+            ),
+            from: Vec::new(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// The peers' agreed calendar, or the table when nobody voted.
+    fn peers(peers: PeerCalendar) -> Self {
+        match peers.calendar {
+            Some(calendar) => Self {
+                bounds: (calendar.first_day(), calendar.last_day()),
+                calendar: Some(calendar),
+                source: "peers",
+                from: peers.from,
+                unreadable: peers.unreadable,
+            },
+            None => Self {
+                from: peers.from,
+                unreadable: peers.unreadable,
+                ..Self::table()
+            },
+        }
+    }
+}
+
+/// The calendar of record from `first` to `last` as a [`pull::calendar::Calendar`]
+/// for `pull::gaps` to count against (D-3336).
+///
+/// Every session is the record's ([`pull::calendar::exchange_kind_of`]),
+/// special windows included, with a recorded halt's whole minutes carved out
+/// of it ([`carved`]): a halted minute is neither owed nor missing. A day the
+/// record does not cover is unmeasured. The span reaches back and forward to
+/// the nearest session within a fortnight, because a `Calendar` reads a day
+/// outside its first and last session as unmeasured, and a month that opens on
+/// a weekend would otherwise read its first closed days as unmeasured rather
+/// than closed.
+///
+/// One `exchange_kind_of` per day of the span and one 1,440-minute pass per
+/// halt day; no store read.
+fn record_calendar(first: i64, last: i64) -> pull::calendar::Calendar {
+    use pull::calendar::DayKind;
+    let open = |day: i64| {
+        matches!(
+            pull::calendar::exchange_kind_of(day),
+            DayKind::Open(_) | DayKind::OpenLengthUnmeasured
+        )
+    };
+    let low = (first.saturating_sub(14)..=first)
+        .rev()
+        .find(|day| open(*day))
+        .unwrap_or(first);
+    let high = (last..=last.saturating_add(14))
+        .find(|day| open(*day))
+        .unwrap_or(last);
+    let mut observed = Vec::new();
+    let mut unmeasured = Vec::new();
+    for day in low..=high {
+        match pull::calendar::exchange_kind_of(day) {
+            DayKind::Open(session) => observed.push(pull::calendar::Observed {
+                day,
+                session: carved(day, session),
+            }),
+            DayKind::OpenLengthUnmeasured => {
+                observed.push(pull::calendar::Observed { day, session: None });
+            }
+            DayKind::Closed => {}
+            DayKind::Unmeasured => unmeasured.push(day),
+        }
+    }
+    let mut calendar = pull::calendar::Calendar::from_observed(&observed);
+    for day in unmeasured {
+        calendar.withhold_closed(day, day);
+    }
+    calendar
+}
+
+/// `session` with `day`'s recorded halt carved out of its windows, or `None`
+/// (a session of unknown length, which owes nothing and loses nothing) when
+/// the carving would need more windows than a session holds.
+fn carved(day: i64, session: pull::calendar::Session) -> Option<pull::calendar::Session> {
+    let Some(halt) = pull::calendar::halt_on(day) else {
+        return Some(session);
+    };
+    let mut runs: Vec<(u16, u16)> = Vec::new();
+    for minute in 0..pull::calendar::MINUTES_PER_DAY {
+        if !session.expects(minute) || halt.halted.holds(minute) {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(last) if last.1.saturating_add(1) == minute => last.1 = minute,
+            _ => runs.push((minute, minute)),
+        }
+    }
+    if runs.len() > pull::calendar::MAX_WINDOWS {
+        return None;
+    }
+    pull::calendar::Observed::from_runs(day, &runs).session
 }
 
 /// Every month of a `/gaps.json` span, audited OFF THE ASYNC WORKERS.
@@ -219,7 +593,7 @@ pub(super) async fn gaps_json(
 /// span. The evidence reader is an `async fn` whose local variant never awaits
 /// a fetch, but it reads and locks files inline, so it is driven to completion
 /// on the blocking thread by the runtime's handle rather than on a worker.
-/// `peers` goes in and comes back, because the answer renders from it.
+/// `denominator` goes in and comes back, because the answer renders from it.
 /// Split from `gaps_json` for the workspace's 100-line ceiling. W1-api2-11,
 /// D-1508.
 ///
@@ -230,8 +604,9 @@ async fn audit_span(
     site: &Loaded,
     asked: Addressed,
     span: Vec<store::path::YearMonth>,
-    peers: PeerCalendar,
-) -> Result<(Vec<AuditedMonth>, PeerCalendar), crate::detail::RunError> {
+    denominator: Denominator,
+    min_run: u32,
+) -> Result<(Vec<AuditedMonth>, Denominator), crate::detail::RunError> {
     let runtime = tokio::runtime::Handle::current();
     let audit_site = std::sync::Arc::clone(site);
     crate::detail::run_calendar(move || {
@@ -242,13 +617,14 @@ async fn audit_span(
                 &audit_site,
                 &asked,
                 *month,
-                peers.calendar.as_ref(),
+                denominator.calendar.as_ref(),
                 schedule.as_ref().ok().and_then(Option::as_ref),
+                min_run,
             );
             audited.evidence_error = schedule.err();
             months.push(audited);
         }
-        (months, peers)
+        (months, denominator)
     })
     .await
 }
@@ -262,9 +638,11 @@ async fn audit_span(
 fn gaps_body(
     months: &[AuditedMonth],
     span: &[store::path::YearMonth],
-    peers: &PeerCalendar,
+    denominator: &Denominator,
     truncated_range: bool,
+    identity: &Identity,
 ) -> String {
+    let one_second = identity.one_second;
     // THE ROLL-UP IS A SUM OF THE MONTHS, not a second computation over them. A
     // total that could disagree with the rows below it is a total nobody can
     // act on.
@@ -284,55 +662,25 @@ fn gaps_body(
     //
     // `expected` counts only days the calendar can vouch for. A day it cannot
     // is `Unmeasured`: it adds nothing to `expected`, it is not a loss, and no
-    // claim is made either way — which is right, and which makes `held` LARGER
-    // than `expected` for any span running past the calendar's edge.
-    //
-    // Read without this block that pair is an arithmetic bug, and an operator
-    // right to distrust it has no way to find out that it is not one. Measured
-    // before the derived calendar was wired in: NIFTY at one minute for 2026-08
-    // answered `expected 5,625, held 7,500, lost 0` — twenty trading days of
-    // bars against fifteen the TABLE could vouch for, because
-    // `pull::calendar::LAST_DAY` is 2026-08-21 and the request was made on
-    // 2026-08-29.
-    //
-    // `covers_span` is the honest statement, and it is source-independent:
-    // whichever calendar answered, what an operator needs to know is whether
-    // the span they ASKED for is inside what can be vouched for.
-    //
-    // The bounds are the ones actually used. With peers, that is the union of
-    // their spans; without, the typed table's `FIRST_DAY..=LAST_DAY`, which is
-    // where `stale` still means something and is reported.
-    let (first_bound, last_bound, source) = peers.calendar.as_ref().map_or_else(
-        || (pull::calendar::FIRST_DAY, pull::calendar::LAST_DAY, "table"),
-        |cal| (cal.first_day(), cal.last_day(), "peers"),
-    );
-    let first_known =
-        pull::session::Day::from_days(u32::try_from(first_bound.max(0)).unwrap_or(u32::MAX));
-    let last_known =
-        pull::session::Day::from_days(u32::try_from(last_bound.max(0)).unwrap_or(u32::MAX));
-    let day_text = |day: Result<pull::session::Day, _>| {
-        day.map_or_else(
+    // claim is made either way — which makes `held` LARGER than `expected` for
+    // any span running past the calendar's edge. `covers_span` says whether the
+    // span ASKED for is inside what the source vouches for, and `stale` whether
+    // today is past that source's last day.
+    let (first_bound, last_bound) = denominator.bounds;
+    let source = denominator.source;
+    let day_text = |day: i64| {
+        pull::session::Day::from_days(u32::try_from(day.max(0)).unwrap_or(u32::MAX)).map_or_else(
             |_| "null".to_owned(),
             |d| format!(r#""{:04}-{:02}-{:02}""#, d.year(), d.month(), d.day()),
         )
     };
-    // THE TABLE'S STALENESS IS STILL REPORTED, because it is still the fallback
-    // and it is still a maintenance fact. It is `false` when peers answered:
-    // the flag is about whichever calendar bounded this answer, not about a
-    // constant nobody consulted.
-    let stale = source == "table"
-        && ingest::today_ist()
-            .is_ok_and(|today| i64::from(today.days_from_epoch()) > pull::calendar::LAST_DAY);
-    // AN ABSENT OR SHORT CALENDAR IS ITS OWN ANSWER, NOT A ZERO. A store with
-    // one feed's copy of one symbol has nothing independent to vote, so every
-    // minute falls to `Unmeasured` and `expected` is 0 beside a `held` of
-    // hundreds of thousands. That is not a store owing nothing; it is a question
-    // this build cannot settle, and it says so rather than reporting a clean
-    // sheet an operator would read as health.
-    let calendar_days = peers
-        .calendar
-        .as_ref()
-        .map_or(0, pull::calendar::Calendar::span);
+    let stale = source != "peers"
+        && ingest::today_ist().is_ok_and(|today| i64::from(today.days_from_epoch()) > last_bound);
+    // AN ABSENT OR SHORT CALENDAR IS ITS OWN ANSWER, NOT A ZERO: see `covers_span`.
+    let calendar_days = last_bound
+        .saturating_sub(first_bound)
+        .saturating_add(1)
+        .max(0);
     let covers_span = span.first().is_some_and(|m| {
         pull::session::Day::new(m.year(), m.month(), 1)
             .is_ok_and(|d| i64::from(d.days_from_epoch()) >= first_bound)
@@ -340,26 +688,29 @@ fn gaps_body(
         pull::session::Day::new(m.year(), m.month(), 1)
             .is_ok_and(|d| i64::from(d.end_of_month().days_from_epoch()) <= last_bound)
     });
-    let voted = peers
-        .from
-        .iter()
-        .map(|name| render::json_string(name))
-        .collect::<Vec<_>>()
-        .join(",");
+    let names = |list: &[String]| {
+        list.iter()
+            .map(|name| render::json_string(name))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let voted = names(&denominator.from);
     // A PEER THAT COULD NOT BE READ IS NAMED, not counted as a peer that held
     // nothing: see `PeerCalendar::unreadable`.
-    let unreadable = peers
-        .unreadable
-        .iter()
-        .map(|name| render::json_string(name))
-        .collect::<Vec<_>>()
-        .join(",");
+    let unreadable = names(&denominator.unreadable);
+    let timeframe = if one_second { "1s" } else { "1min" };
+    let fold = if one_second {
+        r#","folded_with":"pull::fold, 1s to 1min, for the minute verdict; seconds audited where an index owes them (D-3336)""#
+    } else {
+        ""
+    };
 
     format!(
-        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
+        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
+        identity.json,
         months.len(),
-        day_text(first_known),
-        day_text(last_known),
+        day_text(first_bound),
+        day_text(last_bound),
     )
 }
 
@@ -519,6 +870,13 @@ pub(super) fn peer_calendar_reading(
 /// a request open.
 const MAX_AUDIT_MONTHS: usize = 240;
 
+/// [`MAX_AUDIT_MONTHS`] for a `1s` audit: twelve months.
+///
+/// A one-second index month is about 470,000 bars and is read whole, so a year
+/// is about 5.6 million records in one request. Chosen, not sourced; the
+/// answer says `truncated` when it bites, as the minute ceiling does.
+const MAX_AUDIT_MONTHS_1S: usize = 12;
+
 /// The month after this one, or `None` at the end of the representable range.
 ///
 /// `YearMonth::new` is the only judge of what is representable, so December
@@ -569,13 +927,16 @@ struct AuditedMonth {
     truncated: bool,
     /// The runs, already rendered.
     runs: String,
+    /// A `1s` month's own members, already rendered with a leading comma, or
+    /// empty for a minute month.
+    seconds: String,
 }
 
 impl AuditedMonth {
     /// This month as one JSON object.
     fn render(&self) -> String {
         format!(
-            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{},"gaps":[{}]}}"#,
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{}{},"gaps":[{}]}}"#,
             render::json_string(&self.month.to_string()),
             self.expected,
             self.held,
@@ -591,6 +952,7 @@ impl AuditedMonth {
             self.evidence_error
                 .as_ref()
                 .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.seconds,
             self.runs,
         )
     }
@@ -611,6 +973,49 @@ async fn audit_cash_schedule(
     audit_cash_schedule_window(site, asked, window).await
 }
 
+/// The word a run is rendered with.
+///
+/// `pull::gaps` has four reasons and no fifth. Three more are this route's,
+/// and none of them is a loss: a minute inside a recorded halt's window is
+/// `halted` (sourced) or `halt-suspected` (UNVERIFIED, D-3320) rather than
+/// `outside-window`; a minute with no print in a trade-driven series (a `1s`
+/// share or option, D-3336 §2) is `no-print` rather than `vendor-hole`; and a
+/// minute after a contract's expiry day is `expired`.
+fn run_word(gap: &pull::gaps::Gap, trade_driven: bool, expiry: Option<i64>) -> &'static str {
+    if expiry.is_some_and(|last| gap.day > last) {
+        return "expired";
+    }
+    if gap.reason == pull::gaps::Reason::OutsideWindow
+        && let Some(halt) = pull::calendar::halt_on(gap.day)
+        && halt.halted.holds(gap.from)
+        && halt.halted.holds(gap.to)
+    {
+        return if halt.evidence.is_suspected() {
+            "halt-suspected"
+        } else {
+            "halted"
+        };
+    }
+    if trade_driven && gap.reason == pull::gaps::Reason::VendorHole {
+        return "no-print";
+    }
+    gap.reason.word()
+}
+
+/// The last session day of a contract: the expiry date its segment opens
+/// with (`YYYY-MM-DD-…`), or `None` for a spot series or a contract whose
+/// text does not start with a date.
+fn expiry_of(contract: Option<&brutex_core::instrument::Contract>) -> Option<i64> {
+    let text = contract?.as_str().get(..10)?;
+    let mut parts = text.split('-');
+    let year = parts.next()?.parse::<u16>().ok()?;
+    let month = parts.next()?.parse::<u8>().ok()?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    pull::session::Day::new(year, month, day)
+        .ok()
+        .map(|day| i64::from(day.days_from_epoch()))
+}
+
 /// Audit one month of one series.
 ///
 /// # The range comes from the MONTH, not from the bars
@@ -619,12 +1024,27 @@ async fn audit_cash_schedule(
 /// this agree with itself and disagree with the store: a month whose first four
 /// trading days never landed would report a clean interior and a perfect score,
 /// because the missing days would fall outside a range they themselves defined.
+///
+/// # A one-second month (D-3336 §4)
+///
+/// Its seconds are folded to minutes with [`pull::fold::fold_from_bars`] and
+/// the minutes are classified exactly as a minute month's are. A spot index
+/// owes every second of a session (22,500 a regular day), so its seconds are
+/// audited too ([`second_audit`]). A share or an option is trade-driven: it
+/// owes no count, a minute with no print is `no-print`, never a loss, and the
+/// month says how many of its sessions it holds a print on.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one open and one classification for both rungs, the fold and the two \
+              one-second verdicts beside them; split, the rows would be read twice"
+)]
 fn audit_one(
     site: &Loaded,
     asked: &Addressed,
     month: store::path::YearMonth,
     calendar: Option<&pull::calendar::Calendar>,
     cash_schedule: Option<&pull::cash_auction::Schedule>,
+    min_run: u32,
 ) -> AuditedMonth {
     let empty = |absent_file: Option<String>| AuditedMonth {
         month,
@@ -639,6 +1059,7 @@ fn audit_one(
         unreadable: 0,
         truncated: false,
         runs: String::new(),
+        seconds: String::new(),
     };
 
     let Ok(first_day) = pull::session::Day::new(month.year(), month.month(), 1) else {
@@ -649,6 +1070,9 @@ fn audit_one(
     };
     let first = i64::from(first_day.days_from_epoch());
     let last = i64::from(first_day.end_of_month().days_from_epoch());
+    let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
+    let trade_driven = one_second && asked.segment != "INDEX";
+    let expiry = expiry_of(asked.contract.as_ref());
 
     // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
     // `n_valid` seeks of known length and nothing scans.
@@ -660,14 +1084,34 @@ fn audit_one(
         }
         Err(why) => (Vec::new(), Vec::new(), Some(why)),
     };
-    let stamps: Vec<i64> = rows.iter().map(|bar| bar.ts_micros).collect();
+    // ONE SECOND FOLDS TO ONE MINUTE THROUGH THE ONE FOLD AUTHORITY. A fold
+    // that refuses (rows out of order) is input this audit cannot certify: it
+    // says why and claims nothing.
+    let (stamps, fold_error): (Vec<i64>, Option<String>) = if one_second {
+        match pull::fold::fold_from_bars(
+            &rows,
+            pull::fold::Bucket::MINUTE,
+            pull::fold::Bucket::SECOND,
+        ) {
+            Ok(minutes) => (minutes.iter().map(|bar| bar.ts_micros).collect(), None),
+            Err(why) => (Vec::new(), Some(format!("{why:?}"))),
+        }
+    } else {
+        (rows.iter().map(|bar| bar.ts_micros).collect(), None)
+    };
     // A MARKET SESSION AND AN INDEX-PUBLICATION WINDOW ARE NOT THE SAME FACT.
     // On 2021-02-24 SEBI proves 220 normal-market minutes, but also records
     // NIFTY computation unavailable during part of the still-trading morning
     // and gives no common interval for every stored index. The index-specific
     // door therefore refuses to turn that day into invented vendor holes;
     // CASH and derivative series keep the verified exchange-session calendar.
-    let ledger = if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
+    let mut ledger = if fold_error.is_some() {
+        pull::gaps::Ledger::default()
+    } else if trade_driven && asked.segment == "CASH" {
+        // NOTHING IS OWED, so the dated cash schedule decides nothing: a
+        // minute of the exchange session with no print is `no-print`.
+        pull::gaps::classify_against(&stamps, first, last, calendar)
+    } else if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
         pull::gaps::classify_cash(&stamps, first, last, cash_schedule)
     } else if asked.segment == "INDEX" {
         pull::gaps::classify_spot_index_against(&stamps, first, last, calendar)
@@ -683,28 +1127,77 @@ fn audit_one(
     // RUNS, NOT MINUTES, and the reason travels with each one. 1,176 of 1,204
     // measured absences were four contiguous events; a per-minute list is the
     // same facts 43× longer.
+    let words: Vec<&'static str> = ledger
+        .gaps
+        .iter()
+        .map(|gap| run_word(gap, trade_driven, expiry))
+        .collect();
     let runs = ledger
         .gaps
         .iter()
-        .map(|gap| {
+        .zip(&words)
+        .map(|(gap, word)| {
             format!(
                 r#"{{"day":{},"from":{},"to":{},"minutes":{},"reason":{}}}"#,
                 gap.day,
                 gap.from,
                 gap.to,
                 gap.minutes(),
-                render::json_string(gap.reason.word())
+                render::json_string(word)
             )
         })
         .collect::<Vec<_>>()
         .join(",");
+    let minutes_of = |word: &str, lost_only: bool| -> u32 {
+        ledger
+            .gaps
+            .iter()
+            .zip(&words)
+            .filter(|(gap, w)| {
+                **w == word && (!lost_only || gap.reason == pull::gaps::Reason::VendorHole)
+            })
+            .map(|(gap, _)| gap.minutes())
+            .fold(0_u32, u32::saturating_add)
+    };
+    // A CONTRACT OWES NOTHING AFTER ITS EXPIRY DAY: a minute the calendar owes
+    // there, and the contract cannot print, is `expired`, neither owed nor
+    // lost. Only what `pull::gaps` counted as a loss is taken back out, from
+    // the loss and from what was owed; a closed day renamed `expired` was
+    // never either.
+    let expired_lost = minutes_of("expired", true);
+    let mut lost_minutes = ledger.lost_minutes().saturating_sub(expired_lost);
+    ledger.expected = ledger.expected.saturating_sub(expired_lost);
+    let mut members = halts_member(&stamps, first, last);
+    if one_second {
+        let no_print = minutes_of("no-print", false);
+        // THE SESSION MINUTES AFTER EXPIRY, not every minute of those days:
+        // a closed weekend after expiry was never owed either way.
+        let expired = minutes_of("expired", true);
+        if trade_driven {
+            // A TRADE-DRIVEN SERIES OWES NO COUNT (D-3336 §2): nothing it lacks
+            // is a loss, and `expected` is not a denominator for it.
+            lost_minutes = 0;
+            ledger.expected = 0;
+        }
+        members += &one_second_members(
+            &rows,
+            first,
+            last,
+            calendar,
+            trade_driven,
+            expiry,
+            min_run,
+            fold_error.as_deref(),
+            (no_print, expired),
+        );
+    }
 
     AuditedMonth {
         month,
         expected: ledger.expected,
         held: ledger.held,
         invalid_timestamps: ledger.invalid_timestamps,
-        lost: ledger.lost_minutes(),
+        lost: lost_minutes,
         absent: ledger.absent_minutes(),
         unmeasured: ledger.unmeasured_minutes(),
         // A FAULTY RECORD IS NOT SILENTLY SKIPPED, and here it matters more
@@ -717,7 +1210,367 @@ fn audit_one(
         unreadable: faults.len(),
         truncated: ledger.truncated,
         runs,
+        seconds: members,
     }
+}
+
+/// Every recorded halt of the month and the minutes they take out of what is
+/// owed, rendered with a leading comma.
+///
+/// A halted minute is neither owed nor missing (D-3336 §1), so a halt whose
+/// minutes the store does hold leaves no run behind it, and a reader could not
+/// tell the month crossed one. The month counts the minutes apart, a
+/// suspected halt's (`halt_suspected_minutes`, UNVERIFIED, D-3320) separately
+/// from a sourced one's (`halted_minutes`), and names each halt with its
+/// window, whether it is suspected, and how many of its minutes the series
+/// holds a bar in: a straggling print is a bar, labelled, never removed.
+fn halts_member(stamps: &[i64], first: i64, last: i64) -> String {
+    let mut suspected_minutes = 0_u32;
+    let mut sourced_minutes = 0_u32;
+    let halts: Vec<String> = pull::calendar::HALTS
+        .iter()
+        .filter(|halt| (first..=last).contains(&halt.day))
+        .map(|halt| {
+            let minutes = u32::from(halt.halted.to.saturating_sub(halt.halted.from)) + 1;
+            if halt.evidence.is_suspected() {
+                suspected_minutes = suspected_minutes.saturating_add(minutes);
+            } else {
+                sourced_minutes = sourced_minutes.saturating_add(minutes);
+            }
+            let inside = stamps
+                .iter()
+                .filter(|stamp| {
+                    let (day, second) = ist_second(**stamp);
+                    day == halt.day
+                        && u16::try_from(second / 60).is_ok_and(|minute| halt.halted.holds(minute))
+                })
+                .count();
+            format!(
+                r#"{{"day":{},"date":"{}","from":{},"to":{},"minutes":{minutes},"suspected":{},"held_minutes_inside":{inside}}}"#,
+                halt.day,
+                iso(halt.day),
+                halt.halted.from,
+                halt.halted.to,
+                halt.evidence.is_suspected(),
+            )
+        })
+        .collect();
+    format!(
+        r#","halt_suspected_minutes":{suspected_minutes},"halted_minutes":{sourced_minutes},"halts":[{}]"#,
+        halts.join(",")
+    )
+}
+
+/// A `1s` month's own members, rendered with a leading comma.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the month's rows and days, its calendar, and the four facts that decide \
+              what a second owes: trade-driven, expiry, the listing bound, a fold refusal"
+)]
+fn one_second_members(
+    rows: &[store::format::Bar],
+    first: i64,
+    last: i64,
+    calendar: Option<&pull::calendar::Calendar>,
+    trade_driven: bool,
+    expiry: Option<i64>,
+    min_run: u32,
+    fold_error: Option<&str>,
+    (no_print, expired): (u32, u32),
+) -> String {
+    let fold_error = fold_error.map_or_else(|| "null".to_owned(), render::json_string);
+    if trade_driven {
+        let days = trade_days(rows, first, last, calendar, expiry);
+        let without = days
+            .without
+            .iter()
+            .take(MAX_LISTED_DAYS)
+            .map(|day| format!(r#"{{"day":{day},"date":"{}"}}"#, iso(*day)))
+            .collect::<Vec<_>>()
+            .join(",");
+        return format!(
+            r#","trade_driven":true,"fold_error":{fold_error},"no_print_minutes":{no_print},"expired_minutes":{expired},"sessions":{},"days_held":{},"days_without_print":[{without}],"days_without_print_count":{},"expiry":{}"#,
+            days.sessions,
+            days.held,
+            days.without.len(),
+            expiry.map_or_else(|| "null".to_owned(), |day| format!(r#""{}""#, iso(day))),
+        );
+    }
+    let audit = second_audit(rows, first, last, calendar, min_run);
+    let listed = audit
+        .runs
+        .iter()
+        .map(|run| {
+            format!(
+                r#"{{"day":{},"date":"{}","from":"{}","to":"{}","from_second":{},"to_second":{},"seconds":{},"reason":"{}"}}"#,
+                run.day,
+                iso(run.day),
+                clock_secs(run.from),
+                clock_secs(run.to),
+                run.from,
+                run.to,
+                run.to.saturating_sub(run.from).saturating_add(1),
+                run.reason,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let days = audit
+        .days
+        .iter()
+        .map(|day| {
+            format!(
+                r#"{{"day":{},"date":"{}","expected_seconds":{},"held_seconds":{},"missing_seconds":{},"longest_run":{}}}"#,
+                day.day,
+                iso(day.day),
+                day.expected,
+                day.held,
+                day.missing,
+                day.longest.map_or_else(
+                    || "null".to_owned(),
+                    |(from, length)| format!(r#"{{"from":"{}","seconds":{length}}}"#, clock_secs(from))
+                ),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#","trade_driven":false,"fold_error":{fold_error},"seconds":{{"expected":{},"held":{},"missing":{},"outside":{},"runs":{},"runs_listed":{},"min_run":{min_run},"truncated":{}}},"second_runs":[{listed}],"days":[{days}]"#,
+        audit.expected,
+        audit.held,
+        audit.missing,
+        audit.outside,
+        audit.run_count,
+        audit.runs.len(),
+        audit.truncated,
+    )
+}
+
+/// The longest list of days one month names; its count always travels beside it.
+const MAX_LISTED_DAYS: usize = 31;
+
+/// `epoch_day` as `YYYY-MM-DD`.
+fn iso(epoch_day: i64) -> String {
+    crate::calendar_of::record::iso(epoch_day)
+}
+
+/// A second of the day as `HH:MM:SS`.
+fn clock_secs(second: u32) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        second / 3_600,
+        second % 3_600 / 60,
+        second % 60
+    )
+}
+
+/// The IST day and second-of-day of a micros-since-epoch stamp.
+fn ist_second(ts_micros: i64) -> (i64, u32) {
+    let secs = ts_micros.div_euclid(1_000_000).saturating_add(19_800);
+    (
+        secs.div_euclid(86_400),
+        u32::try_from(secs.rem_euclid(86_400)).unwrap_or(u32::MAX),
+    )
+}
+
+/// What a trade-driven month holds against the sessions it could have traded.
+struct TradeDays {
+    /// Sessions of the month inside the contract's life.
+    sessions: u32,
+    /// Of those, the sessions with at least one print.
+    held: u32,
+    /// The sessions with none, in order.
+    without: Vec<i64>,
+}
+
+/// Sessions held and not held by a trade-driven month (D-3336 §2): a session
+/// is a day `calendar` sizes, on or before `expiry`.
+fn trade_days(
+    rows: &[store::format::Bar],
+    first: i64,
+    last: i64,
+    calendar: Option<&pull::calendar::Calendar>,
+    expiry: Option<i64>,
+) -> TradeDays {
+    let mut printed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for bar in rows {
+        printed.insert(ist_second(bar.ts_micros).0);
+    }
+    let mut days = TradeDays {
+        sessions: 0,
+        held: 0,
+        without: Vec::new(),
+    };
+    for day in first..=last.min(expiry.unwrap_or(last)) {
+        let open = calendar.map_or_else(
+            || pull::calendar::exchange_kind_of(day),
+            |calendar| calendar.kind_of(day),
+        );
+        if !matches!(open, pull::calendar::DayKind::Open(_)) {
+            continue;
+        }
+        days.sessions = days.sessions.saturating_add(1);
+        if printed.contains(&day) {
+            days.held = days.held.saturating_add(1);
+        } else {
+            days.without.push(day);
+        }
+    }
+    days
+}
+
+/// One run of missing seconds.
+struct SecondRun {
+    day: i64,
+    from: u32,
+    to: u32,
+    reason: &'static str,
+}
+
+/// One day of a second-level audit.
+struct SecondDay {
+    day: i64,
+    expected: u64,
+    held: u64,
+    missing: u64,
+    /// The longest run of missing seconds: its first second and its length.
+    longest: Option<(u32, u32)>,
+}
+
+/// A spot index's seconds against what the calendar owes.
+#[derive(Default)]
+struct SecondAudit {
+    expected: u64,
+    held: u64,
+    missing: u64,
+    /// Seconds held that no session owes: before the open, after the close,
+    /// inside a halt, on a closed or unmeasured day. Counted, never removed.
+    outside: u64,
+    /// Every run of missing seconds, listed or not.
+    run_count: u64,
+    /// The runs at least `min_run` long, at most [`pull::gaps::MAX_GAPS`].
+    runs: Vec<SecondRun>,
+    truncated: bool,
+    days: Vec<SecondDay>,
+}
+
+/// A spot index's one-second month, second by second (D-3336 §1, §4).
+///
+/// A second is owed when its minute is a session minute of `calendar` (the
+/// record carves a halt's whole minutes out) and it is not one of the seconds
+/// the index spends in a recorded halt ([`pull::calendar::Halt::seconds`]):
+/// 22,500 on a regular session. 2021-02-24 owes none: the index's publication
+/// window that day is unproved (D-0420), as the minute door says. Every
+/// missing second is counted; runs at least `min_run` seconds long are listed,
+/// and every day names its longest run whatever its length.
+///
+/// One pass over the month's rows and one over its owed seconds: O(month).
+fn second_audit(
+    rows: &[store::format::Bar],
+    first: i64,
+    last: i64,
+    calendar: Option<&pull::calendar::Calendar>,
+    min_run: u32,
+) -> SecondAudit {
+    let mut by_day: std::collections::BTreeMap<i64, Vec<u32>> = std::collections::BTreeMap::new();
+    for bar in rows {
+        let (day, second) = ist_second(bar.ts_micros);
+        by_day.entry(day).or_default().push(second);
+    }
+    let mut audit = SecondAudit::default();
+    for day in first..=last {
+        let mut held: Vec<u32> = by_day.remove(&day).unwrap_or_default();
+        held.sort_unstable();
+        held.dedup();
+        let kind = calendar.map_or_else(
+            || pull::calendar::exchange_kind_of(day),
+            |calendar| calendar.kind_of(day),
+        );
+        let session = match kind {
+            pull::calendar::DayKind::Open(session) if day != pull::calendar::SYSTEMS_OUTAGE_DAY => {
+                session
+            }
+            _ => {
+                audit.outside = audit.outside.saturating_add(held.len() as u64);
+                continue;
+            }
+        };
+        let halt =
+            pull::calendar::halt_on(day).map(|halt| halt.seconds(pull::vendor::Venue::NseIndex));
+        let owes = |second: u32| {
+            u16::try_from(second / 60).is_ok_and(|minute| session.expects(minute))
+                && !halt.is_some_and(|h| (h.from..h.resume).contains(&second))
+        };
+        let mut one = SecondDay {
+            day,
+            expected: 0,
+            held: 0,
+            missing: 0,
+            longest: None,
+        };
+        let mut cursor = held.iter().copied().peekable();
+        let mut run: Option<(u32, u32)> = None;
+        for second in 0..86_400_u32 {
+            let present = cursor.next_if_eq(&second).is_some();
+            if !owes(second) {
+                if present {
+                    audit.outside = audit.outside.saturating_add(1);
+                }
+                close_run(&mut audit, &mut one, &mut run, min_run);
+                continue;
+            }
+            one.expected = one.expected.saturating_add(1);
+            if present {
+                one.held = one.held.saturating_add(1);
+                close_run(&mut audit, &mut one, &mut run, min_run);
+            } else {
+                one.missing = one.missing.saturating_add(1);
+                run = Some(run.map_or((second, second), |(from, _)| (from, second)));
+            }
+        }
+        close_run(&mut audit, &mut one, &mut run, min_run);
+        audit.expected = audit.expected.saturating_add(one.expected);
+        audit.held = audit.held.saturating_add(one.held);
+        audit.missing = audit.missing.saturating_add(one.missing);
+        audit.days.push(one);
+    }
+    // ROWS OUTSIDE THE MONTH'S DAYS are not this month's, and are counted as
+    // held outside any owed second rather than dropped.
+    audit.outside = audit
+        .outside
+        .saturating_add(by_day.values().map(|seconds| seconds.len() as u64).sum());
+    audit
+}
+
+/// Close the open run of missing seconds, if any: count it, keep the day's
+/// longest, and list it when it is at least `min_run` long and there is room.
+fn close_run(
+    audit: &mut SecondAudit,
+    day: &mut SecondDay,
+    run: &mut Option<(u32, u32)>,
+    min_run: u32,
+) {
+    let Some((from, to)) = run.take() else {
+        return;
+    };
+    let length = to.saturating_sub(from).saturating_add(1);
+    audit.run_count = audit.run_count.saturating_add(1);
+    if day.longest.is_none_or(|(_, longest)| length > longest) {
+        day.longest = Some((from, length));
+    }
+    if length < min_run {
+        return;
+    }
+    if audit.runs.len() >= pull::gaps::MAX_GAPS {
+        audit.truncated = true;
+        return;
+    }
+    audit.runs.push(SecondRun {
+        day: day.day,
+        from,
+        to,
+        reason: "vendor-hole",
+    });
 }
 
 #[cfg(test)]
@@ -897,7 +1750,14 @@ mod tests {
                 date,
                 &[(555, 929)],
             )]);
-        let absent = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+        let absent = audit_one(
+            &site,
+            &asked,
+            asked.month,
+            Some(&calendar),
+            None,
+            MIN_RUN_DEFAULT,
+        );
         assert!(absent.absent_file.is_some());
         assert_eq!(absent.held, 0);
         assert_eq!(absent.expected, 375);
@@ -921,7 +1781,14 @@ mod tests {
         let id =
             u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
         drop(store::file::BarFile::open_or_create(&root, path, id).unwrap());
-        let empty = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+        let empty = audit_one(
+            &site,
+            &asked,
+            asked.month,
+            Some(&calendar),
+            None,
+            MIN_RUN_DEFAULT,
+        );
         assert!(empty.absent_file.is_none());
         assert_eq!(empty.expected, absent.expected);
         assert_eq!(empty.lost, absent.lost);
@@ -957,7 +1824,14 @@ mod tests {
                 "feed=zerodha&{query}&timeframe=1min&month=2026-08"
             ))
             .unwrap();
-            let audit = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+            let audit = audit_one(
+                &site,
+                &asked,
+                asked.month,
+                Some(&calendar),
+                None,
+                MIN_RUN_DEFAULT,
+            );
             assert!(audit.absent_file.is_some(), "{query}");
             assert_eq!(audit.expected, owed, "{query}");
             assert_eq!(audit.lost, owed, "{query}");
@@ -1045,7 +1919,7 @@ mod tests {
                 "the forged legacy month opens and holds every off-grid row"
             );
             let before = std::fs::read(&source_path).unwrap();
-            let audit = audit_one(&site, &asked, asked.month, None, None);
+            let audit = audit_one(&site, &asked, asked.month, None, None, MIN_RUN_DEFAULT);
             assert_eq!(audit.invalid_timestamps, if extra { 1 } else { 375 });
             assert_eq!(audit.expected, 0, "no coverage claim on invalid input");
             assert_eq!(audit.lost, 0, "no invented downstream holes");
@@ -1123,7 +1997,7 @@ mod tests {
             )]);
         assert_eq!(calendar.expected_bars(day), Some(220));
 
-        let verdict = audit_one(&site, &asked, month, Some(&calendar), None);
+        let verdict = audit_one(&site, &asked, month, Some(&calendar), None, MIN_RUN_DEFAULT);
         assert_eq!(verdict.held, 54, "stored evidence remains visible");
         assert_eq!(verdict.expected, 0, "no invented index denominator");
         assert_eq!(verdict.lost, 0, "no invented vendor loss");
@@ -1284,8 +2158,8 @@ mod tests {
         // input; the typed table is independent of the bars, so it reports the
         // month as almost entirely missing, which it is.
         assert!(
-            three.contains(r#""source":"table""#) && three.contains(r#""voted_by":[]"#),
-            "with no peer to vote the table answers, and the response names it \
+            three.contains(r#""source":"record""#) && three.contains(r#""voted_by":[]"#),
+            "the calendar of record answers (D-3336), and the response names it \
              rather than leaving a number un-attributable: {three}"
         );
         assert!(
@@ -1303,5 +2177,492 @@ mod tests {
             short.contains(r#""months":1"#),
             "2024-1 is January, so the range is one month long: {short}"
         );
+    }
+
+    /// Write `rows` for one series' month at `rung`, with `contract` below the
+    /// symbol when given.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one bar file's address and its rows"
+    )]
+    fn write_rows(
+        root: &std::path::Path,
+        vendor: Vendor,
+        segment: &str,
+        symbol: &str,
+        contract: Option<&str>,
+        rung: store::path::Timeframe,
+        month: store::path::YearMonth,
+        stamps: &[i64],
+    ) {
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor,
+            exchange: "NSE",
+            segment,
+            symbol,
+            contract: contract
+                .map(|text| brutex_core::instrument::Contract::parse(text).expect("a contract")),
+            timeframe: rung,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a(symbol) & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let mut file = store::file::BarFile::open_or_create(root, path, id).expect("a file");
+        let rows: Vec<store::format::Bar> = stamps
+            .iter()
+            .map(|&ts_micros| store::format::Bar {
+                ts_micros,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        file.append(&rows).expect("ordered rows");
+    }
+
+    /// Micros since the epoch of `second` seconds past IST midnight on `day`.
+    fn second_of(day: i64, second: i64) -> i64 {
+        (day * 86_400 - 19_800 + second) * 1_000_000
+    }
+
+    /// `/gaps.json` with `query`, parsed.
+    async fn gaps(
+        site: &std::sync::Arc<Site>,
+        query: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let uri: axum::http::Uri = format!("/gaps.json?{query}").parse().expect("a uri");
+        let (code, _, body) =
+            gaps_json(axum::extract::State(std::sync::Arc::clone(site)), uri).await;
+        (code, serde_json::from_str(&body).expect("JSON"))
+    }
+
+    /// **A ONE-SECOND INDEX MONTH IS FOLDED TO MINUTES AND AUDITED SECOND BY
+    /// SECOND, AND THE 34-SECOND HOLE IS NAMED.** DB-073, D-3336 §4: `1s` was
+    /// refused as "coarser" and no GDFL series could be audited.
+    ///
+    /// 2018-09-03 holds every second of its session but a 34-second stretch
+    /// from 12:21:40 and an isolated missing second at 10:00:00; the month's
+    /// other sessions hold nothing. Every minute of the 3rd still has a print,
+    /// so it loses no minute; its seconds owe 22,500 and miss 35; the long run
+    /// is listed and the short one only counted; the other sessions are lost
+    /// minutes, whole.
+    #[tokio::test]
+    async fn a_one_second_index_month_is_folded_to_minutes_and_audited_by_the_second() {
+        let root = store_root("gaps-one-second-index");
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let day = i64::from(day(2018, 9, 3).days_from_epoch());
+        let hole = (12 * 3_600 + 21 * 60 + 40)..(12 * 3_600 + 21 * 60 + 74);
+        let lone = 10 * 3_600;
+        let stamps: Vec<i64> = (33_300..55_800)
+            .filter(|second| !hole.contains(second) && *second != lone)
+            .map(|second| second_of(day, second))
+            .collect();
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "INDEX",
+            "NIFTY",
+            None,
+            store::path::Timeframe::SECOND_1,
+            month,
+            &stamps,
+        );
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-one-second-index", None, None),
+            &root,
+        ));
+        let (code, body) = gaps(
+            &site,
+            "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09",
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["timeframe"], "1s");
+        assert_eq!(body["calendar"]["source"], "record");
+        let audited = &body["month"][0];
+        assert_eq!(audited["trade_driven"], false);
+        let first = &audited["days"][0];
+        assert_eq!(first["date"], "2018-09-03");
+        assert_eq!(first["expected_seconds"], 22_500);
+        assert_eq!(first["held_seconds"], 22_465);
+        assert_eq!(first["missing_seconds"], 35);
+        assert_eq!(first["longest_run"]["from"], "12:21:40");
+        assert_eq!(first["longest_run"]["seconds"], 34);
+        assert_eq!(
+            audited["seconds"]["runs"], 19,
+            "the two runs of the 3rd and 17 whole days"
+        );
+        assert_eq!(audited["second_runs"][0]["from"], "12:21:40");
+        assert_eq!(audited["second_runs"][0]["to"], "12:22:13");
+        assert_eq!(audited["second_runs"][0]["seconds"], 34);
+        assert_eq!(audited["seconds"]["min_run"], 10);
+        let sessions = 18_u64;
+        assert_eq!(audited["seconds"]["expected"], sessions * 22_500);
+        assert_eq!(audited["expected"], sessions * 375);
+        assert_eq!(
+            audited["lost_minutes"],
+            (sessions - 1) * 375,
+            "the 3rd loses no minute; every other session is lost whole"
+        );
+        // EVERY RUN IS LISTED AT `min_run=1`, AND A BAD VALUE IS REFUSED.
+        let (_, all) = gaps(
+            &site,
+            "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09&min_run=1",
+        )
+        .await;
+        assert_eq!(all["month"][0]["second_runs"][0]["from"], "10:00:00");
+        for bad in ["0", "3601", "ten"] {
+            let (code, refused) = gaps(
+                &site,
+                &format!("feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09&min_run={bad}"),
+            )
+            .await;
+            assert_eq!(
+                code,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{bad}: {refused}"
+            );
+        }
+    }
+
+    /// **A ONE-SECOND OPTION IS TRADE-DRIVEN: IT OWES NO COUNT, A MINUTE WITH
+    /// NO PRINT IS `no-print`, AND IT IS MEASURED BY THE SESSIONS IT HOLDS A
+    /// PRINT ON UP TO ITS EXPIRY.** D-3336 §2.
+    #[tokio::test]
+    async fn a_one_second_option_is_trade_driven_and_measured_by_days_held() {
+        let root = store_root("gaps-one-second-option");
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let (third, fourth) = (
+            i64::from(day(2018, 9, 3).days_from_epoch()),
+            i64::from(day(2018, 9, 4).days_from_epoch()),
+        );
+        let stamps: Vec<i64> = [third, fourth]
+            .iter()
+            .flat_map(|d| [second_of(*d, 33_300), second_of(*d, 40_000)])
+            .collect();
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "FNO",
+            "NIFTY",
+            Some("2018-09-27-1100000-CE"),
+            store::path::Timeframe::SECOND_1,
+            month,
+            &stamps,
+        );
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-one-second-option", None, None),
+            &root,
+        ));
+        let (code, body) = gaps(
+            &site,
+            "feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract=2018-09-27-1100000-CE&timeframe=1s&month=2018-09",
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let audited = &body["month"][0];
+        assert_eq!(audited["trade_driven"], true, "{audited}");
+        assert_eq!(audited["expected"], 0, "no owed count");
+        assert_eq!(audited["lost_minutes"], 0, "nothing it lacks is a loss");
+        assert_eq!(audited["held"], 4, "four minutes with a print");
+        assert_eq!(
+            audited["sessions"], 17,
+            "the sessions of September up to the 27th"
+        );
+        assert_eq!(audited["days_held"], 2);
+        assert_eq!(audited["days_without_print_count"], 15);
+        assert_eq!(audited["expiry"], "2018-09-27");
+        assert_eq!(
+            audited["expired_minutes"], 375,
+            "the 28th's session minutes, not every minute of the 28th to the 30th"
+        );
+        let reasons: std::collections::BTreeSet<&str> = audited["gaps"]
+            .as_array()
+            .expect("runs")
+            .iter()
+            .map(|run| run["reason"].as_str().expect("a word"))
+            .collect();
+        assert!(
+            reasons.contains("no-print") && reasons.contains("expired"),
+            "{reasons:?}"
+        );
+        assert!(!reasons.contains("vendor-hole"), "{reasons:?}");
+    }
+
+    /// **A HALTED MINUTE IS NEITHER OWED NOR MISSING, AND THE MONTH NAMES THE
+    /// HALT EITHER WAY.** D-3320, D-3336 §1. A series holding every minute of
+    /// 2020-03-13, the halt's included, is not over-full: the halt's minutes
+    /// are held inside it. One holding none of the halt's minutes loses none:
+    /// they are `halt-suspected`, not `vendor-hole`.
+    #[tokio::test]
+    async fn a_halted_minute_is_neither_owed_nor_missing_and_the_halt_is_named() {
+        let month = store::path::YearMonth::new(2020, 3).expect("a month");
+        let friday = i64::from(day(2020, 3, 13).days_from_epoch());
+        for (tag, keep_halt) in [("gaps-halt-held", true), ("gaps-halt-absent", false)] {
+            let root = store_root(tag);
+            let stamps: Vec<i64> = (555..930_i64)
+                .filter(|minute| keep_halt || !(562..=620).contains(minute))
+                .map(|minute| second_of(friday, minute * 60))
+                .collect();
+            write_rows(
+                &root,
+                Vendor::Dhan,
+                "INDEX",
+                "NIFTY",
+                None,
+                store::path::Timeframe::MINUTE_1,
+                month,
+                &stamps,
+            );
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), &root));
+            let (code, body) = gaps(
+                &site,
+                "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2020-03",
+            )
+            .await;
+            assert_eq!(code, axum::http::StatusCode::OK, "{tag}: {body}");
+            let audited = &body["month"][0];
+            let halt = &audited["halts"][0];
+            assert_eq!(halt["date"], "2020-03-13", "{tag}");
+            assert_eq!(halt["suspected"], true, "{tag}");
+            // COUNTED APART (D-3336 §1): 09:22-10:20 on the 13th and
+            // 09:59-10:56 on the 23rd, both suspected; no sourced halt.
+            assert_eq!(halt["minutes"], 59, "{tag}");
+            assert_eq!(audited["halts"][1]["minutes"], 58, "{tag}");
+            assert_eq!(audited["halt_suspected_minutes"], 59 + 58, "{tag}");
+            assert_eq!(audited["halted_minutes"], 0, "{tag}");
+            assert_eq!(
+                halt["held_minutes_inside"],
+                if keep_halt { 59 } else { 0 },
+                "{tag}"
+            );
+            let runs = audited["gaps"].as_array().expect("runs");
+            let on_friday: Vec<&serde_json::Value> =
+                runs.iter().filter(|run| run["day"] == friday).collect();
+            assert!(
+                on_friday.iter().all(|run| run["reason"] != "vendor-hole"),
+                "{tag}: no minute of the 13th is lost: {on_friday:?}"
+            );
+            assert_eq!(
+                on_friday
+                    .iter()
+                    .any(|run| run["reason"] == "halt-suspected"),
+                !keep_halt,
+                "{tag}: {on_friday:?}"
+            );
+        }
+    }
+
+    /// **THE PEER VOTE IS ONE PARAMETER AWAY, AND AN UNKNOWN DENOMINATOR IS
+    /// REFUSED.**
+    #[tokio::test]
+    async fn the_peer_vote_is_asked_for_by_name_and_an_unknown_denominator_is_refused() {
+        let root = store_root("gaps-denominator");
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-denominator", None, None),
+            &root,
+        ));
+        let base = "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2024-01";
+        let (_, record) = gaps(&site, base).await;
+        assert_eq!(record["calendar"]["source"], "record");
+        let (_, peers) = gaps(&site, &format!("{base}&calendar=peers")).await;
+        assert_eq!(
+            peers["calendar"]["source"], "table",
+            "nobody voted, so the table answers"
+        );
+        let (code, refused) = gaps(&site, &format!("{base}&calendar=vote")).await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|why| why.contains("calendar=record"))
+        );
+    }
+
+    /// Record one month of one series in `vendor`'s census, as a landing would.
+    #[expect(clippy::too_many_arguments, reason = "one census entry's fields")]
+    fn record_census(
+        root: &std::path::Path,
+        vendor: Vendor,
+        exchange: brutex_core::instrument::Exchange,
+        segment: brutex_core::instrument::Segment,
+        symbol: &str,
+        rung: store::path::Timeframe,
+        month: store::path::YearMonth,
+        rows: u64,
+    ) {
+        let path = pull::manifest::manifest_path(root, vendor);
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let mut manifest =
+            pull::manifest::Manifest::open_image(vendor, &bytes).expect("a manifest");
+        manifest
+            .record(pull::manifest::Entry {
+                key: pull::manifest::EntryKey {
+                    contract: None,
+                    exchange,
+                    segment,
+                    symbol: brutex_core::symbol::Symbol::new(symbol).expect("a symbol"),
+                    timeframe: rung,
+                    month,
+                },
+                rows,
+                first_ts_micros: 1,
+                last_ts_micros: 2,
+            })
+            .expect("one month in the census");
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the manifest directory");
+        std::fs::write(&path, manifest.image()).expect("publish the census");
+    }
+
+    /// **A SERIES NAMED WITHOUT ITS EXCHANGE AND SEGMENT IS AUDITED UNDER THE
+    /// ONE IDENTITY THE CENSUS HOLDS IT BY, AND THE ANSWER SAYS SO; NONE, OR
+    /// MORE THAN ONE, IS REFUSED BY NAME.** WP-35's verification asks
+    /// `/gaps.json?feed=gdfl&symbol=NIFTY&timeframe=1s&month=2018-09`, which
+    /// was a 400 for its empty segment (probeapi-2, D-1200).
+    #[tokio::test]
+    async fn a_series_named_without_exchange_and_segment_is_found_in_the_census_or_refused() {
+        use brutex_core::instrument::{Exchange, Segment};
+        let root = store_root("gaps-inferred-identity");
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let third = i64::from(day(2018, 9, 3).days_from_epoch());
+        let stamps: Vec<i64> = (33_300..33_310).map(|s| second_of(third, s)).collect();
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "INDEX",
+            "NIFTY",
+            None,
+            store::path::Timeframe::SECOND_1,
+            month,
+            &stamps,
+        );
+        record_census(
+            &root,
+            Vendor::Gdfl,
+            Exchange::Nse,
+            Segment::Index,
+            "NIFTY",
+            store::path::Timeframe::SECOND_1,
+            month,
+            10,
+        );
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-inferred-identity", None, None),
+            &root,
+        ));
+        let (code, found) = gaps(&site, "feed=gdfl&symbol=NIFTY&timeframe=1s&month=2018-09").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{found}");
+        assert_eq!(found["identity"]["exchange"], "NSE");
+        assert_eq!(found["identity"]["segment"], "INDEX");
+        assert_eq!(found["identity"]["inferred"], true);
+        let (_, named) = gaps(
+            &site,
+            "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09",
+        )
+        .await;
+        assert_eq!(named["identity"]["inferred"], false);
+        assert_eq!(
+            found["month"], named["month"],
+            "the same audit, whichever way the series was named"
+        );
+        assert_eq!(
+            found["month"][0]["held"], 1,
+            "one minute holds the ten seconds"
+        );
+
+        // A MONTH THE CENSUS DOES NOT HOLD, AND A WORD NAMED ALONE, REFUSE.
+        for query in [
+            "feed=gdfl&symbol=NIFTY&timeframe=1s&month=2018-10",
+            "feed=gdfl&symbol=NIFTY&timeframe=1min&month=2018-09",
+            "feed=gdfl&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09",
+        ] {
+            let (code, refused) = gaps(&site, query).await;
+            assert_eq!(
+                code,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{query}: {refused}"
+            );
+            assert!(refused["error"].is_string(), "{query}: {refused}");
+        }
+        // TWO IDENTITIES ARE TWO SERIES: the request is told to name one.
+        record_census(
+            &root,
+            Vendor::Gdfl,
+            Exchange::Nse,
+            Segment::Cash,
+            "NIFTY",
+            store::path::Timeframe::SECOND_1,
+            month,
+            10,
+        );
+        let (code, ambiguous) =
+            gaps(&site, "feed=gdfl&symbol=NIFTY&timeframe=1s&month=2018-09").await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{ambiguous}");
+        let why = ambiguous["error"].as_str().expect("a reason");
+        assert!(
+            why.contains("NSE/INDEX") && why.contains("NSE/CASH"),
+            "{why}"
+        );
+    }
+
+    /// **A CONTRACT OWES NOTHING AFTER ITS EXPIRY DAY, AT ONE MINUTE AS AT ONE
+    /// SECOND.** A NIFTY option expiring 2018-09-27 that printed every minute
+    /// of its seventeen sessions lost nothing: the 28th's minutes are
+    /// `expired`, taken out of what is owed and out of what is lost. They were
+    /// counted as a vendor loss beside the word `expired`.
+    #[tokio::test]
+    async fn a_contract_owes_nothing_after_its_expiry_day() {
+        let root = store_root("gaps-expired-minute");
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let expiry = i64::from(day(2018, 9, 27).days_from_epoch());
+        let first = i64::from(day(2018, 9, 1).days_from_epoch());
+        let stamps: Vec<i64> = (first..=expiry)
+            .filter(|d| {
+                matches!(
+                    pull::calendar::exchange_kind_of(*d),
+                    pull::calendar::DayKind::Open(_)
+                )
+            })
+            .flat_map(|d| (555..930_i64).map(move |minute| second_of(d, minute * 60)))
+            .collect();
+        assert_eq!(stamps.len(), 17 * 375, "seventeen sessions up to the 27th");
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "FNO",
+            "NIFTY",
+            Some("2018-09-27-1100000-CE"),
+            store::path::Timeframe::MINUTE_1,
+            month,
+            &stamps,
+        );
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-expired-minute", None, None),
+            &root,
+        ));
+        let (code, body) = gaps(
+            &site,
+            "feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract=2018-09-27-1100000-CE&timeframe=1min&month=2018-09",
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let audited = &body["month"][0];
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(audited["expected"], 17 * 375, "{audited}");
+        assert_eq!(audited["held"], 17 * 375);
+        let runs = audited["gaps"].as_array().expect("runs");
+        let friday = i64::from(day(2018, 9, 28).days_from_epoch());
+        assert!(
+            runs.iter()
+                .filter(|run| run["day"] == friday)
+                .all(|run| run["reason"] == "expired"),
+            "{runs:?}"
+        );
+        assert!(runs.iter().any(|run| run["day"] == friday), "{runs:?}");
     }
 }
