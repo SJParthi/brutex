@@ -87,13 +87,20 @@ fn the_screen_sorts_only_what_it_keeps() {
         least.contains("select_nth_unstable_by_key(")
             && least.contains("head.sort_unstable_by_key(")
     );
+    // ONE minimum over the traded rows (D-4401): the key orders every row
+    // the gate keeps ahead of every row it drops, so the filter on the
+    // gate's verdict that preceded it never changed the subject.
     let split = body("\nfn final_selection_split<'a>(");
     assert_eq!(
         split
             .matches(".min_by_key(|row| screen_order_key(row))")
             .count(),
-        2
+        1
     );
-    assert!(split.contains("calendar_holds(row, rules)"));
+    assert!(split.contains(".filter(|row| row.cell.trades > 0)"));
+    assert!(
+        !LIB.contains("fn calendar_holds("),
+        "the gate's verdict is not re-read"
+    );
     assert!(body("\nfn screen_order_key(").contains("r.rank,"));
 }
