@@ -81,6 +81,8 @@ fn the_top_combinations_table_keeps_extreme_figures_apart_and_under_their_header
         frontier_row(2, 0, 1),
     ];
     let text = crate::render_top_record(&record, &found, None, "");
+    // CE-93 / D-2792: `top` says its rows are in sample, validation unrecorded.
+    assert!(text.contains(crate::LEDGER_IN_SAMPLE), "{text}");
     let (header, rows) = table(&text, "rank", found.len());
     under(header, &rows, &[L, R, R, R, R, R]);
 }

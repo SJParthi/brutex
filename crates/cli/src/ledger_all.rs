@@ -182,7 +182,8 @@ impl LedgerTree {
             let execution_rung = execution_parent.join(rung);
             let selection_rung = selection_parent.join(rung);
             for path in [&authority_rung, &execution_rung, &selection_rung] {
-                std::fs::create_dir_all(path)
+                // Durable level by level (ledgerv6-3, D-2623).
+                crate::durable_dir::create_all(path)
                     .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
             }
             execution.push(execution_rung);
@@ -872,9 +873,12 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
     let (admission, active_gates) = admission_policy(request, LEDGER_ALL_VERB)?;
     render_gate_census(out, &active_gates);
     let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
-    let tree = LedgerTree::create(request.root)?;
-
+    // THE SPAN IS SIZED BEFORE THE TREE EXISTS (P1-20-01, D-2638), as
+    // `ledger_v6` does. `build_sweepers` is where every rung's span is first
+    // read; a span it refuses used to leave the 24 stage roots behind under
+    // a report that said nothing was read.
     let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_ALL_VERB)?;
+    let tree = LedgerTree::create(request.root)?;
 
     let ranking = RankingPolicyV1::new(Weights::equal())
         .map_err(|why| format!("ranking policy refused: {why:?}"))?;
@@ -944,8 +948,10 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
 /// operator to go and decode a ledger to find out what it decided, which is the
 /// same as not answering.
 ///
-/// Ten and not twenty-five: `visit_canonical` yields all two hundred, and the
-/// full set is on disk for anything that wants it. A terminal report that runs
+/// Ten and not twenty-five: `visit_committed` yields every committed winner
+/// (two hundred when every rung had 25 eligible, fewer when one did not:
+/// ledgerall-2, D-2627), and the full set is on disk for anything that wants
+/// it. A terminal report that runs
 /// to two hundred rows is one nobody reads, and the Top-10 of each rung is the
 /// prefix the selector itself treats as the answer.
 ///
@@ -962,7 +968,11 @@ pub(crate) fn render_winners(
         "\nTOP 10 BY RUNG -- paisa unless a column says ppm; profit is the PESSIMISTIC fill\n",
     );
     let mut current: OpenRung = None;
-    selection.into_successor_set()?.visit_canonical(|winner| {
+    // `visit_committed`, not `visit_canonical`: a rung with fewer than 25
+    // eligible candidates commits fewer winners, legally, and refusing to
+    // RENDER it after all three stages were durably committed reported a
+    // successful run as refused on every rerun (ledgerall-2, D-2627).
+    selection.into_successor_set()?.visit_committed(|winner| {
         let row = winner.row();
         let rank = row.rank();
         // THE SELECTOR'S OWN CONSTANT, not a literal ten. `all_rung_selection_v5`
@@ -2047,5 +2057,51 @@ pub(crate) mod tests {
                 .expect("separated and aligned");
         }
         assert_eq!(lines.len(), 3 + rows.len(), "{out}");
+    }
+
+    /// P1-20-01 (D-2638): a month outside 1..=12 or a backwards range is
+    /// refused at the arm, before a policy is read or a directory is made, on
+    /// both routes; and inside the chain the span is sized before the tree
+    /// is created. The source-shape half fails on the old order, where
+    /// `LedgerTree::create` preceded `build_sweepers`.
+    #[test]
+    fn ledger_all_refuses_a_bad_month_or_backwards_range_before_creating_its_tree() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-ledger-all-bad-span-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.to_str().expect("utf-8 scratch root");
+        for v6 in [false, true] {
+            for (from, to, needle) in [
+                (("2026", "13"), ("2026", "13"), "not a month"),
+                (("2026", "0"), ("2026", "1"), "not a month"),
+                (("2026", "1"), ("2026", "13"), "not a month"),
+                (("2026", "255"), ("2026", "255"), "not a month"),
+                (("2026", "3"), ("2026", "2"), "runs backwards"),
+                (("2026", "1"), ("2025", "12"), "runs backwards"),
+                (("2026", "256"), ("2026", "1"), "MONTH must be 1..=12"),
+            ] {
+                let mut out = String::new();
+                let code =
+                    crate::ledger_all_arm(&mut out, "dhan", from, to, ("200000", "50"), path, v6);
+                assert_eq!(code, crate::MISUSED, "{from:?}..{to:?}: {out}");
+                assert!(out.contains(needle), "{from:?}..{to:?}: {out}");
+                assert!(
+                    !root.exists(),
+                    "{from:?}..{to:?} created {}",
+                    root.display()
+                );
+            }
+        }
+        let source = include_str!("ledger_all.rs");
+        let body = source
+            .split_once("fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String)")
+            .expect("run_chain exists")
+            .1;
+        let sized = body.find("build_sweepers(").expect("sizing in run_chain");
+        let created = body.find("LedgerTree::create(").expect("tree in run_chain");
+        assert!(
+            sized < created,
+            "run_chain must size every rung's span before creating its tree"
+        );
     }
 }

@@ -376,6 +376,7 @@ fn sweep_under(
     for row in &rows {
         tally.fold(row);
     }
+    note_refusals(&rows, &tally);
     at_least_one_filed(&holdings.census, tally.offered, &rows)?;
 
     // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
@@ -395,6 +396,60 @@ fn sweep_under(
         &tally,
         &rows,
     ))
+}
+
+/// One Warn per refused instrument-month, then the walk's own tally, at Warn
+/// when any month refused (conc13-7, D-2643).
+///
+/// Only swept months emitted anything (`stored month swept`, Info), so a walk
+/// with refused months logged nothing but its successes and the refused count
+/// lived in stdout alone. Emitted here, after the sequential fold and in input
+/// order, at the instrument-month granularity this module already reports at
+/// -- never from a worker and never inside a month.
+fn note_refusals(rows: &[Row], tally: &Tally) {
+    for row in rows {
+        if let Some(why) = row.refused.as_deref() {
+            crate::note(
+                &telemetry::Event::warn("cli.sweep", "stored month refused")
+                    .with("label", row.label.as_str())
+                    .with("why", why)
+                    .with("ran", row.ran),
+            );
+        }
+    }
+    let walked = if tally.refused > 0 {
+        telemetry::Event::warn("cli.sweep", "stored walk tallied")
+    } else {
+        telemetry::Event::info("cli.sweep", "stored walk tallied")
+    };
+    crate::note(
+        &walked
+            .with("offered", tally.offered)
+            .with("swept", tally.swept)
+            .with("refused", tally.refused),
+    );
+}
+
+/// How many months a rendered `sweep-all` page's tally line says refused
+/// (conc13-7, D-2643): the column-zero `N swept · M refused · ...` line
+/// [`render`] prints. Month rows are indented and their names escaped, so no
+/// stored name can forge one. Zero when the page carries no tally.
+pub(crate) fn refused_months(text: &str) -> u64 {
+    for line in text.lines() {
+        let Some((swept, rest)) = line.split_once(" swept · ") else {
+            continue;
+        };
+        if swept.is_empty() || !swept.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Some((refused, _)) = rest.split_once(" refused · ") else {
+            continue;
+        };
+        if let Ok(count) = refused.parse::<u64>() {
+            return count;
+        }
+    }
+    0
 }
 
 /// Nothing, when a month was swept and filed or none was offered; the run's

@@ -1686,6 +1686,93 @@ impl FoldRungs<'_> {
     }
 }
 
+/// Where each walk-forward fold's support threshold comes from.
+///
+/// # The look-ahead this closes (audit-find-17 #5, D-3696)
+///
+/// [`fold_ladder`] restates the caller's `min_hits` for a fold by the ratio of
+/// lengths. That is right only when the count was decided by no bar after the
+/// first training window: a count an operator typed, or a support fraction he
+/// named. `cli`'s range path does neither when no support is named. It derives
+/// the count with [`crate::Sweeper::auto_prepared`] over the WHOLE span's
+/// column, test windows included, so changing only bars inside the last fold's
+/// test window moved fold 0's threshold: measured on `synthetic::sessions(8)`,
+/// the whole-span answer moved from 205 to 495 hits and fold 0's rescaled
+/// threshold from 69 to 165. `CLAUDE.md` §3 rule 7 bans exactly that, and
+/// D-1660 already closed the same shape for the exit ladder.
+///
+/// [`Self::FirstTraining`] runs that probe on the FIRST fold's own training
+/// column instead and rescales its answer to every later fold. Both shapes'
+/// training windows end at `width`, `2·width`, ... in fold order, so the
+/// probed window ends no later than any fold that uses its answer. A fold
+/// whose column is all warm-up has nothing to probe or sweep; the first fold
+/// with rows anchors instead.
+#[derive(Clone, Copy, Debug)]
+pub enum FoldSupport {
+    /// The caller's ladder threshold, rescaled by each fold's training length.
+    Scaled,
+    /// Probe the first fold's training column under `probe`'s ceiling, then
+    /// rescale that answer by training length. `floor` is a whole-span count
+    /// floor (the statistical floor, which reads only how many bars can hit)
+    /// rescaled the same way as [`Self::Scaled`]; the larger of the two wins.
+    FirstTraining {
+        /// The probe ladder: its ceiling, pair budget and lanes bound the
+        /// search exactly as the whole-span probe's do.
+        probe: engine::Ladder,
+        /// A count floor decided by no price, rescaled per fold.
+        floor: u64,
+    },
+}
+
+impl FoldSupport {
+    /// The ladder fold `fold` sweeps its training column at, `train` bars of a
+    /// `whole`-bar walk.
+    ///
+    /// `anchor` carries the first probed fold's answer and training length to
+    /// the folds after it, so the walk probes once per shape.
+    ///
+    /// # Errors
+    ///
+    /// A [`Self::FirstTraining`] probe that settles on no threshold, named with
+    /// the fold position and the training length. The whole-span count is
+    /// never substituted.
+    fn for_fold(
+        self,
+        base: engine::Ladder,
+        anchor: &mut Option<(u64, usize)>,
+        fold: usize,
+        column: &Column,
+        (train, whole): (usize, usize),
+    ) -> Result<engine::Ladder, String> {
+        let Self::FirstTraining { probe, floor } = self else {
+            return Ok(fold_ladder(base, train, whole));
+        };
+        let floored = scale_min_hits(floor, train, whole);
+        let (hits, from) = if let Some(found) = *anchor {
+            found
+        } else if column.is_empty() {
+            // A WINDOW THAT IS ALL WARM-UP has no row to probe and none to
+            // sweep, so any threshold finds nothing. It does not anchor: the
+            // first fold whose probe settles does, and that fold is still in
+            // the past of every fold after it.
+            return Ok(rescaled(base, floored));
+        } else {
+            let hits = crate::Sweeper::new(probe)
+                .auto_prepared(column)
+                .min_hits
+                .ok_or_else(|| {
+                    format!(
+                        "walk-forward fold {fold}: no support threshold completed on its {train}-bar training window, so no fold threshold could be derived from training data alone. The whole-span threshold was not substituted"
+                    )
+                })?;
+            *anchor = Some((hits, train));
+            (hits, train)
+        };
+        let probed = scale_min_hits(hits, train, from);
+        Ok(rescaled(base, probed.max(floored)))
+    }
+}
+
 /// How deep the exit ladder goes in a walk-forward fold, resolved at RUNTIME.
 ///
 /// # The inconsistency this closes
@@ -1842,7 +1929,12 @@ fn scale_min_hits(whole_min_hits: u64, train: usize, whole: usize) -> u64 {
 
 /// Rescale support while preserving every parent search resource limit.
 fn fold_ladder(base: engine::Ladder, train: usize, whole: usize) -> engine::Ladder {
-    engine::Ladder::with_min_hits(scale_min_hits(base.min_hits(), train, whole))
+    rescaled(base, scale_min_hits(base.min_hits(), train, whole))
+}
+
+/// `base` at threshold `min_hits`, every resource limit kept.
+fn rescaled(base: engine::Ladder, min_hits: u64) -> engine::Ladder {
+    engine::Ladder::with_min_hits(min_hits)
         .with_ceiling(base.ceiling())
         .with_pair_budget(base.pair_budget())
         .with_support_lanes(base.support_lanes())
@@ -2082,6 +2174,7 @@ pub fn walk_forward_shaped_with_rungs(
         shape,
         trades_on_these_bars,
         FoldRungs::Fixed(rungs),
+        FoldSupport::Scaled,
         None,
         None,
         // The one-series door has no operator behind it: `cli` validates
@@ -2125,6 +2218,7 @@ pub fn walk_forward_projected_with_rungs(
     evaluator: &mut impl FnMut() -> Evaluator,
     shape: Shape,
     rungs: FoldRungs<'_>,
+    support: FoldSupport,
     on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     let mut builder = |slice: &[Candle]| Ok(Column::build(slice, &mut evaluator()));
@@ -2137,6 +2231,7 @@ pub fn walk_forward_projected_with_rungs(
         shape,
         TradesOnTheseBars::Yes,
         rungs,
+        support,
         Some(execution),
         None,
         on_fold,
@@ -2174,6 +2269,7 @@ pub fn walk_forward_projected_prepared_with_rungs(
     builder: &mut impl FnMut(&[Candle]) -> Result<Column, String>,
     shape: Shape,
     rungs: FoldRungs<'_>,
+    support: FoldSupport,
     on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     walk_forward_core(
@@ -2185,6 +2281,7 @@ pub fn walk_forward_projected_prepared_with_rungs(
         shape,
         TradesOnTheseBars::Yes,
         rungs,
+        support,
         Some(execution),
         None,
         on_fold,
@@ -2241,6 +2338,7 @@ pub fn walk_forward_projected_prepared_anchored_admission_v2(
         Shape::Anchored,
         TradesOnTheseBars::Yes,
         FoldRungs::Fixed(resolved_rungs),
+        FoldSupport::Scaled,
         Some(execution),
         Some(AnchoredCapture::AdmissionV2(&mut capture)),
         &|_| {},
@@ -2298,6 +2396,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v3(
         Shape::Anchored,
         TradesOnTheseBars::Yes,
         FoldRungs::Fixed(rungs),
+        FoldSupport::Scaled,
         Some(execution),
         Some(AnchoredCapture::SearchV3(&mut capture)),
         &|_| {},
@@ -4464,6 +4563,7 @@ fn walk_forward_core(
     shape: Shape,
     trades_on_these_bars: TradesOnTheseBars,
     rungs: FoldRungs<'_>,
+    support: FoldSupport,
     execution: Option<ExecutionSeries<'_>>,
     mut admission_capture: Option<AnchoredCapture<'_>>,
     on_fold: &(dyn Fn(FoldProgress) + Sync),
@@ -4514,6 +4614,7 @@ fn walk_forward_core(
     // the number that survived, which is known only when the walk ends.
     let windows = shape.folds(bars.len(), horizon, splits);
     let of = windows.len();
+    let mut support_anchor: Option<(u64, usize)> = None;
     for (index, fold) in windows.into_iter().enumerate() {
         // THE FOLD'S OWN RANGE, not a prefix. See the doc block above: taking
         // `..end` made every rolling fold anchored.
@@ -4563,9 +4664,22 @@ fn walk_forward_core(
         let base = sweeper.ladder();
         // A new threshold must retain the caller's memory, work and worker
         // limits. Reconstructing a default ladder would escape those bounds.
-        let per_fold = fold_ladder(base, train.len(), bars.len());
         let signal_train_column = match builder(train) {
             Ok(column) => column,
+            Err(why) => {
+                out.refused = Some(why);
+                return out;
+            }
+        };
+        // AND FROM NO BAR AFTER THE FIRST TRAINING WINDOW (D-3696).
+        let per_fold = match support.for_fold(
+            base,
+            &mut support_anchor,
+            index,
+            &signal_train_column,
+            (train.len(), bars.len()),
+        ) {
+            Ok(per_fold) => per_fold,
             Err(why) => {
                 out.refused = Some(why);
                 return out;
@@ -4710,7 +4824,8 @@ fn walk_forward_core(
         // is maximum profit at MINIMAL STOP, and ranking on total profit alone
         // prefers a variant that made more by risking more -- the opposite.
         // `edge_ratio` is favourable-over-adverse excursion on the winners,
-        // which is the tightest stop that would not have killed them.
+        // both MEANS -- not the tightest stop that would not have killed them,
+        // which only a maximum could be (Z1-slice00-F1, D-2537).
         //
         // But it is a proxy chosen by a person, it is computed only over trades
         // that ENDED PROFITABLE so it is structurally silent about how large a
@@ -5276,7 +5391,7 @@ pub(crate) mod tests {
 
     use super::{
         AnchoredAdmissionValidationRefusalV2, AnchoredAdmissionValidationV2,
-        AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, FoldRungs,
+        AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, FoldRungs, FoldSupport,
         MonotonicExecutionPrefix, Shape, TradesOnTheseBars, Validated, is_one_minute_path,
         project_fold, project_oos_fold, walk_forward,
         walk_forward_projected_prepared_anchored_admission_v2,
@@ -5725,6 +5840,7 @@ pub(crate) mod tests {
             &mut evaluator,
             Shape::Anchored,
             FoldRungs::Fixed(DEFAULT_RUNGS),
+            crate::validate::FoldSupport::Scaled,
             &|_| {},
         );
         assert!(refused.folds.is_empty());
@@ -5758,6 +5874,7 @@ pub(crate) mod tests {
             },
             Shape::Anchored,
             FoldRungs::Fixed(DEFAULT_RUNGS),
+            crate::validate::FoldSupport::Scaled,
             &|_| {},
         );
         assert_eq!(called, 1, "the first refused fold stops the walk");
@@ -5820,6 +5937,7 @@ pub(crate) mod tests {
             &mut evaluator,
             Shape::Anchored,
             rungs,
+            crate::validate::FoldSupport::Scaled,
             &|_| {},
         )
     }
@@ -5869,6 +5987,269 @@ pub(crate) mod tests {
         );
     }
 
+    /// The bounds the support probe searches under: `sweeper()`'s own.
+    fn support_probe() -> Ladder {
+        ladder_at(1)
+    }
+
+    fn ladder_at(min_hits: u64) -> Ladder {
+        Ladder::with_min_hits(min_hits)
+            .with_ceiling(20_000)
+            .with_support_lanes(1)
+    }
+
+    /// `sweeper()` at a caller-chosen threshold.
+    fn sweeper_at(min_hits: u64) -> Sweeper {
+        Sweeper::new(ladder_at(min_hits))
+    }
+
+    /// `hits · part / whole`, rounded up and floored at one: the oracle's own
+    /// arithmetic, written apart from `scale_min_hits` so it can check it.
+    fn ceil_share(hits: u64, part: usize, whole: usize) -> u64 {
+        let product = u128::from(hits) * u128::try_from(part).expect("fits");
+        let whole = u128::try_from(whole).expect("fits");
+        u64::try_from(product.div_ceil(whole)).expect("fits").max(1)
+    }
+
+    /// The whole-span probe `cli`'s range path ran before D-3696.
+    fn whole_span_support(bars: &[Candle]) -> u64 {
+        Sweeper::new(support_probe())
+            .auto(bars, &mut evaluator())
+            .min_hits
+            .expect("the whole-span probe settles on the fixture")
+    }
+
+    fn walk_supported(
+        bars: &[Candle],
+        sweeper: &Sweeper,
+        support: FoldSupport,
+        shape: Shape,
+    ) -> Validated {
+        walk_forward_projected_with_rungs(
+            bars,
+            ExecutionSeries {
+                bars,
+                signal_length_micros: 60_000_000,
+            },
+            h(15),
+            2,
+            Direction::Long,
+            sweeper,
+            &mut evaluator,
+            shape,
+            FoldRungs::Fixed(DEFAULT_RUNGS),
+            support,
+            &|_| {},
+        )
+    }
+
+    /// What a fold decided from its training window alone.
+    #[allow(
+        clippy::type_complexity,
+        reason = "a test projection compared whole, never named elsewhere"
+    )]
+    fn trained(
+        fold: &super::FoldResult,
+    ) -> (
+        u64,
+        u64,
+        Option<ConditionMask>,
+        Option<crate::grid::Chosen>,
+        Option<Direction>,
+        Vec<i64>,
+    ) {
+        (
+            fold.considered,
+            fold.priced,
+            fold.chosen,
+            fold.chosen_exit,
+            fold.chosen_side,
+            fold.in_sample_all.clone(),
+        )
+    }
+
+    /// The span and a copy whose LAST fold's test window has every bar three
+    /// times as wide, which moves the whole-span probe on this fixture.
+    fn spans_widened_in_the_last_test_window(shape: Shape) -> (Vec<Candle>, Vec<Candle>) {
+        // Rolling windows are built cold, so they need longer ones to leave
+        // the evaluator's warm-up with rows a sweep can find anything in.
+        let bars = crate::synthetic::sessions(match shape {
+            Shape::Anchored => 16,
+            Shape::Rolling => 24,
+        });
+        let tail = shape
+            .folds(bars.len(), h(15), 2)
+            .last()
+            .map(|fold| fold.test.start)
+            .expect("two splits make a last fold");
+        let mut moved = bars.clone();
+        for bar in moved.get_mut(tail..).expect("the test window is in range") {
+            let wider = bar.high.saturating_sub(bar.low).saturating_mul(2);
+            bar.high = bar.high.saturating_add(wider);
+            bar.low = bar.low.saturating_sub(wider);
+        }
+        (bars, moved)
+    }
+
+    /// audit-find-17 #5, D-3696: a bar inside the last fold's TEST window
+    /// cannot move any fold's training answer once the support is probed on
+    /// the first training window, under either shape.
+    ///
+    /// The second half keeps the first from being vacuous: under the old
+    /// route -- one threshold probed over the WHOLE span and rescaled per fold,
+    /// modelled here as `Scaled` at `whole_span_support(span)` -- the same
+    /// widened window does move an earlier fold. Measured before the fix on
+    /// `sessions(16)` with every last-window bar twice as wide: the whole-span
+    /// probe answered 727 hits, and 1,073 once that window was widened.
+    #[test]
+    fn a_test_window_bar_cannot_move_an_earlier_folds_support() {
+        for shape in [Shape::Anchored, Shape::Rolling] {
+            let (bars, moved) = spans_widened_in_the_last_test_window(shape);
+            let (was, now) = (whole_span_support(&bars), whole_span_support(&moved));
+            assert_ne!(was, now, "the widened window moves the whole-span probe");
+
+            let support = FoldSupport::FirstTraining {
+                probe: support_probe(),
+                floor: 1,
+            };
+            let before = walk_supported(&bars, &sweeper_at(was), support, shape);
+            let after = walk_supported(&moved, &sweeper_at(now), support, shape);
+            assert_eq!(before.refused, None, "{shape:?}");
+            assert_eq!(before.folds.len(), 2, "{shape:?}: two splits, two folds");
+            assert_eq!(after.folds.len(), before.folds.len());
+            // THE TRAINING ANSWER of every fold, the last included: what was
+            // searched, what was chosen and how it priced in sample. An earlier
+            // fold's OUT-of-sample exits may legitimately run past its window
+            // into the widened bars, so those are not compared.
+            for (after, before) in after.folds.iter().zip(&before.folds) {
+                assert_eq!(
+                    trained(after),
+                    trained(before),
+                    "{shape:?} fold {}: a test-window bar moved a training answer",
+                    before.index
+                );
+            }
+
+            let old_before = walk_supported(&bars, &sweeper_at(was), FoldSupport::Scaled, shape);
+            let old_after = walk_supported(&moved, &sweeper_at(now), FoldSupport::Scaled, shape);
+            let answers = |walk: &Validated| walk.folds.iter().map(trained).collect::<Vec<_>>();
+            assert_ne!(
+                answers(&old_after),
+                answers(&old_before),
+                "{shape:?}: the fixture must be one the whole-span probe leaks into"
+            );
+        }
+    }
+
+    /// Every fold sweeps at exactly the anchoring window's probe -- the first
+    /// fold whose column has rows -- rescaled by its own training length, or
+    /// at the rescaled floor when that is higher. Checked against an
+    /// independent sweep at the expected threshold, fold by fold, under both
+    /// shapes, on a span whose first window is all warm-up and one whose is
+    /// not.
+    #[test]
+    fn each_fold_sweeps_at_the_first_windows_probe_rescaled() {
+        for sessions in [8, 16] {
+            let bars = crate::synthetic::sessions(sessions);
+            for shape in [Shape::Anchored, Shape::Rolling] {
+                let windows = shape.folds(bars.len(), h(15), 2);
+                for floor in [1, 2_000] {
+                    let walk = walk_supported(
+                        &bars,
+                        &sweeper(),
+                        FoldSupport::FirstTraining {
+                            probe: support_probe(),
+                            floor,
+                        },
+                        shape,
+                    );
+                    assert_eq!(walk.refused, None, "{shape:?}");
+                    assert_eq!(walk.folds.len(), windows.len());
+                    let mut anchor: Option<(u64, usize)> = None;
+                    let mut floored = 0_usize;
+                    for (fold, window) in walk.folds.iter().zip(&windows) {
+                        let train = bars.get(window.train.0.clone()).expect("in range");
+                        let column = Column::build(train, &mut evaluator());
+                        if column.is_empty() {
+                            assert_eq!(fold.considered, 0, "{shape:?}: an empty window");
+                            continue;
+                        }
+                        let (hits, from) = *anchor.get_or_insert_with(|| {
+                            let hits = Sweeper::new(support_probe())
+                                .auto_prepared(&column)
+                                .min_hits
+                                .expect("the anchoring probe settles");
+                            (hits, train.len())
+                        });
+                        let probed = ceil_share(hits, train.len(), from);
+                        let scaled_floor = ceil_share(floor, train.len(), bars.len());
+                        floored += usize::from(scaled_floor > probed);
+                        let swept = sweeper_at(probed.max(scaled_floor)).run_prepared(&column);
+                        let kept = crate::closed::closed(&swept.sweep).kept.len();
+                        assert_eq!(
+                            fold.considered,
+                            u64::try_from(kept).expect("fits"),
+                            "{sessions} sessions {shape:?} fold {} floor {floor}",
+                            fold.index
+                        );
+                    }
+                    if anchor.is_none() {
+                        // Every window all warm-up: rolling windows on the
+                        // short span are built cold and never leave it.
+                        assert_eq!((sessions, shape), (8, Shape::Rolling));
+                        continue;
+                    }
+                    assert_eq!(
+                        floored > 0,
+                        floor > 1,
+                        "{sessions} sessions {shape:?}: the high floor binds and the low one does not"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A probe that settles on nothing over a window that HAS rows refuses the
+    /// walk by name; the caller's whole-span threshold is never substituted.
+    /// Every row blanked leaves nothing non-vacuous for the probe to find.
+    #[test]
+    fn an_unsettled_first_window_probe_refuses_the_walk() {
+        let bars = crate::synthetic::sessions(16);
+        let mut builds = 0_usize;
+        let refused = walk_forward_projected_prepared_with_rungs(
+            &bars,
+            ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            h(15),
+            2,
+            Direction::Long,
+            &sweeper(),
+            &mut |slice| {
+                builds = builds.saturating_add(1);
+                let mut column = Column::build(slice, &mut evaluator());
+                column.clear_before(usize::MAX);
+                Ok(column)
+            },
+            Shape::Anchored,
+            FoldRungs::Fixed(DEFAULT_RUNGS),
+            FoldSupport::FirstTraining {
+                probe: support_probe(),
+                floor: 1,
+            },
+            &|_| {},
+        );
+        assert_eq!(builds, 1, "the first fold's refusal stops the walk");
+        assert!(refused.folds.is_empty());
+        let why = refused.refused.expect("a named refusal");
+        assert!(why.starts_with("walk-forward fold 0: no support threshold completed on its 2000-bar training window"), "{why}");
+        assert!(
+            why.ends_with("The whole-span threshold was not substituted"),
+            "{why}"
+        );
+    }
+
     /// Each fold's resolver sees exactly that fold's training window -- under
     /// the ROLLING shape too, whose window does not start at zero -- and the
     /// count it answers is the one recorded.
@@ -5896,6 +6277,7 @@ pub(crate) mod tests {
             &mut evaluator,
             Shape::Rolling,
             FoldRungs::PerTraining(&resolve),
+            crate::validate::FoldSupport::Scaled,
             &|_| {},
         );
         let seen = seen.into_inner().expect("no fold panicked");
@@ -5976,6 +6358,7 @@ pub(crate) mod tests {
             &mut evaluator,
             Shape::Rolling,
             FoldRungs::Fixed(DEFAULT_RUNGS),
+            crate::validate::FoldSupport::Scaled,
             &|progress| seen.lock().expect("no fold panicked").push(progress),
         );
         let seen = seen.into_inner().expect("no fold panicked");
@@ -6018,6 +6401,7 @@ pub(crate) mod tests {
             &mut |_| Err("refused before any fold could finish".to_owned()),
             Shape::Anchored,
             FoldRungs::Fixed(DEFAULT_RUNGS),
+            crate::validate::FoldSupport::Scaled,
             &|_| {
                 silent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             },

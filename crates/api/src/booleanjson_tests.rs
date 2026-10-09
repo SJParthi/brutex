@@ -115,6 +115,42 @@ fn canonical_selectors_and_pins_refuse_cross_page_fallback() {
     assert!(Asked::parse(&"x".repeat(513)).is_err());
 }
 
+/// expr-3, D-2576: the catalog's cold open runs with the cache's mutex FREE,
+/// and a warm page after it is still served from the installed reader (no
+/// second cold admission). On the old `render_with_budget` the guard was held
+/// across `Reader::open`, so the probe at the open point recorded `false`.
+#[test]
+fn a_cold_catalog_open_does_not_hold_the_cache_lock() {
+    let _cache = CACHE_TEST.lock().unwrap();
+    let root = fixture("boolean-api-cold-unlocked");
+    let asked = Asked::parse(&format!("identity={ID}&limit=1")).unwrap();
+    crate::detail::SLOT_FREE_AT_OPEN.with(|cell| cell.set(None));
+    // A different root forces a cold admission whatever an earlier test cached.
+    let missing = crate::scratch::path("boolean-api-cold-unlocked-absent");
+    assert!(render(&missing, &asked).is_err());
+    assert_eq!(
+        crate::detail::SLOT_FREE_AT_OPEN.with(std::cell::Cell::get),
+        Some(true),
+        "the catalog was opened with the cache locked"
+    );
+    let cold = COLD_ADMISSIONS.with(std::cell::Cell::get);
+    let first = render(&root, &asked).unwrap();
+    assert_eq!(COLD_ADMISSIONS.with(std::cell::Cell::get), cold + 1);
+    let pin = first["completion"].as_str().unwrap().to_owned();
+    let warm = render(
+        &root,
+        &Asked::parse(&format!("identity={ID}&completion={pin}&limit=1")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        COLD_ADMISSIONS.with(std::cell::Cell::get),
+        cold + 1,
+        "the warm page reopened"
+    );
+    assert_eq!(warm["rows"], first["rows"]);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn authenticated_catalog_projects_exact_program_coordinate_trade_session_and_grid_pages() {
     let _cache = CACHE_TEST.lock().unwrap();

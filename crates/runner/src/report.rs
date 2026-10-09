@@ -336,6 +336,40 @@ pub fn render_ranked(outcome: &RankedOutcome, id: Option<&RunId>) -> String {
     out
 }
 
+/// The threshold rows below two distinct tests; `true` when it rendered them.
+///
+/// At one test there is no best-of-many luck floor, but FINDINGS still judges
+/// every row against `bonferroni_t(1)` = 1.96, so this block prints that bar
+/// rather than saying there is none (p2run-1, D-2619). At zero tests nothing
+/// was judged and the threshold is `-`.
+fn few_hypotheses(out: &mut String, n: u64) -> bool {
+    match n {
+        0 => row(
+            out,
+            "threshold",
+            "-",
+            "too few hypotheses to have a noise floor",
+        ),
+        1 => {
+            row(
+                out,
+                "best t-stat by luck alone",
+                "-",
+                "one test has no best-of-many luck to beat",
+            );
+            row(
+                out,
+                "t required (Bonferroni 5%)",
+                &format!("{:.2}", crate::significance::bonferroni_t(1)),
+                "the bar FINDINGS judges this one test against",
+            );
+        }
+        _ => return false,
+    }
+    let _ = writeln!(out);
+    true
+}
+
 /// The significance block from exact raw and duplicate-deflated counts.
 fn significance_counts(out: &mut String, raw: u64, effective: u64) {
     let _ = writeln!(out, "SIGNIFICANCE");
@@ -351,14 +385,7 @@ fn significance_counts(out: &mut String, raw: u64, effective: u64) {
         &effective.to_string(),
         "exact duplicates removed -- same support, same test",
     );
-    if effective < 2 {
-        row(
-            out,
-            "threshold",
-            "-",
-            "too few hypotheses to have a noise floor",
-        );
-        let _ = writeln!(out);
+    if few_hypotheses(out, effective) {
         return;
     }
     row(
@@ -410,14 +437,7 @@ fn significance(out: &mut String, sweep: &Sweep) {
         &n.to_string(),
         "exact duplicates removed -- same support, same test",
     );
-    if n < 2 {
-        row(
-            out,
-            "threshold",
-            "-",
-            "too few hypotheses to have a noise floor",
-        );
-        let _ = writeln!(out);
+    if few_hypotheses(out, n) {
         return;
     }
     row(
@@ -1072,7 +1092,10 @@ pub fn names_from_words(words: [u64; vocab::mask::WORDS]) -> Vec<String> {
               instrumented, so it leaves no uncoverable region behind."
 )]
 mod tests {
-    use super::{Outcome, condition_names, conditions_line, permille, render, render_auto};
+    use super::{
+        Outcome, condition_names, conditions_line, permille, render, render_auto,
+        significance_counts,
+    };
     use crate::identity::{Direction, Params, Run, data_digest, identity};
     use crate::{Sweeper, synthetic};
     use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -1534,6 +1557,27 @@ mod tests {
         let text = render_auto(&auto, None);
         assert_eq!(cell(&text, "hypotheses tested"), "0");
         assert_eq!(cell(&text, "threshold"), "-");
+    }
+
+    /// p2run-1 / D-2619: at ONE distinct test FINDINGS judges every row against
+    /// `bonferroni_t(1)`, so SIGNIFICANCE prints that bar instead of saying
+    /// there is no threshold; zero tests still print `-`.
+    #[test]
+    fn one_distinct_test_prints_the_bar_findings_judges_it_against() {
+        let mut one = String::new();
+        significance_counts(&mut one, 3, 1);
+        assert_eq!(cell(&one, "t required (Bonferroni 5%)"), "1.96", "{one}");
+        assert_eq!(
+            cell(&one, "t required (Bonferroni 5%)"),
+            format!("{:.2}", crate::significance::bonferroni_t(1))
+        );
+        assert!(!one.contains("too few hypotheses"), "{one}");
+        assert_eq!(cell(&one, "best t-stat by luck alone"), "-", "{one}");
+
+        let mut none = String::new();
+        significance_counts(&mut none, 0, 0);
+        assert_eq!(cell(&none, "threshold"), "-", "{none}");
+        assert!(!none.contains("Bonferroni"), "{none}");
     }
 
     #[test]

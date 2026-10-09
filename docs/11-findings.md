@@ -1072,3 +1072,124 @@ stays IN PROGRESS naming its branch commit until the squash merge to `main`.
 - **`F-8D5073`** (`gap`) — The vocabulary documents stated counts and kinds the table does not hold: void Near rows marked untoleranced, sixteen void names for thirteen, 70 free positions for 14, and a group table stopping at 273. Where: `docs/03-vocabulary.md` (rows 235–271, crossings section); `docs/04-invariants.md` CX-04, CX-05; `crates/vocab/src/table.rs:14-29`; `crates/vocab/src/lib.rs`. Disposition: IN PROGRESS — fixed on `attack/permutations` 3c5c237d (D-3406, XPERM-06); lands with the squash merge to `main`.
 - **`F-0486DA`** (`wrong`) — worst_reward_risk_bp scored a single observation i64::MAX, above payoff_bp, so one lucky move topped the asymmetry ranking. Where: `crates/runner/src/outcome.rs` (`Edge::worst_reward_risk_bp`); `crates/runner/src/rank.rs` (`ByAsymmetry`). Disposition: IN PROGRESS — fixed on `attack/permutations` 24c7e3a (D-3407, XPERM-07); lands with the squash merge to `main`.
 - **`F-1D5275`** (`wrong`) — trades_needed_for documented measured values its ceiling-rounded record does not return, and a monotone threshold it does not have. Where: `crates/runner/src/grid.rs` (`trades_needed_for` doc, `Cell::at_rate`). Disposition: IN PROGRESS — fixed on `attack/permutations` bc1e1f45 (D-3408, XPERM-08); lands with the squash merge to `main`.
+
+### Data-path attack, round 1 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above. Each finding was shown by
+a test failing on the unmodified code before it was fixed; the tests are the
+`attack_*` files named in `docs/04-invariants.md` rows DPG, DPP, DPI, DPF,
+DPS and DPD.
+
+- **Greeks:** on-grid strikes refused at huge level/interval ratios (D-3100);
+  IV uncertainty understated at subnormal scale (D-3101). Fixed.
+- **Pricing and spot match:** two spot closes at one stamp resolved by arrival
+  order (D-3110); one refusal class hid another (D-3111); a signed expiry
+  field read as a date (D-3112); the vendor-volatility path priced premiums
+  the solver refuses (D-3114, D-3117); exchange token ignored (D-3115); one
+  contract filed under two spellings (D-3116). Fixed. A Saturday expiry is
+  accepted until a sourced trading calendar exists (D-3113): open, UNVERIFIED.
+- **Zerodha ingest:** a refused month uncounted the months already written
+  (D-3120); an unplaceable stamp filed as "before the window" (D-3121);
+  decoder-skipped candles missing from a balanced receipt (D-3122). Fixed.
+- **Timeframe fold:** widths not dividing a day opened before 09:15 (D-3130);
+  repeated and off-grid source bars merged silently (D-3131); a day folded
+  from a grid that straddles midnight (D-3132). Fixed.
+- **Store:** a header whose last stamp disagreed with its last record steered
+  an out-of-order append (D-3140). Fixed. Lookup by time remains a bisection,
+  owned by the O(1) sweep.
+- **Name and price decoders:** non-positive strikes rendered (D-3150); contract
+  text with several spellings (D-3151, D-3155, D-3157); case-sensitive marker
+  and alias (D-3152, D-3153); unchecked underlying (D-3156); a drifted index
+  document partly skipped (D-3158). Fixed.
+
+Rounds 2 and 3 (2026-10-04 and 2026-10-05) attacked the round 1 fixes and how
+they meet. Each finding failed a test on the commit before it was fixed; the
+tests are named in `docs/04-invariants.md` rows DPR.
+
+- **Receipts and the journal (round 2):** a balanced spot receipt printed a
+  false equation that left out decoder skips, and the journal note did the
+  same (D-3180). Fixed.
+- **Store (round 2):** a rotted last record was blamed on the header (D-3181).
+  Fixed.
+- **Round 2 open items, closed in round 3:** the F&O chain receipt dropped
+  decoder skips (D-3182); a refused cash schedule under-counted the vendor's
+  rows (D-3183); the ingest attack fixture stored every bar x100 and no
+  assertion noticed (D-3184, test only). Fixed.
+- **Static gates (round 3):** undeclared test literals (D-3185), a refused month
+  with no log event (D-3186), a cost claim with no proof (D-3187), MR-04 naming
+  a renamed test (D-3188), and undeclared gate 11 sites (D-3189). Fixed.
+- **Interactions (round 3):** chain pricing called a contradicted index stamp
+  "no index bar" (D-3123); the receipt deduplicated pricing reasons by sentence
+  across contract-months, so one kind hid another (D-3124); a CSV row skipped
+  for negative volume was on no line of a balanced receipt (D-3125); a monthly
+  vendor name listed under two expiries was filed as two contracts (D-3126).
+  Fixed.
+- **Round 3 open item, closed 2026-10-06:** the rolling-option walk kept
+  run-failure reasons with no de-duplication, so one cause repeated across runs
+  filled every slot and a later, different cause was counted and never named
+  (D-3127, DPM-01, DPM-02). Fixed. The Groww chain receipt's verbatim reason
+  list is the same class and stays open, unrecorded until a round owns it.
+- **Gate 18 pre-run on the data-path diff (2026-10-06):** three greeks
+  survivors. `from_ladder`'s `level_to_interval` bound had no test exactly at
+  the bound, and `SUBNORMAL_GAP` was a product no test observed (D-3129,
+  DPM-03). Killed.
+- **Round 4 (2026-10-06):** a CSV row skipped for a negative open interest was
+  on no line of a balanced receipt (D-3133, DPM-04). Fixed. Two candidates are
+  recorded OPEN, both needing a decision rather than a test:
+  (a) chain pricing measures tenor from the bar's open stamp
+  (`Tenor::between(bar.ts_micros, ..)` in `api::server`) while it prices the
+  bar's close, so the last minute before expiry is priced at 60 s. When a close
+  premium is observed inside its bar is not a sourced fact, and
+  `tenor.rs`'s own test pins the stamp convention.
+  (b) `fold::complete_minutes_with_calendar` names a withheld observed-day
+  tail only when the next day begins, so the batch's last day never gets the
+  diagnostic, and `cli fold_audit` under-counts it. Flushing it would also
+  flag a day still in progress as needing a store repair; whether such a day
+  can reach the fold is unsettled.
+- **Round 5 (2026-10-06):** two defects in D-3134's own repair: its log line
+  fired before the entry reached disk, and the walk did not check row 0 against
+  the header's first stamp (D-3135, DPM-07). Fixed. One candidate recorded
+  OPEN, low confidence: `gaps::classify_with_subject` passes over stored bars
+  on a `Closed` or `Unmeasured` day, and bars on an open day at a minute the
+  session does not expect, without counting or naming them. Ingest drops both
+  (D-2673), so this needs a calendar that changed after ingest, or a store
+  written by another path. Whether the gap ledger should carry an
+  "unexpected" count is a design decision.
+- **Round 6 (2026-10-06), all on the Dhan rolling path:**
+  - A contract run across a month end was refused on every run; `from_rows`
+    now files month by month (D-3136, DPM-08).
+  - Its greeks went to the chunk's first month and were refused (D-3137,
+    DPM-09).
+  - A request side word other than `CALL` was filed as a put. Latent: no
+    shipped spec has such a word (D-3138, DPM-10).
+  All three fixed. OPEN, low: the rolling receipt prints rows read and bars
+  stored with no balance line, and discards the session and window drop
+  census. It makes no false claim, but the gap between the two numbers is
+  unexplained.
+- **Round 7 (2026-10-06):** three defects, two of them in round 6's own
+  multi-month fixes, all fixed:
+  - greeks were filed for a month whose bars were refused (D-3139, DPM-12);
+  - a refused greek month uncounted the month already written (D-3139,
+    DPM-13);
+  - an address-stage refusal lacked its origin (D-3700, DPM-14).
+  Also from the gap audit: the census decoded v2 entries with v3 meaning and
+  read an unreadable contract as the spot key (D-3680, DPM-11), fixed. Its
+  #1, a zero or leading-zero strike, was refuted on this branch.
+  Latent, not fixed: `from_rows` does not check that every overlay was
+  consumed by a month. No caller produces an overlay without a bar today.
+
+### Fix group G3 (runner, indicators, costs) — dispositions — 2026-10-06
+
+- **Z1-slice00-F1** (winners' mean MAE called a stop level): fixed. D-2537, ZX-70.
+- **Z1-slice10-F1** (`Rates::new` public, bypassing the dated refusal): fixed. D-2538, ZX-71.
+- **Z1-slice10-F2** (realized slippage counted the sell floor's upward push as adverse): fixed. D-2539, ZX-72.
+- **Z1-slice08-F1** (separating lines fired on same-colour bars): fixed. D-2540, ZX-73.
+- **Z1-slice08-F2** (reprojected census said "left alone" while `offered` is replaced): documented. D-2541, ZX-74.
+- **Z1-slice08-F3** (positivity refusal tested `low` alone): fixed. D-2542, ZX-75.
+- **Z1-slice08-F4** (gap reference source named for three bars): renamed. D-2543, ZX-76.
+- **p9num-3** (same-bar fill refused an unused sub-tick leg): fixed. D-2544, ZX-77.
+- **p18num-1** (`purged_folds` purged `h`, a trade spans `h + 1`): fixed. D-2545, ZX-78.
+- **p16num-1** (overnight into the first signal day never measured): fixed. D-2546, ZX-79.
+- **P9-02** (lot sizes, strike steps, expiry weekdays unsourced): recorded UNVERIFIED. D-2547. Sourcing is the operator's.
+- **p9num-1** (order touched inside the time-exit bar owns the exit): open, owner decision. Fixing it reverses D-1541's optimistic-target allowance.
+- **p4num-2** (flat trades dilute the average-loss cap): open, owner decision. It needs a stored-evidence record version (Population V2 checks `losses == trades − wins`).

@@ -225,7 +225,7 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         Some(&exits),
         Some(&folds),
         Some(&overfit),
-        Some((rc.as_ref(), spa.as_ref(), named.len())),
+        Some((rc.as_ref(), spa.as_ref(), Some(named.len()))),
         6,
     );
     for section in [

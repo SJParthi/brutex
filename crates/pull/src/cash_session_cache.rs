@@ -279,12 +279,20 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
-        match read_entry(root, day)? {
-            Some(bytes) => {
-                result.insert(day.days_from_epoch(), decode(&bytes)?);
+        // SHARED: validation only reads (pull2-4, equity-2, D-2534; also
+        // conc:pull2-4, D-2799).
+        let lock = lock_day_shared(root, day)?;
+        // AN UNRECEIPTED PAYLOAD IS FETCHED AGAIN AND HEALED ONLY ON BYTE
+        // EQUALITY by `install_and_read` (pull2-3, D-2533); it is never read.
+        if payload_orphaned(root, day)? {
+            missing.push(day);
+        } else {
+            match read_entry(root, day)? {
+                Some(bytes) => {
+                    result.insert(day.days_from_epoch(), decode(&bytes)?);
+                }
+                None => missing.push(day),
             }
-            None => missing.push(day),
         }
         lock.release().map_err(|u| u.to_string())?;
     }
@@ -292,11 +300,27 @@ where
         let url = source_url(day);
         let bytes = fetch(url.clone())
             .await
-            .map_err(|why| format!("missing NSE cash eligibility for {day} ({url}): {why}"))?;
+            .map_err(|why| missing_reason(root, day, &url, &why))?;
         let eligibility = install_and_read(root, day, &bytes)?;
         result.insert(day.days_from_epoch(), eligibility);
     }
     Ok(result)
+}
+
+/// Why a day could not be fetched, naming an unreceipted payload left beside
+/// it when there is one (pull2-3, D-2533), so the local-only path still says
+/// the cache is incomplete rather than merely absent.
+fn missing_reason(root: &Path, day: Day, url: &str, why: &str) -> String {
+    let (payload, _) = paths(root, day);
+    let orphan = if matches!(payload_orphaned(root, day), Ok(true)) {
+        format!(
+            "; an incomplete cache entry with no receipt is retained at {}",
+            payload.display()
+        )
+    } else {
+        String::new()
+    };
+    format!("missing NSE cash eligibility for {day} ({url}): {why}{orphan}")
 }
 
 async fn prepare_observed_with<S, F, Fut>(
@@ -323,7 +347,16 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
+        // SHARED: two ingests, or a `/gaps.json` read beside an ingest, no
+        // longer refuse each other on a read (pull2-4, equity-2, D-2534; also
+        // conc:pull2-4, D-2799).
+        let lock = lock_day_shared(root, day)?;
+        if payload_orphaned(root, day)? {
+            // Fetched again and healed only on byte equality (pull2-3, D-2533).
+            missing.push(day);
+            lock.release().map_err(|u| u.to_string())?;
+            continue;
+        }
         match read_entry(root, day)? {
             Some(bytes) => {
                 pending.insert(day.days_from_epoch(), decode(&bytes)?);
@@ -342,7 +375,7 @@ where
         let url = source_url(day);
         let bytes = fetch(url.clone())
             .await
-            .map_err(|why| format!("missing NSE cash eligibility for {day} ({url}): {why}"))?;
+            .map_err(|why| missing_reason(root, day, &url, &why))?;
         pending.insert(day.days_from_epoch(), install_and_read(root, day, &bytes)?);
     }
     cache
@@ -388,6 +421,42 @@ fn lock_path(root: &Path, day: Day) -> PathBuf {
 }
 
 fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
+    let (file, path) = open_day_lock(root, day)?;
+    Flock::try_lock(file, path.clone()).map_err(|why| {
+        format!(
+            "cash-session cache lock {} unavailable: {why}",
+            path.display()
+        )
+    })
+}
+
+/// The lock a READ of one day's entry takes: shared, so two ingests that only
+/// read the same cached day do not refuse each other, while an installer's
+/// exclusive [`lock_day`] still excludes every reader. The read loops took the
+/// exclusive lock, and a second pull over an overlapping window was refused
+/// "unavailable" for a day neither of them was writing. conc:pull2-4, D-2799.
+///
+/// The day's lock, SHARED, for a path that only reads the entry (pull2-4,
+/// equity-2, D-2534).
+///
+/// Validation took [`lock_day`]'s exclusive lock only to read and decode, so
+/// two concurrent equity ingests on one day, or a `/gaps.json` read beside an
+/// ingest, refused each other. Readers now share; [`install_and_read`] alone
+/// keeps the exclusive lock, so a reader still refuses promptly while a day is
+/// being installed and an installer still refuses while one is being read.
+/// Non-blocking, as every lock here is: no async task waits on a filesystem
+/// lock.
+fn lock_day_shared(root: &Path, day: Day) -> Result<Flock<File>, String> {
+    let (file, path) = open_day_lock(root, day)?;
+    Flock::try_lock_shared(file, path.clone()).map_err(|why| {
+        format!(
+            "cash-session cache lock {} unavailable: {why}",
+            path.display()
+        )
+    })
+}
+
+fn open_day_lock(root: &Path, day: Day) -> Result<(File, PathBuf), String> {
     fs::create_dir_all(root)
         .map_err(|why| format!("cannot create cash-session cache {}: {why}", root.display()))?;
     let path = lock_path(root, day);
@@ -399,12 +468,14 @@ fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
         .truncate(false)
         .open(&path)
         .map_err(|why| format!("cannot open cache lock {}: {why}", path.display()))?;
-    Flock::try_lock(file, path.clone()).map_err(|why| {
-        format!(
-            "cash-session cache lock {} unavailable: {why}",
-            path.display()
-        )
-    })
+    Ok((file, path))
+}
+
+/// Whether the day's payload exists with no receipt beside it (pull2-3,
+/// D-2533): the one incomplete state a crash between the two links can leave.
+fn payload_orphaned(root: &Path, day: Day) -> Result<bool, String> {
+    let (payload, metadata) = paths(root, day);
+    Ok(regular_file(&payload)? && !regular_file(&metadata)?)
 }
 
 fn regular_file(path: &Path) -> Result<bool, String> {
@@ -447,9 +518,14 @@ fn read_entry(root: &Path, day: Day) -> Result<Option<Vec<u8>>, String> {
     match (regular_file(&payload)?, regular_file(&metadata)?) {
         (false, false) => return Ok(None),
         (true, true) => {}
-        _ => {
+        // NAMED, WITH THE WAY OUT (pull2-3, D-2533). A fetching run heals an
+        // unreceipted payload when the fetched bytes are identical; anything
+        // else is the operator's to inspect and remove.
+        (payload_held, _) => {
+            let present = if payload_held { &payload } else { &metadata };
             return Err(format!(
-                "UNVERIFIED incomplete cash-session cache for {day}: payload and receipt must both exist"
+                "UNVERIFIED incomplete cash-session cache for {day}: payload and receipt must both exist; only {} does. Nothing was repaired: a fetching run re-installs it when the fetched bytes are identical, otherwise inspect and remove it by hand",
+                present.display()
             ));
         }
     }
@@ -501,6 +577,26 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
     // Validation precedes even creating the cache directory.
     let eligibility = decode(bytes)?;
     let lock = lock_day(root, day)?;
+    let (payload, metadata) = paths(root, day);
+    // AN UNRECEIPTED PAYLOAD HEALS ONLY ON BYTE EQUALITY (pull2-3, D-2533).
+    // It used to refuse for ever ("incomplete"), and `prepare` read it first,
+    // so a crash between the payload and its receipt stopped every later run
+    // for that day with no path out. The payload is never rewritten: bytes
+    // identical to the ones just validated earn the receipt they were
+    // missing, and anything else is a conflict left for the operator.
+    if payload_orphaned(root, day)? {
+        let orphan = read_limited(&payload, MAX_COMPRESSED)?;
+        if orphan != bytes {
+            return Err(format!(
+                "conflicting NSE cash master for {day}: {} holds bytes with no receipt that differ from the master just validated; it is retained. Inspect it and remove it by hand to let a later run install the master",
+                payload.display()
+            ));
+        }
+        publish_new(&metadata, receipt(day, bytes).as_bytes())?;
+        sync_cache_directory(root, day)?;
+        lock.release().map_err(|u| u.to_string())?;
+        return Ok(eligibility);
+    }
     if let Some(existing) = read_entry(root, day)? {
         if existing != bytes {
             return Err(format!(
@@ -510,36 +606,74 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
         lock.release().map_err(|u| u.to_string())?;
         return Ok(eligibility);
     }
-    let (payload, metadata) = paths(root, day);
-    write_new(&payload, bytes)?;
+    publish_new(&payload, bytes)?;
     // The receipt is last. Failed or interrupted publication leaves evidence
-    // in place and cannot become an implicit refetch/overwrite on the next run.
-    write_new(&metadata, receipt(day, bytes).as_bytes())?;
-    File::open(root).and_then(|directory| directory.sync_all())
-        .map_err(|why| format!("cache for {day} is visible but directory sync failed: {why}; crash durability UNVERIFIED"))?;
+    // in place and cannot become an implicit overwrite on the next run; an
+    // unreceipted payload is re-installed only on byte equality, above.
+    publish_new(&metadata, receipt(day, bytes).as_bytes())?;
+    sync_cache_directory(root, day)?;
     lock.release().map_err(|u| u.to_string())?;
     Ok(eligibility)
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn sync_cache_directory(root: &Path, day: Day) -> Result<(), String> {
+    File::open(root).and_then(|directory| directory.sync_all())
+        .map_err(|why| format!("cache for {day} is visible but directory sync failed: {why}; crash durability UNVERIFIED"))
+}
+
+/// The staging name a cache file is written under before it is linked into
+/// place (pull2-3, D-2533).
+fn staging_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.partial"))
+}
+
+/// Publishes `bytes` at `path` only whole, and never over an existing file
+/// (pull2-3, D-2533).
+///
+/// This created the file at its FINAL name and wrote it there, so a crash or
+/// a full disk mid-write left a torn payload under the name `read_entry`
+/// reads. It is now written and synced under [`staging_path`] and
+/// `hard_link`ed into place, which refuses an existing name, so a final name
+/// holds only whole, synced bytes. Called only under the day's exclusive lock,
+/// so a staging file already present is a crashed installer's leftover and is
+/// removed first.
+fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let staging = staging_path(path);
+    match fs::remove_file(&staging) {
+        Ok(()) => {}
+        Err(why) if why.kind() == ErrorKind::NotFound => {}
+        Err(why) => {
+            return Err(format!(
+                "cannot clear stale staging file {}: {why}",
+                staging.display()
+            ));
+        }
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .map_err(|why| {
-            format!(
-                "cannot create {}; no existing file was overwritten: {why}",
-                path.display()
-            )
-        })?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|why| {
-            format!(
-                "incomplete publication at {} retained: {why}",
-                path.display()
-            )
-        })
+        .open(&staging)
+        .map_err(|why| format!("cannot create {}: {why}", staging.display()))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let linked = written.and_then(|()| fs::hard_link(&staging, path));
+    let cleared = fs::remove_file(&staging);
+    linked.map_err(|why| {
+        format!(
+            "cannot publish {}; no existing file was overwritten and nothing partial was left under that name: {why}",
+            path.display()
+        )
+    })?;
+    cleared.map_err(|why| {
+        format!(
+            "{} was published whole but its staging file {} could not be removed: {why}",
+            path.display(),
+            staging.display()
+        )
+    })
 }
 
 async fn download(url: String) -> Result<Vec<u8>, String> {
@@ -1024,6 +1158,41 @@ mod tests {
         Ok(())
     }
 
+    /// **Two reads of one cached day do not refuse each other; an installer
+    /// still excludes them.** conc:pull2-4, D-2799.
+    #[tokio::test]
+    async fn concurrent_reads_of_a_cached_day_share_its_lock_and_a_writer_excludes_them() {
+        let temp = Temp::new();
+        seed(&temp, 3);
+        let other_reader = lock_day_shared(&temp.0, day(3)).expect("another ingest reading day 3");
+        let read = prepare_with(&temp.0, window(3, 3), |_| async {
+            Err("network must not be used".to_owned())
+        })
+        .await
+        .expect("a second reader is not refused");
+        assert_eq!(read.len(), 1);
+        let mut cache = HashMap::new();
+        prepare_observed_with(&temp.0, &[day(3)], &mut cache, |_| async {
+            Err("network must not be used".to_owned())
+        })
+        .await
+        .expect("nor is an observed-day reader");
+        assert_eq!(cache.len(), 1);
+        assert!(
+            lock_day(&temp.0, day(3)).is_err(),
+            "an installer cannot take the day while it is read"
+        );
+        other_reader.release().expect("the other reader lets go");
+        let writer = lock_day(&temp.0, day(3)).expect("an installer");
+        let refused = prepare_with(&temp.0, window(3, 3), |_| async {
+            Err("network must not be used".to_owned())
+        })
+        .await
+        .expect_err("a reader waits for nobody and is refused by a writer");
+        assert!(refused.contains("unavailable"), "{refused}");
+        writer.release().expect("the installer lets go");
+    }
+
     #[tokio::test]
     async fn cached_window_never_fetches_and_uses_epoch_keys() {
         let temp = Temp::new();
@@ -1389,9 +1558,12 @@ mod tests {
         let bytes = gzip(CSV.as_bytes());
         let (payload, metadata) = paths(&temp.0, day(3));
         fs::write(&payload, &bytes).expect("orphan gzip");
+        // An unreceipted payload still never READS as an entry; identical bytes
+        // re-installed earn its receipt (pull2-3, D-2533), proved in
+        // `an_orphan_payload_heals_only_on_identical_bytes`.
         assert!(
-            install(&temp.0, day(3), &bytes)
-                .expect_err("no implicit receipt upgrade")
+            read_entry(&temp.0, day(3))
+                .expect_err("an orphan payload is not an entry")
                 .contains("incomplete")
         );
         fs::remove_file(&payload).expect("remove owned test fixture");
@@ -1423,6 +1595,164 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// **AN UNRECEIPTED PAYLOAD HEALS ONLY ON IDENTICAL BYTES (pull2-3,
+    /// D-2533).**
+    ///
+    /// On the old code an orphan payload refused for ever: `install` of the
+    /// very same bytes answered "incomplete", and `prepare` read the orphan
+    /// first and refused before any fetch, so the first `expect` below failed.
+    /// Walked: identical bytes heal (and the payload is not rewritten),
+    /// different bytes conflict and leave the orphan alone with no receipt,
+    /// the fetching `prepare` heals through a fetch, and the local-only path
+    /// refuses naming the retained orphan.
+    #[tokio::test]
+    async fn an_orphan_payload_heals_only_on_identical_bytes() {
+        let bytes = gzip(CSV.as_bytes());
+        let changed = gzip(CSV.replace("INE038A01020,1", "INE038A01020,0").as_bytes());
+
+        // DIFFERENT BYTES: a conflict, the orphan retained, no receipt.
+        let temp = Temp::new();
+        let (payload, metadata) = paths(&temp.0, day(3));
+        fs::write(&payload, &bytes).expect("orphan gzip");
+        let why = install(&temp.0, day(3), &changed).expect_err("different bytes conflict");
+        assert!(
+            why.contains("conflicting") && why.contains("by hand"),
+            "{why}"
+        );
+        assert_eq!(fs::read(&payload).expect("orphan kept"), bytes);
+        assert!(!metadata.exists(), "no receipt is invented for other bytes");
+
+        // IDENTICAL BYTES: the receipt is written and the entry reads.
+        install(&temp.0, day(3), &bytes).expect("identical bytes heal the orphan");
+        assert_eq!(
+            read_entry(&temp.0, day(3)).expect("whole"),
+            Some(bytes.clone())
+        );
+        assert!(!staging_path(&metadata).exists() && !staging_path(&payload).exists());
+
+        // THE FETCHING PATH reaches the heal through one fetch.
+        let temp = Temp::new();
+        let (payload, _) = paths(&temp.0, day(4));
+        fs::write(&payload, &bytes).expect("orphan gzip");
+        let mut requested = Vec::new();
+        let result = prepare_with(&temp.0, window(4, 4), |url| {
+            requested.push(url);
+            std::future::ready(Ok(gzip(CSV.as_bytes())))
+        })
+        .await
+        .expect("the orphan is healed by an identical fetch");
+        assert_eq!(result.len(), 1);
+        assert_eq!(requested, [source_url(day(4))]);
+        assert!(read_entry(&temp.0, day(4)).expect("whole").is_some());
+
+        // THE LOCAL-ONLY PATH never downloads, and names the orphan.
+        let temp = Temp::new();
+        let (payload, metadata) = paths(&temp.0, day(5));
+        fs::write(&payload, &bytes).expect("orphan gzip");
+        let mut cache = HashMap::new();
+        let why = prepare_local_observed(&temp.0, &[day(5)], &mut cache)
+            .await
+            .expect_err("no download is attempted for history");
+        assert!(
+            why.contains("no download attempted") && why.contains("incomplete cache entry"),
+            "{why}"
+        );
+        assert!(cache.is_empty() && !metadata.exists());
+    }
+
+    /// **A CACHE FILE IS PUBLISHED WHOLE OR NOT AT ALL, AND NEVER OVER AN
+    /// EXISTING ONE (pull2-3, D-2533).**
+    ///
+    /// On the old code `write_new` created the FINAL name and wrote into it,
+    /// so there was no staging name at all; here a stale staging leftover is
+    /// cleared and replaced, an existing final name refuses without a byte
+    /// changed and leaves no staging file, and an empty body publishes.
+    #[test]
+    fn a_cache_file_is_published_whole_and_never_over_an_existing_one() {
+        let temp = Temp::new();
+        let path = temp.0.join("PUBLISHED.gz");
+        let staging = staging_path(&path);
+        assert_eq!(
+            staging.file_name().and_then(|n| n.to_str()),
+            Some(".PUBLISHED.gz.partial")
+        );
+        fs::write(&staging, b"A CRASHED INSTALLER'S HALF").expect("stale staging");
+        publish_new(&path, b"WHOLE BYTES").expect("a stale staging file is cleared");
+        assert_eq!(fs::read(&path).expect("published"), b"WHOLE BYTES".to_vec());
+        assert!(!staging.exists());
+
+        let why = publish_new(&path, b"OTHER BYTES").expect_err("an existing name refuses");
+        assert!(why.contains("no existing file was overwritten"), "{why}");
+        assert_eq!(fs::read(&path).expect("kept"), b"WHOLE BYTES".to_vec());
+        assert!(
+            !staging.exists(),
+            "a refused publish leaves no staging file"
+        );
+
+        let empty = temp.0.join("EMPTY.gz");
+        publish_new(&empty, b"").expect("an empty body publishes");
+        assert_eq!(fs::read(&empty).expect("published").len(), 0);
+    }
+
+    /// **A READER'S SHARED LOCK DOES NOT REFUSE AN INGEST'S VALIDATION
+    /// (pull2-4, equity-2, D-2534).**
+    ///
+    /// A shared lock is held on day 3 exactly as `read_local_lifecycle` (and so
+    /// `/gaps.json`'s audit and the recovery auditor) holds it. On the old code
+    /// both validation loops took the EXCLUSIVE `lock_day`, so the first
+    /// `expect` below failed with "unavailable". Walked: the fetching and the
+    /// local `prepare_observed`, `prepare` over a window, two shared holders at
+    /// once; and the installer still refuses while a reader holds the day, and
+    /// a reader still refuses while the installer does.
+    #[tokio::test]
+    async fn a_gap_page_read_does_not_refuse_an_ingest_validation() {
+        let temp = Temp::new();
+        seed(&temp, 3);
+        let shared = || {
+            let path = lock_path(&temp.0, day(3));
+            let file = File::open(&path).expect("the lock file exists");
+            Flock::try_lock_shared(file, path).expect("a shared reader lock")
+        };
+        let reader = shared();
+        let also = shared();
+
+        let mut cache = HashMap::new();
+        prepare_observed_with(&temp.0, &[day(3)], &mut cache, |_| async {
+            Err("cached days never fetch".to_owned())
+        })
+        .await
+        .expect("validation beside a reader succeeds");
+        assert_eq!(cache.len(), 1);
+        let mut local = HashMap::new();
+        prepare_local_observed(&temp.0, &[day(3)], &mut local)
+            .await
+            .expect("the local path too");
+        let window_result = prepare_with(&temp.0, window(3, 3), |_| async {
+            Err("cached days never fetch".to_owned())
+        })
+        .await
+        .expect("and the window path");
+        assert_eq!(window_result.len(), 1);
+        assert!(
+            read_local_lifecycle(&temp.0, day(3)).is_ok(),
+            "readers share"
+        );
+
+        // THE INSTALLER IS STILL EXCLUSIVE.
+        let why = install(&temp.0, day(3), &gzip(CSV.as_bytes()))
+            .expect_err("an install waits for no reader; it refuses");
+        assert!(why.contains("unavailable"), "{why}");
+        drop(also);
+        drop(reader);
+
+        let held = lock_day(&temp.0, day(3)).expect("the installer's lock");
+        let why = prepare_local_observed(&temp.0, &[day(3)], &mut HashMap::new())
+            .await
+            .expect_err("a reader refuses while a day is installed");
+        assert!(why.contains("unavailable"), "{why}");
+        drop(held);
     }
 
     #[test]

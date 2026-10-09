@@ -144,9 +144,9 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Eight. With the bound above that is a **64 MiB ceiling on this crate's
 /// footprint while rotation works**: negligible beside the 40 GB lake, and
 /// small enough that no operator has to think about it. It used to say
-/// "forever", and it is not: after the first failed roll `rotation_broken`
-/// stops rotating for the life of the sink and the current file grows past
-/// its bound, loudly, in [`Health`]. D-1324. It is also ~260,000 events
+/// "forever", and it is not: after a failed roll `rotation_broken` pauses
+/// rotation and the current file grows past its bound, loudly, in [`Health`],
+/// until a bounded retry succeeds (D-2509) or, past it, until restart. D-1324. It is also ~260,000 events
 /// of history, which is several backfills.
 pub const DEFAULT_KEEP_FILES: u8 = 8;
 
@@ -678,11 +678,28 @@ pub struct Sink {
     /// `[1862, 927, 926, 0, 0]` in two events — the retained history emptied
     /// one file per event while the sink reported only that rolling had failed.
     ///
-    /// So the first failure stops rotation for the life of the sink. The
-    /// current file then grows past its bound, which is the documented
+    /// So a failure pauses rotation, and only `may_roll`'s bounded, probed
+    /// retry resumes it (D-2509). The current file meanwhile grows past its
+    /// bound, which is the documented
     /// degradation and is visible in [`Health::current_bytes`] — and the events
     /// already on disk survive, which is the whole point of keeping them.
     rotation_broken: AtomicBool,
+    /// The current-file size at which a broken rotation is looked at again:
+    /// one more file bound past the size it failed at. CE-41, D-2509.
+    ///
+    /// `rotation_broken` used to be final for the life of the sink, so one
+    /// transient refusal (a mount briefly read-only, a full disk freed a
+    /// minute later) let the current file grow without bound until a restart.
+    /// A retry is now made once per further bound, and only after a probe
+    /// shows the directory accepts a create, a rename and an unlink, so a
+    /// directory that still refuses is never shifted (the hazard documented on
+    /// `rotation_broken`). An attempt that failed AFTER it had moved or
+    /// deleted a file ends retries for good, because repeating it is that
+    /// shift. At most `keep_files` failed attempts are made in all; after them
+    /// rotation stays stopped, as before, and says so.
+    roll_retry_at: AtomicU64,
+    /// Failed roll attempts so far, bounded by `keep_files`. CE-41, D-2509.
+    roll_attempts: AtomicU64,
 
     /// **BOTH FLOORS, IN ONE WORD, BECAUSE TWO WORDS COULD DISAGREE.**
     ///
@@ -789,7 +806,7 @@ impl Sink {
         let mut target = FileTarget::open(&path)
             .map_err(|e| format!("{}: cannot open the event stream — {e}", path.display()))?;
         let found = target.len();
-        let resumed = resume_point(&config.dir, config.keep_files);
+        let (resumed, unresumed) = resume_point(&config.dir, config.keep_files);
         // THE TORN TAIL IS CLOSED BEFORE THE FIRST APPEND. See
         // `terminate_torn_tail`: without this the first event of the new
         // process fuses onto whatever the old one was killed in the middle of.
@@ -807,6 +824,10 @@ impl Sink {
         // under the second left a `seq` below that id. hunt-costs-2, D-1536.
         sink.reserved_run = AtomicU64::new(resumed.seq.max(resumed.max_run));
         if let Some(why) = torn {
+            sink.report(&why);
+        }
+        // A NUMBERING THAT RESTARTED FOR A REASON IS NAMED. CE-51, D-2510.
+        if let Some(why) = unresumed {
             sink.report(&why);
         }
         // A FLOOR AHEAD OF THE CLOCK IS NAMED, not carried silently.
@@ -855,6 +876,8 @@ impl Sink {
             run: AtomicU64::new(0),
             reserved_run: AtomicU64::new(seq),
             rotation_broken: AtomicBool::new(false),
+            roll_retry_at: AtomicU64::new(0),
+            roll_attempts: AtomicU64::new(0),
             floors: AtomicU16::new(packed(config.min_level, config.fast_floor())),
             inner: Mutex::new(Inner {
                 target,
@@ -1224,13 +1247,24 @@ impl Sink {
         // Only the notice moves. The other two `report` call sites already
         // dropped the guard first; this was the one that did not.
         let mut roll_failure: Option<String> = None;
-        if !self.rotation_broken.load(Ordering::Relaxed)
-            && inner.bytes > 0
+        if inner.bytes > 0
             && inner.bytes.saturating_add(span) > self.max_file_bytes
+            && self.may_roll(inner.bytes)
             && let Err(why) = self.roll(inner)
         {
-            // NEVER AGAIN, for this sink. See `rotation_broken`.
+            // NOT AGAIN UNTIL ONE MORE BOUND HAS BEEN WRITTEN AND A PROBE
+            // PASSES, and never more than `keep_files` times. See
+            // `rotation_broken` and `roll_retry_at`. CE-41, D-2509.
             self.rotation_broken.store(true, Ordering::Relaxed);
+            let _counted =
+                self.roll_attempts
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_add(1))
+                    });
+            self.roll_retry_at.store(
+                inner.bytes.saturating_add(self.max_file_bytes),
+                Ordering::Relaxed,
+            );
             // The roll failed, so the current file will exceed its bound.
             // The event is still written: losing it because a RENAME failed
             // would be the worse of the two, and a bound that has been
@@ -1352,39 +1386,87 @@ impl Sink {
     /// has rolled `keep_files` times.
     fn roll(&self, inner: &mut Inner) -> Result<(), String> {
         let keep = self.keep_files.max(1);
+        // WHETHER THIS ATTEMPT HAS MOVED OR DELETED ANYTHING YET. A failure
+        // before the first change leaves the set exactly as it was, so a later
+        // retry is safe; a failure after it is the shift `rotation_broken`
+        // exists to stop repeating, so it ends retries for good. CE-41, D-2509.
+        let mut changed = false;
         let named = |path: &Path, what: &str, e: &std::io::Error| {
             format!("{}: {what} — {e}", path.display())
         };
-        if keep > 1 {
-            // The oldest goes first, or the shift below overwrites a file it
-            // has not yet moved.
-            let oldest = rotated_path(&self.dir, keep.saturating_sub(1));
-            remove_if_present(&oldest)
-                .map_err(|e| named(&oldest, "cannot delete the oldest file", &e))?;
-            for n in (1..keep.saturating_sub(1)).rev() {
-                let from = rotated_path(&self.dir, n);
-                let to = rotated_path(&self.dir, n.saturating_add(1));
-                rename_if_present(&from, &to).map_err(|e| named(&from, "cannot roll", &e))?;
+        let present = |path: &Path| std::fs::symlink_metadata(path).is_ok();
+        let outcome = (|| {
+            if keep > 1 {
+                // The oldest goes first, or the shift below overwrites a file it
+                // has not yet moved.
+                let oldest = rotated_path(&self.dir, keep.saturating_sub(1));
+                let was = present(&oldest);
+                remove_if_present(&oldest)
+                    .map_err(|e| named(&oldest, "cannot delete the oldest file", &e))?;
+                changed |= was;
+                for n in (1..keep.saturating_sub(1)).rev() {
+                    let from = rotated_path(&self.dir, n);
+                    let to = rotated_path(&self.dir, n.saturating_add(1));
+                    let was = present(&from);
+                    rename_if_present(&from, &to).map_err(|e| named(&from, "cannot roll", &e))?;
+                    changed |= was;
+                }
+                let current = current_path(&self.dir);
+                let was = present(&current);
+                rename_if_present(&current, &rotated_path(&self.dir, 1))
+                    .map_err(|e| named(&current, "cannot roll the current file", &e))?;
+                changed |= was;
+            } else {
+                // ONE FILE KEPT MEANS NO HISTORY AT ALL. The current file is
+                // deleted rather than rolled, which is what `keep_files = 1`
+                // asks for; it is stated here so it cannot be mistaken for a
+                // bug.
+                let current = current_path(&self.dir);
+                let was = present(&current);
+                remove_if_present(&current)
+                    .map_err(|e| named(&current, "cannot delete the current file", &e))?;
+                changed |= was;
             }
-            let current = current_path(&self.dir);
-            rename_if_present(&current, &rotated_path(&self.dir, 1))
-                .map_err(|e| named(&current, "cannot roll the current file", &e))?;
-        } else {
-            // ONE FILE KEPT MEANS NO HISTORY AT ALL. The current file is
-            // deleted rather than rolled, which is what `keep_files = 1` asks
-            // for; it is stated here so it cannot be mistaken for a bug.
-            let current = current_path(&self.dir);
-            remove_if_present(&current)
-                .map_err(|e| named(&current, "cannot delete the current file", &e))?;
+            let path = current_path(&self.dir);
+            inner
+                .target
+                .reopen(&path)
+                .map_err(|e| named(&path, "cannot open the next file", &e))
+        })();
+        if let Err(why) = outcome {
+            if changed {
+                self.roll_attempts.store(u64::MAX, Ordering::Relaxed);
+            }
+            return Err(why);
         }
-        let path = current_path(&self.dir);
-        inner
-            .target
-            .reopen(&path)
-            .map_err(|e| named(&path, "cannot open the next file", &e))?;
         inner.bytes = 0;
         self.rotations.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Whether a roll may be attempted now, with the current file at `bytes`.
+    ///
+    /// Always while rotation works. After a failure: only once the file has
+    /// grown one more bound, only while fewer than `keep_files` attempts have
+    /// failed, and only when [`directory_accepts_a_roll`] passes. A probe that
+    /// fails moves the next look one more bound out and shifts nothing.
+    /// Called under the inner lock. CE-41, D-2509.
+    fn may_roll(&self, bytes: u64) -> bool {
+        if !self.rotation_broken.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self.roll_attempts.load(Ordering::Relaxed) >= u64::from(self.keep_files.max(1))
+            || bytes < self.roll_retry_at.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        if directory_accepts_a_roll(&self.dir) {
+            self.rotation_broken.store(false, Ordering::Relaxed);
+            return true;
+        }
+        self.roll_retry_at
+            .store(bytes.saturating_add(self.max_file_bytes), Ordering::Relaxed);
+        false
     }
 
     /// Records a failure, and says it out loud exactly once.
@@ -1408,6 +1490,25 @@ impl Sink {
             );
         }
     }
+}
+
+/// Whether `dir` accepts the three operations a roll makes: a create, a
+/// rename and an unlink, tried on a probe file of its own. A refusal of any
+/// leaves the log files untouched. CE-41, D-2509.
+fn directory_accepts_a_roll(dir: &Path) -> bool {
+    let probe = dir.join(".roll-probe");
+    let moved = dir.join(".roll-probe.moved");
+    let _stale = remove_if_present(&moved);
+    let accepted = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .and_then(|_created| std::fs::rename(&probe, &moved))
+        .and_then(|()| std::fs::remove_file(&moved))
+        .is_ok();
+    let _left = remove_if_present(&probe);
+    accepted
 }
 
 /// Deletes a path, treating "it was not there" as success.
@@ -1474,15 +1575,50 @@ fn rename_if_present(from: &Path, to: &Path) -> std::io::Result<()> {
 /// is read**: a run id carried only by lines further back than 64 KiB, and
 /// above every `seq` since, is not seen. That is a stated limit in
 /// `docs/06-limits.md`, not a guarantee over the whole set.
-fn resume_point(dir: &Path, keep_files: u8) -> Resumed {
-    paths_newest_first(dir, keep_files)
-        .iter()
-        .find_map(|path| {
-            let len = std::fs::metadata(path).map_or(0, |meta| meta.len());
-            (len > 0).then_some((path, len))
-        })
-        .and_then(|(path, len)| last_records(path, len))
-        .unwrap_or_default()
+///
+/// # And it is said at runtime, not only here
+///
+/// The second value is the sentence `Sink::open` reports when the numbering
+/// restarts for a reason other than an empty set: the newest non-empty file
+/// could not be read or held no decodable line, or its size could not be
+/// measured. A measuring error used to read as length zero, so an unreadable
+/// newest file was skipped for an older one, which this doc forbids; it now
+/// stops the walk there. CE-51, D-2510.
+fn resume_point(dir: &Path, keep_files: u8) -> (Resumed, Option<String>) {
+    const RESTART: &str = "sequence numbers and run ids restart at zero and can repeat ids \
+                           still carried by older events in this set; no older file was \
+                           read in its place, because its numbers could be lower";
+    for path in paths_newest_first(dir, keep_files) {
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() == 0 => {}
+            Ok(meta) => {
+                return last_records(&path, meta.len()).map_or_else(
+                    || {
+                        (
+                            Resumed::default(),
+                            Some(format!(
+                                "{}: the newest non-empty event file could not be read, or \
+                                 its last block holds no line that decodes; {RESTART}",
+                                path.display()
+                            )),
+                        )
+                    },
+                    |resumed| (resumed, None),
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return (
+                    Resumed::default(),
+                    Some(format!(
+                        "{}: cannot measure the newest event file — {e}; {RESTART}",
+                        path.display()
+                    )),
+                );
+            }
+        }
+    }
+    (Resumed::default(), None)
 }
 
 /// What a reopened sink resumes from. See [`resume_point`].
@@ -3252,8 +3388,11 @@ mod tests {
             let _outcome = emit_fat(&sink);
         }
         let health = sink.health();
-        assert_eq!(
-            health.rotation_failures, 1,
+        // AT LEAST ONCE, AND BOUNDED. An unlink that refuses changes nothing,
+        // so it may be retried after a further bound, at most `keep_files`
+        // times in all (CE-41, D-2509).
+        assert!(
+            (1..=2).contains(&health.rotation_failures),
             "an unlink that refused for a reason other than absence is a FAILED \
              roll, not a successful one: {health:?}"
         );
@@ -3895,6 +4034,64 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A ROLL THAT FAILED ONCE IS TRIED AGAIN ONCE THE DIRECTORY HEALS.**
+    /// CE-41, D-2509.
+    ///
+    /// The first failed roll stopped rotation for the life of the sink, so a
+    /// mount that was read-only for a minute let the current file grow without
+    /// bound until a restart. Here the directory refuses, then accepts again:
+    /// rotation must resume and the current file come back under its bound.
+    #[test]
+    fn a_roll_that_failed_once_resumes_when_the_directory_heals() {
+        crate::tests::where_permission_binds(
+            "sink::tests::a_roll_that_failed_once_resumes_when_the_directory_heals",
+            a_roll_that_failed_once_resumes_when_the_directory_heals_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_roll_that_failed_once_resumes_when_the_directory_heals_body() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("roll-heals");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(4),
+        )
+        .expect("opens");
+        let fat = "x".repeat(MAX_MESSAGE_BYTES);
+        let emit_fat = |sink: &Sink| sink.emit(&Event::info("t", &fat));
+        for _ in 0..4 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        let mut ro = std::fs::metadata(&dir).expect("the dir").permissions();
+        ro.set_mode(0o555);
+        std::fs::set_permissions(&dir, ro).expect("make it read-only");
+        for _ in 0..6 {
+            let _outcome = emit_fat(&sink);
+        }
+        let mut rw = std::fs::metadata(&dir).expect("the dir").permissions();
+        rw.set_mode(0o755);
+        std::fs::set_permissions(&dir, rw).expect("restore");
+        let failed = sink.health().rotation_failures;
+        let rolled = sink.health().rotations;
+        for _ in 0..6 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        let health = sink.health();
+        let _ignored = std::fs::remove_dir_all(&dir);
+        assert!(failed >= 1, "the premise: a roll failed");
+        assert!(
+            health.rotations > rolled,
+            "rotation never resumed after the directory healed: {health:?}"
+        );
+        assert!(
+            health.current_bytes <= 2 * MIN_FILE_BYTES + 2 * MAX_MESSAGE_BYTES as u64,
+            "the current file stayed past its bound: {health:?}"
+        );
+    }
+
     /// N THREADS PRODUCE EXACTLY N WHOLE LINES.
     ///
     /// The failure this rules out is interleaving: two writes whose bytes land
@@ -3998,6 +4195,72 @@ mod tests {
         std::fs::write(current_path(&dir), b"not this format at all\n").expect("clobbered");
         let third = Sink::open(&Config::new(&dir)).expect("re-opens");
         assert_eq!(third.health().next_seq, 1);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AN UNREADABLE NEWEST FILE RESTARTS THE NUMBERING LOUDLY, AND NO OLDER
+    /// FILE STANDS IN FOR IT. CE-51, D-2510.
+    ///
+    /// The restart at zero was "a stated limit" only in a doc comment: at
+    /// runtime nothing said it, and `reserve_run_id` then reissued ids still
+    /// carried by older events. Here `.1` holds a readable stream and the
+    /// newest file holds no decodable line: the open must not resume from
+    /// `.1`, and it must name the newest file in `last_error`.
+    #[test]
+    fn an_undecodable_newest_file_is_named_and_not_replaced_by_an_older_one() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("resume-undecodable");
+        let config = Config::new(&dir).with_keep_files(4);
+        {
+            let sink = Sink::open(&config).expect("opens");
+            for _ in 0..5 {
+                assert!(sink.emit(&Event::info("t", "m")).is_written());
+            }
+        }
+        std::fs::rename(current_path(&dir), rotated_path(&dir, 1)).expect("roll");
+        std::fs::write(current_path(&dir), b"not this format at all\n").expect("torn");
+        let sink = Sink::open(&config).expect("reopens");
+        let health = sink.health();
+        assert_eq!(health.next_seq, 1, "the older file did not stand in");
+        let why = health.last_error.unwrap_or_default();
+        assert!(why.contains("restart at zero"), "{why}");
+        assert!(why.contains("events.ndjson"), "the file is named: {why}");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A NEWEST FILE WHOSE SIZE CANNOT BE MEASURED STOPS THE WALK THERE, AND
+    /// SAYS SO. CE-51, D-2510, D-4613.
+    ///
+    /// The other half of the test above. A measuring error used to read as
+    /// length zero, so the walk stepped past it to an older file. Here the
+    /// current file is empty, `.1` is a link to itself (so `metadata` fails
+    /// with a loop, not with absence) and `.2` holds a readable stream: the
+    /// open must not resume from `.2`, and it must name `.1`.
+    #[test]
+    fn an_unmeasurable_newest_file_is_named_and_not_replaced_by_an_older_one() {
+        // A sink is dropped and reopened here: see `FORK_GATE` (D-1462).
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("resume-unmeasurable");
+        let config = Config::new(&dir).with_keep_files(4);
+        {
+            let sink = Sink::open(&config).expect("opens");
+            for _ in 0..5 {
+                assert!(sink.emit(&Event::info("t", "m")).is_written());
+            }
+        }
+        std::fs::rename(current_path(&dir), rotated_path(&dir, 2)).expect("roll");
+        let newest = rotated_path(&dir, 1);
+        std::os::unix::fs::symlink(&newest, &newest).expect("a self-referential link");
+        let sink = Sink::open(&config).expect("reopens");
+        let health = sink.health();
+        assert_eq!(health.next_seq, 1, "the older file did not stand in");
+        let why = health.last_error.unwrap_or_default();
+        assert!(why.contains("cannot measure the newest"), "{why}");
+        assert!(why.contains("restart at zero"), "{why}");
+        assert!(why.contains("events.1.ndjson"), "the file is named: {why}");
+        drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -4310,8 +4573,13 @@ mod tests {
             "not one byte was appended on a guess"
         );
         assert_eq!(health.current_bytes, on_disk);
+        // NOTHING IS CLAIMED ABOUT ITS TAIL. The one thing said is that it
+        // could not be read, which `resume_point` now reports rather than
+        // only documents (CE-51, D-2510).
         assert!(
-            health.last_error.is_none(),
+            health.last_error.as_deref().is_none_or(
+                |why| why.contains("could not be read") && !why.contains("had no newline")
+            ),
             "and nothing is claimed about a file nobody could look at: {health:?}"
         );
         assert_eq!(

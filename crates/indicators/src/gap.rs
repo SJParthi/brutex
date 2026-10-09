@@ -1535,9 +1535,17 @@ mod tests {
         // RE-TAKEN again for D-3402 and D-3403: five candlestick midpoint predicates
         // and the SuperTrend stop are now decided below a paisa, so the all-position
         // digest moved and the gap count did not. Was 9_976_369_688_448_099_888.
+        // RE-TAKEN again for D-2613 (ind1-2): the trend EMA steps truncate and
+        // the EMA and gap-mid bits are decided exactly, on every bar; the gap
+        // family count, 4,092, is unchanged. Was 9_976_369_688_448_099_888.
+        // RE-TAKEN again for D-4610: D-3402/D-3403 and D-2613 each moved the
+        // digest from 9_976_369_688_448_099_888 on its own branch (to
+        // 3_321_827_449_681_235_504 and 1_794_190_917_626_450_722), and the
+        // integration carries both. Measured on the merged tree; the gap count,
+        // 4,092, is still unchanged.
         assert_eq!(
             (digest, gap_known),
-            (1_794_190_917_626_450_722, 4_092),
+            (17_175_828_523_226_610_466, 4_092),
             "complete sessions no longer emit what the three-bar fold emitted"
         );
     }

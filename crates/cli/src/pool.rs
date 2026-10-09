@@ -38,8 +38,13 @@
 //! instruments. The drawdown does not add and cannot be pooled from cell
 //! aggregates: a pooled drawdown is a property of the merged, time-ordered
 //! trade sequence, and the exit grid keeps per-cell totals, not per-trade
-//! P&L. The `dd≥` column is therefore the LARGEST single-instrument drawdown
-//! among those pooled — a lower bound on the pooled figure, labelled as one.
+//! P&L. The `dd1max` column is therefore the LARGEST single-instrument
+//! drawdown among those pooled, and it bounds the pooled figure in NEITHER
+//! direction: A losing 100, then B winning 150, then A losing 100 again shows
+//! 200 here while the merged sequence's drawdown is 100, and two instruments
+//! losing at once can make the pooled drawdown larger than either's. It was
+//! called a lower bound and labelled `dd>=`, which was false (p2misc-1,
+//! D-2648).
 //! Exposing per-trade P&L from the grid is the change that would make it
 //! exact, and `docs/06-limits.md` records it as not done.
 //!
@@ -173,8 +178,9 @@ struct Pooled {
     min_win: i64,
     gross_win: i128,
     gross_loss: i128,
-    /// The largest single-instrument drawdown among those pooled. A LOWER
-    /// BOUND on the pooled drawdown — see the module documentation.
+    /// The largest single-instrument drawdown among those pooled. NOT a
+    /// bound on the pooled drawdown in either direction — see the module
+    /// documentation (p2misc-1, D-2648).
     dd_bound: i64,
     /// Up to the first few symbols it fired on, for the row.
     names: Vec<String>,
@@ -237,8 +243,9 @@ impl Pooled {
         }
     }
 
-    /// The sort key, largest first: the rule met, then the SMALLEST drawdown
-    /// bound, then the profit factor with its never-lost sentinel demoted, then
+    /// The sort key, largest first: the rule met, then the SMALLEST largest
+    /// single-instrument drawdown (a ranking key, not a bound on the pooled
+    /// drawdown; p2misc-1, D-2648), then the profit factor with its never-lost sentinel demoted, then
     /// the net. The drawdown leads because the objective is "very very less max
     /// drawdown" before it is anything else.
     fn key(&self, rule_bp: i64) -> (bool, i64, i128, i128) {
@@ -1212,8 +1219,7 @@ fn render_pooled(
     let _ = writeln!(
         out,
         "  tail = smallest win / largest loss; rule = tail >= {}.{:02}x (the operator's \
-         reward-to-risk floor, 0 = OFF)\n  dd>= is the LARGEST single-instrument drawdown \
-         among those pooled: a lower bound on the pooled drawdown, not the figure itself",
+         reward-to-risk floor, 0 = OFF)\n  {POOLED_DRAWDOWN_LEGEND}",
         rule_bp / 100,
         rule_bp % 100
     );
@@ -1258,6 +1264,12 @@ fn render_pooled(
     out.push_str(crate::IN_SAMPLE_WARNING);
 }
 
+/// What the pooled table's `dd1max` column is, printed under the pass-2
+/// heading (p2misc-1, D-2648). It called the column the pooled drawdown's lower bound,
+/// which the largest single-instrument drawdown is not.
+const POOLED_DRAWDOWN_LEGEND: &str = "dd1max is the LARGEST single-instrument drawdown among those \
+     pooled; it bounds the pooled drawdown in neither direction and is not that figure";
+
 /// The pooled table's columns and header.
 ///
 /// LAID OUT TOGETHER, as pass 1 is (D-1420). This was one `format!` of
@@ -1285,7 +1297,7 @@ fn pooled_columns() -> ([crate::columns::Col; 12], [&'static str; 12]) {
         ],
         [
             "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net",
-            "dd>=", "fired on",
+            "dd1max", "fired on",
         ],
     )
 }
@@ -3870,5 +3882,52 @@ mod tests {
         );
         assert!(pass_1.contains("crate::one_rung("));
         assert!(!pass_1.contains("par_iter"), "{pass_1}");
+    }
+
+    /// The drawdown of a time-ordered P&L sequence: the largest fall from a
+    /// running peak, the figure a pooled drawdown would be.
+    fn sequence_drawdown(pnl: &[i64]) -> i64 {
+        let (mut equity, mut peak, mut worst) = (0_i64, 0_i64, 0_i64);
+        for step in pnl {
+            equity += step;
+            peak = peak.max(equity);
+            worst = worst.max(peak - equity);
+        }
+        worst
+    }
+
+    /// p2misc-1 (D-2648): the drawdown column is not called a bound, because
+    /// the largest single-instrument drawdown bounds the merged sequence's in
+    /// neither direction -- shown here both ways. On the old code the legend
+    /// said "a lower bound on the pooled drawdown" and the header was `dd>=`.
+    #[test]
+    fn the_drawdown_column_is_not_called_a_bound() {
+        let legend = super::POOLED_DRAWDOWN_LEGEND;
+        assert!(!legend.contains("lower bound"), "{legend}");
+        assert!(legend.contains("neither direction"), "{legend}");
+        let (_, header) = super::pooled_columns();
+        assert!(header.contains(&"dd1max"), "{header:?}");
+        assert!(!header.iter().any(|name| name.contains(">=")), "{header:?}");
+        let source = include_str!("pool.rs");
+        let shipping = source.split("\nmod tests {").next().unwrap_or(source);
+        assert!(
+            !shipping.contains("a lower bound on the pooled"),
+            "stale wording"
+        );
+
+        // Above the pooled figure: A -100, B +150, A -100.
+        let a = [-100, -100];
+        let merged = [-100, 150, -100];
+        assert_eq!(sequence_drawdown(&a), 200, "the column prints 200");
+        assert_eq!(sequence_drawdown(&[150]), 0);
+        assert_eq!(sequence_drawdown(&merged), 100, "the pooled figure is 100");
+        // Below the pooled figure: A and B each lose 100 at once.
+        assert_eq!(sequence_drawdown(&[-100]), 100, "the column prints 100");
+        assert_eq!(
+            sequence_drawdown(&[-100, -100]),
+            200,
+            "the pooled figure is 200"
+        );
+        assert_eq!(sequence_drawdown(&[]), 0);
     }
 }

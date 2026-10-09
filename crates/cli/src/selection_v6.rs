@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::execution_v4::CommittedStoredExecutionV4;
@@ -375,44 +375,23 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
 }
 
 /// Moves an interrupted writer's unsealed tail, `committed..len`, into
-/// `<file>.abandoned-<committed>` and cuts it from the ledger. audit-20261003
-/// hunt-cli-a-5, D-1569.
+/// `<file>.abandoned-<committed>-<blake3 of the tail>` and cuts it from the
+/// ledger. audit-20261003 hunt-cli-a-5, D-1569; conc4-1, D-2554.
 ///
 /// The bytes are copied and synced, with their directory, BEFORE the ledger
 /// is shortened, so a crash between the two leaves the tail in both places
 /// rather than in neither. Committed sealed blocks, `..committed`, are never
-/// rewritten. An existing quarantine at the same offset must hold exactly the
-/// same bytes, otherwise this refuses and changes nothing. The move is named
-/// in the log, so the repair is never silent.
-/// The bytes an existing quarantine holds, or `None` when its length already
-/// differs from `tail_len` (then it holds different bytes, read or not).
+/// rewritten. The copy is written under a scratch name, synced, and only then
+/// renamed to a name keyed by the tail's CONTENT as well as its offset, so a
+/// torn or failed copy never sits under a final name, and a second abandoned
+/// tail at the same offset gets its own quarantine rather than wedging the
+/// rung against the first. A failed copy removes its scratch file. The move is
+/// named in the log, so the repair is never silent.
 ///
-/// Opened once through [`crate::readonly_file::open`]: no final symlink is
-/// followed, a FIFO does not hold the open, and anything that is not a regular
-/// file is refused by name. It used to be `fs::read` by path, so a FIFO here
-/// blocked the ledger's repair under its exclusive lock and a device was read
-/// without a bound. The read stops one byte past the tail. CE-65, D-2684.
-fn quarantined(aside: &Path, tail_len: usize) -> Result<Option<Vec<u8>>, String> {
-    use std::io::Read as _;
-    let refused = |why: std::io::Error| {
-        format!(
-            "Selection V6 abandoned tail quarantine {}: {why}; nothing repaired",
-            aside.display()
-        )
-    };
-    let file = crate::readonly_file::open(aside).map_err(refused)?;
-    let len = file.metadata().map_err(refused)?.len();
-    if usize::try_from(len).ok() != Some(tail_len) {
-        return Ok(None);
-    }
-    let mut held = Vec::new();
-    let _ = file
-        .take(len.saturating_add(1))
-        .read_to_end(&mut held)
-        .map_err(refused)?;
-    Ok(Some(held))
-}
-
+/// NAMED BY OFFSET AND CONTENT. The committed length moves only when a block
+/// commits, so two interrupted writes with no commit between them land at one
+/// offset: an offset-only name made the second quarantine collide with the
+/// first and wedged every later persist (CE-88, D-2790).
 fn set_aside_abandoned_tail(
     file: &mut File,
     root: &Path,
@@ -427,23 +406,57 @@ fn set_aside_abandoned_tail(
     file.seek(SeekFrom::Start(committed))
         .map_err(|why| why.to_string())?;
     file.read_exact(&mut tail).map_err(|why| why.to_string())?;
-    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}"));
-    match OpenOptions::new().write(true).create_new(true).open(&aside) {
-        Ok(mut out) => {
-            out.write_all(&tail)
-                .and_then(|()| out.sync_all())
-                .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
-        }
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
-            let held = quarantined(&aside, tail.len())?;
-            if held.as_deref() != Some(tail.as_slice()) {
-                return Err(format!(
-                    "Selection V6 abandoned tail quarantine {} already holds different bytes; nothing repaired",
-                    aside.display()
-                ));
+    let digest = brutex_core::blake3::hash(&tail);
+    let hex = digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}"));
+    let scratch = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}.writing"));
+    // A STALE SCRATCH IS UNLINKED, NEVER OPENED, and the new one is made with
+    // `create_new`, so no FIFO, device or link at that name is ever opened or
+    // waited on under the ledger's lock (CE-65, D-2684, carried to the scratch
+    // name by conc4-1). A directory there refuses below by name.
+    let stale = match std::fs::remove_file(&scratch) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    let copied = stale
+        .and_then(|()| {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&scratch)
+        })
+        .and_then(|mut out| {
+            crate::fixed_tail::write_at_end(
+                &mut out,
+                &scratch.display(),
+                0,
+                &tail,
+                Write::write_all,
+            )
+            .map_err(std::io::Error::other)?;
+            crate::fixed_tail::sync_all_hooked(&out, &scratch)
+        })
+        .and_then(|()| std::fs::rename(&scratch, &aside));
+    if let Err(why) = copied {
+        let removed = match std::fs::remove_file(&scratch) {
+            Err(gone) if gone.kind() != std::io::ErrorKind::NotFound => {
+                format!(
+                    "; removing scratch {} also failed: {gone}",
+                    scratch.display()
+                )
             }
-        }
-        Err(why) => return Err(format!("Selection V6 abandoned tail quarantine: {why}")),
+            _ => String::new(),
+        };
+        return Err(format!(
+            "Selection V6 abandoned tail quarantine {}: {why}{removed}; the ledger was not changed",
+            aside.display()
+        ));
     }
     sync_directory(root)?;
     file.set_len(committed).map_err(|why| why.to_string())?;

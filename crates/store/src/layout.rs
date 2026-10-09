@@ -121,12 +121,13 @@ impl Layout {
 
     /// The overlay sidecar's geometry — 24-byte records, version 9.
     ///
-    /// # Why it is NOT in [`Self::KNOWN`]
+    /// # It IS in [`Self::KNOWN`], and a bar reader still never sees it
     ///
-    /// That list answers "which versions of a BAR file can this build read",
-    /// and a reader resolving a bar file walks it. Offering the overlay there
-    /// would hand a 24-byte geometry to a reader expecting 56, and the header
-    /// would validate because the header region is the same shape in both.
+    /// A bar reader resolving a `.bin` walks `crate::file`'s per-kind
+    /// `BAR_TABLE`, not [`Self::KNOWN`], so a 24-byte geometry is never handed
+    /// to a reader expecting 56 even though the header region is the same
+    /// shape in both. Why it must be in [`Self::KNOWN`] is said there. (This
+    /// block said it was not; gap-audit #17, D-3687.)
     ///
     /// It is a `Layout` at all so the sidecar can use
     /// [`crate::header::Header::validate`] and [`crate::block::seal`] rather
@@ -143,10 +144,10 @@ impl Layout {
 
     /// The computed-greeks sidecar's geometry — 80-byte records, version 8.
     ///
-    /// Not in [`Self::KNOWN`], for exactly the reason [`Self::OVERLAY`] is not:
-    /// that list answers "which versions of a BAR file can this build read", and
-    /// offering an 80-byte geometry to a reader expecting 56 would validate at
-    /// the header and disagree at the first record.
+    /// In [`Self::KNOWN`] for exactly the reason [`Self::OVERLAY`] is, and kept
+    /// from a bar reader the same way: by `crate::file`'s per-kind
+    /// `BAR_TABLE`, so an 80-byte geometry is never offered to a reader
+    /// expecting 56. D-3687.
     ///
     /// It is a `Layout` for the same reason too — so the sidecar reuses
     /// [`crate::header::Header::validate`] and [`crate::block::seal`] instead of

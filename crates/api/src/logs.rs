@@ -140,8 +140,7 @@ fn asked(raw: &str) -> Asked {
     // digit is in the unreserved set — and would have turned any other input
     // into a `%XX` soup that parses to the default, which is the same answer for
     // the wrong reason.
-    let limit = crate::server::param(raw, "limit")
-        .parse::<usize>()
+    let limit = crate::server::whole_count(&crate::server::param(raw, "limit"))
         .unwrap_or(50)
         .clamp(1, PAGE_LIMIT);
     let level_word = crate::server::param(raw, "level");
@@ -964,15 +963,17 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
         let _ = write!(
             out,
             // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
-            // rotating for the life of the process (`Sink::rotation_broken`),
-            // so nothing is overwritten after the failure: the file GROWS. The
-            // banner said the opposite and never said a restart resumes
-            // rotation (CE-41, D-1769).
-            "{} roll(s) failed, so rotation has stopped for the life of this \
-             process: the current file is growing past its bound and no later \
-             event overwrites an older one. The failed roll itself may have \
-             removed the oldest retained file. Fix the cause named below and \
-             restart the server to resume rotation. ",
+            // rotating (`Sink::rotation_broken`), so nothing is overwritten
+            // after the failure: the file GROWS. It looks again once the file
+            // has grown one more bound and the directory accepts a probe, a
+            // bounded number of times, unless the failed roll had already
+            // moved a file (CE-41, D-1769, D-2509).
+            "{} roll(s) failed, so rotation is paused: the current file is \
+             growing past its bound and no later event overwrites an older one. \
+             The failed roll itself may have removed the oldest retained file. \
+             Rotation is retried by itself, a bounded number of times, once the \
+             directory accepts writes again; if it stays paused, fix the cause \
+             named below and restart the server. ",
             h.rotation_failures,
         );
     }
@@ -1177,6 +1178,7 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
 pub async fn note_request(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -1199,7 +1201,9 @@ pub async fn note_request(
     // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
     if rationed(level) {
         let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
-        let admit = FAILED_LINES
+        // THE SITE'S RATIONS, not a process static (P16-04, D-2590).
+        let admit = site
+            .failed_lines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .admit(from_another_site, now);
@@ -1307,9 +1311,6 @@ pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
 /// The length of one rationing window, in milliseconds.
 pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
 
-/// The process's failed-request rations, one per origin class.
-static FAILED_LINES: std::sync::Mutex<Rations> = std::sync::Mutex::new(Rations::new());
-
 /// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
 #[derive(Debug)]
 pub(crate) struct Rations {
@@ -1411,6 +1412,18 @@ mod tests {
         assert!(super::rationed(telemetry::Level::Error));
         assert!(super::rationed(telemetry::Level::Warn));
         assert!(!super::rationed(telemetry::Level::Debug));
+    }
+
+    /// **A `limit` past `usize` asks for the page ceiling, not the default.**
+    /// Gap-audit #4, D-3684.
+    #[test]
+    fn a_limit_past_usize_reads_the_page_ceiling() {
+        assert_eq!(
+            super::asked("limit=99999999999999999999").limit,
+            super::PAGE_LIMIT
+        );
+        assert_eq!(super::asked("limit=nope").limit, 50);
+        assert_eq!(super::asked("limit=7").limit, 7);
     }
 
     /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
@@ -2131,12 +2144,9 @@ mod tests {
     #[test]
     fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
         let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(page.contains("rotation is paused"), "{page}");
         assert!(
-            page.contains("rotation has stopped for the life of this process"),
-            "{page}"
-        );
-        assert!(
-            page.contains("restart the server to resume rotation"),
+            page.contains("Rotation is retried by itself") && page.contains("restart the server"),
             "{page}"
         );
         assert!(

@@ -136,10 +136,17 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     // instrument, so a RELIANCE run's frontier carries the gross label and the
     // corporate-action sentence `cli top` prints over the same rows. Decided
     // from this one snapshot; an index run's payload gains no key. AF-19.
-    let note = crate::detail::equity_note_member(
-        committed
-            .as_ref()
-            .map(|committed| committed.underlying.as_str()),
+    // AND EVERY RECORDED RUN'S ROWS ARE IN SAMPLE, validation unrecorded.
+    // Carried in the same member string so every body that names the note
+    // names this too. D-2792 (CE-93).
+    let note = format!(
+        r#"{},"in_sample":{}"#,
+        crate::detail::equity_note_member(
+            committed
+                .as_ref()
+                .map(|committed| committed.underlying.as_str()),
+        ),
+        crate::render::json_string(cli::LEDGER_IN_SAMPLE)
     );
     let receipt = committed.map(|committed| committed.receipt);
     if let Some(committed) = receipt
@@ -411,7 +418,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
                 row.n,
                 row.mean_milli_paisa,
                 row.t_milli,
-                row.payoff_bp,
+                payoff_on_wire(row.n, row.payoff_bp),
                 row.wins,
                 d.priced,
                 row.trades,
@@ -550,6 +557,30 @@ fn measurable(value: i64) -> String {
         "null".to_owned()
     } else {
         value.to_string()
+    }
+}
+
+/// `payoff_bp` as the wire carries it: `null` for each of its two absences
+/// that the row can name exactly (p5num-5, D-2568).
+///
+/// `runner::outcome::Edge::payoff_bp` answers [`i64::MAX`] for a combination
+/// that never gave anything back and `0` for fewer than two observations. Both
+/// went out raw. The first is `2^63 - 1`, which `JSON.parse` rounds to `2^63`,
+/// so `web/src/lib/frontier-analytics.js` refused the WHOLE frontier for one
+/// honest unbounded row; the second is a refusal that read as a measured zero.
+/// `n` is on the row, so "fewer than two observations" is decided here exactly.
+///
+/// What it cannot decide: the method's third absence -- no observation moved in
+/// the position's favour -- is also stored as `0`, and the stored row keeps no
+/// count that separates it from a payoff that truncated to zero. Telling those
+/// apart needs the refusal persisted beside the value, which is a frontier
+/// file-format change and is left to an owner decision rather than guessed at.
+#[must_use]
+pub(crate) fn payoff_on_wire(n: u64, payoff_bp: i64) -> String {
+    if n < 2 {
+        "null".to_owned()
+    } else {
+        measurable(payoff_bp)
     }
 }
 
@@ -695,6 +726,57 @@ mod tests {
             min_win: 295,
             gross_win: 900,
             gross_loss: -273_649,
+        }
+    }
+
+    /// p5num-5 (D-2568): the payoff's two nameable absences are `null`, and
+    /// every other value passes through unchanged. Exhaustive over the
+    /// boundaries of both inputs, including values the method never produces,
+    /// so the rule is pinned rather than the method's current range.
+    #[test]
+    fn an_unbounded_or_refused_payoff_is_null_on_the_wire() {
+        for n in [0_u64, 1, 2, 3, u64::MAX] {
+            for payoff in [i64::MIN, -1, 0, 1, 129, i64::MAX - 1, i64::MAX] {
+                let expected = if n < 2 || payoff == i64::MAX {
+                    "null".to_owned()
+                } else {
+                    payoff.to_string()
+                };
+                assert_eq!(
+                    super::payoff_on_wire(n, payoff),
+                    expected,
+                    "n {n} payoff {payoff}"
+                );
+            }
+        }
+    }
+
+    /// p5num-5 (D-2568): the rendered row, not just the helper. Before the fix
+    /// the unbounded row carried a bare `9223372036854775807`, which the
+    /// browser cannot hold exactly and which refused the whole frontier, and
+    /// the one-observation row carried a measured-looking `0`.
+    #[test]
+    fn a_rendered_frontier_row_carries_a_null_payoff_where_the_method_has_none() {
+        let identity = [0x5e_u8; 32];
+        for (n, payoff, expected) in [
+            (868_u64, 129_i64, r#""payoff_bp":129,"#),
+            (868, i64::MAX, r#""payoff_bp":null,"#),
+            (868, i64::MAX - 1, r#""payoff_bp":9223372036854775806,"#),
+            (2, 0, r#""payoff_bp":0,"#),
+            (1, 0, r#""payoff_bp":null,"#),
+            (0, 0, r#""payoff_bp":null,"#),
+        ] {
+            let mut row = verdict_row(identity, 1);
+            row.n = n;
+            row.payoff_bp = payoff;
+            let mut out = String::new();
+            let admitted = super::write_rows(&mut out, &[row], &row.rules);
+            assert!(admitted <= 1, "one row admits at most once: {out}");
+            assert!(out.contains(expected), "n {n} payoff {payoff}: {out}");
+            assert!(
+                !out.contains("9223372036854775807"),
+                "no bare i64::MAX reaches the wire: {out}"
+            );
         }
     }
 
@@ -903,6 +985,13 @@ mod tests {
             respond(Ok(dir.clone()), &format!("identity={}", "96".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{index_body}");
         assert!(!index_body.contains("equity_note"), "{index_body}");
+        // CE-93 / D-2792: every recorded run's rows say they are in sample
+        // and that their validation is not recorded, index or stock.
+        let in_sample = format!(
+            r#","in_sample":{}"#,
+            crate::render::json_string(cli::LEDGER_IN_SAMPLE)
+        );
+        assert!(index_body.contains(&in_sample), "{index_body}");
         let (status, _, stock_body) =
             respond(Ok(dir.clone()), &format!("identity={}", "97".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{stock_body}");
@@ -910,7 +999,7 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&stock_body).expect("valid JSON");
         assert!(
             stock_body.starts_with(&format!(
-                r#"{{"identity":"{}"{member},"rows":[{{"rank":1,"#,
+                r#"{{"identity":"{}"{member}{in_sample},"rows":[{{"rank":1,"#,
                 "97".repeat(32)
             )),
             "beside the identity, before the ranked rows: {stock_body}"
@@ -934,7 +1023,7 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         assert!(
             body.starts_with(&format!(
-                r#"{{"identity":"{}"{member},"rows":[],"#,
+                r#"{{"identity":"{}"{member}{in_sample},"rows":[],"#,
                 "98".repeat(32)
             )),
             "{body}"

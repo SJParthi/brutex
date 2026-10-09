@@ -327,6 +327,32 @@ impl Contract {
     pub fn price(&self, volatility: f64, kind: OptionKind) -> Result<f64, GreeksError> {
         self.greeks(volatility, kind).map(|out| out.price)
     }
+
+    /// Refuses a market price no volatility can produce: at or below the
+    /// discounted intrinsic value, or at or above the no-arbitrage maximum.
+    ///
+    /// The screen the implied-volatility solve applies before it evaluates
+    /// anything, made public so a caller that prices with a volatility it was
+    /// GIVEN (a vendor's) refuses the same premium at the same bits instead of
+    /// keeping a second copy of the bound. D-3117.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Contract::greeks`] for the contract, [`GreeksError::NotFinite`]
+    /// for the price, [`GreeksError::PriceBelowIntrinsic`] and
+    /// [`GreeksError::PriceAboveMaximum`].
+    pub fn screen_premium(&self, market_price: f64, kind: OptionKind) -> Result<(), GreeksError> {
+        let checked = self.check()?;
+        let price = finite(market_price, "market_price")?;
+        let (intrinsic, maximum) = checked.no_arbitrage_bounds(kind);
+        if price <= intrinsic {
+            return Err(GreeksError::PriceBelowIntrinsic { price, intrinsic });
+        }
+        if price >= maximum {
+            return Err(GreeksError::PriceAboveMaximum { price, maximum });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

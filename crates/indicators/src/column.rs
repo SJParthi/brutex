@@ -260,8 +260,16 @@ impl Census {
 
     /// Did every offered bar land in exactly one bucket?
     ///
-    /// False is a defect in this module, never in the data. Proved by
+    /// **On a census from [`Column::build`] only** — a signal-sourced column.
+    /// There, false is a defect in this module, never in the data. Proved by
     /// [`crate::column::tests::every_bar_lands_in_exactly_one_bucket`].
+    ///
+    /// A REPROJECTED column's census replaces `offered` with the execution
+    /// series' length (the pairing key `outcome::edge` reads) and keeps the
+    /// signal series' buckets, so there it reconciles only when the two series
+    /// happen to be the same length, and false means nothing. Ask it of the
+    /// signal column, as `runner::complete` does (Z1-slice08-F2, D-2541;
+    /// `crate::column::reproject_tests::a_reprojected_census_does_not_claim_to_reconcile`).
     #[must_use]
     pub const fn reconciles(&self) -> bool {
         self.offered
@@ -1050,13 +1058,21 @@ impl Column {
                 }
             }
         }
-        // THE CENSUS IS THE SIGNAL SERIES', AND IS LEFT ALONE. It answers "where
-        // did every offered bar go", and the offered bars were the signal
-        // series' — reprojection neither offers nor refuses one. `swept` would
-        // become a lie if it were reduced here, because those bars WERE swept;
-        // what changed is how many of them can be acted on, which is `dropped`
-        // and is returned separately rather than folded into a count that means
-        // something else.
+        // THE CENSUS IS THE SIGNAL SERIES' EXCEPT FOR `offered`, WHICH IS
+        // REPLACED. `warming`, `swept` and every refusal bucket answer "where did
+        // every signal bar go", and reprojection neither offers nor refuses one.
+        // `swept` would become a lie if it were reduced here, because those bars
+        // WERE swept; what changed is how many of them can be acted on, which is
+        // `dropped` and is returned separately rather than folded into a count
+        // that means something else.
+        //
+        // `offered` is NOT left alone: it becomes `onto_len`, the length of the
+        // execution series, because `outcome::edge` reads it as the slice
+        // identity a `Forward` must pair with. So on a reprojected column
+        // `offered` no longer counts the bars the other buckets partition, and
+        // `Census::reconciles` is false whenever the two series differ in
+        // length. This comment said the census was "left alone" while the line
+        // below overwrote it (Z1-slice08-F2, D-2541).
         // `first_swept` is the first index of the series this column now indexes,
         // so it is taken from the projected sources rather than carried over.
         // Carrying the signal series' value would name a bar in the wrong
@@ -2480,6 +2496,62 @@ mod reproject_tests {
         );
         assert_eq!(projected.census().warming, column.census().warming);
         assert_eq!(projected.collided(), 0, "a one-to-one map collides nothing");
+    }
+
+    /// A REPROJECTED CENSUS RECONCILES ONLY WHEN THE TWO SERIES ARE THE SAME
+    /// LENGTH, AND THE DOCUMENT SAYS SO.
+    ///
+    /// Z1-slice08-F2, D-2541. `reproject_with` replaces `offered` with the
+    /// execution length and keeps the signal buckets, under a comment that
+    /// said the census was "left alone", while `Census::reconciles` claimed a
+    /// false answer was always a module defect. This pins the behaviour at
+    /// every boundary of `onto_len` — the smallest legal length (one past the
+    /// last mapped index), exactly the signal length, one past it, and far past
+    /// it — and pins the two documents to it, so the old wording fails the
+    /// last two assertions.
+    #[test]
+    fn a_reprojected_census_does_not_claim_to_reconcile() {
+        let bars = run(6);
+        let mut ev = build_evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        assert!(!column.is_empty(), "the fixture must produce rows");
+        assert!(column.census().reconciles(), "the signal column reconciles");
+        let signal_len = usize::try_from(column.census().offered).expect("fits");
+        let onto: Vec<Option<usize>> = (0..column.len()).map(Some).collect();
+        let smallest = column.len();
+        for onto_len in [smallest, signal_len, signal_len + 1, signal_len * 3] {
+            let (projected, dropped) = column
+                .reproject(&onto, onto_len)
+                .expect("every index is inside the series");
+            assert_eq!(dropped, 0);
+            assert_eq!(projected.census().offered, onto_len as u64);
+            assert_eq!(
+                projected.census().reconciles(),
+                onto_len == signal_len,
+                "onto_len {onto_len} against a signal series of {signal_len}"
+            );
+        }
+        // One short of the last mapped index is refused, not reconciled.
+        assert!(column.reproject(&onto, smallest - 1).is_none());
+
+        // Each needle is assembled from two halves, so this test's own text is
+        // not what satisfies it.
+        let source = include_str!("column.rs");
+        let replaced = format!("{}{}", "`offered` is NOT ", "left alone");
+        assert!(
+            source.contains(&replaced),
+            "the reprojection comment must say `offered` is replaced"
+        );
+        let scoped = format!("{}{}", "**On a census from [`Column::build`] ", "only**");
+        assert!(
+            source.contains(&scoped),
+            "`reconciles` must say it holds for signal-sourced columns only"
+        );
+        let stale = format!(
+            "{}{}",
+            "THE CENSUS IS THE SIGNAL SERIES', AND IS ", "LEFT ALONE"
+        );
+        assert!(!source.contains(&stale), "the old comment is gone");
     }
 
     /// TWO SIGNALS, ONE FILL BAR, ONE ROW -- and the second is counted, not lost.

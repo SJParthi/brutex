@@ -140,9 +140,11 @@ fn complete_merge_preserves_original_bytes_and_concurrent_readers() {
         revised.read_record(5),
         Err(StoreError::NotCommitted { .. })
     ));
+    // Two live READERS hold the revision: the writer is refused and told a
+    // reader holds it (barflow-1, D-2552), never "another writer".
     assert!(matches!(
         BarFile::open_or_create(&fixture.revision_root(), path(), 7),
-        Err(StoreError::Locked { .. })
+        Err(StoreError::ReaderHolds { .. })
     ));
     assert_eq!(
         BarFile::open_existing(&fixture.0, path(), 7)

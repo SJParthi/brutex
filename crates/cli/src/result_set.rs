@@ -19,7 +19,7 @@
 //! hash probe. Neither bound is presented as measured.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek as _, SeekFrom, Write as _};
+use std::io::{Read, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -335,14 +335,9 @@ impl Receipts {
             STRIDE,
             &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
         )?;
-        if file
-            .metadata()
-            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
-            .len()
-            == 0
-        {
-            write_header(&mut file, &path)?;
-        }
+        // Writes the header into an empty file, and re-initialises an
+        // all-zero or torn one, under this writer's lock (conc5-1, D-2644).
+        write_header(&mut file, &path)?;
         Self::from_file(file, lock, path, None)
     }
 
@@ -1041,18 +1036,14 @@ fn committed_receipt_with_limit(
     })
 }
 
+/// The writer's header through the shared rule (conc5-1, D-2644): written
+/// into an empty file, an all-zero or torn header re-initialised, a failed
+/// write or barrier cut back to nothing and the barrier remembered. A file
+/// holding more than an interrupted header is left for `from_file` to check.
 fn write_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
-    let mut header = [0_u8; HEADER_BYTES];
-    header
-        .get_mut(..8)
-        .unwrap_or(&mut [])
-        .copy_from_slice(&MAGIC);
-    header
-        .get_mut(8..12)
-        .unwrap_or(&mut [])
-        .copy_from_slice(&VERSION.to_le_bytes());
-    file.write_all(&header)
-        .and_then(|()| file.sync_all())
+    let header: [u8; HEADER_BYTES] = crate::fixed_tail::sixteen_byte_header(MAGIC, VERSION);
+    crate::fixed_tail::init_or_heal_header(file, path, &header, File::sync_all)
+        .map(drop)
         .map_err(|why| {
             format!(
                 "{} could not receive a durable header: {why}",

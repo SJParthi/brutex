@@ -66,6 +66,7 @@ fn session_member() -> Member {
         path: PathBuf::from("/bought/NIFTY.csv"),
         instrument: "NIFTY".to_owned(),
         rows,
+        skipped: pull::fetch::DecodeSkips::default(),
     }
 }
 
@@ -368,6 +369,7 @@ fn broker_duplicates_do_not_double_volume_and_conflicts_are_refused() {
     let conflict = Scratch::new("broker-conflict");
     let req = request();
     let mut raw = pull::fetch::RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: session_member().rows,
     };
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &clean.0, plan(&req));
@@ -423,7 +425,10 @@ fn request_minutes_cash_requires_instrument_eligibility_after_session_change() {
     let mut into = plan(&req);
     into.segment = "CASH";
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows: Vec::new() },
+        &pull::fetch::RawWindow {
+            rows: Vec::new(),
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "TEST",
         "test",
         &scratch.0,
@@ -465,7 +470,10 @@ fn dated_cash_close_filters_auction_and_derives_the_same_continuous_session() {
         let mut into = plan(&req);
         into.segment = "CASH";
         into.cash_schedule = Some(&schedule);
-        let raw = pull::fetch::RawWindow { rows: member.rows };
+        let raw = pull::fetch::RawWindow {
+            rows: member.rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        };
         let done = pull::ingest::from_window(&raw, "TEST", "test", &scratch.0, into);
         assert_eq!(done.rows_read, 375);
         assert_eq!(done.bars_committed, expected);
@@ -519,7 +527,10 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
     let mut into = plan(&req);
     into.segment = "CASH";
     into.cash_schedule = Some(&schedule);
-    let raw = pull::fetch::RawWindow { rows: member.rows };
+    let raw = pull::fetch::RawWindow {
+        rows: member.rows,
+        skipped: pull::fetch::DecodeSkips::default(),
+    };
     let done = pull::ingest::from_window(&raw, "TEST", "test", &scratch.0, into);
     assert_eq!(done.bars_committed, 360);
     assert_eq!(done.census.total(), 15);
@@ -557,7 +568,10 @@ fn a_window_past_the_calendar_names_each_day_once_per_rung() {
         }
         rows.extend(member.rows);
     }
-    let raw = pull::fetch::RawWindow { rows };
+    let raw = pull::fetch::RawWindow {
+        rows,
+        skipped: pull::fetch::DecodeSkips::default(),
+    };
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
     assert_eq!(done.bars_committed, 5 * 375, "the minute source is kept");
     assert_eq!(done.derived_files, 0, "and nothing is derived from it");
@@ -596,7 +610,10 @@ fn request_minutes_skip_closed_days_but_name_unverified_sessions() {
         let mut req = request();
         req.window = Window::new(day, day).unwrap();
         let done = pull::ingest::from_window(
-            &pull::fetch::RawWindow { rows: Vec::new() },
+            &pull::fetch::RawWindow {
+                rows: Vec::new(),
+                skipped: pull::fetch::DecodeSkips::default(),
+            },
             "NIFTY",
             "test",
             &scratch.0,
@@ -645,7 +662,10 @@ fn runtime_observations_cannot_authorize_a_new_session_or_close_an_absent_day() 
         .collect();
     let mut into = plan(&req);
     into.calendar = Runtime::from_observed(&observed);
-    let raw = pull::fetch::RawWindow { rows };
+    let raw = pull::fetch::RawWindow {
+        rows,
+        skipped: pull::fetch::DecodeSkips::default(),
+    };
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, into);
     assert_eq!(done.bars_committed, 375);
     assert_eq!(done.derived_files, 0);
@@ -692,6 +712,7 @@ fn runtime_truncated_observations_do_not_shorten_a_known_session() {
     let mut into = plan(&req);
     into.calendar = Runtime::from_observed(&observed);
     let raw = pull::fetch::RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: session_member().rows,
     };
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, into);
@@ -707,7 +728,10 @@ fn request_minutes_do_not_attest_unordered_rows_or_derivative_requests() {
     let mut rows = session_member().rows;
     rows.swap(0, 1);
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows },
+        &pull::fetch::RawWindow {
+            rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &scratch.0,
@@ -727,7 +751,10 @@ fn request_minutes_do_not_attest_unordered_rows_or_derivative_requests() {
     req.listing = pull::vendor::Listing::Derivative;
     let scratch = Scratch::new("request-derivative-exempt");
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows: Vec::new() },
+        &pull::fetch::RawWindow {
+            rows: Vec::new(),
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &scratch.0,
@@ -770,7 +797,10 @@ fn request_minutes_report_month_end_absent_days_and_final_tail_without_weekend_g
         );
     }
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows },
+        &pull::fetch::RawWindow {
+            rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &scratch.0,
@@ -802,7 +832,10 @@ fn request_minutes_aggregate_opening_and_interior_gaps_and_report_empty_requests
         .filter_map(|(i, row)| (i >= 5 && !(60..75).contains(&i)).then_some(row))
         .collect();
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows },
+        &pull::fetch::RawWindow {
+            rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &scratch.0,
@@ -819,7 +852,10 @@ fn request_minutes_aggregate_opening_and_interior_gaps_and_report_empty_requests
     assert!(gaps[1].why.contains("10:15–10:30"));
     let empty = Scratch::new("request-empty");
     let done = pull::ingest::from_window(
-        &pull::fetch::RawWindow { rows: Vec::new() },
+        &pull::fetch::RawWindow {
+            rows: Vec::new(),
+            skipped: pull::fetch::DecodeSkips::default(),
+        },
         "NIFTY",
         "test",
         &empty.0,
@@ -838,6 +874,7 @@ fn broker_candles_shifted_thirty_seconds_refuse_before_any_write() {
     let scratch = Scratch::new("broker-shifted");
     let req = request();
     let mut raw = pull::fetch::RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: session_member().rows,
     };
     for row in &mut raw.rows {
@@ -865,6 +902,7 @@ fn an_extra_broker_timestamp_inside_a_minute_refuses_but_archive_seconds_survive
     extra.timestamp += 30;
     member.rows.insert(1, extra);
     let raw = pull::fetch::RawWindow {
+        skipped: pull::fetch::DecodeSkips::default(),
         rows: member.rows.clone(),
     };
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &broker.0, plan(&req));
@@ -897,7 +935,10 @@ fn daily_broker_sources_do_not_require_the_intraday_opening_grid() {
         into.vendor = brutex_core::vendor::Vendor::Zerodha;
         let mut row = session_member().rows[0];
         row.timestamp = timestamp;
-        let raw = pull::fetch::RawWindow { rows: vec![row] };
+        let raw = pull::fetch::RawWindow {
+            rows: vec![row],
+            skipped: pull::fetch::DecodeSkips::default(),
+        };
         let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, into);
         assert!(done.failures.is_empty(), "{tag}: {:?}", done.failures);
         assert_eq!(done.bars_committed, 1);
@@ -943,7 +984,10 @@ fn broker_grid_uses_requested_width_and_preserves_millisecond_precision() {
         let mut row = session_member().rows[0];
         row.timestamp = timestamp;
         let done = pull::ingest::from_window(
-            &pull::fetch::RawWindow { rows: vec![row] },
+            &pull::fetch::RawWindow {
+                rows: vec![row],
+                skipped: pull::fetch::DecodeSkips::default(),
+            },
             "NIFTY",
             "test",
             &scratch.0,
@@ -1072,7 +1116,10 @@ fn incomplete_historical_source_requires_evidence_before_a_store_remedy() {
         );
         let before = fs::read(&at).unwrap();
         member.rows.drain(missing);
-        let raw = pull::fetch::RawWindow { rows: member.rows };
+        let raw = pull::fetch::RawWindow {
+            rows: member.rows,
+            skipped: pull::fetch::DecodeSkips::default(),
+        };
         let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
         assert_eq!(done.bars_committed, raw.rows.len());
         assert_eq!(done.derived_files, 6);

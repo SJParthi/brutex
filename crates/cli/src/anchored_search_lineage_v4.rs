@@ -730,21 +730,26 @@ impl AnchoredSearchLineageV4Ledger {
                 // lock; the bytes past the last whole record were never acknowledged.
                 // A whole NIFTY member left by a torn pair is kept: the scan
                 // already treats it as the exact retry's orphan.
-                for (file, path, width) in [
+                // Each file is cut only when it begins with its own records'
+                // magic, so a renamed or foreign file reaches the scan's
+                // refusal uncut (CE-89, D-2795).
+                for (file, path, width, magic) in [
                     (
                         &member_file,
                         &member_path,
                         ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES,
+                        &MEMBER_MAGIC,
                     ),
                     (
                         &completion_file,
                         &completion_path,
                         ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES,
+                        &COMPLETION_MAGIC,
                     ),
                 ] {
                     let width = u64::try_from(width)
                         .map_err(|_| "search-lineage V4 width does not fit u64".to_owned())?;
-                    crate::fixed_tail::heal_torn_tail(file, path, 0, width, &[])?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, width, magic)?;
                 }
             }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_FILE_MAX_BYTES)?;
@@ -2666,6 +2671,45 @@ mod tests {
     }
 
     #[test]
+    fn a_torn_record_of_its_own_is_cut_by_the_next_writer() {
+        for (label, file_name, magic) in [
+            ("torn-member", MEMBER_FILE, MEMBER_MAGIC),
+            ("torn-completion", COMPLETION_FILE, COMPLETION_MAGIC),
+        ] {
+            let root = TestRoot::new(label);
+            initialize(root.path());
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(root.path().join(file_name))
+                .expect("open V4 file for torn append");
+            file.write_all(&magic[..5]).expect("append torn V4 record");
+            file.sync_all().expect("sync torn V4 record");
+            drop(file);
+            assert_refuses(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
+                "ragged",
+            );
+            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
+            // tail of its own record, and a reader then opens.
+            drop(
+                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
+                    .expect("the writer cuts the ragged tail"),
+            );
+            assert_eq!(
+                std::fs::metadata(root.path().join(file_name))
+                    .expect("measure healed V4 file")
+                    .len(),
+                0,
+                "the torn {label} record is cut"
+            );
+            drop(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
+                    .expect("a reader opens the healed ledger"),
+            );
+        }
+    }
+
+    #[test]
     fn member_completion_ragged_and_canonical_order_attacks_fail_closed() {
         let (nifty, banknifty) = projections();
 
@@ -2704,15 +2748,25 @@ mod tests {
                 AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
                 "ragged",
             );
-            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
-            // tail, and a reader then opens.
-            drop(
-                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
-                    .expect("the writer cuts the ragged tail"),
+            // CE-89, D-2794/D-2795: the WRITABLE open refuses the same
+            // foreign-byte file and cuts nothing -- a renamed or foreign file
+            // is never truncated before it is refused.
+            let held = std::fs::read(root.path().join(file_name)).expect("ragged bytes");
+            let (nifty_again, banknifty_again) = projections();
+            assert!(
+                persist_anchored_search_lineage_v4(
+                    root.path(),
+                    bounds(),
+                    &nifty_again,
+                    &banknifty_again
+                )
+                .is_err(),
+                "a writable open over a ragged {label} file refuses"
             );
-            drop(
-                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
-                    .expect("a reader opens the healed ledger"),
+            assert_eq!(
+                std::fs::read(root.path().join(file_name)).expect("ragged bytes kept"),
+                held,
+                "the writable open cut nothing"
             );
         }
 

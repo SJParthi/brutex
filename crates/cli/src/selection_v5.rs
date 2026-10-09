@@ -2097,17 +2097,28 @@ impl SelectionV5Ledger {
         if let Some(existing) = self.receipts.get(&prepared.selection_id).copied() {
             return self.reuse_existing(prepared, existing);
         }
-        let trailing = self.trailing.clone().unwrap_or(TrailingSelectionV5 {
+        if let Some(trailing) = self.trailing.clone() {
+            self.withdraw_trailing(prepared, &trailing)?;
+        }
+        let trailing = TrailingSelectionV5 {
             first_row_record: self.row_records,
             rows: Vec::new(),
-        });
-        Self::require_exact_prefix(prepared, &trailing)?;
+        };
         self.require_append_bound(prepared, &trailing)?;
-        self.append_row_suffix(prepared, trailing.rows.len())?;
-        self.rows
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Selection V5 winner rows: {why}"))?;
+        let block_start = trailing
+            .first_row_record
+            .checked_mul(SELECTION_V5_ROW_BYTES as u64)
+            .ok_or_else(|| "Selection V5 row offset overflowed".to_owned())?;
+        self.append_row_suffix(prepared, 0)?;
+        // A failed barrier cuts the block back and is remembered for this
+        // process; a second barrier never confirms it (ledgers-2, D-2556).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.rows.file,
+            &self.rows.path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Selection V5 winner rows: {why}"))?;
         self.rows.refresh()?;
         self.row_records = self.rows.record_count()?;
         self.require_unchanged()?;
@@ -2147,6 +2158,10 @@ impl SelectionV5Ledger {
                 hex32(existing.selection_id)
             ));
         }
+        // A path whose barrier failed in this process is never confirmed by
+        // a second one (ledgers-2, D-2556).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.rows.path)?;
+        crate::fixed_tail::refuse_after_failed_barrier(&self.completions.path)?;
         self.rows
             .file
             .sync_data()
@@ -2155,6 +2170,39 @@ impl SelectionV5Ledger {
         sync_directory(&self.root_file, &self.root)?;
         self.require_unchanged()?;
         Ok(SelectionV5StructuralCommit::Reused(existing))
+    }
+
+    /// Cuts the receipt-less trailing rows before this append writes: this
+    /// exact retry's own prefix is rewritten rather than vouched for, and
+    /// another identity's is discarded with a warn event rather than refusing
+    /// the rung for good (pop2-4, ledgerall-1, ledgers-2, D-2556).
+    fn withdraw_trailing(
+        &mut self,
+        prepared: &PreparedSelectionV5,
+        trailing: &TrailingSelectionV5,
+    ) -> Result<(), SelectionV5Refusal> {
+        let at = trailing
+            .first_row_record
+            .checked_mul(SELECTION_V5_ROW_BYTES as u64)
+            .ok_or_else(|| "Selection V5 row offset overflowed".to_owned())?;
+        if Self::require_exact_prefix(prepared, trailing).is_ok() {
+            self.rows
+                .file
+                .set_len(at)
+                .and_then(|()| self.rows.file.sync_all())
+                .map_err(|why| format!("cannot cut Selection V5 retry prefix: {why}"))?;
+        } else {
+            crate::fixed_tail::discard_orphan(
+                &self.rows.file,
+                &self.rows.path,
+                at,
+                "Selection V5 winner rows that are not this exact retry",
+            )?;
+        }
+        self.rows.refresh()?;
+        self.row_records = self.rows.record_count()?;
+        self.trailing = None;
+        Ok(())
     }
 
     fn require_exact_prefix(
@@ -2221,11 +2269,18 @@ impl SelectionV5Ledger {
         first_row_record: u64,
     ) -> Result<(), SelectionV5Refusal> {
         let completion = prepared.expected_completion(self.completion_records, first_row_record)?;
+        let completion_start = self
+            .completion_records
+            .checked_mul(SELECTION_V5_COMPLETION_BYTES as u64)
+            .ok_or_else(|| "Selection V5 Completion offset overflowed".to_owned())?;
         append_raw(&mut self.completions.file, &completion.encode()?)?;
-        self.completions
-            .file
-            .sync_data()
-            .map_err(|why| format!("cannot sync Selection V5 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completions.file,
+            &self.completions.path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(|why| format!("cannot sync Selection V5 Completion: {why}"))?;
         sync_directory(&self.root_file, &self.root)?;
         self.completions.refresh()?;
         self.completion_records = self.completions.record_count()?;
@@ -4218,8 +4273,11 @@ mod tests {
         assert_eq!(directory_bytes(root.path()), before);
     }
 
+    /// pop2-4 / ledgerall-1, D-2556: an exact prefix is completed, and a
+    /// foreign or reordered receipt-less prefix is discarded rather than
+    /// refusing every later Selection on the rung.
     #[test]
-    fn every_exact_winner_prefix_recovers_but_foreign_or_reordered_prefix_refuses() {
+    fn every_exact_winner_prefix_recovers_and_a_foreign_or_reordered_prefix_is_discarded() {
         let fixture = prepared(30);
         for prefix in 0..=fixture.rows.len() {
             let root = TestRoot::new(&format!("prefix-{prefix}"));
@@ -4244,7 +4302,12 @@ mod tests {
         .expect("write foreign orphan");
         let mut writer = SelectionV5Ledger::open_write(root.path(), bounds())
             .expect("valid foreign prefix can be inspected");
-        assert!(writer.append(&fixture).is_err());
+        assert!(
+            writer
+                .append(&fixture)
+                .expect("a foreign prefix is scratch")
+                .was_written()
+        );
 
         let root = TestRoot::new("reordered-prefix");
         create_empty_files(root.path());
@@ -4258,7 +4321,47 @@ mod tests {
         .expect("write reordered orphan");
         let mut writer = SelectionV5Ledger::open_write(root.path(), bounds())
             .expect("structurally canonical reordered prefix opens");
-        assert!(writer.append(&fixture).is_err());
+        assert!(
+            writer
+                .append(&fixture)
+                .expect("a reordered prefix is scratch")
+                .was_written()
+        );
+    }
+
+    /// ledgers-2, D-2556: a failed row or Completion barrier cuts the block,
+    /// and the exact retry over its own prefix issues a barrier of its own.
+    #[test]
+    fn a_failed_selection_v5_barrier_is_cut_and_the_retry_rewrites() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let fixture = prepared(30);
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new("failed-v5-selection-barrier");
+            create_empty_files(root.path());
+            {
+                let _armed = Armed::arm(name, Kind::Sync);
+                assert!(commit_prepared_for_test(root.path(), bounds(), &fixture).is_err());
+            }
+            if name == COMPLETION_FILE {
+                let _armed = Armed::arm(ROW_FILE, Kind::Sync);
+                assert!(commit_prepared_for_test(root.path(), bounds(), &fixture).is_err());
+                assert!(!Armed::pending(), "the retry issued its own barrier");
+            }
+            for file in [ROW_FILE, COMPLETION_FILE] {
+                assert_eq!(
+                    std::fs::metadata(root.path().join(file))
+                        .expect("measure")
+                        .len(),
+                    0,
+                    "{name}: {file} is cut back"
+                );
+            }
+            assert!(
+                commit_prepared_for_test(root.path(), bounds(), &fixture)
+                    .expect("the exact rerun writes")
+                    .was_written()
+            );
+        }
     }
 
     #[test]

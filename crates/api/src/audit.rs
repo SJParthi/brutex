@@ -121,6 +121,16 @@ use pull::session::{DropCensus, DropReason, Window};
 use store::crc::crc32c;
 use store::flock::Flock;
 
+/// Serialises in-process appenders of any [`Journal`] for one write and one
+/// fsync, so they wait for each other instead of refusing on the
+/// cross-process flock. server1-1, recovery-4, recauto-2, D-2500.
+static APPEND_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Opens a directory and syncs it, so a new entry in it survives a crash.
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
 /// One record, in bytes. Every record is exactly this long, always.
 pub const RECORD_LEN: usize = 256;
 
@@ -785,9 +795,22 @@ impl Record {
     ) -> Self {
         let note = done.failures.first().map_or_else(
             || {
-                if done.balances() {
-                    "every row accounted for: stored, folded into an open bar, or dropped"
-                        .to_owned()
+                // A CANDLE THE DECODER SKIPPED IS NONE OF THE THREE (D-3180).
+                // This record's stride has no field for the count, so the
+                // note names it rather than claim three places for a row
+                // that is in a fourth.
+                //
+                // WITHIN NOTE_CAPACITY (60 since record version 2, D-2673) FOR
+                // ANY COUNT A usize CAN HOLD, and the clean sentence too: both
+                // were written for 68 bytes, and at 60 the clean one lost its
+                // last word on every run (D-3128).
+                if done.balances() && done.decoder_skips.total() > 0 {
+                    format!(
+                        "every row accounted for; {} decoder skips",
+                        done.decoder_skips.total()
+                    )
+                } else if done.balances() {
+                    "every row accounted for: stored, folded or dropped".to_owned()
                 } else {
                     "THE BOOKS DO NOT BALANCE — see the run's own page".to_owned()
                 }
@@ -1284,6 +1307,9 @@ impl Journal {
 
     /// The append itself, so the refusal has exactly one place to be noticed.
     ///
+    /// Callers in one process queue on [`APPEND_SERIAL`] for the length of
+    /// one append; only another process meets the non-blocking flock.
+    ///
     /// # Errors
     ///
     /// As [`Self::append`], which is the only caller and adds the line.
@@ -1297,9 +1323,31 @@ impl Journal {
         // split journal there, the case `autopilot`'s "NEVER RECREATE A MISSING
         // STORE ROOT" refuses. Only `audit/` itself is made; a missing parent
         // is refused by name, nothing created. One `mkdir`. W1-api1-9, D-0954.
+        // ONE IN-PROCESS APPENDER AT A TIME, AND IT WAITS. The flock below is
+        // non-blocking, and two open descriptions of one file conflict under
+        // flock even inside one process, so two parallel feed legs of one
+        // press, a recovery receipt and the autopilot's tick record refused
+        // each other's receipts by plain scheduling: the loser read "NOT in
+        // the journal" for a run whose bars had landed. In-process writers now
+        // queue on this mutex for one write and one fsync; the flock stays as
+        // the cross-process guard only. Read through poison: the guard carries
+        // no data. server1-1, recovery-4, recauto-2, D-2500.
+        //
+        // THE TEST HOOK IS RECORDED BEFORE THE FIRST OF THE TWO SERIALISERS
+        // (`APPEND_SERIAL` from D-2500, then `APPENDING` from D-2770, met in
+        // the zero/next merge and always taken in that order). Recorded after
+        // `APPEND_SERIAL`, D-2770's queue test, which holds `APPENDING`, could
+        // wait forever for a writer parked behind another test's appender
+        // that is itself parked on the `APPENDING` the test holds.
+        #[cfg(test)]
+        tests::queued(&self.path);
+        let _serial = APPEND_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut created_dir = None;
         if let Some(dir) = self.path.parent() {
             match std::fs::create_dir(dir) {
-                Ok(()) => {}
+                Ok(()) => created_dir = Some(dir),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(named(
@@ -1310,6 +1358,19 @@ impl Journal {
                 Err(e) => return Err(named("cannot create the audit directory", &e)),
             }
         }
+        // IN-PROCESS WRITERS QUEUE; ONLY ANOTHER PROCESS IS REFUSED. The legs
+        // of one Pull press run in parallel and every leg appends here, as do
+        // a hand pull and a refused request. `flock` conflicts between two
+        // open file descriptions of ONE process, so a leg whose append met
+        // another leg's `write_all` + `sync_all` window was refused and its
+        // run went unrecorded. Held across the whole append so this process
+        // has one writer at a time; `Flock::try_lock` below is then met only
+        // by another process. One record is one `write_all` on an `O_APPEND`
+        // handle, so the wait is one fsync per queued writer, never a scan.
+        // conc:server1-1, D-2770.
+        let _one_writer = APPENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Every path below releases the append lock through the guard's
         // explicit unlock in its `Drop`, a refusal by returning and the
         // success path once the record is synced: closing the descriptor would
@@ -1334,6 +1395,23 @@ impl Journal {
             .metadata()
             .map_err(|e| named("cannot measure the locked journal", &e))?
             .len();
+        // THE NEW DIRECTORY ENTRIES ARE MADE DURABLE BEFORE THE FIRST RECORD.
+        // `sync_all` on the file makes its inode and data durable, not the
+        // entry naming it: a power cut after the first ever "Recorded: yes"
+        // could leave `audit/` or `pull.journal` unreachable. So a directory
+        // this call created is synced into the store root, and an empty
+        // journal (the one this call may have just created) is synced into
+        // `audit/`. Both happen once per store; the steady-state append is
+        // unchanged. press-2, D-2500.
+        if let Some(dir) = created_dir {
+            sync_directory(dir.parent().unwrap_or(dir))
+                .map_err(|e| named("cannot make the new audit directory durable", &e))?;
+        }
+        if bytes == 0
+            && let Some(dir) = self.path.parent()
+        {
+            sync_directory(dir).map_err(|e| named("cannot make the new journal durable", &e))?;
+        }
         let torn = bytes % RECORD_LEN_U64;
         if torn != 0 {
             return Err(format!(
@@ -1739,6 +1817,11 @@ fn covered(image: &[u8; RECORD_LEN]) -> [u8; OFF_CRC] {
     head
 }
 
+/// The one in-process journal writer at a time. See [`Journal::appended`]:
+/// the file lock refuses another process, and this makes this process's own
+/// writers wait for each other instead of refusing each other (D-2770).
+static APPENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -1851,7 +1934,7 @@ mod tests {
 
     fn run() -> Ingested {
         Ingested {
-            pending: None,
+            pending: Vec::new(),
             bars_committed: 0,
             derived_files: 0,
             members: 194,
@@ -1860,6 +1943,7 @@ mod tests {
             rows_folded: 291_527,
             counted: 194,
             census: census(0, 170, 0, 0),
+            decoder_skips: pull::fetch::DecodeSkips::default(),
             failures: Vec::new(),
         }
     }
@@ -2652,6 +2736,170 @@ mod tests {
                 torn: None,
             }
         );
+    }
+
+    /// The journals a writer in this test binary has queued on, recorded just
+    /// before it waits for [`APPEND_SERIAL`] and then [`APPENDING`], so a test
+    /// can tell "waiting" from "not started" without a clock.
+    static QUEUED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+    pub(super) fn queued(path: &Path) {
+        QUEUED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_path_buf());
+    }
+
+    fn has_queued(path: &Path) -> bool {
+        QUEUED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(path)
+    }
+
+    /// **Two writers in ONE process queue for the journal; neither is
+    /// refused.** conc:server1-1, D-2770.
+    ///
+    /// The legs of one Pull press run in parallel and each appends its run
+    /// record here. The file lock conflicts between two handles of one
+    /// process, so a leg that met another leg's append was refused and its
+    /// run was never recorded. The first writer is modelled by holding what
+    /// it holds mid-append (the in-process serialiser and the file lock);
+    /// the second must wait for it and then land.
+    #[test]
+    fn a_second_writer_in_this_process_waits_for_the_first_instead_of_being_refused() {
+        let root = scratch("audit-in-process-queue");
+        let journal = Journal::at(&root);
+        std::fs::create_dir_all(journal.path.parent().expect("a parent")).expect("audit dir");
+        let first_writer = APPENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let first_lock = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&journal.path)
+                .expect("the journal handle"),
+            journal.path.clone(),
+        )
+        .expect("nothing else holds it");
+        let landed = std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                journal.append(&Record::refused(
+                    Scope::Spot,
+                    Outcome::Stored,
+                    at(1),
+                    "second-leg",
+                    "",
+                ))
+            });
+            // No clock: the second writer either queues (recorded) or, without
+            // the serialiser, is refused at once (finished).
+            while !second.is_finished() && !has_queued(&journal.path) {
+                std::thread::yield_now();
+            }
+            drop(first_lock);
+            drop(first_writer);
+            second.join().expect("the second writer")
+        });
+        landed.expect("an in-process writer waits for the first and is not refused");
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 1,
+                bytes: RECORD_LEN_U64,
+                torn: None,
+            }
+        );
+    }
+
+    /// IN-PROCESS APPENDERS WAIT FOR EACH OTHER; NONE IS REFUSED. D-2500.
+    ///
+    /// The append lock was a non-blocking flock on a freshly opened
+    /// description, and two descriptions of one file conflict under flock
+    /// inside one process too. Parallel feed legs of one press, a recovery
+    /// receipt and the autopilot tick each lost their record to plain
+    /// scheduling. Eight threads appending at once must all land, every
+    /// record whole. server1-1, recovery-4, recauto-2.
+    #[test]
+    fn in_process_appenders_wait_for_each_other_instead_of_refusing() {
+        let root = scratch("audit-parallel");
+        let journal = std::sync::Arc::new(Journal::at(&root));
+        let threads: Vec<_> = (0..8u32)
+            .map(|t| {
+                let journal = std::sync::Arc::clone(&journal);
+                std::thread::spawn(move || {
+                    (0..20u32)
+                        .map(|i| {
+                            journal.append(&Record::refused(
+                                Scope::Spot,
+                                Outcome::Stored,
+                                at(i64::from(t * 100 + i)),
+                                "parallel",
+                                "",
+                            ))
+                        })
+                        .filter(Result::is_err)
+                        .count()
+                })
+            })
+            .collect();
+        let refused: usize = threads
+            .into_iter()
+            .map(|h| h.join().expect("an appender thread"))
+            .sum();
+        assert_eq!(refused, 0, "no in-process appender may be refused");
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 160,
+                bytes: 160 * RECORD_LEN_U64,
+                torn: None,
+            }
+        );
+    }
+
+    /// THE FIRST RECORD'S DIRECTORY ENTRIES ARE SYNCED BEFORE IT IS WRITTEN.
+    ///
+    /// A power cut cannot be driven from a test, so this reads `appended`'s
+    /// own source: before `write_all`, a directory this call created is
+    /// synced into the store root and an empty journal into `audit/`. Without
+    /// both, "Recorded: yes" for a store's first run rested on directory
+    /// entries nothing had made durable. press-2, D-2500.
+    #[test]
+    fn a_first_append_syncs_the_new_directory_entries_before_writing() {
+        let body = include_str!("audit.rs")
+            .split_once("    fn appended(&self, record: &Record) -> Result<(), String> {\n")
+            .expect("`appended` is in this file")
+            .1
+            .split_once("\n    }\n")
+            .expect("`appended` ends")
+            .0;
+        let before_write = body
+            .split_once("write_rolled_back(")
+            .expect("`appended` writes the record")
+            .0;
+        assert!(
+            before_write.contains("sync_directory(dir.parent().unwrap_or(dir))"),
+            "a created audit directory is synced into the store root"
+        );
+        assert!(
+            before_write.contains("if bytes == 0") && before_write.contains("sync_directory(dir)"),
+            "an empty journal is synced into its directory"
+        );
+        let root = scratch("audit-first-entry");
+        Journal::at(&root)
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Stored,
+                at(1),
+                "first",
+                "",
+            ))
+            .expect("the first append on a fresh store");
+        assert!(root.join("audit").is_dir());
     }
 
     /// ONCE THE RECORD IS SYNCED, NOTHING MAY REFUSE THE APPEND. D-0695.

@@ -18,8 +18,12 @@
 //!
 //! Coordinate reconstruction and OOS replay are linear in the supplied bars,
 //! resolved grid and candidate paths.  The chronological merge examines at
-//! most 200 stream heads per emitted minute.  Persistence, hashing and reopen
-//! are linear in their records.  Only an already-indexed execution-capability
+//! most 200 stream heads per emitted minute, indexes the minute's offered
+//! constituents once, and resolves each scheduled decision with one
+//! expected-O(1) probe of that index rather than a rescan of every offered
+//! stream (rep-1, D-2640; UNVERIFIED as a measured bound, proven only in
+//! shape by `cli::global_replay::tests::a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan`).
+//! Persistence, hashing and reopen are linear in their records.  Only an already-indexed execution-capability
 //! lookup is average O(1); this module makes no end-to-end O(1) claim.
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
@@ -508,8 +512,9 @@ impl ScheduleStateV1 {
             .scheduler
             .schedule_minute(entry_micros, &offered)
             .map_err(|refusal| format!("global minute {entry_micros} refused: {refusal:?}"))?;
+        let offered_index = OfferedIndex::new(&offered, &offered_streams)?;
         for decision in schedule.decisions() {
-            self.record_decision(decision, runtime, &offered_streams, vix)?;
+            self.record_decision(decision, runtime, &offered_index, vix)?;
         }
         Ok(())
     }
@@ -518,10 +523,10 @@ impl ScheduleStateV1 {
         &mut self,
         decision: &PortfolioDecision,
         runtime: &mut [RuntimeStream],
-        offered_streams: &[usize],
+        offered: &OfferedIndex,
         vix: &VixCatalogV1<'_>,
     ) -> Result<(), GlobalReplayRefusal> {
-        let stream_index = find_offered_stream(runtime, offered_streams, decision.constituent)?;
+        let stream_index = find_offered_stream(offered, decision.constituent)?;
         let stream = runtime
             .get_mut(stream_index)
             .ok_or_else(|| "scheduled stream index disappeared".to_owned())?;
@@ -747,24 +752,77 @@ fn constituent_of(stream: &RuntimeStream) -> Result<Constituent, GlobalReplayRef
     })
 }
 
+/// Which offered stream a scheduled constituent names (rep-1, D-2640).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OfferedStream {
+    /// Exactly one offered stream carries the constituent.
+    Found(usize),
+    /// Two or more offered streams carry it.
+    Aliased,
+    /// No offered stream carries it.
+    Unoffered,
+}
+
+/// One minute's offered constituents, indexed ONCE per minute (rep-1,
+/// D-2640).
+///
+/// Every scheduled decision used to rescan every offered stream and rebuild
+/// each one's `Constituent` from its record, so a minute with 200 offered
+/// streams cost up to 200² rebuilds where the module header promised "at most
+/// 200 stream heads per emitted minute". The minute's intents already carry
+/// each constituent, built once in `offered_for_minute`; they are indexed
+/// here once, and each decision is one expected-O(1) probe. The answers are
+/// the scan's: a unique match, an alias, or nothing offered. UNVERIFIED as a
+/// measured bound; proven in shape by
+/// `cli::global_replay::tests::a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan`.
+pub(crate) struct OfferedIndex(HashMap<Constituent, OfferedStream>);
+
+impl OfferedIndex {
+    /// Indexes `intents[k]` as stream `streams[k]`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses intents and stream indexes of different lengths, or an
+    /// allocation the host denies.
+    pub(crate) fn new(intents: &[Intent], streams: &[usize]) -> Result<Self, String> {
+        if intents.len() != streams.len() {
+            return Err("offered intents and stream indexes differ in length".to_owned());
+        }
+        let mut index = HashMap::new();
+        index
+            .try_reserve(intents.len())
+            .map_err(|why| format!("offered-constituent index allocation refused: {why}"))?;
+        for (intent, stream) in intents.iter().zip(streams.iter().copied()) {
+            index
+                .entry(intent.constituent)
+                .and_modify(|seen| *seen = OfferedStream::Aliased)
+                .or_insert(OfferedStream::Found(stream));
+        }
+        Ok(Self(index))
+    }
+
+    /// The offered stream `constituent` names.
+    pub(crate) fn find(&self, constituent: Constituent) -> OfferedStream {
+        self.0
+            .get(&constituent)
+            .copied()
+            .unwrap_or(OfferedStream::Unoffered)
+    }
+}
+
 fn find_offered_stream(
-    runtime: &[RuntimeStream],
-    offered: &[usize],
+    offered: &OfferedIndex,
     constituent: Constituent,
 ) -> Result<usize, GlobalReplayRefusal> {
-    let mut found = None;
-    for index in offered.iter().copied() {
-        let Some(stream) = runtime.get(index) else {
-            return Err("offered stream index is outside the runtime".to_owned());
-        };
-        if constituent_of(stream)? == constituent {
-            if found.is_some() {
-                return Err("scheduler constituent aliases more than one runtime stream".to_owned());
-            }
-            found = Some(index);
+    match offered.find(constituent) {
+        OfferedStream::Found(index) => Ok(index),
+        OfferedStream::Aliased => {
+            Err("scheduler constituent aliases more than one runtime stream".to_owned())
+        }
+        OfferedStream::Unoffered => {
+            Err("scheduler returned a constituent not offered for this minute".to_owned())
         }
     }
-    found.ok_or_else(|| "scheduler returned a constituent not offered for this minute".to_owned())
 }
 
 fn absorb_quality(
@@ -5158,5 +5216,105 @@ mod tests {
         assert!(why.contains("injected encode refusal"), "{why}");
         assert!(why.contains("rolled back to byte 24"), "{why}");
         fs::remove_dir_all(&dir).expect("remove append-rollback root");
+    }
+
+    fn offered_constituent(priority: u16, direction: Direction) -> Constituent {
+        Constituent {
+            priority,
+            strategy_digest: StrategyDigest::new([u8::try_from(priority % 251).unwrap(); 32]),
+            instrument: InstrumentKey::index(Exchange::Nse, "NIFTY").unwrap(),
+            direction,
+            rung_minutes: 5,
+        }
+    }
+
+    fn offered_intent(constituent: Constituent) -> Intent {
+        Intent {
+            constituent,
+            evidence: Evidence::Reachable {
+                occupied_through_micros: 0,
+            },
+        }
+    }
+
+    /// The scan `find_offered_stream` ran per decision before rep-1, as the
+    /// oracle the per-minute index is proven against.
+    fn scanned(intents: &[Intent], streams: &[usize], constituent: Constituent) -> OfferedStream {
+        let mut found = OfferedStream::Unoffered;
+        for (intent, stream) in intents.iter().zip(streams) {
+            if intent.constituent == constituent {
+                found = match found {
+                    OfferedStream::Unoffered => OfferedStream::Found(*stream),
+                    _ => OfferedStream::Aliased,
+                };
+            }
+        }
+        found
+    }
+
+    /// rep-1 (D-2640): a minute's offered constituents are indexed once and
+    /// every scheduled decision is answered as the per-decision scan answered
+    /// it: the unique stream, an alias refusal, or an unoffered refusal. The
+    /// scan rebuilt every offered stream's constituent for every decision,
+    /// up to 200² per minute; `find_offered_stream` no longer takes the
+    /// runtime at all, which the source check below pins.
+    #[test]
+    fn a_minute_of_200_offers_is_indexed_once_and_answers_like_the_scan() {
+        // 200 distinct constituents, streams in reverse order.
+        let intents: Vec<Intent> = (1..=200_u16)
+            .map(|p| offered_intent(offered_constituent(p, Direction::Long)))
+            .collect();
+        let streams: Vec<usize> = (0..200).rev().collect();
+        let index = OfferedIndex::new(&intents, &streams).expect("index");
+        for (intent, stream) in intents.iter().zip(&streams) {
+            assert_eq!(
+                index.find(intent.constituent),
+                OfferedStream::Found(*stream)
+            );
+            assert_eq!(find_offered_stream(&index, intent.constituent), Ok(*stream));
+        }
+        // Same priority, other side: a different constituent, not offered.
+        let short = offered_constituent(1, Direction::Short);
+        assert_eq!(index.find(short), OfferedStream::Unoffered);
+        assert!(
+            find_offered_stream(&index, short)
+                .unwrap_err()
+                .contains("not offered for this minute")
+        );
+        // An alias is refused for that constituent only, as the scan did.
+        let mut aliased = intents.clone();
+        aliased.push(offered_intent(offered_constituent(7, Direction::Long)));
+        let mut alias_streams = streams.clone();
+        alias_streams.push(200);
+        let index = OfferedIndex::new(&aliased, &alias_streams).expect("index");
+        for probe in (1..=201_u16)
+            .map(|p| offered_constituent(p, Direction::Long))
+            .chain([short])
+        {
+            assert_eq!(
+                index.find(probe),
+                scanned(&aliased, &alias_streams, probe),
+                "{probe:?}"
+            );
+        }
+        assert!(
+            find_offered_stream(&index, offered_constituent(7, Direction::Long))
+                .unwrap_err()
+                .contains("aliases more than one runtime stream")
+        );
+        // Empty minute; mismatched lengths.
+        let empty = OfferedIndex::new(&[], &[]).expect("empty minute");
+        assert_eq!(empty.find(short), OfferedStream::Unoffered);
+        assert!(OfferedIndex::new(&intents, &streams[..199]).is_err());
+        // The decision path no longer rebuilds constituents per decision.
+        let source = include_str!("global_replay.rs");
+        let body = source
+            .split_once("fn find_offered_stream(")
+            .expect("find_offered_stream exists")
+            .1
+            .split_once("\n}\n")
+            .expect("its body ends")
+            .0;
+        assert!(!body.contains("constituent_of("), "{body}");
     }
 }

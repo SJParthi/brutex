@@ -757,3 +757,74 @@ fn admitted_quality_counts_refuse_on_overflow_instead_of_wrapping() {
     assert_eq!(edge.admitted_ambiguous_bars, u64::MAX);
     assert_eq!(edge.admitted_gap_fills, u64::MAX);
 }
+
+/// replay-5 (D-2636): a VIX month a writer holds when the replay first needs
+/// it is waited for a bounded second, never refused at once and never turned
+/// into absence. On the old code `VixCatalog::stamp` opened through the plain
+/// door, so the held month refused at once with "another writer holds" and
+/// this test's first stamp was `Err`.
+#[test]
+fn a_vix_month_held_briefly_by_a_writer_is_waited_for_not_refused() {
+    use store::file::BarFile;
+    use store::path::{FileKind, StorePath, Timeframe, YearMonth};
+    let scratch = Scratch::new();
+    let month = YearMonth::new(2025, 5).expect("month");
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        crate::vix_reference::VIX_REFERENCE_SYMBOL,
+    )
+    .expect("VIX key");
+    let path = StorePath::for_key(
+        Vendor::Dhan,
+        &key,
+        Timeframe::MINUTE_1,
+        month,
+        FileKind::Bars,
+    )
+    .expect("VIX path");
+    let hash =
+        brutex_core::universe::fnv1a(crate::vix_reference::VIX_REFERENCE_SYMBOL).to_le_bytes();
+    let symbol_id = u32::from_le_bytes(hash[..4].try_into().expect("low 32 bits"));
+    let ts = month.ist_bounds_micros().0 + 600 * MINUTE;
+    let mut writer = BarFile::open_or_create(&scratch.0, path, symbol_id).expect("VIX writer");
+    writer
+        .append(&[store::format::Bar {
+            ts_micros: ts,
+            open: 1_500,
+            high: 1_510,
+            low: 1_490,
+            close: 1_505,
+            volume: 0,
+            open_interest: i64::MIN,
+        }])
+        .expect("one VIX bar");
+    // The writer still holds the month when the stamp is asked for, and
+    // closes inside the bound.
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(writer);
+    });
+    let mut catalog = VixCatalog {
+        root: &scratch.0,
+        months: HashMap::new(),
+    };
+    let stamped = catalog.stamp(Vendor::Dhan, ts);
+    release.join().expect("release thread");
+    assert!(
+        matches!(stamped, Ok(VixStamp::Exact(candle)) if candle.close == 1_505),
+        "a briefly held month is waited for, not {stamped:?}"
+    );
+    // The minute after is a hole in the same held month: absent.
+    assert_eq!(
+        catalog.stamp(Vendor::Dhan, ts + MINUTE),
+        Ok(VixStamp::Absent)
+    );
+    // A month that does not exist is a refusal, never an absent stamp.
+    let missing = catalog.stamp(Vendor::Groww, ts);
+    assert!(
+        missing
+            .as_ref()
+            .is_err_and(|why| why.contains("does not exist")),
+        "{missing:?}"
+    );
+}

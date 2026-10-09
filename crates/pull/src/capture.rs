@@ -232,39 +232,179 @@ fn candidate_path(
     ))
 }
 
+/// The staging name a capture is written under before it is linked into place.
+///
+/// A leading dot and a `.partial` suffix, so no reader matching the
+/// `<prefix>-p…-c<n>.txt` shape can take a half-written file for a capture
+/// (pull1-3, D-2527).
+///
+/// The hidden sibling a capture is written to before it is linked into
+/// `path`. It does not end in `.txt`, so nothing that lists captures takes it
+/// for one. conc:pull1-3, D-3600 named it `partial_path`; it is this function.
+fn staging_path(path: &std::path::Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.partial"))
+}
+
+/// Removes a staging file, naming a removal that failed.
+///
+/// `Ok` when the file is gone, including when it was already gone.
+fn discard_staging(staging: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(staging) {
+        Ok(()) => Ok(()),
+        Err(ref gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(left) => Err(format!(
+            "its staging file {} could not be removed — {left}",
+            staging.display()
+        )),
+    }
+}
+
+/// `why`, with a failed staging removal appended when there was one.
+fn with_discard(staging: &std::path::Path, why: String) -> String {
+    match discard_staging(staging) {
+        Ok(()) => why,
+        Err(left) => format!("{why}; {left}"),
+    }
+}
+
 /// Persists one capture without ever opening an existing file for writing.
+///
+/// # Staged, linked, then the directory synced (pull1-3, D-2527)
+///
+/// This created the capture at its FINAL name and wrote and synced it there,
+/// so a crash or a full disk between `create_new` and `sync_all` left a
+/// final-named file holding fewer bytes than its own `bytes:` line — a fixture
+/// that lies about the vendor, which is the one thing this module must never
+/// produce. The body is now written and synced under [`staging_path`], then
+/// `hard_link`ed to the final name — no-clobber, so an existing capture is
+/// never replaced and an `AlreadyExists` moves to the next bounded name — and
+/// only then is the staging name removed and the directory synced, so the new
+/// entry survives a power cut. A final name therefore exists only for a whole,
+/// synced body.
 fn write_new_capture_with_stamp(
     dir: &std::path::Path,
     prefix: &str,
     bytes: &[u8],
     stamp: u128,
 ) -> Result<std::path::PathBuf, String> {
+    write_new_capture_staged(
+        dir,
+        prefix,
+        bytes,
+        stamp,
+        &|file: &mut std::fs::File, body: &[u8]| file.write_all(body),
+    )
+}
+
+/// [`write_new_capture_with_stamp`] with the body write injectable, so a test
+/// can fail it halfway without a full disk.
+///
+/// A borrowed `Fn` for the callers that hand one over; the walk itself is
+/// [`write_new_capture_via`], which takes any `FnMut` (a `&dyn Fn` is one).
+fn write_new_capture_staged(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+    stamp: u128,
+    write: &dyn Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<std::path::PathBuf, String> {
+    write_new_capture_via(dir, prefix, bytes, stamp, write)
+}
+
+/// [`write_new_capture_with_stamp`] with the byte write injectable, so a test
+/// can stop it part-way the way a crash would.
+///
+/// WRITTEN ASIDE, THEN LINKED INTO ITS NAME. The capture used to be created at
+/// its final `.txt` name and filled in place, so a crash (or a kill, or a full
+/// disk the cleanup could not undo) left a torn fixture under a name that
+/// says it is complete. The bytes now go to a hidden `.partial` sibling, are
+/// synced, and only then appear under the final name through `hard_link`,
+/// which, like `create_new`, refuses an existing name: no capture is ever
+/// overwritten, and the final name is only ever whole. The directory is synced
+/// after the link so the name survives a power loss. conc:pull1-3, D-3600.
+///
+/// The same fix landed independently as pull1-3, D-2527; the body below is
+/// that one, because it also names a staging file it could not remove and a
+/// directory sync that failed after publication (see the doc above).
+fn write_new_capture_via(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+    stamp: u128,
+    mut write: impl FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(dir)
         .map_err(|why| format!("{} cannot be created — {why}", dir.display()))?;
 
     for attempt in 0..NAME_ATTEMPTS {
         let path = candidate_path(dir, prefix, stamp, attempt);
-        let opened = OpenOptions::new().write(true).create_new(true).open(&path);
+        // A FINAL NAME ALREADY HELD is skipped before any staging is written.
+        // The link below is still the authority; this only spares the bytes.
+        if path.symlink_metadata().is_ok() {
+            continue;
+        }
+        let staging = staging_path(&path);
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging);
         let mut file = match opened {
             Ok(file) => file,
+            // A STAGING NAME LEFT BY A CRASHED WRITER is not reused or
+            // removed: it may be another live writer's. Next name.
             Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(why) => return Err(format!("{} cannot be created — {why}", path.display())),
+            Err(why) => {
+                return Err(format!("{} cannot be created — {why}", staging.display()));
+            }
         };
 
-        if let Err(why) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        if let Err(why) = write(&mut file, bytes).and_then(|()| file.sync_all()) {
             drop(file);
-            let cleanup = std::fs::remove_file(&path);
-            return Err(match cleanup {
-                Ok(()) => format!("{} could not be written and synced — {why}", path.display()),
-                Err(ref cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {
-                    format!("{} could not be written and synced — {why}", path.display())
-                }
-                Err(cleanup) => format!(
-                    "{} could not be written and synced — {why}; its incomplete file also \
-                     could not be removed — {cleanup}",
+            return Err(with_discard(
+                &staging,
+                format!(
+                    "{} could not be written and synced — {why}; no capture was \
+                     published under {}",
+                    staging.display(),
                     path.display()
                 ),
-            });
+            ));
+        }
+        drop(file);
+
+        match std::fs::hard_link(&staging, &path) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
+                discard_staging(&staging).map_err(|left| {
+                    format!("{} was taken by another writer; {left}", path.display())
+                })?;
+                continue;
+            }
+            Err(why) => {
+                return Err(with_discard(
+                    &staging,
+                    format!(
+                        "{} could not be linked into place as {} — {why}",
+                        staging.display(),
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        // PUBLISHED. What follows cannot unpublish it, so a failure is named
+        // as published-but-unsettled rather than as "not written".
+        discard_staging(&staging)
+            .map_err(|left| format!("{} was published whole, but {left}", path.display()))?;
+        if let Err(why) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+            return Err(format!(
+                "{} was published whole, but {} could not be synced, so the \
+                 entry's survival of a power cut is UNVERIFIED — {why}",
+                path.display(),
+                dir.display()
+            ));
         }
         return Ok(path);
     }
@@ -654,6 +794,63 @@ mod tests {
         );
     }
 
+    /// **A capture stopped part-way never appears under its final name.**
+    /// conc:pull1-3, D-3600. A write that dies after half the bytes (a panic
+    /// stands in for the kill: nothing after it runs) leaves at most the
+    /// hidden `.partial` sibling; the `.txt` name is absent, and the next write
+    /// of the same name lands whole.
+    #[test]
+    fn a_capture_stopped_part_way_never_appears_under_its_final_name() {
+        let dir = std::env::temp_dir().join(format!("brutex-capture-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prefix = "dhan-GET-torn";
+        let stamp = 7_u128;
+        let died = std::panic::catch_unwind(|| {
+            let _ = write_new_capture_via(&dir, prefix, b"TEN BYTES!", stamp, |file, bytes| {
+                file.write_all(bytes.get(..5).unwrap_or(bytes))?;
+                panic!("killed mid-write");
+            });
+        });
+        assert!(died.is_err(), "the write was stopped");
+        let final_name = candidate_path(&dir, prefix, stamp, 0);
+        assert!(!final_name.exists(), "no torn capture under its final name");
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the capture directory")
+            .map(|entry| {
+                entry
+                    .expect("a listed capture")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            left.iter()
+                .all(|name| name.ends_with(".partial") && name.starts_with('.')),
+            "only the hidden partial sibling is left: {left:?}"
+        );
+
+        let path = write_new_capture_with_stamp(&dir, prefix, b"TEN BYTES!", stamp)
+            .expect("the next write");
+        assert_eq!(std::fs::read(&path).expect("whole"), b"TEN BYTES!");
+        assert!(
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("TXT"))
+        );
+
+        let refused = write_new_capture_via(&dir, "dhan-GET-full", b"x", stamp, |_, _| {
+            Err(std::io::Error::other("disk full"))
+        })
+        .expect_err("a failed write refuses");
+        assert!(refused.contains("disk full"), "{refused}");
+        assert!(!candidate_path(&dir, "dhan-GET-full", stamp, 0).exists());
+        assert!(
+            !staging_path(&candidate_path(&dir, "dhan-GET-full", stamp, 0)).exists(),
+            "and cleans up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_restart_collision_creates_a_new_file_and_never_overwrites_the_old_one() {
         // SAME STAMP, PID AND SEQUENCE: the exact state a reused process id and
@@ -746,6 +943,120 @@ mod tests {
                 "collision {attempt} was not opened for writing"
             );
         }
+    }
+
+    /// **NO FINAL-NAMED CAPTURE EVER HOLDS A TORN BODY (pull1-3, D-2527).**
+    ///
+    /// On the old code the file was created at its FINAL name and written in
+    /// place, so a write that failed halfway was visible there until cleanup
+    /// and a crash before cleanup left it for good. Here the injected writer
+    /// writes half the bytes and fails: the final name must not exist at any
+    /// point after the call, the staging name must be gone, and the refusal
+    /// must say nothing was published. Walked at every cut point of a short
+    /// body (0 bytes written, 1, half, all-but-one, all then a failed flush).
+    #[test]
+    fn a_capture_that_fails_halfway_never_appears_under_its_final_name() {
+        let root = scratch("TORN-CAPTURE");
+        let dir = root.join("captures");
+        let body = b"bytes: 9\n---\n123456789";
+        for (stamp, cut) in [
+            (100_u128, 0),
+            (101, 1),
+            (102, body.len() / 2),
+            (103, body.len() - 1),
+            (104, body.len()),
+        ] {
+            let prefix = "dhan-GET-torn";
+            let why = write_new_capture_staged(
+                &dir,
+                prefix,
+                body,
+                stamp,
+                &|file: &mut std::fs::File, bytes: &[u8]| {
+                    std::io::Write::write_all(file, bytes.get(..cut).unwrap_or(bytes))?;
+                    Err(std::io::Error::other(
+                        "injected failure after a partial write",
+                    ))
+                },
+            )
+            .expect_err("a failed write refuses");
+            assert!(why.contains("no capture was published"), "{why}");
+            let path = candidate_path(&dir, prefix, stamp, 0);
+            assert!(
+                path.symlink_metadata().is_err(),
+                "cut {cut}: a torn body never holds the final name"
+            );
+            assert!(
+                staging_path(&path).symlink_metadata().is_err(),
+                "cut {cut}: the staging file was removed"
+            );
+        }
+        // AND A WHOLE ONE LANDS, UNDER THE FINAL NAME ONLY.
+        let landed = write_new_capture_with_stamp(&dir, "dhan-GET-whole", body, 7)
+            .expect("a whole capture lands");
+        assert_eq!(std::fs::read(&landed).expect("read back"), body.to_vec());
+        assert!(
+            staging_path(&landed).symlink_metadata().is_err(),
+            "no staging file is left beside a published capture"
+        );
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("list")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.ends_with(".partial")),
+            "{names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A STAGING NAME LEFT BY A CRASHED WRITER IS SKIPPED, NEVER REUSED OR
+    /// REMOVED, AND A HELD FINAL NAME IS NEVER REPLACED (pull1-3, D-2527).**
+    ///
+    /// Candidate 0's staging name is pre-created (a crash mid-write); candidate
+    /// 1's final name is pre-created (an earlier capture). The write must land
+    /// at candidate 2, leave both untouched, and on the old code there was no
+    /// staging name at all, so candidate 0's final name was written instead.
+    #[test]
+    fn a_left_staging_file_and_a_held_name_are_both_skipped() {
+        let root = scratch("LEFT-STAGING");
+        let dir = root.join("captures");
+        std::fs::create_dir_all(&dir).expect("capture directory");
+        let prefix = "groww-GET-left";
+        let stamp = 41;
+        let crashed = staging_path(&candidate_path(&dir, prefix, stamp, 0));
+        std::fs::write(&crashed, b"CRASHED HALF").expect("left staging");
+        let held = candidate_path(&dir, prefix, stamp, 1);
+        std::fs::write(&held, b"EARLIER CAPTURE").expect("held name");
+
+        let landed = write_new_capture_with_stamp(&dir, prefix, b"NEW BODY", stamp)
+            .expect("a later name is free");
+        assert_eq!(landed, candidate_path(&dir, prefix, stamp, 2));
+        assert_eq!(
+            std::fs::read(&landed).expect("the landed body"),
+            b"NEW BODY".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(&crashed).expect("left staging survives"),
+            b"CRASHED HALF".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(&held).expect("held survives"),
+            b"EARLIER CAPTURE".to_vec()
+        );
+        assert!(
+            candidate_path(&dir, prefix, stamp, 0)
+                .symlink_metadata()
+                .is_err(),
+            "the crashed writer's name was not published by anyone"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A WRITE THAT CANNOT LAND IS COUNTED, NEVER SWALLOWED.**

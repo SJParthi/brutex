@@ -307,7 +307,19 @@ pub struct HttpSource {
     /// Holding the assembled value is not a wider exposure than holding the
     /// token was — it is the same secret, in the same struct, behind the same
     /// hand-written `Debug`.
-    header_value: String,
+    ///
+    /// # A validated, SENSITIVE `HeaderValue` (P1-19-01, P11-03, D-2525)
+    ///
+    /// This was a `String` handed to the request builder on every send. A token
+    /// holding a byte a header cannot carry — a stored newline — passed
+    /// construction and failed inside `send`, where it was reported as
+    /// `TransportFailed` ("was not reached") and retried like a network blip.
+    /// It is now parsed ONCE here, and a value that is not a header value
+    /// refuses construction as [`FetchError::CredentialNotAHeaderValue`]
+    /// before a client or a permit exists. It is marked sensitive, so the
+    /// HTTP stack's own `Debug` of a header map prints `Sensitive` rather than
+    /// the token.
+    header_value: reqwest::header::HeaderValue,
     client: reqwest::Client,
     /// THE BUDGET, ENFORCED RATHER THAN MERELY DECLARED.
     ///
@@ -506,6 +518,24 @@ impl HttpSource {
         }
     }
 
+    /// The assembled auth value as a header the HTTP client will send, marked
+    /// sensitive (P1-19-01, P11-03, D-2525).
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::CredentialNotAHeaderValue`] naming the header and never
+    /// the value, for a credential holding a byte no header can carry. The
+    /// caller drops the assembled `String` either way; nothing else holds it.
+    fn sensitive_header(
+        header: &'static str,
+        assembled: &str,
+    ) -> Result<reqwest::header::HeaderValue, FetchError> {
+        let mut value = reqwest::header::HeaderValue::from_str(assembled)
+            .map_err(|_| FetchError::CredentialNotAHeaderValue { header })?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
+
     /// Builds a source for one vendor.
     ///
     /// # Errors
@@ -515,6 +545,8 @@ impl HttpSource {
     /// deployment fault rather than a vendor one.
     /// [`FetchError::CredentialMismatch`] if the credential does not match the
     /// scheme — see [`Self::header_value`].
+    /// [`FetchError::CredentialNotAHeaderValue`] if the assembled credential
+    /// cannot be sent as a header — see [`Self::sensitive_header`].
     pub fn new(spec: HttpSpec, credential: Credential) -> Result<Self, FetchError> {
         // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
         // costs nothing to find; building a TLS client first would spend that
@@ -523,7 +555,8 @@ impl HttpSource {
         // print is what `CLAUDE.md` §8's comparison is made on; see
         // `Credential::print`.
         let print = credential.print();
-        let header_value = Self::header_value(spec.auth.scheme, credential)?;
+        let assembled = Self::header_value(spec.auth.scheme, credential)?;
+        let header_value = Self::sensitive_header(spec.auth.header, &assembled)?;
         let client = pooled_client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
         })?;
@@ -598,18 +631,35 @@ impl HttpSource {
     /// A source whose feed declares no budget is left ungoverned: handing one a
     /// governor would enforce a ceiling nobody wrote down, which is the
     /// invention §3 rule 1 forbids.
+    ///
+    /// # `None` keeps the private governor (pull1-2, D-2524)
+    ///
+    /// Handing over NOTHING is not handing over "no budget". This used to
+    /// assign the argument unconditionally, so a governed source given `None`
+    /// dropped the private governor `new` built and `wait_for_permit` became a
+    /// no-op: the api's `shared_governor` answers `None` for a poisoned budget
+    /// list, and that one panic elsewhere switched the vendor's ceiling off for
+    /// every later source. A `None` is now a no-op: the source stays governed
+    /// by its own instance and charges it itself.
     #[must_use]
     pub fn sharing(
         mut self,
         governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
     ) -> Self {
-        if self.governor.is_some() {
-            // THE CALLER NOW CHARGES, and only if it actually handed one over.
+        // NOTHING HANDED OVER IS NOT "NO GOVERNOR". `None` used to replace the
+        // source's own governor and clear its charge, so a caller that had no
+        // shared instance to give left a budgeted feed ungoverned: no permit
+        // was asked for by anyone. The source keeps its own and charges it.
+        // conc:pull1-2, D-2799. The same rule was reached independently as
+        // pull1-2, D-2524 (see the doc above): replace only when the source is
+        // governed AND a governor was actually handed over.
+        if let (Some(_), Some(shared)) = (&self.governor, governor) {
+            // THE CALLER NOW CHARGES, because it actually handed one over.
             // Sharing a governor and spending from it are one act; both sides
             // calling `admit` is two permits for one request. See
             // `charged_by_caller`.
-            self.charged_by_caller = governor.is_some();
-            self.governor = governor;
+            self.charged_by_caller = true;
+            self.governor = Some(shared);
         }
         self
     }
@@ -832,8 +882,12 @@ impl HttpSource {
     ///
     /// Returned as a pair rather than applied inside, so a test can assert the
     /// NAME without ever seeing the value.
-    fn header(&self) -> (&'static str, &str) {
-        (self.spec.auth.header, &self.header_value)
+    ///
+    /// The value is a refcounted clone of the one validated, sensitive
+    /// `HeaderValue` built in [`Self::new`] (P11-03, D-2525): the flag travels
+    /// with it into the request.
+    fn header(&self) -> (&'static str, reqwest::header::HeaderValue) {
+        (self.spec.auth.header, self.header_value.clone())
     }
 }
 
@@ -1134,8 +1188,17 @@ fn decode_value(
                 note_negative_volume_bars(decided.negative_volume, keep.len());
                 note_negative_interest_bars(decided.negative_open_interest, keep.len());
                 let mut arrays = arrays;
-                note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
-                RawWindow::decode(&arrays)
+                // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+                finish(
+                    &mut arrays,
+                    keep.len(),
+                    crate::fetch::DecodeSkips {
+                        null_price: decided.null_bars,
+                        negative_volume: decided.negative_volume,
+                        negative_open_interest: decided.negative_open_interest,
+                        impossible_ohlc: 0,
+                    },
+                )
             })()
         }
         // ONE OBJECT PER BAR — the shape `crate::vendor`'s Groww row declares.
@@ -1273,9 +1336,7 @@ fn decode_objects(
         open_interest: Vec::new(),
     };
 
-    let mut null_bars = 0usize;
-    let mut negative = 0usize;
-    let mut interest = 0usize;
+    let mut skipped = crate::fetch::DecodeSkips::default();
     for (i, item) in items.iter().enumerate() {
         // A field missing from ONE object is refused naming both the field and
         // which bar it was, because "the vendor sent 400 bars and one of them
@@ -1299,7 +1360,7 @@ fn decode_objects(
         // that had no trade, and this store cannot tell an invented zero from a
         // real one afterwards.
         //
-        // Skipped rather than silent: `null_bars` is counted and travels with
+        // Skipped rather than silent: `skipped.null_price` is counted and travels with
         // the window, so a run that dropped half its bars says so. `CLAUDE.md`
         // §4 — degrade loudly and name the reason.
         //
@@ -1312,7 +1373,7 @@ fn decode_objects(
             .iter()
             .any(|name| one(name).is_ok_and(serde_json::Value::is_null))
         {
-            null_bars += 1;
+            skipped.null_price += 1;
             continue;
         }
         // THE SAME COUNT RULE AS THE COLUMNAR SHAPE (c4a-1, c4a-2, D-1490).
@@ -1323,11 +1384,11 @@ fn decode_objects(
         ) {
             CountVerdict::Keep => {}
             CountVerdict::NegativeVolume => {
-                negative = negative.saturating_add(1);
+                skipped.negative_volume = skipped.negative_volume.saturating_add(1);
                 continue;
             }
             CountVerdict::NegativeInterest => {
-                interest = interest.saturating_add(1);
+                skipped.negative_open_interest = skipped.negative_open_interest.saturating_add(1);
                 continue;
             }
         }
@@ -1356,7 +1417,7 @@ fn decode_objects(
     // window an operator has to know about — it is not an error, and it is not
     // a full answer either. Emitted once per window rather than once per bar,
     // because 375 lines of "skipped" is noise and one count is information.
-    if null_bars > 0 {
+    if skipped.null_price > 0 {
         // BOTH, and the event is the load-bearing one. `eprintln!` reaches the
         // operator watching a terminal; the event reaches the log FILE, which is
         // the thing handed to somebody diagnosing a run that already finished.
@@ -1368,25 +1429,29 @@ fn decode_objects(
                 "pull.decode",
                 "bars carried a null price and were skipped",
             )
-            .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
+            .with(
+                "skipped",
+                u64::try_from(skipped.null_price).unwrap_or(u64::MAX),
+            )
             .with("bars", u64::try_from(items.len()).unwrap_or(u64::MAX)),
         );
         eprintln!(
-            "brutex: {null_bars} of {} bars carried a null price and were \
+            "brutex: {} of {} bars carried a null price and were \
              skipped — the vendor reported no trade in those minutes",
+            skipped.null_price,
             items.len()
         );
     }
 
-    note_negative_volume_bars(negative, items.len());
-    note_negative_interest_bars(interest, items.len());
+    note_negative_volume_bars(skipped.negative_volume, items.len());
+    note_negative_interest_bars(skipped.negative_open_interest, items.len());
 
     // THE THIRD DOOR GETS THE RULE AT THE SAME TIME AS THE FIRST. Three
     // separate rules in this decoder reached two of the three shapes and missed
     // the same one; this one is applied at every `RawWindow::decode` in the
     // file, so a shape cannot be forgotten without deleting the call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), items.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(&mut arrays, items.len(), skipped)
 }
 
 /// The unit [`decode_body`] leaves prices in, whatever the vendor quoted.
@@ -1789,6 +1854,27 @@ fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
          and is never below zero. `i64::MIN` is NOT counted here: that is the \
          null sentinel and is refused by name."
     );
+}
+
+/// Drops the impossible bars (counted and logged by [`note_impossible_bars`]),
+/// decodes the arrays, and attaches every skip to the window — or the refusal
+/// as it was.
+///
+/// One site for all three shapes, so a shape cannot attach the rows and forget
+/// the count — which is how the count was forgotten in the first place: each
+/// skip was logged and never reached the window, so the receipt balanced over
+/// candles that were not on it (D-3122).
+fn finish(
+    arrays: &mut ParallelArrays,
+    bars: usize,
+    mut skipped: crate::fetch::DecodeSkips,
+) -> Result<RawWindow, FetchError> {
+    skipped.impossible_ohlc = drop_impossible_bars(arrays);
+    note_impossible_bars(skipped.impossible_ohlc, bars);
+    RawWindow::decode(arrays).map(|mut window| {
+        window.skipped = skipped;
+        window
+    })
 }
 
 /// One event per WINDOW for rows whose four prices cannot be a bar.
@@ -3552,8 +3638,17 @@ fn decode_positional(
     note_negative_volume_bars(negative, rows.len());
     note_negative_interest_bars(interest, rows.len());
     // AND THE SECOND DOOR. See the note on the object shape's call.
-    note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
-    RawWindow::decode(&arrays)
+    // CARRIED, NOT ONLY LOGGED (D-3122): see `fetch::DecodeSkips`.
+    finish(
+        &mut arrays,
+        rows.len(),
+        crate::fetch::DecodeSkips {
+            null_price: null_bars,
+            negative_volume: negative,
+            negative_open_interest: interest,
+            impossible_ohlc: 0,
+        },
+    )
 }
 
 /// One timestamp cell, in whichever spelling this feed uses.
@@ -3949,6 +4044,26 @@ mod tests {
     /// moves it forward only. The cursor therefore answers the exact question
     /// this test is about -- **was the governor asked at all** -- with no sleep,
     /// no ceiling to exhaust, and no race against the second rolling over.
+    /// **A source handed no governor keeps its own and charges it.**
+    /// conc:pull1-2, D-2799.
+    #[test]
+    fn sharing_nothing_keeps_the_sources_own_governor() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let own = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let kept = owned.sharing(None);
+        assert!(
+            kept.governor
+                .as_ref()
+                .is_some_and(|held| std::sync::Arc::ptr_eq(held, &own)),
+            "the source's own governor stays"
+        );
+        assert!(!kept.charged_by_caller, "and the source still charges it");
+    }
+
     #[tokio::test]
     async fn a_shared_governor_is_charged_by_the_caller_and_not_again_here() {
         let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
@@ -4109,6 +4224,90 @@ mod tests {
             "names the cursor: {why}"
         );
         assert_eq!(credit(&held), before, "nothing was charged");
+    }
+
+    /// **`sharing(None)` KEEPS THE PRIVATE GOVERNOR (pull1-2, D-2524).**
+    ///
+    /// On the old code `sharing` assigned its argument whenever the source was
+    /// governed, so `sharing(None)` left `governor == None` and
+    /// `charged_by_caller == false` -- nobody charged anything, and the first
+    /// assertion below failed. Every ordering of the two calls a server makes
+    /// is walked, plus the ungoverned source that must stay ungoverned.
+    #[tokio::test]
+    async fn sharing_none_keeps_the_private_governor() {
+        type Shared = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let build =
+            || HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let same = |a: Option<&Shared>, b: &Shared| a.is_some_and(|a| std::sync::Arc::ptr_eq(a, b));
+        let cursor_of = |held: &Shared| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cursor_micros()
+        };
+
+        // NONE ALONE: the private instance survives and is still charged here.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("Dhan is budgeted"));
+        let source = source.sharing(None);
+        assert!(
+            same(source.governor.as_ref(), &private),
+            "sharing(None) must keep the governor `new` built, not drop it"
+        );
+        assert!(
+            !source.charged_by_caller,
+            "nobody handed a governor over, so this source still charges its own"
+        );
+        // AND IT REALLY IS CHARGED: the cursor moves on a permit. The clock is
+        // read first for the reason the shared-governor test gives.
+        let _origin = crate::rate::monotonic_micros();
+        tokio::time::sleep(core::time::Duration::from_millis(2)).await;
+        let before = cursor_of(&private);
+        source
+            .wait_for_permit()
+            .await
+            .expect("a fresh governor admits");
+        assert!(
+            cursor_of(&private) > before,
+            "the kept private governor is the one spent"
+        );
+
+        // NONE TWICE: idempotent.
+        let source = build();
+        let private = std::sync::Arc::clone(source.governor.as_ref().expect("budgeted"));
+        let source = source.sharing(None).sharing(None);
+        assert!(same(source.governor.as_ref(), &private));
+        assert!(!source.charged_by_caller);
+
+        // SOME THEN NONE: a later `None` does not undo a real hand-over.
+        let held = std::sync::Arc::clone(build().governor.as_ref().expect("budgeted"));
+        let source = build()
+            .sharing(Some(std::sync::Arc::clone(&held)))
+            .sharing(None);
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(
+            source.charged_by_caller,
+            "the caller that handed it over still charges"
+        );
+
+        // NONE THEN SOME: the hand-over still lands after a no-op.
+        let source = build()
+            .sharing(None)
+            .sharing(Some(std::sync::Arc::clone(&held)));
+        assert!(same(source.governor.as_ref(), &held));
+        assert!(source.charged_by_caller);
+
+        // AN UNGOVERNED SOURCE stays ungoverned whatever it is handed.
+        for offered in [None, Some(std::sync::Arc::clone(&held))] {
+            let mut source = build();
+            source.governor = None;
+            let source = source.sharing(offered);
+            assert!(source.governor.is_none(), "no ceiling nobody wrote down");
+            assert!(!source.charged_by_caller);
+        }
     }
 
     /// A throttle lowers the allowance; clean answers raise it again.
@@ -6167,9 +6366,11 @@ mod tests {
         let (name, value) = source.header();
         assert_eq!(name, "Authorization");
         assert_eq!(
-            value, "token APIKEY:TOKEN",
+            value.to_str().expect("an ASCII header"),
+            "token APIKEY:TOKEN",
             "key first, one colon, one trailing space in the prefix"
         );
+        assert!(value.is_sensitive(), "P11-03, D-2525");
         assert!(
             zerodha
                 .extra_headers
@@ -6210,6 +6411,91 @@ mod tests {
                 given_two: true
             }
         );
+    }
+
+    /// **A CREDENTIAL THAT IS NOT A HEADER VALUE REFUSES AT CONSTRUCTION, AND A
+    /// GOOD ONE IS HELD SENSITIVE (P1-19-01, P11-03, D-2525).**
+    ///
+    /// On the old code `header_value` was a `String` and `new` never parsed it,
+    /// so every "bad" case below BUILT a source (the first `expect_err` failed)
+    /// and the newline surfaced only at send time as `TransportFailed`; and
+    /// there was no `HeaderValue` to ask `is_sensitive` of. Walked for every
+    /// HTTP feed in `Feed::ALL`, with each refused byte at the start, the
+    /// middle and the end of the token, and in the key of a two-secret scheme.
+    /// A scheme mismatch still refuses FIRST, as `CredentialMismatch`.
+    #[test]
+    fn a_credential_that_is_not_a_header_value_is_refused_at_construction() {
+        const TOKEN: &str = "TOKENBYTES";
+        let refused_bytes = ['\n', '\r', '\0', '\u{01}', '\u{1f}', '\u{7f}'];
+        let mut walked = 0_usize;
+        for feed in crate::vendor::Feed::ALL {
+            let crate::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let two = spec.auth.scheme.names_two_secrets();
+            let credential = |token: String, key: String| {
+                if two {
+                    Credential::pair(key, token)
+                } else {
+                    Credential::token(token)
+                }
+            };
+            for bad in refused_bytes {
+                let mut cases = vec![
+                    (format!("{bad}{TOKEN}"), "KEY".to_owned()),
+                    (format!("TOKEN{bad}BYTES"), "KEY".to_owned()),
+                    (format!("{TOKEN}{bad}"), "KEY".to_owned()),
+                ];
+                if two {
+                    cases.push((TOKEN.to_owned(), format!("KEY{bad}")));
+                }
+                for (token, key) in cases {
+                    let why = HttpSource::new(spec, credential(token, key))
+                        .expect_err("a credential no header can carry refuses");
+                    assert_eq!(
+                        why,
+                        FetchError::CredentialNotAHeaderValue {
+                            header: spec.auth.header
+                        },
+                        "{feed} {bad:?}"
+                    );
+                    let said = why.to_string();
+                    assert!(!said.contains("TOKEN"), "the value is never shown: {said}");
+                    assert!(said.contains(spec.auth.header), "{said}");
+                    walked += 1;
+                }
+            }
+            // THE ORDER: a mismatch is named before the bytes are looked at.
+            let mismatched = if two {
+                Credential::token(format!("{TOKEN}\n"))
+            } else {
+                Credential::pair("KEY".to_owned(), format!("{TOKEN}\n"))
+            };
+            assert!(
+                matches!(
+                    HttpSource::new(spec, mismatched),
+                    Err(FetchError::CredentialMismatch { .. })
+                ),
+                "{feed}: a scheme mismatch refuses first"
+            );
+            // A GOOD CREDENTIAL, including a tab and a space a header CAN
+            // carry, builds, and its header is sensitive everywhere it goes.
+            for good in [TOKEN, "TOKEN\tBYTES", "TOKEN BYTES"] {
+                let source = HttpSource::new(spec, credential(good.to_owned(), "KEY".to_owned()))
+                    .expect("a header-safe credential builds");
+                let (name, value) = source.header();
+                assert!(value.is_sensitive(), "{feed}: the auth header is sensitive");
+                let mut map = reqwest::header::HeaderMap::new();
+                map.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                        .expect("a header name"),
+                    value,
+                );
+                let printed = format!("{map:?} {source:?}");
+                assert!(!printed.contains("BYTES"), "{feed}: {printed}");
+            }
+        }
+        assert!(walked >= 18, "at least one HTTP feed was walked: {walked}");
     }
 
     /// The blocking seam refuses by name rather than silently blocking, and

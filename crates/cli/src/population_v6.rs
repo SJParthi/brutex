@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -1953,20 +1953,33 @@ impl PopulationV6Ledger {
             // no byte left in it can tell the two apart. So initialising a file
             // some earlier process left empty emits a named `Warn` event
             // (`REINITIALISED_EMPTY`) before the header is written.
-            let empty = data_file
-                .metadata()
-                .map_err(|why| format!("cannot stat Population V6 data: {why}"))?
-                .len()
-                == 0;
-            if writable && empty {
-                if !data_created {
+            //
+            // ONE HEADER RULE (conc5-1, D-2644): a failed header write or
+            // barrier is cut back to nothing and remembered, and an all-zero
+            // or torn header is re-initialised by the writer, through
+            // `fixed_tail::init_or_heal_header`.
+            let written = if writable {
+                let empty = data_file
+                    .metadata()
+                    .map_err(|why| format!("cannot stat Population V6 data: {why}"))?
+                    .len()
+                    == 0;
+                if empty && !data_created {
                     let shown = data_path.display().to_string();
                     crate::note(&reinitialised_empty_event(&shown));
                 }
-                data_file
-                    .write_all(&header())
-                    .and_then(|()| data_file.sync_all())
-                    .map_err(|why| format!("cannot initialize Population V6 header: {why}"))?;
+                crate::fixed_tail::init_or_heal_header(
+                    &mut data_file,
+                    &data_path,
+                    &header(),
+                    File::sync_all,
+                )
+                .map_err(|why| format!("cannot initialize Population V6 header: {why}"))?
+                    == crate::fixed_tail::HeaderInit::Written
+            } else {
+                false
+            };
+            if written {
                 root_file
                     .sync_all()
                     .map_err(|why| format!("cannot sync Population V6 directory: {why}"))?;
@@ -3511,6 +3524,7 @@ pub(crate) fn commit_population_v6(
 )]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     fn bounds() -> PopulationV6Bounds {
         PopulationV6Bounds::new(8, 1_000_000, 512 * 1_024 * 1_024)
@@ -4040,16 +4054,21 @@ mod tests {
         assert_eq!(bytes, header().to_vec());
         drop(PopulationV6Ledger::open_read(&root, bounds())?);
 
+        // A ONE-BYTE PREFIX OF THE HEADER is an interrupted genesis, and since
+        // conc5-1 (D-2644) the writer cuts and re-initialises it under its
+        // lock instead of refusing it on every open. A reader still refuses.
         std::fs::write(root.join(DATA_FILE), [header()[0]]).map_err(|why| why.to_string())?;
-        let short = PopulationV6Ledger::open_write(&root, bounds());
+        let reader = PopulationV6Ledger::open_read(&root, bounds());
         assert!(
-            matches!(&short, Err(why) if why.contains("cannot read Population V6 header")),
-            "a one-byte header still refuses: {:?}",
-            short.as_ref().err()
+            matches!(&reader, Err(why) if why.contains("cannot read Population V6 header")),
+            "a reader never heals a torn header: {:?}",
+            reader.as_ref().err()
         );
+        drop(PopulationV6Ledger::open_write(&root, bounds())?);
         assert_eq!(
             std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?,
-            vec![header()[0]]
+            header().to_vec(),
+            "the writer re-initialised the torn header"
         );
         std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
         Ok(())

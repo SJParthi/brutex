@@ -31,6 +31,7 @@ fn id() -> RunId {
 
 fn options(root: &Path) -> AuditOptions<'_> {
     AuditOptions {
+        fold_support: runner::validate::FoldSupport::Scaled,
         prepared_column: None,
         replay: None,
         execution: None,
@@ -354,6 +355,7 @@ fn the_audit_header_is_the_scope_the_caller_supplied() {
             1_400,
             None,
             AuditOptions {
+                fold_support: runner::validate::FoldSupport::Scaled,
                 prepared_column: None,
                 replay: None,
                 execution: None,
@@ -405,6 +407,7 @@ fn generated_audit(
         min_hits,
         None,
         AuditOptions {
+            fold_support: runner::validate::FoldSupport::Scaled,
             prepared_column: None,
             replay: None,
             execution: None,

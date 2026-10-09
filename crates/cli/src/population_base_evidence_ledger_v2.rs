@@ -1675,17 +1675,17 @@ fn ensure_header(
     stride: u64,
     path: &Path,
 ) -> Result<(), BaseEvidenceLedgerRefusalV2> {
-    if file
-        .metadata()
-        .map_err(|why| io_error("stat", path, &why))?
-        .len()
-        == 0
-    {
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&header_bytes(magic, kind, stride)))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| io_error("initialize header", path, &why))?;
-    }
+    // conc5-1 (D-2644): the shared writer header rule. A failed header write
+    // or barrier is cut back and remembered; an all-zero or torn header is
+    // re-initialised. The root is synced by the caller after first appends
+    // (D-1903).
+    crate::fixed_tail::init_or_heal_header(
+        file,
+        path,
+        &header_bytes(magic, kind, stride),
+        File::sync_data,
+    )
+    .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
     verify_header(file, magic, kind, stride, path)?;
     // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
     // lock; the bytes past the last whole record were never acknowledged.
