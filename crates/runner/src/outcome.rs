@@ -2461,13 +2461,15 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // `no_zero_spread_mask_reports_a_finding_on_the_ordinary_fixture` are those
     // two measurements, and both FAIL when this check is removed.
     //
-    // AND `rank::walk` ORDERS ON `edge.t.abs()`, so those artefacts sorted
+    // AND `rank::rank` ORDERS ON `edge.t.abs()`, so those artefacts sorted
     // ABOVE every genuine finding and occupied the head of `Ranked::top`, where
     // `keep` cut the real results out beneath them. `significance::p_value` is
     // `2(1 - Φ(|t|))`, which clamps to exactly zero at that magnitude, so they
     // cleared any Bonferroni bar the run could set. `Scored::cmp` deliberately
     // demotes NON-FINITE scores — the ordering defends against infinity and was
-    // defeated by a large finite artefact.
+    // defeated by a large finite artefact. (This and four more sites in this
+    // file named `rank::walk`, which never existed: the ordering is
+    // `rank::rank`'s, through `impl Ord for rank::Scored`. Audit r64-3, D-4501.)
     //
     // `m2` IS THE EXACT TEST AND NEEDS NO EPSILON. Welford increments it by
     // `delta * delta2`, and on identical observations both factors are exactly
@@ -2496,7 +2498,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // `H = u32::MAX`: 353 hits scored `t` = 14,175.6 without this check.
     // Before the session drain the whole slice was one window, and the audit
     // measured `t` = 24,673.4 and 116,747.9 at 8 and 32 sessions and 0 at
-    // 128, where the residue came out negative. `rank::walk` sorts such a
+    // 128, where the residue came out negative. `rank::rank` sorts such a
     // figure above every real finding.
     //
     // `Horizon::bars` refuses only zero and `BRUTEX_HORIZON_BARS` parses any
@@ -3151,7 +3153,7 @@ mod tests {
     ///
     /// `Evaluator::warmed_up` needs five completed prior sessions, so a
     /// two-session slice yields an EMPTY column and every assertion below would
-    /// pass against nothing. `rank::walk` orders on `edge.t.abs()`, which is
+    /// pass against nothing. `rank::rank` orders on `edge.t.abs()`, which is
     /// why a large `t` here would sort above every genuine finding, and
     /// `p_value` is `2(1 - Φ(|t|))`, which clamps to exactly zero at that
     /// magnitude and clears any Bonferroni bar the run can set.
@@ -3212,7 +3214,7 @@ mod tests {
         assert!(
             e.t == 0.0,
             "{} identical forward moves scored a t of {} -- a degenerate sample \
-             reported as certainty, which `rank::walk` then sorts above every \
+             reported as certainty, which `rank::rank` then sorts above every \
              real finding and `p_value` clamps to zero",
             e.n,
             e.t
@@ -3999,7 +4001,7 @@ mod tests {
     /// out NEGATIVE, `sqrt` returned `NaN`, and `is_finite` sent them to zero.
     /// 60 huge and 60 zero out of 120, maximum `|t|` 2.611610832622043e8. There
     /// is no middle: a degenerate sample scores either nothing or a `t` that
-    /// `rank::walk` sorts above every real finding and that `p_value` clamps to
+    /// `rank::rank` sorts above every real finding and that `p_value` clamps to
     /// exactly zero.
     #[test]
     fn a_constant_sample_whose_windows_overlap_is_still_no_evidence() {

@@ -716,8 +716,20 @@ fn ranked_run(
 /// Whether one frequent itemset is an exact closed representative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClosureVerdict {
-    /// No immediate superset has equal support; this mask belongs to the
-    /// lossless closed population.
+    /// No immediate superset the sweep BUILT has equal support; this mask
+    /// belongs to the lossless closed population of the informative lattice the
+    /// sweep walks.
+    ///
+    /// **Amended by D-4503 (audit AC-whp-cx-2).** This said "No immediate
+    /// superset has equal support", which is false for one case by design:
+    /// `engine`'s join prunes a superset whose one new pair is uninformative
+    /// under `vocab::implication` (`above_s2` with `above_s3`, the first
+    /// implying the second). Such a superset has exactly this mask's support
+    /// and is never built, so this mask is `Closed` although an equal-support
+    /// superset exists in the full frequent lattice. That superset only
+    /// restates this mask, which is why the answer is kept; `crate::closed`'s
+    /// module header states the same. A halted level is never `Closed`: it is
+    /// [`Self::Unknown`].
     Closed,
     /// An immediate superset has the same support; this mask is recoverable
     /// from that closed superset and is not a separate strategy population row.

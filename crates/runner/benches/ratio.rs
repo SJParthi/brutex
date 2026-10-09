@@ -39,7 +39,9 @@
 //! Two budget rows sit beside them. **C-R-04** prices the index column build in
 //! per-bar floors. **C-R-05** prices the column build a cash equity runs, with
 //! `Availability::Present` turning the VWAP family on, against a floor timed
-//! for long enough to hold still. D-0690.
+//! for long enough to hold still. D-0690. **C-R-06** times the closure check
+//! per insertion or probe on two sweep sizes and prints its p50, p99 and
+//! maximum (audit c4a-6, D-4504).
 //!
 //! **Not measured here:** whether any of those costs is *small*. This file
 //! refuses a cost that GROWS. `docs/06-limits.md` is where absolute figures and
@@ -556,6 +558,107 @@ fn the_identity_does_not_depend_on_how_many_bars_the_digest_covered() -> bool {
     )
 }
 
+/// The units [`runner::closed::redundant_count`] is charged in: for each
+/// adjacent pair of levels, one insertion per lower itemset into its
+/// `mask -> hits` copy, and one probe per set bit of each upper itemset.
+fn closure_units(sweep: &engine::Sweep) -> u128 {
+    sweep
+        .levels
+        .iter()
+        .zip(sweep.levels.iter().skip(1))
+        .fold(0_u128, |units, (lower, upper)| {
+            let probes = upper.frequent.iter().fold(0_u128, |sum, itemset| {
+                sum.saturating_add(u128::from(itemset.mask.popcount()))
+            });
+            units
+                .saturating_add(u128::try_from(lower.frequent.len()).unwrap_or(u128::MAX))
+                .saturating_add(probes)
+        })
+}
+
+/// Per-unit picoseconds of `f` over [`SPREAD_TRIALS`] trials, sorted, so a
+/// row can print its p50, p99 and maximum rather than one figure.
+fn per_unit_spread<T>(units: u128, reps: u32, mut f: impl FnMut() -> T) -> Vec<u128> {
+    black_box(f());
+    let mut trials = Vec::with_capacity(SPREAD_TRIALS);
+    for _ in 0..SPREAD_TRIALS {
+        let start = Instant::now();
+        for _ in 0..reps {
+            black_box(f());
+        }
+        let ps = start.elapsed().as_nanos().saturating_mul(1_000);
+        trials.push(ps / u128::from(reps).max(1) / units.max(1));
+    }
+    trials.sort_unstable();
+    trials
+}
+
+/// Trials per spread measurement: enough that p99 is not simply the maximum.
+const SPREAD_TRIALS: usize = 201;
+
+/// The `p`-permille order statistic of a sorted spread.
+fn permille(sorted: &[u128], p: usize) -> u128 {
+    sorted
+        .get(sorted.len().saturating_sub(1).saturating_mul(p) / 1_000)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// C-R-06 — the CLOSURE CHECK costs the same per unit at every sweep size
+/// (audit c4a-6, D-4504).
+///
+/// `closed::redundant_between` copies each lower level into a
+/// `HashMap<ConditionMask, u64>` and probes it once per set bit of each upper
+/// itemset: O(|lower| + k·|upper|) per adjacent pair, k at most 384. D-1496
+/// stated that cost and said "Not timed". This row times it per unit -- one
+/// insertion or one probe -- on two sweeps of comparable shape over 1,124 and
+/// 10,124 swept bars, and refuses a per-unit cost that grows with the sweep.
+/// It also prints the long sweep's per-unit p50, p99 and maximum over
+/// [`SPREAD_TRIALS`] trials, which is the absolute figure `docs/06-limits.md`
+/// records.
+fn the_closure_check_costs_the_same_per_unit_at_every_sweep_size() -> bool {
+    let swept = |bars: &[indicators::Candle]| {
+        let census = Sweeper::new(Ladder::with_min_hits(u64::MAX))
+            .run(bars, &mut evaluator())
+            .census;
+        Sweeper::new(ladder(census.swept))
+            .run(bars, &mut evaluator())
+            .sweep
+    };
+    let short = swept(&synthetic::sessions(8));
+    let long = swept(&synthetic::sessions(32));
+    let (short_units, long_units) = (closure_units(&short), closure_units(&long));
+    if short_units == 0 || long_units == 0 {
+        println!("  C-R-06 UNMEASURABLE — a fixture sweep has no adjacent levels");
+        return false;
+    }
+    println!(
+        "  C-R-06 units (inserts + probes): {short_units} over {} levels -> {long_units} over {} levels",
+        short.levels.len(),
+        long.levels.len()
+    );
+    let base = per_unit_min(short_units, REPS, || {
+        runner::closed::redundant_count(black_box(&short))
+    });
+    let at = per_unit_min(long_units, REPS, || {
+        runner::closed::redundant_count(black_box(&long))
+    });
+    let spread = per_unit_spread(long_units, 1, || {
+        runner::closed::redundant_count(black_box(&long))
+    });
+    println!(
+        "  C-R-06 long sweep, ps per unit over {SPREAD_TRIALS} trials: p50 {} p99 {} max {}",
+        permille(&spread, 500),
+        permille(&spread, 990),
+        permille(&spread, 1_000)
+    );
+    ratio(
+        "C-R-06 closure check, ps/unit: 1,124 -> 10,124 swept bars",
+        base,
+        at,
+    )
+}
+
 fn main() {
     println!("crates/runner — ratio bench, ceiling {CEILING_PERMILLE} permille");
     let rows = [
@@ -564,6 +667,7 @@ fn main() {
         the_identity_does_not_depend_on_how_many_bars_the_digest_covered(),
         the_column_build_stays_within_its_budget(),
         the_equity_column_build_stays_within_its_budget(),
+        the_closure_check_costs_the_same_per_unit_at_every_sweep_size(),
     ];
     let breached = rows.iter().filter(|ok| !**ok).count();
     if breached > 0 {

@@ -354,7 +354,13 @@ impl TradeDirectionV1 {
 /// Exact closure classification inherited from the uncapped Apriori walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ClosureV1 {
-    /// No immediate superset had equal support.
+    /// No immediate superset the sweep built had equal support:
+    /// `runner::ClosureVerdict::Closed`. **Amended by D-4503 (audit
+    /// AC-whp-cx-2):** this said "No immediate superset had equal support",
+    /// but a superset `engine`'s join prunes as uninformative under
+    /// `vocab::implication` can have equal support and is never built, so it
+    /// cannot disqualify this itemset; it only restates it. Closed relative to
+    /// the informative lattice the sweep walks, not to every frequent set.
     Closed,
     /// An equal-support immediate superset represents this itemset.
     Redundant,

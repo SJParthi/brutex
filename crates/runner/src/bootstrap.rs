@@ -408,6 +408,11 @@ pub const MAX_BLOCK: usize = 1_000_000;
 /// answered, because a p-value computed over misaligned strategies, or over
 /// draws that are all rotations of the sample, is a number about nothing.
 ///
+/// A zero `block` is answered rather than refused, and the answer is the
+/// conservative one: no draw is taken (`Verdict::draws` is 0) and `p = 1`.
+/// It used to be resampled as a block of one and could clear (audit satk-8,
+/// D-4506).
+///
 /// # Cost
 ///
 /// O(S·N) once to build each series' exact prefix sums, O(B·N) to draw and
@@ -430,6 +435,16 @@ pub fn reality_check(
         return None;
     }
     let periods = aligned_for(returns, block)?;
+    // A ZERO BLOCK IS NO RESAMPLE, AND IT READS AS NO EVIDENCE (audit satk-8,
+    // D-4506). The continuation draw below cannot express a mean block of zero
+    // periods, and it used to run one as a block of ONE (`block <= 1` in
+    // `stationary_indices_into`) -- so a caller who asked for a block nobody can
+    // draw got an i.i.d. bootstrap they did not ask for, and a p-value that
+    // could clear. The doc on [`white_reality_check_receipt_v1`] has promised the
+    // legacy API answers a zero block `p = 1`; this is that promise kept: no
+    // draw is taken, `Verdict::draws` says so, and the p-value is the
+    // conservative `1 / 1`.
+    let draws = if block == 0 { 0 } else { draws };
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // THE OBSERVED STATISTIC: the best mean across strategies, scaled by the
@@ -576,6 +591,9 @@ fn white_point_mass_would_mint_evidence(returns: &[Vec<i64>], observed: f64) -> 
 ///
 /// `None` under the same conditions as [`reality_check`].
 ///
+/// A zero `block` is answered as [`reality_check`] answers it: no draw,
+/// `p = 1` (audit satk-8, D-4506).
+///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
 pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Option<Verdict> {
@@ -583,6 +601,17 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
         return None;
     }
     let periods = aligned_for(returns, block)?;
+    // A ZERO BLOCK IS NO RESAMPLE, AND IT READS AS NO EVIDENCE (audit satk-8,
+    // D-4506). The continuation draw below cannot express a mean block of zero
+    // periods, and it used to run one as a block of ONE (`block <= 1` in
+    // `stationary_indices_into`) -- so a caller who asked for a block nobody can
+    // draw got an i.i.d. bootstrap they did not ask for, and a p-value that
+    // could clear. [`white_reality_check_receipt_v1`]'s doc promised the
+    // legacy White API answers a zero block `p = 1`, and Hansen's legacy API
+    // answers it the same way rather than differently from its sibling: no
+    // draw is taken, `Verdict::draws` says so, and the p-value is the
+    // conservative `1 / 1`.
+    let draws = if block == 0 { 0 } else { draws };
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
     // HANSEN'S STATISTIC IS `sqrt(n) * mean / sigma`, AND THAT IS EXACTLY
@@ -1216,8 +1245,9 @@ impl RomanoWolfAdjustedReceiptV1 {
 /// what makes this different from testing each strategy at 5% and hoping.
 ///
 /// Returns the rejected strategies in the order they were rejected. This
-/// legacy vector shape renders malformed input, a `block` above
-/// [`MAX_BLOCK`] and a complete non-rejection as empty; callers that must
+/// legacy vector shape renders malformed input, a zero `block` or one above
+/// [`MAX_BLOCK`] and a complete non-rejection as empty (the zero block since
+/// audit satk-8, D-4506; it was resampled as a block of one before); callers that must
 /// distinguish them use
 /// [`romano_wolf_receipt`]. An `alpha_ppm` above `1_000_000` and zero draws
 /// are malformed input here (D-0973).
@@ -1238,7 +1268,10 @@ pub fn romano_wolf(
     block: usize,
     alpha_ppm: u64,
 ) -> Vec<Rejected> {
-    if block > MAX_BLOCK {
+    // A zero block is malformed here as it is for the receipt: there is no
+    // mean block length of zero periods to draw, and it used to be run as a
+    // block of one (audit satk-8, D-4506).
+    if block == 0 || block > MAX_BLOCK {
         return Vec::new();
     }
     let Some(periods) = aligned_for(returns, block) else {
@@ -2532,6 +2565,64 @@ mod tests {
         let v = spa(&set, 0, 1, DEFAULT_BLOCK).expect("a verdict");
         same(v.p_value, 1.0, "no draws means no evidence");
         assert!(!v.clears(), "no draws cannot clear anything");
+    }
+
+    #[test]
+    fn a_zero_block_takes_no_draw_and_reads_as_no_evidence() {
+        // Audit satk-8, D-4506. A zero block used to be resampled as a block of
+        // one -- `block <= 1` in `stationary_indices_into` -- so the very same
+        // family that clears at a block of one cleared at a block of zero, a
+        // block no caller can mean. The premise is pinned first: at a block of
+        // one this family DOES clear, so the zero-block answer below is not a
+        // family that would have read p = 1 anyway.
+        let set = vec![edged(100, 1, 500), noise(100, 2)];
+        let draws = 400;
+        let white_one = reality_check(&set, draws, 1, 1).expect("a verdict at block 1");
+        let hansen_one = spa(&set, draws, 1, 1).expect("a verdict at block 1");
+        assert!(
+            white_one.clears(),
+            "premise: White clears at a block of one"
+        );
+        assert!(
+            hansen_one.clears(),
+            "premise: Hansen clears at a block of one"
+        );
+        assert_eq!(white_one.draws, draws);
+        assert!(
+            !romano_wolf(&set, draws, 1, 1, 50_000).is_empty(),
+            "premise: the stepdown names a strategy at a block of one"
+        );
+
+        for (name, verdict) in [
+            ("White", reality_check(&set, draws, 1, 0)),
+            ("Hansen", spa(&set, draws, 1, 0)),
+        ] {
+            let v = verdict.expect("a zero block is answered, not refused");
+            same(v.p_value, 1.0, name);
+            assert_eq!(v.draws, 0, "{name}: no draw is taken at a zero block");
+            assert!(!v.clears(), "{name}: a zero block cannot clear");
+            assert_eq!(v.periods, 100, "{name}: the sample is still measured");
+            assert_eq!(v.strategies, 2, "{name}: every strategy is still counted");
+        }
+        // The observed statistic is the sample's own and does not depend on the
+        // block, so it is reported unchanged.
+        let white_zero = reality_check(&set, draws, 1, 0).expect("a verdict");
+        same(white_zero.statistic, white_one.statistic, "White statistic");
+        let hansen_zero = spa(&set, draws, 1, 0).expect("a verdict");
+        same(
+            hansen_zero.statistic,
+            hansen_one.statistic,
+            "Hansen statistic",
+        );
+        assert!(
+            romano_wolf(&set, draws, 1, 0, 50_000).is_empty(),
+            "the legacy stepdown renders a zero block as malformed: empty"
+        );
+        // Extreme draw counts change nothing: no draw is ever taken.
+        let huge = reality_check(&set, usize::MAX, 1, 0).expect("a verdict");
+        assert_eq!((huge.draws, huge.p_value.to_bits()), (0, 1.0_f64.to_bits()));
+        let huge = spa(&set, usize::MAX, 1, 0).expect("a verdict");
+        assert_eq!((huge.draws, huge.p_value.to_bits()), (0, 1.0_f64.to_bits()));
     }
 
     #[test]
