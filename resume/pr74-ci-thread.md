@@ -356,3 +356,9 @@ approve anything. Use D-4183 onward for new decisions. Save resume state to
 fix-queue resume/pr74-ci-thread.md after every step. Deliver results as
 comparison-table Artifacts.
 ```
+
+## 2026-10-09 17:45 UTC — PUSHED 2a986236 (FINAL SAVE, supersedes the head named above)
+- final/all-fixes: fe8aefc1 -> **2a986236** (D-4183). The local full test run on fe8aefc1 finished: 151 of 154 binaries pass. Two of the 3 "failures" are target/debug/api and target/debug/cli, which are programs, not tests. The one real failure was store `cited_commits` (docs/06-limits.md cited a7a27dc3 and 2a74690d, which are on this branch but not on main). Fixed by listing both as Off::Squashed and adding "`main`'s squash merge does not keep" to each citing sentence. The store and core tests and gates 27b, 12 and 15 pass after the fix.
+- So the whole workspace test suite passes locally on 2a986236 (run as root).
+- Tomorrow: same steps as above, starting from the CI run on 2a986236. Next decision number: D-4184.
+- In the paste-in prompt above, read "fe8aefc1" as "2a986236" and "D-4183 onward" as "D-4184 onward".
