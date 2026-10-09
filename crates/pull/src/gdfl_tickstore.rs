@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::gdfl_archive::{ReadAt, crc32, day_zip_name};
-use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, DayListing, ListedFile};
+use crate::gdfl_cm::{CmKind, CmRefusal, CmScope, CmSource, DayListing, ListedFile};
 use crate::session::Day;
 
 /// The first eight bytes of a day file (§3).
@@ -513,6 +513,9 @@ fn render(shape: u8, v: i64, out: &mut Vec<u8>) -> Result<(), CmRefusal> {
 #[derive(Debug, Clone)]
 pub struct TickStore {
     root: PathBuf,
+    /// What every day listing files (D-3333): the swept surface unless
+    /// [`TickStore::with_scope`] names another.
+    scope: Arc<CmScope>,
 }
 
 impl TickStore {
@@ -521,7 +524,14 @@ impl TickStore {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            scope: CmScope::swept_shared(),
         }
+    }
+
+    /// This store, its day listings filing what `scope` files (D-3333).
+    #[must_use]
+    pub fn with_scope(self, scope: Arc<CmScope>) -> Self {
+        Self { scope, ..self }
     }
 
     /// Where the day file of tree `kind` on `day` lies (§2).
@@ -555,7 +565,7 @@ impl CmSource for TickStore {
         let file_len = file.metadata().map_err(unavailable)?.len();
         let entries = read_index(&file, file_len)?;
         let file = Arc::new(file);
-        let mut listing = DayListing::new(kind, day);
+        let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));
         for entry in entries {
             let locator = TickLocator {
                 file: Arc::clone(&file),

@@ -188,9 +188,7 @@ use store::format::{Bar, OI_NULL};
 
 use crate::fetch::BarRequest;
 use crate::fold::{Bucket, fold};
-use crate::gdfl_cm::{
-    CmKind, CmRefusal, CmSource, Resolution, read_listed, resolve, session_gate, split_name,
-};
+use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, read_listed, session_gate, split_name};
 use crate::gdfl_nfo::{NfoRefusal, NfoSource, decode_ticker, read_file};
 use crate::ingest::{Failure, Ingested, Plan, from_rows, record_held};
 use crate::manifest::{ENTRY_STRIDE, HEADER_LEN, Held, MAX_ENTRIES, Manifest, manifest_path};
@@ -624,6 +622,19 @@ pub const fn cm_cause(why: &CmRefusal) -> Cause {
         CmRefusal::TickStoreUnavailable { .. } => {
             Cause::open(Stage::Vendor, "tick_store_unavailable")
         }
+        // D-3318, D-3333: the vendor's own bytes, refused the same way by
+        // the same reader every time.
+        CmRefusal::TooManyBadRows { .. } => Cause::vendor("too_many_bad_rows"),
+        CmRefusal::SymbolNotInUse { .. } => Cause::vendor("symbol_not_in_use"),
+        // D-3319, D-3320: a calendar, a security master or a sidecar another
+        // build or another day can change.
+        CmRefusal::CalendarWindowNotLanded { .. } => {
+            Cause::open(Stage::Calendar, "calendar_window_not_landed")
+        }
+        CmRefusal::AuctionEligibilityUnknown { .. } => {
+            Cause::open(Stage::Calendar, "auction_eligibility_unknown")
+        }
+        CmRefusal::AuctionSidecar { .. } => Cause::open(Stage::File, "auction_sidecar"),
     }
 }
 
@@ -2862,17 +2873,25 @@ fn cm_day<S: CmSource>(
     let mut seen = HashSet::with_capacity(listing.entries().len());
     let folder = format!("{}/", listing.folder());
     for file in listing.entries() {
-        let key = file
+        // What the listing's scope files the stem under this day (D-3333):
+        // the swept surface under the default scope, as `resolve` answers.
+        let filed = file
             .entry
             .strip_prefix(&folder)
             .and_then(|name| split_name(name).ok())
-            .and_then(|(stem, _)| match resolve(tree, stem) {
-                Resolution::Swept(key) => Some(key),
-                _ => None,
-            });
-        let Some(key) = key else {
-            read.skipped += 1;
-            continue;
+            .map(|(stem, _)| listing.filing(stem));
+        let key = match filed {
+            Some(Ok(Some(key))) => key,
+            // A stem refused for its symbol is refused only where the run
+            // wants the series it would have been filed under.
+            Some(Err(why)) if why.filed_as().is_none_or(|symbol| run.wants(symbol)) => {
+                read.refused.push(Refused::cm(file.name(), &why));
+                continue;
+            }
+            Some(Ok(None) | Err(_)) | None => {
+                read.skipped += 1;
+                continue;
+            }
         };
         // A second name for one ticker is a skip: its first name was refused
         // as twins, so every entry is a file, a skip or a refusal (D-2814).
@@ -2887,7 +2906,16 @@ fn cm_day<S: CmSource>(
         }
         // A key resolved from this listing always has its file here, so a
         // `None` is refused by name rather than counted as skipped.
-        match read_listed(source, &listing, &key).and_then(|f| f.ok_or(CmRefusal::NotSwept)) {
+        // The closing auction's prints (D-3320) go to the month's sidecar
+        // before the trades are filed, and a file whose prints it refuses is
+        // refused whole, so every entry stays one file, skip or refusal.
+        let read_file = read_listed(source, &listing, &key)
+            .and_then(|f| f.ok_or(CmRefusal::NotSwept))
+            .and_then(|day_file| {
+                crate::gdfl_cm::auction::append(run.store_root, &key, day, &day_file.file.auction)
+                    .map(|_| day_file)
+            });
+        match read_file {
             Ok(day_file) => sink(TickFile {
                 symbol,
                 contract: None,

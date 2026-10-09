@@ -783,9 +783,11 @@ fn a_day_whose_every_file_is_refused_is_journalled_refused_with_its_reason() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// DB-025: a special session and a day the source does not hold are holes
-/// with a reason in the journal, each closed `refused`; a re-run that meets
-/// them again writes nothing.
+/// DB-025: a day the calendar declines and a day the source does not hold
+/// are holes with a reason in the journal, each closed `refused`; a re-run
+/// that meets them again writes nothing. (A special session was the
+/// calendar's example until D-3319 read it inside its windows; a day before
+/// the calendar's spans is one now.)
 #[test]
 fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
     let root = scratch("import-holes");
@@ -795,14 +797,14 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
         &root,
         Src::Store,
         ImportKind::Indices,
-        day(2024, 3, 2),
-        day(2024, 3, 2),
+        day(2017, 12, 29),
+        day(2017, 12, 29),
         &store,
     );
     assert_eq!(special.days_refused, 1);
     assert_eq!(
-        without_run(&line_of(&store, "indices", "2024-03-02")),
-        "refused indices 2024-03-02 * definition=2 stage=calendar reason=calendar_not_regular \
+        without_run(&line_of(&store, "indices", "2017-12-29")),
+        "refused indices 2017-12-29 * definition=2 stage=calendar reason=calendar_unmeasured \
          failures=1"
     );
     let missing = import(&root, Src::Store, ImportKind::Stocks, d1(), d2(), &store);
@@ -824,8 +826,8 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
         &root,
         Src::Zips,
         ImportKind::Indices,
-        day(2024, 3, 2),
-        day(2024, 3, 2),
+        day(2017, 12, 29),
+        day(2017, 12, 29),
         &store,
     );
     assert_eq!(special.days_refused, 1);
@@ -2098,7 +2100,8 @@ fn closed_unmeasured_special_and_missing_days_are_each_named() {
         got.days_missing,
         vec![d2(), d3(), day(2024, 4, 4), day(2024, 4, 5)]
     );
-    // The disaster-recovery Saturday is a special session, never a regular day.
+    // The disaster-recovery Saturday is a special session read inside its
+    // windows (D-3319, WP-12a): admitted, and this world does not hold it.
     let special = import(
         &root,
         Src::Zips,
@@ -2107,8 +2110,8 @@ fn closed_unmeasured_special_and_missing_days_are_each_named() {
         day(2024, 3, 2),
         &store,
     );
-    assert_eq!(special.days_refused, 1);
-    assert!(special.failures[0].instrument.ends_with("calendar"));
+    assert_eq!(special.days_refused, 0);
+    assert_eq!(special.days_missing, vec![day(2024, 3, 2)]);
     let unmeasured = import(
         &root,
         Src::Zips,

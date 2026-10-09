@@ -870,18 +870,19 @@ fn hostile_rows_refuse_by_name_and_edge_prices_decode_exactly() {
         decode(&session_file(&[good.clone(), header]), &expect(stem)),
         Err(CmRefusal::TickerMismatch { line: 3 })
     );
-    assert_eq!(
-        decode(
-            &session_file(&[good.clone(), format!("{good},0")]),
-            &expect(stem)
-        ),
-        Err(CmRefusal::MalformedRow { line: 3 })
-    );
+    // D-3318: a column short or extra refuses that row by name, and the
+    // file's other rows are read.
+    let extra = decode(
+        &session_file(&[good.clone(), format!("{good},0")]),
+        &expect(stem),
+    )
+    .unwrap();
+    assert_eq!((extra.rows.len(), extra.refused.malformed), (1, 1));
+    assert_eq!(extra.refused.named[0].line, 3);
     let short = good.rsplit_once(',').unwrap().0.to_owned();
-    assert_eq!(
-        decode(&session_file(&[short, good.clone()]), &expect(stem)),
-        Err(CmRefusal::MalformedRow { line: 2 })
-    );
+    let short = decode(&session_file(&[short, good.clone()]), &expect(stem)).unwrap();
+    assert_eq!((short.rows.len(), short.refused.malformed), (1, 1));
+    assert_eq!(short.refused.named[0].line, 2);
     // LF and CRLF lines mixed in one file read alike.
     let mut mixed = session_file(std::slice::from_ref(&good));
     mixed.extend_from_slice(format!("{good}\n").as_bytes());

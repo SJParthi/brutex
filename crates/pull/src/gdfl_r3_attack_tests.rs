@@ -985,7 +985,8 @@ struct WantCm {
 /// The reference: per day, each swept ticker's FIRST entry is the one the
 /// day offers, a later name of it a skip; a ticker the filter does not want
 /// is a skip; two names of one ticker are twins, refused once (D-2814); a
-/// bent row refuses at line 2; a stock with no traded in-session row, or an
+/// bent row is refused by name and the file read on (D-3318), refusing at line
+/// 2 only a file with no other row; a stock with no traded in-session row, or an
 /// index with no in-session row or none at or after 15:30, refuses; a
 /// quantity past `i64` refuses.
 fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
@@ -1031,10 +1032,12 @@ fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
                 .iter()
                 .any(|r| (every_row || r.ltq > 0) && (OPEN..CLOSE).contains(&r.sod));
             let closed = rows.iter().any(|r| r.sod >= CLOSE);
+            // D-3318: a bent row is refused by name and the file read on; only
+            // a file with no other row names it as the file's refusal.
             if count[name] > 1 {
                 want.totals.files_refused += 1;
                 late.push((file, "two names for one ticker"));
-            } else if *bent {
+            } else if *bent && rows.is_empty() {
                 want.totals.files_refused += 1;
                 late.push((file, "line 2"));
             } else if !usable {

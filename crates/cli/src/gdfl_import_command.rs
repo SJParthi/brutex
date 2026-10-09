@@ -31,12 +31,34 @@
 //!
 //! `--retry-refused`, anywhere after `TO`, reads again every day of the range
 //! closed done with refusals (D-3317 item 2); it is never a symbol.
+//!
+//! # What a capital-market run files (D-3333)
+//!
+//! An `indices` or `stocks` run files the scope `pull::gdfl_cm::CmScope::stored`
+//! names, stored and never swept beside the swept surface: every other
+//! applied index row of `core::alias` (FINNIFTY's `NIFTY FIN SERVICE` under
+//! `NIFTYFINSERVICE`, and the rest; `INDIA VIX` under `INDIAVIX`, reference
+//! only), every share symbol of an applied symbol change (an old name filed
+//! under the newest symbol its chain reaches, for the days before each
+//! change), and every share underlying the options store holds, read once
+//! from `<store>/bars/gdfl/NSE/FNO/` (D-3333 item 2: "widened from
+//! `FNO_UNDERLYINGS` to every stored option underlying"). A `stocks` run reads
+//! closing-auction eligibility from `<store>/session-masters` (D-3320).
+//!
+//! `--stored`, anywhere after `TO`, narrows the run to the series D-3333 adds
+//! and the swept shares an old name is filed under, as the run's filter: a
+//! filter has its own journal key, so days already done for the swept
+//! surface are read again for those series only (WP-80 step 4). It is never
+//! a symbol.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use pull::gdfl_archive::Archive;
+use pull::gdfl_cm::CmScope;
 use pull::gdfl_import::{
     ImportKind, Origin, Report, Run, RunOptions, SourceKind, run_cm_from, run_nfo_from,
 };
@@ -54,6 +76,129 @@ pub(crate) const CM_ARCHIVE_VAR: &str = "BRUTEX_GDFL_CM_ARCHIVE";
 pub(crate) const NFO_ARCHIVES_VAR: &str = "BRUTEX_GDFL_NFO_ARCHIVES";
 /// The flag that reads again the days closed done with refusals (D-3317).
 pub(crate) const RETRY_REFUSED: &str = "--retry-refused";
+/// The flag that narrows a capital-market run to what D-3333 adds.
+pub(crate) const STORED: &str = "--stored";
+
+/// The store's GDFL options tree, whose underlyings a share run files.
+fn options_tree(store: &Path) -> PathBuf {
+    store.join("bars").join("gdfl").join("NSE").join("FNO")
+}
+
+/// Every underlying the options store holds, sorted: one read of the options
+/// tree's directory, O(underlyings). A tree that does not exist yet holds
+/// none.
+///
+/// # Errors
+///
+/// A tree that cannot be listed, or an entry whose name is not text, named.
+fn stored_option_underlyings(store: &Path) -> Result<Vec<String>, String> {
+    let tree = options_tree(store);
+    let entries = match std::fs::read_dir(&tree) {
+        Ok(entries) => entries,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(why) => return Err(format!("{}: {why}", tree.display())),
+    };
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|why| format!("{}: {why}", tree.display()))?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|name| format!("{}: {} is not a symbol", tree.display(), name.display()))?;
+        names.insert(name);
+    }
+    Ok(names.into_iter().collect())
+}
+
+/// The scope of a capital-market run of `kind` (D-3333), and how many
+/// option underlyings it read.
+///
+/// # Errors
+///
+/// What [`stored_option_underlyings`] and `CmScope::stored` refuse.
+fn scope_of(kind: ImportKind, store: &Path) -> Result<(CmScope, usize), String> {
+    match kind {
+        ImportKind::Stocks => {
+            let underlyings = stored_option_underlyings(store)?;
+            let scope = CmScope::stored(&underlyings)?.with_masters(store.join("session-masters"));
+            Ok((scope, underlyings.len()))
+        }
+        _ => Ok((CmScope::stored(std::iter::empty::<&str>())?, 0)),
+    }
+}
+
+/// The filter `--stored` stands for: every store symbol the scope files that
+/// the swept surface alone does not, sorted. An index row's store key; a
+/// stored share's own symbol, and the newest symbol its chain of changes
+/// reaches, which is where its old name's days are filed.
+fn stored_filter(kind: ImportKind, scope: &CmScope) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    match kind {
+        ImportKind::Indices => {
+            for row in scope.indices() {
+                names.insert(row.store_key.to_owned());
+            }
+        }
+        _ => {
+            for share in scope.shares() {
+                names.insert(share.to_string());
+                names.insert(brutex_core::alias::LINEAGE.current(share).to_owned());
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// WHAT A RUN FILES (D-3333), and the receipt's sentence saying so: the
+/// swept surface alone for an options run; for a capital-market run the
+/// stored scope (the other index rows, the old names and every share
+/// underlying the options store holds), `--stored` narrowing `only` to what
+/// it adds, under a filter of its own.
+///
+/// # Errors
+///
+/// What [`scope_of`] refuses.
+fn scope_for(
+    kind: ImportKind,
+    store: &Path,
+    stored_only: bool,
+    only: &mut Vec<String>,
+) -> Result<(Arc<CmScope>, Option<String>), String> {
+    if kind == ImportKind::Options {
+        return Ok((Arc::new(CmScope::swept()), None));
+    }
+    let (scope, underlyings) = scope_of(kind, store)?;
+    if stored_only {
+        only.extend(stored_filter(kind, &scope));
+    }
+    let words = format!(
+        "stored (D-3333): {} index rows and {} shares beyond the F&O list; {} option \
+         underlyings read from {}",
+        scope.indices().len(),
+        scope.shares().len(),
+        underlyings,
+        options_tree(store).display()
+    );
+    Ok((Arc::new(scope), Some(words)))
+}
+
+/// The words after `TO`: whether `--retry-refused` and `--stored` were
+/// given (each a flag anywhere among them, never a symbol), and the symbols.
+fn flags_of(words: &[&str]) -> (bool, bool, Vec<String>) {
+    let symbols = words
+        .iter()
+        .filter(|word| **word != RETRY_REFUSED && **word != STORED)
+        .map(|word| (*word).to_owned())
+        .collect();
+    (
+        words.contains(&RETRY_REFUSED),
+        words.contains(&STORED),
+        symbols,
+    )
+}
 
 /// `YYYY-MM-DD` as a day, or why not.
 fn day(text: &str) -> Result<Day, String> {
@@ -119,14 +264,17 @@ pub(crate) fn command_with(
             return MISUSED;
         }
     };
-    let retry_refused = only.contains(&RETRY_REFUSED);
-    let only: Vec<String> = only
-        .iter()
-        .filter(|word| **word != RETRY_REFUSED)
-        .map(|word| (*word).to_owned())
-        .collect();
+    let (retry_refused, stored_only, mut only) = flags_of(only);
+    if stored_only && kind == ImportKind::Options {
+        let _ = writeln!(
+            out,
+            "refused: {STORED} narrows a capital-market run; an options run files no stored series"
+        );
+        return MISUSED;
+    }
     let roots = root(var, env).and_then(|data| Ok((data, store()?)));
     let result = roots.and_then(|(data, store)| {
+        let (scope, scope_words) = scope_for(kind, &store, stored_only, &mut only)?;
         let run = Run {
             kind,
             from,
@@ -151,26 +299,34 @@ pub(crate) fn command_with(
             ("tickstore", ImportKind::Options) => {
                 run_nfo_from(&NfoTickStore::new(&data), &run, options)
             }
-            ("tickstore", _) => run_cm_from(&TickStore::new(&data), &run, options),
+            ("tickstore", _) => run_cm_from(
+                &TickStore::new(&data).with_scope(Arc::clone(&scope)),
+                &run,
+                options,
+            ),
             ("zip", ImportKind::Options) => run_nfo_from(&NfoZips::new(&data), &run, options),
             _ => {
-                let archive =
-                    Archive::open(&data).map_err(|w| format!("{}: {w}", data.display()))?;
+                let archive = Archive::open(&data)
+                    .map_err(|w| format!("{}: {w}", data.display()))?
+                    .with_scope(Arc::clone(&scope));
                 run_cm_from(&archive, &run, options)
             }
         };
-        Ok((report, store))
+        Ok((report, store, scope_words))
     });
     match result {
-        Ok((Ok(report), store)) => {
+        Ok((Ok(report), store, scope_words)) => {
             render(out, kind, source, &store, &report);
+            if let Some(words) = scope_words {
+                let _ = writeln!(out, "  scope               {words}");
+            }
             if report.failures.is_empty() {
                 OK
             } else {
                 FAILED
             }
         }
-        Ok((Err(refusal), store)) => {
+        Ok((Err(refusal), store, _)) => {
             // A census refusal stopped the run part way (D-3317 item 7): what
             // it did before the refused day is on disk, so it is printed too.
             if let Some(done) = refusal.report() {

@@ -148,10 +148,11 @@ fn a_named_failure_or_a_refused_run_exits_failed() {
         (TICKSTORE_VAR, root.join("ts")),
         (CM_ARCHIVE_VAR, root.join("absent.zip")),
     ]);
-    // A disaster-recovery Saturday: a special session, refused by name.
+    // A day before the calendar's spans, refused by name. (A special session
+    // was this example until D-3319 read it inside its windows.)
     let mut out = String::new();
     let code = command_with(
-        &["indices", "tickstore", "2024-03-02", "2024-03-02"],
+        &["indices", "tickstore", "2017-12-29", "2017-12-29"],
         &env,
         &|| Ok(store.clone()),
         &mut out,
@@ -258,5 +259,100 @@ fn the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source() {
                 && l.contains(" reason=day_not_held ")),
         "{journal}"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// D-3333: a capital-market run files the stored scope, built from the
+/// options tree the store holds (every directory one underlying), and says
+/// so; `--stored` is a flag, never a symbol, that narrows the run to what
+/// D-3333 adds under a journal key of its own; on an options run it is
+/// refused before anything is read.
+#[test]
+fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
+    let root = scratch("stored");
+    let store = root.join("store");
+    let tree = options_tree(&store);
+    for name in ["HDFC", "NIFTY", "TATAMOTORS"] {
+        std::fs::create_dir_all(tree.join(name)).unwrap();
+    }
+    // A file in the tree is not an underlying.
+    std::fs::write(tree.join("README"), b"not a directory").unwrap();
+    let ts = root.join("ts");
+    std::fs::create_dir_all(&ts).unwrap();
+    let env = env_of(&[(TICKSTORE_VAR, ts)]);
+    assert_eq!(
+        stored_option_underlyings(&store).unwrap(),
+        vec!["HDFC", "NIFTY", "TATAMOTORS"]
+    );
+    assert!(
+        stored_option_underlyings(&root.join("absent"))
+            .unwrap()
+            .is_empty()
+    );
+    let mut out = String::new();
+    let code = command_with(
+        &["stocks", "tickstore", "2024-04-01", "2024-04-01", STORED],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("stored (D-3333): 7 index rows and ")
+            && out.contains("3 option underlyings read from "),
+        "{out}"
+    );
+    let journal = std::fs::read_to_string(pull::gdfl_import::journal_path(&store)).unwrap();
+    let line = journal
+        .lines()
+        .find(|l| l.starts_with("refused stocks 2024-04-01 "));
+    assert!(line.is_some(), "{journal}");
+    let line = line.unwrap();
+    // The filter's key names the stored shares and where old names are
+    // filed, never `*`: the swept surface's done days are not skipped.
+    assert!(
+        !line.contains(" * ") && line.contains("HDFC") && line.contains("TMPV"),
+        "{line}"
+    );
+    let (_, filter) = scope_of(ImportKind::Indices, &store).unwrap();
+    assert_eq!(filter, 0, "an index run reads no options tree");
+    let (scope, _) = scope_of(ImportKind::Indices, &store).unwrap();
+    assert_eq!(
+        stored_filter(ImportKind::Indices, &scope),
+        vec![
+            "INDIAVIX",
+            "NIFTYCPSE",
+            "NIFTYFINSERVICE",
+            "NIFTYFPI150",
+            "NIFTYIT",
+            "NIFTYMIDSELECT",
+            "NIFTYNEXT50"
+        ]
+    );
+    let mut out = String::new();
+    let code = command_with(
+        &["options", "tickstore", "2024-04-01", "2024-04-01", STORED],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED);
+    assert!(
+        out.starts_with("refused: ") && out.contains(STORED),
+        "{out}"
+    );
+    // An underlying the store could not file under its own spelling refuses
+    // the run by name before any day is read. (Lower case, and no upper-case
+    // twin in the tree: a case-insensitive volume would fold the two.)
+    std::fs::create_dir_all(tree.join("acc")).unwrap();
+    let mut out = String::new();
+    let code = command_with(
+        &["stocks", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, FAILED);
+    assert!(out.contains("\"acc\" is not a share symbol"), "{out}");
     std::fs::remove_dir_all(root).unwrap();
 }
