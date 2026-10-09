@@ -34,9 +34,9 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
 1. /db fix run: Workflow scriptPath work-20260925/state/fix/db-fix-round-1b.js, launched FRESH (never
    resumeFromRunId: its cache is order-dependent and re-runs finished packages), args
    {maxLive:6, niftyFirst:true, niftySkip:[], doneExtra:[every package with a "Merge WP-xx" commit on feat/db-fix],
-   priority:[WP-10,WP-31,WP-30,WP-50,WP-52,WP-53,WP-32,WP-51,WP-15,WP-54,WP-56]}.
-   Check resume/mac-gdfl-20261009.md for what merged last; WP-10 (census record: makes NIFTY options after Dec 2019
-   reachable) and WP-31 (bars window) were in progress at the hand-off.
+   priority:[WP-30,WP-50,WP-52,WP-53,WP-32,WP-51,WP-54,WP-56,WP-55,WP-11b,WP-34,WP-37,WP-38b]}.
+   Check resume/mac-gdfl-20261009.md (its last "Update" section) for what merged last: 17 of 37 at 16:55 UTC 9 Oct.
+   WP-30 (census serving) had uncommitted work in wt/P-WP-30 and was the last thing running.
 2. Add the 18 new defects (new-defects-20261009.json) as packages for the next round, NIFTY ones first, including the
    blocking one: sorting a 1s series by price/volume over all months reads all 43.9M bars (4-7 s, 8-12 GB).
 3. As soon as WP-31, WP-50, WP-52 and WP-53 are merged: deploy feat/db-fix to :8080 (fast-forward wt/APP, npm run build
@@ -49,8 +49,10 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    route, Rust-only, control permutations, robustness on a shadow server, GDFL edge days, observability); a row is
    Correct only when a second agent reproduced it. Then a fresh audit round; repeat fix -> deploy -> verify until a
    whole round finds zero.
-6. AUTOMATE INGEST AND THE CHECKS. Build from the reviewed design work-20260925/state/design/ingest-automation.md
-   (written 9 Oct by a design agent and an adversarial reviewer; follow its package order). AUTOMATE THE CHECKS (operator, 9 Oct): stop relying on agents to prove the data. Port the checks Claude ran by hand
+6. AUTOMATE INGEST AND THE CHECKS. The design is written but NOT yet reviewed: work-20260925/state/design/ingest-automation.md
+   (1,273 lines, 128-row input case matrix, packages IA-0..IA-14). First run an adversarial review of it (claims checked
+   first-hand, every O(1) claim, every case) and revise it; answer its section 17 questions with sensible defaults and say
+   which; then build the IA packages in its order. AUTOMATE THE CHECKS (operator, 9 Oct): stop relying on agents to prove the data. Port the checks Claude ran by hand
    (work-20260925/state/gdfl-board/reconcile.py: rebuild a day's one-second bars from the raw GDFL file with the D-2802
    late-row rule and compare price/volume/OI with the store; completeness.py: every trading day present against the
    archive's day list and the calendar, no gaps or duplicates, journal seconds = stored seconds; the Zerodha minute
