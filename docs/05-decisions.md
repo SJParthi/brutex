@@ -66779,3 +66779,22 @@ ABSENT".
 `etaSecs`. The card shows "progress not measured" with one sentence saying
 why, in place of the fraction, the meter and the foot. A run pressed from this
 page is unchanged: it still refuses to start without a before-reading. OBSV-25.
+
+### D-3224 — A refused Stop on /ingest names its reason — 2026-10-09
+
+**What was observed.** `/ingest` `stopWatching` posts `/pull/run/stop`. On a
+non-2xx it read the body as JSON once, kept the one shape that means the stop
+was taken but not saved (`stopping:true, stop_persisted:false`, OBSV-09,
+D-3208), and otherwise threw "the server answered HTTP N". Every POST on this
+server passes origin admission (`same_origin_writes_only`) and the form-field
+check (`one_value_per_form_field`) before its handler. Both refuse in
+text/plain with a sentence that ends "Nothing was read or run." The page read
+that sentence, failed to parse it as JSON, and dropped it. A JSON refusal
+carrying `error` was dropped the same way.
+
+**Decided.** The body is read as text once and parsed as JSON from that text.
+The unpersisted-stop branch is unchanged. Every other non-2xx throws
+`refusalSentence('/pull/run/stop', status, reasonOfText(text))`, which names
+the route, the status and the server's own reason, or says that it named none.
+The stop stays undelivered: `stopAsked` and `aborted` are reset and no
+`stopWarning` is set. OBSV-26.

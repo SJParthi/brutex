@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
+import * as refusal from '../src/lib/refusal.js';
 
 const source = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
 const ast = /** @type {any} */ (parse(source, { modern: true }));
@@ -34,7 +35,7 @@ const flush = () => new Promise((done) => setImmediate(done));
 
 /** The actual `start`, `runPull` and `stopWatching`, over stubs. */
 function ingest() {
-  const create = new Function('hooks', `
+  const create = new Function('hooks', ...Object.keys(refusal), `
     let showProblems=false, problems=[], phase='idle', pressing=false, receipt=null, receipts=[], outcomes=[],
       outcomeIndex=new Map(), samples=[], netError=null, pollError=null, aborted=false, passSummary=null,
       runState=null, askedKeys=new Set(), sent=null, baseline=null, live=null, startedAt=0, lastGrowthAt=0,
@@ -52,7 +53,7 @@ function ingest() {
     snapshot() { const d = deferred(); hooks.snapshots.push(d); return d.promise; },
     /** @type {(url:string,o:any)=>Promise<Response>} */
     request: async (url) => { if (url === '/pull/run') hooks.posts++; return Response.json({ started: true }, { status: 202 }); } };
-  return { app: create(hooks), hooks };
+  return { app: create(hooks, ...Object.values(refusal)), hooks };
 }
 
 test('a Stop the server never took is not left recorded as an aborted run', async () => {
@@ -126,5 +127,32 @@ test('a Stop the server took in memory but could not persist says so, and stays 
     assert.equal(again.app.state().aborted, false);
     assert.match(String(again.app.state().pollError), /could not be delivered/);
     assert.equal(again.app.state().stopWarning, '');
+  }
+});
+
+test('a refused Stop names the route, the status and the server reason (OBSV-26)', async () => {
+  // OBSV-26, D-3224. Every POST on this server passes origin admission and the
+  // form-field check before its handler, and both refuse in text/plain:
+  // "REFUSED -- ... Nothing was read or run." A refused stop, and any JSON
+  // refusal other than the unpersisted-stop shape, was reported as "the server
+  // answered HTTP 403" -- the reason, which says why the stop did not land and
+  // what to change, was read and thrown away.
+  const plain = 'REFUSED - a write must come from this server\'s own page. Nothing was read or run.\n';
+  for (const [reply, reason] of /** @type {[() => Response, RegExp][]} */ ([
+    [() => new Response(plain, { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } }),
+      /\/pull\/run\/stop answered HTTP 403: REFUSED - a write must come from this server's own page\. Nothing was read or run\./],
+    [() => Response.json({ stopping: false, error: 'the run slot is held by another process' }, { status: 503 }),
+      /\/pull\/run\/stop answered HTTP 503: the run slot is held by another process/],
+    [() => new Response('', { status: 502 }), /\/pull\/run\/stop answered HTTP 502 and named no reason/]
+  ])) {
+    const { app, hooks } = ingest();
+    hooks.request = async () => reply();
+    app.running();
+    await app.stopWatching();
+    assert.equal(app.state().stopAsked, false, 'a refused stop was not taken');
+    assert.equal(app.state().aborted, false);
+    assert.equal(app.state().stopWarning, '');
+    assert.match(String(app.state().pollError), /^Stop could not be delivered/);
+    assert.match(String(app.state().pollError), reason);
   }
 });

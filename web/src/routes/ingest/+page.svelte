@@ -7156,15 +7156,22 @@
            the run winds down, and the STOP will not survive a restart. That
            is a delivered stop with a durability warning, not an undelivered
            one -- and the warning is the operator's to read (OBSV-09, D-3208).
-           Any other failure is still undelivered. */
-        const body = await r.json().catch(() => null);
+           Any other failure is still undelivered.
+           READ AS TEXT, ONCE. Origin admission and the form check refuse a
+           POST in text/plain before this handler runs, so a JSON-only read
+           dropped the one sentence that said why the stop did not land. The
+           undelivered branch names the route, the status and that reason
+           (OBSV-26, D-3224). */
+        const text = await r.text().catch(() => '');
+        /** @type {any} */ let body = null;
+        try { body = JSON.parse(text); } catch { body = null; }
         if (body?.stopping === true && body?.stop_persisted === false) {
           said = body;
           unpersisted = typeof body.error === 'string' && body.error.trim() !== ''
             ? body.error.trim()
             : 'The STOP was not durably recorded.';
         } else {
-          throw new Error(`the server answered HTTP ${r.status}`);
+          throw new Error(refusalSentence('/pull/run/stop', r.status, reasonOfText(text)));
         }
       } else {
         said = await r.json();
