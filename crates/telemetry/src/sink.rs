@@ -1048,6 +1048,11 @@ impl Sink {
     /// which is correct, because they are one press — and a leg that finds the
     /// key already held does not take it and does not release it.
     ///
+    /// A held key still names EVERY event the process writes, so a server that
+    /// does other work while a run is in flight no longer claims it: the api
+    /// opens a scope ([`crate::in_run`]) instead, which names only the work
+    /// polled inside it (sobs-14, D-4451).
+    ///
     /// # Cost
     ///
     /// One `compare_exchange`. O(1), lock-free, and exact: two threads racing
@@ -1148,8 +1153,16 @@ impl Sink {
     ///
     /// Never panics and never propagates a failure; the module documentation
     /// says how a failure is surfaced instead.
+    ///
+    /// The run it carries is the innermost scope open on this thread
+    /// ([`crate::in_run`], [`crate::enter`]), and only outside every scope
+    /// the ambient key [`Self::claim_run`] holds. A scope names the work
+    /// actually running; the ambient key names whatever claimed it, which on
+    /// a server is not the work that happens to be writing (sobs-14,
+    /// D-4451).
     pub fn emit(&self, event: &Event<'_>) -> Emitted {
-        self.emit_for_run(self.run.load(Ordering::Relaxed), event)
+        let run = crate::scope::current_run().unwrap_or_else(|| self.run.load(Ordering::Relaxed));
+        self.emit_for_run(run, event)
     }
 
     /// Writes one event under an explicit run id.

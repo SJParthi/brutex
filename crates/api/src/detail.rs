@@ -202,8 +202,14 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    // THE CALLER'S LOG RUN CROSSES TO THE BLOCKING THREAD (sobs-14, D-4451).
+    // The scope is a thread-local set while a future is polled, and the work
+    // runs on another thread, so an event written inside it would otherwise
+    // lose the run of the request that asked for it.
+    let run = telemetry::current_run();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _scope = run.map(telemetry::enter);
         work()
     })
     .await
@@ -230,13 +236,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Permit::owed();
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        work()
-    })
-    .await
-    .map_err(|why| RunError::Join(why.to_string()))
+    admitted(Permit::owed(), work).await
 }
 
 /// Refuses a detail query before any parser allocates from an unbounded URI.
@@ -1550,5 +1550,29 @@ mod tests {
             .await
             .expect("admitted blocking task");
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+    }
+
+    /// sobs-14, D-4451: BLOCKING WORK KEEPS THE LOG RUN OF THE REQUEST THAT
+    /// ASKED FOR IT, through each admission (`run`, `run_store_read`,
+    /// `run_owed`), and work asked for outside any run carries none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_work_keeps_the_callers_log_run() {
+        let _serial = super::TEST_SERIAL.lock().await;
+        let inside = telemetry::in_run(4_454_001, run(telemetry::current_run))
+            .await
+            .expect("admitted blocking task");
+        assert_eq!(inside, Some(4_454_001));
+        let read = telemetry::in_run(4_454_002, run_store_read(telemetry::current_run))
+            .await
+            .expect("admitted store read");
+        assert_eq!(read, Some(4_454_002));
+        let owed = telemetry::in_run(4_454_003, super::run_owed(telemetry::current_run))
+            .await
+            .expect("owed blocking task");
+        assert_eq!(owed, Some(4_454_003));
+        let outside = run(telemetry::current_run)
+            .await
+            .expect("admitted blocking task");
+        assert_eq!(outside, None);
     }
 }

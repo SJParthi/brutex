@@ -51,6 +51,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import Picker from '$lib/Picker.svelte';
   import DayField from '$lib/DayField.svelte';
+  import StoreScrub from '$lib/StoreScrub.svelte';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
      `loadCatalogue(feeds.active)` on every feed change, so the universe rung
      costs this page NO request — it is a join against a list the layout has
@@ -10047,6 +10048,9 @@
          have gone anyway. -->
     </div>
   {/if}
+  <!-- THE SCRUB (sobs-10, D-4454): the one check that opens the bar files
+       this page's census counts. On request only; never polled. -->
+  {#if feeds.active}<StoreScrub feed={feeds.active} />{/if}
 </div>
 
 <!-- ======================================================================

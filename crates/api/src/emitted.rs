@@ -175,6 +175,25 @@ pub(crate) fn counts(record: &telemetry::Record, key: &str, want: u64) -> bool {
     record.field(key).and_then(telemetry::OwnedValue::as_u64) == Some(want)
 }
 
+/// Every record the shared sink holds for one log run, oldest first.
+///
+/// sobs-14, D-4451: a test that drives its work inside [`telemetry::in_run`]
+/// under an id from [`telemetry::reserve_run_id`] reads back its own events and
+/// no other test's, which [`mark`] cannot promise while tests running in
+/// parallel write the same target and message.
+pub(crate) fn run_story(run: u64) -> Vec<telemetry::Record> {
+    let sink = sink();
+    let dir = sink
+        .path()
+        .parent()
+        .expect("the sink writes a file inside a directory")
+        .to_path_buf();
+    let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_run(run);
+    let mut records = telemetry::tail(&dir, sink.keep_files(), &query).records;
+    records.reverse();
+    records
+}
+
 /// One production emit site, and the record it must leave in the file.
 struct Case {
     /// Where the `telemetry::emit` call lives, so a failure names the line
@@ -1631,11 +1650,28 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
     // could not be stamped`, driven through `note_unstamped_lock` and read back
     // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
-    const REACHED_IN_SERVER_TESTS: usize = 21;
+    // 21 -> 25 at D-4449, D-4450, D-4454 and D-4455 (fxb2): `api.pull
+    // contract not landed` (`an_fno_landing_keeps_five_refusal_reasons_and_
+    // counts_all_six`), `pull.run refused before it started`
+    // (`a_run_refused_before_it_starts_is_logged_with_its_reason`), `api.verify
+    // scrub` (`server::verification_route_tests::every_scrub_writes_its_
+    // verdict_to_the_log_once`) and `pull.http retrying a refused request`
+    // (`server::fno_boundary_tests::every_retry_on_the_bars_ladder_is_one_
+    // event_with_its_reason`), each read back from this sink.
+    const REACHED_IN_SERVER_TESTS: usize = 25;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
-    const REACHED_IN_RECOVERY_TESTS: usize = 2;
+    // 2 -> 3 at D-4448: `pull.recovery recovery blocked`, read back by
+    // `recovery::tests::every_refused_recovery_names_its_stage_and_reason_in_the_log`.
+    const REACHED_IN_RECOVERY_TESTS: usize = 3;
+    // D-4452 and D-4453 (fxb2): the one site of each of two modules that had
+    // none, both read back from this sink by the module's own tests:
+    // `api.pullrun` (`pullrun::note_press`, by
+    // `pullrun::tests::a_press_logs_its_legs_and_verdict_under_one_run_and_nothing_else`)
+    // and `autopilot` halts, stalls and ends (`autopilot::note_backfill`, by
+    // `autopilot::tests::a_stall_and_a_halt_are_logged_once_each_with_feed_and_month`).
+    const REACHED_IN_MODULE_TESTS: usize = 2;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1755,17 +1791,24 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
     // named above.
+    // 65 -> 72 at D-4448 to D-4455 (fxb2): seven new sites, each read back
+    // in the column its test lives in, above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 65,
+        lib_sites, 72,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
+        SITES_HERE
+            + REACHED_IN_SERVER_TESTS
+            + REACHED_IN_RECOVERY_TESTS
+            + REACHED_IN_MODULE_TESTS
+            + UNREACHABLE,
         lib_sites,
-        "every emit site is proven here, in server::tests or recovery::tests, or named above"
+        "every emit site is proven here, in server::tests, recovery::tests or its own \
+         module's tests, or named above"
     );
 }

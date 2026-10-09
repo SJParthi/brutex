@@ -231,3 +231,72 @@ async fn scrub_route_refuses_a_corrupted_counter_instead_of_claiming_an_empty_su
     fs::write(path, original).expect("restore exact counter");
     assert_eq!(fixture.get("dhan").await.1["verified"], true);
 }
+
+/// sobs-10, D-4454: EVERY SCRUB IS ONE EVENT ON THE LOG, and the event
+/// carries the verdict the reply carries: Error for a refused question, Info
+/// for a counter that checked out, Warn with the first finding for one that
+/// disagreed. A feed that is not one is refused before any scrub and writes
+/// none.
+#[tokio::test]
+async fn every_scrub_writes_its_verdict_to_the_log_once() {
+    let _installed = crate::emitted::sink();
+    let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+    let fixture = Fixture::new("scrub-route-logged");
+    let truthful = entry("SOBSTEN");
+    telemetry::in_run(run, async {
+        assert_eq!(fixture.get("dhan").await.0, StatusCode::SERVICE_UNAVAILABLE);
+        fixture.stored(truthful);
+        fixture.publish(&[truthful]);
+        assert_eq!(fixture.get("dhan").await.1["verified"], true);
+        let mut wrong = truthful;
+        wrong.rows = 2;
+        fixture.publish(&[wrong]);
+        assert_eq!(fixture.get("dhan").await.1["rows"], 1);
+        assert_eq!(fixture.get("unknown").await.0, StatusCode::BAD_REQUEST);
+    })
+    .await;
+    let scrubs: Vec<telemetry::Record> = crate::emitted::run_story(run)
+        .into_iter()
+        .filter(|record| record.target == "api.verify")
+        .collect();
+    assert_eq!(
+        scrubs.len(),
+        3,
+        "one event per scrub and none for the refused feed: {scrubs:?}"
+    );
+    let (refused, clean, disagreed) = (&scrubs[0], &scrubs[1], &scrubs[2]);
+    for scrub in [refused, clean, disagreed] {
+        assert_eq!(scrub.message, "scrub");
+        assert!(crate::emitted::says(scrub, "feed", "dhan"), "{scrub:?}");
+    }
+    assert_eq!(refused.level, telemetry::Level::Error);
+    assert!(
+        crate::emitted::says(refused, "say", "not verified"),
+        "{refused:?}"
+    );
+    assert!(crate::emitted::counts(refused, "seen", 0));
+
+    assert_eq!(clean.level, telemetry::Level::Info);
+    assert_eq!(
+        clean
+            .field("verified")
+            .and_then(telemetry::OwnedValue::as_bool),
+        Some(true)
+    );
+    assert!(crate::emitted::counts(clean, "seen", 1));
+    assert!(crate::emitted::counts(clean, "agreed", 1));
+
+    assert_eq!(disagreed.level, telemetry::Level::Warn);
+    assert_eq!(
+        disagreed
+            .field("verified")
+            .and_then(telemetry::OwnedValue::as_bool),
+        Some(false)
+    );
+    assert!(crate::emitted::counts(disagreed, "rows", 1));
+    assert!(crate::emitted::counts(disagreed, "agreed", 0));
+    assert!(
+        crate::emitted::says(disagreed, "first", "SOBSTEN"),
+        "the first finding names the entry: {disagreed:?}"
+    );
+}

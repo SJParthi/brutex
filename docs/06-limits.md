@@ -9898,10 +9898,12 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   cannot be one call, because asking a `cli` entry point from `api` would run
   it. A kernel that starts or stops refusing a budget must change the list.
   Tests pin `api`'s side of it at the route, not `cli`'s.
-- **The environment-budget refusal writes no telemetry event.** The
+- ~~**The environment-budget refusal writes no telemetry event.** The
   unstamped-build refusal beside it on `/backtest/run` writes one. The HTTP
   request journal records the 503 (D-0568), so the refusal is not lost, but
-  `/logs` does not show it.
+  `/logs` does not show it.~~ Closed by D-4447 (sobs-9): both refusals now
+  write one `api.sweep` Warn, naming the route and carrying the reason, on all
+  three launch routes (`/backtest/run`, `/backtest/descend`, `/engine/command`).
 - **One census fault is still served stale.** A permission change on an
   existing manifest file keeps its modified time, so the cache key does not
   move and a census cached "held" is served after the file becomes unreadable,
@@ -10002,7 +10004,8 @@ The text above is kept as it was written.
   `a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves` and
   must update this section.
 * *"The environment-budget refusal writes no telemetry event … `/logs` does
-  not show it."* The first half is still true. The second is not. On the
+  not show it."* The first half was true until D-4447, which logs it with its
+  reason. The second was not. On the
   production router, `logs::note_request` records every 5xx as an
   `api.request` `served` event at Error level, with its method, path and
   status. So `/logs` shows the 503, and not why. D-0695 corrects the reason it
