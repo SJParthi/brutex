@@ -2362,16 +2362,31 @@ fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sin
             .with("phase", "running"),
     );
     let code = dispatch(args, out);
-    command_event(
-        sink,
-        attempt,
-        &telemetry::Event::info("cli.lifecycle", "command finished")
-            .with("command", command)
-            .with("sweep_command", is_sweep_command(command))
-            .with("phase", if code == OK { "completed" } else { "refused" })
-            .with("exit_code", u64::from(code)),
-    );
+    let finished = telemetry::Event::info("cli.lifecycle", "command finished")
+        .with("command", command)
+        .with("sweep_command", is_sweep_command(command))
+        .with("phase", if code == OK { "completed" } else { "refused" })
+        .with("exit_code", u64::from(code));
+    // A REFUSED COMMAND SAYS WHY, in the one event every verb ends in. It said
+    // `phase=refused` and nothing else, so a refused verb's reason reached
+    // stdout and never `/logs` (OBSV-08, D-3207). The reason is the page's own
+    // refusal line, or its last non-blank line when the page has none (a
+    // misuse prints usage; `sweep-audited-stored` prints `<label> REFUSED:`).
+    // The sink cuts a long one at its value ceiling and marks it cut.
+    let reason = (code != OK).then(|| finish_reason(out)).flatten();
+    let finished = match reason {
+        Some(why) => finished.with("reason", why),
+        None => finished,
+    };
+    command_event(sink, attempt, &finished);
     code
+}
+
+/// The line a refused command's `command finished` event carries.
+fn finish_reason(page: &str) -> Option<&str> {
+    refusal_reason(page)
+        .or_else(|| page.lines().rev().find(|line| !line.trim().is_empty()))
+        .map(str::trim)
 }
 
 fn command_event(
@@ -3799,7 +3814,22 @@ pub fn sweep_stored(
 ) -> String {
     match sweep_stored_inner(vendor_word, underlying, rung, year, month, min_hits) {
         Ok(text) => text,
-        Err(why) => format!("refused: {why}\n"),
+        Err(why) => {
+            // THE REASON REACHES THE LOG, not only the terminal: the generic
+            // "command finished" carries `phase=refused` and no reason, so
+            // `/logs` could not say why a month refused (OBSV-07, D-3206).
+            // The event and label are `sweep-all`'s, so one search finds both.
+            note(
+                &telemetry::Event::warn("cli.sweep", "stored month refused")
+                    .with("feed", vendor_word)
+                    .with(
+                        "label",
+                        format!("{vendor_word} {underlying} {rung} {year}-{month:02}").as_str(),
+                    )
+                    .with("reason", why.as_str()),
+            );
+            format!("refused: {why}\n")
+        }
     }
 }
 
@@ -23678,6 +23708,103 @@ mod tests {
         );
         assert!(without_sink.contains("`scrreen` is not a command this build knows"));
         sink.release_run(777);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// OBSV-08 (D-3207): **a refused command's `command finished` carries
+    /// its reason.** Every verb ends in this one event, and it said only
+    /// `phase=refused` and an exit code, so a refused `audit-stored`,
+    /// `auto-stored`, `sweep-audited-stored`, `range-all`, `audit-range`,
+    /// `screen` or any expression or Boolean search verb left `/logs` unable
+    /// to say why -- the gap OBSV-07 closed for `sweep-stored` alone.
+    #[test]
+    fn a_refused_command_finishes_with_its_reason() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-command-reason-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&root)).expect("private sink");
+        let finished = |sink: &telemetry::Sink| {
+            let mut events = telemetry::tail(
+                &root,
+                sink.keep_files(),
+                &telemetry::Query::last(64).from_target("cli.lifecycle"),
+            )
+            .records;
+            events.retain(|event| event.message == "command finished");
+            events.sort_by_key(|event| event.seq);
+            events
+        };
+
+        // A refusal rendered as `refused: <why>` by the work itself.
+        let mut out = String::new();
+        let code = super::run_with_sink(
+            &argv(&["audit-stored", "groww", "NIFTY", "2min", "2026", "4", "100"]),
+            &mut out,
+            Some(&sink),
+        );
+        assert_ne!(code, OK, "{out}");
+        let line = out
+            .lines()
+            .find(|line| line.starts_with("refused"))
+            .expect("the page names its refusal");
+        // A page with no `refused` line at column zero: `sweep-audited-stored`
+        // prints `<label> REFUSED: …`, so its last non-blank line stands in.
+        let mut audited = String::new();
+        let code = super::run_with_sink(
+            &argv(&[
+                "sweep-audited-stored",
+                "groww",
+                "NIFTY",
+                "1min",
+                "2026",
+                "6",
+                "100",
+                "/nonexistent-receipts",
+                "1024",
+                "1",
+            ]),
+            &mut audited,
+            Some(&sink),
+        );
+        assert_ne!(code, OK, "{audited}");
+        assert!(super::refusal_reason(&audited).is_none(), "{audited}");
+        let last = audited
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .expect("a page")
+            .trim();
+
+        let events = finished(&sink);
+        assert_eq!(events.len(), 2, "{events:?}");
+        let reason = |event: &telemetry::Record| {
+            event
+                .field("reason")
+                .and_then(telemetry::OwnedValue::as_str)
+                .map(str::to_owned)
+        };
+        let first = events.first().expect("audit-stored");
+        for event in &events {
+            assert_eq!(
+                event.field("phase").and_then(telemetry::OwnedValue::as_str),
+                Some("refused"),
+                "a refused command finishes as refused: {event:?}"
+            );
+        }
+        assert!(
+            reason(first).is_some_and(|got| !got.is_empty() && line.starts_with(got.as_str())),
+            "the refusal's own line: {first:?} vs {line}"
+        );
+        let second = events.get(1).expect("sweep-audited-stored");
+        assert!(
+            reason(second).is_some_and(|got| !got.is_empty() && last.starts_with(got.as_str())),
+            "the page's last line: {second:?} vs {last}"
+        );
+
         drop(sink);
         let _ = std::fs::remove_dir_all(&root);
     }

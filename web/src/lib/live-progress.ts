@@ -149,6 +149,28 @@ export function liveAttemptKey(run: unknown): string | null {
   return object(run) ? exactToken(run, 'attempt', 'attempt_key') : null;
 }
 
+/**
+ * The event-feed request for one attempt, bounded to the attempt's own start.
+ *
+ * OBSV-05, D-3204. `run=` is a skip-filter: it cannot end the server's walk,
+ * so an attempt with fewer than `limit` events had every older line of both
+ * log halves read -- to the 4 MiB scan cap, or through a torn line an earlier
+ * crash left behind -- and `recordsOf` refuses on `hit_scan_cap` and on any
+ * `malformed` count. A healthy run's live view died for history it had no
+ * part in. `since` ends the walk at the first record older than the attempt:
+ * the start marker is emitted after `started_micros` is read, and the sink
+ * stamps each line no earlier than the clock, so nothing of this attempt is
+ * older than `floor(started_micros / 1000)`. Without a usable start the
+ * request is the unbounded one it always was, never a guessed bound.
+ */
+export function liveLogsPath(attempt: string, run: unknown): string {
+  const base = `/logs.json?limit=200&run=${encodeURIComponent(attempt)}`;
+  if (!object(run)) return base;
+  const started = run.started_micros;
+  if (!safeInteger(started) || started < 0) return base;
+  return `${base}&since=${Math.floor(started / 1000)}`;
+}
+
 const nonempty = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 

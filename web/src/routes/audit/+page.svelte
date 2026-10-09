@@ -89,7 +89,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
-  import { mergePages, nextOrdinal, pageFor } from '$lib/audit-pages.js';
+  import { mergePages, nextOrdinal, olderPageOf, pageFor } from '$lib/audit-pages.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -303,6 +303,8 @@
   /** @type {any[]} */
   let older = $state([]);
   let pagesHeld = $state(1);
+  /** Why the last older page could not be read; empty when it could (OBSV-10). */
+  let olderError = $state('');
   let loadingOlder = $state(false);
 
   /** Round trips, newest last, for the probe sparkline. */
@@ -439,8 +441,15 @@
       const got = await read(ticket, page, feed);
       if (!ticket.current() || feeds.active !== feed) return;
       if (got) {
-        older = [...older, ...got.body.runs];
-        pagesHeld += 1;
+        const one = olderPageOf(got.body);
+        if (one.error !== null) {
+          // NAMED, AND NOT COUNTED HELD: the page was not read (OBSV-10).
+          olderError = one.error;
+        } else {
+          olderError = '';
+          older = [...older, ...one.runs];
+          pagesHeld += 1;
+        }
       }
     } catch (why) {
       if (!ticket.current() || feeds.active !== feed) return;
@@ -556,6 +565,7 @@
       if (changed) {
         payload = null;
         older = [];
+        olderError = '';
         pagesHeld = 1;
         samples = [];
         base = null;
@@ -1594,6 +1604,9 @@
               — the journal grew between two reads, so these rows are missing from the list below. The next load
               reads the newest of them first.
             </span>
+          {/if}
+          {#if olderError}
+            <span class="fine" role="alert">The older page could not be read: {olderError}</span>
           {/if}
           {#if pagesHeld < Math.min(MAX_PAGES, payload.journal.pages)}
             <button class="btn" type="button" onclick={loadOlder} disabled={loadingOlder}>

@@ -64,3 +64,35 @@ test('the audit page merges by ordinal and names a gap', () => {
   assert.match(page, /pageFor\(/);
   assert.doesNotMatch(page, /\[\.\.\.\(payload\?\.runs \?\? \[\]\), \.\.\.older\]/, 'no positional concatenation');
 });
+
+test('an older page the server could not read is an error, never an empty page held (OBSV-10)', async () => {
+  // D-3209. `journal_block` answers 200 with `runs:[]` and `runs_error` when
+  // its page read fails. `readOlder` appended the empty list and counted a
+  // page held, so the failure was never shown -- `runs_error` was rendered
+  // only while no run at all was on screen -- and a failed read spent one of
+  // `MAX_PAGES`.
+  const { olderPageOf } = await import('../src/lib/audit-pages.js');
+  assert.deepEqual(olderPageOf({ runs: [], runs_error: 'page 3: short read' }), {
+    runs: [],
+    error: 'page 3: short read'
+  });
+  assert.deepEqual(olderPageOf({ runs: [{ ordinal: 1 }] }), { runs: [{ ordinal: 1 }], error: null });
+  assert.deepEqual(olderPageOf({ runs: [{ ordinal: 1 }], runs_error: '  ' }), {
+    runs: [{ ordinal: 1 }],
+    error: null
+  });
+  assert.deepEqual(olderPageOf({ runs: 'nope' }), {
+    runs: [],
+    error: 'the older page carried no runs list'
+  });
+  assert.deepEqual(olderPageOf(null), { runs: [], error: 'the older page carried no runs list' });
+
+  const page = readFileSync(new URL('../src/routes/audit/+page.svelte', import.meta.url), 'utf8');
+  const body = page.slice(page.indexOf('async function readOlder'), page.indexOf('function loadOlder'));
+  assert.match(body, /olderPageOf\(/, 'readOlder reads the page through the helper');
+  assert.ok(
+    body.indexOf('olderError') !== -1 && body.indexOf('olderError') < body.indexOf('pagesHeld += 1'),
+    'a failed page is named before any page is counted held'
+  );
+  assert.match(page, /\{#if olderError\}[\s\S]*?role="alert"[\s\S]*?\{olderError\}/);
+});

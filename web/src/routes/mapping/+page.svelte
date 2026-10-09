@@ -148,7 +148,9 @@
          The Rust-rendered `/masters` page has always read the truthful one, so
          the two front ends disagreed about whether a stale master was visible.
          They now agree. */
-      restartNeeded = Boolean(body.restart_required);
+      // `null` when a master could not be read (OBSV-02, D-3201): the flag is
+      // then unknown, never a guessed false.
+      restartNeeded = body.restart_required === null ? null : Boolean(body.restart_required);
     } catch (error) {
       if (!ticket.current()) return;
       // A FAILED STATUS READ IS NAMED, AND THE RESTART FLAG IT FED BECOMES
@@ -658,6 +660,9 @@
                 {#if file.modified_unix_millis}
                   <span class="dim">{stampLabel(file.modified_unix_millis)} IST</span>
                 {/if}
+              {:else if file.unreadable}
+                <span class="no">unreadable</span>
+                <span class="dim">{file.unreadable}</span>
               {:else}
                 <span class="no">absent</span>
               {/if}

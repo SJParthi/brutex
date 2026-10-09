@@ -718,7 +718,16 @@ fn status_rows(dir: &Path, parsed_at: std::time::SystemTime) -> String {
         .iter()
         .map(|source| {
             let path = masters::path_of(dir, source);
-            let held = std::fs::metadata(&path).ok();
+            // ABSENT AND UNREADABLE ARE TWO ANSWERS. Only `NotFound` is
+            // absent; any other error (a denied directory, a symlink loop, an
+            // I/O fault) is a file this cannot see, named with the operating
+            // system's own reason rather than folded into "absent" and an
+            // instruction to fetch what is already there (OBSV-02, D-3201).
+            let (held, unreadable) = match std::fs::metadata(&path) {
+                Ok(meta) => (Some(meta), None),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => (None, None),
+                Err(why) => (None, Some(why.to_string())),
+            };
             let bytes = held.as_ref().map_or(0, std::fs::Metadata::len);
             // NEWER THAN THE PARSE MEANS THE PROCESS IS ANSWERING FROM OLD
             // BYTES. Equal is not newer: a file written in the same second the
@@ -742,17 +751,36 @@ fn status_rows(dir: &Path, parsed_at: std::time::SystemTime) -> String {
                     |since| since.as_millis().to_string(),
                 );
             format!(
-                r#"{{"file":{},"present":{},"bytes":{bytes},"modified_unix_millis":{modified},"newer_than_parse":{newer},"needs_token":{}}}"#,
+                r#"{{"file":{},"present":{},"unreadable":{},"bytes":{bytes},"modified_unix_millis":{modified},"newer_than_parse":{newer},"needs_token":{}}}"#,
                 crate::render::json_string(source.file),
-                held.is_some(),
+                if unreadable.is_some() {
+                    "null"
+                } else if held.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+                unreadable
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), crate::render::json_string),
                 source.needs_token
             )
         })
         .collect();
 
-    let any_newer = rows
+    // A ROW THAT COULD NOT BE READ MAKES "RESTART REQUIRED" UNKNOWN. Its
+    // `newer_than_parse` is false only because nothing was seen, and `false`
+    // here would promise the parse is current.
+    let any_newer = if rows.iter().any(|row| row.contains(r#""present":null"#)) {
+        "null"
+    } else if rows
         .iter()
-        .any(|row| row.contains(r#""newer_than_parse":true"#));
+        .any(|row| row.contains(r#""newer_than_parse":true"#))
+    {
+        "true"
+    } else {
+        "false"
+    };
     format!(
         r#"{{"masters":[{}],"restart_required":{any_newer}}}"#,
         rows.join(",")
@@ -1643,6 +1671,39 @@ mod tests {
             "and the three absent ones must carry null rather than a zero \
              that reads as 1970: {json}"
         );
+    }
+
+    /// OBSV-02 (D-3201): a master that cannot be READ is not an absent one.
+    /// `metadata(..).ok()` folded every error into "absent", so a symlink loop,
+    /// a denied directory or an I/O error told the operator to fetch a file
+    /// that is on disk, with no reason anywhere -- the fallback §4 bans.
+    #[test]
+    fn an_unreadable_master_is_named_and_not_reported_absent() {
+        let dir = scratch("status-unreadable");
+        let looped = masters::path_of(&dir, &masters::SOURCES[0]);
+        let _ = std::fs::remove_file(&looped);
+        // ELOOP even for root, so the attack does not depend on who runs it.
+        std::os::unix::fs::symlink(&looped, &looped).expect("a symlink loop");
+
+        let json = super::status_rows(&dir, std::time::SystemTime::UNIX_EPOCH);
+        let first = json.split(r#"{"file":"#).nth(1).expect("the first row");
+        assert!(
+            first.contains(r#""present":null"#) && first.contains(r#""unreadable":""#),
+            "an unreadable master is neither present nor absent, and says why: {json}"
+        );
+        assert!(!first.contains(r#""present":false"#), "{json}");
+        assert!(
+            first.contains("symbolic links") || first.contains("os error 40"),
+            "the reason is the operating system's own: {json}"
+        );
+        // The three genuinely absent ones still say absent, with no reason.
+        assert_eq!(
+            json.matches(r#""present":false,"unreadable":null"#).count(),
+            masters::SOURCES.len() - 1,
+            "{json}"
+        );
+        // RESTART IS UNKNOWN, not "not required", while a row is unreadable.
+        assert!(json.contains(r#""restart_required":null"#), "{json}");
     }
 
     #[test]
