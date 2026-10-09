@@ -94,9 +94,31 @@ the binding constraint; this thread goes quiet after the handover.
 - `store/cited_commits` and `core/findings` fail as uid 65534 (git ownership)
   and must be run as root. Four store catalog lock tests fail only as root.
 
+## State at 10:20 UTC 2026-10-09
+
+- Run 1288 went red at Gate 1e (an operation-audit test unwrapped a BUSY
+  journal read). Fixed in `bff477f0` (D-4622, test-only `poll` helper), which
+  also merged the attack-audit head `de932e5b` (D-4614..D-4621). Pushed to
+  `claude/project-thread-lx6ptl`. The full local test run on it passed except
+  the two git-ownership binaries, and those pass as root.
+- In progress, NOT pushed: merging `wip/audit-fx/integ` `a7a27dc3` (81
+  commits, 282 files) onto `bff477f0` in `/home/claude/wt-int2` (branch
+  int/ws3-fx). Decisions D-4647..D-4658 (lead) and D-4623..D-4630 (api
+  agent). Real semantic overlaps found: double directory sync in
+  `pull::capture` (D-4649); the trade-reader cache, where each side's fix undid
+  the other (D-4655); and double autopilot verdict logging (D-4657, one writer:
+  `note_decision`). Check pullrun, sweeprun and server for the same
+  double-logging pattern. `api::emitted` site counts must be re-measured.
+- Coordinator (09:58 UTC): GDFL is Parthi's top priority. Use at most one
+  agent and start no fan-outs. The audit thread is pausing and will send its
+  current sha; merge that, then hand PR 74 one sha.
+
 ## Next
 
-1. Fix any MISSED/TIMEOUT run 1288 reports, on this branch (D-4614+); keep
-   the head a merge with first parent fbdabaec; send the new sha to the PR 74
-   CI thread.
-2. Nothing else is owed by this thread.
+1. Finish the a7a27dc3 merge: emitted.rs counts, fmt, clippy, the tests, the
+   static gates, and Gate 20 for telemetry `sink.rs` (re-measure).
+2. Merge the audit thread's paused sha when it arrives and revalidate.
+3. Build the final head as a merge whose first parent is fbdabaec and whose
+   tree is the combined integration. Push it and send its sha to the PR 74 CI
+   thread (cse_0192cvXYTyfh6ihYTAF7UgaR). Do not dispatch CI unless that is
+   agreed.
