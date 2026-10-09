@@ -34,6 +34,10 @@
 /// rather than written as it is produced, so that every arm of the library is
 /// drivable from a test with no stdout to capture.
 fn main() -> std::process::ExitCode {
+    // A CRASH IS LOGGED, not only printed (sobs-1, D-4464): one `error` event
+    // with the message and location, written before the default hook prints
+    // and the release profile aborts. `cli::panic_log` says what it may not do.
+    cli::panic_log::install("cli.main");
     // WRITTEN, NEVER PRINTED (v53-2, D-1484). `println!` panics on a closed
     // stdout, so `cli sweep 6 100 | true` exited 101 after the work was done.
     // `cli::deliver` writes, says a failure on stderr, and decides the code.

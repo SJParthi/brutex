@@ -931,7 +931,8 @@ impl Results {
         count_open();
         let dir = root.join("results");
         if writable {
-            std::fs::create_dir_all(&dir)
+            // Every directory this makes is made durable (sobs-12, D-4461).
+            crate::fixed_tail::create_dir_all_durable(&dir)
                 .map_err(|why| format!("the results directory could not be made: {why}"))?;
         }
         let path = Self::path(root);
@@ -971,6 +972,10 @@ impl Results {
                     path.display()
                 ));
             }
+            // The new name is made durable BEFORE the header is written
+            // (sobs-12, D-4461): a kill between the two leaves an empty file,
+            // which the next writer treats as new and barriers again.
+            crate::fixed_tail::sync_parent(&path)?;
             write_fresh_header(&mut file, &path)?;
             VERSION
         } else {
@@ -2959,6 +2964,47 @@ mod tests {
             assert!(why.contains("duplicate run identity"), "{why}");
             assert!(why.contains(&"05".repeat(32)), "{why}");
         }
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// sobs-12, D-4461: the writer makes the `results/` directory it creates
+    /// durable, and the new ledger's name durable BEFORE its header is
+    /// written. Each failed directory barrier is refused by name, and a retry
+    /// after one completes the ledger.
+    #[test]
+    fn a_new_ledgers_directory_and_name_are_made_durable_and_a_failed_barrier_is_named() {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let r = root("durable-names");
+        let dir = r.join("results");
+        let path = Results::path(&r);
+
+        let armed = Armed::arm(&r.display().to_string(), Kind::DirectorySync);
+        let why = Results::open(&r).expect_err("the barrier on the root refuses");
+        assert!(
+            why.contains("the results directory could not be made")
+                && why.contains("injected directory sync fault"),
+            "{why}"
+        );
+        drop(armed);
+        assert!(
+            dir.is_dir() && !path.exists(),
+            "no ledger before its directory is durable"
+        );
+
+        let armed = Armed::arm(&dir.display().to_string(), Kind::DirectorySync);
+        let why = Results::open(&r).expect_err("the barrier on results/ refuses");
+        assert!(why.contains("injected directory sync fault"), "{why}");
+        drop(armed);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the file was created")
+                .len(),
+            0,
+            "no header is written before its name is durable"
+        );
+
+        drop(Results::open(&r).expect("a retry completes the ledger"));
+        assert_eq!(std::fs::metadata(&path).expect("the ledger").len(), HEADER);
         let _ = std::fs::remove_dir_all(&r);
     }
 }

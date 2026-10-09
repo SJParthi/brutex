@@ -1520,7 +1520,7 @@ fn last_event(path: &Path, max_bytes: u64) -> Result<Option<Evidence>, String> {
     };
     file.lock_shared().map_err(io_error)?;
     let result = (|| {
-        bound(&file, max_bytes)?;
+        bound(HEADER + EVENT_BYTES as u64, max_bytes)?;
         let count = shape::<EVENT_BYTES>(&mut file, path, EVENTS, false)?;
         if count == 0 {
             return Ok(None);
@@ -1537,11 +1537,18 @@ fn last_event(path: &Path, max_bytes: u64) -> Result<Option<Evidence>, String> {
         (Err(why), _) | (_, Err(why)) => Err(why),
     }
 }
-fn bound(file: &File, max_bytes: u64) -> Result<(), String> {
-    let len = file.metadata().map_err(io_error)?.len();
-    if len > max_bytes {
+/// Refuses a read that would TOUCH more than `max_bytes` (r3-1, D-4465).
+///
+/// It measured the whole FILE, so a ranked file grown past the API's 64 MiB
+/// scan bound -- 335,545 rows at 200 bytes -- refused every page and every
+/// read of that identity, including the ones that touch nothing but its
+/// 16-byte header. No reader here reads more than a header, one event or one
+/// page of at most 4,096 rows, so a file's length is only arithmetic for its
+/// row count, and what is bounded is what is read.
+fn bound(touched: u64, max_bytes: u64) -> Result<(), String> {
+    if touched > max_bytes {
         return Err(format!(
-            "sweep evidence file is {len} bytes, beyond its {max_bytes}-byte read bound"
+            "this sweep evidence read would touch {touched} bytes, beyond its {max_bytes}-byte read bound"
         ));
     }
     Ok(())
@@ -1558,7 +1565,7 @@ fn count_optional<const N: usize>(
     };
     file.lock_shared().map_err(io_error)?;
     let result = (|| {
-        bound(&file, max_bytes)?;
+        bound(HEADER, max_bytes)?;
         shape::<N>(&mut file, path, magic, false)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1603,7 +1610,6 @@ fn page<const N: usize>(
     let mut file = Flock::lock_shared(file, path.as_path()).map_err(io_error)?;
     let generation = crate::result_set::file_generation(&file, &path)?;
     let result = (|| {
-        bound(&file, max_bytes)?;
         let count = shape::<N>(&mut file, &path, magic, false)?;
         if count != expected {
             return Err(
@@ -1613,6 +1619,11 @@ fn page<const N: usize>(
         let take = count
             .saturating_sub(offset)
             .min(u64::try_from(limit).unwrap_or(u64::MAX));
+        let stride = u64::try_from(N).map_err(|why| why.to_string())?;
+        bound(
+            HEADER.saturating_add(take.saturating_mul(stride)),
+            max_bytes,
+        )?;
         let mut rows = Vec::new();
         rows.try_reserve_exact(usize::try_from(take).map_err(|why| why.to_string())?)
             .map_err(|why| why.to_string())?;

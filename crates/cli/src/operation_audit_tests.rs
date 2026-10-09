@@ -529,3 +529,60 @@ fn an_empty_journal_left_by_a_crash_reads_as_its_unconfirmed_start() {
         );
     }
 }
+
+std::thread_local! {
+    static FINISH_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next [`Attempt::finish`] on this thread fail as a terminal that
+/// could not be confirmed (sobs-4, D-4462).
+pub(crate) fn fail_next_finish() {
+    FINISH_FAULT.with(|fault| fault.set(true));
+}
+
+pub(super) fn take_finish_fault() -> bool {
+    FINISH_FAULT.with(|fault| fault.replace(false))
+}
+
+/// sobs-4, D-4462: a terminal that cannot be confirmed is logged by `finish`
+/// itself, once, naming the phase and the reason, whether the failure is the
+/// write's or a misuse's, and the attempt is disarmed so `Drop` adds nothing.
+#[test]
+fn an_unconfirmed_terminal_is_logged_once_by_finish_itself() {
+    let root = Scratch::new();
+    let mut attempt = begin(&root.0, Origin::Cli, "range-all").unwrap();
+    drop(crate::noted::take());
+    fail_next_finish();
+    let why = attempt.finish(Phase::Completed, 0).unwrap_err();
+    assert!(why.contains("injected terminal audit fault"), "{why}");
+    drop(attempt);
+    let noted = crate::noted::take();
+    let logged: Vec<&String> = noted
+        .iter()
+        .filter(|line| line.contains("terminal audit unconfirmed"))
+        .collect();
+    assert_eq!(logged.len(), 1, "{noted:#?}");
+    assert!(
+        logged.iter().all(|line| line.starts_with("cli.audit ")
+            && line.contains("completed")
+            && line.contains("injected terminal audit fault")),
+        "{logged:#?}"
+    );
+    assert_eq!(
+        read(&root.0, ID_BASE + 1).unwrap().unwrap().phase,
+        Phase::Started,
+        "the unconfirmed terminal left the start, and nothing claims more"
+    );
+
+    let mut misused = begin(&root.0, Origin::Cli, "range-all").unwrap();
+    let why = misused.finish(Phase::Progress, 0).unwrap_err();
+    assert!(why.contains("explicit terminal phase"), "{why}");
+    assert_eq!(crate::noted::count("terminal audit unconfirmed"), 1);
+    misused.finish(Phase::Refused, 0).unwrap();
+    assert_eq!(crate::noted::count("terminal audit unconfirmed"), 0);
+    drop(misused);
+    assert_eq!(
+        read(&root.0, ID_BASE + 2).unwrap().unwrap().phase,
+        Phase::Refused
+    );
+}

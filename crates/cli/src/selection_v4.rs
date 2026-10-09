@@ -1742,6 +1742,17 @@ impl SelectionLedgerV4 {
                 .map_err(|why| format!("{} could not be shared-locked: {why}", path.display()))?;
         }
         let opened = (|| {
+            if writable {
+                // rnew-1, D-4460: the writer cuts what a killed process left,
+                // a torn header or a sub-record tail, loudly and under its lock.
+                crate::fixed_tail::heal_header_and_tail(
+                    &file,
+                    &path,
+                    &header_bytes()?,
+                    SELECTION_V4_STRIDE,
+                    &crate::fixed_tail::magic_and_version(MAGIC_V4, VERSION_V4),
+                )?;
+            }
             let len = file
                 .metadata()
                 .map_err(|why| format!("{} length could not be read: {why}", path.display()))?
@@ -1750,6 +1761,10 @@ impl SelectionLedgerV4 {
                 if !writable {
                     return Err(format!("{} is empty and read-only", path.display()));
                 }
+                // The new name is made durable BEFORE the header is written
+                // (sobs-12, D-4461): a kill between the two leaves an empty
+                // file, which the next writer treats as new and barriers again.
+                crate::fixed_tail::sync_parent(&path)?;
                 write_header(&mut file)?;
                 file.sync_all().map_err(|why| {
                     format!("{} V4 header could not be synced: {why}", path.display())
@@ -1958,7 +1973,8 @@ fn ensure_results_directory(root: &Path) -> Result<(), SelectionV4Refusal> {
 
     let results = root.join("results");
     match std::fs::create_dir(&results) {
-        Ok(()) => Ok(()),
+        // The new directory's name is made durable (sobs-12, D-4461).
+        Ok(()) => crate::fixed_tail::sync_parent(&results),
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
             let metadata = std::fs::metadata(&results).map_err(|metadata_why| {
                 format!(
@@ -2030,6 +2046,15 @@ impl SelectionIndexesV4 {
 }
 
 fn write_header(file: &mut File) -> Result<(), SelectionV4Refusal> {
+    let header = header_bytes()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|why| format!("Selection V4 header seek failed: {why}"))?;
+    file.write_all(&header)
+        .map_err(|why| format!("Selection V4 header write failed: {why}"))
+}
+
+/// The one header a V4 ledger begins with.
+fn header_bytes() -> Result<[u8; HEADER_BYTES], SelectionV4Refusal> {
     let mut header = [0_u8; HEADER_BYTES];
     let mut encoder = Encoder::new(&mut header);
     encoder.bytes(&MAGIC_V4)?;
@@ -2040,10 +2065,7 @@ fn write_header(file: &mut File) -> Result<(), SelectionV4Refusal> {
     encoder.u64(SCORE_SCALE)?;
     encoder.zeros(8)?;
     encoder.finish()?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|why| format!("Selection V4 header seek failed: {why}"))?;
-    file.write_all(&header)
-        .map_err(|why| format!("Selection V4 header write failed: {why}"))
+    Ok(header)
 }
 
 fn scan_file(
@@ -3181,6 +3203,75 @@ mod tests {
         let reopened = SelectionLedgerV4::open_read(&root.path, 4).expect("ledger reopens");
         assert_eq!(reopened.selections(), 2);
         assert_eq!(reopened.receipt(&second.selection_id()), Some(&second));
+    }
+
+    /// rnew-1, D-4460: a process killed mid-append leaves a sub-record tail,
+    /// and one killed while writing a new ledger's header a strict prefix of
+    /// it. Readers still refuse both; the next writer cuts either, says so
+    /// once, and keeps every committed receipt.
+    #[test]
+    fn a_kill_torn_tail_or_header_is_cut_by_the_writer_and_history_kept() {
+        let root = TempRoot::new("kill-torn");
+        let first = receipt_with_salt(0);
+        let mut ledger = SelectionLedgerV4::open(&root.path, 4).expect("V4 ledger creates");
+        ledger.append(&first).expect("first V4 receipt appends");
+        drop(ledger);
+        let path = SelectionLedgerV4::path(&root.path);
+        crate::fixed_tail::attack::torn_tails(
+            &[(path.as_path(), SELECTION_V4_STRIDE)],
+            &mut || {
+                Ok(format!(
+                    "{:?}",
+                    SelectionLedgerV4::open_read(&root.path, 4)?.selection_ids()
+                ))
+            },
+            &mut || SelectionLedgerV4::open(&root.path, 4).map(drop),
+        );
+        let header = header_bytes().expect("V4 header");
+        for torn in [1, HEADER_BYTES / 2, HEADER_BYTES - 1] {
+            let fresh = root.path.join(format!("torn-header-{torn}"));
+            std::fs::create_dir_all(fresh.join("results")).expect("torn-header results");
+            std::fs::write(SelectionLedgerV4::path(&fresh), &header[..torn]).expect("torn header");
+            assert!(SelectionLedgerV4::open_read(&fresh, 4).is_err());
+            drop(crate::noted::take());
+            drop(SelectionLedgerV4::open(&fresh, 4).expect("the writer heals its header"));
+            assert_eq!(crate::noted::count("torn ledger header truncated"), 1);
+            assert_eq!(
+                std::fs::read(SelectionLedgerV4::path(&fresh)).expect("V4 bytes"),
+                header.to_vec()
+            );
+        }
+        // sobs-12, D-4461: the results directory and a new ledger's name are
+        // each made durable (the name BEFORE the header is written), and a
+        // failed directory barrier is refused by name.
+        let unsynced = root.path.join("unsynced");
+        std::fs::create_dir(&unsynced).expect("authority root");
+        let path = SelectionLedgerV4::path(&unsynced);
+        let results = path.parent().unwrap().to_path_buf();
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &unsynced.display().to_string(),
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedgerV4::open(&unsynced, 4).expect_err("the root barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        assert!(results.is_dir() && !path.exists());
+        let armed = crate::fixed_tail::fault::Armed::arm(
+            &results.display().to_string(),
+            crate::fixed_tail::fault::Kind::DirectorySync,
+        );
+        let refusal = SelectionLedgerV4::open(&unsynced, 4).expect_err("the file barrier refuses");
+        assert!(
+            refusal.contains("injected directory sync fault"),
+            "{refusal}"
+        );
+        drop(armed);
+        assert_eq!(std::fs::metadata(&path).expect("created").len(), 0);
+        drop(SelectionLedgerV4::open(&unsynced, 4).expect("the writer retries"));
+        assert_eq!(std::fs::read(&path).expect("V4 bytes"), header.to_vec());
     }
 
     #[test]

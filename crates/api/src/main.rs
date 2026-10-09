@@ -34,6 +34,10 @@
 /// then left a ghost process with no HTTP surface. `end_runtime` bounds that
 /// wait and names what it abandons (hunt-api-2, D-1582).
 fn main() -> std::process::ExitCode {
+    // A CRASH IS LOGGED, not only printed (sobs-1, D-4464): one `error` event
+    // with the message and location, written before the default hook prints
+    // and the release profile aborts. `cli::panic_log` says what it may not do.
+    cli::panic_log::install("api.main");
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let count = raw.len();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -42,7 +46,9 @@ fn main() -> std::process::ExitCode {
     {
         Ok(runtime) => runtime,
         Err(why) => {
-            eprintln!("FAILED: the async runtime could not start: {why}");
+            tell(format_args!(
+                "FAILED: the async runtime could not start: {why}"
+            ));
             note_exit(api::server::FAILED, count);
             return std::process::ExitCode::from(api::server::FAILED);
         }
@@ -51,7 +57,7 @@ fn main() -> std::process::ExitCode {
         match text_args(raw) {
             Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
             Err(refusal) => {
-                eprintln!("{refusal}");
+                tell(format_args!("{refusal}"));
                 api::server::MISUSED
             }
         }
@@ -59,6 +65,22 @@ fn main() -> std::process::ExitCode {
     let _abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
     note_exit(code, count);
     std::process::ExitCode::from(code)
+}
+
+/// One line for stderr, never a panic (r53-1, D-4463).
+///
+/// `eprintln!` PANICS when stderr is a closed pipe, and the release profile
+/// aborts on a panic, so the refusal of a bad argument or a runtime that could
+/// not start became an abort that skipped [`note_exit`]. A line that cannot be
+/// written is dropped: stderr is the channel that failed, and the exit is
+/// still noted.
+fn tell(line: std::fmt::Arguments<'_>) {
+    let _shown = tell_on(&mut std::io::stderr(), line);
+}
+
+/// [`tell`] over a writer a test can close. Returns whether the line landed.
+fn tell_on(err: &mut impl std::io::Write, line: std::fmt::Arguments<'_>) -> bool {
+    err.write_fmt(format_args!("{line}\n")).is_ok()
 }
 
 /// The arguments as text, or the sentence refusing the first one that is not.
@@ -217,7 +239,26 @@ fn exit_note(code: u8) -> (telemetry::Level, &'static str, &'static str) {
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{exit_note, note_exit, text_args};
+    use super::{exit_note, note_exit, tell_on, text_args};
+
+    /// r53-1, D-4463: a line for a closed stderr is dropped, never a panic,
+    /// and an open one gets the line whole.
+    #[test]
+    fn a_stderr_line_is_dropped_not_a_panic_when_the_stream_is_closed() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        assert!(!tell_on(&mut Closed, format_args!("REFUSED: {}", 1)));
+        let mut open = Vec::new();
+        assert!(tell_on(&mut open, format_args!("REFUSED: {}", 2)));
+        assert_eq!(open, b"REFUSED: 2\n".to_vec());
+    }
 
     /// Every code this build can return says something of its own, and zero is
     /// the only one that is not an error.
