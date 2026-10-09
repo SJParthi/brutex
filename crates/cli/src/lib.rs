@@ -4346,12 +4346,18 @@ fn stored_month_kernel(
     // `withheld > 0`. A holed minute day the signal rung holds no bar of
     // removes nothing, and "0 signal bar(s)" would name a withholding that
     // did not happen.
+    //
+    // THE SWEPT COUNT, BESIDE THE RETAINED ONE (AC-whp-law-2, D-4751). The
+    // sweep's support is counted over the column's swept rows, which the
+    // ledger records as this run's bars; the retained slice also holds the
+    // warm-up. The span audit's line has said so since D-2101.
     if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| gaps.signal_bars() > 0) {
         let _ = writeln!(
             out,
-            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. The sweep uses the remaining {} signal bars.",
+            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. Support uses the {} swept bar(s) of the remaining {} signal bars.",
             gaps.signal_bars(),
             gaps.day_names().join(" "),
+            outcome.census.swept,
             loaded.bars.len(),
         );
     }

@@ -65146,3 +65146,27 @@ distinct for one share.
 
 **Rejected.** Classifying by matching the reason's text. That would make the
 identity depend on the wording of a message in another crate.
+
+### D-4751 — `sweep-stored` names the swept bars beside the retained ones — 2026-10-09
+
+**Finding.** AC-whp-law-2. When minute-gap sessions are withheld, the
+`sweep-stored` page said "The sweep uses the remaining {retained} signal
+bars". The retained count is `loaded.bars.len()`. The sweep's support is
+counted over the column's swept rows, which exclude the warm-up and the
+unknown-only rows. So the sentence stated a denominator the sweep did not
+use. The span audit's page already says "Support uses the {can_hit} swept
+bar(s) of the remaining {retained} signal bars".
+
+**Decision.** The `sweep-stored` line now reads "Support uses the {swept} swept
+bar(s) of the remaining {retained} signal bars". `swept` is
+`outcome.census.swept`, the figure the run's own ledger records as its bars.
+
+The other bar-count lines were checked:
+
+- `sweep-all`'s tally already sums `census.swept`.
+- The descent states `can_hit`.
+- The execution notes count signal bars, and say so.
+
+Test: `the_ordinary_stored_sweep_withholds_and_names_a_holed_session`
+(L1FD-03), re-pinned on the new sentence. It also asserts that the old
+sentence is gone.
