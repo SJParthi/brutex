@@ -69147,3 +69147,27 @@ block is unchanged. No stored format or digest moves.
 
 **Tests.** `runner::bootstrap::tests::a_zero_block_takes_no_draw_and_reads_as_no_evidence`
 (FXR-06).
+
+### D-4420 — The store bench removes every scratch directory it makes, loudly when it cannot — 2026-10-09
+
+**What was observed (audit `so1-6`).** `crates/store/benches/ratio.rs`'s
+`loaded` made `$TMPDIR/brutex-bench-<name>-<pid>`, filled a month file there and
+returned a bare `PathBuf` that nothing removed, so every `cargo bench -p store`
+left its directories behind; fxa measured 16 directories and 81 MB after one
+run.
+
+**Decision.** `loaded` returns a `Scratch` guard with the file; a tuple drops in
+field order, so the file closes before its directory is removed. A removal
+that fails prints `BENCH SCRATCH NOT REMOVED` with the path and reason rather
+than being swallowed. `process::exit` runs no destructor, so a setup refusal
+after the directory exists goes through `Scratch::refuse`, which removes it
+first. Removing a stale directory of the same process id ignores only
+`NotFound`; any other failure refuses the bench by name.
+
+**Measured.** One run of `cargo bench -p store` on the merged tree
+(2026-10-09, load average 3.65 to 2.46) with `TMPDIR` set to a new empty
+directory: every row passed, and the directory held no entry afterwards (0
+`brutex-bench-*`).
+
+**What changes.** The bench only. No crate source, output or format moves.
+

@@ -16941,3 +16941,16 @@ Measured by `api::latency` (`api` test build (the workspace's optimized test pro
   (measured at `u64::MAX` trials) and never at or below the normal bar. Below
   the ceiling the bar is monotone in `df` only to rounding: up to 1.711e-8
   t-units of rise between adjacent `df`, measured.
+- **The store bench leaves no scratch behind (D-4420).** One run with a fresh
+  `TMPDIR` left 0 `brutex-bench-*` entries. A directory whose removal fails is
+  printed with its path and reason; a crash that kills the process (a signal,
+  not a refusal) still leaves its directories, and the next run of the same
+  process id empties its own.
+- **One more lake bench run (so1-2, D-4419), 2026-10-09, load average 1.83 to
+  2.91.** FXA-10, 32 random rows a sample: p50 / p99 / max 367 / 400 / 80,671 ns
+  at 2,480 rows, 567 / 1,447 / 2,902,640 ns at 24,800, 2,970 / 4,966 / 224,079 ns
+  at 248,000 and 6,297 / 18,040 / 1,984,419 ns at 2,480,000. The gated ratio,
+  row p99 against seven plain columns, read 1.433x, 1.269x, 1.207x and 1.404x.
+  The reported p99 ratio against 2,480 rows read 45.1x at 2,480,000, above the
+  24.5x to 36.0x of D-4419's six runs: that ratio is memory, is printed and not
+  gated, and one run is not a range.
