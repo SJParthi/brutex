@@ -3058,15 +3058,15 @@ fn program_words(l: &str) -> impl Iterator<Item = &str> {
         .filter(|w| !w.is_empty())
 }
 
-/// The value of every `shell` key on one logical workflow line (P15-07,
-/// D-2321): the key at the start of the line, after a `- ` list marker, or
-/// after a flow mapping's `{` or `,`, bare or quoted, then `:` and a space or
-/// the end of the line. The value runs to a ` #` comment or the end, so a
-/// flow mapping's closing brace stays in it and the value is refused: fail
-/// closed rather than parse flow YAML.
-fn shell_values(l: &str) -> Vec<&str> {
+/// The value of every `key` key on one logical workflow line (P15-07,
+/// D-2321), with the comment that follows it: the key at the start of the
+/// line, after a `- ` list marker, or after a flow mapping's `{` or `,`, bare
+/// or quoted, then `:` and a space or the end of the line. The value runs to a
+/// ` #` comment or the end, so a flow mapping's closing brace stays in it and
+/// the value is refused: fail closed rather than parse flow YAML.
+fn key_values<'a>(l: &'a str, key: &str) -> Vec<(&'a str, &'a str)> {
     let mut out = Vec::new();
-    for (at, _) in l.match_indices("shell") {
+    for (at, _) in l.match_indices(key) {
         let (open, quote) = match l[..at].chars().next_back() {
             Some(q @ ('"' | '\'')) => (&l[..at - 1], Some(q)),
             _ => (&l[..at], None),
@@ -3075,7 +3075,7 @@ fn shell_values(l: &str) -> Vec<&str> {
         if !(pre.is_empty() || pre == "-" || pre.ends_with('{') || pre.ends_with(',')) {
             continue;
         }
-        let mut rest = &l[at + "shell".len()..];
+        let mut rest = &l[at + key.len()..];
         if let Some(q) = quote {
             let Some(r) = rest.strip_prefix(q) else {
                 continue;
@@ -3088,8 +3088,386 @@ fn shell_values(l: &str) -> Vec<&str> {
         if !(value.is_empty() || value.starts_with([' ', '\t'])) {
             continue;
         }
-        let value = value.find(" #").map_or(value, |c| &value[..c]);
-        out.push(value.trim());
+        let (value, comment) = value
+            .find(" #")
+            .map_or((value, ""), |c| (&value[..c], &value[c + 2..]));
+        out.push((value.trim(), comment.trim()));
+    }
+    out
+}
+
+/// The value of every `shell` key on one logical workflow line.
+fn shell_values(l: &str) -> Vec<&str> {
+    key_values(l, "shell").into_iter().map(|(v, _)| v).collect()
+}
+
+/// ci.yml's front-end job: the only place a JavaScript runtime or
+/// `actions/setup-node` may run (D-0052, D-0053, srust-5, D-4494).
+const WEB_JOB: (&str, &str) = (".github/workflows/ci.yml", "web");
+
+/// The front end's runtimes and package managers, as program names.
+const JS_RUNTIMES: [&str; 13] = [
+    "node", "nodejs", "npm", "npx", "yarn", "pnpm", "pnpx", "bun", "bunx", "deno", "corepack",
+    "tsx", "ts-node",
+];
+
+/// Inputs that hand an action a program to run rather than data: refused
+/// whatever the action (srust-2, D-4491).
+const CODE_INPUTS: [&str; 10] = [
+    "script",
+    "code",
+    "run",
+    "command",
+    "commands",
+    "entrypoint",
+    "args",
+    "pre",
+    "post",
+    "main",
+];
+
+/// One action a workflow may name, pinned to the commit D-1457 resolved
+/// (srust-5, D-4494).
+struct Pinned {
+    repo: &'static str,
+    sha: &'static str,
+    /// The tag or branch the commit was resolved from, which D-1457 keeps as
+    /// the `uses:` line's comment.
+    tag: &'static str,
+    /// `runs.using` in the action's own `action.yml` at that commit, fetched
+    /// from raw.githubusercontent.com on 2026-10-09: the program GitHub's
+    /// runner starts for it.
+    runtime: &'static str,
+    /// The `with:` inputs a workflow may hand it, each data, never a program.
+    inputs: &'static [&'static str],
+    /// The one (workflow, job) it may run in, when not every job.
+    only: Option<(&'static str, &'static str)>,
+}
+
+/// Every action any tracked workflow may name. Anything else, a tag or a
+/// branch in place of the commit, a local action, a container image or a
+/// reusable workflow is refused, so no new action, and no new JavaScript
+/// run on Node, enters CI without an edit to this list and its decision.
+const ACTIONS: [Pinned; 7] = [
+    Pinned {
+        repo: "actions/checkout",
+        sha: "11d5960a326750d5838078e36cf38b85af677262",
+        tag: "v4",
+        runtime: "node20",
+        inputs: &["fetch-depth", "ref", "persist-credentials"],
+        only: None,
+    },
+    Pinned {
+        repo: "dtolnay/rust-toolchain",
+        sha: "89b12181fb390509a0842a86cc55eeb8eb928c1d",
+        tag: "stable",
+        runtime: "composite",
+        inputs: &["components", "targets"],
+        only: None,
+    },
+    Pinned {
+        repo: "Swatinem/rust-cache",
+        sha: "6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+        tag: "v2",
+        runtime: "node24",
+        inputs: &["shared-key"],
+        only: None,
+    },
+    Pinned {
+        repo: "actions/cache",
+        sha: "0057852bfaa89a56745cba8c7296529d2fc39830",
+        tag: "v4",
+        runtime: "node20",
+        inputs: &["path", "key"],
+        only: None,
+    },
+    Pinned {
+        repo: "actions/upload-artifact",
+        sha: "ea165f8d65b6e75b540449e92b4886f43607fa02",
+        tag: "v4",
+        runtime: "node20",
+        inputs: &["name", "path", "retention-days", "if-no-files-found"],
+        only: None,
+    },
+    Pinned {
+        repo: "actions/download-artifact",
+        sha: "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        tag: "v4",
+        runtime: "node20",
+        inputs: &["name", "path"],
+        only: None,
+    },
+    Pinned {
+        repo: "actions/setup-node",
+        sha: "49933ea5288caeca8642d1e84afbd3f7d6820020",
+        tag: "v4",
+        runtime: "node20",
+        inputs: &["node-version", "cache", "cache-dependency-path"],
+        only: Some(WEB_JOB),
+    },
+];
+
+/// The pinned action a `uses:` value names exactly, quotes removed.
+fn pinned(value: &str) -> Option<&'static Pinned> {
+    let v = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(value);
+    let (repo, sha) = v.split_once('@')?;
+    ACTIONS.iter().find(|a| a.repo == repo && a.sha == sha)
+}
+
+/// The job each line of a workflow belongs to, by 0-based line index: `None`
+/// above `jobs:` and from any later top-level key; a job's name from its
+/// two-space key (a trailing comment and quotes allowed). Second, the 1-based
+/// numbers of lines inside the jobs map, indented less than a job's body, that
+/// are not such a key: a line this reader cannot place, refused rather than
+/// guessed at, so no line can be read as the web job's while GitHub runs it in
+/// another (srust-5, D-4494).
+fn job_of_lines(src: &str) -> (Vec<Option<String>>, Vec<usize>) {
+    let mut jobs = Vec::new();
+    let mut unplaced = Vec::new();
+    let mut in_jobs = false;
+    let mut job: Option<String> = None;
+    for (n, line) in src.lines().enumerate() {
+        let body = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        if !(body.is_empty() || body.starts_with('#')) {
+            let key = body.find(" #").map_or(body, |c| body[..c].trim_end());
+            if indent == 0 {
+                in_jobs = key == "jobs:";
+                job = None;
+            } else if in_jobs && indent < 4 {
+                let name = key
+                    .strip_suffix(':')
+                    .map(|k| k.trim_matches(|c| c == '"' || c == '\''))
+                    .filter(|k| {
+                        indent == 2
+                            && !k.is_empty()
+                            && k.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    });
+                match name {
+                    Some(k) => job = Some(k.to_owned()),
+                    None => {
+                        unplaced.push(n + 1);
+                        job = None;
+                    }
+                }
+            }
+        }
+        jobs.push(job.clone());
+    }
+    (jobs, unplaced)
+}
+
+/// The keys a step sets at its own level, by 1-based line, with each value:
+/// the `- key:` line and every later line at the indentation of the first
+/// key. A block under a key (`with:` with no inline value) is read by
+/// `with_inputs`.
+fn step_keys(step: &Step) -> Vec<(usize, String, String)> {
+    let mut out = Vec::new();
+    let Some(first) = step.lines.first() else {
+        return out;
+    };
+    let dash = first.len() - first.trim_start().len();
+    let own = dash + 2;
+    for (k, line) in step.lines.iter().enumerate() {
+        let indent = line.len() - line.trim_start().len();
+        let body = if k == 0 {
+            line.trim_start().trim_start_matches("- ")
+        } else if indent == own {
+            line.trim_start()
+        } else {
+            continue;
+        };
+        if body.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = body.split_once(':') {
+            out.push((
+                step.line + k,
+                key.trim_matches(|c| c == '"' || c == '\'').to_owned(),
+                value.trim().to_owned(),
+            ));
+        }
+    }
+    out
+}
+
+/// The input names a step's `with:` hands its action, by 1-based line: a flow
+/// mapping on the `with:` line itself, or the keys of the block below it, the
+/// block's first key setting the indentation every key shares. `Err` names a
+/// line that is neither, refused rather than read past.
+fn with_inputs(step: &Step, at: usize, inline: &str) -> Result<Vec<(usize, String)>, usize> {
+    let inline = inline.find(" #").map_or(inline, |c| inline[..c].trim_end());
+    if !inline.is_empty() {
+        let inner = inline
+            .strip_prefix('{')
+            .and_then(|v| v.strip_suffix('}'))
+            .filter(|v| !v.contains(['{', '}', '[', ']', '"', '\'']))
+            .ok_or(at)?;
+        return Ok(inner
+            .split(',')
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| (at, e.split(':').next().unwrap_or("").trim().to_owned()))
+            .collect());
+    }
+    let Some(head) = step.lines.get(at - step.line) else {
+        return Err(at);
+    };
+    let base = head.len() - head.trim_start().len();
+    let mut keys = Vec::new();
+    let mut child: Option<usize> = None;
+    for (k, line) in step.lines.iter().enumerate().skip(at - step.line + 1) {
+        let body = line.trim();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= base {
+            break;
+        }
+        let c = *child.get_or_insert(indent);
+        if indent > c {
+            continue;
+        }
+        if indent < c {
+            return Err(step.line + k);
+        }
+        let key = body.split_once(':').map(|(k, _)| k).ok_or(step.line + k)?;
+        keys.push((
+            step.line + k,
+            key.trim_matches(|c| c == '"' || c == '\'').to_owned(),
+        ));
+    }
+    Ok(keys)
+}
+
+/// What D-4491 and D-4494 refuse in one workflow: every `uses:` must name a
+/// pinned action exactly, keep its tag comment, sit at a step's own level and
+/// run in a job its pin allows; `actions/github-script` is named as running
+/// JavaScript written inline; every `with:` input must be one its pin admits
+/// and none may carry a program; no `INPUT_` variable may feed an action
+/// beside `with:`; and outside ci.yml's `web` job no line names a JavaScript
+/// runtime or package manager.
+fn action_findings(path: &str, src: &str, logical: &[(usize, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let (jobs, unplaced) = job_of_lines(src);
+    for n in unplaced {
+        out.push(format!(
+            "{path}:{n}: a line in the jobs map that is not a job's key; its job cannot be placed (D-4494)"
+        ));
+    }
+    let job_at = |n: usize| jobs.get(n - 1).cloned().flatten();
+    let in_web = |n: usize| path == WEB_JOB.0 && job_at(n).as_deref() == Some(WEB_JOB.1);
+    let mut uses_lines = Vec::new();
+    for (n, l) in logical {
+        for (value, comment) in key_values(l, "uses") {
+            uses_lines.push(*n);
+            if value.to_ascii_lowercase().contains("github-script") {
+                out.push(format!(
+                    "{path}:{n}: `uses: {value}` runs JavaScript written inline in the workflow (D-4491)"
+                ));
+                continue;
+            }
+            let Some(a) = pinned(value) else {
+                let known: Vec<String> = ACTIONS
+                    .iter()
+                    .map(|a| format!("{}@{} ({}, {})", a.repo, a.sha, a.tag, a.runtime))
+                    .collect();
+                out.push(format!(
+                    "{path}:{n}: `uses: {value}` is not an action D-4494 pins; allowed: {}",
+                    known.join(", ")
+                ));
+                continue;
+            };
+            if let Some((p, j)) = a.only
+                && !(path == p && job_at(*n).as_deref() == Some(j))
+            {
+                out.push(format!(
+                    "{path}:{n}: `{}` runs only in job `{j}` of {p} (D-4494)",
+                    a.repo
+                ));
+            }
+            if !comment.starts_with(a.tag) {
+                out.push(format!(
+                    "{path}:{n}: `uses: {value}` must keep the tag it was resolved from as its comment, `# {}` (D-1457)",
+                    a.tag
+                ));
+            }
+        }
+        if l.contains("INPUT_") {
+            out.push(format!(
+                "{path}:{n}: an `INPUT_` variable hands an action an input beside `with:` (D-4491)"
+            ));
+        }
+        if !in_web(*n)
+            && let Some(w) = program_words(l).find(|w| JS_RUNTIMES.contains(w))
+        {
+            out.push(format!(
+                "{path}:{n}: `{w}` is a JavaScript runtime, allowed only in job `{}` of {} (D-4494)",
+                WEB_JOB.1, WEB_JOB.0
+            ));
+        }
+    }
+    let (_, steps) = jobs_and_steps(src);
+    let mut placed = Vec::new();
+    for step in &steps {
+        let keys = step_keys(step);
+        let uses: Vec<&(usize, String, String)> =
+            keys.iter().filter(|(_, k, _)| k == "uses").collect();
+        placed.extend(uses.iter().map(|(at, _, _)| *at));
+        if let [_, second, ..] = uses.as_slice() {
+            out.push(format!(
+                "{path}:{}: a step that names a second action; its inputs could be read against either (D-4494)",
+                second.0
+            ));
+        }
+        let action = uses.first().and_then(|(_, _, v)| {
+            let v = v.find(" #").map_or(v.as_str(), |c| v[..c].trim_end());
+            pinned(v)
+        });
+        for (at, key, value) in &keys {
+            if key != "with" {
+                continue;
+            }
+            let inputs = match with_inputs(step, *at, value) {
+                Ok(inputs) => inputs,
+                Err(line) => {
+                    out.push(format!(
+                        "{path}:{line}: a `with:` this reader cannot read as one input per key (D-4491)"
+                    ));
+                    continue;
+                }
+            };
+            for (line, input) in inputs {
+                if CODE_INPUTS.contains(&input.as_str()) {
+                    out.push(format!(
+                        "{path}:{line}: input `{input}` hands an action a program written inline (D-4491)"
+                    ));
+                } else if let Some(a) = action {
+                    if !a.inputs.contains(&input.as_str()) {
+                        out.push(format!(
+                            "{path}:{line}: input `{input}` is not one D-4494 admits for `{}`",
+                            a.repo
+                        ));
+                    }
+                } else {
+                    out.push(format!(
+                        "{path}:{line}: input `{input}` on a step that runs no pinned action (D-4494)"
+                    ));
+                }
+            }
+        }
+    }
+    for n in uses_lines {
+        if !placed.contains(&n) {
+            out.push(format!(
+                "{path}:{n}: a `uses:` that is not a step's own key; only a step may name an action (D-4494)"
+            ));
+        }
     }
     out
 }
@@ -3159,6 +3537,8 @@ fn workflow_findings(path: &str, src: &str) -> Vec<String> {
         }
         logical.push((n + 1, body.to_owned()));
     }
+    // srust-2 and srust-5 (D-4491, D-4494): what an action may run, and where.
+    out.extend(action_findings(path, src, &logical));
     for (n, l) in &logical {
         let key = l.trim_start_matches("- ");
         if key.starts_with("continue-on-error")
@@ -4707,7 +5087,7 @@ mod tests {
             concat!("          /usr/bin/py", "thon3 -c 'import os'\n"),
             "          x | grep --quiet y\n",
         ] {
-            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+            assert!(!in_web_job(bad).is_empty(), "passed: {bad}");
         }
         for good in [
             "          # node -e in prose\n",
@@ -4716,8 +5096,334 @@ mod tests {
             "          node web/scripts/check.js\n",
             "          bad=$(git ls-files | grep -Ev '^x' || true)\n",
         ] {
-            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+            assert!(in_web_job(good).is_empty(), "refused: {good}");
         }
+    }
+
+    /// A fragment as lines of ci.yml's front-end job, the one place a
+    /// JavaScript runtime may run (D-4494): a refusal there is the fragment's
+    /// own, and a pass proves no other rule over-refuses it.
+    fn in_web_job(fragment: &str) -> Vec<String> {
+        workflow_findings(WEB_JOB.0, &format!("jobs:\n  web:\n{fragment}"))
+    }
+
+    /// `steps` as the steps of job `job` in the workflow at `path`.
+    fn job(path: &str, job: &str, steps: &str) -> Vec<String> {
+        workflow_findings(
+            path,
+            &format!("on: push\njobs:\n  {job}:\n    runs-on: x\n    steps:\n{steps}"),
+        )
+    }
+
+    const CHECKOUT: &str =
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n";
+
+    #[test]
+    fn an_action_input_or_variable_that_carries_a_program_is_refused() {
+        // srust-2, D-4491. The audit's P12 passed every language gate.
+        let p12 = "      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7\n        with:\n          script: |\n            const fs = require('fs');\n";
+        for path in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/auto-merge.yml",
+            ".github/workflows/main-check.yml",
+        ] {
+            for j in ["language-purity", "web"] {
+                let found = job(path, j, p12);
+                assert!(
+                    found
+                        .iter()
+                        .any(|f| f.contains("runs JavaScript written inline")),
+                    "{path} {j}: {found:?}"
+                );
+                assert!(
+                    found
+                        .iter()
+                        .any(|f| f.contains("input `script` hands an action a program")),
+                    "{path} {j}: {found:?}"
+                );
+            }
+        }
+        for steps in [
+            "      - uses: \"Actions/GitHub-Script@v7\"\n",
+            "      - { uses: actions/github-script@v7 }\n",
+            "      - name: x\n        uses: actions/github-script@v7 # v7\n",
+        ] {
+            let found = job(".github/workflows/ci.yml", "build", steps);
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.contains("JavaScript written inline")),
+                "passed: {steps}: {found:?}"
+            );
+        }
+        // A program input on a pinned action, flow or block, and the
+        // environment form of an input.
+        for (steps, want) in [
+            (
+                format!("{CHECKOUT}        with: {{ fetch-depth: 0, script: x }}\n"),
+                "input `script` hands",
+            ),
+            (
+                format!("{CHECKOUT}        with:\n          entrypoint: x\n"),
+                "input `entrypoint` hands",
+            ),
+            (
+                format!("{CHECKOUT}        with:\n          \"args\": x\n"),
+                "input `args` hands",
+            ),
+            (
+                format!("{CHECKOUT}        env:\n          INPUT_SCRIPT: x\n"),
+                "`INPUT_` variable",
+            ),
+            (
+                format!("{CHECKOUT}        env: {{ INPUT_FETCH-DEPTH: 1 }}\n"),
+                "`INPUT_` variable",
+            ),
+        ] {
+            let found = job(".github/workflows/ci.yml", "build", &steps);
+            assert!(
+                found.iter().any(|f| f.contains(want)),
+                "passed: {steps}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_pinned_action_runs_and_javascript_stays_in_the_web_job() {
+        // srust-5, D-4494.
+        const CI: &str = ".github/workflows/ci.yml";
+        const CO: &str = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
+        let node = "      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n          node-version: '24'\n          cache: npm\n          cache-dependency-path: web/package-lock.json\n";
+        let refused: [(&str, &str, String, &str); 20] = [
+            // A tag or branch, another commit, a local action, an image.
+            (
+                CI,
+                "build",
+                "      - uses: actions/checkout@v4 # v4\n".to_owned(),
+                "not an action D-4494 pins",
+            ),
+            (
+                CI,
+                "build",
+                "      - uses: actions/checkout@0000000000000000000000000000000000000000 # v4\n"
+                    .to_owned(),
+                "not an action D-4494 pins",
+            ),
+            (
+                CI,
+                "build",
+                "      - uses: ./.github/actions/x\n".to_owned(),
+                "not an action D-4494 pins",
+            ),
+            (
+                CI,
+                "build",
+                "      - uses: docker://node:20\n".to_owned(),
+                "not an action D-4494 pins",
+            ),
+            // The pin without the tag D-1457 keeps beside it.
+            (CI, "build", format!("{CO}\n"), "`# v4` (D-1457)"),
+            // An input the pin does not admit, or no pinned action at all.
+            (
+                CI,
+                "build",
+                format!("{CO} # v4\n        with: {{ token: x }}\n"),
+                "input `token` is not one D-4494 admits",
+            ),
+            (
+                CI,
+                "build",
+                "      - run: true\n        with:\n          path: x\n".to_owned(),
+                "on a step that runs no pinned action",
+            ),
+            // A `with:` this reader will not guess at.
+            (
+                CI,
+                "build",
+                format!("{CO} # v4\n        with: {{ ref: \"a,b\" }}\n"),
+                "cannot read as one input per key",
+            ),
+            (
+                CI,
+                "build",
+                format!("{CO} # v4\n        with:\n            ref: x\n          fetch-depth: 0\n"),
+                "cannot read as one input per key",
+            ),
+            // setup-node and every JavaScript runtime outside ci.yml's web job.
+            (CI, "build", node.to_owned(), "runs only in job `web`"),
+            (
+                ".github/workflows/auto-merge.yml",
+                "web",
+                node.to_owned(),
+                "runs only in job `web`",
+            ),
+            (
+                CI,
+                "build",
+                "      - run: npm ci --prefix web\n".to_owned(),
+                "`npm` is a JavaScript runtime",
+            ),
+            (
+                CI,
+                "language-purity",
+                "      - run: |\n          x=$(npx tsc)\n".to_owned(),
+                "`npx` is a JavaScript runtime",
+            ),
+            (
+                CI,
+                "build",
+                "      - run: /usr/bin/node22 web/x.mjs\n".to_owned(),
+                "`node` is a JavaScript runtime",
+            ),
+            (
+                ".github/workflows/main-check.yml",
+                "web",
+                "      - run: node web/x.mjs\n".to_owned(),
+                "`node` is a JavaScript runtime",
+            ),
+            (
+                CI,
+                "build",
+                "      - run: deno run web/x.ts\n".to_owned(),
+                "`deno` is a JavaScript runtime",
+            ),
+            (
+                CI,
+                "ci-ok",
+                "      - run: bun web/x.ts\n".to_owned(),
+                "`bun` is a JavaScript runtime",
+            ),
+            // One step naming two actions.
+            (
+                CI,
+                "build",
+                format!("{CO} # v4\n        uses: {} # v4\n", &CO[14..]),
+                "a step that names a second action",
+            ),
+            // A `uses:` that is not a step's own key.
+            (
+                CI,
+                "build",
+                format!("      - name: x\n        with:\n  {CO} # v4\n"),
+                "not a step's own key",
+            ),
+            (
+                CI,
+                "build",
+                format!(
+                    "      - name: x\n        with:\n          uses: {} # v4\n",
+                    &CO[14..]
+                ),
+                "not a step's own key",
+            ),
+        ];
+        for (path, j, steps, want) in &refused {
+            let found = job(path, j, steps);
+            assert!(
+                found.iter().any(|f| f.contains(want)),
+                "passed {path} {j}: {steps}: {found:?}"
+            );
+        }
+        let reusable = workflow_findings(
+            CI,
+            "jobs:\n  x:\n    uses: actions/checkout/.github/workflows/w.yml@11d5960a326750d5838078e36cf38b85af677262 # v4\n",
+        );
+        assert!(
+            reusable
+                .iter()
+                .any(|f| f.contains("not an action D-4494 pins")),
+            "{reusable:?}"
+        );
+        // A line in the jobs map that is not a job key cannot be placed.
+        for src in [
+            "jobs:\n  web:\n   x: y\n",
+            "jobs:\n  web:\n  - x\n",
+            "jobs:\n  web:\n  web build:\n",
+            "jobs:\n  web: {}\n",
+        ] {
+            let found = workflow_findings(CI, src);
+            assert!(
+                found.iter().any(|f| f.contains("its job cannot be placed")),
+                "passed: {src:?}: {found:?}"
+            );
+        }
+        // What the real workflows do, which must still pass.
+        let passing: [(&str, &str, String); 4] = [
+            (
+                CI,
+                "web",
+                format!(
+                    "{CHECKOUT}{node}      - run: npm ci --prefix web\n      - name: W2\n        run: node --test web/tests/*.test.js\n"
+                ),
+            ),
+            (
+                CI,
+                "build",
+                format!(
+                    "{CHECKOUT}        with: {{ fetch-depth: 0 }}\n      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable\n        with:\n          components: rustfmt, clippy\n          targets: wasm32-unknown-unknown\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2\n        with:\n          shared-key: x\n"
+                ),
+            ),
+            (
+                CI,
+                "mutants",
+                "      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n        with:\n          path: |\n            ~/.cargo/bin/cargo-mutants\n          key: k\n      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4\n        with:\n          name: plan\n          path: /tmp/p\n      - if: always()\n        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n        with:\n          name: x\n          path: |\n            /tmp/a\n          retention-days: 35\n          if-no-files-found: error\n"
+                    .to_owned(),
+            ),
+            (
+                ".github/workflows/auto-merge.yml",
+                "auto-merge",
+                format!(
+                    "{CHECKOUT}        with: {{ ref: main, persist-credentials: false }}\n      - name: Gate 1e has no front-end toolchain\n        run: echo nodes\n"
+                ),
+            ),
+        ];
+        for (path, j, steps) in &passing {
+            let found = job(path, j, steps);
+            assert!(found.is_empty(), "refused {path} {j}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn every_line_is_read_as_the_job_github_runs_it_in() {
+        // srust-5, D-4494.
+        let src = "name: x\non: push\njobs:\n  a: # first\n    steps:\n      - run: x\n\n  # a comment at job indentation\n  \"web\":\n    steps:\n      - run: y\nenv:\n  z: 1\n";
+        let (jobs, unplaced) = job_of_lines(src);
+        let names: Vec<Option<&str>> = jobs.iter().map(|j| j.as_deref()).collect();
+        assert_eq!(
+            names,
+            [
+                None,
+                None,
+                None,
+                Some("a"),
+                Some("a"),
+                Some("a"),
+                Some("a"),
+                Some("a"),
+                Some("web"),
+                Some("web"),
+                Some("web"),
+                None,
+                None,
+            ]
+        );
+        assert!(unplaced.is_empty(), "{unplaced:?}");
+        // Every pin is a full lowercase commit, an owner and a repository,
+        // a tag and a runtime, and admits no program input.
+        for a in &ACTIONS {
+            assert_eq!(a.sha.len(), 40, "{}", a.repo);
+            assert!(
+                a.sha
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            );
+            assert!(a.repo.contains('/') && !a.tag.is_empty() && !a.runtime.is_empty());
+            assert!(pinned(&format!("{}@{}", a.repo, a.sha)).is_some());
+            assert!(pinned(&format!("'{}@{}'", a.repo, a.sha)).is_some());
+            assert!(pinned(&format!("{}@{}x", a.repo, a.sha)).is_none());
+            assert!(a.inputs.iter().all(|i| !CODE_INPUTS.contains(i)));
+        }
+        assert!(pinned("actions/checkout").is_none());
     }
 
     #[test]
@@ -5075,7 +5781,7 @@ mod tests {
             "          ruby <<< 'puts 1'\n",
             "          echo x | perl -\n",
         ] {
-            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+            assert!(!in_web_job(bad).is_empty(), "passed: {bad}");
         }
         for good in [
             "          node --test web/tests/a.test.js\n",
@@ -5084,7 +5790,7 @@ mod tests {
             "          grep -Ew 'node|perl' f || true\n",
             "          read -r total zero <<EOF\n",
         ] {
-            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+            assert!(in_web_job(good).is_empty(), "refused: {good}");
         }
     }
 
@@ -5282,7 +5988,7 @@ mod tests {
             "          julia --eval 'x'\n",
             "          x | node --no-warnings\n",
         ] {
-            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+            assert!(!in_web_job(bad).is_empty(), "passed: {bad}");
         }
         for good in [
             "          bash -c 'echo hi'\n",
@@ -5291,7 +5997,7 @@ mod tests {
             "          gh pr merge 1 --auto --squash\n",
             "          sha=$(gh api x | \"$j\" field sha)\n",
         ] {
-            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+            assert!(in_web_job(good).is_empty(), "refused: {good}");
         }
     }
 
@@ -5399,9 +6105,9 @@ mod tests {
             "        shells: node\n",
         ] {
             assert!(
-                workflow_findings("w", good).is_empty(),
+                in_web_job(good).is_empty(),
                 "refused: {good}: {:?}",
-                workflow_findings("w", good)
+                in_web_job(good)
             );
         }
     }

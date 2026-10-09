@@ -72,6 +72,11 @@ jobs:
           #     D-2342 widens the forms; awk is a pinned ratchet (06-limits).
           #   * the stream editor's name on any line that is not a comment:
           #     every invocation runs a program (D-4493).
+          #   * an action that is not one of the seven `ACTIONS` pins in
+          #     .github/source_scan.rs, a pin without its tag comment, an input
+          #     its pin does not admit, `actions/github-script` or any input or
+          #     `INPUT_` variable that carries a program (D-4491), and setup-node
+          #     or a JavaScript runtime outside this file's `web` job (D-4494).
           # Every tracked .yml under .github/, not only workflows/ (D-2341).
           # An empty listing is refused.
           work=$(mktemp -d)
