@@ -2255,6 +2255,23 @@ impl Control {
         }
     }
 
+    /// Publish, and answer the new detail when this edit moved the phase INTO
+    /// [`Phase::Halted`]; `None` when it was halted already, did not halt, or
+    /// the lock is poisoned (the edit is then dropped, as [`Self::publish`]
+    /// drops it).
+    ///
+    /// sobs-6, D-4453: the pass that finds nothing to choose re-publishes its
+    /// halt once a minute for as long as the halt stands, so an event per
+    /// publish would be an event per minute. Answering only the TRANSITION
+    /// lets the caller log the halt once, where it begins. One uncontended lock
+    /// and one compare; the detail is cloned only on the transition.
+    fn publish_into_halt<F: FnOnce(&mut Status)>(&self, edit: F) -> Option<String> {
+        let mut held = self.status.lock().ok()?;
+        let was = held.phase;
+        edit(&mut held);
+        (was != Phase::Halted && held.phase == Phase::Halted).then(|| held.detail.clone())
+    }
+
     /// Read the published status without cloning it, or `None` when the lock is
     /// poisoned.
     ///
@@ -2634,6 +2651,108 @@ pub fn yesterday_ist(now: std::time::SystemTime) -> Option<Day> {
     Day::from_days(today.days_from_epoch().checked_sub(1)?).ok()
 }
 
+/// Spawn [`fly`] under a supervisor that writes how it ended to the log.
+///
+/// sobs-6, D-4453. `run_in` spawned `fly` bare and kept the handle only to
+/// abort it at shutdown, so a backfill that returned (the clock allowance
+/// spent, no daily directory) or panicked (in a build that unwinds) left no
+/// event at all, and a panic left the status page drawing whatever phase it
+/// held when the task died, for the life of the process. The supervisor awaits
+/// the task once and answers through [`flight_ended`]: one event per task, at
+/// the one boundary where the task is known to be gone.
+///
+/// Aborting the returned handle aborts the backfill too: the inner handle is
+/// held by [`Aborting`], whose drop aborts it, so a shutdown that aborts the
+/// supervisor cannot detach the backfill and leave it running.
+///
+/// Both spawns carry the caller's log scope (`telemetry::inherit`); the server
+/// launches from outside every scope, so in production that is none, and the
+/// backfill's own pulls each open their own run in `broker_run`.
+pub fn launch(site: Loaded) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(telemetry::inherit(supervise(site)))
+}
+
+/// A task handle that aborts its task when dropped.
+///
+/// Dropping a plain [`tokio::task::JoinHandle`] detaches the task; this is the
+/// opposite, and it is what lets aborting [`launch`]'s supervisor stop the
+/// backfill it supervises.
+struct Aborting(tokio::task::JoinHandle<()>);
+
+impl Drop for Aborting {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Await one backfill task and name how it ended.
+async fn supervise(site: Loaded) {
+    let mut flying = Aborting(tokio::spawn(telemetry::inherit(fly(Loaded::clone(&site)))));
+    let ended = (&mut flying.0).await;
+    flight_ended(&site.autopilot, ended);
+}
+
+/// Name, once, how a backfill task ended, and leave a status that says so.
+///
+/// `fly` returns only after publishing [`Phase::Halted`] with its reason, so a
+/// normal end quotes that reason. A task that panicked or was cancelled
+/// published nothing on its way out: its status is replaced with a halt naming
+/// the runtime's own words (which carry the panic's message), so the page stops
+/// drawing a phase that no task is behind. A poisoned status lock drops that
+/// edit, and [`Control::json`] already answers a poisoned lock by name.
+///
+/// Error in both arms: either way no backfill runs again in this process
+/// until it is restarted.
+fn flight_ended(control: &Control, ended: Result<(), tokio::task::JoinError>) {
+    match ended {
+        Ok(()) => {
+            let why = control
+                .inspect(|status| status.detail.clone())
+                .unwrap_or_else(|| String::from(POISONED_STATUS));
+            note_backfill(telemetry::Level::Error, "backfill task ended", &why, None);
+        }
+        Err(lost) => {
+            let why = format!(
+                "the backfill task ended abnormally ({lost}). No backfill runs in this \
+                 process any more; only a restart starts another."
+            );
+            control.publish(|status| {
+                status.phase = Phase::Halted;
+                status.detail.clone_from(&why);
+                status.due_unix = 0;
+            });
+            note_backfill(
+                telemetry::Level::Error,
+                "backfill task ended abnormally",
+                &why,
+                None,
+            );
+        }
+    }
+}
+
+/// What [`flight_ended`] quotes when the status lock cannot be read.
+const POISONED_STATUS: &str = "the autopilot's status lock is poisoned, so the reason the \
+     backfill task published on its way out cannot be read";
+
+/// Write one autopilot event: a halt, a stall, a clock wait or the task's end.
+///
+/// sobs-6, D-4453. Every caller sits at a boundary that happens once per
+/// verdict, per transition or per task, never once per pass or per bar; the
+/// reason travels verbatim and the encoder bounds its length. `at` names the
+/// feed and month for a verdict about one month.
+fn note_backfill(level: telemetry::Level, message: &str, why: &str, at: Option<(&str, &str)>) {
+    let event =
+        telemetry::Event::new(level, "autopilot", message).with("why", telemetry::Value::Str(why));
+    let event = match at {
+        Some((feed, month)) => event
+            .with("feed", telemetry::Value::Str(feed))
+            .with("month", telemetry::Value::Str(month)),
+        None => event,
+    };
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
 /// The background task: decide, fetch, report, repeat.
 ///
 /// Spawned beside the HTTP server and holding the same `Arc`, so it can never
@@ -2688,12 +2807,7 @@ pub async fn fly(site: Loaded) {
             });
             return;
         };
-        site.autopilot.publish(move |status| {
-            status.phase = Phase::Halted;
-            status.detail = saying;
-            status.since_unix = ingest::epoch_secs(std::time::SystemTime::now());
-            status.due_unix = 0;
-        });
+        clock_wait_published(&site.autopilot, saying);
         clock_waits = clock_waits.saturating_add(1);
         tokio::time::sleep(std::time::Duration::from_secs(IDLE_POLL_SECS)).await;
     };
@@ -2795,6 +2909,29 @@ pub async fn fly(site: Loaded) {
         if waited > 0 {
             nap(&site, waited).await;
         }
+    }
+}
+
+/// Publish one wait for a usable clock, and log the FIRST wait only.
+///
+/// sobs-6, D-4453: one event where the halt begins; the waits after it stand
+/// in the same halt and write nothing, and the task's end, if the allowance is
+/// spent, is the supervisor's event ([`flight_ended`]). Split out of [`fly`]
+/// so it can be driven without a broken clock.
+fn clock_wait_published(control: &Control, saying: String) {
+    let began = control.publish_into_halt(move |status| {
+        status.phase = Phase::Halted;
+        status.detail = saying;
+        status.since_unix = ingest::epoch_secs(std::time::SystemTime::now());
+        status.due_unix = 0;
+    });
+    if let Some(why) = began {
+        note_backfill(
+            telemetry::Level::Warn,
+            "waiting for a usable clock",
+            &why,
+            None,
+        );
     }
 }
 
@@ -3373,7 +3510,9 @@ async fn round(
             ),
             None => settled.say(&site.universe().read, &note, &probed),
         };
-        site.autopilot.publish(move |status| {
+        // A HALT IS LOGGED WHERE IT BEGINS, not once a minute while it stands
+        // (sobs-6, D-4453).
+        let halted = site.autopilot.publish_into_halt(move |status| {
             // AN EMPTY UNIVERSE IS HALTED, NOT IDLE. `idle` beside a countdown
             // is what an operator reads as "it is working"; the masters cannot
             // load without a restart, so there is nothing to wait for.
@@ -3391,6 +3530,9 @@ async fn round(
             status.since_unix = ingest::epoch_secs(std::time::SystemTime::now());
             status.feeds = reports;
         });
+        if let Some(why) = halted {
+            note_backfill(telemetry::Level::Error, "backfill halted", &why, None);
+        }
         // A RECONSIDERED MONTH IS WORK, so the next pass happens at once rather
         // than a minute later. It cannot spin: `reconsider` stamps the stall it
         // moved, so the same month cannot be chosen again for
@@ -3486,6 +3628,14 @@ fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
             if let Some(next) = month_after(state.frontier) {
                 state.frontier = next;
             }
+            // ONE EVENT PER VERDICT (sobs-6, D-4453). A stall is returned once
+            // per exhausted allowance, so this is bounded by months, not ticks.
+            note_backfill(
+                telemetry::Level::Warn,
+                "month passed over",
+                &reason,
+                Some((state.feed.display(), &month.to_string())),
+            );
             site.autopilot.publish(move |status| {
                 status.detail = format!(
                     "{month} was passed over after {MAX_MONTH_ATTEMPTS} attempts and stays \
@@ -3495,6 +3645,15 @@ fn settle(site: &Loaded, state: &mut FeedState, out: &TickOutcome) -> u64 {
             0
         }
         Next::Halt { reason } => {
+            // A FEED'S HALT IS ITS OWN EVENT, naming the feed and the month the
+            // status sentence does not (sobs-6, D-4453). `halt` marks the feed,
+            // so `survey` never chooses it again and this runs once per halt.
+            note_backfill(
+                telemetry::Level::Error,
+                "feed halted",
+                &reason,
+                Some((state.feed.display(), &state.frontier.to_string())),
+            );
             site.autopilot.publish(move |status| {
                 status.phase = Phase::Halted;
                 status.detail = reason;
@@ -7346,5 +7505,306 @@ mod tests {
             assert!(state.halted.is_none() && state.halt_kind.is_none());
             assert!(state.probe.is_none());
         }
+    }
+
+    /// sobs-6, D-4453: ONLY THE TRANSITION INTO A HALT IS ANSWERED. Idle to
+    /// idle, halted to halted and halted to idle answer nothing; idle to halted
+    /// answers the new detail, and so does a fresh halt after a recovery. The
+    /// edit lands in every case, and a poisoned lock answers nothing.
+    #[test]
+    fn publish_into_halt_answers_the_transition_and_nothing_else() {
+        let control = Control::new();
+        let halt = |why: &'static str| {
+            move |status: &mut Status| {
+                status.phase = Phase::Halted;
+                status.detail = why.to_owned();
+            }
+        };
+        let idle = |status: &mut Status| status.phase = Phase::Idle;
+        assert_eq!(control.publish_into_halt(idle), None, "starting to idle");
+        assert_eq!(control.publish_into_halt(idle), None, "idle to idle");
+        assert_eq!(
+            control.publish_into_halt(halt("sobs6 first")).as_deref(),
+            Some("sobs6 first"),
+            "idle to halted is the transition"
+        );
+        assert_eq!(
+            control.publish_into_halt(halt("sobs6 again")),
+            None,
+            "halted to halted is not"
+        );
+        assert_eq!(
+            control.inspect(|status| status.detail.clone()).as_deref(),
+            Some("sobs6 again"),
+            "the edit landed even though nothing was answered"
+        );
+        assert_eq!(control.publish_into_halt(idle), None, "halted to idle");
+        assert_eq!(
+            control.publish_into_halt(halt("sobs6 later")).as_deref(),
+            Some("sobs6 later"),
+            "a halt after a recovery is a new transition"
+        );
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            control.publish(|_| panic!("sobs6 poisons the status lock"));
+        }));
+        assert!(poisoned.is_err(), "the panic has to reach the lock");
+        assert_eq!(control.publish_into_halt(halt("sobs6 unseen")), None);
+    }
+
+    /// sobs-6, D-4453: A STALL AND A FEED'S HALT ARE ONE EVENT EACH, naming the
+    /// feed and the month the status sentence leaves out. A backoff writes
+    /// nothing: the tick's own failure is already journalled and logged.
+    #[tokio::test]
+    async fn a_stall_and_a_halt_are_logged_once_each_with_feed_and_month() {
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let site = empty_site("sobs6-verdicts");
+        let failed = TickOutcome {
+            attempted: 785,
+            reached: 0,
+            stored: 0,
+            reason: Some(String::from("sobs6 connection reset")),
+            complete: false,
+            stopped: false,
+            journal_error: None,
+            credential: None,
+        };
+        let groww = || {
+            FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2020, 5),
+            )
+        };
+        telemetry::in_run(run, async {
+            let mut waiting = groww();
+            assert_eq!(settle(&site, &mut waiting, &failed), BACKOFF_FLOOR_SECS);
+            let mut stalling = FeedState {
+                attempts: MAX_MONTH_ATTEMPTS.saturating_sub(1),
+                ..groww()
+            };
+            assert_eq!(settle(&site, &mut stalling, &failed), 0);
+            let mut dead = FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2021, 2),
+            );
+            let credential = TickOutcome {
+                credential: Some(CredentialStop::SameValue),
+                ..failed.clone()
+            };
+            assert_eq!(settle(&site, &mut dead, &credential), IDLE_POLL_SECS);
+        })
+        .await;
+        let story: Vec<telemetry::Record> = crate::emitted::run_story(run)
+            .into_iter()
+            .filter(|record| record.target == "autopilot")
+            .collect();
+        let said: Vec<(telemetry::Level, &str)> = story
+            .iter()
+            .map(|record| (record.level, record.message.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (telemetry::Level::Warn, "month passed over"),
+                (telemetry::Level::Error, "feed halted"),
+            ],
+            "one event per verdict and none for the backoff"
+        );
+        let [stall, halt] = story.as_slice() else {
+            panic!("two events: {story:?}");
+        };
+        let groww_named = pull::vendor::Feed::Groww.display();
+        assert!(crate::emitted::says(stall, "why", "sobs6 connection reset"));
+        assert!(crate::emitted::says(stall, "feed", groww_named));
+        assert!(crate::emitted::says(
+            stall,
+            "month",
+            &month(2020, 5).to_string()
+        ));
+        assert!(crate::emitted::says(
+            halt,
+            "why",
+            "the broker credential is dead"
+        ));
+        assert!(crate::emitted::says(halt, "feed", groww_named));
+        assert!(crate::emitted::says(
+            halt,
+            "month",
+            &month(2021, 2).to_string()
+        ));
+    }
+
+    /// sobs-6, D-4453: A HALT THE PASS RE-PUBLISHES EVERY MINUTE IS LOGGED
+    /// ONCE. Three passes over an empty universe publish the halt three times
+    /// and write one event, carrying the reason the status page carries.
+    #[tokio::test]
+    async fn an_empty_universe_logs_its_halt_once_and_not_once_a_pass() {
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let site = empty_site("sobs6-halt-once");
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let mut feeds = drivable(yesterday);
+        telemetry::in_run(run, async {
+            for _ in 0..3 {
+                let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+                assert_eq!(pass.wait, IDLE_POLL_SECS);
+            }
+        })
+        .await;
+        let halts: Vec<telemetry::Record> = crate::emitted::run_story(run)
+            .into_iter()
+            .filter(|record| record.target == "autopilot" && record.message == "backfill halted")
+            .collect();
+        let [halt] = halts.as_slice() else {
+            panic!("one halt event over three passes: {halts:?}");
+        };
+        assert_eq!(halt.level, telemetry::Level::Error);
+        assert!(
+            crate::emitted::says(halt, "why", "NOTHING IS TRACKED"),
+            "{halt:?}"
+        );
+    }
+
+    /// sobs-6, D-4453: A BACKFILL TASK THAT RETURNS IS NAMED ON THE LOG, ONCE,
+    /// with the reason it published on its way out. `launch` is awaited to its
+    /// end here because a site that may not reach a broker returns at once.
+    #[tokio::test]
+    async fn a_backfill_task_that_ends_is_named_on_the_log_once() {
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let site = empty_site("sobs6-ended");
+        telemetry::in_run(run, async {
+            launch(Loaded::clone(&site))
+                .await
+                .expect("the supervisor itself ends normally");
+        })
+        .await;
+        let story: Vec<telemetry::Record> = crate::emitted::run_story(run)
+            .into_iter()
+            .filter(|record| record.target == "autopilot")
+            .collect();
+        let [ended] = story.as_slice() else {
+            panic!("exactly one autopilot event: {story:?}");
+        };
+        assert_eq!(ended.message, "backfill task ended");
+        assert_eq!(ended.level, telemetry::Level::Error);
+        assert!(
+            crate::emitted::says(ended, "why", "may not reach a live broker"),
+            "{ended:?}"
+        );
+        assert!(site.autopilot.json().contains(r#""state":"halted""#));
+    }
+
+    /// sobs-6, D-4453: A BACKFILL TASK THAT PANICS OR IS CANCELLED IS NAMED,
+    /// AND ITS STATUS STOPS CLAIMING A PHASE NO TASK IS BEHIND. The runtime's
+    /// own words carry the panic's message onto both surfaces. A normal end
+    /// over a poisoned status lock says the reason cannot be read.
+    #[tokio::test]
+    async fn a_backfill_task_that_dies_is_named_and_its_status_halted() {
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let control = Control::new();
+        control.publish(|status| status.phase = Phase::Running);
+        let panicked = tokio::spawn(async { panic!("sobs6 flight panic") }).await;
+        let pending = tokio::spawn(std::future::pending::<()>());
+        pending.abort();
+        let cancelled = pending.await;
+        let poisoned = Control::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poisoned.publish(|_| panic!("sobs6 poisons the status lock"));
+        }));
+        telemetry::in_run(run, async {
+            flight_ended(&control, panicked);
+            let (phase, detail) = control
+                .inspect(|status| (status.phase, status.detail.clone()))
+                .expect("the status lock");
+            assert_eq!(phase, Phase::Halted, "{detail}");
+            assert!(detail.contains("sobs6 flight panic"), "{detail}");
+            flight_ended(&control, cancelled);
+            flight_ended(&poisoned, Ok(()));
+        })
+        .await;
+        let story: Vec<telemetry::Record> = crate::emitted::run_story(run)
+            .into_iter()
+            .filter(|record| record.target == "autopilot")
+            .collect();
+        let [panic, cancel, unread] = story.as_slice() else {
+            panic!("three events: {story:?}");
+        };
+        for died in [panic, cancel] {
+            assert_eq!(died.message, "backfill task ended abnormally");
+            assert_eq!(died.level, telemetry::Level::Error);
+        }
+        assert!(
+            crate::emitted::says(panic, "why", "sobs6 flight panic"),
+            "{panic:?}"
+        );
+        assert!(
+            crate::emitted::says(cancel, "why", "cancelled"),
+            "{cancel:?}"
+        );
+        assert_eq!(unread.message, "backfill task ended");
+        assert!(crate::emitted::says(
+            unread,
+            "why",
+            "status lock is poisoned"
+        ));
+    }
+
+    /// sobs-6, D-4453: A CLOCK WAIT IS LOGGED WHERE IT BEGINS AND NOT AGAIN.
+    /// Three waits publish three sentences and write one Warn, quoting the
+    /// first; the status carries the latest.
+    #[tokio::test]
+    async fn only_the_first_clock_wait_is_logged() {
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let control = Control::new();
+        telemetry::in_run(run, async {
+            for waits in 0..3 {
+                clock_wait_published(&control, clock_wait(waits).expect("within the allowance"));
+            }
+        })
+        .await;
+        let waits: Vec<telemetry::Record> = crate::emitted::run_story(run)
+            .into_iter()
+            .filter(|record| record.target == "autopilot")
+            .collect();
+        assert_eq!(waits.len(), 1, "{waits:?}");
+        assert_eq!(waits[0].message, "waiting for a usable clock");
+        assert_eq!(waits[0].level, telemetry::Level::Warn);
+        assert!(
+            crate::emitted::says(&waits[0], "why", "check 1 of"),
+            "{:?}",
+            waits[0]
+        );
+        let (phase, detail) = control
+            .inspect(|status| (status.phase, status.detail.clone()))
+            .expect("the status lock");
+        assert_eq!(phase, Phase::Halted);
+        assert!(detail.contains("check 3 of"), "{detail}");
+    }
+
+    /// sobs-6, D-4453: DROPPING THE SUPERVISOR'S HOLD ABORTS THE BACKFILL, so
+    /// the shutdown that aborts `launch`'s handle stops the task rather than
+    /// detaching it. A detached task would keep the value it holds alive.
+    #[tokio::test]
+    async fn dropping_the_supervisors_hold_aborts_the_task_it_holds() {
+        let held = std::sync::Arc::new(());
+        let inside = std::sync::Arc::clone(&held);
+        let hold = Aborting(tokio::spawn(async move {
+            let _inside = inside;
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+        drop(hold);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while std::sync::Arc::strong_count(&held) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the aborted task dropped what it held");
     }
 }

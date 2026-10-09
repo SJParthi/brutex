@@ -997,12 +997,25 @@ async fn rolling_requests_spend_one_shared_permit_per_network_attempt() {
         .expect("owned loopback source")
         .sharing(Some(Arc::clone(&governor)));
 
-        let (status, body, record) = fixture.rolling_report(rolling).await;
+        // L1-R3-5, D-4455: ONE EVENT PER RETRY, and none for a request that
+        // answered first time or was answered with a reason.
+        let _installed = crate::emitted::sink();
+        let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+        let (status, body, record) = telemetry::in_run(run, fixture.rolling_report(rolling)).await;
         assert_eq!(status, expected_status, "{body}");
         assert_eq!(
             transport.seen.load(std::sync::atomic::Ordering::Relaxed),
             expected_requests
         );
+        let retries = retry_events(run);
+        assert_eq!(retries.len(), expected_requests - 1, "{retries:?}");
+        for retry in &retries {
+            assert_eq!(retry.level, telemetry::Level::Warn);
+            assert!(crate::emitted::says(retry, "what", "rolling request"));
+            assert!(crate::emitted::counts(retry, "status", 500));
+            assert!(crate::emitted::counts(retry, "attempt", 1));
+            assert!(crate::emitted::says(retry, "why", "500"), "{retry:?}");
+        }
         let held = governor.lock().expect("measured shared governor");
         let after = held
             .credit_micro_permits(WindowSpan::Day)
@@ -1443,4 +1456,74 @@ async fn named_pricing_receipt_matches_the_greek_file_commit_or_its_refusal() {
         }
         assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
+}
+
+/// Every retry decision one log run carries, oldest first.
+fn retry_events(run: u64) -> Vec<telemetry::Record> {
+    crate::emitted::run_story(run)
+        .into_iter()
+        .filter(|record| {
+            record.target == "pull.http" && record.message == "retrying a refused request"
+        })
+        .collect()
+}
+
+/// L1-R3-5, D-4455: THE BARS LADDER LOGS EACH RETRY ONCE, with the vendor's
+/// status, the attempt, the wait and the vendor's words. A 503 and then a
+/// transport-shaped 502 are each re-asked and each logged; the answer that
+/// lands writes no retry, and the window is filed.
+#[tokio::test]
+async fn every_retry_on_the_bars_ladder_is_one_event_with_its_reason() {
+    let _installed = crate::emitted::sink();
+    let run = telemetry::reserve_run_id().expect("the shared sink reserves an id");
+    let mut fixture = Fixture::new(1);
+    let transport = fixture
+        .serve_replies(
+            vec![
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "generated l1r35 backend refusal".to_owned(),
+                ),
+                (StatusCode::OK, complete_session()),
+            ],
+            None,
+        )
+        .await;
+    let (status, body, record) = telemetry::in_run(run, fixture.report()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.failures, 0);
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let retries = retry_events(run);
+    assert_eq!(retries.len(), 1, "one retry, one event: {retries:?}");
+    let retry = &retries[0];
+    assert_eq!(retry.level, telemetry::Level::Warn);
+    assert!(crate::emitted::says(retry, "what", "window"));
+    assert!(crate::emitted::says(
+        retry,
+        "feed",
+        fixture.asked.feed.wire()
+    ));
+    assert!(crate::emitted::counts(retry, "status", 503));
+    assert!(crate::emitted::counts(retry, "attempt", 1));
+    assert!(crate::emitted::counts(
+        retry,
+        "of",
+        u64::from(THROTTLE_ATTEMPTS)
+    ));
+    assert!(
+        retry
+            .field("wait_ms")
+            .and_then(telemetry::OwnedValue::as_u64)
+            .is_some_and(|ms| ms > 0)
+    );
+    assert_eq!(
+        retry
+            .field("throttled")
+            .and_then(telemetry::OwnedValue::as_bool),
+        Some(false)
+    );
+    assert!(
+        crate::emitted::says(retry, "why", "generated l1r35 backend refusal"),
+        "{retry:?}"
+    );
 }
