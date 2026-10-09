@@ -127,6 +127,7 @@ mod event;
 mod json;
 mod level;
 mod record;
+mod scope;
 mod sink;
 mod tail;
 mod value;
@@ -138,6 +139,7 @@ pub use crate::event::{
 pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
 pub use crate::record::Record;
+pub use crate::scope::{Entered, InRun, current_run, enter, in_run, inherit};
 pub use crate::sink::{
     BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
     Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
