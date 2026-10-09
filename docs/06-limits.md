@@ -15609,9 +15609,12 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   map probe plus a Wilson bound.
 
 - **`cli results` and `cli top`, per request: `O(ledger rows)` reads, `O(1)`
-  retained** (W2-cli8-5, D-1729). `results_at` makes one newest-first pass
-  over every recorded run and keeps at most `LIST_ROWS` (40) records plus a
-  running best. `newest_complete` makes one pass and keeps one record. Neither
+  retained** (W2-cli8-5, D-1729). `results_at` makes one pass over every
+  recorded run, in the append order of the ledger open's own visit since
+  D-2310 (not newest first), and keeps at most `LIST_ROWS` (40) records, by
+  dropping the oldest held row before each push, plus a running best; the
+  retention is pinned by `the_results_listing_retains_a_bounded_window`
+  (D-4721). `newest_complete` makes one pass and keeps one record. Neither
   can stop early: the best complete run can be anywhere in the ledger. A
   per-request bound below the ledger would need a secondary index, which this
   append-only, path-is-the-index file does not keep. UNVERIFIED as a

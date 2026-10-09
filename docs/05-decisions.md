@@ -65190,3 +65190,15 @@ reads three rungs' rows by identity in a child process (the shared handle is
 process-global) and requires `results::OPENS == 1`. With the fresh open it
 failed `left: 3, right: 1`. No production code changes; the child's proof
 line is declared to gate 23 beside D-0695's.
+
+### D-4721 — The results listing's forty-row retention is pinned — 2026-10-09
+
+**Finding.** W2-cli8-5, test gap. Deleting `ListingFold::visit`'s `pop_front`
+passed every test: `results_table` prints only `take(LIST_ROWS)`. SCB-10's
+test asserted only that `results_at` lacks the text `rows.push(record)`.
+
+**Decision.** SCB-10's test, `the_results_listing_retains_a_bounded_window`,
+now folds 500 rows (100 filtered out) and checks at every step that at most
+`LIST_ROWS` are held, then that exactly the newest 40 matching rows are held
+in order at an unchanged capacity. With `pop_front` deleted it failed "row
+50: the window grew". No production code changes.

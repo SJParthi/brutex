@@ -739,6 +739,14 @@ fn the_frontier_prefix_equals_the_full_sort_with_each_key_once() {
     assert!(first_accepted_in_order(&items, 2, |item| item.0, |_| false).is_empty());
 }
 /// W2-cli8-5. The listing retains a bounded window, not every matching row.
+///
+/// D-4721: this asserted only that `results_at` lacks the text
+/// `rows.push(record)`, so deleting the window's `pop_front` passed it, and
+/// passed every other test too, because the table prints only `LIST_ROWS`
+/// rows whatever is held. It now drives the fold: over 500 rows, 400 of them
+/// matching, `ListingFold` holds exactly `LIST_ROWS` records, the newest
+/// matching ones in append order, in the capacity it started with; a row the
+/// filter refuses is counted and never held.
 #[test]
 fn the_results_listing_retains_a_bounded_window() {
     let listing = code_of("\nfn results_at(");
@@ -746,6 +754,36 @@ fn the_results_listing_retains_a_bounded_window() {
         !listing.contains("rows.push(record)"),
         "every matching record is retained: {listing}"
     );
+    let ordinal = |record: &crate::results::Record| {
+        u32::from_le_bytes([
+            record.identity[0],
+            record.identity[1],
+            record.identity[2],
+            record.identity[3],
+        ])
+    };
+    let mut fold = ListingFold::new(Some("zerodha"), None);
+    let capacity = fold.newest.capacity();
+    assert!(capacity >= LIST_ROWS, "pre-sized to the window");
+    for at in 0..500_u32 {
+        let mut record = crate::tests::record_for_naming();
+        record.identity = [0; 32];
+        record.identity[..4].copy_from_slice(&at.to_le_bytes());
+        if at % 5 == 4 {
+            record.feed = crate::results::field("dhan");
+        }
+        fold.visit(Ok(record));
+        assert!(fold.newest.len() <= LIST_ROWS, "row {at}: the window grew");
+    }
+    assert_eq!((fold.rows, fold.matching), (500, 400));
+    assert_eq!(fold.newest.len(), LIST_ROWS, "exactly the window is held");
+    assert_eq!(fold.newest.capacity(), capacity, "and it never reallocated");
+    let held: Vec<u32> = fold.newest.iter().map(ordinal).collect();
+    let newest: Vec<u32> = (0..500_u32)
+        .filter(|at| at % 5 != 4)
+        .skip(400 - LIST_ROWS)
+        .collect();
+    assert_eq!(held, newest, "the newest matching rows, in append order");
 }
 
 /// AC-whp-o1-2. The bootstrap family builds its slice facts once, not once
