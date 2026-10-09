@@ -65127,3 +65127,54 @@ with no ledger and no attempt written; before the fix the points door's zero
 refusal lacked the domain's sentence) and
 `api::sweeprun::tests::the_screen_command_refuses_the_support_domain_cli_refuses`
 (0, 1,000,000, 1,000,001 and `u64::MAX` refused, 1 and 999,999 parsed).
+
+### D-4719 — A derived-support rung prepares through the audit's own inputs, and a build reads its daily context once — 2026-10-09
+
+**Finding.** W2-cli8-6 and G2-3. D-1662 ran the minute-hole census at every
+stored door but one: `one_rung_cached`'s derived-support branch built its own
+column through `column_withholding_unsourceable_days` from the raw span and an
+EMPTY withheld set. An edge-holed day cost a refused pass, a reloaded context
+and a durable preparation attempt under a digest the audit never used; a day
+whose only hole no close demands stayed in that column while the audit
+withheld it, so `min_hits` was sized on a population the audit did not sweep.
+The branch also stamped its preparation with the binary's stamp rather than
+the rung's, so a rung the audit was about to refuse as unstamped built and
+recorded a column first. Separately, `column_withholding_at_build` reloaded
+the daily context on every one of up to 64 passes although it is derived from
+the whole folded series (D-1781), which no pass changes.
+
+**Decision.** The derived branch reads `cache.inputs(.., load_audit_inputs)`,
+as the named branch does (D-1557): one census, one withholding, one column,
+one preparation attempt, shared with the audit that follows. `can_hit` is
+that column's swept count and `affordable_min_hits` names its probes by the
+preparation digest, now held as `AuditInputs::preparation_digest`. With no
+commit on the rung it refuses before any load, with the sentence the wrapper
+gave. `column_withholding_unsourceable_days` lost its only caller and is
+removed; its doc moved onto `column_withholding_at_build`, and G18-cli-a-24's
+test now asks that build with an admitted stamp. The daily context is read
+once, above the retry loop; the overlay context is still read per pass,
+because a withheld day changes the bars it overlays.
+
+**What changes in stored results.** On a span with no census-withheld day,
+nothing: the withheld set was empty both ways, so the column, digest,
+`AutoSearch` identities and `min_hits` are byte-identical. On a span the
+census withholds from, a derived-support rung's `AutoSearch` identities move
+with their `data_digest` (the audit's withheld set), its `min_hits` may move
+with the swept count, and so may its row; the rung no longer writes its own
+preparation attempts. Rows already recorded keep their identities.
+
+**Limits restated.** AU-O1CLI-2 and AU-O1CLI-3 described the second build as
+current. Their `docs/06-limits.md` sections now state one column build per
+rung and three minute reads per rung, derived or named; their tests are
+updated to hold the new statement, and the heading of o1cli-2 now reads
+"builds its column once".
+
+**Proof.** `a_derived_support_rung_sizes_on_the_audits_census_and_builds_once`
+(three edge-holed days and one interior gap: one build where the unfixed code
+made five, one input load, the sized population equal to the audit's swept
+count, `min_hits` equal to the larger of the floors on the audit's column),
+`an_unstamped_derived_support_rung_prepares_nothing` (no build, no load, no
+attempt; before, four builds) and
+`a_column_builds_retry_loop_reads_the_daily_context_once` (four passes, one
+daily load where there were four, and the same withholding, census and
+digest as the census path).

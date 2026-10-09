@@ -58,10 +58,10 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
     for sentence in [
         "`sweep_rungs` runs every rung through `one_rung`, one rung at a time in input order",
         "the execution series `audit_range_kernel` loads",
-        "one per attempt of every column build",
+        "one per attempt of the column build",
         "one per attempt of `exact_minute_withholding_unsourceable_days`",
-        "at least three reads of that rung's one-minute span, four when the support is derived",
-        "some 24 to 32 reads of identical minutes per command",
+        "at least three reads of that rung's one-minute span, derived support or named",
+        "some 24 reads of identical minutes per command",
         "up to 64 attempts",
     ] {
         assert!(
@@ -111,5 +111,8 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
             "the kernel no longer calls {call}: update the limit"
         );
     }
-    assert!(body("\nfn one_rung_cached(").contains("column_withholding_unsourceable_days("));
+    // D-4719: a derived support reads the kernel's own build, so it adds no
+    // read of its own.
+    assert!(body("\nfn one_rung_cached(").contains("load_audit_inputs("));
+    assert!(!LIB.contains("fn column_withholding_unsourceable_days("));
 }

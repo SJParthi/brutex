@@ -11638,14 +11638,16 @@ the counts the tests assert: no bench times the fold.
   input order (in parallel until D-1701), and each rung reads the same
   one-minute span for itself.** For a rung other than
   `1min` the reads are the execution series `audit_range_kernel` loads, one
-  per attempt of every column build (inside `load_exact_minute_context`: the
-  kernel's build, and `one_rung`'s own when the support is derived), and one
-  per attempt of `exact_minute_withholding_unsourceable_days`. That is at
-  least three reads of that rung's one-minute span, four when the support is
-  derived, and the `1min` rung reads it as its own span as well. Across the
-  eight rungs that is some 24 to 32 reads of identical minutes per command,
-  O(minute bars) each, and more when withheld days force a rebuild: each
-  build retries up to 64 attempts and every attempt reads the minutes again.
+  per attempt of the column build (inside `load_exact_minute_context`: the
+  kernel's build, which a derived support shares since D-4719), and one per
+  attempt of `exact_minute_withholding_unsourceable_days`. That is at least
+  three reads of that rung's one-minute span, derived support or named (a
+  derived support paid a fourth until D-4719), and the `1min` rung reads it
+  as its own span as well. Across the eight rungs that is some 24 reads of
+  identical minutes per command, O(minute bars) each, and more when withheld
+  days force a rebuild: each build retries up to 64 attempts and every
+  attempt reads the minutes again. The census withholds every holed day it
+  can see before the first attempt, so a rebuild needs a hole it cannot.
   Loading the minute span once per command and sharing it is possible, since
   the read itself does not depend on the rung, and is not done: each context
   is derived from that rung's surviving bars and digested into its
@@ -11654,25 +11656,26 @@ the counts the tests assert: no bench times the fold.
   `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in
   `crates/cli/tests/limits_o1cli_3.rs`.
 
-## A rung loads its span twice and may build its column twice (audit o1cli-2)
+## A rung loads its span twice and builds its column once (audit o1cli-2)
 
 - **`one_rung` loads the rung's span with `stored::load_span`, and the audit
-  kernel `audit_range_kernel` then loads the same span again.** When no
-  support is named, the column is also built twice:
-  `column_withholding_unsourceable_days` for `affordable_min_hits`, then
-  `column_withholding_at_build` inside the kernel, each loading its own daily
-  and exact-minute context. So an all-rungs run pays two span loads per rung
-  always, and two column builds per rung when the support is derived, O(rung
-  bars) each. Until this audit only a comment in `stored.rs` admitted it.
-  Threading the loaded span and column into the kernel would remove the
-  second pair; it is not done because the kernel re-derives both from the
-  bars that survive its own withholding and binds them to the preparation
-  digest. Since D-1557 both loads go through one `AuditCache` per command
-  (`one_rung_cached`, and `load_audit_inputs` for the kernel), so a `descend`
-  pays the pair once for its whole ladder, not once per step; a single rung
-  still pays both. Stated from the code's shape; not timed. Held to the code
-  by `a_rungs_second_load_and_build_are_stated_and_still_paid` in
-  `crates/cli/tests/limits_o1cli_2.rs`.
+  kernel `audit_range_kernel` then loads the same span again.** The column is
+  built once per rung whether or not a support is named: both branches of
+  `one_rung_cached` read `load_audit_inputs` through the `AuditCache` the
+  audit then reads, so a derived support sizes `affordable_min_hits` on the
+  audit's own column, census and preparation digest. So an all-rungs run pays
+  two span loads per rung always, and one column build, O(rung bars) each.
+  Until D-4719 a derived support built its own column first with
+  `column_withholding_unsourceable_days`, from an empty withheld set and with
+  no minute-hole census, and the kernel built it again. Reading the row's
+  missing months and calendar exclusions off the kernel's load would remove
+  the first load; it is not done because an unstamped rung reports them
+  without preparing anything, and the kernel's load is the one its
+  preparation digest is bound to. Since D-1557 both loads go
+  through one `AuditCache` per command, so a `descend` pays them once for its
+  whole ladder, not once per step. Stated from the code's shape; not timed.
+  Held to the code by `a_rungs_second_load_and_build_are_stated_and_still_paid`
+  in `crates/cli/tests/limits_o1cli_2.rs`.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)
 

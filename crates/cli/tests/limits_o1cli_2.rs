@@ -1,12 +1,12 @@
 //! The all-rungs support probe's second load and build, stated where it is
 //! paid (audit o1cli-2).
 //!
-//! `one_rung` loads a rung's span and, when no support is named, builds its
-//! column to size the affordable floor; the audit kernel then loads
-//! and builds the same span again. Only a code comment admitted it. This file
-//! holds `docs/06-limits.md` to the code: the section must state both costs,
-//! and the calls it describes must still be where it says, so the day the
-//! span is threaded through, this fails and the limit is withdrawn with it.
+//! `one_rung` loads a rung's span; the audit kernel then loads the same span
+//! again. Until D-4719 a derived support also built its own column first, and
+//! the kernel built it again. This file holds `docs/06-limits.md` to the code:
+//! the section must state the costs, and the calls it describes must still be
+//! where it says, so the day the span is threaded through, this fails and the
+//! limit is withdrawn with it.
 
 #![allow(
     clippy::expect_used,
@@ -49,17 +49,17 @@ fn body(head: &str) -> &'static str {
         .expect("its body")
 }
 
-/// THE SECOND LOAD AND BUILD PER RUNG ARE STATED, AND STILL TRUE.
+/// THE SECOND LOAD PER RUNG IS STATED, AND STILL TRUE; THE SECOND BUILD IS
+/// GONE (D-4719).
 #[test]
 fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
-    let limit =
-        limit("## A rung loads its span twice and may build its column twice (audit o1cli-2)");
+    let limit = limit("## A rung loads its span twice and builds its column once (audit o1cli-2)");
     for sentence in [
         "`one_rung` loads the rung's span with `stored::load_span`",
         "the audit kernel `audit_range_kernel` then loads the same span again",
-        "When no support is named, the column is also built twice",
-        "`column_withholding_unsourceable_days` for `affordable_min_hits`, then `column_withholding_at_build`",
-        "two span loads per rung always, and two column builds",
+        "The column is built once per rung whether or not a support is named",
+        "both branches of `one_rung_cached` read `load_audit_inputs` through the `AuditCache` the audit then reads",
+        "two span loads per rung always, and one column build",
         "O(rung bars) each",
     ] {
         assert!(
@@ -71,7 +71,6 @@ fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
     let rung = body("\nfn one_rung_cached(");
     for call in [
         "stored::load_span(",
-        "column_withholding_unsourceable_days(",
         "affordable_min_hits(",
         "audit_range_cached(",
     ] {
@@ -80,6 +79,17 @@ fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
             "`one_rung` no longer calls {call}: update the limit"
         );
     }
+    // D-4719: both support branches prepare through the audit's own loader,
+    // and the derived branch's private build is gone.
+    assert_eq!(
+        rung.matches("load_audit_inputs(").count(),
+        2,
+        "each support branch reads the audit's inputs: update the limit"
+    );
+    assert!(
+        !LIB.contains("fn column_withholding_unsourceable_days("),
+        "a second column build is back: update the limit"
+    );
     assert!(
         rung.find("stored::load_span(") < rung.find("named_ppm.is_some()"),
         "the span is loaded before the named-support branch, so even a named support pays the first load"

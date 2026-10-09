@@ -3769,3 +3769,223 @@ fn points_screen_doors_child() {
     crate::knobs::clear_all();
     println!("POINTS SCREEN DOORS CHECKED");
 }
+
+/// A warmed NIFTY May whose sessions of the 6th, 8th and 12th stop at 15:24,
+/// as in `sessions_missing_their_closing_minutes_are_withheld_up_front`, and,
+/// when `interior`, whose 9th also lacks 10:57: a minute no five-minute bar
+/// closes on, so only the census can see it.
+fn holed_may(interior: bool) -> Fixture {
+    let fixture = Fixture::warmed();
+    fixture.rewrite_owned_minutes(|day, rows| {
+        if [6_u8, 8, 12].contains(&day) {
+            let keep = rows.len().saturating_sub(5);
+            rows.truncate(keep);
+        }
+        if interior && day == 9 {
+            rows.remove(102);
+        }
+    });
+    fixture
+}
+
+/// The IST epoch days of these May 2025 dates.
+fn may_days(dates: &[u8]) -> Vec<i64> {
+    dates
+        .iter()
+        .map(|date| {
+            i64::from(
+                pull::session::Day::new(2025, 5, *date)
+                    .expect("date")
+                    .days_from_epoch(),
+            )
+        })
+        .collect()
+}
+
+/// A derived-support rung of `holed` under `commit`, counted.
+fn derived_support_rung(holed: &Fixture, commit: Option<&'static str>) -> crate::RungRow {
+    crate::COLUMN_BUILD_ATTEMPTS.with(|count| count.set(0));
+    crate::AUDIT_INPUT_LOADS.with(|loads| loads.set(0));
+    crate::AUTO_SUPPORT_SWEPT.with(|swept| swept.set(None));
+    crate::one_rung_cached(
+        crate::RungAsk {
+            vendor_word: "zerodha",
+            underlying: "NIFTY",
+            rung: "5min",
+            from: (2025, 5),
+            to: (2025, 5),
+            support_ppm: None,
+            attempt: None,
+        },
+        crate::RungStore {
+            root: Ok(holed.root.clone()),
+            commit,
+        },
+        &mut crate::AuditCache::default(),
+    )
+}
+
+/// **A derived-support rung runs the minute-hole census, builds one column,
+/// and sizes its support on the swept population the audit then sweeps.**
+/// W2-cli8-6 and G2-3, D-4719.
+///
+/// `one_rung_cached`'s `auto` branch built its own column from an EMPTY
+/// withheld set: three edge-holed days cost three refused passes, each under
+/// a durable preparation attempt the audit never used, and an interior-gap
+/// day the census withholds stayed in, so `min_hits` was sized on a different
+/// population from the one the audit swept. It now asks the audit's own
+/// `AuditCache` entry, as the named-support branch does.
+#[test]
+fn a_derived_support_rung_sizes_on_the_audits_census_and_builds_once() {
+    const COMMIT: &str = "generated-derived-support-rung-fixture";
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    // THE PREMISE, CHECKED BEFORE THE WORK (G18-cli-a-36, D-2018).
+    assert!(
+        !crate::validate_from_env(),
+        "BRUTEX_VALIDATE=0 turns validation off"
+    );
+    let holed = holed_may(true);
+    let row = derived_support_rung(&holed, Some(COMMIT));
+    assert_eq!(
+        crate::COLUMN_BUILD_ATTEMPTS.with(std::cell::Cell::get),
+        1,
+        "the census withheld every holed day before the one build: {:?}",
+        row.outcome
+    );
+    assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 1);
+
+    // The audit's own preparation, on an identical store.
+    let twin = holed_may(true);
+    let inputs = crate::load_audit_inputs(
+        &twin.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        ((2025, 5), (2025, 5)),
+        COMMIT,
+    )
+    .expect("the audit's inputs");
+    assert_eq!(inputs.withheld_days, may_days(&[6, 8, 9, 12]));
+    let swept = inputs.column.census().swept;
+    assert_eq!(
+        crate::AUTO_SUPPORT_SWEPT.with(std::cell::Cell::get),
+        Some(swept),
+        "the support was sized on another population: {:?}",
+        row.outcome
+    );
+    if crate::commit_stamp().is_none() {
+        let why = row.outcome.expect_err("an unstamped build runs no probe");
+        assert!(why.contains("no verified commit stamp"), "{why}");
+    } else {
+        let digest = crate::minute_gaps::bind_withheld(
+            crate::stored_anchored_digest(&inputs.folded, &inputs.exact_minute, &inputs.daily)
+                .expect("the preparation digest"),
+            &inputs.withheld_days,
+        );
+        let statistical = crate::min_hits_for_swept(swept, crate::statistical_support_floor(swept));
+        let affordable =
+            crate::affordable_min_hits(&inputs.column, &twin.root, &inputs.span, digest)
+                .expect("the twin's probe");
+        let record = row.outcome.expect("the rung recorded");
+        assert_eq!(record.min_hits, affordable.max(statistical));
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A derived-support rung with no commit stamp prepares nothing.** W2-cli8-6,
+/// D-4719.
+///
+/// The named-support branch already kept an unstamped rung from writing a
+/// preparation attempt the audit would not have written. The derived branch
+/// stamped its own preparation with the BINARY's stamp, so a rung the audit
+/// was about to refuse as unstamped built its column, durably, first.
+#[test]
+fn an_unstamped_derived_support_rung_prepares_nothing() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let holed = holed_may(true);
+    let row = derived_support_rung(&holed, None);
+    let why = row.outcome.expect_err("an unstamped rung refuses");
+    assert!(why.contains("no verified commit stamp"), "{why}");
+    assert_eq!(crate::COLUMN_BUILD_ATTEMPTS.with(std::cell::Cell::get), 0);
+    assert_eq!(crate::AUDIT_INPUT_LOADS.with(std::cell::Cell::get), 0);
+    assert_eq!(crate::AUTO_SUPPORT_SWEPT.with(std::cell::Cell::get), None);
+    assert_eq!(
+        crate::sweep_evidence::latest(&holed.root, 1_048_576).expect("readable evidence"),
+        None,
+        "no attempt of any kind was begun"
+    );
+    crate::knobs::clear_all();
+}
+
+/// **A column build's retry loop reads the daily context once, and answers
+/// exactly as the census path does.** W2-cli8-6, D-4719.
+///
+/// The daily context is derived from the WHOLE folded series (D-1781), which
+/// no pass changes, yet every pass of the 64 reloaded it from disk.
+#[test]
+fn a_column_builds_retry_loop_reads_the_daily_context_once() {
+    let edged = holed_may(false);
+    let span = ((2025, 5), (2025, 5));
+    let loaded = stored::load_span(
+        &edged.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        span.0,
+        span.1,
+    )
+    .expect("the signal span");
+    let folded = loaded.bars.clone();
+    let mut bars = loaded.bars.clone();
+    let mut withheld: Vec<i64> = Vec::new();
+    crate::COLUMN_BUILD_ATTEMPTS.with(|count| count.set(0));
+    stored::DAILY_CONTEXT_LOADS.with(|loads| loads.set(0));
+    let (column, digest) = crate::column_withholding_at_build(
+        &edged.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        span,
+        crate::FoldedSeries {
+            folded: &folded,
+            days: &mut withheld,
+            bars: &mut bars,
+        },
+        stored::rung_length_micros("5min").expect("five minutes"),
+        crate::StoredPreparationBuild {
+            rung: "5min",
+            commit: None,
+        },
+    )
+    .expect("the retried build");
+    assert_eq!(
+        crate::COLUMN_BUILD_ATTEMPTS.with(std::cell::Cell::get),
+        4,
+        "one refused pass per edge-holed day, then the build"
+    );
+    assert_eq!(stored::DAILY_CONTEXT_LOADS.with(std::cell::Cell::get), 1);
+    assert_eq!(withheld, may_days(&[6, 8, 12]));
+
+    let twin = holed_may(false);
+    let inputs = crate::load_audit_inputs(
+        &twin.root,
+        Vendor::Zerodha,
+        "NIFTY",
+        "5min",
+        span,
+        "generated-daily-context-hoist-fixture",
+    )
+    .expect("the census path");
+    assert_eq!(inputs.withheld_days, withheld);
+    assert_eq!(column.census(), inputs.column.census());
+    assert_eq!(
+        digest,
+        crate::minute_gaps::bind_withheld(
+            crate::stored_anchored_digest(&inputs.folded, &inputs.exact_minute, &inputs.daily)
+                .expect("the census digest"),
+            &inputs.withheld_days,
+        )
+    );
+}

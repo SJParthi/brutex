@@ -3427,10 +3427,21 @@ pub fn load_daily_context(
     signal_months: ((u16, u8), (u16, u8)),
     signal: &[Candle],
 ) -> Result<DailyContext, Refusal> {
+    #[cfg(test)]
+    DAILY_CONTEXT_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
     let (from, to) = signal_months;
     let warm_from = previous_month(from)?;
     let daily = load_span(root, vendor, underlying, "1day", warm_from, to)?;
     daily_context_from_span(daily, signal)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: calls of [`load_daily_context`] on this thread, so a test can
+    /// prove a column build's retry loop reads the daily context once
+    /// (W2-cli8-6, D-4719).
+    pub(crate) static DAILY_CONTEXT_LOADS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Load stored one-day reference evidence under a pre-allocation record ceiling.
