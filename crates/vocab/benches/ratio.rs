@@ -49,8 +49,10 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use vocab::ConditionMask;
+use vocab::expression::{ENCODED_LEN, Expression, MAX_INSTRUCTIONS, Truth};
+use vocab::expression_search::{CURSOR_BYTES, Cursor, Step};
 use vocab::mask::WORDS;
-use vocab::table::{LIVE, NEXT_FREE};
+use vocab::table::{LIVE, NEXT_FREE, is_live};
 
 /// A ratio above this is a failure. Thousandths, so the comparison is integer.
 ///
@@ -437,6 +439,415 @@ fn no_operation_costs_more_than_its_budget(floor: u128) -> bool {
     ok
 }
 
+/// Groups per p99 row and samples per group, as in
+/// `crates/engine/benches/ratio.rs` (D-4482): every size is measured inside
+/// every group, back to back, and the row gates the median of the per-group
+/// p99 ratios, so a burst of load must land in five groups of nine to move it.
+const P99_GROUPS: usize = 9;
+const P99_SAMPLES: usize = 2_000;
+
+/// p50, p99 and max of one group, nanoseconds per sample.
+#[derive(Clone, Copy)]
+struct Tail {
+    p50: u128,
+    p99: u128,
+    max: u128,
+}
+
+/// Times `sample` `P99_SAMPLES` times after `P99_SAMPLES / 5` untimed calls.
+fn group_tail(mut sample: impl FnMut() -> Truth) -> Tail {
+    let mut ns: Vec<u128> = Vec::with_capacity(P99_SAMPLES);
+    for at in 0..P99_SAMPLES + P99_SAMPLES / 5 {
+        let start = Instant::now();
+        black_box(sample());
+        let took = start.elapsed().as_nanos();
+        if at >= P99_SAMPLES / 5 {
+            ns.push(took);
+        }
+    }
+    ns.sort_unstable();
+    let at = |permille: usize| {
+        ns.get((ns.len() * permille / 1_000).min(ns.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    };
+    Tail {
+        p50: at(500),
+        p99: at(990),
+        max: ns.last().copied().unwrap_or(0),
+    }
+}
+
+/// `measure(at)` for every program inside every group, rotating which goes
+/// first; one vector of [`P99_GROUPS`] tails per program.
+fn interleaved(count: usize, mut measure: impl FnMut(usize) -> Tail) -> Vec<Vec<Tail>> {
+    let mut out: Vec<Vec<Tail>> = (0..count).map(|_| Vec::with_capacity(P99_GROUPS)).collect();
+    for group in 0..P99_GROUPS {
+        for step in 0..count {
+            let at = (step + group) % count;
+            let tail = measure(at);
+            if let Some(row) = out.get_mut(at) {
+                row.push(tail);
+            }
+        }
+    }
+    out
+}
+
+/// The median over groups of `field`, scaled by `scale` thousandths.
+fn median(tails: &[Tail], field: impl Fn(&Tail) -> u128) -> u128 {
+    let mut v: Vec<u128> = tails.iter().map(field).collect();
+    v.sort_unstable();
+    v.get(v.len() / 2).copied().unwrap_or(0)
+}
+
+/// The median of the per-group ratios `at[g] * scale_at / (base[g] * scale_base)`
+/// in thousandths, or `None` when a group timed at zero.
+fn paired(base: &[Tail], at: &[Tail], scale_base: u128, scale_at: u128) -> Option<u128> {
+    if base.len() != at.len() || base.is_empty() {
+        return None;
+    }
+    let mut ratios: Vec<u128> = Vec::with_capacity(base.len());
+    for (b, a) in base.iter().zip(at) {
+        if b.p99 == 0 || a.p99 == 0 {
+            return None;
+        }
+        ratios.push(a.p99 * scale_at * 1_000 / (b.p99 * scale_base));
+    }
+    ratios.sort_unstable();
+    ratios.get(ratios.len() / 2).copied()
+}
+
+/// Two live bit ids, the smaller first, for building canonical programs.
+fn two_live_bits() -> (u16, u16) {
+    let mut live = (0..u16::try_from(ConditionMask::BITS).unwrap_or(0)).filter(|&b| is_live(b));
+    if let (Some(a), Some(b)) = (live.next(), live.next()) {
+        return (a, b);
+    }
+    println!("BENCH SETUP FAILED — fewer than two live bits");
+    std::process::exit(1)
+}
+
+/// A canonical program from its instructions, through the public decoder:
+/// `(opcode, operand)` pairs as `Expression::encode` writes them.
+fn decoded(code: &[(u8, u16)]) -> Expression {
+    let mut bytes = [0_u8; ENCODED_LEN];
+    let count = u16::try_from(code.len()).unwrap_or(0).to_le_bytes();
+    for (slot, byte) in bytes.iter_mut().zip([1, 0, count[0], count[1]]) {
+        *slot = byte;
+    }
+    for (chunk, &(op, operand)) in bytes
+        .get_mut(4..)
+        .unwrap_or_default()
+        .chunks_exact_mut(3)
+        .zip(code)
+    {
+        for (slot, byte) in
+            chunk
+                .iter_mut()
+                .zip([op, operand.to_le_bytes()[0], operand.to_le_bytes()[1]])
+        {
+            *slot = byte;
+        }
+    }
+    match Expression::decode(&bytes) {
+        Ok(expression) => expression,
+        Err(refusal) => {
+            println!("BENCH SETUP FAILED — a bench program was refused: {refusal:?}");
+            std::process::exit(1)
+        }
+    }
+}
+
+/// `leaves` leaves joined left to right: `2 * leaves - 1` instructions whose
+/// stack never stands taller than two. The first leaf is the smaller bit, so
+/// every join's left sibling sorts first and the program is canonical.
+fn shallow(leaves: usize) -> Expression {
+    let (low, high) = two_live_bits();
+    let mut code = vec![(1, low)];
+    for _ in 1..leaves {
+        code.extend([(1, high), (3, 0)]);
+    }
+    decoded(&code)
+}
+
+/// `leaves` leaves, then every join: the same length as [`shallow`], with a
+/// stack `leaves` tall.
+fn tallest(leaves: usize) -> Expression {
+    let (low, _) = two_live_bits();
+    let mut code = vec![(1, low); leaves];
+    code.extend(std::iter::repeat_n((3, 0), leaves.saturating_sub(1)));
+    decoded(&code)
+}
+
+/// FXD-04 and FXD-05 — one expression instruction costs the same at p99
+/// whatever the program's length, and a program costs the same whatever its
+/// stack height (o1engine-22, D-4484).
+///
+/// FXD-04: AND chains of 1, 15, 127 and 1,151 instructions. Each sample
+/// evaluates the program enough times to run 1,151 instructions, so every
+/// sample is the same work; the row divides by instructions and gates growth
+/// one-sided, because each call's fixed cost -- the dispatch and the two
+/// cleared words -- is amortised over more instructions as the program grows.
+/// FXD-05: two programs of 1,151 instructions, one whose stack stands two
+/// tall and one 576 tall, gated two-sided: the deep one clears nine words per
+/// plane instead of one and must not cost more for it.
+fn an_expression_instruction_costs_the_same_at_p99() -> bool {
+    let truth = ConditionMask::from_words([u64::MAX; WORDS]);
+    let known = truth;
+    let programs = vec![
+        (shallow(1), "chain, 1 instruction"),
+        (shallow(8), "chain, 15 instructions"),
+        (shallow(64), "chain, 127 instructions"),
+        (shallow(576), "chain, 1,151 instructions"),
+        (tallest(576), "height 576, 1,151 instructions"),
+    ];
+    for (expression, label) in &programs {
+        if expression.evaluate(truth, known) != Truth::True {
+            println!("BENCH SETUP FAILED — {label} did not evaluate true");
+            std::process::exit(1)
+        }
+    }
+    let lens: Vec<u128> = [1_u128, 15, 127, 1_151, 1_151].to_vec();
+    let tails = interleaved(programs.len(), |at| {
+        let Some((expression, _)) = programs.get(at) else {
+            return Tail {
+                p50: 0,
+                p99: 0,
+                max: 0,
+            };
+        };
+        let reps = 1_151 / lens.get(at).copied().unwrap_or(1).max(1);
+        group_tail(|| {
+            let mut last = Truth::Unknown;
+            for _ in 0..reps {
+                last = black_box(expression).evaluate(black_box(truth), black_box(known));
+            }
+            last
+        })
+    });
+    let mut ok = true;
+    for (at, ((_, label), groups)) in programs.iter().zip(&tails).enumerate() {
+        let len = lens.get(at).copied().unwrap_or(1);
+        let reps = 1_151 / len.max(1);
+        let instructions = reps * len;
+        println!(
+            "  FXD-04/05 {label:<32} p50 {:>6} p99 {:>6} max {:>9} ps per instruction",
+            median(groups, |t| t.p50) * 1_000 / instructions,
+            median(groups, |t| t.p99) * 1_000 / instructions,
+            groups.iter().map(|t| t.max).max().unwrap_or(0) * 1_000 / instructions,
+        );
+    }
+    let instructions = |at: usize| {
+        let len = lens.get(at).copied().unwrap_or(1);
+        (1_151 / len.max(1)) * len
+    };
+    let Some(base) = tails.first() else {
+        return false;
+    };
+    for at in 1..4 {
+        let Some(groups) = tails.get(at) else {
+            return false;
+        };
+        let Some(up) = paired(base, groups, instructions(at), instructions(0)) else {
+            println!("  FXD-04 UNMEASURABLE — a group timed at zero");
+            return false;
+        };
+        let held = up <= CEILING_PERMILLE;
+        println!(
+            "  FXD-04 per-instruction p99, {} -> {} instructions: median ratio {}.{:03}x  {}",
+            lens.first().copied().unwrap_or(0),
+            lens.get(at).copied().unwrap_or(0),
+            up / 1_000,
+            up % 1_000,
+            if held { "ok" } else { "BREACH" }
+        );
+        ok &= held;
+    }
+    let deep = tails
+        .get(3)
+        .zip(tails.get(4))
+        .and_then(|(chain, tall)| paired(chain, tall, 1, 1));
+    if let Some(up) = deep {
+        let held = up <= CEILING_PERMILLE && 1_000_000 / up.max(1) <= CEILING_PERMILLE;
+        println!(
+            "  FXD-05 p99, height 2 -> height 576 at 1,151 instructions: median ratio {}.{:03}x  {}",
+            up / 1_000,
+            up % 1_000,
+            if held { "ok" } else { "BREACH" }
+        );
+        ok &= held;
+    } else {
+        println!("  FXD-05 UNMEASURABLE — a group timed at zero");
+        ok = false;
+    }
+    ok
+}
+
+/// A cursor about to place the last instruction of a 1,151-instruction
+/// program: two siblings of 575 instructions each -- a leaf and 574 `Not`s --
+/// and the `And` that joins them. With one bit both siblings are the same and
+/// the canonical-order check reads all 575 pairs; with two, the right sibling
+/// starts with the other bit and the check stops at the first.
+fn about_to_join(same: bool) -> Cursor {
+    let (low, high) = two_live_bits();
+    let alphabet: Vec<u32> = if same {
+        vec![u32::from(low)]
+    } else {
+        vec![u32::from(low), u32::from(high)]
+    };
+    let count = u16::try_from(alphabet.len()).unwrap_or(1);
+    let mut digits = vec![0_u16; MAX_INSTRUCTIONS];
+    let sibling = MAX_INSTRUCTIONS / 2;
+    for (at, digit) in digits.iter_mut().enumerate().take(MAX_INSTRUCTIONS - 1) {
+        let within = at % sibling;
+        *digit = if within == 0 {
+            // A leaf: rank 0 is the low bit, rank 1 the high one.
+            if at == 0 || same { 1 } else { 2 }
+        } else {
+            // `Not` is the rank after the alphabet; a digit is rank + 1.
+            count + 1
+        };
+    }
+    // The position being placed: the next rank to try is `And`.
+    if let Some(last) = digits.last_mut() {
+        *last = count + 1;
+    }
+    let mut bytes = [0_u8; CURSOR_BYTES];
+    let length = u16::try_from(MAX_INSTRUCTIONS).unwrap_or(0);
+    let at = length - 1;
+    let header = b"BTXEGN01"
+        .iter()
+        .copied()
+        .chain(count.to_le_bytes())
+        .chain(length.to_le_bytes())
+        .chain(at.to_le_bytes())
+        .chain([0, 0]);
+    let offered = (0..384).flat_map(|i| {
+        u16::try_from(alphabet.get(i).copied().unwrap_or(0))
+            .unwrap_or(0)
+            .to_le_bytes()
+    });
+    for (slot, byte) in bytes.iter_mut().zip(
+        header
+            .chain(offered)
+            .chain(digits.iter().flat_map(|d| d.to_le_bytes())),
+    ) {
+        *slot = byte;
+    }
+    match Cursor::decode(&bytes) {
+        Ok(cursor) => cursor,
+        Err(refusal) => {
+            println!("BENCH SETUP FAILED — the crafted cursor was refused: {refusal:?}");
+            std::process::exit(1)
+        }
+    }
+}
+
+/// FXD-06 — one search node's sibling-order check is bounded by the program
+/// it is placing, and at its worst costs no more than three times the same
+/// placement where the siblings differ at once (o1engine-23, D-4485).
+///
+/// Both placements finish a 1,151-instruction program and emit it, so both
+/// pay the candidate's fixed-width copy and height measurement; the only
+/// difference is the 575-pair comparison the identical siblings force. A
+/// realistic search -- three bits, from the start -- is printed beside it.
+fn a_search_node_is_bounded_at_p99() -> bool {
+    let joins: Vec<Cursor> = [false, true].into_iter().map(about_to_join).collect();
+    let tails = interleaved(2, |at| {
+        let Some(start) = joins.get(at) else {
+            return Tail {
+                p50: 0,
+                p99: 0,
+                max: 0,
+            };
+        };
+        let mut cursor = start.clone();
+        let mut work = 0_u64;
+        let mut ns: Vec<u128> = Vec::with_capacity(P99_SAMPLES);
+        for sample in 0..P99_SAMPLES + P99_SAMPLES / 5 {
+            cursor.clone_from(start);
+            let begin = Instant::now();
+            let step = cursor.advance(1, &mut work);
+            let took = begin.elapsed().as_nanos();
+            if !matches!(step, Ok(Step::Candidate(_))) {
+                println!("BENCH SETUP FAILED — the crafted placement emitted no candidate");
+                std::process::exit(1)
+            }
+            black_box(step.ok());
+            if sample >= P99_SAMPLES / 5 {
+                ns.push(took);
+            }
+        }
+        ns.sort_unstable();
+        let rank = |permille: usize| ns.get(ns.len() * permille / 1_000).copied().unwrap_or(0);
+        Tail {
+            p50: rank(500),
+            p99: rank(990),
+            max: ns.last().copied().unwrap_or(0),
+        }
+    });
+    let mut ok = true;
+    for (label, groups) in ["siblings differ at once", "siblings identical, 575 pairs"]
+        .iter()
+        .zip(&tails)
+    {
+        println!(
+            "  FXD-06 {label:<32} p50 {:>7} p99 {:>7} max {:>9} ns per node",
+            median(groups, |t| t.p50),
+            median(groups, |t| t.p99),
+            groups.iter().map(|t| t.max).max().unwrap_or(0),
+        );
+    }
+    let node = tails
+        .first()
+        .zip(tails.get(1))
+        .and_then(|(differ, identical)| paired(differ, identical, 1, 1));
+    if let Some(up) = node {
+        let held = up <= CEILING_PERMILLE;
+        println!(
+            "  FXD-06 p99, siblings differ -> identical: median ratio {}.{:03}x  {}",
+            up / 1_000,
+            up % 1_000,
+            if held { "ok" } else { "BREACH" }
+        );
+        ok &= held;
+    } else {
+        println!("  FXD-06 UNMEASURABLE — a group timed at zero");
+        ok = false;
+    }
+
+    // A realistic search: three live bits from the start, one node a sample.
+    let (low, high) = two_live_bits();
+    let third = (high + 1..u16::try_from(ConditionMask::BITS).unwrap_or(0))
+        .find(|&b| is_live(b))
+        .unwrap_or(high);
+    if let Ok(mut cursor) = Cursor::new(&[u32::from(low), u32::from(high), u32::from(third)]) {
+        let mut work = 0_u64;
+        let mut ns: Vec<u128> = Vec::with_capacity(200_000);
+        let mut candidates = 0_u64;
+        for _ in 0..200_000 {
+            let begin = Instant::now();
+            let step = cursor.advance(1, &mut work);
+            ns.push(begin.elapsed().as_nanos());
+            if matches!(step, Ok(Step::Candidate(_))) {
+                candidates += 1;
+            }
+            black_box(step.ok());
+        }
+        ns.sort_unstable();
+        let rank = |permille: usize| ns.get(ns.len() * permille / 1_000).copied().unwrap_or(0);
+        println!(
+            "  FXD-06 realistic search, 3 bits, 200,000 nodes ({candidates} candidates): \
+             p50 {} p99 {} max {} ns per node — REPORTED, not gated",
+            rank(500),
+            rank(990),
+            ns.last().copied().unwrap_or(0)
+        );
+    }
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/vocab, ceiling {CEILING_PERMILLE} permille");
     println!(
@@ -454,6 +865,8 @@ fn main() {
     ok &= a_miss_costs_the_same_in_every_word();
     ok &= the_cost_does_not_grow_with_what_the_candidate_requires();
     ok &= the_set_operations_do_not_grow_with_the_bits_set();
+    ok &= an_expression_instruction_costs_the_same_at_p99();
+    ok &= a_search_node_is_bounded_at_p99();
     if ok {
         println!("all ratios within the ceiling");
     } else {

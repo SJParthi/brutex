@@ -280,29 +280,30 @@ fn the_fingerprinted_path_has_no_production_caller_and_says_so() {
     );
 }
 
-/// **`keep::Best` has no production caller, and its doc says so**
-/// (ET-masks-evaluation-sweep-13, D-0762).
+/// **`keep::Best` is gone and stays gone** (o1engine-20, D-4480).
 ///
-/// Every use of `Best` outside `keep.rs` is in the engine's test module, and
-/// `runner::rank` keeps its own heap. This reads the engine's shipping source
-/// and every other crate's whole `src`, requires that none of it names `Best` as
-/// a token except the type's own `pub struct Best` and `impl Best` lines, and
-/// requires the type's doc to say no production path calls it.
+/// D-0762 found the bounded retention had no production caller and pinned that
+/// with a scan; its admission was O(log cap) and no bench row ever timed it, so
+/// D-4480 removed the type with its tests rather than keep an unmeasured cost on
+/// a path nothing runs. This reads the engine's shipping source and every other
+/// crate's whole `src` and requires that none of it names `Best` as a token, and
+/// requires `keep.rs` -- tests included -- to define no such type. A
+/// reintroduction has to come with its own measurement and decision, and this
+/// fails until it does.
 #[test]
-fn best_has_no_production_caller_and_says_so() {
-    let uses = mentions("Best", &["pub struct Best", "impl Best"]);
+fn best_is_gone_and_no_crate_names_it() {
+    let uses = mentions("Best", &[]);
     assert!(
         uses.is_empty(),
-        "keep::Best now has a production caller: {uses:?}. Revisit its doc and \
-         D-0762 before keeping this test's claim"
+        "a `Best` token is back in shipping source: {uses:?}. D-4480 removed \
+         keep::Best for having no caller and no measurement; a reintroduction \
+         needs both"
     );
-    let doc = between(
-        include_str!("../src/keep.rs"),
-        "/// The best `cap` itemsets offered, in memory proportional to `cap`.",
-        "pub struct Best {",
-    );
-    assert!(
-        doc.contains("/// **No production path calls this.**"),
-        "the doc must state that no production path constructs `Best`"
-    );
+    let keep = include_str!("../src/keep.rs");
+    for definition in ["struct Best", "impl Best", "fn ranks_below", "fn weaker"] {
+        assert!(
+            !keep.contains(definition),
+            "keep.rs defines `{definition}` again; D-4480 removed it"
+        );
+    }
 }

@@ -50,7 +50,10 @@
 // converted once from an exact paisa integer by `wide` (D-1173, whose bound is
 // one rounding above 2^53 paisa), and the payoff ratio divides two of those
 // `f64` paisa magnitudes. D-1173 sanctions those fields because `cli` persists
-// their IEEE bits, and §3 rule 8 forbids changing that row in place. This
+// their IEEE bits, and §3 rule 8 forbids changing that row in place. Since
+// D-4486 that one rounding never reaches a ranked row: `Edge::money_is_exact`
+// is false for any money field at or past 2^53, and `rank` refuses the row by
+// name rather than keep a rounded total (GAP16-26). This
 // comment and the reason below used to say "only the mean and t-statistic are
 // floating", which this file contradicted; crash-edge-pass20 CE-96, D-1958.
 // The allow is still module-wide: a NEW float price computation added here is
@@ -1381,7 +1384,49 @@ pub struct Edge {
     pub t: f64,
 }
 
+/// 2^53, the first paisa magnitude an `f64` cannot prove it holds exactly.
+///
+/// Every integer of smaller magnitude is an `f64` exactly, and [`wide`] rounds
+/// to nearest, so a converted value strictly below this came from exactly that
+/// integer. At this value and above the conversion may have rounded: 2^53 + 1
+/// converts to 2^53. D-4486.
+pub const EXACT_PAISA_LIMIT: f64 = 9_007_199_254_740_992.0;
+
 impl Edge {
+    /// Whether every money field is the exact paisa integer it was summed as —
+    /// GAP16-26, D-4486.
+    ///
+    /// The eight money fields are [`Self::win_sum`], [`Self::loss_sum`],
+    /// [`Self::adverse_sum`], [`Self::favourable_sum`] and the four extrema.
+    /// Each is an exact `i128` or `i64` converted once by [`wide`], and each is
+    /// exact while its magnitude is below 2^53. `true` exactly when all eight
+    /// are finite and strictly below [`EXACT_PAISA_LIMIT`] in magnitude.
+    ///
+    /// **A field of exactly 2^53 answers `false` though it is exact.** The
+    /// `f64` 2^53 is also what 2^53 + 1 converts to, so from the stored value
+    /// the two cannot be told apart, and refusing both is the side of that
+    /// ambiguity §4 allows. One value, and 90 lakh crore rupees out.
+    ///
+    /// `mean_paisa` and `t` are statistics, and §7 keeps those at full float
+    /// precision; they are not money totals and are not asked. When the two
+    /// largest-move extrema are exact every move was below 2^53, so each move
+    /// the mean folded in was itself exact.
+    #[must_use]
+    pub fn money_is_exact(&self) -> bool {
+        [
+            self.win_sum,
+            self.loss_sum,
+            self.adverse_sum,
+            self.favourable_sum,
+            self.min_win_paisa,
+            self.max_win_paisa,
+            self.max_loss_paisa,
+            self.min_loss_paisa,
+        ]
+        .iter()
+        .all(|money| money.abs() < EXACT_PAISA_LIMIT)
+    }
+
     /// The SMALLEST win over the LARGEST loss, in hundredths. The operator's
     /// own rule, stated verbatim — D-0593.
     ///
@@ -1870,6 +1915,13 @@ impl Sides {
 /// every addition. `Edge`'s money fields stay `f64` because `cli` persists their
 /// IEEE bits in the sweep-evidence row, and changing that row's meaning in place
 /// is what §3 rule 8 forbids.
+///
+/// **The rounding is made here and refused downstream (D-4486).** An `Edge` whose
+/// money field came out of this at or past 2^53 answers `false` from
+/// [`Edge::money_is_exact`], and `crate::rank` keeps no such row: it is counted
+/// in `Ranked::inexact` and the findings report names the count. So a stored or
+/// printed ranked total is always the exact integer, and the rounded one exists
+/// only in an `Edge` a caller asked `edge` for directly.
 fn wide(paisa: i128) -> f64 {
     #[allow(
         clippy::cast_precision_loss,
@@ -4924,7 +4976,7 @@ mod overlap_tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod money_tests {
-    use super::{Horizon, Sides, edge, forward, wide};
+    use super::{EXACT_PAISA_LIMIT, Edge, Horizon, Sides, edge, forward, wide};
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -5089,6 +5141,108 @@ mod money_tests {
             wide(favourable).to_bits(),
             "favourable_sum"
         );
+        // And that `Edge` is the one rank refuses: its win sum passed 2^53
+        // (GAP16-26, D-4486).
+        assert!(!e.money_is_exact(), "a total past 2^53 is not exact money");
+    }
+
+    /// The eight money fields, each set alone to `value` on an otherwise
+    /// zero `Edge`.
+    fn each_money_field_alone(value: f64) -> [Edge; 8] {
+        let zero = Edge::default();
+        [
+            Edge {
+                win_sum: value,
+                ..zero
+            },
+            Edge {
+                loss_sum: value,
+                ..zero
+            },
+            Edge {
+                adverse_sum: value,
+                ..zero
+            },
+            Edge {
+                favourable_sum: value,
+                ..zero
+            },
+            Edge {
+                min_win_paisa: value,
+                ..zero
+            },
+            Edge {
+                max_win_paisa: value,
+                ..zero
+            },
+            Edge {
+                max_loss_paisa: value,
+                ..zero
+            },
+            Edge {
+                min_loss_paisa: value,
+                ..zero
+            },
+        ]
+    }
+
+    /// GAP16-26, D-4486: exact below 2^53 in magnitude, and nowhere else, in
+    /// every one of the eight money fields.
+    ///
+    /// Each field alone, at the last exact integer on each side, at 2^53
+    /// itself (exact, but the double 2^53 + 1 converts to, so refused), past
+    /// it, at the extremes of the type `Sides` holds, and at the three values
+    /// that are not numbers. A field left out of the check passes its row and
+    /// fails here; a `<=` in place of `<` passes 2^53 and fails here.
+    #[test]
+    fn money_is_exact_below_two_to_the_fifty_three_in_every_field() {
+        let limit = 1_i128 << 53;
+        assert_eq!(EXACT_PAISA_LIMIT.to_bits(), wide(limit).to_bits());
+        assert_eq!(wide(limit + 1).to_bits(), wide(limit).to_bits());
+        assert!(
+            Edge::default().money_is_exact(),
+            "nothing measured is exact"
+        );
+        for exact in [wide(limit - 1), wide(1 - limit), 0.0, wide(-1), wide(1)] {
+            for (field, e) in each_money_field_alone(exact).iter().enumerate() {
+                assert!(e.money_is_exact(), "field {field} at {exact}");
+            }
+        }
+        for inexact in [
+            wide(limit),
+            wide(-limit),
+            wide(limit + 1),
+            wide(i128::from(i64::MAX)),
+            wide(i128::from(i64::MIN)),
+            wide(i128::from(i64::MIN.unsigned_abs())),
+            wide(2 * i128::from(i64::MIN)),
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            for (field, e) in each_money_field_alone(inexact).iter().enumerate() {
+                assert!(!e.money_is_exact(), "field {field} at {inexact}");
+            }
+        }
+        // Statistics are not money: a mean or t of any size is not asked.
+        let statistics = Edge {
+            mean_paisa: f64::MAX,
+            t: f64::INFINITY,
+            ..Edge::default()
+        };
+        assert!(statistics.money_is_exact());
+    }
+
+    /// The default series is exact money end to end: no ordinary bar walk
+    /// comes near the refusal.
+    #[test]
+    fn an_ordinary_series_is_exact_money() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.n > 100, "the fixture must measure -- n={}", e.n);
+        assert!(e.money_is_exact());
     }
 }
 
