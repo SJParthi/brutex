@@ -50,8 +50,30 @@
 //! fractional zero, at most two places), so every name that decodes renders
 //! back to itself byte for byte ([`OptionTicker::ticker_text`]). The
 //! underlying may hold any byte a `Symbol` admits, digits included (`M&M`,
-//! `NAM-INDIA`, `360ONE`, `TV18BRDCST`). An expiry the day form states on an
-//! exchange holiday is kept as stated: the name is the contract's identity.
+//! `NAM-INDIA`, `360ONE`, `TV18BRDCST`).
+//!
+//! # The expiry a contract SETTLED on, not the one its text states (D-3331)
+//!
+//! Until D-3331 an expiry the day form stated on an exchange holiday was kept
+//! as stated, the name being the contract's identity. That split one contract
+//! into two or three store series whenever NSE re-dated it and the vendor
+//! renamed the file (DB-018, DB-G50), and measured tenor to a closed day
+//! (DB-G51). Every reading is now settled by [`crate::expiry_alias::settle`]:
+//! a measured re-dating row, or the calendar (a closed stated day settles on
+//! the previous open session, the charter's NSE rule). The contract segment
+//! carries the SETTLED expiry, [`OptionTicker::stated`] keeps the vendor's
+//! text as the alias, and [`OptionTicker::settlement`] says how. A closed
+//! stated day with no open session the calendar records before it, a retired
+//! text traded after its rename, and a trade after the settled day are
+//! refused by name ([`NfoRefusal::ExpiryUnsettled`]).
+//!
+//! # A strike the day's ladder makes impossible (D-3331)
+//!
+//! A decoded strike more than [`STRIKE_PLAUSIBLE_MULTIPLE`] times the median
+//! strike of the same underlying's names that day is refused by name
+//! ([`NfoRefusal::StrikeImplausible`]) when the file is read, and so is never
+//! stored or listed (DB-027, DB-G52). The median is the day's own, computed
+//! once per listing ([`NfoDay::strike_median`]).
 //!
 //! # What it hands on, and what it does not decide
 //!
@@ -65,18 +87,22 @@
 //! A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
 //! one hash probe (expected O(1), measured by `C-GI-01` in
 //! `crates/pull/benches/ratio.rs`). [`decode_ticker`] is O(ticker length),
-//! bounded by the 64-byte cap it refuses past. [`decode`] is O(bytes).
+//! bounded by the 64-byte cap it refuses past, plus one settlement (bounded
+//! walks over compile-time tables). The day's strike medians are
+//! O(entries · log entries) once per listing, on its first read; after that
+//! the strike check is one hash probe. [`decode`] is O(bytes).
 //! Fetching a file is O(its compressed and rebuilt bytes). The listing and
 //! the fetch are limits in `docs/06-limits.md`, not constant-time claims.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
 use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
 
+use crate::expiry_alias::{SettleRefusal, Settlement, settle};
 use crate::gdfl_archive::{
     MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries,
 };
@@ -104,6 +130,27 @@ pub const TICKER_CAP: usize = 64;
 
 /// How far after the trade date a stated expiry may lie (FORMAT.md §6).
 pub const EXPIRY_HORIZON_DAYS: u32 = 2_200;
+
+/// How many times the day's median strike of an underlying a strike may be
+/// before it is refused as impossible ([`NfoRefusal::StrikeImplausible`],
+/// D-3331: `k` = 10).
+///
+/// **Chosen from a measurement, not sourced** (D-3331 decision 2). Measured
+/// 2026-10-09 by the ignored test
+/// `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
+/// over the GDFL options name census (names only, from each day zip's central
+/// directory: 1,997 vendor days from 2018-09-03 to 2026-09-24, 20,825,673
+/// file-days), each underlying-day's highest admitted strike against the
+/// lower median of that underlying's strikes that day: at most 5.75
+/// (RELCAPITAL, 2019-08-27, during its collapse), then 5.20 (INFIBEAM,
+/// 2018-11-28) and 5.00 (JPASSOCIAT, 2018-11-21), the audit's 5.75 (DB-G52).
+/// The only names above it are the three NIFTY `25JUN20` strikes of
+/// 2019-05-30, at about 163.5 times that day's median of 11,700. Ten clears
+/// the real maximum by more than half again and sits sixteen times under the
+/// impossible ones. Only the high side is refused: real ladders reach 20.0
+/// times BELOW their median (INFIBEAM, 2018-10-16, the same census), so a
+/// low-side bound at this `k` would refuse real contracts.
+pub const STRIKE_PLAUSIBLE_MULTIPLE: i64 = 10;
 
 /// Why an options file, its name or a row was refused. Every refusal names
 /// itself; none is skipped.
@@ -138,6 +185,26 @@ pub enum NfoRefusal {
     ExpiryPassed {
         /// The ticker.
         ticker: String,
+    },
+    /// The stated expiry could not be settled (D-3331): a closed day with no
+    /// open session before it, a retired text traded after its rename, or a
+    /// trade after the settled day.
+    ExpiryUnsettled {
+        /// The ticker.
+        ticker: String,
+        /// Why, in the settlement's own words.
+        why: SettleRefusal,
+    },
+    /// The strike is more than [`STRIKE_PLAUSIBLE_MULTIPLE`] times the day's
+    /// median strike of its underlying (D-3331): a name no real contract
+    /// carries, refused rather than stored and listed.
+    StrikeImplausible {
+        /// The ticker.
+        ticker: String,
+        /// The decoded strike, paisa.
+        strike: i64,
+        /// The day's median strike of the underlying, paisa.
+        median: i64,
     },
     /// The underlying is not a symbol the store can file.
     UnderlyingRefused {
@@ -216,6 +283,17 @@ impl core::fmt::Display for NfoRefusal {
                 f,
                 "{ticker}: traded after the expiry NSE's last-Thursday rule derives; rule and vendor disagree"
             ),
+            Self::ExpiryUnsettled { ticker, why } => {
+                write!(f, "{ticker}: expiry unsettled: {why}")
+            }
+            Self::StrikeImplausible {
+                ticker,
+                strike,
+                median,
+            } => write!(
+                f,
+                "{ticker}: strike implausible: {strike} paisa is more than {STRIKE_PLAUSIBLE_MULTIPLE} times the day's median strike {median} paisa of its underlying; refused, never listed"
+            ),
             Self::UnderlyingRefused { ticker } => {
                 write!(
                     f,
@@ -286,12 +364,19 @@ pub enum TickerForm {
 pub struct OptionTicker {
     /// The underlying's symbol, exactly as the ticker spells it.
     pub underlying: Symbol,
-    /// The store's contract segment.
+    /// The store's contract segment, keyed on the SETTLED expiry (D-3331).
     pub contract: Contract,
     /// The form the ticker was read in.
     pub form: TickerForm,
-    /// The expiry: stated (day form) or derived (monthly form).
+    /// The settled expiry: the day the contract expired (D-3331). Equal to
+    /// [`Self::stated`] unless a measured re-dating, or the closed-day rule,
+    /// settles it elsewhere ([`Self::settlement`] says which).
     pub expiry: Day,
+    /// The expiry the vendor's text states (day form) or the rule derives
+    /// (monthly form): the alias the settled contract was traded under.
+    pub stated: Day,
+    /// How [`Self::expiry`] was established.
+    pub settlement: Settlement,
     /// The strike, paisa.
     pub strike: i64,
     /// Call or put.
@@ -301,13 +386,14 @@ pub struct OptionTicker {
 impl OptionTicker {
     /// The ticker this reading renders back to, byte for byte the vendor's
     /// when the name decoded (every strike is canonical, so nothing is lost).
+    /// Rendered from the STATED expiry: the text is the vendor's.
     #[must_use]
     pub fn ticker_text(&self) -> String {
         let month = MONTHS
-            .get(usize::from(self.expiry.month()).saturating_sub(1))
+            .get(usize::from(self.stated.month()).saturating_sub(1))
             .copied()
             .unwrap_or_default();
-        let yy = self.expiry.year() % 100;
+        let yy = self.stated.year() % 100;
         let side = match self.side {
             OptionSide::Call => "CE",
             OptionSide::Put => "PE",
@@ -322,7 +408,7 @@ impl OptionTicker {
         match self.form {
             TickerForm::Day => format!(
                 "{under}{:02}{month}{yy:02}{strike}{side}",
-                self.expiry.day()
+                self.stated.day()
             ),
             TickerForm::Monthly => format!("{under}{yy:02}{month}{strike}{side}"),
         }
@@ -553,8 +639,10 @@ fn single(
 ///
 /// [`NfoRefusal::TickerUnparsed`] (no reading), [`NfoRefusal::TickerAmbiguous`]
 /// (more than one), [`NfoRefusal::MonthlyExpiryUnmeasured`],
-/// [`NfoRefusal::ExpiryPassed`], [`NfoRefusal::UnderlyingRefused`] and
-/// [`NfoRefusal::ContractUnrenderable`].
+/// [`NfoRefusal::ExpiryPassed`], [`NfoRefusal::UnderlyingRefused`],
+/// [`NfoRefusal::ExpiryUnsettled`] and [`NfoRefusal::ContractUnrenderable`].
+/// The strike's plausibility needs the day's ladder and is checked by
+/// [`read_file`] ([`NfoDay::check_strike`]), not here.
 pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusal> {
     let unparsed = || NfoRefusal::TickerUnparsed {
         ticker: ticker.to_owned(),
@@ -579,10 +667,20 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
         .ok_or_else(|| NfoRefusal::UnderlyingRefused {
             ticker: ticker.to_owned(),
         })?;
+    // THE SETTLED EXPIRY IS THE IDENTITY (D-3331). A re-dated contract is one
+    // series under its final day; a closed stated day no row names settles on
+    // the previous open session the calendar records (the charter's rule),
+    // and one with no such session is refused, never kept as stated.
+    let settled = settle(underlying.as_str(), reading.expiry, Some(trade)).map_err(|why| {
+        NfoRefusal::ExpiryUnsettled {
+            ticker: ticker.to_owned(),
+            why,
+        }
+    })?;
     let contract = Expiry::new(
-        reading.expiry.year(),
-        reading.expiry.month(),
-        reading.expiry.day(),
+        settled.expiry.year(),
+        settled.expiry.month(),
+        settled.expiry.day(),
     )
     .ok()
     .and_then(|expiry| {
@@ -599,7 +697,9 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
         underlying,
         contract,
         form: reading.form,
-        expiry: reading.expiry,
+        expiry: settled.expiry,
+        stated: reading.expiry,
+        settlement: settled.settlement,
         strike: reading.strike,
         side,
     })
@@ -649,6 +749,9 @@ pub struct NfoDay<L> {
     by_ticker: HashMap<Box<str>, usize>,
     duplicates: HashSet<Box<str>>,
     skipped: usize,
+    /// Each underlying's median strike over the day's decodable names,
+    /// computed on the first ask and dropped by every [`Self::push`].
+    medians: OnceLock<HashMap<Box<str>, i64>>,
 }
 
 impl<L> NfoDay<L> {
@@ -662,12 +765,15 @@ impl<L> NfoDay<L> {
             by_ticker: HashMap::with_capacity(entries),
             duplicates: HashSet::with_capacity(1),
             skipped: 0,
+            medians: OnceLock::new(),
         }
     }
 
     /// Appends one entry in source order. An option file of the day folder is
     /// filed by its ticker; anything else is kept and counted, never filed.
     pub fn push(&mut self, entry: &str, len: u64, crc32: u32, locator: L) {
+        // A median computed before this entry would not be the day's.
+        self.medians = OnceLock::new();
         let at = self.entries.len();
         match entry_ticker(&self.folder, entry) {
             Some(ticker) => {
@@ -724,6 +830,62 @@ impl<L> NfoDay<L> {
             .by_ticker
             .get(ticker)
             .and_then(|&at| self.entries.get(at)))
+    }
+
+    /// The LOWER median strike, paisa, of `underlying`'s decodable option
+    /// names this day (every expiry and side; a name that does not decode is
+    /// not in it), or `None` when the day lists none. The day's own ladder,
+    /// whatever a run's filter asks for, so the answer does not depend on the
+    /// filter. Computed for every underlying on the first ask
+    /// (O(entries · log entries), once per listing); after it, one hash
+    /// probe.
+    #[must_use]
+    pub fn strike_median(&self, underlying: &str) -> Option<i64> {
+        self.medians
+            .get_or_init(|| {
+                let mut strikes: HashMap<Box<str>, Vec<i64>> = HashMap::new();
+                for file in &self.entries {
+                    let decoded = entry_ticker(&self.folder, &file.entry)
+                        .map(|ticker| decode_ticker(ticker, self.day));
+                    if let Some(Ok(ticker)) = decoded {
+                        strikes
+                            .entry(ticker.underlying.as_str().into())
+                            .or_default()
+                            .push(ticker.strike);
+                    }
+                }
+                strikes
+                    .into_iter()
+                    .filter_map(|(underlying, mut all)| {
+                        all.sort_unstable();
+                        let lower = all.len().saturating_sub(1) / 2;
+                        all.get(lower).map(|&median| (underlying, median))
+                    })
+                    .collect()
+            })
+            .get(underlying)
+            .copied()
+    }
+
+    /// Whether `ticker`'s strike is one the day's ladder admits: at most
+    /// [`STRIKE_PLAUSIBLE_MULTIPLE`] times its underlying's
+    /// [`Self::strike_median`] (D-3331).
+    ///
+    /// # Errors
+    ///
+    /// [`NfoRefusal::StrikeImplausible`], naming the ticker, the strike and
+    /// the median.
+    pub fn check_strike(&self, ticker: &OptionTicker, name: &str) -> Result<(), NfoRefusal> {
+        match self.strike_median(ticker.underlying.as_str()) {
+            Some(median) if ticker.strike > median.saturating_mul(STRIKE_PLAUSIBLE_MULTIPLE) => {
+                Err(NfoRefusal::StrikeImplausible {
+                    ticker: name.to_owned(),
+                    strike: ticker.strike,
+                    median,
+                })
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1073,10 +1235,12 @@ pub struct NfoDayFile {
 ///
 /// # Errors
 ///
-/// The ticker refusals of [`decode_ticker`], the source's own, the
-/// capital-market reader's `SourceLengthMismatch` / `SourceCrcMismatch`, and
-/// every refusal of [`decode`]. A file that is not an option file of the day
-/// is [`NfoRefusal::TickerUnparsed`].
+/// The ticker refusals of [`decode_ticker`], [`NfoRefusal::StrikeImplausible`]
+/// against the day's ladder ([`NfoDay::check_strike`], before any byte is
+/// read), the source's own, the capital-market reader's
+/// `SourceLengthMismatch` / `SourceCrcMismatch`, and every refusal of
+/// [`decode`]. A file that is not an option file of the day is
+/// [`NfoRefusal::TickerUnparsed`].
 pub fn read_file<S: NfoSource>(
     source: &S,
     listing: &NfoDay<S::Locator>,
@@ -1090,6 +1254,7 @@ pub fn read_file<S: NfoSource>(
     // A duplicate name is refused before anything is read.
     listing.locate(name)?;
     let ticker = decode_ticker(name, listing.day())?;
+    listing.check_strike(&ticker, name)?;
     let bytes = source.fetch(file)?;
     crate::gdfl_cm::verify(file, &bytes)?;
     let decoded = decode(&bytes, &format!("{name}{ROW_SUFFIX}"), listing.day())?;

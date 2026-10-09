@@ -56,15 +56,27 @@
 //! computed against invented hours is wrong by up to a full session on the one
 //! day where a wrong tenor costs the most.
 //!
+//! # The expiry DAY is the settled one (D-3331, DB-G51)
+//!
+//! The dated hours table has no holiday in it, so until D-3331 a contract
+//! keyed on a closed day was measured to a session that never happened:
+//! MIDCPNIFTY `22JAN24` settled on the Saturday session of 2024-01-20, and its
+//! 15:29:59 bar that day measured 172,801 s to the 22nd instead of 1 s.
+//! [`Tenor::between`] now refuses an expiry the calendar records as closed
+//! ([`TenorError::ExpiryOnClosedDay`]), and [`Tenor::to_settled`] measures to
+//! the day [`crate::expiry_alias::settle`] settles the contract on.
+//!
 //! # Cost
 //!
 //! **O(1) time, O(1) space, no allocation, no calendar walk.** One
 //! `IstMoment::from_epoch_secs` (closed-form civil-date arithmetic), one
-//! `Day::new`, one `hours_on` — bounded by
+//! `Day::new`, one [`crate::calendar::sourced_kind_of`] (one bit test and
+//! bounded walks over compile-time tables), one `hours_on` — bounded by
 //! [`crate::vendor::MAX_LATER_SESSION_ROWS`] `+ 1 = 3` rows, a compile-time
-//! constant no input can raise — and a fixed number of integer operations. The
-//! only float in the module is produced by [`Tenor::years`], once, at the
-//! boundary where the model demands one.
+//! constant no input can raise — and a fixed number of integer operations;
+//! [`Tenor::to_settled`] adds one settlement, bounded walks over
+//! [`crate::expiry_alias::ALIASES`]. The only float in the module is produced
+//! by [`Tenor::years`], once, at the boundary where the model demands one.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -73,6 +85,8 @@
 
 use brutex_core::instrument::Expiry;
 
+use crate::calendar::{DayKind, sourced_kind_of};
+use crate::expiry_alias::{SettleRefusal, Settled, settle};
 use crate::session::{Day, IstMoment};
 use crate::vendor::{SessionRefusal, Venue};
 
@@ -165,6 +179,16 @@ pub enum TenorError {
         /// The expiry that could not be placed.
         expiry: Expiry,
     },
+    /// The expiry day is one the calendar records as CLOSED: no contract
+    /// stopped trading on it, so a tenor to its close would measure to a
+    /// session that never happened (DB-G51). Settle it first
+    /// ([`Tenor::to_settled`]).
+    ExpiryOnClosedDay {
+        /// The closed expiry.
+        expiry: Expiry,
+    },
+    /// The stated expiry could not be settled, in the settlement's words.
+    ExpiryUnsettled(SettleRefusal),
 }
 
 impl std::fmt::Display for TenorError {
@@ -195,6 +219,16 @@ impl std::fmt::Display for TenorError {
                  represent, which the two calendars agreeing is supposed to \
                  make impossible. No tenor was measured."
             ),
+            Self::ExpiryOnClosedDay { expiry } => write!(
+                f,
+                "the expiry {expiry} is a day the exchange was closed, so no \
+                 contract stopped trading at its close; the tenor was refused \
+                 rather than measured to a session that never happened. \
+                 Measure it to the settled expiry."
+            ),
+            Self::ExpiryUnsettled(why) => {
+                write!(f, "the expiry could not be settled: {why}")
+            }
         }
     }
 }
@@ -236,6 +270,13 @@ impl Tenor {
             .map_err(|_| TenorError::StampOffCalendar { ts_micros })?;
         let last_day = Day::new(expiry.year(), expiry.month(), expiry.day())
             .map_err(|_| TenorError::ExpiryOffCalendar { expiry })?;
+        // A CLOSED EXPIRY DAY IS REFUSED (D-3331, DB-G51). The hours table is
+        // dated, not a calendar, and would hand a holiday a full session. A
+        // day the calendar has not measured keeps the hours table's answer:
+        // refusing every long-dated contract would refuse correct tenors.
+        if sourced_kind_of(i64::from(last_day.days_from_epoch())) == DayKind::Closed {
+            return Err(TenorError::ExpiryOnClosedDay { expiry });
+        }
 
         // THE DATED TABLE, NOT A CONSTANT. `close_minute` is exclusive — the
         // end of the session, which is exactly the instant trading stops.
@@ -260,6 +301,36 @@ impl Tenor {
             });
         }
         Ok(Self { seconds })
+    }
+
+    /// The tenor of `underlying`'s contract whose name states `stated`, at the
+    /// bar stamped `ts_micros`, measured to the day the contract SETTLED
+    /// (D-3331): [`crate::expiry_alias::settle`], then [`Self::between`]. The
+    /// settlement comes back with the tenor so a caller can show the alias.
+    ///
+    /// MIDCPNIFTY `22JAN24` at 2024-01-20 15:29:59 IST is 1 s, not 172,801 s.
+    ///
+    /// # Errors
+    ///
+    /// [`TenorError::ExpiryUnsettled`] when the stated expiry cannot be
+    /// settled, [`TenorError::ExpiryOffCalendar`] for a stated day `Day`
+    /// cannot hold (unreachable, as in [`Self::between`]), and every arm of
+    /// [`Self::between`].
+    pub fn to_settled(
+        ts_micros: i64,
+        underlying: &str,
+        stated: Expiry,
+    ) -> Result<(Self, Settled), TenorError> {
+        let day = Day::new(stated.year(), stated.month(), stated.day())
+            .map_err(|_| TenorError::ExpiryOffCalendar { expiry: stated })?;
+        let settled = settle(underlying, day, None).map_err(TenorError::ExpiryUnsettled)?;
+        let expiry = Expiry::new(
+            settled.expiry.year(),
+            settled.expiry.month(),
+            settled.expiry.day(),
+        )
+        .map_err(|_| TenorError::ExpiryOffCalendar { expiry: stated })?;
+        Ok((Self::between(ts_micros, expiry)?, settled))
     }
 
     /// Seconds left, exactly.
@@ -544,6 +615,69 @@ mod tests {
             }
         }
         assert_eq!(checked, 9 * 12 * 7, "every boundary date was compared");
+    }
+
+    /// Epoch micros for an IST wall-clock moment with seconds.
+    fn ist_s(year: u16, month: u8, day: u8, hour: i64, minute: i64, second: i64) -> i64 {
+        ist(year, month, day, hour, minute) + second * 1_000_000
+    }
+
+    /// **DB-G51: MIDCPNIFTY `22JAN24` ON ITS LAST SESSION HAS ONE SECOND LEFT.**
+    ///
+    /// The stated day 2024-01-22 was closed; the contract settled on the
+    /// Saturday session of 2024-01-20. Measured to the stated day the 15:29:59
+    /// bar had 2 × 86,400 + 1 = 172,801 s; to the settled day it has 1 s.
+    #[test]
+    fn a_tenor_is_measured_to_the_settled_expiry_and_a_closed_day_is_refused() {
+        let at = ist_s(2024, 1, 20, 15, 29, 59);
+        let stated = expiry(2024, 1, 22);
+        // The bare reader refuses the closed day by name instead of 172,801.
+        let refused = Tenor::between(at, stated).unwrap_err();
+        assert_eq!(refused, TenorError::ExpiryOnClosedDay { expiry: stated });
+        assert!(refused.to_string().contains("closed"), "{refused}");
+        // Settled, it is one second.
+        let (tenor, settled) = Tenor::to_settled(at, "MIDCPNIFTY", stated).expect("settled");
+        assert_eq!(tenor.seconds(), 1);
+        assert_eq!(settled.expiry, Day::new(2024, 1, 20).unwrap());
+        assert_eq!(settled.settlement.as_str(), "aliased");
+        // The bar one second later is at the settled close: expired.
+        assert_eq!(
+            Tenor::to_settled(at + 1_000_000, "MIDCPNIFTY", stated),
+            Err(TenorError::AlreadyExpired { seconds_past: 0 })
+        );
+        // ACC `29JUN23` on 2023-06-27 15:00 has one day and thirty minutes to
+        // 2023-06-28's close, not two days.
+        let (acc, _) = Tenor::to_settled(ist(2023, 6, 27, 15, 0), "ACC", expiry(2023, 6, 29))
+            .expect("settled");
+        assert_eq!(acc.seconds(), 86_400 + 30 * 60);
+        // An open stated day settles as itself.
+        let (same, how) =
+            Tenor::to_settled(ist(2026, 8, 27, 15, 0), "NIFTY", expiry(2026, 8, 27)).unwrap();
+        assert_eq!(same.minutes(), 40);
+        assert_eq!(how.settlement.as_str(), "as_stated");
+        // A closed stated day no row names settles on the previous session,
+        // the charter's rule (Good Friday 2024 -> Thursday 28 March): 10:00 on
+        // the 27th is one day and five and a half hours from its close.
+        let (rule, how) =
+            Tenor::to_settled(ist(2024, 3, 27, 10, 0), "NIFTY", expiry(2024, 3, 29)).unwrap();
+        assert_eq!(rule.seconds(), 86_400 + 5 * 3_600 + 30 * 60);
+        assert_eq!(how.settlement.as_str(), "closed_day_rule");
+        // A stated day that cannot be settled is refused in the settlement's
+        // words. No closed day of the sourced calendar walks off it (its first
+        // day is a session), so the arm is shown by its words alone; the walk
+        // itself is `expiry_alias`'s test.
+        let stated_day = Day::new(2024, 3, 29).unwrap();
+        let unsettled =
+            TenorError::ExpiryUnsettled(crate::expiry_alias::SettleRefusal::NoOpenSessionBefore {
+                stated: stated_day,
+            });
+        let words = unsettled.to_string();
+        assert!(
+            words.starts_with("the expiry could not be settled: ") && words.contains("2024-03-29"),
+            "{words}"
+        );
+        // A day the calendar has not measured keeps the hours table's answer.
+        assert!(Tenor::between(ist(2027, 12, 20, 10, 0), expiry(2027, 12, 28)).is_ok());
     }
 
     /// A tenor is ordered by what it is, so a caller can take the shortest.

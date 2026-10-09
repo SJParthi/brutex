@@ -513,6 +513,24 @@ fn nfo_bytes(on: Day, entry: &Entry) -> (String, Vec<u8>) {
     }
 }
 
+/// Whether a name of `under` stating `expiry`, traded on `on`, settles on
+/// the day it states (D-3331).
+fn settles_as_stated(under: &str, expiry: Day, on: Day) -> bool {
+    crate::expiry_alias::settle(under, expiry, Some(on)).is_ok_and(|s| s.expiry == expiry)
+}
+
+/// The lower median of `strikes`, written independently of the reader:
+/// the day's ladder a strike is checked against (D-3331).
+fn lower_median(mut strikes: Vec<i64>) -> Option<i64> {
+    strikes.sort_unstable();
+    strikes.get(strikes.len().checked_sub(1)? / 2).copied()
+}
+
+/// Whether `strike` is more than the plausible multiple of `median`.
+fn implausible(strike: i64, median: Option<i64>) -> bool {
+    median.is_some_and(|m| strike > m * crate::gdfl_nfo::STRIKE_PLAUSIBLE_MULTIPLE)
+}
+
 /// A random world: one to three days of April 2024, each a random list of
 /// entries over a small pool of contracts (so series recur across days),
 /// with duplicates, undecodable names, bent files, fold refusals and
@@ -528,7 +546,10 @@ fn random_world(rng: &mut Rng) -> Vec<(Day, Vec<Entry>)> {
     for _ in 0..=rng.below(6) {
         let under = rng.pick(&UNDERS);
         let mut expiry = plus(days[days.len() - 1], u32::try_from(rng.below(90)).unwrap());
-        while !weekday(expiry) {
+        // ADAPTED (D-3331): a stated day the calendar records as closed, or
+        // one a measured re-dating retires, is the settlement's own path
+        // (r2_10); this world's contracts settle on the day they state.
+        while !weekday(expiry) || !settles_as_stated(under, expiry, days[0]) {
             expiry = expiry.succ().unwrap();
         }
         pool.push(Opt {
@@ -620,7 +641,9 @@ fn write_world(root: &Path, world: &[(Day, Vec<Entry>)]) {
         .iter()
         .map(|(n, b)| (n.as_str(), b.as_slice(), Method::Stored))
         .collect();
-    put(root, "zips/2024.zip", &zip(&members));
+    // One year zip, the world's year (every world lies in one year).
+    let year = world.first().map_or(2024, |(on, _)| on.year());
+    put(root, &format!("zips/{year}.zip"), &zip(&members));
 }
 
 /// The longest name of `names` that `ticker` starts with.
@@ -671,6 +694,18 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                 Entry::Other => {}
             }
         }
+        // ADAPTED (D-3331): the day's ladder per underlying, every option
+        // entry of the day whatever the filter, and its lower median.
+        let mut ladders: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+        for e in entries {
+            if let Entry::Option { opt, .. } = e {
+                ladders.entry(opt.under).or_default().push(opt.paisa);
+            }
+        }
+        let medians: BTreeMap<&str, Option<i64>> = ladders
+            .into_iter()
+            .map(|(under, strikes)| (under, lower_median(strikes)))
+            .collect();
         let mut files: Vec<(Opt, Expect)> = Vec::new();
         let mut late_failures: Vec<(String, &'static str)> = Vec::new();
         for e in entries {
@@ -717,6 +752,12 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                             format!("{on} {name}"),
                             "another ticker of the same day names the same contract",
                         ));
+                        continue;
+                    }
+                    // ADAPTED (D-3331): checked before a byte is read.
+                    if implausible(opt.paisa, medians[opt.under]) {
+                        want.totals.files_refused += 1;
+                        late_failures.push((format!("{on} {name}"), "strike implausible"));
                         continue;
                     }
                     if *bent {
@@ -1339,6 +1380,7 @@ fn r2_06_pre_cutover_listings_key_every_file_by_its_decoded_contract() {
     ];
     let unders = ["NIFTY", "BANKNIFTY", "ACC", "TV18BRDCST", "M&M"];
     let (mut handed, mut ambiguous, mut tried) = (0_usize, 0_usize, 0_usize);
+    let mut implausible_names = 0_usize;
     for case in 0..2_000 {
         let on = rng.pick(&days);
         let mut names: Vec<String> = Vec::new();
@@ -1427,10 +1469,14 @@ fn r2_06_pre_cutover_listings_key_every_file_by_its_decoded_contract() {
             "{ctx}"
         );
         // The reference: each name's decoding, grouped by contract.
-        let decoded: Vec<Option<(String, String)>> = names
+        let readings: Vec<Option<crate::gdfl_nfo::OptionTicker>> = names
             .iter()
-            .map(|n| {
-                crate::gdfl_nfo::decode_ticker(n, on).ok().map(|t| {
+            .map(|n| crate::gdfl_nfo::decode_ticker(n, on).ok())
+            .collect();
+        let decoded: Vec<Option<(String, String)>> = readings
+            .iter()
+            .map(|t| {
+                t.as_ref().map(|t| {
                     (
                         t.underlying.as_str().to_owned(),
                         t.contract.as_str().to_owned(),
@@ -1438,12 +1484,36 @@ fn r2_06_pre_cutover_listings_key_every_file_by_its_decoded_contract() {
                 })
             })
             .collect();
-        for (name, key) in names.iter().zip(&decoded) {
-            let Some(key) = key else {
+        // ADAPTED (D-3331): the day's lower-median strike per underlying,
+        // over every entry that decodes.
+        let median_of = |under: &str| {
+            lower_median(
+                readings
+                    .iter()
+                    .flatten()
+                    .filter(|t| t.underlying.as_str() == under)
+                    .map(|t| t.strike)
+                    .collect(),
+            )
+        };
+        for ((name, key), reading) in names.iter().zip(&decoded).zip(&readings) {
+            let (Some(key), Some(reading)) = (key, reading) else {
                 continue;
             };
             let twins = decoded.iter().filter(|k| k.as_ref() == Some(key)).count();
             let sunk: Vec<&TickFile> = got.iter().filter(|f| &f.name == name).collect();
+            if twins == 1 && implausible(reading.strike, median_of(&key.0)) {
+                implausible_names += 1;
+                assert!(sunk.is_empty(), "{ctx}: {name} was filed off its ladder");
+                assert!(
+                    read.refused
+                        .iter()
+                        .any(|r| &r.instrument == name && r.why.contains("strike implausible")),
+                    "{ctx}: {name} is not refused as implausible: {:?}",
+                    read.refused
+                );
+                continue;
+            }
             if twins > 1 {
                 ambiguous += 1;
                 assert!(sunk.is_empty(), "{ctx}: {name} was filed beside its twin");
@@ -1471,8 +1541,8 @@ fn r2_06_pre_cutover_listings_key_every_file_by_its_decoded_contract() {
         std::fs::remove_dir_all(root).unwrap();
     }
     assert!(
-        handed > 500 && ambiguous > 100 && tried > 6_000,
-        "{handed} handed, {ambiguous} ambiguous, {tried} names"
+        handed > 500 && ambiguous > 100 && tried > 6_000 && implausible_names > 50,
+        "{handed} handed, {ambiguous} ambiguous, {implausible_names} implausible, {tried} names"
     );
 }
 
@@ -1590,4 +1660,150 @@ fn r2_09_the_era_constants_and_the_table_are_one_story() {
         needed, 15,
         "five trade months (2018-09 to 2019-01), three contract months each"
     );
+}
+
+/// The stored one-second bars of `symbol`'s `contract` in the month of `on`.
+fn held_in(store: &Path, symbol: &str, contract: &str, on: Day) -> Option<Vec<Bar>> {
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol,
+        contract: Some(Contract::parse(contract).unwrap()),
+        timeframe: Timeframe::SECOND_1,
+        month: on.year_month().unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    #[expect(clippy::cast_possible_truncation, reason = "the store's own id fold")]
+    let id = brutex_core::universe::fnv1a(symbol) as u32;
+    let file = BarFile::open_existing(store, path, id).ok()?;
+    Some(
+        (0..file.header().n_valid)
+            .map(|i| file.read_record(i).unwrap())
+            .collect(),
+    )
+}
+
+/// D-3331 end to end, through both sources (DB-018, DB-G50, DB-G51, DB-027).
+/// Across the 2023-06-28 rename the old text (`29JUN23`) and the new
+/// (`28JUN23`) of one contract file ONE series under the settled day; a
+/// stated closed day no row names settles on the session before it (the
+/// charter's rule); the retired text traded after its rename and a strike off
+/// the day's ladder are each refused by name; and nothing is filed under a
+/// closed day. Before the fix the old text filed its own series under
+/// 2023-06-29, the closed 2023-08-15 was a store key, and both refusals were
+/// stored contracts.
+#[test]
+fn r2_10_a_re_dated_contract_is_one_series_and_the_unsettled_are_refused() {
+    let (d1, d2) = (day(2023, 6, 27), day(2023, 6, 28));
+    for on in [d1, d2] {
+        assert!(
+            crate::gdfl_cm::session_gate(on).is_ok(),
+            "{on} is a session"
+        );
+    }
+    let stated = day(2023, 6, 29);
+    let opt = |expiry: Day, paisa: i64| Opt {
+        under: "ACC",
+        expiry,
+        paisa,
+        call: true,
+    };
+    let traded = |sod: u32, ltp: i64| Row {
+        sod,
+        ltp,
+        ltp_text: price_text(ltp),
+        ltq: 250,
+        oi: 10_000,
+    };
+    let file = |opt: Opt, rows: Vec<Row>| Entry::Option {
+        opt,
+        rows,
+        bent: false,
+        upper: false,
+    };
+    let world = vec![
+        (
+            d1,
+            vec![
+                file(
+                    opt(stated, 180_000),
+                    vec![traded(OPEN + 5, 1_000), traded(OPEN + 9, 1_005)],
+                ),
+                file(opt(stated, 190_000), vec![traded(OPEN + 7, 500)]),
+                // 1,80,000 rupees against a ladder whose lower median is 1,900.
+                file(opt(stated, 18_000_000), vec![traded(OPEN + 7, 5)]),
+                // Independence Day, a closed day no row names: the rule
+                // settles it on Monday 14 August.
+                file(opt(day(2023, 8, 15), 180_000), vec![traded(OPEN + 8, 900)]),
+            ],
+        ),
+        (
+            d2,
+            vec![
+                file(opt(d2, 180_000), vec![traded(OPEN + 3, 1_010)]),
+                // The retired text, traded on the day it was replaced.
+                file(opt(stated, 190_000), vec![traded(OPEN + 4, 510)]),
+            ],
+        ),
+    ];
+    let root = scratch("r2-settle");
+    write_world(&root, &world);
+    let run_on = |zips: bool, store: &Path| {
+        let run = Run {
+            kind: ImportKind::Options,
+            from: d1,
+            to: d2,
+            only: &[],
+            store_root: store,
+        };
+        if zips {
+            run_nfo(&NfoZips::new(&root.join("zips")), &run).unwrap()
+        } else {
+            run_nfo(&NfoTickStore::new(&root.join("ts")), &run).unwrap()
+        }
+    };
+    let (a, b) = (root.join("A"), root.join("B"));
+    let (ra, rb) = (run_on(false, &a), run_on(true, &b));
+    assert_eq!(ra, rb, "the two sources report one run");
+    assert_eq!(tree(&a), tree(&b), "the two stores are one store");
+    let mut got: Vec<(String, String)> = ra
+        .failures
+        .iter()
+        .map(|f| (f.instrument.clone(), f.why.clone()))
+        .collect();
+    got.sort();
+    let want = [
+        ("2023-06-27 ACC29JUN23180000CE", "strike implausible"),
+        ("2023-06-28 ACC29JUN231900CE", "the vendor replaced it"),
+    ];
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for ((name, why), (want_name, want_why)) in got.iter().zip(want) {
+        assert_eq!(name, want_name);
+        assert!(why.contains(want_why), "{name}: {why}");
+    }
+    assert_eq!((ra.files, ra.files_refused), (4, 2), "{ra:?}");
+    // ONE series for both texts, under the settled day, in time order.
+    let one = held_in(&a, "ACC", "2023-06-28-180000-CE", d1).unwrap();
+    let closes: Vec<i64> = one.iter().map(|bar| bar.close).collect();
+    assert_eq!(closes, [1_000, 1_005, 1_010], "{one:?}");
+    assert_eq!(one[0].ts_micros, utc_micros(d1, OPEN + 5));
+    assert_eq!(one[2].ts_micros, utc_micros(d2, OPEN + 3));
+    let other = held_in(&a, "ACC", "2023-06-28-190000-CE", d1).unwrap();
+    assert_eq!(other.len(), 1, "the retired text's day-2 file was refused");
+    let ruled = held_in(&a, "ACC", "2023-08-14-180000-CE", d1).unwrap();
+    assert_eq!(
+        ruled.iter().map(|bar| bar.close).collect::<Vec<_>>(),
+        [900],
+        "the closed 15 August settles on the 14th"
+    );
+    assert!(
+        tree(&a).keys().all(|path| {
+            let text = path.to_string_lossy();
+            !text.contains("2023-06-29") && !text.contains("2023-08-15")
+        }),
+        "nothing is filed under a closed stated day"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
