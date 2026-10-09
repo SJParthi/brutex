@@ -68996,3 +68996,154 @@ ending where the next starts) to `pull`'s answer. The copies stay; the
 
 **Left open, for the owner.** Whether `rust-toolchain.toml` and `Cargo.toml`
 join the auto-merge workflow's sensitive paths (D-3510) is not decided here.
+
+### D-4501 — `outcome.rs` names the ordering it relies on: `rank::rank`, not `rank::walk` — 2026-10-09
+
+**What was observed (audit `r64-3`, low).** Five comments in
+`crates/runner/src/outcome.rs` (lines 2464, 2499, 3154, 3215 and 4002 of the
+audited tree) said `rank::walk` orders results on `edge.t.abs()`. No function
+`walk` exists in `crates/runner/src/rank.rs`; the ordering is `rank::rank`'s,
+through `impl Ord for rank::Scored`. The first of the five is a production
+comment that justifies the zero-spread guard in `outcome::edge`, so a reader
+looking for the site that makes the guard necessary found nothing.
+
+**Decision.** The five comments name `rank::rank`; the production one says the
+old name never existed and cites this entry. `crates/runner/Cargo.toml`'s own
+note, which already records the `rank::walk` mistake until D-1498, is unchanged.
+
+**What changes.** Comments only. No code, output, digest or format moves.
+
+### D-4502 — The session window's comment matches the index table it reads: 15:30, not 15:15; supersedes D-0151's index row — 2026-10-09
+
+**What was observed (audit `satk-4`, low).** The comment in
+`pull::session::Window::verdict` said that from 2026-08-03 the swept index
+"now stops at 15:15" and that its 15:15–15:29 bars are "not continuous-session
+bars". `NSE_INDEX_SESSIONS` in `crates/pull/src/vendor.rs`, which the function
+reads, keeps 15:30 from 2026-08-03 by the operator's rule of 2026-08-20 ("the
+extension applies to futures and options ALONE ... Nothing else moved").
+Probe P11 kept 15:15:00 and 15:29:59 on 2026-08-04 and dropped 15:30:00. D-0151
+still tabulates the index row at 15:15, and no decision recorded its reversal.
+
+**Decision.** The comment states the table: derivatives extend to 15:40 (last
+bar 15:39); cash and the index keep 15:30 (last bar 15:29). An amendment
+paragraph names the two retracted sentences and why 15:15 was an inference
+about a derived value, not a published hour. **This entry supersedes D-0151's
+`NSE_INDEX_SESSIONS` row**: from 2026-08-03 the index closes at 15:30, as the
+table has said since the operator's rule. The charter's open question — whether
+the index minutes 15:15–15:29 carry the frozen or the indicative auction index —
+stays UNVERIFIED.
+
+**What changes.** A comment and the decision record. The window's behaviour,
+which already followed the table, does not move.
+
+### D-4503 — A walk-forward fold says when its candidates' closure is unproved — 2026-10-09
+
+**What was observed (audits `W3-runner1-3`, `c4a-7`, `AC-whp-cx-2`).** D-1496
+gave `closed::Closed` a `closure_complete` flag, but the walk-forward still
+called `closed()` and read `kept` without it: on a halted fold the candidate
+set may hold sets that are not closed, and the audit row said only that the
+fold "ranked a truncated candidate set". `ClosureVerdict::Closed` and `cli`'s
+`ClosureV1::Closed` said "No immediate superset has equal support", which is
+false by design for a superset `engine`'s join prunes as uninformative under
+`vocab::implication`: it has equal support and is never built.
+
+**Decision.** `FoldResult` gains `closure_unproved`, set at both walk-forward
+call sites from `!closed.closure_complete` rather than inferred from `halted`.
+`Validated::closure_unproved_folds()` counts them, O(folds). `audit::walk_forward`
+prints a row "whose closure is UNPROVED" with the count, zero included, and
+marks each such fold's candidate count with `?`. The two `Closed` docs say
+"closed relative to the informative lattice the sweep walks". `FoldProgress`,
+which `cli` builds by name, does not carry the flag; its `candidates` doc says
+so. `kept` itself is unchanged, as D-1496 decided.
+
+**What changes.** One new public field (default `false`, so every `..Default`
+literal in `cli` still builds) and one new audit row and marker in the
+walk-forward report text. No digest, stored format or run identity moves.
+
+**Tests.** `runner::validate::tests::a_fold_whose_closure_is_unproved_is_labelled_and_counted`
+(FXR-08).
+
+### D-4504 — The closure check is timed: bench row C-R-06 — 2026-10-09
+
+**What was observed (audit `c4a-6`).** D-1496 stated the cost of
+`closed::redundant_between` — an O(|lower|) `HashMap` copy of each lower level
+and one probe per set bit of each upper itemset — and recorded "Not timed".
+
+**Decision.** `crates/runner/benches/ratio.rs` gains `C-R-06`: per insertion or
+probe, `closed::redundant_count` on one 10,124-bar column swept at the bench's
+support (37,065 units, extinct at k=12) and at half of it (302,837 units, up to
+20,004 sets a level, halted at the 50,000 ceiling), gated at the bench's 2.5x
+ceiling, and the larger sweep's per-unit p50, p99 and maximum over 201 trials.
+The first draft compared `sessions(8)` with `sessions(32)` at one support
+fraction; both produced the same twelve levels and the same 37,065 units, so it
+measured nothing that grows, and was replaced before it was committed.
+
+**Measured** 2026-10-09 on the 4-CPU audit box at load average 4.5, one run:
+73,772 -> 69,971 ps a unit (0.948x); p50 74,803, p99 125,353, max 134,992 ps a
+unit, n = 201 trials, each trial one whole `redundant_count`, so these are
+percentiles of a trial's mean per-unit cost, not of single probes. Not measured
+on CI. `docs/06-limits.md`'s D-1496 entry records the figures.
+
+**Tests.** `C-R-06` in `docs/04-invariants.md`; `core`'s `cost_invariants`
+reconciles the printed id with the declared row.
+
+### D-4505 — The Student-t tail is read at 10^7 degrees of freedom past that — 2026-10-09
+
+**What was observed (audit `satk-7`).** `student_t_two_sided_tail` loses digits
+as `df` grows, because `ln B(df/2, 1/2)` is a difference of two large `ln Γ`
+values and `x = df / (df + t^2)` rounds toward one. The audit measured the
+Student-t Bonferroni bar BELOW the normal bar at `df = 1e9` and `1e12` — the
+anti-conservative direction — more than a whole t-unit wrong past `1e14`, and
+the tail of `t = 6` at exactly `1.0` at `df = 1e18`.
+
+**Decision.** `STUDENT_DF_CEILING = 10_000_000`: above it the tail, and so the
+bar and `clears_bonferroni`, are taken at the ceiling. For a fixed `|t|` the
+true tail falls toward the normal tail as `df` grows, so the ceiling's tail is
+the heavier one: conservative to within its own error.
+
+**Measured, by a scratch harness outside the repository that runs this file's
+own functions** (the incomplete beta, its continued fraction, `ln Γ`, the
+normal quantile and the bisection are byte-identical copies, checked by hash;
+the tail is the same expression with the ceiling as a parameter, and the
+measurement at `df = 1e7` above is with the ceiling lifted): against a four-term
+Fisher expansion, over `t` 1.9 to 9.6 in steps of 0.001, the tail's relative
+error at `df = 1e7` is at most `1.382e-8` (signed `-1.38e-8` to `+4.7e-9`),
+against a Student-minus-normal gap of `5.546e-7` at `t = 1.96` — about forty
+times, not the "four orders" the WIP doc estimated. The same harness read
+`1.708e-6` at `1e6`, `3.872e-8` at `1e8` and `7.616e-7` at `1e9`, where the gap
+is `5.546e-9`, so a higher ceiling would cross. The ceiling's bar sits `2.370e-7`
+(one trial) to `2.149e-5` t-units (`u64::MAX` trials) above the normal bar. On a
+geometric grid of 296 `df` values and 43 trial counts no bar rose with `df` and
+none was at or below the normal bar; the tail rose in 69 of 237,096 readings,
+all at `t <= 1.70`, below any bar, by at most `3.418e-8` relative. Between
+ADJACENT `df` values the bar does rise by rounding: 28,150 of 105,000 adjacent
+pairs at five sample points up to the ceiling, by at most `1.711e-8` t-units.
+So the doc says "monotone to its rounding", not "monotone".
+
+**What changes.** A row whose `df` exceeds `10^7` is judged on the bar at
+`10^7`: at most `2.149e-5` t-units stricter than the normal bar, where it was
+judged on a bar that could fall below it. Real runs reach such `df` only with
+more than ten million observations in one row. No stored format or digest moves.
+
+**Tests.** `runner::significance::tests::the_student_t_bar_is_monotone_within_its_rounding_and_never_below_the_normal_bar_at_any_df`
+(FXR-07).
+
+### D-4506 — A zero bootstrap block takes no draw and reads as no evidence — 2026-10-09
+
+**What was observed (audit `satk-8`).** `bootstrap::reality_check` and `spa`
+accepted `block == 0` and ran it as a block of ONE (`block <= 1` in
+`stationary_indices_into`): a caller asking for a block nobody can draw got an
+i.i.d. bootstrap and a p-value that could clear. Legacy `romano_wolf` did the
+same. The doc on `white_reality_check_receipt_v1` already promised the legacy
+API answers a zero block `p = 1`.
+
+**Decision.** At `block == 0`, `reality_check` and `spa` take no draw:
+`Verdict::draws` is 0 and `p = 1`, which never clears; periods, strategies and
+the observed statistic are still reported. `romano_wolf` treats a zero block as
+malformed and returns empty, as it already did above `MAX_BLOCK`.
+
+**What changes.** A zero-block call that could clear no longer can. Every other
+block is unchanged. No stored format or digest moves.
+
+**Tests.** `runner::bootstrap::tests::a_zero_block_takes_no_draw_and_reads_as_no_evidence`
+(FXR-06).

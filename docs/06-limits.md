@@ -15353,12 +15353,21 @@ pass over the bars at a once-per-report boundary, O(bars).
   once per level pair in `closed` and `redundant_count`. The transient map is
   outside the engine's `DEFAULT_CEILING` memory model, so a level near the
   ceiling briefly needs that much again. Probing the engine's own sorted
-  level instead was not done here. Not timed: no bench row covers it.
+  level instead was not done here. It was not timed until D-4504; **`C-R-06`
+  now times it** per insertion or probe: 73,772 ps at
+  37,065 units and 69,971 ps at 302,837 units (0.948x), and at the larger
+  size p50 74,803, p99 125,353, max 134,992 ps a unit over 201 trials of one
+  whole `redundant_count` each, measured 2026-10-09 on the 4-CPU audit box at
+  load 4.5. Those are percentiles of a trial's mean, not of one probe.
 - **A halted sweep's closed set is an over-count (c4a-7, W3-runner1-3,
   D-1496).** `runner::closed::closed` cannot prove closure for the top two
   levels of a halted sweep and now says so through `closure_complete`; it
   still returns those sets in `kept`. `validate` records `halted` beside its
   candidate count, and the streamed rankers mark the two levels `Unknown`.
+  **Since D-4503** each `FoldResult` also carries `closure_unproved`, read
+  from `closure_complete`, and the walk-forward audit prints how many folds
+  have it and marks their candidate counts `?`. `FoldProgress::candidates`,
+  the hook `cli` builds by name, still does not carry it.
 - **`keep::Best` probed a hash set on every offer (v4-4, D-1497); removed
   with the type by D-4480.** The probe, its `cap + 1` reservation and the
   O(log cap) sift went together; nothing in the engine retains a bounded
@@ -16924,3 +16933,11 @@ Measured by `api::latency` (`api` test build (the workspace's optimized test pro
   `pull::session` fails `web/tests/ist.test.js` (W2), not the page.
 - **Bar re-bucketing in `api` and `cli` has no census.** Round 4 checked the
   browser's fold and the sweep side's open only (D-3522).
+
+## Audit integration `intl` — lower crates on the merged tree — 2026-10-09
+
+- **Past 10^7 degrees of freedom the Student-t bar is the bar at 10^7
+  (D-4505).** It is stricter than the exact bar by at most 2.149e-5 t-units
+  (measured at `u64::MAX` trials) and never at or below the normal bar. Below
+  the ceiling the bar is monotone in `df` only to rounding: up to 1.711e-8
+  t-units of rise between adjacent `df`, measured.
