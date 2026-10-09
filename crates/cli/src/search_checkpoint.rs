@@ -307,14 +307,19 @@ impl Journal {
     }
 }
 
+/// The name a completion seal is staged under before its rename (D-1740).
+/// Discovery never reads it. One constant, so the test that requires it gone
+/// after an acknowledgement checks the name this file writes (G5-1, D-4733).
+const STAGED_MARKER: &str = "complete.tmp";
+
 /// Make `complete` appear whole or not at all (D-1740). The seal is written
-/// and synced under a temporary name and only then renamed into place, then
+/// and synced under [`STAGED_MARKER`] and only then renamed into place, then
 /// the reservation directory is synced. A kill before the rename leaves at
-/// most `complete.tmp`, which discovery never reads, so the reservation is an
-/// interrupted one and the previous checkpoint stays the resume point. A
+/// most that staged file, which discovery never reads, so the reservation is
+/// an interrupted one and the previous checkpoint stays the resume point. A
 /// failure this process sees removes the temporary file and refuses.
 fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
-    let temporary = directory.join("complete.tmp");
+    let temporary = directory.join(STAGED_MARKER);
     let written = (|| {
         let mut marker = File::create_new(&temporary)?;
         #[cfg(test)]

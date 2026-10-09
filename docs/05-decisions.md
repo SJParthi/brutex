@@ -65075,3 +65075,30 @@ The scan works on source text, not syntax: an open built through a helper
 that hides `OpenOptions::new()` is not seen.
 
 Invariants L1FC-01, L1FC-02, L1FC-03, L1FC-14.
+
+### D-4733 — The search-checkpoint staged marker is checked by its real name; corrects D-1770 — 2026-10-09
+
+**Finding.** G5-1. `a_torn_completion_marker_is_an_interrupted_reservation`
+asserted `!newest.join("complete.writing").exists()`. No code writes that
+name: at fbdabaec the assertion is the only place in `crates/` it appears.
+`publish_marker` stages its seal as `complete.tmp`. The check therefore held
+whatever the publisher left behind. D-1770's bullet ("Staging's
+`complete.writing` is kept") named the same file that does not exist.
+
+**The decision.** The name is one constant, `STAGED_MARKER = "complete.tmp"`.
+The test watches the publisher from the `marker_created` hook. While staging,
+the reservation must hold exactly `payload` and `STAGED_MARKER`. After the
+publication is acknowledged, `STAGED_MARKER` must be gone and `complete` must
+hold all 32 bytes. A kill between the synced seal and the rename leaves
+`STAGED_MARKER` and no `complete`. The reopen must count that reservation as
+interrupted, keep the older checkpoint as latest, publish the next sequence,
+and leave the staged file byte for byte as it was.
+
+A mutant publisher that copies instead of renaming fails the new check at
+`search_checkpoint_tests.rs:354` ("an acknowledged publication leaves no staged
+marker"). The old check passed it.
+
+**Corrects D-1770.** The kept staging name is `complete.tmp`, not
+`complete.writing`. D-1770 stays as written; this entry is the correction.
+
+Invariant L1FC-04.
