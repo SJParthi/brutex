@@ -68638,3 +68638,160 @@ failed (log-1, D-2501)` in `web/tests/sweep-admission.test.js` checks the
 exact response and fourteen damaged or wrong-status variants. Run against
 the old `sweep-admission.js`, it failed:
 `not ok 4 - an audit start refused before dispatch settles the launch as failed`.
+
+### D-4601 — The Fix Board batches are merged onto PR #74 in one step — 2026-10-09
+
+**What was merged.** `fixboard/pr74-batch4` at e0709bd3 (which contains
+batch3 289ea4ab, the pr74-api2 and pr74-ce2 merges, and the batch4 conc rows
+D-2798, D-2799, D-3600 to D-3603), then `fixboard/pr74-batch5` at 7dd8f8d1
+(gap-audit #2 #3 #4 #13 #14 #17, D-3684 to D-3689), onto the data-path merge
+of D-4600, with merge commits. batch5 was cut from batch4 a08d2ec4, so the
+second merge is also where it meets e0709bd3's `linked_or_lost_race`.
+
+**Conflicts.** `crates/pull/src/ingest.rs` and `crates/api/src/logs.rs`:
+both sides added tests at one place, all kept. `docs/05` and `docs/06`:
+tails, both sides, base first; the base's "Not timed per request" bullet
+replaces the branch's older copy of the same line.
+
+**Left as the Fix Board left them.** ledgerall-2, pull2-3, recovery-5's claim
+half, clock-4 and ledgerv6-2 were owner decisions or open designs on the
+board. ledgerall-2 is now closed by the zero-round branch (D-2627, see
+D-4605); the other four stay open.
+
+### D-4602 — A candidate detail's aside is locked from creation until its name is gone — 2026-10-09
+
+**The conflict.** cli2-5 was fixed twice. D-3603 (Fix Board) writes the
+detail to a hidden aside and hard-links it into the final name, so a kill
+part-way leaves no torn file under that name. D-2624 (zero rounds) kept
+`create_new` at the final name, filled an empty remnant in place, and
+rejected the aside because unlinking the aside after the link changes the
+final inode's ctime, which every pinned `FileGeneration` compares. Each side's
+tests failed against the other's code.
+
+**Decision.** D-3603's write path, plus the lock D-2624's objection needs:
+the aside is locked exclusively from its creation, written and synced
+(through `fixed_tail::sync_all_hooked`, so the test fault hook reaches it),
+linked, unlinked, and only then released. A reader reaches the inode only
+through the final name and takes its shared lock before it pins a
+generation, so in the link-to-unlink window it meets `busy` and retries. No
+generation is pinned before the unlink. D-2624's `fill_empty_remnant` stays
+on the existing-name arm for a 0-byte file an older binary left, and its
+reader still answers an empty detail as busy.
+
+**Test re-taken.** D-2624's `a_failed_detail_barrier_leaves_an_empty_file_the_retry_fills`
+asserted the final name holds 0 bytes after a failed barrier. Under the
+merged write a failed barrier leaves nothing under the final name, which is
+the stronger form of ZQ-28. It is renamed
+`a_failed_detail_barrier_leaves_nothing_under_the_name_and_the_retry_lands`
+and asserts that, plus that the aside is removed. ZQ-28's row says so.
+
+**Proof.** `a_detail_being_written_is_locked_against_every_reader` (MRG-01):
+a shared lock on the aside, tried during each of the three writes, is
+refused with `WouldBlock`.
+
+### D-4603 — Selection V6's quarantine follows D-2554, and D-2027's two tests are re-taken for it — 2026-10-09
+
+**The conflict.** CE-88 / conc4-1 was fixed twice. D-2790 (Fix Board, via
+pr74-ce2) named the quarantine `abandoned-<offset>-<16 hex>`, created it with
+`create_new` and compared an existing copy's bytes. D-2554 (zero rounds)
+writes the copy under a `.writing` scratch name, syncs it, and renames it to
+`abandoned-<offset>-<64 hex of the tail>`, so a failed or killed copy never
+sits under a final name and a repeated quarantine never wedges the rung.
+
+**Decision.** D-2554's design, which is strictly stronger: D-2790's own proof
+test passes under it. `quarantine_path` is removed with the code that called
+it; its CE-88 rationale moved to `set_aside_abandoned_tail`'s doc.
+
+**Tests re-taken.** Two G18-cli-b-19 tests (D-2027) asserted the old
+comparison. `reuse_sets_nothing_aside_records_bind_and_an_identical_quarantine_is_accepted`
+was already red after the batch4 merge, because it placed its quarantine at
+the offset-only name. It now places other bytes at that old name (left
+untouched, never compared) and an identical copy at the content name
+(accepted). `a_quarantine_that_cannot_be_created_refuses_with_the_create_error`
+now expects D-2554's wording, "Selection V6 abandoned tail quarantine <path>:
+…; the ledger was not changed". The "Also in this merge" paragraph of
+D-2795 that says the name is built by `quarantine_path` is history; this
+entry supersedes it.
+
+### D-4604 — The invocation index keeps one bounded lock wait, D-2799's — 2026-10-09
+
+cli1-2 was fixed twice with the same one-second bound: D-2799's
+`operation_audit::within(INDEX_LOCK_WAIT)` and D-2620's
+`lock_wait::patiently`. Keeping both would leave one of them used only by
+tests. The merge keeps D-2799's and both sides' tests, which pass against it.
+`lock_wait.rs`'s module doc said the index went through `patiently`; it now
+says the other three writers do and the index does not.
+
+### D-4605 — The zero-round branch is merged onto PR #74, and the rest of its overlaps are joined — 2026-10-09
+
+**What was merged.** `zero/next` at 8db2fa83 (G1-G8, D-2500 to D-2648, the
+look-ahead fix D-3696 and the in-sample stop note D-3697) onto D-4601's
+head. 63 files conflicted. The doc ledgers took both sides, base first. The
+`web/build` bundle was rebuilt from the merged `web/src` (node 22; `npm ci`
+then `npm run build`), and W2 ran 911 of 911.
+
+**Joined, both halves kept** (each side's tests pass against the join):
+- `cli::ledger_all`: the base's `OpenRung` alias and D-2627's
+  `visit_committed`. ledgerall-2 follows D-2627. D-0625 still holds, because
+  Global Replay keeps `visit_canonical` and its exactly-8×25 cohort.
+- `cli::execution_lease`: D-2774's probe gate and D-2620's patient wait, the
+  wait taken with the gate free, so no probe waits behind it.
+- `cli::ledger_v6`: D-2799's sync-to-root loop over D-2623's durable walker.
+- `runner::audit`: D-2546's `keep_larger` with D-2055's `is_negative`.
+- `indicators::trend`: D-2613's generic `side` calls D-3403's `side_by`.
+- `pull::capture`: D-2527's stronger body under D-3600's name, one scratch
+  path. `pull::cash_session_cache`: D-2534's loops on D-2799's shared lock,
+  one `lock_day_shared`. `pull::ingest::record_all`: D-2528's per-row names
+  and D-2529's fault split with D-3601's batch sentence. `pull::fold`: the
+  same divisor fix twice (D-3130, D-2608), test widths unioned.
+- `api::audit`: both journal mutexes, always taken in one order.
+  `api::recovery`: D-2798's `terminal_outcome` and D-2503's `with_terminal`.
+  `api::expressionsearchjson`: D-2777's held-session LRU with D-2576's
+  unlocked cold open.
+- The head deadline's interim test (MRG-03): D-3688 judged any 1xx status
+  line interim; D-2597 judged only a lone `HTTP/1.1 100` head interim, so an
+  interim coalesced with the final response re-arms. The write path now uses
+  one predicate with both rules: a 1xx head of either version, ending at its
+  blank line, with nothing after it on either path. D-2597's
+  `is_interim_response` is folded into `interim`, and its edge table tests
+  the one predicate (HTTP/1.0 100 and 101 are interim under D-3688's rule).
+
+### D-4606 — The autopilot's probe keeps D-2756's guard on D-2579's steady clock — 2026-10-09
+
+D-2579 moved the store-probe and stall schedules onto a monotonic clock that
+cannot step. D-2756's guard answers `Now` when the deadline is further away
+than the wait that armed it, which only a clock behind the arming instant
+produces. The merge keeps both. D-2579's test asserted `Later` at
+`now_secs = i64::MIN`; under the guard the far past is `Now`. That assertion
+is re-taken, and a new one pins the arming instant itself as `Later`.
+
+### D-4607 — A master present at the parse and absent now still reads as changed — 2026-10-09
+
+D-2580 (clock-5) and D-2757 (CE-85) fixed the same finding. The merge keeps
+D-2580's `FileStamp` (length, mtime, device, inode, ctime) and D-2757's
+comparison: no stamp slot answers `null`, and a stamp that differs from
+what is on disk now, absence included, is a change. D-2580 read a removed
+master as unchanged. The process then answers from bytes no longer on disk
+and the page says no restart is needed, which is the quiet answer
+`CLAUDE.md` §4 bans. D-2580's test is re-taken at its last assertion: the
+removed master is the one row that reads as changed.
+
+### D-4608 — Shutdown reaches every walk; the autopilot's Stop reaches only its own — 2026-10-09
+
+**The conflict.** D-2771 made the shutdown signal pause the autopilot, so
+the stop generation moved and every walk, hand walks included, broke at its
+next instrument and journalled its partial run. D-2695 then made hand walks,
+press legs and recovery units carry no generation, so the autopilot page's
+Stop could not cut them. Merged as written, shutdown no longer broke a hand
+walk: it ran on until the bounded drain cut it.
+
+**Decision.** Two signals. `autopilot::Control` gains a `shutting_down`
+flag, set once by `stopping_walks` and never cleared. The instrument loop
+asks `Control::walk_stops(epoch)`: the flag, or, for a walk that captured a
+generation, the generation having moved. Shutdown stops every walk again
+(D-2771) and the page's Stop still reaches only the autopilot's walk
+(D-2695). The added cost is one relaxed load per instrument.
+
+**Proof.** `a_pause_stops_only_the_autopilots_walk_and_a_shutdown_stops_every_walk`
+walks the whole truth table, and the D-2771 shutdown test now also asserts
+that a hand walk stops (MRG-02).
