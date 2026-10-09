@@ -193,15 +193,186 @@ fn a_name_with_two_readings_or_none_is_refused_by_name() {
     assert!(decode_ticker("ACC25JAN1300CE", day(2018, 12, 3)).is_err());
 }
 
+/// DB-G51 (D-3331): a stated expiry on a closed day is no longer kept as
+/// stated. Before the fix `NIFTY29MAR2422000CE` (Good Friday 2024, a holiday
+/// no measured re-dating names) decoded to a contract keyed on the holiday;
+/// it now settles on the previous open session, the charter's NSE rule, and
+/// keeps the vendor's text as its alias.
 #[test]
-fn an_expiry_on_a_weekday_holiday_is_kept_as_the_vendor_stated_it() {
-    // 2024-03-29 was Good Friday, a trading holiday; the name is the identity.
+fn an_expiry_on_a_closed_day_settles_on_the_previous_session_and_keeps_its_text() {
+    let got = decode_ticker("NIFTY29MAR2422000CE", day(2024, 3, 27)).unwrap();
+    assert_eq!(got.contract.as_str(), "2024-03-28-2200000-CE");
     assert_eq!(
-        contract("NIFTY29MAR2422000CE", day(2024, 3, 27)),
-        "2024-03-29-2200000-CE"
+        (got.expiry, got.stated),
+        (day(2024, 3, 28), day(2024, 3, 29))
+    );
+    assert_eq!(got.settlement.as_str(), "closed_day_rule");
+    assert_eq!(got.ticker_text(), "NIFTY29MAR2422000CE");
+    // Traded on the settled day itself: still the contract's last session.
+    assert_eq!(
+        contract("NIFTY29MAR2422000CE", day(2024, 3, 28)),
+        "2024-03-28-2200000-CE"
     );
     // A weekend is no day-form reading.
     assert!(decode_ticker("NIFTY06APR2422000CE", trade()).is_err());
+}
+
+/// DB-018 / DB-G50 (D-3331): one contract, one series. Every text the vendor
+/// gave a re-dated contract decodes to ONE contract segment, keyed on the day
+/// it settled, and each name still renders back to its own text.
+#[test]
+fn every_text_of_a_re_dated_contract_is_one_contract_keyed_on_its_settled_day() {
+    let one = |names: &[(&str, Day)], want: &str| {
+        for &(name, on) in names {
+            let got = decode_ticker(name, on).unwrap();
+            assert_eq!(got.contract.as_str(), want, "{name} on {on}");
+            assert_eq!(got.ticker_text(), name, "the vendor's text is kept");
+        }
+    };
+    // 29 June 2023 became a holiday: `29JUN23` became `28JUN23` on the 28th.
+    one(
+        &[
+            ("ACC29JUN231800CE", day(2023, 6, 27)),
+            ("ACC28JUN231800CE", day(2023, 6, 28)),
+        ],
+        "2023-06-28-180000-CE",
+    );
+    // A NIFTY long-dated contract of 2019 keyed on the same settled day; the
+    // census holds three such keyed on the closed 2023-06-29 today.
+    let leaps = decode_ticker("NIFTY29JUN239500PE", day(2019, 2, 20)).unwrap();
+    assert_eq!(leaps.contract.as_str(), "2023-06-28-950000-PE");
+    assert_eq!(leaps.stated, day(2023, 6, 29));
+    assert_eq!(leaps.expiry, day(2023, 6, 28));
+    assert_eq!(leaps.settlement.as_str(), "aliased");
+    // The weekday-regime change of 2025-01-01.
+    one(
+        &[
+            ("BANKNIFTY29JAN2550000PE", day(2025, 1, 1)),
+            ("BANKNIFTY30JAN2550000PE", day(2025, 1, 2)),
+        ],
+        "2025-01-30-5000000-PE",
+    );
+    // A chain of three texts: 26MAR26, 31MAR26, then 30MAR26.
+    one(
+        &[
+            ("NIFTY26MAR2623000PE", day(2025, 7, 31)),
+            ("NIFTY31MAR2623000PE", day(2025, 8, 1)),
+            ("NIFTY31MAR2623000PE", day(2025, 12, 26)),
+            ("NIFTY30MAR2623000PE", day(2025, 12, 29)),
+        ],
+        "2026-03-30-2300000-PE",
+    );
+    // MIDCPNIFTY `22JAN24`: never renamed, settled on the Saturday session.
+    let mid = decode_ticker("MIDCPNIFTY22JAN2410000CE", day(2024, 1, 20)).unwrap();
+    assert_eq!(mid.contract.as_str(), "2024-01-20-1000000-CE");
+    assert_eq!(mid.ticker_text(), "MIDCPNIFTY22JAN2410000CE");
+    // An open stated day is its own settlement, labelled so.
+    let plain = decode_ticker("NIFTY04APR2422000CE", trade()).unwrap();
+    assert_eq!(plain.stated, plain.expiry);
+    assert_eq!(plain.settlement.as_str(), "as_stated");
+    // A monthly name's derived expiry settles as itself.
+    let monthly = decode_ticker("ACC18DEC1300CE", day(2018, 12, 3)).unwrap();
+    assert_eq!(
+        (monthly.stated, monthly.settlement.as_str()),
+        (day(2018, 12, 27), "as_stated")
+    );
+}
+
+/// A retired text the vendor ships again on or after its rename day would
+/// name a different contract: refused by name.
+#[test]
+fn a_retired_text_traded_after_its_rename_is_refused() {
+    for on in [day(2023, 6, 28), day(2023, 6, 29)] {
+        assert!(
+            matches!(
+                decode_ticker("ACC29JUN231800CE", on),
+                Err(NfoRefusal::ExpiryUnsettled {
+                    why: crate::expiry_alias::SettleRefusal::TextAfterRename { .. },
+                    ..
+                })
+            ),
+            "{on}"
+        );
+    }
+}
+
+/// A source whose fetch is never expected: a refusal before any byte is read
+/// comes back as itself, not as this source's error.
+struct NoFetch;
+
+impl NfoSource for NoFetch {
+    type Locator = u8;
+
+    fn day(&self, _: Day) -> Result<Option<NfoDay<u8>>, CmRefusal> {
+        Ok(None)
+    }
+
+    fn fetch(&self, _: &ListedFile<u8>) -> Result<Vec<u8>, CmRefusal> {
+        Err(CmRefusal::NotSwept)
+    }
+}
+
+/// DB-027 / DB-G52 (D-3331): the three NIFTY `25JUN20` strikes of 2019-05-30
+/// (19,12,500 to 19,13,000 with the day's ladder near 11,700) are refused by
+/// name before a byte is read, so they are never stored and never listed.
+/// Before the fix `read_file` decoded them as contracts.
+#[test]
+fn a_strike_far_off_the_days_ladder_is_refused_before_it_is_read() {
+    let on = day(2019, 5, 30);
+    let mut listing: NfoDay<u8> = NfoDay::new(on, 8);
+    let real = [
+        "NIFTY30MAY1911700CE",
+        "NIFTY30MAY1911800PE",
+        "NIFTY27JUN1911700CE",
+        "NIFTY27JUN1912500CE",
+        "NIFTY25JUN2010900CE",
+    ];
+    let impossible = [
+        "NIFTY25JUN201912500CE",
+        "NIFTY25JUN201912700CE",
+        "NIFTY25JUN201913000CE",
+    ];
+    for (at, name) in real.iter().chain(&impossible).enumerate() {
+        listing.push(&entry(on, name), 1, 1, u8::try_from(at).unwrap());
+    }
+    // The lower median of the eight decodable strikes is 11,800.
+    assert_eq!(listing.strike_median("NIFTY"), Some(1_180_000));
+    assert_eq!(listing.strike_median("BANKNIFTY"), None);
+    for (at, name) in impossible.iter().enumerate() {
+        let file = &listing.entries()[real.len() + at];
+        let got = read_file(&NoFetch, &listing, file).unwrap_err();
+        let NfoRefusal::StrikeImplausible {
+            ticker,
+            strike,
+            median,
+        } = &got
+        else {
+            panic!("{name}: {got:?}")
+        };
+        assert_eq!((ticker.as_str(), *median), (*name, 1_180_000));
+        assert!(*strike > 190_000_000, "{strike}");
+        assert!(got.to_string().contains("strike implausible"), "{got}");
+    }
+    // A real strike passes the check and reaches the source.
+    assert_eq!(
+        read_file(&NoFetch, &listing, &listing.entries()[3]),
+        Err(NfoRefusal::Source(CmRefusal::NotSwept))
+    );
+    // The boundary: exactly ten times the median (D-3331's k) is admitted,
+    // one paisa more is not.
+    assert_eq!(STRIKE_PLAUSIBLE_MULTIPLE, 10, "D-3331 decision 2");
+    let mut edge = decode_ticker("NIFTY27JUN1911700CE", on).unwrap();
+    edge.strike = 1_180_000 * STRIKE_PLAUSIBLE_MULTIPLE;
+    assert_eq!(listing.check_strike(&edge, "X"), Ok(()));
+    edge.strike += 1;
+    assert!(matches!(
+        listing.check_strike(&edge, "X"),
+        Err(NfoRefusal::StrikeImplausible { .. })
+    ));
+    // A pushed entry drops the median: it is the whole day's, recomputed.
+    listing.push(&entry(on, "NIFTY27JUN1990000CE"), 1, 1, 9);
+    listing.push(&entry(on, "NIFTY27JUN1990500CE"), 1, 1, 10);
+    assert_eq!(listing.strike_median("NIFTY"), Some(1_250_000));
 }
 
 #[test]
@@ -930,4 +1101,583 @@ fn the_edges_mutation_found_hold() {
     listing.push("x", 1, 1, 0);
     listing.push("y", 1, 1, 1);
     assert_eq!(listing.skipped(), 2);
+}
+
+/// D-3331 against the operator's REAL options zips, read-only: every name
+/// of every vendor day in `BRUTEX_WP12B_FROM..=BRUTEX_WP12B_TO` (default the
+/// whole archive) is decoded and checked against its day's ladder, and no
+/// file's bytes are read. No vendor row reaches the repository: only counts,
+/// names and derived ratios are printed. Over the whole archive the
+/// settlement refuses no real name, the closed-day rule answers none (every
+/// closed stated day the archive holds is a row), no two names of a day
+/// settle on one contract, the table re-keys exactly its own count of
+/// distinct names, and the strike check refuses exactly the three NIFTY
+/// `25JUN20` names of 2019-05-30. It prints the day-ladder ratios
+/// `STRIKE_PLAUSIBLE_MULTIPLE` is chosen against: each underlying-day's
+/// highest strike over its lower median, and its lower median over its
+/// lowest strike.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_NFO_ARCHIVES (the vendor's yearly options zips); read-only"]
+fn the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes() {
+    let dir = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES").expect("BRUTEX_GDFL_NFO_ARCHIVES");
+    let bound = |var: &str, fallback: Day| {
+        std::env::var(var).ok().map_or(fallback, |text| {
+            let parts: Vec<u16> = text.split('-').map(|p| p.parse().unwrap()).collect();
+            day(
+                parts[0],
+                u8::try_from(parts[1]).unwrap(),
+                u8::try_from(parts[2]).unwrap(),
+            )
+        })
+    };
+    let (from, to) = (
+        bound("BRUTEX_WP12B_FROM", day(2018, 9, 3)),
+        bound("BRUTEX_WP12B_TO", day(2026, 9, 24)),
+    );
+    let zips = NfoZips::new(Path::new(&dir));
+    let (mut days, mut names, mut rekeyed) = (0_u64, 0_u64, 0_u64);
+    let mut rekeyed_names: HashSet<String> = HashSet::new();
+    let mut unsettled: Vec<String> = Vec::new();
+    let mut implausible: Vec<String> = Vec::new();
+    // Two names of one vendor day that settle on one contract: the split
+    // D-3331 closes would have become a same-day collision instead.
+    let mut collisions: Vec<String> = Vec::new();
+    let mut by_rule: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    // (ratio x 100, day, underlying) of the highest strike over the lower
+    // median, and of the lower median over the lowest strike.
+    let mut high: Vec<(i64, Day, String)> = Vec::new();
+    let mut low: Vec<(i64, Day, String)> = Vec::new();
+    let mut on = from;
+    while on <= to {
+        if let Some(listing) = zips.day(on).unwrap() {
+            days += 1;
+            let mut seen: HashMap<(String, String), String> = HashMap::new();
+            let mut ladders: HashMap<String, (i64, i64)> = HashMap::new();
+            for file in listing.entries() {
+                let Some(name) = listing.ticker_of(file) else {
+                    continue;
+                };
+                names += 1;
+                match decode_ticker(name, on) {
+                    Ok(ticker) => {
+                        if ticker.expiry != ticker.stated {
+                            rekeyed += 1;
+                            rekeyed_names.insert(name.to_owned());
+                        }
+                        if ticker.settlement == crate::expiry_alias::Settlement::ClosedDayRule {
+                            *by_rule
+                                .entry(format!("{} {}", ticker.underlying.as_str(), ticker.stated))
+                                .or_default() += 1;
+                        }
+                        let key = (
+                            ticker.underlying.as_str().to_owned(),
+                            ticker.contract.as_str().to_owned(),
+                        );
+                        if let Some(first) = seen.insert(key, name.to_owned()) {
+                            collisions.push(format!("{on} {first} {name}"));
+                        }
+                        if listing.check_strike(&ticker, name).is_err() {
+                            implausible.push(format!("{on} {name}"));
+                        } else {
+                            let span = ladders
+                                .entry(ticker.underlying.as_str().to_owned())
+                                .or_insert((ticker.strike, ticker.strike));
+                            span.0 = span.0.min(ticker.strike);
+                            span.1 = span.1.max(ticker.strike);
+                        }
+                    }
+                    Err(NfoRefusal::ExpiryUnsettled { why, .. }) => {
+                        unsettled.push(format!("{on} {name}: {why}"));
+                    }
+                    Err(_) => {}
+                }
+            }
+            for (under, (lo, hi)) in ladders {
+                let median = listing.strike_median(&under).unwrap();
+                high.push((hi * 100 / median, on, under.clone()));
+                if lo > 0 {
+                    low.push((median * 100 / lo, on, under));
+                }
+            }
+            high.sort_unstable_by(|a, b| b.cmp(a));
+            high.truncate(3);
+            low.sort_unstable_by(|a, b| b.cmp(a));
+            low.truncate(3);
+        }
+        on = on.succ().unwrap();
+    }
+    eprintln!(
+        "real archive {from}..={to}: {days} vendor days, {names} names, {rekeyed} re-keyed file-days ({} distinct names) to a settled day, {} settled by the closed-day rule {by_rule:?}, {} unsettled, {} same-day collisions, {} implausible: {implausible:?} {:?} {:?}; admitted ladders, highest strike / lower median x100: {high:?}; lower median / lowest strike x100: {low:?}",
+        rekeyed_names.len(),
+        by_rule.values().sum::<u64>(),
+        unsettled.len(),
+        collisions.len(),
+        implausible.len(),
+        &unsettled[..unsettled.len().min(20)],
+        &collisions[..collisions.len().min(20)]
+    );
+    assert!(days > 0, "no vendor day in range");
+    assert!(unsettled.is_empty(), "{unsettled:?}");
+    assert!(collisions.is_empty(), "{collisions:?}");
+    // Every closed stated day of the archive is a row: the rule answers
+    // only days the archive has not shown.
+    assert!(by_rule.is_empty(), "{by_rule:?}");
+    // No admitted ladder comes within reach of the multiple.
+    assert!(
+        high.iter()
+            .all(|(ratio, ..)| *ratio < STRIKE_PLAUSIBLE_MULTIPLE * 100),
+        "{high:?}"
+    );
+    let impossible = [
+        "2019-05-30 NIFTY25JUN201912500CE",
+        "2019-05-30 NIFTY25JUN201912700CE",
+        "2019-05-30 NIFTY25JUN201913000CE",
+    ];
+    if (from..=to).contains(&day(2019, 5, 30)) {
+        implausible.sort();
+        assert_eq!(implausible, impossible);
+    } else {
+        assert!(implausible.is_empty(), "{implausible:?}");
+    }
+    if (from, to) == (day(2018, 9, 3), day(2026, 9, 24)) {
+        assert_eq!(
+            u32::try_from(rekeyed_names.len()).unwrap(),
+            crate::expiry_alias::ALIASES
+                .iter()
+                .map(|row| row.contracts)
+                .sum::<u32>(),
+            "the table's contract counts are the archive's re-keyed names"
+        );
+    }
+}
+
+/// D-3331 against the operator's REAL zips and REAL store, read-only: every
+/// option name of each underlying in `BRUTEX_WP12B_UNDERLYINGS` first traded
+/// in `BRUTEX_WP12B_FROM..=BRUTEX_WP12B_TO` is decoded, and the contract set
+/// is compared with the contract directories `BRUTEX_STORE_FNO` (the store's
+/// `bars/gdfl/NSE/FNO`) holds for it. Names and directory names only: no
+/// file's bytes are read and nothing is written. Prints what the decoder no
+/// longer files (the refused names, the closed stated days) and what it files
+/// instead (their settled days); every other contract must agree.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_NFO_ARCHIVES and BRUTEX_STORE_FNO; read-only"]
+fn the_real_names_decode_to_the_stored_contracts_less_the_refused_and_the_resettled() {
+    let dir = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES").expect("BRUTEX_GDFL_NFO_ARCHIVES");
+    let store =
+        std::path::PathBuf::from(std::env::var_os("BRUTEX_STORE_FNO").expect("BRUTEX_STORE_FNO"));
+    let unders = std::env::var("BRUTEX_WP12B_UNDERLYINGS").unwrap_or_else(|_| "NIFTY".to_owned());
+    let bound = |var: &str, fallback: Day| {
+        std::env::var(var).ok().map_or(fallback, |text| {
+            let parts: Vec<u16> = text.split('-').map(|p| p.parse().unwrap()).collect();
+            day(
+                parts[0],
+                u8::try_from(parts[1]).unwrap(),
+                u8::try_from(parts[2]).unwrap(),
+            )
+        })
+    };
+    let (from, to) = (
+        bound("BRUTEX_WP12B_FROM", day(2018, 9, 3)),
+        bound("BRUTEX_WP12B_TO", day(2020, 9, 15)),
+    );
+    let wanted: HashSet<&str> = unders.split(',').collect();
+    let zips = NfoZips::new(Path::new(&dir));
+    let mut decoded: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    let mut refused: Vec<String> = Vec::new();
+    let mut refused_contracts: HashSet<(String, String)> = HashSet::new();
+    // (underlying, name) -> (the stated contract, the settled one, how).
+    let mut resettled: std::collections::BTreeMap<(String, String), (String, String, &str)> =
+        std::collections::BTreeMap::new();
+    let mut on = from;
+    while on <= to {
+        if let Some(listing) = zips.day(on).unwrap() {
+            for file in listing.entries() {
+                let Some(name) = listing.ticker_of(file) else {
+                    continue;
+                };
+                match decode_ticker(name, on) {
+                    Ok(ticker) if wanted.contains(ticker.underlying.as_str()) => {
+                        if let Err(why) = listing.check_strike(&ticker, name) {
+                            refused.push(format!("{on} {why}"));
+                            refused_contracts.insert((
+                                ticker.underlying.as_str().to_owned(),
+                                ticker.contract.as_str().to_owned(),
+                            ));
+                            continue;
+                        }
+                        if ticker.expiry != ticker.stated {
+                            let stated = crate::gdfl_lineage::ContractDay {
+                                expiry: ticker.stated,
+                                strike: ticker.strike,
+                                side: ticker.side,
+                                lot: crate::gdfl_lineage::LotEvidence::NoTrade,
+                                first_oi: None,
+                                close_oi: None,
+                            }
+                            .contract()
+                            .unwrap();
+                            resettled.insert(
+                                (ticker.underlying.as_str().to_owned(), name.to_owned()),
+                                (
+                                    stated.as_str().to_owned(),
+                                    ticker.contract.as_str().to_owned(),
+                                    ticker.settlement.as_str(),
+                                ),
+                            );
+                        }
+                        decoded
+                            .entry(ticker.underlying.as_str().to_owned())
+                            .or_default()
+                            .insert(ticker.contract.as_str().to_owned());
+                    }
+                    Ok(_) => {}
+                    Err(why) => {
+                        if wanted.iter().any(|u| name.starts_with(u)) {
+                            refused.push(format!("{on} {name}: {why}"));
+                        }
+                    }
+                }
+            }
+        }
+        on = on.succ().unwrap();
+    }
+    for under in &wanted {
+        let held: std::collections::BTreeSet<String> = std::fs::read_dir(store.join(under))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let mine = decoded.remove(*under).unwrap_or_default();
+        let only_held: Vec<&String> = held.difference(&mine).collect();
+        let only_mine: Vec<&String> = mine.difference(&held).collect();
+        eprintln!(
+            "{under} {from}..={to}: {} decoded contracts, {} stored; only stored {}: {only_held:?}; only decoded {}: {only_mine:?}",
+            mine.len(),
+            held.len(),
+            only_held.len(),
+            only_mine.len()
+        );
+        // What this decoder changed, checked both ways: every name it now
+        // re-keys had its STATED contract stored and files its SETTLED one,
+        // which the store lacks; every name it refuses as implausible was
+        // stored and is not filed. Anything else that differs (a contract
+        // first traded after `to`, a file an older reader refused) is
+        // printed, and is not this decoder's doing.
+        let closed = |seg: &str| {
+            let day = crate::gdfl_lineage::parse_day(&seg[..10]).unwrap();
+            crate::calendar::sourced_kind_of(i64::from(day.days_from_epoch()))
+                == crate::calendar::DayKind::Closed
+        };
+        let mut changed = 0_usize;
+        for ((_, name), (stated, settled, _)) in resettled.iter().filter(|((u, _), _)| u == under) {
+            assert!(
+                held.contains(stated),
+                "{under}: {name} was stored as {stated}"
+            );
+            assert!(
+                mine.contains(settled) && !held.contains(settled),
+                "{under}: {settled}"
+            );
+            changed += 1;
+        }
+        for (u, seg) in refused_contracts.iter().filter(|(u, _)| u == under) {
+            assert!(held.contains(seg) && !mine.contains(seg), "{u}: {seg}");
+            changed += 1;
+        }
+        let other_held: Vec<&&String> = only_held
+            .iter()
+            .filter(|seg| {
+                !closed(seg) && !refused_contracts.contains(&((*under).to_owned(), (**seg).clone()))
+            })
+            .collect();
+        let other_mine: Vec<&&String> = only_mine
+            .iter()
+            .filter(|seg| !resettled.values().any(|(_, settled, _)| settled == **seg))
+            .collect();
+        eprintln!(
+            "{under}: {changed} names changed by this decoder; other differences, not this decoder's: stored only {other_held:?}, decoded only {other_mine:?}"
+        );
+    }
+    eprintln!("refused {}: {refused:?}", refused.len());
+    eprintln!("resettled {}: {resettled:?}", resettled.len());
+}
+
+/// D-3331 / D-3343 against the operator's REAL options zips, read-only: the
+/// corporate-action detector on the ex-dates the audit measured (DB-G71,
+/// DB-G72, DB-G77), and on the next ordinary day as the control. Only counts
+/// are printed; no vendor row reaches the repository.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_NFO_ARCHIVES (the vendor's yearly options zips); read-only"]
+fn the_real_ex_dates_are_detected_from_the_data_and_ordinary_days_are_not() {
+    use crate::gdfl_lineage::{ContractDay, OiCarry, detect};
+    let dir = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES").expect("BRUTEX_GDFL_NFO_ARCHIVES");
+    let zips = NfoZips::new(Path::new(&dir));
+    // The contract-days of `under` on `on`, with each file's rows kept.
+    let day_of = |under: &str, on: Day| {
+        let mut out: Vec<(ContractDay, Vec<(u32, i64)>)> = Vec::new();
+        let Some(listing) = zips.day(on).unwrap() else {
+            return out;
+        };
+        for file in listing.entries() {
+            let Some(name) = listing.ticker_of(file) else {
+                continue;
+            };
+            let Ok(ticker) = decode_ticker(name, on) else {
+                continue;
+            };
+            if ticker.underlying.as_str() != under {
+                continue;
+            }
+            let read = read_file(&zips, &listing, file).unwrap();
+            let rows: Vec<(u32, u64, i64)> = read
+                .file
+                .rows
+                .iter()
+                .map(|r| (r.sod, r.ltq, r.oi))
+                .collect();
+            out.push((
+                ContractDay::from_rows(&read.ticker, rows.iter().copied()),
+                rows.iter().map(|&(sod, _, oi)| (sod, oi)).collect(),
+            ));
+        }
+        out
+    };
+    // (underlying, the vendor day before, the ex-date, the next day, the lot
+    // step the audit measured as after : before).
+    let cases = [
+        (
+            "BRITANNIA",
+            day(2018, 11, 28),
+            day(2018, 11, 29),
+            day(2018, 11, 30),
+            (2, 1),
+        ),
+        (
+            "NTPC",
+            day(2019, 3, 18),
+            day(2019, 3, 19),
+            day(2019, 3, 20),
+            (6, 5),
+        ),
+        (
+            "HCLTECH",
+            day(2019, 12, 4),
+            day(2019, 12, 5),
+            day(2019, 12, 6),
+            (2, 1),
+        ),
+        (
+            "BAJAJFINSV",
+            day(2022, 9, 12),
+            day(2022, 9, 13),
+            day(2022, 9, 14),
+            (10, 1),
+        ),
+        (
+            "RELIANCE",
+            day(2024, 10, 25),
+            day(2024, 10, 28),
+            day(2024, 10, 29),
+            (2, 1),
+        ),
+        (
+            "BAJFINANCE",
+            day(2025, 6, 13),
+            day(2025, 6, 16),
+            day(2025, 6, 17),
+            (10, 1),
+        ),
+    ];
+    for (under, before, ex, next, (num, den)) in cases {
+        let symbol = brutex_core::symbol::Symbol::new(under).unwrap();
+        let (eve, post, later) = (
+            day_of(under, before),
+            day_of(under, ex),
+            day_of(under, next),
+        );
+        // The pre-ex state: the latest contract-day of every key over the
+        // hundred days before the ex-date (a contract lists at most three
+        // months ahead), still unexpired on it.
+        let mut latest: std::collections::BTreeMap<String, (ContractDay, Vec<(u32, i64)>)> =
+            std::collections::BTreeMap::new();
+        let mut on = Day::from_days(before.days_from_epoch() - 100).unwrap();
+        while on <= before {
+            for (c, rows) in day_of(under, on) {
+                if c.expiry >= ex {
+                    latest.insert(c.contract().unwrap().to_string(), (c, rows));
+                }
+            }
+            on = on.succ().unwrap();
+        }
+        let pre: Vec<(ContractDay, Vec<(u32, i64)>)> = latest.into_values().collect();
+        let strip = |days: &[(ContractDay, Vec<(u32, i64)>)]| -> Vec<ContractDay> {
+            days.iter().map(|(c, _)| *c).collect()
+        };
+        let eve_only = detect(symbol, ex, &strip(&eve), &strip(&post)).expect(under);
+        let event = detect(symbol, ex, &strip(&pre), &strip(&post)).expect(under);
+        assert!(event.lineage.len() >= eve_only.lineage.len(), "{under}");
+        let count = |carry: OiCarry| event.lineage.iter().filter(|l| l.oi == carry).count();
+        let reused = event.lineage.iter().filter(|l| l.reused).count();
+        // The stale ex-date rows of every pair whose OI carried unscaled.
+        let mut stale_rows = 0_usize;
+        let mut records: Vec<String> = Vec::new();
+        for pair in event.lineage.iter().filter(|l| l.oi == OiCarry::Unadjusted) {
+            let new = post
+                .iter()
+                .find(|(c, _)| c.contract() == Some(pair.new))
+                .unwrap();
+            let stale = pair.stale_oi(&new.1);
+            assert!(
+                stale.rows > 0 && stale.until_sod.is_some(),
+                "{under}: {pair:?}"
+            );
+            stale_rows += stale.rows;
+            records.push(pair.record(&new.1).line());
+        }
+        // The records parse back (D-3331's lines); the unix second is derived
+        // from the vendor's stamps, the only part of a row a record carries.
+        for line in &records {
+            assert!(
+                crate::gdfl_lineage::LineageRecord::parse(line).is_some(),
+                "{line}"
+            );
+        }
+        // The first post-ex OI over the pre-ex close, per mille, of every pair
+        // whose carry neither scales nor equals: a derived ratio, not a row.
+        let odd: Vec<i64> = event
+            .lineage
+            .iter()
+            .filter(|l| l.oi == OiCarry::Unexplained)
+            .map(|pair| {
+                let old = pre
+                    .iter()
+                    .find(|(c, _)| c.contract() == Some(pair.old))
+                    .unwrap();
+                let new = post
+                    .iter()
+                    .find(|(c, _)| c.contract() == Some(pair.new))
+                    .unwrap();
+                new.0.first_oi.unwrap() * 1_000 / old.0.close_oi.unwrap()
+            })
+            .collect();
+        eprintln!(
+            "{under} {ex}: lot {} -> {}, {} pre-ex keys ({} traded the day before, {} paired from it), {} post-ex, {} paired, {} unpaired, {} stitched keys ({reused} of them renamed), OI scaled {} unadjusted {} ({stale_rows} stale rows) indistinct {} unexplained {} {odd:?} missing {}",
+            event.lot_before,
+            event.lot_after,
+            pre.len(),
+            eve.len(),
+            eve_only.lineage.len(),
+            post.len(),
+            event.lineage.len(),
+            event.unpaired.len(),
+            event.stitched.len(),
+            count(OiCarry::Scaled),
+            count(OiCarry::Unadjusted),
+            count(OiCarry::Indistinct),
+            count(OiCarry::Unexplained),
+            count(OiCarry::Missing),
+        );
+        assert_eq!(
+            event.lot_after * den,
+            event.lot_before * num,
+            "{under}: the lot steps by {num}/{den}"
+        );
+        assert!(
+            eve_only.lineage.len() * 2 > eve.len(),
+            "{under}: most contracts of the day before pair"
+        );
+        // The next ordinary day is no adjustment.
+        assert_eq!(
+            detect(symbol, next, &strip(&post), &strip(&later)),
+            None,
+            "{under} {next}"
+        );
+        // Every retired key traded again on the ex-date or after it, to the
+        // last retired expiry: the stitched series.
+        let retired = event.retired();
+        let last = pre.iter().map(|(c, _)| c.expiry).max().unwrap();
+        let mut again: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut on = ex;
+        while on <= last {
+            // Names only: no file is read for this.
+            if let Some(listing) = zips.day(on).unwrap() {
+                for file in listing.entries() {
+                    let decoded = listing.ticker_of(file).map(|t| decode_ticker(t, on));
+                    if let Some(Ok(ticker)) = decoded
+                        && ticker.underlying.as_str() == under
+                        && retired.contains(&ticker.contract)
+                    {
+                        again.insert(ticker.contract.to_string());
+                    }
+                }
+            }
+            on = on.succ().unwrap();
+        }
+        eprintln!(
+            "{under}: {} retired keys, {} traded again after the ex-date",
+            retired.len(),
+            again.len()
+        );
+        assert!(again.len() >= event.stitched.len(), "{under}");
+        // The audit's own counts (DB-G71, DB-G72, DB-G77), reproduced.
+        match under {
+            "NTPC" => assert_eq!(again.len(), 35, "NTPC's stitched series"),
+            "BRITANNIA" => assert_eq!(retired.len(), 56, "BRITANNIA's series ending early"),
+            "BAJFINANCE" => assert_eq!(count(OiCarry::Unadjusted), 18, "stale ex-date OI"),
+            _ => {}
+        }
+    }
+}
+
+/// D-3331's per-name costs on REAL days, read-only (names only, no file
+/// read): `decode_ticker` with its settlement, the day's strike medians on
+/// the first ask, and `check_strike` after it. Prints p50 and p99 of each,
+/// timed per call with `Instant`; the ratio harness owns the gate cases.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_NFO_ARCHIVES (the vendor's yearly options zips); read-only"]
+fn the_decoders_costs_on_real_days_are_measured() {
+    let dir = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES").expect("BRUTEX_GDFL_NFO_ARCHIVES");
+    let zips = NfoZips::new(Path::new(&dir));
+    let pct = |mut ns: Vec<u128>, q: usize| {
+        ns.sort_unstable();
+        ns[(ns.len() * q / 100).min(ns.len() - 1)]
+    };
+    for on in [day(2023, 6, 27), day(2026, 8, 3)] {
+        let listing = zips.day(on).unwrap().expect("a vendor day");
+        let names: Vec<&str> = listing
+            .entries()
+            .iter()
+            .filter_map(|f| listing.ticker_of(f))
+            .collect();
+        let mut decode_ns = Vec::with_capacity(names.len());
+        let mut decoded = Vec::with_capacity(names.len());
+        for name in &names {
+            let at = std::time::Instant::now();
+            let got = decode_ticker(name, on);
+            decode_ns.push(at.elapsed().as_nanos());
+            decoded.extend(got.ok().map(|t| (t, *name)));
+        }
+        let at = std::time::Instant::now();
+        let first = decoded
+            .first()
+            .map(|(t, _)| listing.strike_median(t.underlying.as_str()));
+        let medians_ns = at.elapsed().as_nanos();
+        let mut check_ns = Vec::with_capacity(decoded.len());
+        for (ticker, name) in &decoded {
+            let at = std::time::Instant::now();
+            let _ = listing.check_strike(ticker, name);
+            check_ns.push(at.elapsed().as_nanos());
+        }
+        eprintln!(
+            "{on}: {} names, {} decoded; decode_ticker p50 {} ns p99 {} ns; strike medians once {} us; check_strike p50 {} ns p99 {} ns",
+            names.len(),
+            decoded.len(),
+            pct(decode_ns.clone(), 50),
+            pct(decode_ns, 99),
+            medians_ns / 1_000,
+            pct(check_ns.clone(), 50),
+            pct(check_ns, 99),
+        );
+        assert!(first.flatten().is_some(), "{on}: a median");
+        assert_eq!(decoded.len(), names.len(), "{on}: every real name decodes");
+    }
 }

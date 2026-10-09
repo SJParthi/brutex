@@ -111,7 +111,10 @@ fn segment(expiry: Day, paisa: i64, call: bool) -> String {
     )
 }
 
-/// Re-encodes a decoded ticker from its contract segment alone.
+/// Re-encodes a decoded ticker from its contract segment's strike and side
+/// and its STATED expiry. ADAPTED (D-3331): the segment carries the SETTLED
+/// day, which is checked here against the reading and against the
+/// settlement of the stated day, and the name carries the stated one.
 fn reencode(got: &OptionTicker) -> String {
     let seg = got.contract.as_str();
     let parts: Vec<&str> = seg.split('-').collect();
@@ -121,8 +124,22 @@ fn reencode(got: &OptionTicker) -> String {
         parts[1].parse().unwrap(),
         parts[2].parse().unwrap(),
     );
+    assert_eq!(expiry, got.expiry, "{seg}: the segment is the settled day");
+    assert_eq!(
+        crate::expiry_alias::settle(got.underlying.as_str(), got.stated, None)
+            .unwrap()
+            .expiry,
+        got.expiry,
+        "{seg}: the settled day is the stated day's settlement"
+    );
     let paisa: i64 = parts[3].parse().unwrap();
-    encode(got.underlying.as_str(), expiry, paisa, parts[4] == "CE")
+    encode(got.underlying.as_str(), got.stated, paisa, parts[4] == "CE")
+}
+
+/// The day a dated name of `under` stating `stated`, traded on `on`,
+/// settles on (D-3331), or why it cannot.
+fn settled(under: &str, stated: Day, on: Day) -> Result<Day, crate::expiry_alias::SettleRefusal> {
+    crate::expiry_alias::settle(under, stated, Some(on)).map(|s| s.expiry)
 }
 
 /// Whether a decoded ticker's name is the canonical spelling of its
@@ -545,6 +562,7 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
     let strikes = [5_i64, 250, 7_750, 101_250, 2_200_000, 9_999_999_999];
     let (mut tried, mut before_share, mut before_index_refused) = (0_u64, 0_u64, 0_u64);
     let mut before_share_monthly = 0_u64;
+    let (mut rekeyed, mut unsettled) = (0_u64, 0_u64);
     let mut on = d(2018, 9, 3);
     let last = d(2027, 12, 31);
     while on <= last {
@@ -578,12 +596,25 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
                             }
                             Ok(got) => {
                                 assert_eq!(got.underlying.as_str(), under, "{name} on {on}");
+                                // ADAPTED (D-3331): keyed on the SETTLED day.
+                                let settles = settled(under, expiry, on).unwrap();
+                                if settles != expiry {
+                                    rekeyed += 1;
+                                }
                                 assert_eq!(
                                     got.contract.as_str(),
-                                    segment(expiry, paisa, call),
+                                    segment(settles, paisa, call),
                                     "{name} on {on}"
                                 );
                                 assert_eq!(reencode(&got), name);
+                            }
+                            // ADAPTED (D-3331): a dated reading whose stated day
+                            // cannot be settled is refused in the settlement's
+                            // own words, in every era.
+                            Err(NfoRefusal::ExpiryUnsettled { ticker, why }) => {
+                                assert_eq!(ticker, name);
+                                assert_eq!(settled(under, expiry, on), Err(why), "{name} on {on}");
+                                unsettled += 1;
                             }
                             Err(why) => {
                                 assert!(on < cutover(), "{name} on {on}: {why}");
@@ -612,9 +643,49 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
         on = plus(on, 11);
     }
     eprintln!(
-        "dpn_04: {tried} dated names, 0 misread; before the cutover {before_share_monthly} share names read as the monthly form with the sourced day, {before_share} share names refused (the monthly era) and {before_index_refused} index names refused as two-form"
+        "dpn_04: {tried} dated names, 0 misread; before the cutover {before_share_monthly} share names read as the monthly form with the sourced day, {before_share} share names refused (the monthly era) and {before_index_refused} index names refused as two-form; {rekeyed} keyed on a settled day, {unsettled} refused as unsettled"
     );
     assert!(tried > 1_000_000, "{tried}");
+    assert!(
+        rekeyed > 1_000 && unsettled > 1_000,
+        "closed and re-dated stated days settle elsewhere ({rekeyed}), and a retired text traded after its rename is refused ({unsettled})"
+    );
+}
+
+/// ADAPTED (D-3331): every measured re-dating, for every underlying it
+/// names, traded the session before its rename (or on its settled day when
+/// it was never renamed), decodes to the settled contract and renders back to
+/// the vendor's own text.
+#[test]
+fn dpn_04b_every_measured_re_dating_decodes_to_its_settled_contract() {
+    let mut rekeyed = 0_u64;
+    for row in &crate::expiry_alias::ALIASES {
+        let ymd = |(y, m, dd): (u16, u8, u8)| d(y, m, dd);
+        let (stated, settles) = (ymd(row.stated), ymd(row.settled));
+        // The session before the rename for a re-dated row; the settled day
+        // itself for the closed-day row, which was never renamed.
+        let on = match row.kind {
+            crate::expiry_alias::AliasKind::VendorRedated => {
+                Day::from_days(ymd(row.first_day).days_from_epoch() - 1).unwrap()
+            }
+            crate::expiry_alias::AliasKind::ClosedDay => settles,
+        };
+        let unders: Vec<&str> = row
+            .underlying
+            .map_or_else(|| FNO_UNDERLYINGS.to_vec(), |u| vec![u]);
+        for under in unders {
+            let name = encode(under, stated, 7_750, true);
+            let got = decode_ticker(&name, on).unwrap();
+            assert_eq!(
+                got.contract.as_str(),
+                segment(settles, 7_750, true),
+                "{name} on {on}"
+            );
+            assert_eq!(reencode(&got), name);
+            rekeyed += 1;
+        }
+    }
+    assert!(rekeyed > 200, "{rekeyed}");
 }
 
 /// A strike with a leading zero is no exchange spelling, and before the fix
@@ -803,7 +874,9 @@ fn dpn_07_spelling_faults_are_refused_by_name() {
 #[test]
 fn dpn_08_every_underlying_with_decimal_and_extreme_strikes() {
     let on = d(2024, 4, 1);
-    let expiry = d(2024, 4, 25);
+    // ADAPTED (D-3331): not 2024-04-25, whose BANKNIFTY text the vendor
+    // retired on 2024-03-01 (re-dated to the 24th); a day no row touches.
+    let expiry = d(2024, 4, 18);
     let mut tried = 0;
     for under in FNO_UNDERLYINGS {
         for paisa in [
@@ -927,11 +1000,16 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
                     reencode(&got)
                 );
                 let seg = got.contract.as_str();
-                let expiry = d(
+                let settles = d(
                     seg[0..4].parse().unwrap(),
                     seg[5..7].parse().unwrap(),
                     seg[8..10].parse().unwrap(),
                 );
+                // ADAPTED (D-3331): the stated day is the name's, inside the
+                // horizon and a weekday; the segment's is the settled day,
+                // never before the trade.
+                let expiry = got.stated;
+                assert!(settles >= on, "{ticker} on {on}: settled before the trade");
                 assert!(
                     expiry >= on
                         && expiry.days_from_epoch() <= on.days_from_epoch() + EXPIRY_HORIZON_DAYS
