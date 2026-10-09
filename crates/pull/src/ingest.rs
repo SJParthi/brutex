@@ -4134,6 +4134,69 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// **A CENSUS DIRECTORY THAT CANNOT BE MEASURED REFUSES THE LOCK, UNLESS
+    /// IT IS SIMPLY NOT THERE.** R1286-rest-05, D-4153.
+    ///
+    /// When the lock will not open and the directory above it will not stat
+    /// either, the stat's kind decides. A directory that is absent
+    /// (`NotFound`), under a file (`NotADirectory`) or past the host's name
+    /// limit (`InvalidFilename`) is a path the install fails on too, so the
+    /// lock defers to it. Any other kind is not, and a loop of symbolic links
+    /// above the census (`ELOOP`) is refused by name. Gate 18 run 1286 kept the
+    /// guard between them replaced by `false` alive: that defers the loop too,
+    /// and the census then runs unlocked.
+    #[test]
+    fn a_census_directory_that_cannot_be_measured_refuses_unless_it_is_absent() {
+        use std::io::ErrorKind::{InvalidFilename, NotADirectory, NotFound};
+        let root = scratch("lock-unmeasured");
+        let starved = std::io::Error::from(std::io::ErrorKind::OutOfMemory);
+        let kind_above = |lock: &std::path::Path| {
+            std::fs::metadata(lock.parent().expect("a parent"))
+                .expect_err("the directory above cannot be measured")
+                .kind()
+        };
+
+        // A LOOP ABOVE THE LOCK, which no kind in the deferring three names.
+        std::os::unix::fs::symlink(root.join("loop-b"), root.join("loop-a")).expect("a link");
+        std::os::unix::fs::symlink(root.join("loop-a"), root.join("loop-b")).expect("its pair");
+        let looped = root.join("loop-a").join("dhan.man.lock");
+        let kind = kind_above(&looped);
+        assert!(
+            !matches!(kind, NotFound | NotADirectory | InvalidFilename),
+            "{kind:?}"
+        );
+        let Err(why) = CensusLock::unopened(&looped, &starved) else {
+            panic!("a census directory that cannot be measured must refuse, never run unlocked")
+        };
+        assert!(
+            why.starts_with(&format!("the census lock at {}", looped.display()))
+                && why.contains("the directory that holds it could not be measured")
+                && why.ends_with("Refused rather than run without the lock."),
+            "{why}"
+        );
+
+        // THE THREE THAT DEFER, each built and its kind confirmed.
+        std::fs::write(root.join("a-file"), b"NOT A DIRECTORY").expect("a file");
+        for (lock, expected) in [
+            (root.join("absent").join("dhan.man.lock"), NotFound),
+            (
+                root.join("a-file").join("manifest").join("dhan.man.lock"),
+                NotADirectory,
+            ),
+            (
+                root.join("n".repeat(300)).join("dhan.man.lock"),
+                InvalidFilename,
+            ),
+        ] {
+            assert_eq!(kind_above(&lock), expected, "{}", lock.display());
+            assert!(
+                CensusLock::unopened(&lock, &starved).is_ok(),
+                "{expected:?} above the lock is the install's to report"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// **AN IN-PLACE APPEND ENDS UNDER A STAMP NO READER COULD HAVE TAKEN
     /// WHILE IT WROTE.** census-1, D-2766.
     ///

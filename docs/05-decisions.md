@@ -65164,3 +65164,19 @@ holds, unwrapped. R1286-rest-03.
 
 **Rejected.** A hook to corrupt the rebuilt index between rebuild and resume.
 That adds production code whose only purpose is to reach one sentence.
+
+### D-4153 — A census lock above an unmeasurable directory refuses, tested with a link loop — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 left the guard in
+`pull::ingest::CensusLock::unopened` replaced by `false` MISSED. The guard is
+`Some(Err(stat)) if !matches!(stat.kind(), NotFound | NotADirectory |
+InvalidFilename)`. The tests built a standing directory, an absent one and a
+file in its place, but never a directory whose stat fails with any other
+kind. The box runs as root, so a permission denial is not available. A loop of
+symbolic links above the census fails `stat` with `ELOOP` for every uid.
+
+**Decided.** One test builds the loop and requires the refusal: the sentence
+naming the lock, `the directory that holds it could not be measured`, and
+`Refused rather than run without the lock.` It also builds each of the three
+deferring cases, asserts the stat kind it really produces, and requires the
+deferral. R1286-rest-05.
