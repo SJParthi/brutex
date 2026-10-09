@@ -137,7 +137,7 @@ fn an_address_stage_refusal_names_its_origin() {
     };
     // Its own root: the two tests run at once in one process, and a shared
     // tag let either one's `Drop` remove the other's store mid-run (D-4612).
-    let scratch = Scratch::new("address-stage");
+    let scratch = Scratch::new("month-refused");
     let bars = [bar(day(2025, 6, 30), 15, 29)];
     let done = pull::ingest::from_rows(
         &bars,

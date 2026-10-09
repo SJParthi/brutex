@@ -68833,8 +68833,9 @@ side's figure is the merged tree's.
   is unchanged on every side, and the gap-only pin above it did not move.
 - `emitted::the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten`
   counts the api library's emit sites. zero/next counted 76 and 24 reached
-  in server tests, both without D-2771's shutdown drain WARN, which the base
-  carries and drives in `server::shutdown_tests`. The merged tree measures
+  in server tests, both without D-2771's shutdown drain WARN, which the Fix
+  Board batches carry and drive in `server::shutdown_tests` (the base
+  counted 65 and 21). The merged tree measures
   77 sites, and 25 server-test sites makes the partition sum to 77.
 
 **Decision.** Each figure is the merged tree's measurement, written beside
@@ -68899,4 +68900,4 @@ and the test is re-taken; none of these changes production code.
   binary. The two run at once, and either one's `Drop` removed the other's
   store mid-run: measured as `.../bars/zerodha does not exist` under the
   default thread count, green with `--test-threads=1`. It now has its own
-  root, `address-stage`.
+  root, `month-refused`, a tag gate 1d already declares.
