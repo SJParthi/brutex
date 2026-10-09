@@ -1,1 +1,0 @@
-async function e(e,t){try{let n=await e?.json?.();if(typeof n==`object`&&n&&!Array.isArray(n)&&n.schema_version===1&&n.status===`refused`&&Array.isArray(n.rows)&&n.rows.length===0&&typeof n.refusal==`string`&&n.refusal.length<=4096&&n.refusal.trim())return t+` `+n.refusal.trim()}catch{}return t}export{e as t};
