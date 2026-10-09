@@ -74236,3 +74236,54 @@ when only its failing Gate 0 self-test is set aside:
 - 21: two telemetry file-open sites.
 - 23: ten print sites.
 They belong to the audit's own open items and land with its final integration.
+
+### D-4182 — The combined branch lands on PR 74, and the four gates its audit head left open are closed at the merge — 2026-10-09
+
+**What was observed.** `claude/project-thread-lx6ptl` at `614fdc4b` (WS2, WS3,
+WS5 and the audit's paused head `8102ca76`, D-4600..D-4662) was merged onto
+`final/all-fixes` at `ff390a4f`. Five files conflicted. A replay of the
+language-purity job on the merge then failed the four gates D-4662 left open,
+and failed them on the same sites `8102ca76` fails them on:
+
+- Gate 1d refused fourteen numeric cells and two words in the `#[cfg(test)]`
+  modules of `crates/pull/src/http.rs` and `rolling.rs`, all from D-4508's
+  `whole_text` tests (`7`, `700e-2`, `1e19`, `1e20`, `1e21`,
+  `123456789012345678901`, `-0e-99999999999999999999`, `7e`, `0e`, `0ex`,
+  `x7`, `--7`, two exponents past any scale, `fraction`, `microseconds`).
+- Gate 12 refused two cost claims that named no proof: the header of
+  `crates/api/src/topjson.rs`, whose second paragraph is D-4433's
+  one-read refusal, and the doc of
+  `latency_audit_begin_and_terminal_by_directory_size` (D-4441).
+- Gate 21 refused two telemetry file opens: `loss.rs`'s `Ledger::open` of
+  `<dir>/events.loss` (D-4410) and `sink.rs`'s `sync_directory`, which opens
+  the sink's own directory only to `fsync` it (D-4411).
+- Gate 23 refused twenty-three `println!` sites: three more in
+  `api/src/server.rs` and twenty across nine other api files. Every one is
+  the result line of an api latency test under `#[ignore = "a latency
+  measurement, run on purpose: see crate::latency"]`.
+
+**Decided.** Each is declared or proved where the gate asks, with its reason
+beside it. Gate 1d's group is `WHOLE_TEXT_CELL` in `.github/gates_tree.rs`:
+every word is a number a vendor cell can hold or a refusal substring, and
+none is in a path. Gate 12's claims now name their proofs: JR-07 and
+`api::topjson::tests::a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`
+for the header, and OAU-03 and
+`api::operation_audit::tests::the_journals_per_request_growth_is_stated_in_the_limits`
+for the measurement. Gate 21's list gains the two opens, and Gate 23's the
+twenty-three prints, `server.rs` going from 4 to 7. Every declared site was
+read where it sits on the merge.
+
+`crates/runner/src/significance.rs` is reconciled, not picked. D-4505 caps
+the degrees of freedom at `STUDENT_DF_CEILING` inside
+`student_t_two_sided_tail`. D-4150's `turning_point` bisects that same tail
+through `clears_bonferroni`, so past the ceiling the bar is the ceiling's bar
+under both, and it still clears where it turns and not one ulp below. The
+doc says both, and both test sets are kept.
+
+**Rejected.** Fixing the sites instead of declaring them. The literals are
+test inputs whose whole point is their shape, the opens and prints are the
+features D-4410, D-4411 and the latency tests were written to add, and
+rewriting any of them would change what an audited fix asserts. Holding the
+merge for the audit's final batch was rejected by Parthi's "push now"
+(2026-10-09 16:19 UTC). That batch merges on top of this one when the audit
+resumes.

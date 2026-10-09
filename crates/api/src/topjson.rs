@@ -7,7 +7,8 @@
 //! metadata checks when the file is unchanged) and reads that one record
 //! again, so the refusal is re-proven from the bytes each time at O(1) rather
 //! than by a cold O(history) walk. A repair moves the file's generation, the
-//! refresh refuses, and the next request opens cold (W1-api6-3, D-4433).
+//! refresh refuses, and the next request opens cold (W1-api6-3, D-4433). JR-07
+//! proves it: `api::topjson::tests::a_persistent_refusal_costs_one_read_per_request_and_a_repair_is_seen`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

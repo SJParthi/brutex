@@ -1794,8 +1794,11 @@ jobs:
           # and `-REFUSED` lines its parent reads, the fourth the serve-lock
           # cost test's p50/p99/max line. All four are in `#[cfg(test)] mod
           # tests`; production output still goes through `say!`/`warn_line!`.
+          # api/src/server.rs println! 4 -> 7 (D-4182): the three result lines
+          # of `latency_master_refresh_skip_and_parse`, an ignored latency test
+          # of the kind declared below.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
-          api/src/server.rs:println!:4
+          api/src/server.rs:println!:7
           api/src/frontierjson.rs:println!:1
           api/src/sweeprun.rs:println!:1
           api/src/trades.rs:println!:2
@@ -1810,6 +1813,21 @@ jobs:
           # `--ignored --nocapture`; test-only, no production path.
           declared="$declared cli/src/lib.rs:println!:1
           cli/src/audited_stored_tests.rs:println!:1"
+          # TWENTY MORE, the same kind (D-4182): the result lines of the api's
+          # ignored latency tests, each under `#[ignore = "a latency
+          # measurement, run on purpose: see crate::latency"]` and run only by
+          # hand with `--ignored --nocapture`. They print the p50/p99/max line
+          # `crate::latency` builds, and a size or count beside it. Test-only;
+          # no production path reaches them.
+          declared="$declared api/src/bars.rs:println!:5
+          api/src/booleancampaignjson_tests.rs:println!:1
+          api/src/booleanevidencejson_tests.rs:println!:1
+          api/src/booleanqualification_projection_tests.rs:println!:1
+          api/src/candidatejson.rs:println!:2
+          api/src/livejson.rs:println!:3
+          api/src/operation_audit_tests.rs:println!:2
+          api/src/serve_edge_tests.rs:println!:3
+          api/src/verification_route_tests.rs:println!:2"
           # NONE NOW (two until D-3128, one until D-4413), one kind (D-1933):
           # the stderr half of a degraded decode,
           # each written beside a `telemetry::emit` of the same counts.
@@ -2174,7 +2192,17 @@ jobs:
           # asks `symlink_metadata` whether a rotated file is present, so a
           # failure after a file was moved ends retries for good. None reads
           # or writes an event byte.
-          declared='sink.rs:std::fs::OpenOptions::new:4
+          #
+          # D-4182 adds two, both inside the sink's own directory. `loss.rs`'s
+          # `Ledger::open` opens `<dir>/events.loss`, the loss ledger of
+          # D-4410 (read, write, create, no truncate): one record of how many
+          # events a sink dropped, so the count outlives its process. And
+          # `sink.rs`'s `sync_directory` opens `<dir>` itself only to `fsync`
+          # it, so a file the sink created stays named after a power cut
+          # (sobs-13, D-4411). Neither reads or writes an event byte.
+          declared='loss.rs:std::fs::OpenOptions::new:1
+          sink.rs:std::fs::File::open:1
+          sink.rs:std::fs::OpenOptions::new:4
           sink.rs:std::fs::create_dir_all:1
           sink.rs:std::fs::metadata:1
           sink.rs:std::fs::remove_file:2

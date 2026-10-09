@@ -2572,9 +2572,25 @@ const ATTACK_LITERAL: &str = "
     clean
     25
 ";
+// Met when the audit's paused head merged onto final/all-fixes (D-4182).
+// Every word was read where it sits (`source_scan strings`, 2026-10-09):
+// all in the `#[cfg(test)]` modules of http.rs and rolling.rs that D-4508
+// (audit r64-4) added for `whole_text`, the reader of a vendor's numeric
+// cell. None is a path segment:
+//   7 1e21 700e-2 7e 7e-99999999999999999999 7e99999999999999999999 x7
+//   -0e-99999999999999999999 1e19 1e20 123456789012345678901 0e 0ex --7 --
+//     numeric cells the reader must read whole (`7`, `700e-2`, a signed
+//     zero at any exponent) or refuse (past `i64`, a fraction past any
+//     scale, a dangling exponent, a leading letter, a doubled sign).
+//   fraction microseconds -- substrings the refusals must contain.
+const WHOLE_TEXT_CELL: &str = "
+    7 1e21 700e-2 7e 7e-99999999999999999999 7e99999999999999999999 x7
+    -0e-99999999999999999999 1e19 1e20 123456789012345678901 0e 0ex --7
+    fraction microseconds
+";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 55] = [
+const DECLARED: [&str; 56] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2630,6 +2646,7 @@ const DECLARED: [&str; 55] = [
     LATE_PIECES,
     LATE_LABEL,
     ATTACK_LITERAL,
+    WHOLE_TEXT_CELL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

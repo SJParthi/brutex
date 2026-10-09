@@ -946,7 +946,9 @@ fn the_backtest_page_is_not_a_registered_route_and_its_json_is() {
 /// row pads the same directory with 90,000 plain empty files that are not
 /// journal entries, which is a proxy for a 10^5-entry directory and is
 /// labelled so: filling it with real invocations costs four `fsync`s each.
-/// A measurement, run on purpose; the numbers are in `docs/06-limits.md`.
+/// A measurement, run on purpose; the numbers are in `docs/06-limits.md`, and
+/// `api::operation_audit::tests::the_journals_per_request_growth_is_stated_in_the_limits`
+/// (OAU-03) fails the build if that section stops stating them.
 #[test]
 #[ignore = "a latency measurement, run on purpose: see crate::latency"]
 fn latency_audit_begin_and_terminal_by_directory_size() -> Result<(), String> {
