@@ -1007,11 +1007,27 @@ fn price_all(
                 Direction::Short => runner::excursion::Side::Short,
             };
             let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
-            crate::shown_cell(&g, rules)
-                .map(|(cell, _admitted)| cell)
-                .filter(|cell| cell.trades > 0)
+            priced_cell(&g, rules)
         })
         .collect())
+}
+
+/// The cell pass 2 prices from one candidate's grid: the cell the screen
+/// shows, or `None` when that cell never traded.
+///
+/// `shown_cell` falls back to `Grid::best`, which does not ask whether a cell
+/// traded, and a grid can hold one that did not: a refused path blocks every
+/// clean entry behind it (`runner::grid`'s replay names that case). Such a
+/// cell is "no candidate fired", never a priced zero.
+///
+/// A function of its own so the boundary is asserted over plain cells
+/// (R1286-cli-02, D-4101), as D-2008 lifted `best_shown`: a candidate that
+/// never fires has no cell at all, so no generated pricing fixture shows a
+/// zero-trade cell reaching this filter.
+fn priced_cell(g: &grid::Grid, rules: crate::Rules) -> Priced {
+    crate::shown_cell(g, rules)
+        .map(|(cell, _admitted)| cell)
+        .filter(|cell| cell.trades > 0)
 }
 
 /// One instrument's span over one month range, prepared exactly as the screen
@@ -1398,6 +1414,42 @@ mod tests {
             max_drawdown: dd,
             ..grid::Cell::default()
         }
+    }
+
+    /// **A grid whose shown cell never traded prices as no cell, even where
+    /// that cell beats every trading one; a shown cell with one trade is
+    /// priced as itself.** R1286-cli-02, D-4101.
+    ///
+    /// The losing cell traded once and lost 500; the zero-trade cell is the
+    /// one a refused path leaves behind. Neither is admitted, so `shown_cell`
+    /// falls back to `Grid::best`, whose larger pessimistic total is the zero
+    /// cell's 0 (the premise). Pass 2 must still call it unpriced. One trade
+    /// is the smallest count that is priced, and an empty grid is unpriced.
+    #[test]
+    fn a_shown_cell_that_never_traded_prices_as_no_cell() {
+        let rules = crate::Rules::BASELINE;
+        let never = grid::Cell::default();
+        let losing = cell(1, 0, -500, -500, 0, 500);
+        let lost_to_nothing = grid::Grid {
+            cells: vec![losing, never],
+            ..grid::Grid::default()
+        };
+        assert_eq!(
+            crate::shown_cell(&lost_to_nothing, rules),
+            Some((never, false)),
+            "premise: the fallback shows the cell that never traded"
+        );
+        assert_eq!(super::priced_cell(&lost_to_nothing, rules), None);
+        let only_losing = grid::Grid {
+            cells: vec![losing],
+            ..grid::Grid::default()
+        };
+        assert_eq!(
+            super::priced_cell(&only_losing, rules),
+            Some(losing),
+            "one trade is priced"
+        );
+        assert_eq!(super::priced_cell(&grid::Grid::default(), rules), None);
     }
 
     fn candidates(n: usize) -> Vec<Candidate> {
