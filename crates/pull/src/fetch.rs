@@ -814,6 +814,11 @@ pub fn land_rows(
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
     let mut refused_days = Vec::new();
+    // OPEN INTEREST APPLIES TO A CONTRACT AND TO NOTHING ELSE (D-3322). Asked
+    // once per window, of the segment these bars are filed under, so the loop
+    // below reads one `bool` per row.
+    let interest_applies = crate::vendor::open_interest_applies(request.listing.segment());
+    let mut interest = InterestWithheld::default();
 
     for (i, row) in rows.iter().enumerate() {
         // W1 LIVES HERE. The encoding is dispatched, never assumed. A vendor
@@ -821,41 +826,7 @@ pub fn land_rows(
         // produced 45 bars at wrong timestamps that passed every check and
         // were written to disk — the only fault in this pipeline that STORED a
         // wrong answer instead of refusing.
-        let epoch_utc = match encoding {
-            // ALREADY UTC — AND THE THIRD SPELLING IS HERE FOR A REASON, NOT
-            // FOR TIDINESS.
-            //
-            // `IsoDateTimeOffset` carries its own zone (`…T09:15:00+0530`) and
-            // `crate::http::one_stamp` has already applied it, because that is
-            // the only place the offset is visible. Subtracting
-            // `IST_OFFSET_SECS` here as well — which is what the text arm below
-            // does, correctly, for a value that states no zone — would put
-            // every bar 5h30m early. 03:45 on a trading day passes every
-            // validation below this line and writes to disk looking exactly
-            // like a real bar: the **W1 fault** this module's header describes,
-            // the one class of timestamp error that stores instead of refusing.
-            //
-            // It sits WITH the epoch arms rather than below them because "the
-            // value already means UTC" is precisely what all three say, and one
-            // arm is one place to be wrong instead of two. D-0135.
-            TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
-                row.timestamp
-            }
-            TimestampEncoding::EpochMillisUtc => row.timestamp.div_euclid(1_000),
-            // The vendor's value is already IST-based, so the offset this
-            // build would add has already been added by the vendor. Subtract it
-            // back out before the shared conversion, rather than teaching that
-            // conversion a second mode.
-            // BOTH TEXT SPELLINGS, ONE BEHAVIOUR. The decoder has already
-            // turned `2026-08-04 09:15:00` and `2026-08-04T09:15:00` into
-            // IST-based seconds — the separator differs on the wire and the
-            // meaning does not — so the offset the vendor already added comes
-            // back out here. Joined rather than written twice, because two arms
-            // doing the same thing is two places for one of them to drift.
-            TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
-                row.timestamp - crate::session::IST_OFFSET_SECS
-            }
-        };
+        let epoch_utc = epoch_utc(row.timestamp, encoding);
 
         // `verdict` does the conversion itself and refuses a timestamp that is
         // not one. A drop is a bar this engine DECLINED; a timestamp it could
@@ -1021,7 +992,18 @@ pub fn land_rows(
             // so a caller assembling one by hand — a test double, a decoder in
             // another crate — can still hand this line `Some(i64::MIN)` and
             // have it stored as the null. No shipped decoder can.
-            open_interest: row.open_interest.unwrap_or(i64::MIN),
+            //
+            // AND AN INDEX OR A SHARE CARRIES NONE AT ALL (D-3322). Kite's
+            // `oi=1` answer puts a `0` in the seventh cell of every index and
+            // share candle, and it was stored, so a Zerodha index read `0` where
+            // GDFL's read the null for the same instrument. The cell is
+            // withheld here — the one landing every REST feed goes through —
+            // and counted, never stored as a measurement nobody took.
+            open_interest: if interest_applies {
+                row.open_interest.unwrap_or(i64::MIN)
+            } else {
+                interest.withhold(row.open_interest)
+            },
         };
         bars.push(bar);
     }
@@ -1036,7 +1018,8 @@ pub fn land_rows(
     // The reasons are named separately rather than summed, because
     // "outside the window" and "outside the session" send an operator to two
     // different places — the caller's chunking and the vendor's clock.
-    emit_landed(rows.len(), bars.len(), &census);
+    emit_landed(rows.len(), bars.len(), &census, interest);
+    interest.warn_if_measured(request);
     Ok(Landed {
         bars,
         census,
@@ -1045,15 +1028,127 @@ pub fn land_rows(
     })
 }
 
+/// Open-interest cells a vendor sent for a bar that carries none (D-3322).
+///
+/// # Why counted, and why only a non-zero one warns
+///
+/// Kite answers `oi=1` with a seventh cell on every candle, and for an index
+/// or a share that cell is `0` — on every one of 765,442 stored Zerodha `1day`
+/// bars (DB-036). That `0` is no measurement: an index and a share have no
+/// open interest, so [`land_rows`] files [`store::format::OI_NULL`] for every
+/// `INDEX` and `CASH` bar of every feed, and the routine zero is counted on the
+/// window's one `pull.land` event rather than warned about. A NON-ZERO cell on
+/// such a bar is not routine — no source says any vendor sends one — so it is
+/// counted apart and warned about once per window, naming the instrument.
+/// Neither is ever stored as open interest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InterestWithheld {
+    /// Cells holding a value, zero included, replaced by the null.
+    withheld: u32,
+    /// Of those, the cells whose value was not zero.
+    nonzero: u32,
+}
+
+impl InterestWithheld {
+    /// Count one cell, and answer the null the bar is filed with.
+    fn withhold(&mut self, cell: Option<i64>) -> i64 {
+        if let Some(value) = cell {
+            self.withheld = self.withheld.saturating_add(1);
+            if value != 0 {
+                self.nonzero = self.nonzero.saturating_add(1);
+            }
+        }
+        store::format::OI_NULL
+    }
+
+    /// One `warn` per window that withheld a non-zero cell, naming the
+    /// instrument as the vendor knows it, its listing, the rung and the window.
+    fn warn_if_measured(self, request: &BarRequest) {
+        if self.nonzero == 0 {
+            return;
+        }
+        let listing = format!("{:?}", request.listing);
+        let (from, to) = (
+            request.window.from().to_string(),
+            request.window.to().to_string(),
+        );
+        // EVERY KEY IS ONE GATE 1D ALREADY DECLARES: `oi` counts the non-zero
+        // cells and `rows` every cell withheld, zero included.
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.land",
+                "the vendor sent a non-zero open interest for an index or a share; \
+                 the bar is filed with the null sentinel (D-3322)",
+            )
+            .with("instrument", telemetry::Value::Str(&request.instrument_id))
+            .with("listing", telemetry::Value::Str(&listing))
+            .with("rung", telemetry::Value::Str(request.granularity.dir()))
+            .with("from", telemetry::Value::Str(&from))
+            .with("to", telemetry::Value::Str(&to))
+            .with("oi", telemetry::Value::Uint(u64::from(self.nonzero)))
+            .with("rows", telemetry::Value::Uint(u64::from(self.withheld))),
+        );
+    }
+}
+
+/// A vendor timestamp as UTC epoch seconds, by the descriptor's encoding.
+///
+/// W1 lives here: the encoding is dispatched, never assumed. A vendor stamping
+/// IST wall-clock seconds into a field read as UTC epoch produced 45 bars at
+/// wrong timestamps that passed every check and were written to disk — the
+/// only fault in this pipeline that STORED a wrong answer instead of refusing.
+///
+/// Lifted out of [`land_rows`] so `crate::http` names a row it refuses at the
+/// instant the landing would have filed it at — one conversion, two readers,
+/// and no second copy to drift. One match and at most one division.
+pub(crate) const fn epoch_utc(raw: i64, encoding: TimestampEncoding) -> i64 {
+    match encoding {
+        // ALREADY UTC — AND THE THIRD SPELLING IS HERE FOR A REASON, NOT
+        // FOR TIDINESS.
+        //
+        // `IsoDateTimeOffset` carries its own zone (`…T09:15:00+0530`) and
+        // `crate::http::one_stamp` has already applied it, because that is
+        // the only place the offset is visible. Subtracting
+        // `IST_OFFSET_SECS` here as well — which is what the text arm below
+        // does, correctly, for a value that states no zone — would put
+        // every bar 5h30m early. 03:45 on a trading day passes every
+        // validation below this line and writes to disk looking exactly
+        // like a real bar: the **W1 fault** this module's header describes,
+        // the one class of timestamp error that stores instead of refusing.
+        //
+        // It sits WITH the epoch arms rather than below them because "the
+        // value already means UTC" is precisely what all three say, and one
+        // arm is one place to be wrong instead of two. D-0135.
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => raw,
+        TimestampEncoding::EpochMillisUtc => raw.div_euclid(1_000),
+        // The vendor's value is already IST-based, so the offset this
+        // build would add has already been added by the vendor. Subtract it
+        // back out before the shared conversion, rather than teaching that
+        // conversion a second mode.
+        // BOTH TEXT SPELLINGS, ONE BEHAVIOUR. The decoder has already
+        // turned `2026-08-04 09:15:00` and `2026-08-04T09:15:00` into
+        // IST-based seconds — the separator differs on the wire and the
+        // meaning does not — so the offset the vendor already added comes
+        // back out here. Joined rather than written twice, because two arms
+        // doing the same thing is two places for one of them to drift.
+        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+            raw - crate::session::IST_OFFSET_SECS
+        }
+    }
+}
+
 /// The row ledger for one landed window, as one aggregate event: rows in, bars
 /// out, and each drop reason by name, plus the bars kept on a day the exchange
 /// calendar cannot classify. Split out of [`land_rows`] so that body stays one
 /// readable loop; it emits once per window, never per row.
-fn emit_landed(rows_in: usize, bars_out: usize, census: &DropCensus) {
+fn emit_landed(rows_in: usize, bars_out: usize, census: &DropCensus, interest: InterestWithheld) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::debug("pull.land", "window decoded")
             .with("rows_in", telemetry::Value::Uint(rows_in as u64))
             .with("bars_out", telemetry::Value::Uint(bars_out as u64))
+            // THE ROUTINE ZERO, COUNTED WHERE THE WINDOW CLOSES (D-3322): the
+            // open-interest cells an index or a share sent, filed as the null.
+            .with("oi", telemetry::Value::Uint(u64::from(interest.withheld)))
             .with(
                 "before_window",
                 telemetry::Value::Uint(u64::from(
@@ -1120,5 +1215,172 @@ pub fn wire_end(last: Day, end: crate::vendor::RangeEnd) -> Result<Day, SessionE
     match end {
         crate::vendor::RangeEnd::Inclusive => Ok(last),
         crate::vendor::RangeEnd::Exclusive => last.succ(),
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod tests {
+    use super::*;
+    use crate::vendor::Listing;
+
+    /// 2022-10-03 09:15:00 IST, inside the regular session, as UTC seconds.
+    const AT: i64 = 1_664_768_700;
+
+    /// A one-minute request over 2022-10-03..04 for `listing`.
+    fn request(listing: Listing) -> BarRequest {
+        BarRequest {
+            instrument_id: "INVENTED ID".to_owned(),
+            listing,
+            window: Window::new(
+                Day::new(2022, 10, 3).expect("a real date"),
+                Day::new(2022, 10, 4).expect("a real date"),
+            )
+            .expect("a forward window"),
+            granularity: Granularity::Minute1,
+        }
+    }
+
+    /// One invented minute row, `minute` minutes after 09:15, carrying `oi`.
+    const fn row(minute: i64, oi: Option<i64>) -> RawRow {
+        RawRow {
+            timestamp: AT + minute * 60,
+            open: 4_100,
+            high: 4_130,
+            low: 4_090,
+            close: 4_120,
+            volume: 7,
+            open_interest: oi,
+        }
+    }
+
+    /// **AN INDEX OR A SHARE IS FILED WITH THE NULL, WHATEVER CELL THE VENDOR
+    /// SENT; A CONTRACT KEEPS ITS OPEN INTEREST, ZERO INCLUDED** (D-3322;
+    /// DB-036, DB-G28, DB-G44, DB-G100).
+    ///
+    /// Kite's `oi=1` answer puts a `0` in the seventh cell of every index and
+    /// share candle, and it was stored, so Zerodha NIFTY read `0` where GDFL
+    /// NIFTY read the null. The rows here are invented.
+    #[test]
+    fn an_index_or_a_share_is_filed_with_the_null_and_a_contract_keeps_its_interest() {
+        let rows = [row(0, Some(0)), row(1, Some(4_200)), row(2, None)];
+        for listing in [Listing::Index, Listing::Equity] {
+            let landed = land_rows(
+                &rows,
+                &request(listing),
+                TimestampEncoding::EpochSecondsUtc,
+                PriceScale::Paisa,
+                None,
+            )
+            .expect("three rows inside the window and the session");
+            assert_eq!(landed.bars.len(), 3, "{listing:?}: every row lands");
+            assert!(
+                landed
+                    .bars
+                    .iter()
+                    .all(|bar| bar.open_interest == store::format::OI_NULL),
+                "{listing:?}: a zero nobody measured is not stored as one: {:?}",
+                landed.bars
+            );
+            assert_eq!(
+                landed.bars[1].close, 4_120,
+                "{listing:?}: and nothing else about the bar moves"
+            );
+        }
+        let landed = land_rows(
+            &rows,
+            &request(Listing::Derivative),
+            TimestampEncoding::EpochSecondsUtc,
+            PriceScale::Paisa,
+            None,
+        )
+        .expect("the same rows, as a contract");
+        assert_eq!(
+            landed
+                .bars
+                .iter()
+                .map(|bar| bar.open_interest)
+                .collect::<Vec<_>>(),
+            vec![0, 4_200, store::format::OI_NULL],
+            "a contract's zero is a measurement, and an absent cell is the null"
+        );
+    }
+
+    /// The withheld cells are counted, a non-zero one apart, and every one is
+    /// answered with the null.
+    #[test]
+    fn withheld_interest_is_counted_and_only_a_nonzero_cell_is_counted_apart() {
+        let mut interest = InterestWithheld::default();
+        assert_eq!(interest.withhold(None), store::format::OI_NULL);
+        assert_eq!(
+            interest,
+            InterestWithheld::default(),
+            "an absent cell withholds nothing"
+        );
+        assert_eq!(interest.withhold(Some(0)), store::format::OI_NULL);
+        assert_eq!(
+            interest,
+            InterestWithheld {
+                withheld: 1,
+                nonzero: 0
+            }
+        );
+        assert_eq!(interest.withhold(Some(-3)), store::format::OI_NULL);
+        assert_eq!(interest.withhold(Some(9)), store::format::OI_NULL);
+        assert_eq!(
+            interest,
+            InterestWithheld {
+                withheld: 3,
+                nonzero: 2
+            }
+        );
+        // Both arms of the warning run: quiet for a routine zero, one line for
+        // a window that withheld a non-zero cell. The line's contents are the
+        // telemetry sink's to prove; here the arms are driven.
+        InterestWithheld {
+            withheld: 4,
+            nonzero: 0,
+        }
+        .warn_if_measured(&request(Listing::Index));
+        interest.warn_if_measured(&request(Listing::Equity));
+        // SATURATES rather than wraps.
+        let mut full = InterestWithheld {
+            withheld: u32::MAX,
+            nonzero: u32::MAX,
+        };
+        assert_eq!(full.withhold(Some(1)), store::format::OI_NULL);
+        assert_eq!(
+            full,
+            InterestWithheld {
+                withheld: u32::MAX,
+                nonzero: u32::MAX
+            }
+        );
+    }
+
+    /// The one conversion `crate::http` and the landing share: each encoding
+    /// to the same UTC second.
+    #[test]
+    fn every_encoding_reaches_the_same_utc_second() {
+        for (raw, encoding) in [
+            (AT, TimestampEncoding::EpochSecondsUtc),
+            (AT, TimestampEncoding::IsoDateTimeOffset),
+            (AT * 1_000 + 999, TimestampEncoding::EpochMillisUtc),
+            (
+                AT + crate::session::IST_OFFSET_SECS,
+                TimestampEncoding::IstDateTimeText,
+            ),
+            (
+                AT + crate::session::IST_OFFSET_SECS,
+                TimestampEncoding::IsoDateTimeText,
+            ),
+        ] {
+            assert_eq!(epoch_utc(raw, encoding), AT, "{encoding:?}");
+        }
     }
 }

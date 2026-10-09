@@ -1011,7 +1011,11 @@ fn session_hours(member: &Member) -> Vec<store::format::Bar> {
             low: raw.low,
             close: raw.close,
             volume: raw.volume,
-            open_interest: raw.open_interest.unwrap(),
+            // WHAT THE LANDING FILES FOR AN INDEX: the null, whatever cell the
+            // vendor sent (D-3322). The member's invented open interest never
+            // reaches a NIFTY bar, so history seeded with it would be a
+            // conflict this test is not about.
+            open_interest: store::format::OI_NULL,
         })
         .collect();
     pull::fold::fold(&minutes, pull::fold::Bucket::of_secs(3_600).unwrap()).unwrap()
