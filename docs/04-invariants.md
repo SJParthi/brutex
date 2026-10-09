@@ -7081,7 +7081,7 @@ old line regex the same input and watched it pass.
 | Id | Invariant | Proof | |
 |---|---|---|---|
 | AHD-01 | A `/bars.json` window past a sealed month's last bar answers `[]` from the bisection without reading the month, a sealed zero tail is never an empty window, and an unsealed month with a zero tail is still read whole (D-2280) | `api::server::tests::bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection` | ✓ |
-| AHD-02 | `/verify.json` runs its census read and scrub on the store-read pool and never inline on the handler's task (D-2281) | `api::server::cost_limits_tests::w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry` | ✓ |
+| AHD-02 | `/verify.json` runs its census read and scrub on the store-read pool and never inline on the handler's task (D-2281) | `api::server::cost_limits_tests::w1_api5_7_a_scrub_opens_one_page_and_walks_the_log_once_per_snapshot` | ✓ |
 | AHD-03 | Every async row count runs off the runtime worker, returns the inline count, and re-raises a panic instead of a number (D-2282) | `api::pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count` | ✓ |
 | AHD-04 | A held candidate summary serves a later page without a catalog read, and another capture, a rewritten catalog or a missing one reads cold (D-2283) | `api::candidatejson::tests::a_held_summary_serves_again_warm_and_is_dropped_by_a_key_or_a_rewrite` | ✓ |
 | AHD-05 | The qualified campaign route re-verifies its history once per GET, in `open`, and not again after rendering (D-2284) | `api::booleancampaignjson::tests::the_qualified_campaign_history_walk_per_request_is_stated` | ✓ |
