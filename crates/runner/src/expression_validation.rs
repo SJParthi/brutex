@@ -140,6 +140,7 @@ impl FixedTrainingFoldPlanV1 {
         Ok(BoundFixedTrainingFoldsV1 {
             plan: self,
             later,
+            replay: later.coordinate_replay(),
             mapping: Cow::Owned(mapping),
             sessions: Cow::Owned(sessions),
         })
@@ -174,6 +175,7 @@ impl FixedTrainingFoldPlanV1 {
         Ok(BoundFixedTrainingFoldsV1 {
             plan: self,
             later,
+            replay: later.coordinate_replay(),
             mapping: Cow::Borrowed(mapping),
             sessions: Cow::Borrowed(sessions),
         })
@@ -286,6 +288,9 @@ fn index_folds(
 pub struct BoundFixedTrainingFoldsV1<'a> {
     plan: &'a FixedTrainingFoldPlanV1,
     later: &'a EvaluatedExpressionOosV1<'a>,
+    /// One program walk for every coordinate this binding materializes
+    /// (D-1833), taken on the first.
+    replay: super::LaterCoordinateReplayV1<'a>,
     mapping: Cow<'a, [usize]>,
     sessions: Cow<'a, [u64]>,
 }
@@ -318,7 +323,7 @@ impl BoundFixedTrainingFoldsV1<'_> {
         if Chosen::from_cell(cell) != selected.coordinate() {
             return Err("fixed-training coordinate axes differ".into());
         }
-        let trades = self.later.materialize(ordinal)?;
+        let trades = self.replay.materialize(ordinal)?;
         let folds = partition(
             self.plan,
             &self.mapping,

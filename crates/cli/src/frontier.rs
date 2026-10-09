@@ -1955,7 +1955,8 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
 mod tests {
     use super::{
         DIRECTION_AT, Frontier, HEADER_BYTES, HEADER_RESERVED, MAGIC, PAYLOAD_BYTES, ROW_RESERVED,
-        Row, SEAL_BYTES, STRIDE, STRIDE_BYTES, VERSION, seal_of,
+        Row, SEAL_BYTES, STRIDE, STRIDE_BYTES, VERDICT_CHECKED, VERDICT_UNCHECKED, VERSION,
+        Verdict, seal_of,
     };
 
     fn root(tag: &str) -> std::path::PathBuf {
@@ -2096,6 +2097,18 @@ mod tests {
             v.protective_exits_unchecked,
             "an unpriced row said its protective exits were checked"
         );
+        assert!(!v.trades && !v.assurance && !v.avg_payoff);
+        assert!(v.stop_unchecked && v.protective_exits_unchecked && v.fill_headroom_unchecked);
+        assert!(v.checked().iter().all(|(_, holds)| !holds));
+        assert_eq!(
+            v.unchecked(),
+            [
+                ("stop", true),
+                ("protective_exits", true),
+                ("fill_headroom", true)
+            ],
+            "the served unchecked list names every unanswerable rule as unchecked"
+        );
     }
 
     /// `docs/02-store-format.md` §13 states the version, the stride and the
@@ -2121,6 +2134,197 @@ mod tests {
             ROW_RESERVED.start,
             ROW_RESERVED.len()
         )));
+    }
+
+    /// The row's cell, with every field a row stores and nothing else.
+    fn cell_of(row: &Row) -> runner::grid::Cell {
+        runner::grid::Cell {
+            trades: row.trades,
+            wins: row.cell_wins,
+            pessimistic: row.pessimistic,
+            worst_trade: row.worst_trade,
+            max_drawdown: row.max_drawdown,
+            min_win: row.min_win,
+            gross_win: row.gross_win,
+            gross_loss: row.gross_loss,
+            ..Default::default()
+        }
+    }
+
+    /// W2-cli5-4, D-1810: the verdict IS `Rules::admits` on every term a row
+    /// can answer, and names every term it cannot.
+    ///
+    /// The three terms a row cannot answer (worst MAE, protective exits, fill
+    /// headroom) are switched off in the rules here, so `admits` decides on
+    /// exactly the terms the verdict answers. Before D-1810 the verdict
+    /// ignored `min_avg_rr_bp` and this failed on the first row whose average
+    /// win fell short of the floor.
+    #[test]
+    fn the_verdict_is_rules_admits_on_every_term_a_row_can_answer() {
+        let shapes: [(u64, u64, i64, i64, i64, i64, i64); 9] = [
+            // trades, wins, gross_win, gross_loss, min_win, worst_trade, dd
+            (100, 95, 505_000, -5_000, 400, -100, 1_000),
+            (868, 3, 900, -273_649, 295, -3_035, 329_165),
+            (40, 40, 80_000, 0, 1_000, 0, 0),
+            (40, 0, 0, -80_000, 0, -5_000, 80_000),
+            (10, 5, 500, -2_000, 100, -400, 300),
+            (1, 1, i64::MAX, 0, i64::MAX, 0, 0),
+            (
+                u64::MAX,
+                u64::MAX / 2,
+                i64::MAX,
+                i64::MIN,
+                1,
+                i64::MIN,
+                i64::MAX,
+            ),
+            (3, 2, 600, -150, 300, -150, 150),
+            (1_000, 999, 999_000, -1, 1_000, -1, 1),
+        ];
+        let floors = [i64::MIN, -1, 0, 1, 100, 200, 400, 10_000, i64::MAX];
+        let bases = [crate::Rules::operator(), crate::Rules::elite(400, 25)];
+        let mut admitted = 0_u32;
+        let mut refused_only_on_payoff = 0_u32;
+        for base in bases {
+            for avg in floors {
+                let unanswerable_off = crate::Rules {
+                    max_mae_ppm: 0,
+                    require_protective_exits: false,
+                    min_fill_headroom_bp: 0,
+                    min_avg_rr_bp: avg,
+                    ..base
+                };
+                let payoff_only = crate::Rules {
+                    min_rr_bp: 0,
+                    min_win_rate_bp: 0,
+                    min_trades: 0,
+                    min_assurance_bp: 0,
+                    min_ret_over_dd_bp: 0,
+                    ..unanswerable_off
+                };
+                for (rules, which) in [
+                    (payoff_only, "payoff only"),
+                    (unanswerable_off, "every answerable rule"),
+                ] {
+                    for (trades, wins, gw, gl, mw, wt, dd) in shapes {
+                        let row = Row {
+                            trades,
+                            cell_wins: wins,
+                            gross_win: gw,
+                            gross_loss: gl,
+                            pessimistic: gw.saturating_add(gl),
+                            min_win: mw,
+                            worst_trade: wt,
+                            max_drawdown: dd,
+                            ..row(1, 1)
+                        };
+                        let v = row.verdict(&rules);
+                        let cell = cell_of(&row);
+                        assert_eq!(
+                            v.admitted,
+                            rules.admits(&cell),
+                            "{which}: avg floor {avg}, row {trades}/{wins}/{gw}/{gl}: \
+                             the frontier's PASS must be `Rules::admits`"
+                        );
+                        assert_eq!(
+                            v.admitted,
+                            v.checked().iter().all(|(_, holds)| *holds),
+                            "`admitted` is the conjunction of exactly the checked rules"
+                        );
+                        assert!(v.fill_headroom_unchecked && v.stop_unchecked);
+                        admitted += u32::from(v.admitted);
+                        let others = v.win_rate
+                            && v.reward_to_risk
+                            && v.return_over_drawdown
+                            && v.trades
+                            && v.assurance;
+                        refused_only_on_payoff += u32::from(others && !v.avg_payoff);
+                    }
+                }
+            }
+        }
+        assert!(
+            admitted > 0,
+            "some row passes, so the comparison is not vacuous"
+        );
+        assert!(
+            refused_only_on_payoff > 0,
+            "some row passes the five old rules and fails only average payoff -- \
+             the row the page used to show as PASS"
+        );
+    }
+
+    /// The names the API serves are the verdict's own, once each, and the
+    /// checked set and the unchecked set do not overlap.
+    #[test]
+    fn the_served_rule_names_are_the_verdicts_fields_once_each() {
+        let v = Verdict::default();
+        let checked: Vec<&str> = v.checked().iter().map(|(name, _)| *name).collect();
+        assert_eq!(checked, VERDICT_CHECKED.to_vec());
+        assert_eq!(
+            VERDICT_CHECKED,
+            [
+                "win_rate",
+                "reward_to_risk",
+                "return_over_drawdown",
+                "trades",
+                "assurance",
+                "avg_payoff"
+            ]
+        );
+        assert_eq!(
+            VERDICT_UNCHECKED,
+            ["stop", "protective_exits", "fill_headroom"]
+        );
+        let mut all: Vec<&str> = VERDICT_CHECKED
+            .iter()
+            .chain(VERDICT_UNCHECKED.iter())
+            .copied()
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), VERDICT_CHECKED.len() + VERDICT_UNCHECKED.len());
+        assert!(!all.contains(&"all") && !all.contains(&"priced"));
+        let priced = Row {
+            trades: 3,
+            cell_wins: 2,
+            gross_win: 600,
+            gross_loss: -150,
+            pessimistic: 450,
+            min_win: 300,
+            worst_trade: -150,
+            max_drawdown: 150,
+            ..row(1, 1)
+        }
+        .verdict(&crate::Rules {
+            min_avg_rr_bp: 1_000,
+            ..crate::Rules::operator()
+        });
+        let named: Vec<(&str, bool)> = priced.checked().to_vec();
+        assert_eq!(
+            named,
+            vec![
+                ("win_rate", priced.win_rate),
+                ("reward_to_risk", priced.reward_to_risk),
+                ("return_over_drawdown", priced.return_over_drawdown),
+                ("trades", priced.trades),
+                ("assurance", priced.assurance),
+                ("avg_payoff", priced.avg_payoff),
+            ]
+        );
+        assert!(
+            !priced.avg_payoff,
+            "300 avg win over 150 avg loss is 2x, under a 10x floor"
+        );
+        assert_eq!(
+            priced.unchecked().to_vec(),
+            vec![
+                ("stop", priced.stop_unchecked),
+                ("protective_exits", priced.protective_exits_unchecked),
+                ("fill_headroom", priced.fill_headroom_unchecked),
+            ]
+        );
+        assert!(priced.priced);
     }
 
     /// The stride is what the writer writes, not what a comment claims.
@@ -3329,18 +3533,18 @@ impl Row {
 /// failure. The field is therefore not a `bool`. It is absent, and
 /// [`Self::stop_unchecked`] says so, because "we did not measure this" and "this
 /// passed" are the two things that must never render the same.
-/// # Why six booleans rather than the enum clippy asks for
+/// # Why these booleans rather than the enum clippy asks for
 ///
 /// `struct_excessive_bools` fires at three, and its remedy — split the type into
 /// variants — is right when the flags are a STATE that only some combinations of
-/// which are legal. These are not a state. They are five independent rules and
-/// their conjunction, every one of the thirty-two combinations is reachable, and
+/// which are legal. These are not a state. They are six independent rules and
+/// their conjunction, every one of the sixty-four combinations is reachable, and
 /// an operator reading `FAIL` needs to know WHICH rules failed. Collapsing them
-/// into variants would either enumerate thirty-two names or throw away the
+/// into variants would either enumerate sixty-four names or throw away the
 /// detail that makes the verdict worth showing.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "five independent rule outcomes and their conjunction; every \
+    reason = "six independent rule outcomes and their conjunction; every \
               combination is reachable and the page renders which ones failed"
 )]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3356,8 +3560,17 @@ pub struct Verdict {
     /// `assurance_bp >= Rules::min_assurance_bp` — the 95% lower bound on the
     /// rate, not the observed rate.
     pub assurance: bool,
-    /// Every rule above holds. **Not "every rule holds"** — see
-    /// [`Self::stop_unchecked`] and [`Self::protective_exits_unchecked`].
+    /// Average win over average loss clears `Rules::min_avg_rr_bp`.
+    ///
+    /// Answered from the row's `gross_win`, `gross_loss`, `cell_wins` and
+    /// `trades` by the same `Rules` method `Rules::admits` calls. Before
+    /// D-1810 the verdict left this rule out, so a row `admits` refuses could
+    /// be served as PASS (W2-cli5-4).
+    pub avg_payoff: bool,
+    /// Every rule above holds, exactly [`VERDICT_CHECKED`]. **Not "every rule
+    /// holds"** — see [`Self::stop_unchecked`],
+    /// [`Self::protective_exits_unchecked`] and
+    /// [`Self::fill_headroom_unchecked`].
     pub admitted: bool,
     /// Always `true`. The stop rule was not evaluated because the row does not
     /// carry `worst_mae`, and a reader must be told that rather than shown a
@@ -3387,10 +3600,65 @@ pub struct Verdict {
     /// reader needs is not the shape but the knowledge that this verdict does
     /// not speak for it.
     pub protective_exits_unchecked: bool,
+    /// Always `true`. `Rules::min_fill_headroom_bp` compares the cell's
+    /// OPTIMISTIC total with its pessimistic one, and [`Row`] stores no
+    /// optimistic total, so this verdict cannot answer it. Named rather than
+    /// passed, exactly like the stop. D-1810.
+    pub fill_headroom_unchecked: bool,
     /// Whether this combination was ever priced. An unpriced row fails every
     /// rule on zeros, which is honest but is not the same claim as "priced and
     /// it failed" — the reader needs both.
     pub priced: bool,
+}
+
+/// The rules a frontier [`Verdict`] answers, in the order
+/// [`Verdict::checked`] returns them. `admitted` is their conjunction.
+///
+/// # One list, served rather than copied (D-1810)
+///
+/// `api`'s `/frontier.json` writes `meets` from [`Verdict::checked`] and
+/// echoes this list and [`VERDICT_UNCHECKED`] in its envelope, and the
+/// browser's verifier checks `all` against the served list. Before D-1810 the
+/// browser restated five thresholds, the assurance formula and the
+/// conjunction, so adding a rule here would have made it refuse every valid
+/// answer -- the shape D-0288 refused for the vocabulary.
+pub const VERDICT_CHECKED: [&str; 6] = [
+    "win_rate",
+    "reward_to_risk",
+    "return_over_drawdown",
+    "trades",
+    "assurance",
+    "avg_payoff",
+];
+
+/// The `Rules::admits` terms a frontier [`Row`] cannot answer. Each is served
+/// as `<name>_unchecked: true` on every row, never as a pass.
+pub const VERDICT_UNCHECKED: [&str; 3] = ["stop", "protective_exits", "fill_headroom"];
+
+impl Verdict {
+    /// Every rule this verdict answered, named, in [`VERDICT_CHECKED`] order.
+    #[must_use]
+    pub const fn checked(&self) -> [(&'static str, bool); 6] {
+        [
+            (VERDICT_CHECKED[0], self.win_rate),
+            (VERDICT_CHECKED[1], self.reward_to_risk),
+            (VERDICT_CHECKED[2], self.return_over_drawdown),
+            (VERDICT_CHECKED[3], self.trades),
+            (VERDICT_CHECKED[4], self.assurance),
+            (VERDICT_CHECKED[5], self.avg_payoff),
+        ]
+    }
+
+    /// Every rule this verdict could not answer, each with its flag, in
+    /// [`VERDICT_UNCHECKED`] order.
+    #[must_use]
+    pub const fn unchecked(&self) -> [(&'static str, bool); 3] {
+        [
+            (VERDICT_UNCHECKED[0], self.stop_unchecked),
+            (VERDICT_UNCHECKED[1], self.protective_exits_unchecked),
+            (VERDICT_UNCHECKED[2], self.fill_headroom_unchecked),
+        ]
+    }
 }
 
 impl Row {
@@ -3402,43 +3670,57 @@ impl Row {
     /// found wanting.
     #[must_use]
     pub fn verdict(&self, rules: &crate::Rules) -> Verdict {
-        let d = self.derived();
-        if !d.priced {
-            // BOTH UNCHECKED FLAGS, AS THEIR DOCS SAY: "Always `true`". This
-            // set only `stop_unchecked`, so an unpriced row carried
+        if !self.derived().priced {
+            // EVERY UNCHECKED FLAG, AS ITS DOC SAYS: "Always `true`". This
+            // once set only `stop_unchecked`, so an unpriced row carried
             // `protective_exits_unchecked: false` and the browser's check of
             // `/frontier.json` refused the WHOLE frontier for any run whose
             // TOP exceeded what `screen_cap` priced (CE-42, D-2653).
             return Verdict {
                 stop_unchecked: true,
                 protective_exits_unchecked: true,
+                fill_headroom_unchecked: true,
                 ..Verdict::default()
             };
         }
         let cell = runner::grid::Cell {
             trades: self.trades,
             wins: self.cell_wins,
+            pessimistic: self.pessimistic,
+            worst_trade: self.worst_trade,
+            max_drawdown: self.max_drawdown,
+            min_win: self.min_win,
+            gross_win: self.gross_win,
+            gross_loss: self.gross_loss,
             ..Default::default()
         };
-        let win_rate = d.win_rate_bp >= rules.min_win_rate_bp;
-        let reward_to_risk = d.reward_to_risk_bp >= rules.min_rr_bp;
-        let return_over_drawdown = d.return_over_drawdown >= rules.min_ret_over_dd_bp;
-        let trades = self.trades >= rules.min_trades;
-        let assurance = cell.assurance_bp() >= rules.min_assurance_bp;
+        // EVERY ANSWER BELOW IS THE `Rules` METHOD `Rules::admits` CALLS, so
+        // a rule is defined once (D-1810). Three more exist and none can be
+        // answered from a `Row`: the stop ceiling needs `worst_mae`, the
+        // protective-exit rule needs the exit shape and fill headroom needs
+        // the optimistic total. They are reported unchecked, never passed.
+        let win_rate = rules.win_rate_holds(&cell);
+        let reward_to_risk = rules.reward_to_risk_holds(&cell);
+        let return_over_drawdown = rules.return_over_drawdown_holds(&cell);
+        let trades = rules.trades_hold(&cell);
+        let assurance = rules.assurance_holds(&cell);
+        let avg_payoff = rules.avg_payoff_holds_for(&cell);
         Verdict {
             win_rate,
             reward_to_risk,
             return_over_drawdown,
             trades,
             assurance,
-            // FIVE RULES, AND THE NAME SAYS FIVE. Two more exist and neither
-            // can be answered from a `Row`: the stop ceiling needs `worst_mae`
-            // and the protective-exit rule needs the exit shape, and this type
-            // carries neither. Both are reported unchecked rather than folded
-            // in as passes.
-            admitted: win_rate && reward_to_risk && return_over_drawdown && trades && assurance,
+            avg_payoff,
+            admitted: win_rate
+                && reward_to_risk
+                && return_over_drawdown
+                && trades
+                && assurance
+                && avg_payoff,
             stop_unchecked: true,
             protective_exits_unchecked: true,
+            fill_headroom_unchecked: true,
             priced: true,
         }
     }

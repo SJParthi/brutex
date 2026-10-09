@@ -190,26 +190,65 @@ impl EvaluatedExpressionOosV1<'_> {
         self.refusals.get(ordinal).copied()
     }
     /// Materialize exactly one frozen coordinate, without choosing a winner.
+    ///
+    /// One-off door: it walks the program once for this one coordinate. A loop
+    /// over the coordinates uses [`Self::coordinate_replay`] (D-1833).
     /// # Errors
     /// Refuses absent ordinals or any mismatch between the grid and actual trades.
     pub fn materialize(&self, ordinal: usize) -> Result<Vec<TradeRow>, String> {
-        let cell = self
+        self.coordinate_replay().materialize(ordinal)
+    }
+
+    /// Every frozen coordinate of this later grid over ONE program walk and
+    /// one crossing table (W3-runner2-1, D-1833): the walk is taken on the
+    /// first [`LaterCoordinateReplayV1::materialize`] and each coordinate then
+    /// costs O(C) plus its rows, where [`Self::materialize`] per ordinal paid
+    /// the walk and the crossings again every time.
+    #[must_use]
+    pub fn coordinate_replay(&self) -> LaterCoordinateReplayV1<'_> {
+        LaterCoordinateReplayV1 {
+            later: self,
+            replay: std::cell::OnceCell::new(),
+        }
+    }
+}
+
+/// Every coordinate of one later grid, replayed over one program walk
+/// (D-1833). Built by [`EvaluatedExpressionOosV1::coordinate_replay`].
+pub struct LaterCoordinateReplayV1<'r> {
+    later: &'r EvaluatedExpressionOosV1<'r>,
+    replay: std::cell::OnceCell<Result<crate::grid::ExpressionCellReplay<'r>, String>>,
+}
+
+impl LaterCoordinateReplayV1<'_> {
+    /// Materialize exactly one frozen coordinate, exactly as
+    /// [`EvaluatedExpressionOosV1::materialize`] does.
+    /// # Errors
+    /// As [`EvaluatedExpressionOosV1::materialize`].
+    pub fn materialize(&self, ordinal: usize) -> Result<Vec<TradeRow>, String> {
+        let later = self.later;
+        let cell = later
             .grid
             .cells
             .get(ordinal)
             .ok_or("later expression coordinate absent")?;
-        // Over the facts built once with the grid (D-1184): one per ordinal
-        // was an O(B) rebuild per materialised coordinate.
-        crate::grid::materialize_expression_cell_over(
-            self.bars,
-            self.column,
-            self.anchor.program(),
-            self.anchor.horizon,
-            self.side,
-            &self.grid,
-            cell,
-            &self.facts,
-        )
+        // Over the facts built once with the grid (D-1184) and the walk built
+        // once for every coordinate (D-1833).
+        self.replay
+            .get_or_init(|| {
+                crate::grid::ExpressionCellReplay::prepare(
+                    later.bars,
+                    later.column,
+                    later.anchor.program(),
+                    later.anchor.horizon,
+                    later.side,
+                    &later.grid,
+                    &later.facts,
+                )
+            })
+            .as_ref()
+            .map_err(Clone::clone)?
+            .materialize(cell)
     }
 }
 

@@ -52,7 +52,8 @@ use vocab::ConditionMask;
 
 use crate::exit_grid_policy::{
     AttestedTrainingV1, ExecutionDigestsV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1,
-    OosExecutionSeriesV1, ResolvedExitGridV1, SelectedExitV1, column_digest_v1,
+    OosExecutionSeriesV1, OosReplaySliceV1, ReplayedExitV1, ResolvedExitGridV1, SelectedExitV1,
+    column_digest_v2,
 };
 use crate::identity::{Params, Run, data_digest};
 use crate::outcome::Horizon;
@@ -2462,7 +2463,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
         signal_digest: data_digest(signal),
         signal_first_ts_micros,
         signal_last_ts_micros,
-        signal_column_digest: column_digest_v1(full_signal_column),
+        signal_column_digest: column_digest_v2(full_signal_column),
         horizon_bars: horizon.as_bars(),
         splits: stable_u64_v4(splits)?,
         min_hits: base.min_hits(),
@@ -2983,29 +2984,45 @@ fn walk_forward_exact_grid_v4(
             // built `SliceFacts::of(trade_test, &projected_oos)` once per
             // pending candidate, an O(E_prefix) value no candidate changes.
             let oos_facts = crate::trade::SliceFacts::of(trade_test, &projected_oos);
-            for (ordinal, candidate) in pending.iter().enumerate() {
-                let resolved = match candidate.side {
-                    Direction::Long => &long,
-                    Direction::Short => &short,
-                };
-                let run = Run {
-                    mask: candidate.mask,
-                    direction: run_direction_v4(candidate.side),
-                    instrument: execution.instrument(),
-                    timeframe,
-                    params,
-                    data_digest: oos_digests.data_digest(),
-                    commit: execution.commit(),
-                    feed: execution.feed(),
-                };
-                let execution_run = ExecutionRunV1::with_digests(&run, &oos_digests)?;
-                let replay = resolved.replay_selected_over(
-                    oos,
-                    &projected_oos,
-                    &candidate.selected,
-                    execution_run,
-                    &oos_facts,
-                )?;
+            // And the OOS attestation with them (D-1811, W3-runner5-0): the
+            // series and column BLAKE3 passes, the bar, acceptance, source and
+            // price-extreme checks were O(E + R) per pending candidate inside
+            // `replay_selected`. The slice takes each once and every replay
+            // reads its verdicts at the position the per-call door checked
+            // them, so each candidate's refusal is unchanged.
+            let oos_slice = OosReplaySliceV1::new(oos, &projected_oos, Some(&oos_facts));
+            // IN PARALLEL, THEN IN ORDER. Each replay depends on no other, so
+            // they run on rayon's pool; the results are read back in pending
+            // order, so the first refusal reported is the lowest ordinal's,
+            // exactly as the serial loop reported it, and `final_candidates`
+            // keeps pending order.
+            let replays: Vec<Result<ReplayedExitV1, AnchoredSearchValidationRefusalV4>> = pending
+                .par_iter()
+                .map(|candidate| {
+                    let resolved = match candidate.side {
+                        Direction::Long => &long,
+                        Direction::Short => &short,
+                    };
+                    let run = Run {
+                        mask: candidate.mask,
+                        direction: run_direction_v4(candidate.side),
+                        instrument: execution.instrument(),
+                        timeframe,
+                        params,
+                        data_digest: oos_digests.data_digest(),
+                        commit: execution.commit(),
+                        feed: execution.feed(),
+                    };
+                    let execution_run = ExecutionRunV1::with_digests(&run, &oos_digests)?;
+                    Ok(resolved.replay_selected_on(
+                        &oos_slice,
+                        &candidate.selected,
+                        execution_run,
+                    )?)
+                })
+                .collect();
+            for (ordinal, (candidate, replay)) in pending.iter().zip(replays).enumerate() {
+                let replay = replay?;
                 let outcome = replay.cell().ok_or(
                     AnchoredSearchValidationRefusalV4::IncompleteCandidateOos {
                         fold: index,
@@ -8026,7 +8043,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             source.signal_column_digest(),
-            crate::exit_grid_policy::column_digest_v1(&full_signal_column)
+            crate::exit_grid_policy::column_digest_v2(&full_signal_column)
         );
         assert_eq!(
             projection.long_grid_identity().policy_digest(),
@@ -8474,13 +8491,60 @@ pub(crate) mod tests {
         let inner = rest
             .get(anchor.len()..end.unwrap_or_default())
             .unwrap_or_default();
-        assert!(inner.contains("for (ordinal, candidate) in pending.iter().enumerate()"));
+        assert!(inner.contains(
+            "for (ordinal, (candidate, replay)) in pending.iter().zip(replays).enumerate()"
+        ));
         assert!(inner.contains("ExecutionRunV1::with_digests(&run, &oos_digests)"));
         assert!(
             !inner.contains("data_digest_with_execution(")
                 && !inner.contains("ExecutionRunV1::new("),
             "nothing inside the pending loop may hash the fold's slices"
         );
+    }
+
+    /// D-1811 (W3-runner5-0): the OOS pass builds one attested OOS slice per
+    /// fold, before the candidates, and replays every pending candidate on it
+    /// in parallel; the serial pass after it only reads the results back in
+    /// pending order. Nothing per candidate hashes, validates or indexes the
+    /// fold's series or column.
+    #[test]
+    fn the_oos_replay_loop_attests_once_per_fold_and_replays_in_parallel() {
+        let source = include_str!("validate.rs");
+        let anchor = "let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));";
+        let rest = source
+            .split_once(anchor)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let region = rest
+            .split_once("final_candidates.push(proof);")
+            .map_or("", |(body, _)| body);
+        let (head, tail) = region.split_once(".par_iter()").unwrap_or_default();
+        assert_eq!(
+            head.matches("OosReplaySliceV1::new(oos, &projected_oos, Some(&oos_facts))")
+                .count(),
+            1,
+            "one slice per fold, built before the candidates"
+        );
+        let (closure, serial) = tail.split_once(".collect();").unwrap_or_default();
+        assert!(closure.contains("resolved.replay_selected_on("));
+        assert!(closure.contains("&oos_slice,"));
+        for per_candidate in [
+            "replay_selected(",
+            "replay_selected_over(",
+            "OosReplaySliceV1::new(",
+            "SliceFacts::of(",
+            "identity::data_digest(",
+            "data_digest_with_execution(",
+            "column_digest",
+            "ExecutionDigestsV1::of(",
+        ] {
+            assert!(
+                !closure.contains(per_candidate) && !serial.contains(per_candidate),
+                "nothing per candidate may call `{per_candidate}`"
+            );
+        }
+        assert!(serial.contains("pending.iter().zip(replays).enumerate()"));
+        assert!(serial.contains("let replay = replay?;"));
     }
 
     /// The V4 population loop attests its training slice once per side, not

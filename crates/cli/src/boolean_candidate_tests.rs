@@ -591,7 +591,7 @@ fn a_catalogue_attests_its_training_slice_once_per_side() -> Result<(), String> 
 }
 
 std::thread_local! {
-    /// Source digests [`super::SourceDigest`] or [`super::slice_digests`] has
+    /// Source digests [`super::slice_digests`] has
     /// hashed on this thread.
     pub(super) static DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// TRAINING attestations [`super::PricedSide`] has made on this thread.
@@ -614,7 +614,7 @@ pub(super) fn passes() -> (u64, u64) {
     )
 }
 
-/// cli's own passes over a TRAINING family's source: [`super::SourceDigest`]
+/// cli's own passes over a TRAINING family's source: [`super::slice_digests`]
 /// hashes the three streams once and [`super::PricedSide`] attests each side's
 /// slice once, however many programs the catalog holds, where cli used to do
 /// both afresh for every program × side. W2-cli2-3.

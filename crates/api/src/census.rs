@@ -959,7 +959,7 @@ pub fn held_entries(censuses: &[VendorCensus]) -> Vec<(Series, YearMonth)> {
 /// unfiltered page is the same page it always was and a filter can only ever
 /// remove rows. That is what makes the count honest: `showing N of M` is a
 /// statement about this filter, not about the store.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct StoreFilter {
     /// Index, cash or F&O. `None` is all three.
     pub segment: Option<Segment>,

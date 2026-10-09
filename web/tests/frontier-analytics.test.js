@@ -65,10 +65,18 @@ const row = (rank, admitted) => ({
     return_over_drawdown: admitted,
     trades: true,
     assurance: admitted,
+    avg_payoff: admitted,
     all: admitted,
     stop_unchecked: true,
-    protective_exits_unchecked: true
+    protective_exits_unchecked: true,
+    fill_headroom_unchecked: true
   }
+});
+
+/** The envelope member `api` writes from `cli::frontier::VERDICT_CHECKED`/`VERDICT_UNCHECKED`. */
+const admission = () => ({
+  checked: ['win_rate', 'reward_to_risk', 'return_over_drawdown', 'trades', 'assurance', 'avg_payoff'],
+  unchecked: ['stop', 'protective_exits', 'fill_headroom']
 });
 
 /** @returns {any} */
@@ -84,8 +92,11 @@ const validPayload = () => ({
     min_trades: 4,
     min_assurance_bp: 3_000,
     max_mae_ppm: 0,
+    min_avg_rr_bp: 200,
+    min_fill_headroom_bp: 150,
     top: 25
   },
+  admission: admission(),
   refusal: null
 });
 
@@ -95,6 +106,7 @@ test('one complete exact frontier admits every row without copying or reranking 
   assert.equal(result.ok, true, result.why);
   assert.equal(result.rows, payload.rows);
   assert.equal(result.rules, payload.rules);
+  assert.deepEqual(result.admission, admission());
   assert.equal(result.admitted, 1);
   assert.equal(result.empty, false);
 });
@@ -118,6 +130,14 @@ test('every bare Rust integer field refuses the whole frontier once JavaScript c
     assert.match(result.why, new RegExp(field));
   }
   for (const field of RULE_INTEGERS) {
+    const payload = validPayload();
+    payload.rules[field] = unsafe;
+    const result = validateFrontierPayload(payload);
+    assert.equal(result.ok, false, field);
+    assert.deepEqual(result.rows, [], `${field} leaked a valid-looking prefix`);
+    assert.match(result.why, new RegExp(field));
+  }
+  for (const field of ['min_avg_rr_bp', 'min_fill_headroom_bp']) {
     const payload = validPayload();
     payload.rules[field] = unsafe;
     const result = validateFrontierPayload(payload);
@@ -199,7 +219,7 @@ test('envelope and row arithmetic contradictions refuse the entire answer', () =
   }
 });
 
-test('raw cell totals, every derived figure, and every rule verdict must agree exactly', () => {
+test('raw cell totals, every derived figure, and the served verdict must agree exactly', () => {
   /** @type {Array<[string, (payload: any) => void]>} */
   const cases = [
     ['win rate', (payload) => (payload.rows[0].win_rate_bp += 1)],
@@ -208,6 +228,8 @@ test('raw cell totals, every derived figure, and every rule verdict must agree e
     ['average win', (payload) => (payload.rows[0].avg_win += 1)],
     ['average loss', (payload) => (payload.rows[0].avg_loss -= 1)],
     ['individual verdict', (payload) => (payload.rows[0].meets.assurance = false)],
+    ['average payoff', (payload) => (payload.rows[0].meets.avg_payoff = false)],
+    ['unchecked fill headroom', (payload) => (payload.rows[0].meets.fill_headroom_unchecked = false)],
     ['unchecked stop', (payload) => (payload.rows[0].meets.stop_unchecked = false)],
     // A row claiming the PROTECTIVE-EXIT rule was checked is refused for the
     // same reason as the stop: `frontier::Row` drops `stop`, `target`, `tsl`
@@ -282,124 +304,14 @@ test('malformed schema shapes cannot masquerade as a zero-row frontier', () => {
 
 // ---------------------------------------------------------------------------
 // P19-03 (D-2562): the rules a mutation could delete with the suite green.
-// ---------------------------------------------------------------------------
-
-/**
- * One priced row of `wins` winning and `trades - wins` losing round trips,
- * every derived figure computed the way Rust derives it, and every rule but
- * assurance set to pass -- so `meets.all` is exactly `meets.assurance`.
- * Each win is +100 paisa and each loss -50; generated shape, not market data.
- *
- * @param {number} wins @param {number} trades @param {boolean} assured
- * @returns {any}
- */
-function cell(wins, trades, assured) {
-  const losses = trades - wins;
-  const gross_win = 100 * wins;
-  const gross_loss = losses > 0 ? -50 * losses : 0;
-  const pessimistic = gross_win + gross_loss;
-  const max_drawdown = losses > 0 ? 50 : 0;
-  return {
-    rank: 1,
-    direction: 'long',
-    mask_words: ['1', '0', '0', '0', '0', '0'],
-    hits: trades,
-    n: trades,
-    mean_milli_paisa: 1_000,
-    t_milli: 2_000,
-    // One observation is a payoff refusal, which the route sends as null.
-    payoff_bp: trades < 2 ? null : 200,
-    edge_wins: wins,
-    priced: true,
-    trades,
-    wins,
-    losses,
-    pessimistic,
-    worst_trade: losses > 0 ? -50 : 0,
-    max_drawdown,
-    min_win: wins > 0 ? 100 : 0,
-    win_rate_bp: Math.floor((wins * 10_000) / trades),
-    reward_to_risk_bp: losses > 0 ? (wins > 0 ? 200 : 0) : null,
-    return_over_drawdown: pessimistic <= 0 ? 0 : max_drawdown <= 0 ? null : (pessimistic * 100) / max_drawdown,
-    avg_win: wins > 0 ? 100 : 0,
-    avg_loss: losses > 0 ? -50 : 0,
-    gross_win,
-    gross_loss,
-    meets: {
-      win_rate: true,
-      reward_to_risk: true,
-      return_over_drawdown: true,
-      trades: true,
-      assurance: assured,
-      all: assured,
-      stop_unchecked: true,
-      protective_exits_unchecked: true
-    }
-  };
-}
-
-/** @param {any} row @param {number} minAssurance @returns {any} */
-const single = (row, minAssurance) => ({
-  identity: 'cd'.repeat(32),
-  rows: [row],
-  count: 1,
-  admitted: row.meets.all ? 1 : 0,
-  rules: {
-    min_win_rate_bp: 0,
-    min_rr_bp: 0,
-    min_ret_over_dd_bp: 0,
-    min_trades: 0,
-    min_assurance_bp: minAssurance,
-    max_mae_ppm: 0,
-    top: 25
-  },
-  refusal: null
-});
-
-// (wins, trades, the Wilson lower bound in basis points). The bound is
-// `runner::grid::Cell::assurance_bp`: z = 1.959964, truncated toward zero after
-// a clamp to [0, 10_000]. Computed in IEEE double with the SAME operation order
-// as that function (and as `frontier-analytics.js`), and pinned on the Rust
-// side by `the_wilson_table_the_browser_copy_is_checked_against` in
-// `crates/runner/src/grid.rs`, so the two copies are held to ONE table.
 //
-// Chosen at the edges that kill a drifted copy:
-//   * z = 1.96 instead of 1.959964 moves 3/3 and 4/4 by one basis point;
-//   * Math.round instead of Math.trunc moves 1/4, 7/9, 2/3, 19/20, 1000/1000;
-//   * z = 1.645 moves every non-zero row by hundreds.
-/** @type {[number, number, number][]} */
-const WILSON = [
-  [0, 1, 0],
-  [1, 1, 2065],
-  [1, 2, 945],
-  [2, 3, 2076],
-  [3, 3, 4385],
-  [1, 4, 455],
-  [3, 4, 3006],
-  [4, 4, 5101],
-  [7, 9, 4525],
-  [19, 20, 7638],
-  [50, 100, 4038],
-  [99, 100, 9455],
-  [100, 100, 9630],
-  [1000, 1000, 9961]
-];
-
-test('the browser Wilson bound matches the Rust table and flips meets.assurance exactly at the rule', () => {
-  for (const [wins, trades, bound] of WILSON) {
-    for (const rule of [bound - 1, bound, bound + 1]) {
-      if (rule < 0) continue;
-      const truth = bound >= rule;
-      const honest = validateFrontierPayload(single(cell(wins, trades, truth), rule));
-      assert.equal(honest.ok, true, `${wins}/${trades} at rule ${rule}: ${honest.why}`);
-      assert.equal(honest.admitted, truth ? 1 : 0);
-      const lying = validateFrontierPayload(single(cell(wins, trades, !truth), rule));
-      assert.equal(lying.ok, false, `${wins}/${trades} at rule ${rule} accepted a wrong assurance verdict`);
-      assert.match(lying.why, /meets does not match/);
-      assert.deepEqual(lying.rows, []);
-    }
-  }
-});
+// Its first test held the browser's copy of the Wilson bound to the Rust
+// table. W2-cli5-4 (D-1810, AGB-02) removed that copy: the browser compares
+// no threshold and checks `all` against the served admission list, so a
+// verdict that differs from a browser recomputation is now the answer, not a
+// lie. The test went with the copy; the Rust table it was checked against
+// still pins `Cell::assurance_bp` (ZX-89). D-4619.
+// ---------------------------------------------------------------------------
 
 test('a frontier carrying more rows than rules.top is refused, and exactly top is not', () => {
   for (const [top, ok] of /** @type {[number, boolean][]} */ ([[1, false], [2, true], [3, true]])) {
@@ -481,5 +393,98 @@ test('below two observations a payoff number is a refusal read as a measurement,
     const result = validateFrontierPayload(payload);
     assert.equal(result.ok, ok, `n ${n} payoff ${String(payoff)}: ${result.why}`);
     if (!ok) assert.match(result.why, /payoff_bp must be null below two observations/);
+  }
+});
+
+// W2-cli5-4, D-1810. The browser used to restate five thresholds, the
+// assurance formula and their conjunction, and refused any row whose `all`
+// differed. `cli` gained average payoff; the copy here did not, so a correct
+// server answer would have been refused and a stale one accepted.
+test('which rules `all` conjoins is the served admission list, never a list of this file', () => {
+  // A rule this file has never heard of is still enforced by `all`.
+  const unknown = validPayload();
+  unknown.admission.checked.push('future_rule');
+  unknown.rows[0].meets.future_rule = false;
+  unknown.rows[1].meets.future_rule = true;
+  const refusedUnknown = validateFrontierPayload(unknown);
+  assert.equal(refusedUnknown.ok, false);
+  assert.match(refusedUnknown.why, /conjunction of the served checked rules/);
+  unknown.rows[0].meets.all = false;
+  unknown.admitted = 0;
+  const accepted = validateFrontierPayload(unknown);
+  assert.equal(accepted.ok, true, accepted.why);
+  assert.equal(accepted.admitted, 0);
+
+  // An unanswerable rule the server names must be flagged on every row.
+  const flagged = validPayload();
+  flagged.admission.unchecked.push('future_gap');
+  assert.match(validateFrontierPayload(flagged).why, /exactly the served admission members/);
+  for (const r of flagged.rows) r.meets.future_gap_unchecked = true;
+  assert.equal(validateFrontierPayload(flagged).ok, true);
+  flagged.rows[1].meets.future_gap_unchecked = false;
+  assert.match(validateFrontierPayload(flagged).why, /cannot answer/);
+});
+
+test('no threshold is compared here: the server verdict is the answer', () => {
+  // Row 1 says win rate holds at 75%. A browser comparing thresholds would
+  // now call that a lie against a 100% floor; the rule lives in `cli`.
+  const payload = validPayload();
+  payload.rules.min_win_rate_bp = 10_000;
+  payload.rules.min_avg_rr_bp = -5;
+  const result = validateFrontierPayload(payload);
+  assert.equal(result.ok, true, result.why);
+  assert.equal(result.admitted, 1);
+});
+
+test('an unpriced row is never admitted, whatever its members say', () => {
+  const payload = validPayload();
+  Object.assign(payload.rows[0], {
+    priced: false,
+    trades: 0,
+    wins: 0,
+    losses: 0,
+    pessimistic: 0,
+    worst_trade: 0,
+    max_drawdown: 0,
+    min_win: 0,
+    win_rate_bp: 0,
+    reward_to_risk_bp: null,
+    return_over_drawdown: 0,
+    avg_win: 0,
+    avg_loss: 0,
+    gross_win: 0,
+    gross_loss: 0
+  });
+  const result = validateFrontierPayload(payload);
+  assert.equal(result.ok, false);
+  assert.match(result.why, /without ever being priced/);
+});
+
+test('a malformed admission list refuses the whole answer', () => {
+  /** @type {Array<[string, (payload: any) => void]>} */
+  const cases = [
+    ['missing', (payload) => delete payload.admission],
+    ['array', (payload) => (payload.admission = [])],
+    ['extra member', (payload) => (payload.admission.why = 'x')],
+    ['empty checked', (payload) => (payload.admission.checked = [])],
+    ['not an array', (payload) => (payload.admission.unchecked = 'stop')],
+    ['repeated checked', (payload) => payload.admission.checked.push('win_rate')],
+    ['repeated unchecked', (payload) => payload.admission.unchecked.push('stop')],
+    ['both lists', (payload) => payload.admission.unchecked.push('trades')],
+    ['reserved all', (payload) => payload.admission.checked.push('all')],
+    ['reserved suffix', (payload) => payload.admission.checked.push('stop_unchecked')],
+    ['malformed name', (payload) => payload.admission.checked.push('Win Rate')],
+    ['non-string', (payload) => payload.admission.unchecked.push(7)],
+    ['meets missing a rule', (payload) => delete payload.rows[1].meets.avg_payoff],
+    ['meets with an unlisted rule', (payload) => (payload.rows[1].meets.extra = false)],
+    ['meets non-boolean', (payload) => (payload.rows[1].meets.trades = 'true')]
+  ];
+  for (const [name, mutate] of cases) {
+    const payload = validPayload();
+    mutate(payload);
+    const result = validateFrontierPayload(payload);
+    assert.equal(result.ok, false, name);
+    assert.deepEqual(result.rows, [], `${name} leaked a valid-looking prefix`);
+    assert.equal(result.admission, null, name);
   }
 });

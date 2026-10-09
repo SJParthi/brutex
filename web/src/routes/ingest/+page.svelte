@@ -5448,6 +5448,9 @@
   let live = $state(/** @type {StoreFold | null} */ (null));
   /** @type {string | null} */
   let pollError = $state(null);
+  /** A stop the server took but could not record durably. Its own state, so
+   *  a poll's `pollError = null` cannot wipe it (OBSV-09, D-3208). */
+  let stopWarning = $state('');
   let lastGrowthAt = $state(0);
   /** {t, units, rows} samples, newest last. Bounded — only the tail is kept. */
   /** @type {{ t: number, units: number, rows: number }[]} */
@@ -7109,11 +7112,31 @@
        answer is a control the operator presses again. */
     stopAsked = true;
     aborted = true;
+    stopWarning = '';
     let said;
+    let unpersisted = '';
     try {
       const r = await request('/pull/run/stop', { ms: 10_000, method: 'POST' });
-      if (!r.ok) throw new Error(`the server answered HTTP ${r.status}`);
-      said = await r.json();
+      if (!r.ok) {
+        /* A 503 CAN STILL BE A STOP THAT WAS TAKEN. The server sets the
+           in-memory flag first and answers `stopping:true,
+           stop_persisted:false` when it could not record the STOP durably:
+           the run winds down, and the STOP will not survive a restart. That
+           is a delivered stop with a durability warning, not an undelivered
+           one -- and the warning is the operator's to read (OBSV-09, D-3208).
+           Any other failure is still undelivered. */
+        const body = await r.json().catch(() => null);
+        if (body?.stopping === true && body?.stop_persisted === false) {
+          said = body;
+          unpersisted = typeof body.error === 'string' && body.error.trim() !== ''
+            ? body.error.trim()
+            : 'The STOP was not durably recorded.';
+        } else {
+          throw new Error(`the server answered HTTP ${r.status}`);
+        }
+      } else {
+        said = await r.json();
+      }
     } catch (why) {
       stopAsked = false;
       // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
@@ -7133,6 +7156,9 @@
         'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
     }
+    if (unpersisted) {
+      stopWarning = `Stop taken, but not saved: ${unpersisted} The run is winding down now; after a server restart it may not stay stopped.`;
+    }
     controller?.abort();
   }
 
@@ -7148,6 +7174,7 @@
     askedKeys = new Set();
     netError = null;
     pollError = null;
+    stopWarning = '';
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
@@ -8586,6 +8613,9 @@
                  is. conc18-2, CLAUDE.md §4. -->
             {#if netError}
               <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
+            {/if}
+            {#if stopWarning}
+              <p class="note wrap warn" role="alert" data-run-error="stop">{stopWarning}</p>
             {/if}
             {#if pollError}
               <p class="note wrap warn" role="alert" data-run-error="poll">

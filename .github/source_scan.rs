@@ -3342,6 +3342,57 @@ fn compiled_roots(
         }
     }
     let member = |krate: &str| members.contains(&format!("crates/{krate}"));
+    // WHAT EACH MEMBER'S MANIFEST TURNS OFF (D-3692). A conventional path is
+    // compiled only while Cargo still discovers it: `autobins`, `autotests`,
+    // `autobenches` or `autoexamples = false` stops discovery of that kind
+    // (an explicitly named target still builds `<dir>/<name>.rs`), a `[lib]`
+    // path moves the library off `src/lib.rs`, and `build = false` or a
+    // `build` path moves the script off `build.rs`. Counting the conventional
+    // file regardless called a file compiled that nothing compiles.
+    let mut off: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for f in tracked {
+        let ["crates", c, "Cargo.toml"] = f.split('/').collect::<Vec<_>>()[..] else {
+            continue;
+        };
+        if !member(c) {
+            continue;
+        }
+        let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
+        let leaves = toml_leaves(&src).map_err(|e| format!("{f}: {e}"))?;
+        for l in &leaves {
+            let p: Vec<&str> = l.path.iter().map(String::as_str).collect();
+            let value = l.value.trim_matches('"');
+            match p.as_slice() {
+                [
+                    "package",
+                    key @ ("autobins" | "autotests" | "autobenches" | "autoexamples"),
+                ] if value == "false" => {
+                    off.insert((c.to_owned(), (*key).to_owned()));
+                }
+                ["lib", "path"] => {
+                    off.insert((c.to_owned(), "lib".to_owned()));
+                }
+                ["package", "build"] => {
+                    off.insert((c.to_owned(), "build".to_owned()));
+                }
+                [
+                    kind @ ("bin[]" | "test[]" | "bench[]" | "example[]"),
+                    "name",
+                ] => {
+                    let dir = match *kind {
+                        "bin[]" => "src/bin",
+                        "test[]" => "tests",
+                        "bench[]" => "benches",
+                        _ => "examples",
+                    };
+                    named.insert(format!("crates/{c}/{dir}/{value}.rs"));
+                }
+                _ => {}
+            }
+        }
+    }
+    let on = |c: &str, key: &str| member(c) && !off.contains(&(c.to_owned(), key.to_owned()));
     let mut built = BTreeSet::new();
     for wf in tracked.iter().filter(|f| is_github_yml(f)) {
         let src = read(wf).ok_or_else(|| format!("{wf}: cannot be read"))?;
@@ -3363,18 +3414,31 @@ fn compiled_roots(
     let mut roots = BTreeSet::new();
     for f in tracked {
         let parts: Vec<&str> = f.split('/').collect();
-        let is_root = match parts.as_slice() {
-            [".github", _] => built.contains(f),
-            ["crates", c, "build.rs"] => member(c),
-            ["crates", c, "src", "lib.rs" | "main.rs"] => member(c),
-            ["crates", c, "src", "bin", file] => member(c) && file.ends_with(".rs"),
-            ["crates", c, "src", "bin", _, "main.rs"] => member(c),
-            ["crates", c, "tests" | "benches" | "examples", file] => {
-                member(c) && file.ends_with(".rs")
-            }
-            ["crates", c, "tests" | "benches" | "examples", _, "main.rs"] => member(c),
-            _ => false,
+        let auto = |dir: &str| match dir {
+            "tests" => "autotests",
+            "benches" => "autobenches",
+            _ => "autoexamples",
         };
+        let is_root = named.contains(f)
+            || match parts.as_slice() {
+                [".github", _] => built.contains(f),
+                ["crates", c, "build.rs"] => on(c, "build"),
+                ["crates", c, "src", "lib.rs"] => on(c, "lib"),
+                ["crates", c, "src", "main.rs"] => on(c, "autobins"),
+                ["crates", c, "src", "bin", file] => on(c, "autobins") && file.ends_with(".rs"),
+                ["crates", c, "src", "bin", _, "main.rs"] => on(c, "autobins"),
+                ["crates", c, dir @ ("tests" | "benches" | "examples"), file] => {
+                    on(c, auto(dir)) && file.ends_with(".rs")
+                }
+                [
+                    "crates",
+                    c,
+                    dir @ ("tests" | "benches" | "examples"),
+                    _,
+                    "main.rs",
+                ] => on(c, auto(dir)),
+                _ => false,
+            };
         if is_root {
             roots.insert(f.clone());
         }
@@ -3391,6 +3455,10 @@ fn compiled_roots(
                     )
                 {
                     let rel = l.value.trim_matches('"');
+                    // `build = false` (or `true`) is a switch, not a path.
+                    if l.value == "false" || l.value == "true" {
+                        continue;
+                    }
                     let full = path_string(&normalise(
                         &Path::new(f).parent().unwrap_or(Path::new("")).join(rel),
                     ));
@@ -4711,6 +4779,57 @@ mod tests {
         assert!(!r.contains(&"crates/a/tests/common/mod.rs".to_owned()));
         assert!(!r.contains(&"web/x.rs".to_owned()));
         assert_eq!(r.len(), 6);
+    }
+
+    /// D-3692: a conventional path whose discovery the member's manifest
+    /// turned off is not a root; an explicitly named target still is, and an
+    /// overriding `[lib]` or `build` path takes the root's place.
+    #[test]
+    fn a_target_cargo_does_not_discover_is_not_a_root() {
+        let t: BTreeSet<String> = [
+            "Cargo.toml",
+            "crates/a/Cargo.toml",
+            "crates/a/build.rs",
+            "crates/a/src/lib.rs",
+            "crates/a/src/core.rs",
+            "crates/a/src/main.rs",
+            "crates/a/src/bin/x.rs",
+            "crates/a/tests/t.rs",
+            "crates/a/benches/b.rs",
+            "crates/a/benches/ratio.rs",
+            "crates/a/examples/e.rs",
+            "crates/b/Cargo.toml",
+            "crates/b/build.rs",
+            "crates/b/src/lib.rs",
+            "crates/b/tests/t.rs",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let read = |p: &str| {
+            match p {
+            "Cargo.toml" => {
+                Some("[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n".to_owned())
+            }
+            "crates/a/Cargo.toml" => Some(
+                "[package]\nname = \"a\"\nbuild = false\nautobins = false\nautotests = false\nautobenches = false\nautoexamples = false\n\n[lib]\npath = \"src/core.rs\"\n\n[[bench]]\nname = \"ratio\"\nharness = false\n"
+                    .to_owned(),
+            ),
+            "crates/b/Cargo.toml" => Some("[package]\nname = \"b\"\n".to_owned()),
+            _ => None,
+        }
+        };
+        let r = compiled_roots(&t, &read).unwrap();
+        assert_eq!(
+            r,
+            vec![
+                "crates/a/benches/ratio.rs".to_owned(),
+                "crates/a/src/core.rs".to_owned(),
+                "crates/b/build.rs".to_owned(),
+                "crates/b/src/lib.rs".to_owned(),
+                "crates/b/tests/t.rs".to_owned(),
+            ]
+        );
     }
 
     // ---- audit-20261003 (D-1600..D-1619) ----

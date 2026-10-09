@@ -569,6 +569,19 @@ fn decode(compressed: &[u8]) -> Result<DailyEligibility, String> {
 }
 
 fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibility, String> {
+    install_and_read_with(root, day, bytes, |directory| {
+        File::open(directory).and_then(|handle| handle.sync_all())
+    })
+}
+
+/// [`install_and_read`] with its directory sync named, so a test can make it
+/// fail; production passes the real `sync_all` and nothing else.
+fn install_and_read_with(
+    root: &Path,
+    day: Day,
+    bytes: &[u8],
+    sync_directory: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<DailyEligibility, String> {
     if !crate::vendor::cash_auction_eligibility_required(day) {
         return Err(format!(
             "UNVERIFIED {day} precedes the 2026-08-03 cash-session identifier"
@@ -593,7 +606,7 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
             ));
         }
         publish_new(&metadata, receipt(day, bytes).as_bytes())?;
-        sync_cache_directory(root, day)?;
+        sync_cache_directory(root, day, &sync_directory)?;
         lock.release().map_err(|u| u.to_string())?;
         return Ok(eligibility);
     }
@@ -603,6 +616,13 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
                 "conflicting NSE cash master for {day}; existing cache retained"
             ));
         }
+        // A MATCH IS NOT A SYNC. An earlier install may have landed both files
+        // and then failed its directory sync ("crash durability UNVERIFIED");
+        // reading them back proves they are visible, not that a crash keeps
+        // them, so the match syncs before it confirms (OBSV-03, D-3202).
+        sync_directory(root).map_err(|why| {
+            format!("cache for {day} matches but directory sync failed: {why}; crash durability UNVERIFIED")
+        })?;
         lock.release().map_err(|u| u.to_string())?;
         return Ok(eligibility);
     }
@@ -611,13 +631,21 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
     // in place and cannot become an implicit overwrite on the next run; an
     // unreceipted payload is re-installed only on byte equality, above.
     publish_new(&metadata, receipt(day, bytes).as_bytes())?;
-    sync_cache_directory(root, day)?;
+    sync_cache_directory(root, day, &sync_directory)?;
     lock.release().map_err(|u| u.to_string())?;
     Ok(eligibility)
 }
 
-fn sync_cache_directory(root: &Path, day: Day) -> Result<(), String> {
-    File::open(root).and_then(|directory| directory.sync_all())
+/// The cache directory's barrier, through the sync `install_and_read_with`
+/// was handed (OBSV-03, D-3202), so a test that fails it fails this one too.
+/// The staged publish (pull2-3, D-2533) and the injectable sync came from two
+/// branches; the merge routes both installs through it (D-4618).
+fn sync_cache_directory(
+    root: &Path,
+    day: Day,
+    sync_directory: &impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    sync_directory(root)
         .map_err(|why| format!("cache for {day} is visible but directory sync failed: {why}; crash durability UNVERIFIED"))
 }
 
@@ -1487,6 +1515,38 @@ mod tests {
             );
             assert!(!fetched);
         }
+    }
+
+    /// OBSV-03 (D-3202): an entry whose directory sync failed is not made
+    /// durable by being read back. The first install below lands both files
+    /// and then fails its directory sync, reported as "crash durability
+    /// UNVERIFIED"; a retry of the same bytes found them, matched them and
+    /// answered `Ok` without syncing anything -- durability claimed on the
+    /// strength of a read, which `masters::refresh_mtime` refuses (D-2374).
+    #[test]
+    fn a_reinstall_after_a_failed_directory_sync_syncs_again() {
+        let temp = Temp::new();
+        let bytes = gzip(CSV.as_bytes());
+        let failing = |_: &Path| Err(std::io::Error::other("injected directory sync failure"));
+        let first = install_and_read_with(&temp.0, day(3), &bytes, failing)
+            .expect_err("the first directory sync failed");
+        assert!(first.contains("crash durability UNVERIFIED"), "{first}");
+        assert_eq!(
+            read_entry(&temp.0, day(3)).expect("the entry reads back"),
+            Some(bytes.clone())
+        );
+
+        let again = install_and_read_with(&temp.0, day(3), &bytes, failing)
+            .expect_err("a read is not a directory sync");
+        assert!(again.contains("injected directory sync failure"), "{again}");
+
+        let calls = std::cell::Cell::new(0_u32);
+        let counted = |root: &Path| {
+            calls.set(calls.get() + 1);
+            File::open(root).and_then(|directory| directory.sync_all())
+        };
+        install_and_read_with(&temp.0, day(3), &bytes, counted).expect("a real sync confirms");
+        assert_eq!(calls.get(), 1, "the matched entry was synced exactly once");
     }
 
     #[test]

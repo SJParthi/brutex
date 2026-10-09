@@ -381,6 +381,20 @@ async fn failed_audit_start_never_polls_the_handler() {
     assert_eq!(body["handler_completed"], false);
 }
 
+/// One poll of a journal a blocking-pool writer may be appending to. `None` is
+/// a read that met the append: BUSY by design ("retry the read"), and the race
+/// the poll waits out. Any other refusal fails the test. CI run 1288 failed
+/// the test below on exactly that BUSY, through an `unwrap` (D-4622).
+fn poll(root: &std::path::Path, id: u64) -> Option<Option<Record>> {
+    match journal::read(root, id) {
+        Ok(record) => Some(record),
+        Err(why) => {
+            assert!(journal::is_busy(&why), "{why}");
+            None
+        }
+    }
+}
+
 #[tokio::test]
 async fn cancelled_request_records_cancellation_and_never_completed() {
     // `request_audited` journals through a detail slot, so this is kept apart
@@ -407,9 +421,9 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
     // it is awaited rather than assumed to have happened inside the abort.
     let mut phase = None;
     for _ in 0..500 {
-        phase = journal::read(&root.0, ID_BASE + 1)
-            .unwrap()
-            .map(|record| record.phase);
+        if let Some(seen) = poll(&root.0, ID_BASE + 1) {
+            phase = seen.map(|record| record.phase);
+        }
         if phase.is_some_and(Phase::terminal) {
             break;
         }
@@ -446,8 +460,9 @@ async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
     release.notify_one();
     let mut record = None;
     for _ in 0..500 {
-        let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
-        if seen.phase.terminal() {
+        if let Some(seen) = poll(&root.0, ID_BASE + 1).map(Option::unwrap)
+            && seen.phase.terminal()
+        {
             record = Some(seen);
             break;
         }
@@ -487,8 +502,9 @@ async fn a_read_whose_client_goes_away_writes_cancelled_off_the_async_worker() {
     assert!(connection.await.unwrap_err().is_cancelled());
     let mut record = None;
     for _ in 0..500 {
-        let seen = journal::read(&root.0, ID_BASE + 1).unwrap().unwrap();
-        if seen.phase.terminal() {
+        if let Some(seen) = poll(&root.0, ID_BASE + 1).map(Option::unwrap)
+            && seen.phase.terminal()
+        {
             record = Some(seen);
             break;
         }

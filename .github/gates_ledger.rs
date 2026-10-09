@@ -1530,8 +1530,6 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/api/src/server.rs", 4),
     ("crates/cli/src/admission_store.rs", 5),
     ("crates/cli/src/all_rung_selection_v5.rs", 6),
-    ("crates/cli/src/anchored_search_lineage_v2.rs", 1),
-    ("crates/cli/src/anchored_search_lineage_v3.rs", 1),
     ("crates/cli/src/anchored_search_lineage_v4.rs", 1),
     ("crates/cli/src/candidate_universe.rs", 2),
     ("crates/cli/src/execution_capability.rs", 2),

@@ -2031,6 +2031,26 @@ mod tests {
         )
         .expect_err("a different evidence population cannot borrow complete data authority");
         assert!(why.contains("another evidence population"));
+        // D-1835: the per-population binding reconciles the same data authority
+        // once and carries its verdict to every cell.
+        let bound = crate::institutional_evidence::BoundPopulationCompletenessV1::bind(
+            &population_authority,
+            DataCompletenessSourceV1::Complete(&data_authority),
+        )
+        .expect("matching durable authority binds");
+        assert_eq!(bound.population_id(), fixture.population_id);
+        let mut foreign_identities = fixture.identities;
+        foreign_identities.run_identity[0] ^= 1;
+        let foreign = fixture.authority_with_identities(&foreign_identities);
+        let why = crate::institutional_evidence::BoundPopulationCompletenessV1::bind(
+            &foreign,
+            DataCompletenessSourceV1::Complete(&data_authority),
+        )
+        .expect_err("a data authority of another population does not bind");
+        assert!(
+            why.contains("stored-data completeness authority refused"),
+            "{why}"
+        );
     }
 
     #[test]

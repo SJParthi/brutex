@@ -1268,13 +1268,21 @@ fn broker_stamp_on_grid(
 /// measurement, however sound it is.
 fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String> {
     let census_path = crate::manifest::manifest_path(store_root, vendor);
+    // A REFUSAL BEFORE THE READ IS LOGGED as the install refusal is: the
+    // receipt carried it and `/logs` did not (OBSV-11, D-3210).
     let lock = match CensusLock::take(&census_path) {
         Ok(lock) => lock,
-        Err(why) => return Some(why.clone()),
+        Err(why) => {
+            note_census_unpublished(&census_path, held.len(), &why);
+            return Some(why.clone());
+        }
     };
     let mut census = match read_census(&census_path, vendor) {
         Ok(census) => census,
-        Err(why) => return Some(why),
+        Err(why) => {
+            note_census_unpublished(&census_path, held.len(), &why);
+            return Some(why);
+        }
     };
     // RESERVED FROM THE BOUND IN HAND — at most one append per entry offered.
     let mut appends: Vec<Append> = Vec::with_capacity(held.len());
@@ -1292,6 +1300,10 @@ fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String
     // now does the same. A refused row leaves the census unchanged
     // (`Manifest::record_held` refuses before it records), so the rows after it
     // are counted against the same census they would have been.
+    //
+    // The attack audit found the same return a third time (OBSV-11, D-3210)
+    // and kept only the first reason; the merge keeps this list, which names
+    // every refusal and still holds OBSV-11's test (D-4618).
     let mut refused: Vec<String> = Vec::new();
     for one in held {
         match count(&mut census, *one) {
@@ -3778,6 +3790,11 @@ impl core::fmt::Display for CensusFault {
 
 /// The positional writes, kept apart from the sentence they fail with.
 fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<(), CensusFault> {
+    // THE COUNT IS WHAT LANDED. Each append commits its own slot, so a failure
+    // at append `i` leaves exactly `i` entries durable; the sentence names that
+    // number beside the one asked for, never the asked-for one alone
+    // (OBSV-04, D-3203). xcut-2 (D-2529) carries the same count as a field;
+    // the merge keeps the typed fault and this sentence (D-4618).
     write_appends(path, appends).map_err(|(committed, why)| {
         if committed == appends.len() {
             // EVERY SLOT IS DURABLE; only the stamp past the writes failed.
@@ -4673,6 +4690,101 @@ mod tests {
     /// kernel moved the times before copying the bytes, and nothing after the
     /// slot moved them again. Before D-2766 the final stamp WAS that stamp, so
     /// the api's cache kept whatever that reader saw under it indefinitely.
+    /// OBSV-11 (D-3210): **one refused row does not drop the rest of the
+    /// batch.** `record_all` returned at the first `count` refusal, before
+    /// `install_census`, so every OTHER contract's row in that rolling answer
+    /// was dropped though its bars were on disk -- "the worst outcome there
+    /// is", in the folder path's own words, repeated on every roll because a
+    /// backwards count never heals -- and the log said nothing.
+    #[test]
+    fn one_refused_row_does_not_drop_the_rest_of_the_batch() {
+        let root = scratch("census-stamp");
+        let held = |symbol: &str, rows: u64| {
+            crate::manifest::Held::new(
+                crate::manifest::Entry {
+                    key: crate::manifest::EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(symbol).expect("legal"),
+                        timeframe: store::path::Timeframe::MINUTE_1,
+                        month: store::path::YearMonth::new(2022, 10).expect("legal"),
+                    },
+                    rows,
+                    first_ts_micros: 1_664_775_000_000_000,
+                    last_ts_micros: 1_664_775_060_000_000,
+                },
+                crate::manifest::Closes::UNKNOWN,
+            )
+        };
+        assert_eq!(
+            super::record_held(&root, Vendor::Groww, &[held("NIFTY", 9_999)]),
+            None
+        );
+        let fresh = held("BANKNIFTY", 2);
+        let why = super::record_held(&root, Vendor::Groww, &[held("NIFTY", 2), fresh])
+            .expect("the backwards row is still reported");
+        assert!(!why.is_empty());
+        let census = super::read_census(
+            &crate::manifest::manifest_path(&root, Vendor::Groww),
+            Vendor::Groww,
+        )
+        .expect("the census reads");
+        assert_eq!(
+            census.held(&fresh.entry.key),
+            Some(fresh),
+            "a sibling row's census append survives one row's refusal"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// OBSV-04 (D-3203): the refusal names the entries that LANDED, not the
+    /// ones asked for. A failure at the open lands none and a failure at the
+    /// second append leaves exactly one committed slot, yet the sentence said
+    /// "after 2 entry write(s)" for both -- an operator reconciling the census
+    /// against it was told two entries had been written.
+    #[test]
+    fn a_failed_append_names_how_many_entries_landed() {
+        let root = scratch("census-stamp");
+        let census = root.join("manifest").join("dhan.man");
+        std::fs::write(&census, vec![0_u8; 4096]).expect("a census file");
+        let at = |offset: u64, slot: u64| super::Append {
+            ordinal: 0,
+            offset,
+            bytes: [7; crate::manifest::ENTRY_LEN],
+            commit: crate::manifest::Commit {
+                slot: 0,
+                offset: slot,
+                bytes: [9; crate::manifest::IMAGE_LEN],
+                durable_through: offset.saturating_add(128),
+                header: crate::manifest::ManifestHeader::genesis(brutex_core::vendor::Vendor::Dhan),
+            },
+        };
+        let lock = CensusLock::take(&census).unwrap_or_else(|why| panic!("a free lock: {why}"));
+
+        // The second seek is past `i64::MAX`, which no file offset can be.
+        // The refusal is xcut-2's typed fault (D-2529); its sentence is read
+        // through `Display` and its count as the field (D-4618).
+        let Err(super::CensusFault::NotPublished {
+            committed: 1,
+            why: one,
+        }) = super::append_locked(&lock, &census, &[at(1024, 64), at(u64::MAX, 64)])
+        else {
+            panic!("an offset no file can have must refuse, unpublished after one");
+        };
+        assert!(one.contains("after 1 of 2 entry write(s)"), "{one}");
+
+        let absent = root.join("manifest").join("absent.man");
+        let Err(super::CensusFault::NotPublished {
+            committed: 0,
+            why: none,
+        }) = super::append_locked(&lock, &absent, &[at(1024, 64), at(1152, 64)])
+        else {
+            panic!("an absent census must refuse, unpublished after none");
+        };
+        assert!(none.contains("after 0 of 2 entry write(s)"), "{none}");
+    }
+
     #[test]
     fn an_in_place_append_moves_the_census_stamp_past_its_own_writes() {
         let root = scratch("census-stamp");

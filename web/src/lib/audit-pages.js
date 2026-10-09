@@ -75,3 +75,22 @@ export function nextOrdinal(merged) {
   if (oldest === undefined || oldest.ordinal <= 0) return null;
   return oldest.ordinal - 1;
 }
+
+/**
+ * One older page's answer, as rows to merge or an error to show.
+ *
+ * OBSV-10, D-3209. `journal_block` answers 200 with `runs: []` and a
+ * `runs_error` when its page read fails. Taken as an empty page, the failure
+ * was never shown and still spent a page of `MAX_PAGES`. A named error wins
+ * over any rows beside it; a body with no `runs` list is an error too, never
+ * an empty page.
+ *
+ * @param {any} body
+ * @returns {{ runs: any[], error: string | null }}
+ */
+export function olderPageOf(body) {
+  const why = typeof body?.runs_error === 'string' ? body.runs_error.trim() : '';
+  if (why !== '') return { runs: [], error: why };
+  if (!Array.isArray(body?.runs)) return { runs: [], error: 'the older page carried no runs list' };
+  return { runs: body.runs, error: null };
+}

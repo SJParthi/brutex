@@ -2331,6 +2331,8 @@ impl PopulationFinalizationV4Ledger {
     }
 
     fn scan(&mut self) -> Result<(), PopulationFinalizationV4Refusal> {
+        #[cfg(test)]
+        SCANS.with(|scans| scans.set(scans.get().saturating_add(1)));
         self.receipts.clear();
         self.trailing = None;
         let len = self.data_generation.len;
@@ -2420,13 +2422,14 @@ impl PopulationFinalizationV4Ledger {
     /// file, and an exact reuse runs another before it returns, so a reused
     /// append that writes nothing is O(F) as well.
     /// After the Completion is synced, the append hashes the whole data file
-    /// and then rescans the whole ledger: `scan` decodes every record,
-    /// validates every complete block, and ends with a generation check that
-    /// hashes the data file whole again. One append is therefore O(F) in the
-    /// ledger's file bytes F, not O(D) in its own decisions, and the appends
-    /// into one ledger cost quadratically in its length over its life.
-    /// Block validation inserts every decision into hash sets, so the bound
-    /// is expected, not worst case.
+    /// once more, to hold the generation every later check compares with, and
+    /// then reads back and validates only the block it wrote: O(D) in its own
+    /// decisions. It no longer rescans the ledger (W2-cli11-0, D-1845). The
+    /// two whole-file hashes keep one append O(F) in the ledger's file bytes
+    /// F, and that is inherent to the check: a generation that did not hash
+    /// the bytes could not see a same-size rewrite (D-0036). Block validation
+    /// inserts every decision into hash sets, so the bound is expected, not
+    /// worst case.
     /// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole
     /// files per call".
     /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
@@ -2575,12 +2578,35 @@ impl PopulationFinalizationV4Ledger {
             .map_err(|why| format!("cannot sync Finalization V4 directory: {why}"))?;
         self.data_generation =
             file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
-        self.scan()?;
-        let receipt = self
+        // THE NEW BLOCK IS VALIDATED, NOT THE WHOLE LEDGER AGAIN (W2-cli11-0,
+        // D-1845). This called `scan`, which re-read and re-validated every
+        // earlier block. Those blocks were validated when this writer opened
+        // and `require_unchanged` above proved the file still held them; the
+        // block written here is read back from disk and validated in full by
+        // the same `validate_complete_block` a scan would run, so the receipt
+        // is the one a scan derives. `commit_population_finalization_v4`
+        // still reopens the ledger and compares receipts.
+        let block_first = self
+            .record_count
+            .checked_sub(prefix)
+            .ok_or_else(|| "Finalization V4 block start underflowed".to_owned())?;
+        let data = decode_manifest(
+            &read_record_at(&mut self.data_file, block_first)?,
+            DATA_KIND,
+        )?;
+        if data.sequence != sequence || data.source != prepared.source {
+            return Err("Finalization V4 appended block does not read back as written".to_owned());
+        }
+        let receipt = validate_complete_block(&mut self.data_file, block_first, &data)?;
+        if self
             .receipts
-            .get(&prepared.source.finalization_id)
-            .copied()
-            .ok_or_else(|| "Finalization V4 appended block is absent after scan".to_owned())?;
+            .insert(receipt.finalization_id, receipt)
+            .is_some()
+        {
+            return Err("Finalization V4 identity appears more than once".to_owned());
+        }
+        self.trailing = None;
+        self.record_count = next_record_count;
         Ok((true, receipt))
     }
 
@@ -3112,6 +3138,12 @@ impl PopulationFinalizationV4Commit {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: whole-ledger scans on this thread. D-1845.
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Finalizes one retained fresh-reopen Admission V4 capability.
 ///
 /// No row, family, terminal, digest, policy or status is caller-authored.
@@ -3406,6 +3438,59 @@ mod tests {
                 .expect("reuse Finalization V4");
         assert!(matches!(&reused, PopulationFinalizationV4Commit::Reused(_)));
         assert_eq!(reused.into_authority().structural_receipt(), receipt);
+    }
+
+    /// W2-cli11-0, D-1845: an append validates the block it wrote and does
+    /// not rescan the ledger; the open and the commit's fresh reopen are the
+    /// only whole-ledger scans, and the reopened receipt equals the append's.
+    #[test]
+    fn an_append_validates_its_own_block_and_does_not_rescan_the_ledger() {
+        let admission_root = TestRoot::new("scan-admission");
+        let finalization_root = TestRoot::new("scan-finalization");
+        let scans = || SCANS.with(std::cell::Cell::get);
+        let mut receipts = Vec::new();
+        for (count, nifty) in [
+            (31, AdmissionV4FamilyTerminal::InsufficientForCscv),
+            (32, AdmissionV4FamilyTerminal::Evaluated),
+        ] {
+            let source = admission(
+                admission_root.path(),
+                nifty,
+                AdmissionV4FamilyTerminal::Evaluated,
+                count,
+            );
+            let prepared = {
+                let mut source = source;
+                prepare_population_finalization_v4(&mut source).expect("prepare")
+            };
+            let mut writer =
+                PopulationFinalizationV4Ledger::open_write(finalization_root.path(), bounds())
+                    .expect("open");
+            let before = scans();
+            let (written, receipt) = writer.append(&prepared).expect("append");
+            assert!(written);
+            assert_eq!(scans(), before, "the append rescanned the ledger");
+            drop(writer);
+            let reopened =
+                PopulationFinalizationV4Ledger::open_read(finalization_root.path(), bounds())
+                    .expect("reopen");
+            assert_eq!(
+                reopened
+                    .receipts
+                    .get(&prepared.source.finalization_id)
+                    .copied(),
+                Some(receipt),
+                "the append's receipt is the one a scan derives"
+            );
+            assert_eq!(reopened.receipts.len(), receipts.len() + 1);
+            receipts.push(receipt);
+        }
+        assert_ne!(receipts[0], receipts[1]);
+        assert_eq!(
+            receipts[1].sequence(),
+            1,
+            "the second block follows the first"
+        );
     }
 
     /// slice24-F1, D-1900: a short write or failed barrier on the evidence or

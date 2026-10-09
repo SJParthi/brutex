@@ -1768,6 +1768,11 @@ jobs:
           cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
+          # TWO MORE, one kind (D-1849): the result lines of two IGNORED
+          # timing tests (o1cli before/after), run only by hand with
+          # `--ignored --nocapture`; test-only, no production path.
+          declared="$declared cli/src/lib.rs:println!:1
+          cli/src/audited_stored_tests.rs:println!:1"
           # ONE MORE (two until D-3128), one kind (D-1933): the stderr half of a
           # degraded decode,
           # each written beside a `telemetry::emit` of the same counts.
