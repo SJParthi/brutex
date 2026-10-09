@@ -66539,3 +66539,17 @@ nobody measured, in place of the one the server wrote.
 panel's existing "could not be read" line. The run binding (conc18-4) is asked
 again after the body is read, so a refusal for a sweep replaced meanwhile is
 dropped. OBSV-15.
+
+### D-3215 — A refused saved-evidence read names the server's refusal — 2026-10-09
+
+**What was observed.** `/sweep-evidence.json` refuses a selector (400), a
+saturated detail door (429) or a changed or unreadable saved attempt (503)
+with the detail envelope `{"schema_version":1,"status":"refused",
+"evidence":null,"rows":[],"refusal":…}` (`crates/api/src/sweepevidence.rs`
+`refusal`). `fetchSweepEvidence` threw "Saved evidence request failed (HTTP
+503)." and never read it; every sibling saved-evidence reader already passes
+the same envelope through `detailRefusal`.
+
+**Decided.** `fetchSweepEvidence` throws `detailRefusal(response, …)`: the
+status sentence followed by the bounded `refusal`, and the status sentence
+alone for a body that is not the envelope (a proxy's HTML). OBSV-16.
