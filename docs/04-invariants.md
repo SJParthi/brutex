@@ -7052,3 +7052,9 @@ old line regex the same input and watched it pass.
 | G18-api-27 | The seek path's `records unreadable` line names the first file that refused a record, not the first file read (D-2046) | `api::bars::window_tests::the_unreadable_line_names_the_first_damaged_file_not_the_first_file` | ✓ |
 | G18-api-28 | The route test's HTTP exchange is bounded at 30 s per read and write, so a server that admits or answers nothing fails it rather than hanging (D-2047) | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end` | ✓ |
 | G18-api-29 | A dropped calendar `Landing` marks its flight `Abandoned` (or answered), removes it from the flight table, and wakes every follower (D-2047) | `api::calendar_of::tests::a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped` | ✓ |
+
+### Lane 1-b fixer D, G3 and G5 verification items (D-4748 onward)
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| L1FD-01 | Boolean research judges each venue against its own close. An eligible share's CAS-day calendar ends at its dated close and receipts under policy 4. The index on the same days is unchanged at policy 3. A day with an unreadable close refuses as "cash session close UNVERIFIED", never as an incomplete store, and a bar past the dated close refuses as the store contradicting its master. A dated day with no close and no bar is `Unmeasured`, and a pre-CAS share receipt expects the calendar yet differs in digest from the index's (D-4748) | `cli::candidate_universe::boolean_candidate_v1::tests::a_cas_share_and_an_index_on_the_same_days_are_each_judged_against_their_own_close` · `cli::stored::tests::a_share_receipt_is_policy_four_and_expects_its_dated_close` | ✓ |

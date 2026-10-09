@@ -65025,3 +65025,82 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4748 — The Boolean research path judges a cash share's calendar against its dated close — 2026-10-09
+
+**Finding.** G3-1, the Boolean sibling of GAP12-6 (medium). Boolean research
+admits a cash share (`ResearchFamilyV1::new` takes tag 3), and its
+`prepare_column` built both calendar receipts with
+`stored::calendar_receipt_v2_for_bars`, whose expected buckets come from
+`pull::calendar::kind_of` alone: the index session, last minute 15:29. From
+2026-08-03 an eligible share's stored minutes end at 15:14 on every
+closing-auction day, so any span holding one was refused as "calendar receipt
+V2 ... is not complete". Past that check, `build_candidate_signal_column`
+overlaid ORB and `GapFib` with `stored::nse_session_close_minute`.
+
+**Decision.**
+
+- `stored::calendar_receipt_v2_for_venue_bars(bars, rung, first, last, cash)`
+  takes the share's `CashCloses`, the dated authority the stored path already
+  reads (D-2102). It is the only receipt implementation:
+  `calendar_receipt_v2_for_bars` is it with `None`, byte for byte.
+- On a CAS-dated day the last window of the expected session ends at the
+  share's dated close. The day hashes tag 6, not 1, and the dated windows
+  are hashed in place of the calendar's.
+- A day whose close cannot be read refuses as "cash session close UNVERIFIED",
+  naming the reason, never as an incomplete store. A bar past the dated close
+  refuses as the store contradicting its session master.
+- A dated day whose close was not read, with no bar offered on it, hashes
+  tag 7 and leaves the receipt `Unmeasured`: completeness is never claimed
+  against a close the run does not hold.
+- A receipt built with closes carries **policy 4**,
+  `CALENDAR_RECEIPT_POLICY_V2_DATED_CASH`, so it never shares a version with
+  a policy-3 receipt (§3 rule 8). An index receipt is unchanged: policy 3, the
+  same bytes.
+- The Boolean path passes `data.exact_minute.cash` to both receipts, to
+  `require_exact_calendar_for_venue` and to `build_candidate_columns_for_venue`.
+  The overlay then asks `stored::session_close_for`, the one rule the stored
+  path's overlay and census ask.
+- The Boolean source identity binds the closes' digest, so the same bars
+  judged against a different master are a different source.
+
+**What changes.**
+
+- Boolean research over an NSE cash share: its receipts are policy 4 and its
+  source identity binds the closes, so every such family, coordinate and
+  catalogue identity changes, pre-CAS spans included.
+- Spans holding a CAS day now complete instead of refusing.
+- Index runs and every other receipt caller are unchanged. Candidate V4,
+  Global Replay, Search V4, `index_stop` and the Step 3 sizing census are
+  index-only, and they keep `None`.
+
+Tests (L1FD-01):
+
+- `a_cas_share_and_an_index_on_the_same_days_are_each_judged_against_their_own_close`.
+  It covers an eligible share ending at 15:14, an index on the same days, an
+  ineligible share, one absent master, and a store running past the dated
+  close.
+- `a_share_receipt_is_policy_four_and_expects_its_dated_close`. On one CAS
+  day the index receipt expects 375 minutes and misses 15, while the share's
+  expects 360 and is complete. It also checks that a pre-CAS day expects the
+  same count under both policies with different digests, that an unread close
+  is `Unmeasured` with no bar and refused with one, and that a bar past 15:14
+  is refused.
+
+**Rejected.** A per-day closure parameter on the receipt. A closure could
+answer differently from the overlay. Passing the closes value lets both ask
+one function.
+
+### D-4749 — Correction to D-2102: a share does reach the Candidate universe's overlay — 2026-10-09
+
+**Corrects.** D-2102, "Unchanged on purpose", says: "The Candidate universe's
+overlay still asks the index calendar. Its families are NIFTY and BANKNIFTY
+only (`candidate_universe::require_series_family`), so no share reaches it."
+
+That holds for the Candidate V4 grid. It was false for
+`candidate_universe::boolean_candidate_v1`, a submodule of the same file. It
+admits cash families and called the same `build_candidate_columns`, so an
+eligible share reached the index calendar there (G3-1).
+
+**Now.** D-4748 threads the share's closes through that builder. The index-only
+callers still pass none, and that is the statement D-2102 should have made.

@@ -15967,3 +15967,16 @@ on every request. D-0904 names the same directory walk for three other
 routes; this one was named only in D-1445's list of audited routes. The second
 open is the freshness check, and it is kept. **No timing was taken. The cost
 is UNVERIFIED as a measurement.**
+
+## Two read-side costs from lane 1-b fixer D — D-4748 and D-4756, 9 October 2026
+
+### A cash share's calendar receipt asks its dated close once per bar and once per day (D-4748)
+
+`stored::calendar_receipt_v2_for_venue_bars` keeps the receipt at O(B + D) time
+for B offered timestamps and D requested days, with O(1) auxiliary space.
+Given a share's `CashCloses`, every offered bar and every requested day on or
+after 2026-08-03 also pays one `CashCloses::session_close_minute`: two
+`pull::calendar::kind_of` calls and one schedule lookup. Days before then pay one
+civil-day conversion. An index receipt, built with `None`, pays nothing more.
+**UNVERIFIED as a measured bound.** No bench times either receipt, so this is
+read off the source.

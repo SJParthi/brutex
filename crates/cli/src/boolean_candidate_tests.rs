@@ -544,6 +544,173 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
     Ok(())
 }
 
+/// Writes 2026-07 and 2026-08 for `name`: every measured open day's minutes,
+/// each day's last minute at `last(day)`, one daily bar per day, and, when
+/// `flag` is given, one receipted session master per closing-auction full
+/// session naming `name` with that flag, except the `skip`th. Returns the CAS
+/// days a master was due for. Generated, never market evidence.
+fn prepare_cas_span(
+    fixture: &Fixture,
+    name: &str,
+    last: impl Fn(i64) -> u16,
+    flag: Option<u8>,
+    skip: Option<usize>,
+) -> Result<Vec<i64>, String> {
+    use std::io::Write as _;
+    let key = crate::stored::swept_index(name)?;
+    let symbol = u32::from_le_bytes(
+        brutex_core::universe::fnv1a(name)
+            .to_le_bytes()
+            .get(..4)
+            .ok_or("fixture symbol prefix")?
+            .try_into()
+            .map_err(|_| "fixture symbol width")?,
+    );
+    let mut cas_days = Vec::new();
+    for month in [7, 8] {
+        let mut minutes = Vec::new();
+        let mut daily = Vec::new();
+        for day in 1..=31 {
+            let Ok(date) = pull::session::Day::new(2026, month, day) else {
+                continue;
+            };
+            let stamp = i64::from(date.days_from_epoch());
+            let pull::calendar::DayKind::Open(session) = pull::calendar::kind_of(stamp) else {
+                continue;
+            };
+            if indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS.contains(&stamp) {
+                continue;
+            }
+            if pull::vendor::cash_auction_eligibility_required(date)
+                && session == pull::calendar::Session::full()
+            {
+                cas_days.push(stamp);
+            }
+            let start = minutes.len();
+            for minute in 555..=last(stamp) {
+                let open = 2_000_000 + i64::from((minute + u16::from(day)) % 31) * 100;
+                minutes.push(Bar {
+                    ts_micros: stamp * 86_400_000_000 + i64::from(minute) * 60_000_000
+                        - indicators::IST_OFFSET_MICROS,
+                    open,
+                    high: open + 1000,
+                    low: open - 900,
+                    close: open + if minute % 3 == 0 { -50 } else { 50 },
+                    volume: 100,
+                    open_interest: i64::MIN,
+                });
+            }
+            daily.push(aggregate(
+                minutes.get(start..).ok_or("fixture session slice")?,
+            )?);
+        }
+        for (rung, bars) in [
+            (Timeframe::MINUTE_1, minutes.as_slice()),
+            (Timeframe::DAY_1, daily.as_slice()),
+        ] {
+            let path = StorePath::for_key(
+                brutex_core::vendor::Vendor::Zerodha,
+                &key,
+                rung,
+                YearMonth::new(2026, month).map_err(display)?,
+                FileKind::Bars,
+            )
+            .map_err(display)?;
+            let mut writer =
+                BarFile::open_or_create(&fixture.root, path, symbol).map_err(display)?;
+            writer.append(bars).map_err(display)?;
+        }
+    }
+    if let Some(flag) = flag {
+        let isin = brutex_core::universe::nse_isin(name).ok_or("fixture share has no ISIN")?;
+        for (index, day) in cas_days.iter().enumerate() {
+            if skip == Some(index) {
+                continue;
+            }
+            let csv = format!(
+                "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,{name},EQ,{},{flag}\n",
+                isin.as_str()
+            );
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            gz.write_all(csv.as_bytes()).map_err(display)?;
+            let civil = pull::session::Day::from_days(u32::try_from(*day).map_err(display)?)
+                .map_err(display)?;
+            pull::cash_session_cache::install(
+                &fixture.root.join("session-masters"),
+                civil,
+                &gz.finish().map_err(display)?,
+            )?;
+        }
+    }
+    Ok(cas_days)
+}
+
+/// G3-1 / GAP12-6 (D-4748): the Boolean research path judges each venue's
+/// calendar against ITS close, from the one dated authority the stored path
+/// already reads (`stored::CashCloses`), with no second calendar.
+///
+/// From 2026-08-03 an eligible share's continuous session ends at 15:14 on
+/// every closing-auction day, so its complete August used to be refused as an
+/// incomplete calendar against the index's 15:29. On the SAME days the index
+/// keeps its own close; an ineligible share keeps 15:29; a day whose master is
+/// absent refuses by naming the unverified close, never as a holed store; and
+/// a share whose store runs past the dated close contradicts its master and
+/// refuses rather than being certified complete.
+#[test]
+fn a_cas_share_and_an_index_on_the_same_days_are_each_judged_against_their_own_close()
+-> Result<(), String> {
+    const ELIGIBLE_CLOSE: u16 = 914;
+    const FULL_CLOSE: u16 = 929;
+    let long = policy(Side::Long)?;
+    let short = policy(Side::Short)?;
+    let catalog = programs()?;
+    let dated = |close: u16| move |day: i64| if day >= 20_668 { close } else { FULL_CLOSE };
+    let run = |name: &str,
+               close: u16,
+               flag: Option<u8>,
+               skip: Option<usize>|
+     -> Result<Result<usize, String>, String> {
+        let fixture = Fixture::new()?;
+        let cas_days = prepare_cas_span(&fixture, name, dated(close), flag, skip)?;
+        assert!(
+            cas_days.len() > 10,
+            "fixture premise: August 2026 is CAS-era"
+        );
+        let config = config(&fixture.root)?;
+        let mut request = fixture.request(name, &catalog, &config, &long, &short)?;
+        request.from = (2026, 8);
+        request.to = (2026, 8);
+        let source = load_source(&request)?;
+        Ok(prepare_column(&request, &source).map(|(_, sessions)| sessions.days.len()))
+    };
+
+    let share = run("RELIANCE", ELIGIBLE_CLOSE, Some(1), None)?;
+    assert!(share.as_ref().is_ok_and(|days| *days > 0), "{share:?}");
+
+    let index = run("NIFTY", FULL_CLOSE, None, None)?;
+    assert_eq!(index.as_ref().ok(), share.as_ref().ok(), "{index:?}");
+
+    let ineligible = run("RELIANCE", FULL_CLOSE, Some(0), None)?;
+    assert_eq!(
+        ineligible.as_ref().ok(),
+        share.as_ref().ok(),
+        "{ineligible:?}"
+    );
+
+    let unverified = run("RELIANCE", ELIGIBLE_CLOSE, Some(1), Some(3))?;
+    let why = unverified.err().unwrap_or_default();
+    assert!(why.contains("cash session close UNVERIFIED"), "{why}");
+    assert!(!why.contains("is not complete"), "{why}");
+
+    let contradicted = run("RELIANCE", FULL_CLOSE, Some(1), None)?;
+    let why = contradicted.err().unwrap_or_default();
+    assert!(
+        why.contains("past this share's dated session close"),
+        "{why}"
+    );
+    Ok(())
+}
+
 /// D-1143, source shape: `produce_side` runs once per program and side and
 /// must seal its run against the catalogue's hoisted digests rather than hash
 /// the signal, minute and daily bars again. The answers are byte-identical, so
