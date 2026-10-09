@@ -374,8 +374,12 @@ fn record_families_keep_independent_checksums_in_every_write_order_and_exact_rep
         fixture.check(Bars, &bars);
         fixture.check(Overlay, &overlays);
         fixture.check(Greeks, &greeks);
+        // Every sibling this fixture wrote. The provenance sidecar (D-3334)
+        // is written by a landing's writer, not by `BarFile::append`, and this
+        // fixture records no landing.
         let before: Vec<_> = FileKind::ALL
             .into_iter()
+            .filter(|kind| *kind != FileKind::Provenance)
             .map(|kind| {
                 let path = Fixture::path(kind).to_path_buf(&fixture.0);
                 (path.clone(), fs::read(path).expect("all sibling bytes"))

@@ -15,6 +15,7 @@
 //! | [`catalog`] | what the store HOLDS, walked back off the tree |
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
 //! | [`flock`] | the advisory-lock guard, released by unlock and never by close |
+//! | [`provenance`] | where a month's bars came from: the `.prv` sidecar (D-3334) |
 //!
 //! # Seven properties the types enforce rather than document
 //!
@@ -70,6 +71,10 @@ pub mod layout;
 /// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).
 pub mod open_flags;
 pub mod path;
+/// Where a month's bars came from: one append-only `.prv` record per landing,
+/// written after the bars it names are committed and never touching them
+/// (D-3334; DB-078, DB-G56).
+pub mod provenance;
 pub mod repair;
 pub mod time_index;
 
