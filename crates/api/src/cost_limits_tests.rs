@@ -15,6 +15,12 @@
 
 const LIMITS: &str = include_str!("../../../docs/06-limits.md");
 const SERVER: &str = include_str!("server.rs");
+// THE HANDLERS WP-01 MOVED OUT OF `server.rs`, read where they now live. The
+// costs and the shapes these tests hold are unchanged; only the file is.
+const CENSUS_CACHE: &str = include_str!("census_cache.rs");
+const INSTRUMENTS_ROUTE: &str = include_str!("instruments_route.rs");
+const CALENDAR_ROUTE: &str = include_str!("calendar_route.rs");
+const BARS_ROUTE: &str = include_str!("bars_route.rs");
 const BARS: &str = include_str!("bars.rs");
 const CENSUS: &str = include_str!("census.rs");
 const VERIFY: &str = include_str!("verify.rs");
@@ -151,7 +157,7 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
             "`census::MAX_MANIFEST_BYTES`",
         ],
     );
-    let miss = item(SERVER, "fn census_now_stamping(");
+    let miss = item(CENSUS_CACHE, "pub(super) fn census_now_stamping(");
     assert!(
         miss.contains("let mut censuses = read(&site.store_root);"),
         "{miss}"
@@ -175,7 +181,7 @@ fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
             "O(T log T)",
         ],
     );
-    let route = item(SERVER, "async fn instruments_json(");
+    let route = item(INSTRUMENTS_ROUTE, "pub(super) async fn instruments_json(");
     assert!(
         route.contains(".by_key\n        .iter()\n        .filter("),
         "{route}"
@@ -184,7 +190,8 @@ fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
     assert!(route.contains("entries.iter()"), "{route}");
     assert!(route.contains("listing.sort_unstable_by_key("), "{route}");
     assert!(
-        item(SERVER, "fn bars_by_symbol<'a>(").contains("for (series, month) in entries"),
+        item(INSTRUMENTS_ROUTE, "fn bars_by_symbol<'a>(")
+            .contains("for (series, month) in entries"),
         "every entry is walked"
     );
 }
@@ -233,7 +240,7 @@ fn w1_api5_5_the_calendar_route_sorts_its_feed_per_request_and_its_doc_says_so()
             "corrected",
         ],
     );
-    let route = item(SERVER, "fn calendar_json_reading(");
+    let route = item(CALENDAR_ROUTE, "pub(super) fn calendar_json_reading(");
     assert_eq!(
         route
             .matches("census::held_entries(std::slice::from_ref(")
@@ -306,7 +313,7 @@ fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
             "zero-filled records",
         ],
     );
-    let route = item(SERVER, "async fn bars_json(");
+    let route = item(BARS_ROUTE, "pub(super) async fn bars_json(");
     assert!(
         route.contains(".filter(|&index| index < held)\n        .unwrap_or(0);"),
         "a bisection that lands past the end falls back to the whole month: {route}"
