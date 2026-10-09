@@ -285,7 +285,7 @@
    * The cast sits INSIDE `$state(...)` for the reason the block above gives.
    */
   let liveTop = $state(
-    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number, stale: boolean, why: string, identity: string }} */ ({
+    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number | null, stale: boolean | null, why: string, identity: string }} */ ({
       phase: 'idle',
       rows: [],
       trials: 0,
@@ -313,6 +313,19 @@
    *
    * A refusal is NAMED and never rendered as "no rows".
    */
+  /**
+   * What the panel may say about the heap's age (F3, D-3219). `/live.json`
+   * sends `idle_secs` and `stale` as null when the heap file cannot be dated
+   * (`crates/api/src/livejson.rs`); that is said as such, never as "0s ago".
+   * `warn` is the pill's text, or null for none.
+   * @param {{ idleSecs: number | null, stale: boolean | null }} top
+   */
+  function liveFreshness(top) {
+    if (top.idleSecs === null) return { text: 'age unknown: /live.json could not date this heap', warn: 'undated' };
+    const ago = top.idleSecs < 60 ? `${top.idleSecs}s` : `${Math.floor(top.idleSecs / 60)}m`;
+    return { text: `updated ${ago} ago`, warn: top.stale === true || top.idleSecs > 120 ? 'not moving' : null };
+  }
+
   async function fetchLiveTop() {
     const seq = ++liveTopSeq;
     const runKey = liveRunKey(sweep.run);
@@ -358,10 +371,17 @@
       // Undated now sorts last. A run with no rows is also dropped: a freshly
       // started sweep whose heap is still empty would otherwise blank the panel
       // while an older run with real rows sat right behind it.
-      const freshness = (/** @type {any} */ r) => {
-        const idle = Number(r?.idle_secs);
-        return Number.isFinite(idle) ? idle : Number.MAX_SAFE_INTEGER;
+      //
+      // AND IT DID NOT, UNTIL F3 (D-3219). The fix above still read
+      // `Number(r?.idle_secs)`, and `Number(null)` is 0 -- finite -- so an
+      // undated run kept sorting FIRST, and was then shown "updated 0s ago"
+      // with no pill. An age is only a non-negative finite JSON number; null,
+      // a string or a negative is no age, held as null and rendered as such.
+      const idleOf = (/** @type {any} */ r) => {
+        const idle = r?.idle_secs;
+        return typeof idle === 'number' && Number.isFinite(idle) && idle >= 0 ? idle : null;
       };
+      const freshness = (/** @type {any} */ r) => idleOf(r) ?? Number.MAX_SAFE_INTEGER;
       const fresh = runs
         .filter(
           (/** @type {any} */ r) => r && Array.isArray(r.rows) && r.rows.length > 0
@@ -392,8 +412,10 @@
         barMilli: Number(best.bar_milli) || 0,
         // RENDERED, NOT JUST USED TO CHOOSE. A reader has to be able to see
         // that these rows are seconds old rather than trust that they are.
-        idleSecs: Number(best.idle_secs) || 0,
-        stale: best.stale === true,
+        idleSecs: idleOf(best),
+        // `true`, `false` or null (undated), as `/live.json` sends it. null is
+        // not `false`: `liveFreshness` says the heap is undated instead.
+        stale: typeof best.stale === 'boolean' ? best.stale : null,
         why: '',
         // WHOSE HEAP THIS IS. `/live.json` names each heap by its run identity
         // and the sweep status names none, so the page cannot prove the heap is
@@ -7289,6 +7311,7 @@
       {@const lead = liveTop.rows[0]}
       {@const leadT = Math.abs(lead?.t_milli ?? 0) / 1000}
       {@const leadWin = liveWinShare(lead)}
+      {@const freshness = liveFreshness(liveTop)}
       <div class="livetop">
         <!-- THE PLAIN-ENGLISH ANSWER FIRST, THEN THE EVIDENCE.
              This block first rendered a nine-column table of |t|, mean paisa and
@@ -7300,11 +7323,9 @@
         <p class="livetop-head">
           <b>Best combinations so far</b>
           <span class="dim">
-            · {exact(liveTop.trials)} tested · updated {liveTop.idleSecs < 60
-              ? `${liveTop.idleSecs}s`
-              : `${Math.floor(liveTop.idleSecs / 60)}m`} ago
-            {#if liveTop.stale || liveTop.idleSecs > 120}
-              <span class="pill warn">not moving</span>
+            · {exact(liveTop.trials)} tested · {freshness.text}
+            {#if freshness.warn}
+              <span class="pill warn">{freshness.warn}</span>
             {/if}
             {#if liveTop.identity}
               · heap <code

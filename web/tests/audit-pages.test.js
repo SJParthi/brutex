@@ -96,3 +96,60 @@ test('an older page the server could not read is an error, never an empty page h
   );
   assert.match(page, /\{#if olderError\}[\s\S]*?role="alert"[\s\S]*?\{olderError\}/);
 });
+
+// F3 (OBSV-21, D-3219): `/audit.json` sends `store.generation` and
+// `store.commits` as null when no census is held (`crates/api/src/audit_json.rs`;
+// its own test pins `"generation":null` for an absent census). The footer
+// rendered `n0(generation ?? 0)` -- "generation 0, 0 committed entries" -- and
+// each sample held `generation ?? 0`, so a census that became readable while the
+// page was open read as thousands of commits "measured" in seconds.
+test('an unknown census generation is never rendered or subtracted as zero (F3)', async () => {
+  const lib = await import('../src/lib/audit-pages.js');
+  const { generationOf, generationStep } = /** @type {any} */ (lib);
+  for (const [g, kept] of [[null, null], [undefined, null], [0, 0], [4000, 4000], [-1, null], [1.5, null], ['7', null]]) {
+    assert.equal(generationOf({ generation: g }), kept, `generation ${String(g)}`);
+  }
+  assert.equal(generationOf(null), null);
+  assert.equal(generationStep(null, 4000), null);
+  assert.equal(generationStep(4000, null), null);
+  assert.equal(generationStep(4000, 4003), 3);
+  assert.equal(generationStep(0, 0), 0);
+
+  const page = readFileSync(new URL('../src/routes/audit/+page.svelte', import.meta.url), 'utf8');
+  const { parse } = await import('svelte/compiler');
+  const { whole } = await import('../src/lib/money.js');
+  const ast = /** @type {any} */ (parse(page, { modern: true }));
+  /** @type {string[]} */ const footer = [];
+  (function walk(/** @type {any} */ node) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'ExpressionTag') {
+      const text = page.slice(node.expression.start, node.expression.end);
+      if (/payload\.store\.(generation|commits)/.test(text)) footer.push(text);
+    }
+    for (const value of Object.values(node)) if (value && typeof value === 'object' && value !== node.expression) walk(value);
+  })(ast.fragment);
+  assert.equal(footer.length, 2, 'the census line renders generation and commits');
+  for (const text of footer) {
+    assert.equal(new Function('n0', 'payload', `return (${text});`)(whole, { store: { generation: null, commits: null } }), '—', text);
+    assert.equal(new Function('n0', 'payload', `return (${text});`)(whole, { store: { generation: 0, commits: 0 } }), '0', text);
+  }
+
+  const body = ast.instance.content.body;
+  const pulseDecl = body.flatMap((/** @type {any} */ n) => n.type === 'VariableDeclaration' ? n.declarations : [])
+    .find((/** @type {any} */ d) => d.id?.name === 'pulse');
+  const arrow = pulseDecl.init.arguments[0];
+  const pulse = (/** @type {any[]} */ samples, /** @type {any} */ base) => new Function('payload', 'samples', 'base', 'FRESH_SECS', 'generationStep',
+    `return (${page.slice(arrow.start, arrow.end)})();`)({ at: 100, store: { state: 'held', committed_at: 0 } }, samples, base, 30, generationStep);
+  const sample = (/** @type {number} */ at, /** @type {number|null} */ gen) => ({ at, bars: 10, im: 1, gen, months: new Map() });
+  const unknownThenHeld = pulse([sample(90, null), sample(100, 4000)], { at: 90, bars: 10, im: 1, gen: null });
+  assert.equal(unknownThenHeld.dGen, null, 'no commits were measured across an unknown generation');
+  assert.equal(unknownThenHeld.stepped, null);
+  assert.equal(unknownThenHeld.sinceOpen.gen, null);
+  assert.notEqual(unknownThenHeld.state, 'moving', 'an unknown-to-known generation is not a run filing bars');
+  const measured = pulse([sample(90, 4000), sample(100, 4002)], { at: 90, bars: 10, im: 1, gen: 4000 });
+  assert.equal(measured.dGen, 2);
+  assert.equal(measured.stepped, 2);
+  assert.equal(measured.sinceOpen.gen, 2);
+  assert.equal(measured.state, 'moving');
+  assert.match(page, /\{#if pulse\.sinceOpen && pulse\.sinceOpen\.gen === null\}/, 'an unknown delta is said, not shown as "unchanged"');
+});

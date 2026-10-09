@@ -94,3 +94,29 @@ export function olderPageOf(body) {
   if (!Array.isArray(body?.runs)) return { runs: [], error: 'the older page carried no runs list' };
   return { runs: body.runs, error: null };
 }
+
+// F3, D-3219. `/audit.json` sends `store.generation` as null when no census is
+// held (`crates/api/src/audit_json.rs`: absent or unreadable). The page held it
+// as `?? 0`, so a census that became readable while the page was open read as
+// every one of its commits "measured" between two answers. Zero is a
+// generation; unknown is not zero, and no difference is taken across it.
+
+/**
+ * The manifest generation `/audit.json` reported, or null when it reported none.
+ * @param {unknown} store
+ * @returns {number | null}
+ */
+export function generationOf(store) {
+  const g = store !== null && typeof store === 'object' ? /** @type {Record<string, unknown>} */ (store).generation : undefined;
+  return typeof g === 'number' && Number.isSafeInteger(g) && g >= 0 ? g : null;
+}
+
+/**
+ * Commits between two generations, or null when either is unknown.
+ * @param {number | null} from
+ * @param {number | null} to
+ * @returns {number | null}
+ */
+export function generationStep(from, to) {
+  return from === null || to === null ? null : to - from;
+}

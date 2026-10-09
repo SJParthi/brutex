@@ -66618,3 +66618,33 @@ its three keys, and `invocation-audit.js` now calls `detailRefusal` instead of
 its copy. An envelope that does not validate is still not echoed by
 `detailRefusal`, and is still read for its bare `refusal` by `refusalOf`, as
 before. OBSV-19.
+
+### D-3219 — An undated live heap and an unheld census generation are unknown, never zero — 2026-10-09
+
+**What was observed.** Two pages turned a null the server sends on purpose into
+a zero, and the zero read as a measurement.
+
+1. `/live.json` sends `idle_secs` and `stale` as null when the heap file cannot
+   be dated (`crates/api/src/livejson.rs`). The backtest page's
+   `fetchLiveTop` carried a comment saying an undated run "now sorts last", but
+   sorted on `Number(r?.idle_secs)`, and `Number(null)` is 0 and finite: the
+   undated run still sorted first. It was then rendered "updated 0s ago"
+   (`Number(best.idle_secs) || 0`) with no "not moving" pill
+   (`best.stale === true`).
+2. `/audit.json` sends `store.generation` and `store.commits` as null when no
+   census is held (`crates/api/src/audit_json.rs`, whose own test pins
+   `"generation":null` for an absent census). The audit page footer rendered
+   `n0(generation ?? 0)` and `n0(commits ?? 0)`, "generation 0, 0 committed
+   entries", although the same page's count-up effect had already been moved to
+   `?? Number.NaN` for this reason. Each sample held `generation ?? 0`, so a
+   census that became readable while the page was open read as all of its
+   commits "measured" between two answers, and the strip said RUNNING.
+
+**Decided.** An age is a non-negative finite JSON number or null; a null sorts
+after every dated heap and `liveFreshness` renders it "age unknown: /live.json
+could not date this heap" with an "undated" pill. `stale` keeps `true`, `false`
+or null. On `/audit`, `audit-pages.js` `generationOf` keeps a sample's
+generation as a non-negative safe integer or null, and `generationStep` takes
+no difference across a null. The strip says "not comparable" for such a
+difference instead of "unchanged", and the footer renders an unknown count as
+"—". OBSV-20, OBSV-21.

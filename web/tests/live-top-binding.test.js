@@ -94,3 +94,48 @@ test('a refused /live.json read names the server refusal and guesses nothing (W4
   await reading; await flush();
   assert.equal(slow.app.top().phase, 'idle', 'a sweep replaced while the refusal body was read is not overwritten');
 });
+
+// F3 (OBSV-20, D-3219): `/live.json` sends `idle_secs` and `stale` as null when
+// the heap file cannot be dated (`crates/api/src/livejson.rs`). The page sorted
+// on `Number(r.idle_secs)`, and `Number(null)` is 0 -- finite -- so an undated
+// heap sorted FIRST, despite the comment saying it sorts last; it was then
+// rendered "updated 0s ago" with no "not moving" pill (`Number(null) || 0`,
+// `stale === true`). Unknown age was shown as the freshest possible age.
+test('an undated heap sorts after a dated one and keeps its unknown age and staleness (F3)', async () => {
+  const run = (/** @type {string} */ identity, /** @type {any} */ idle, /** @type {any} */ stale) =>
+    ({ identity, trials: 7, bar_milli: 3000, idle_secs: idle, stale, rows: [{ rank: 1, direction: 'long', n: 1 }] });
+  const { app, replies } = page();
+  let read = app.fetchLiveTop();
+  replies[0].resolve(Response.json({ runs: [run('undated', null, null), run('dated', 400, false)] }));
+  await read; await flush();
+  assert.equal(app.top().identity, 'dated', 'a heap with no age never outranks one whose age was measured');
+  assert.equal(app.top().idleSecs, 400);
+  read = app.fetchLiveTop();
+  replies[1].resolve(Response.json({ runs: [run('undated', null, null)] }));
+  await read; await flush();
+  assert.equal(app.top().identity, 'undated', 'an undated heap with rows is still shown');
+  assert.equal(app.top().idleSecs, null, 'null on the wire is not 0 seconds');
+  assert.equal(app.top().stale, null, 'null on the wire is not "moving"');
+  for (const [idle, kept] of [[0, 0], [59, 59], [-1, null], ['5', null], [1.5, 1.5], [Infinity, null]]) {
+    read = app.fetchLiveTop();
+    replies.at(-1)?.resolve(Response.json({ runs: [run('one', idle, false)] }));
+    await read; await flush();
+    assert.equal(app.top().idleSecs, kept, `idle_secs ${String(idle)}`);
+  }
+});
+
+test('the freshness line says an undated heap is undated, never "0s ago" (F3)', () => {
+  const create = new Function(`${functions(['liveFreshness'])}; return liveFreshness;`);
+  const freshness = create();
+  assert.deepEqual(freshness({ idleSecs: null, stale: null }),
+    { text: 'age unknown: /live.json could not date this heap', warn: 'undated' });
+  assert.deepEqual(freshness({ idleSecs: 0, stale: false }), { text: 'updated 0s ago', warn: null });
+  assert.deepEqual(freshness({ idleSecs: 59, stale: false }), { text: 'updated 59s ago', warn: null });
+  assert.deepEqual(freshness({ idleSecs: 60, stale: false }), { text: 'updated 1m ago', warn: null });
+  assert.deepEqual(freshness({ idleSecs: 120, stale: false }), { text: 'updated 2m ago', warn: null });
+  assert.deepEqual(freshness({ idleSecs: 121, stale: false }), { text: 'updated 2m ago', warn: 'not moving' });
+  assert.deepEqual(freshness({ idleSecs: 5, stale: true }), { text: 'updated 5s ago', warn: 'not moving' });
+  assert.deepEqual(freshness({ idleSecs: 5, stale: null }), { text: 'updated 5s ago', warn: null });
+  assert.match(source, /\{@const freshness = liveFreshness\(liveTop\)\}/);
+  assert.doesNotMatch(source, /liveTop\.idleSecs < 60/, 'the panel renders through the helper');
+});
