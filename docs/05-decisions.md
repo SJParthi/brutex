@@ -66523,3 +66523,19 @@ behaviour with a stub that had no body.
 <n> refused: " followed by `refusalFrom('/frontier.json', response)`. The
 pinned test now gives its HTML stub a `text()` and asserts the HTML is quoted
 with the status, still without parsing the body as JSON. OBSV-14.
+
+### D-3214 — A refused `/live.json` read is shown with the server's refusal — 2026-10-09
+
+**What was observed.** `/live.json` refuses with `{"runs":[],"listed":false,
+"refusal":…}` under 429 (snapshot capacity full) or 503 (a task that could not
+be joined, an unset store root, a live census that refused)
+(`crates/api/src/livejson.rs` `unavailable`). The backtest page's
+`fetchLiveTop` wrote "/live.json answered 503. The heap is still being written
+to the store — this page could not read it back.": the status, and a cause
+nobody measured, in place of the one the server wrote.
+
+**Decided.** `fetchLiveTop` reads a non-2xx through
+`refusalFrom('/live.json', response)` and shows exactly that sentence in the
+panel's existing "could not be read" line. The run binding (conc18-4) is asked
+again after the body is read, so a refusal for a sweep replaced meanwhile is
+dropped. OBSV-15.

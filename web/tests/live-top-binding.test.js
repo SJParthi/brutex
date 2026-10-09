@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
+import { refusalFrom } from '../src/lib/refusal.js';
 
 const source = readFileSync(new URL('../src/routes/backtest/+page.svelte', import.meta.url), 'utf8');
 const ast = /** @type {any} */ (parse(source));
@@ -29,14 +30,14 @@ const heap = (/** @type {string} */ identity, /** @type {number} */ trials) =>
 
 function page() {
   /** @type {ReturnType<typeof deferred>[]} */ const replies = [];
-  const create = new Function('ask_', `
+  const create = new Function('ask_', 'refusalFrom', `
     let liveSeq=0, live=null, liveTopSeq=0, sweep={run:{kind:'grid', token:'A'}};
     let liveTop={phase:'idle',rows:[],trials:0,barMilli:0,idleSecs:0,stale:false,why:'',identity:''};
     const liveRunKey=(run)=>JSON.stringify([run?.kind, run?.token]);
     ${functions(['fetchLiveTop', 'invalidateLive'])}
     return {fetchLiveTop, invalidateLive, top:()=>liveTop, switchRun:(token)=>{sweep={run:{kind:'grid', token}};}};
   `);
-  const app = create(() => { const reply = deferred(); replies.push(reply); return reply.promise; });
+  const app = create(() => { const reply = deferred(); replies.push(reply); return reply.promise; }, refusalFrom);
   return { app, replies };
 }
 
@@ -64,4 +65,32 @@ test('a reply for a sweep that has been replaced is dropped, and the replacement
 test('the verdict no longer claims the heap is this run', () => {
   assert.doesNotMatch(source, /bar of \{bar\.toFixed\(2\)\} for this run/);
   assert.match(source, /liveTop\.identity\.slice\(0, 12\)/);
+});
+
+// W4 (OBSV-15, D-3214): `/live.json` refuses with `{"runs":[],"listed":false,
+// "refusal":…}` (`crates/api/src/livejson.rs` `unavailable`); the panel printed
+// the status and a guess ("The heap is still being written to the store").
+test('a refused /live.json read names the server refusal and guesses nothing (W4)', async () => {
+  const { app, replies } = page();
+  const read = app.fetchLiveTop();
+  const refusal = 'live snapshot capacity is full; no blocking task was queued. Retry after another detail read finishes';
+  replies[0].resolve(Response.json({ runs: [], listed: false, refusal }, { status: 429 }));
+  await read; await flush();
+  assert.equal(app.top().phase, 'failed');
+  assert.match(app.top().why, new RegExp(`^/live\\.json answered HTTP 429: ${refusal.replace(/[.]/g, '\\.')}`));
+  assert.doesNotMatch(app.top().why, /still being written/);
+  const late = page();
+  const stale = late.app.fetchLiveTop();
+  late.app.switchRun('B');
+  late.replies[0].resolve(Response.json({ runs: [], listed: false, refusal }, { status: 503 }));
+  await stale; await flush();
+  assert.equal(late.app.top().phase, 'idle', 'a refusal for a replaced sweep is dropped');
+  const slow = page(), text = deferred();
+  const reading = slow.app.fetchLiveTop();
+  slow.replies[0].resolve({ ok: false, status: 503, text: () => text.promise });
+  await flush();
+  slow.app.switchRun('C');
+  text.resolve(JSON.stringify({ runs: [], listed: false, refusal }));
+  await reading; await flush();
+  assert.equal(slow.app.top().phase, 'idle', 'a sweep replaced while the refusal body was read is not overwritten');
 });

@@ -321,11 +321,12 @@
       const response = await ask_('/live.json', { cache: 'no-store' });
       if (!current()) return;
       if (!response.ok) {
-        liveTop = {
-          ...liveTop,
-          phase: 'failed',
-          why: `/live.json answered ${response.status}. The heap is still being written to the store — this page could not read it back.`
-        };
+        // THE SERVER'S `refusal`, NOT A GUESS (W4, D-3214). This said "the heap
+        // is still being written to the store" whatever the route refused for --
+        // saturation, an unreadable live directory, an unset store root.
+        const why = await refusalFrom('/live.json', response);
+        if (!current()) return;
+        liveTop = { ...liveTop, phase: 'failed', why };
         return;
       }
       const body = await response.json();
