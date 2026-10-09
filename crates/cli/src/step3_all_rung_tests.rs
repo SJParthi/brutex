@@ -8,8 +8,9 @@ use super::tests::{
 };
 use super::*;
 use crate::all_rung_population_v5::{
-    AllRungStoredExecutionV3Request, AllRungStoredPopulationV5Request,
-    commit_all_rung_stored_execution_v3, commit_all_rung_with_verified_build_v5,
+    AllRungStoredExecutionV3Request, AllRungStoredPopulationV5Request, AllRungSweepersV1,
+    NamedAllRungSweepersV1, commit_all_rung_stored_execution_v3,
+    commit_all_rung_with_verified_build_v5,
 };
 use crate::all_rung_selection_v5::{
     AllRungSelectionV5Request, commit_all_rung_stored_selection_v5,
@@ -122,14 +123,16 @@ impl Policies {
             vendor: Vendor::Zerodha,
             from: FIRST_MONTH,
             to: FIXTURE_TO,
-            one_minute_sweeper: &self.sweepers[0],
-            two_minute_sweeper: &self.sweepers[1],
-            three_minute_sweeper: &self.sweepers[2],
-            five_minute_sweeper: &self.sweepers[3],
-            ten_minute_sweeper: &self.sweepers[4],
-            fifteen_minute_sweeper: &self.sweepers[5],
-            thirty_minute_sweeper: &self.sweepers[6],
-            sixty_minute_sweeper: &self.sweepers[7],
+            sweepers: AllRungSweepersV1::Named(NamedAllRungSweepersV1 {
+                one_minute: &self.sweepers[0],
+                two_minute: &self.sweepers[1],
+                three_minute: &self.sweepers[2],
+                five_minute: &self.sweepers[3],
+                ten_minute: &self.sweepers[4],
+                fifteen_minute: &self.sweepers[5],
+                thirty_minute: &self.sweepers[6],
+                sixty_minute: &self.sweepers[7],
+            }),
             horizon: Horizon::DEFAULT,
             widths: Widths::pinned().map_err(|why| format!("{why:?}"))?,
             availability: Availability::Absent,
@@ -398,5 +401,81 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte() 
         }
     }
     assert_eq!(published(&all_paths)?, original.expect("first publication"));
+    Ok(())
+}
+
+#[test]
+fn all_rung_sizing_hands_each_nifty_context_to_its_commit_and_one_writer_serves_every_append()
+-> Result<(), String> {
+    // G4-2 / D-4784: `ledger-all` sized every rung on a full NIFTY context and
+    // column, dropped them, and each NIFTY commit loaded and built them again.
+    // W2-cli3-4 / D-4780: every one of the sixteen Candidate appends opened the
+    // whole source-root ledger.
+    let fixture = StoredSuccessFixture::with_family_prices([2_000_000; 2])?;
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        for month in &MONTHS[..4] {
+            seed_stored_family_month(&fixture.source, Vendor::Zerodha, symbol, *month, 2_000_000)?;
+        }
+    }
+    seed_derived(&fixture.source)?;
+    let policies = Policies::new(&fixture.source)?;
+    let authority = fixture.base.join("all-rung-population");
+    roots(&authority)?;
+    let named = policies.request(&fixture.source, &authority)?;
+    let evaluation = crate::candidate_universe::CandidateEvaluationInputsV1 {
+        widths: named.widths,
+        availability: named.availability,
+        thresholds: named.thresholds,
+    };
+    let size = |index: usize, rung: &str| {
+        let sized = crate::step3_orchestrator::stored_candidate_swept_v1(
+            &fixture.source,
+            Vendor::Zerodha,
+            ("NIFTY", rung),
+            (named.from, named.to),
+            named.candidate_bounds,
+            &evaluation,
+        )?;
+        Ok((Sweeper::new(policies.sweepers[index].ladder()), sized))
+    };
+    let mut sized = named;
+    sized.sweepers = AllRungSweepersV1::SizedPerRung(&size);
+
+    let mut counts = Vec::new();
+    for request in [&named, &sized] {
+        STORED_CONTEXT_LOADS.with(|count| count.set(0));
+        crate::candidate_universe::FULL_SIGNAL_COLUMN_BUILDS.with(|count| count.set(0));
+        crate::candidate_universe::LEDGER_WRITER_OPENS.with(|count| count.set(0));
+        drop(commit_all_rung_with_verified_build_v5(
+            request,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+        )?);
+        counts.push((
+            STORED_CONTEXT_LOADS.with(std::cell::Cell::get),
+            crate::candidate_universe::FULL_SIGNAL_COLUMN_BUILDS.with(std::cell::Cell::get),
+            crate::candidate_universe::LEDGER_WRITER_OPENS.with(std::cell::Cell::get),
+        ));
+    }
+    let [
+        (named_loads, named_builds, named_scans),
+        (sized_loads, sized_builds, sized_scans),
+    ]: [_; 2] = counts.try_into().map_err(|_| "two measured runs")?;
+    assert_eq!(
+        named_loads, 16,
+        "two families by eight rungs, one load each"
+    );
+    assert_eq!(
+        sized_loads, 16,
+        "the eight sizing loads are the NIFTY commits' loads, not extra ones"
+    );
+    assert_eq!(
+        sized_builds, named_builds,
+        "the eight sizing column builds are the NIFTY commits' builds, not extra ones"
+    );
+    assert_eq!(
+        (named_scans, sized_scans),
+        (1, 1),
+        "one writable Candidate ledger open serves all sixteen appends of a run"
+    );
     Ok(())
 }

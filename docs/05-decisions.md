@@ -65981,3 +65981,295 @@ both functions from the page source and pins the call sites. It failed first
 with "the page defines stopCeiling".
 
 Invariant L1FC-13.
+
+### D-4780 — One Candidate ledger writer per run, caught up before each append — 2026-10-09
+
+**What was observed.** W2-cli3-4 was PARTIAL after D-1680. One production
+append no longer opened the Candidate ledger twice, but it still opened it once,
+and an open walks and re-seals every stored block: O(R + C). That ledger sits at
+the store root, and every run, rung and family shares it. `ledger-v6` and
+`ledger-all` each make 16 appends per run, so one run paid 16 x O(R_total + C),
+which grows with the ledger's history and not with the run's own work. D-1680
+rejected carrying the writer only because it changed three callers' ownership.
+
+**Decided.** A run carries one `CandidateLedgerWriterV1` through the whole
+commit chain. `ledger_v6::run_route` and the all-rung coordinator's phase one
+each create one before their rung loop. It passes through
+`commit_strict_candidate_pre_admission_authority_sized_v1` or
+`commit_stored_candidate_pre_admission_authority_carried_v1`, then
+`commit_family_from_v6`, `commit_loaded_stored_v1` and
+`commit_candidate_family_guarded_v6`, and reaches
+`ProducedCandidateUniverseV1::append_and_reopen_with`. The writer's first append
+opens the ledger. Every later append runs `append_complete` on the held handle.
+Under the exclusive writer lock, `catch_up_locked` then rechecks the three
+generations:
+
+- Unchanged generations cost three stats.
+- Otherwise `absorb_foreign_completions` catches up. The ledger must hold more
+  completions than the handle indexed. The last completion it indexed must
+  still be the one stored there. Each new completion's block is validated
+  against its seal from the handle's own committed cursor: the orphan's first
+  row when it holds one, the row total when not. A universe completed twice
+  refuses, and the orphan tail after the new blocks is re-scanned. Nothing is
+  indexed until every new completion has verified.
+- Any other change refuses: a replaced path, a change that added no completion,
+  or a moved last completion.
+
+The writer serves only the root and bounds it opened, as two separate checks,
+and any refusal discards the held handle, so the next append opens again rather
+than trusting a handle that refused. D-1700's ledger catch-up is the precedent.
+The single-family doors keep a fresh writer per call, so they still pay one open
+per call, as before. The read-only reopens that successor authentication makes
+are unchanged.
+
+A run now pays one O(R + C) open plus O(new rows + foreign new rows) per append.
+
+**Honest limit.** A metadata generation cannot tell an append from an append
+made together with an in-place rewrite of an older block. A carried writer
+therefore does not see such a rewrite: it verifies only the new blocks, and its
+witness is the last completion it indexed. The next full open re-validates every
+block and refuses the rewrite.
+`cli::candidate_universe::tests::a_carried_writer_refuses_what_it_cannot_catch_up_on`
+drives that case to the refusal. A rewrite that grows nothing is refused at once.
+
+**Rejected.** Re-scanning the whole ledger on any change that is not a pure
+append. A carried handle would then silently adopt a history rewritten under it.
+Refusing is the loud answer, and a rerun opens afresh.
+
+Tests:
+- `cli::candidate_universe::tests::a_carried_writer_opens_once_and_verifies_what_others_appended_since`
+  (fails at 1 against 0 scans on the per-append-open code).
+- `cli::candidate_universe::tests::a_carried_writer_refuses_what_it_cannot_catch_up_on`.
+- `cli::candidate_universe::tests::a_carried_writer_catches_up_from_its_own_committed_cursor`.
+- `cli::candidate_universe::tests::a_carried_writer_refuses_history_that_moved_and_duplicate_completions`.
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_candidate_writer_serves_every_family_and_catches_up_on_others`.
+- `cli::step3_orchestrator::all_rung_tests::all_rung_sizing_hands_each_nifty_context_to_its_commit_and_one_writer_serves_every_append`.
+
+### D-4781 — The Pre-Admission V1 and V2 append doors re-read only their pair — 2026-10-09
+
+**What was observed.** G4-4 found a sibling of W2-cli3-4 that no document
+stated. Both Pre-Admission append doors ran the same sequence: `open` (a full
+scan plus a whole-file content hash), the append, `drop`, a fresh `open_read`
+(another full scan and content hash) and `reopen_audit` (a third hash). That is
+two full opens per append. The doors run once per family per rung, on ledgers at
+the shared store root.
+
+**Decided.** This is the D-1680 pattern. Each door runs one `open`, the append,
+then `reverify_committed` on the same handle under the shared lock:
+
+- The lock and data generations are compared by metadata.
+- The physical record count must be exactly twice the completed pairs the
+  handle indexed, so no orphan remains.
+- The authority must be in the index, and a written pair must be the last one.
+- The Data and Completion records on disk must be byte for byte the two records
+  the indexed value encodes.
+
+The re-read is O(1) in ledger size. The door then compares the re-read audit
+with the committed one and with the derived semantics, as two separate checks
+(D-2004). One door now scans the ledger once.
+
+**Honest limit.** One append is still O(file bytes). The append's own generation
+checks hash the whole data file: `require_unchanged` before writing, then one
+re-measure after each of the two records. Only the second open and the lookup's
+hash are gone. §153 says so.
+
+**Rejected.** Carrying one Pre-Admission writer per run, as D-4780 does for
+Candidate. The append's content-hash generation checks keep every append at
+O(file bytes) either way, so the class would not change.
+
+Tests:
+- `cli::pre_admission_data::tests::v1_and_v2_append_doors_scan_once_and_reread_only_their_pair`
+  (fails at 2 against 1 scans per door on the two-open code).
+- `cli::pre_admission_data::tests::v1_reverify_refuses_every_disagreement_with_the_disk`.
+- `cli::pre_admission_data::tests::v2_reverify_refuses_every_disagreement_with_the_disk`.
+
+### D-4782 — A stored OOS witness hashes no stream — 2026-10-09
+
+**What was observed.** W2-cli3-3 was PARTIAL after D-1684. The fold was built
+once per cohort, but every witness still hashed all four streams four times:
+
+- it ran the cohort's `require_integrity` twice, and each run re-derived the
+  cohort identity by hashing the signal, minute-context, daily and execution
+  streams;
+- it ran the source's `require_integrity` once, which re-hashed the three-stream
+  data term;
+- it ran `ExecutionRunV1::new_with_daily_reference`, which hashed all four
+  streams again to seal the run.
+
+So a witness stayed Θ(S + Q + D + E) in hashing. With three witnesses a fold
+counted 15 stream-hash passes, where the fold alone needs 3. D-1684 kept the
+per-witness check because it "refuses a source that changed after the fold".
+That reason did not hold. The cohort owns those streams and the fold borrows
+them immutably for its whole life, so re-hashing them could not see a change.
+A changed stored file is caught by the held strict guards.
+
+**Decided.**
+- `CandidateGlobalReplayOosSourceV1` hashes `ExecutionDigestsV1::of_daily_reference`
+  once, at construction, and keeps the result. Its integrity check compares that
+  full digest pair.
+- Each witness seals its run with `ExecutionRunV1::with_digests`, D-0990's
+  Runner door. Its equality with hashing per run is proved by
+  `runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`.
+- The per-witness cohort check is now `require_current`: the held strict guards
+  (O(M) metadata and receipt checks), the admitted root, and the cached audit
+  fields in O(1).
+- The full `require_integrity`, which re-derives the cohort identity, runs at
+  construction and once per fold.
+
+No witness byte, run id, cohort id or witness id changes: the test compares each
+witness with the cohort's unfolded mint. A witness now costs O(M) plus the
+Runner replay.
+
+**Rejected.** G4's step 4, one more full re-check after the last witness. It
+would re-hash memory that cannot change, so no test could make it refuse: a
+check no input can provoke. The per-witness guards are what detects a change.
+A daily file corrupted after the fold still refuses the next witness.
+
+Tests:
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_witness_hashes_no_stream_its_fold_already_hashed`
+  (fails at 15 against 3 passes on the re-hashing code; it also refuses a
+  tampered cohort identity at the fold).
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`.
+
+### D-4783 — The NIFTY commit consumes the signal column its sizing census built — 2026-10-09
+
+**What was observed.** G4-3 found that D-2103 had re-created W2-cli7-3's shape.
+`size_sweeper` built NIFTY's whole anchored Candidate signal column, which is
+Θ(S·W + Q + D) with the evaluator fold and the exact-minute overlay, only to
+read `census().swept`, and then dropped it. The NIFTY commit consumed the same
+`SizedNifty` context and built the identical column again, eight times per
+`ledger-v6` run.
+
+**Decided.** `SizedNifty` now holds a `PrebuiltSignalColumnV1`: the column, the
+evaluation inputs and rung it was built under, and the address and length of the
+three slices it was built from. `differing_term` adds `evaluation`, so a request
+with other widths, availability or thresholds is refused by name.
+`CandidateUniverseProductionSourceV1::new` takes an
+`Option<PrebuiltSignalColumnV1>`. When one is given, `into_column_for` makes
+three separate checks and refuses other evaluation inputs, another rung, or
+slices at another address or of another length. It then derives only the
+execution projection (`project_candidate_execution_column`). The column digest,
+source id and universe id are unchanged: the unit test compares them with the
+unsized build.
+
+The address check is sound because the context that owns the slices is moved,
+never copied, between the census and the commit, so its buffers keep their
+addresses. Equal bytes at another address refuse, and nothing falls back to a
+rebuild.
+
+**Rejected.** Hashing the slices to prove they are the same. That costs
+Θ(S + Q + D), which defeats the purpose. Relying on `SizedNifty`'s term checks
+alone was also rejected: they do not bind the slices.
+
+Tests:
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_column_once`
+  (fails at 2 against 1 builds on the rebuilding code).
+- `cli::candidate_universe::tests::a_prebuilt_signal_column_serves_exactly_the_inputs_it_was_built_from`.
+
+### D-4784 — `ledger-all` sizes each rung at its Candidate phase and hands that rung's NIFTY commit the context and column — 2026-10-09
+
+**What was observed.** G4-2 found the same problem in `ledger-all`, and worse.
+After D-2103, `build_sweepers` loaded NIFTY's full signal, one-minute and daily
+context and built its column for all eight rungs before the first commit, only
+to read the swept count. Each NIFTY commit then loaded and built them again: 24
+context loads per run where 16 suffice.
+
+**Decided.** The all-rung request now carries `AllRungSweepersV1`:
+
+- `Named` holds the eight caller-built sweepers, as before.
+- `SizedPerRung` is a sizing closure.
+
+`ledger-all` passes `SizedPerRung(size_rung ...)`. The coordinator calls it at
+the start of each rung's Candidate phase and uses the returned sweeper for both
+families. It hands the `SizedNifty` to that rung's NIFTY commit through
+`commit_stored_candidate_pre_admission_authority_carried_v1`. `size_rung` builds
+an ordinary (non-strict) census through the same
+`strict_v6_inputs::census` as `ledger-v6`, so the count and the commit use the
+same bytes. A run now makes 16 context loads (the test measured 24 before), with
+as many column builds as the named path. Peak memory holds one sized context at
+a time.
+
+**Consequences.**
+- A rung whose span cannot be sized now refuses when its own rung is reached.
+  That is after the earlier rungs' receipt-last appends, which an exact retry
+  reuses; it is the coordinator's documented recoverable-prefix contract.
+- The eight `rung sized` events now come after the population stage's start
+  event and interleave with its work, where before all eight came first.
+- A sizing refusal now also emits the stage's refusal event.
+- The report text is unchanged, and no stored byte or run identity changes.
+
+**Rejected.** Building all eight sizings first and holding them for the commits.
+That would raise peak memory eightfold.
+
+Tests:
+- `cli::step3_orchestrator::all_rung_tests::all_rung_sizing_hands_each_nifty_context_to_its_commit_and_one_writer_serves_every_append`
+  (fails at 24 against 16 loads on the up-front sizing code).
+
+### D-4785 — Ledger V6 replay stays a full re-proof, and the duplicated validation inside it is removed — 2026-10-09
+
+**What was observed.** W2-cli7-2 was DOCUMENTED-ONLY. `replay_route` calls the
+complete `run_route`, and G4's §A sketches a cheaper replay that would trust a
+sealed route manifest. Before choosing, the route was searched for work
+duplicated inside the full re-proof that could go without trusting any sealed
+output. Five cases were found:
+
+- the NIFTY column built twice (D-4783);
+- `ledger-all`'s extra loads (D-4784);
+- one Candidate ledger open per append (D-4780);
+- the Pre-Admission doors' second open (D-4781);
+- a fifth, decided here. `CandidateUniverseProductionSourceV1::validate`
+  re-hashes every stream, both columns and the data term:
+  Θ(S + Q + D + E + columns). It ran at construction, then again before
+  Search V4 and again before production, and twice more around the Execution V3
+  replay on that replay's own freshly constructed source.
+
+**Decided.**
+- **Validate once, at construction.** The calls in `anchored_search_v4`,
+  `produce_candidate_universe_v1` and `build_execution_v3_replay_authority` are
+  removed. The source has no `&mut` path, its slices are borrowed immutably, its
+  columns are owned, and construction validated all of them, so the later calls
+  re-read memory that cannot change. A family commit now validates its source
+  once where it validated it three times, and the replay once where it validated
+  it three times.
+- **The replay stays a full re-proof.** A replay that trusted its own sealed
+  output would prove nothing that output does not already claim. Its value is
+  that every authority is re-derived from the bytes on disk under the running
+  binary.
+
+**The exact cost of one replay, which is one `ledger-v6` run.**
+- 16 strict loads, 8 rungs x 2 families, each O(M + B + source bytes).
+- 16 Candidate column builds. The NIFTY build is the sizing census's.
+- 16 execution projections.
+- 16 Apriori sweeps.
+- 16 Search V4 walk-forward runs.
+- 16 complete two-sided grid expansions.
+- 16 Execution V3 replay column rebuilds, memoized to one per family (D-0994).
+- 8 Statistics bootstraps of B draws each.
+- 8 recomputations each of Admission V4, Finalization V4, Population V6,
+  Execution V4 and Selection V6.
+- One writable Candidate ledger open plus its catch-ups.
+- One Pre-Admission door open per family.
+- Every successor ledger's open and reopen.
+- The OOS witness work: one fold per family cohort and O(M) plus the Runner
+  replay per witness (D-4782).
+
+**Documented alternative: G4's §A.** It adds a route manifest keyed by both
+universe ids and every policy term, and a rehydrated selection whose winners
+are re-derived and checked against the sealed digests. It would remove the
+sweeps, the Search V4 runs, the grid expansions, the bootstraps and the
+downstream recomputation. That would leave 16 loads, 16 column builds and at
+most 200 winner grid evaluations. It needs a new authority and format, and a
+contract change: Global Replay V4 would accept a sealed record plus rebuilt
+winners where it now accepts only a live, re-proved chain. That is an owner
+decision, and it is not taken here.
+
+**Rejected.** Handing the production signal column to the Execution V3 replay,
+which would remove those 16 rebuilds. It would keep a column copy alive per
+family until that family's replay. `ledger-all` commits all 16 families in
+phase one before any successor runs, so peak memory would rise by up to 16
+columns.
+
+Tests:
+- `cli::candidate_universe::tests::production_and_its_replay_validate_each_source_once_at_construction`.
+- `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_family_commit_validates_its_source_once`.
+- `cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated`.

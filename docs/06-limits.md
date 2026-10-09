@@ -8018,15 +8018,27 @@ and worst-case O(1) in record count; a hash lookup is average O(1), not a
 worst-case collision guarantee, and a page costs O(P) for P returned rows.
 On an already-open handle, append, hashing, canonical-order validation and
 durability are proportional to the new block plus filesystem costs. The one
-production door, `append_produced_candidate_universe_v1`, opens the ledger on
-every call, so one production append is O(R+C) for that open plus O(new rows)
-to write the block and re-read it through the same handle. Before D-1680 it
-then dropped the handle and ran a second full `open_read`, so it cost two
-O(R+C) passes. `ledger-v6` makes one such append per rung per family, 16 per
-run against one root, so a run's Candidate appends cost O(16 x (R+C)) plus the
-rows written: they grow with the ledger's history, not only the new block.
-Universe construction would additionally walk the naturally extinct frontier
-and both dynamic grids. It is not O(1).
+production door, `append_produced_candidate_universe_v1`, appends through a
+`CandidateLedgerWriterV1` that one run carries across all its appends
+(W2-cli3-4, D-4780). The run's first append opens the ledger, so it is
+O(R+C) for that open plus O(new rows) to write the block and re-read it
+through the same handle. Every later append catches the held handle up under
+the exclusive writer lock instead of opening again: unchanged generations cost
+three stats, and a ledger another writer appended to is caught up by
+validating only the completions past the indexed count and the blocks they
+name, so a later append is O(new rows + foreign new rows). `ledger-v6` and
+`ledger-all` each make one append per rung per family, 16 per run against one
+root, so a run's Candidate appends now cost one O(R+C) open plus the rows
+written and caught up on. Before D-4780 every append opened the ledger, so
+the 16 cost O(16 x (R+C)) and grew with the ledger's history; before D-1680
+each also dropped the handle and ran a second full `open_read`. The catch-up
+has an honest limit: a metadata generation cannot tell an append from an
+append made together with an in-place rewrite of an older block, so a carried
+writer does not see such a rewrite. It re-reads the last completion it indexed
+as a witness, refuses a change that added no completion, and the next full
+open re-validates every block and refuses the rewrite. Universe construction
+would additionally walk the naturally extinct frontier and both dynamic grids.
+It is not O(1).
 
 On Unix, cached-generation refusal binds the held lock, row and receipt paths by
 device/inode, length and nanosecond modification/change times. It is metadata
@@ -8108,6 +8120,17 @@ The metadata check is length, device/inode and nanosecond modification/change
 times: a same-length rewrite of a record outside the page that left all of
 those equal is not seen by that page, and a rewrite of a returned record is
 refused by its seal.
+
+One production append door, V1 or V2, runs one full open since D-4781
+(G4-4): the open, the append, then a re-read of only the committed Data and
+Completion pair through the writer's own handle. The re-read compares both
+generations by metadata, requires the physical record count to be exactly the
+completed pairs (no orphan) and a written pair to be the last, and compares the
+pair's bytes with the two records the indexed value encodes, O(1) in ledger
+size. Before D-4781 each door then dropped the handle and ran a second full
+`open_read` plus a hashing `reopen_audit`, two full opens per append. One append
+is still O(file bytes): the append's own generation checks content-hash the
+data file before it writes and after each of its two records.
 Lock acquisition, filesystem cache, `sync_data`, allocation and storage latency
 remain system-dependent.
 
@@ -8719,15 +8742,25 @@ source a witness replays over (the anchored signal column, its exact-minute
 overlay, the checked execution column, alignment, calendars and stream
 digests) costs Θ(S + Q + D + E) to build. Since D-1684 Population V6 builds it
 once per family cohort and every witness of that cohort replays over it;
-before D-1684 it was rebuilt for every witness. Each witness still pays two
-cohort integrity checks, and each re-derives the cohort identity by hashing
-the signal, minute-context, daily and execution streams and re-checks the
-strict source guards, so a witness remains Θ(S + Q + D + E) in hashing; what
-D-1684 removes per witness is the column evaluation and alignment, not that
-term. Then the authenticated Runner replay over its OOS bars and exit paths. Until
-D-1636 (W2-cli16-1) this paragraph called minting "proportional to the replay";
-D-1636 stated the per-witness Θ(S + Q + D + E) recomputation, and D-1684 then
-moved the column fold and alignment out of it. Full future V4 preflight/scheduling is at least O(P + C) before
+before D-1684 it was rebuilt for every witness. Since D-4782 (W2-cli3-3's
+second fix) a witness hashes no stream. The fold hashes the cohort identity,
+the source's three-stream data term and execution-slice digest once, and each
+witness seals its run against those digests through Runner's
+`ExecutionRunV1::with_digests`, proved equal to hashing per run by
+`runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`.
+Each witness still pays two cohort currency checks: the held strict source
+guards (O(M) metadata and receipt checks), the admitted root and the cached
+audit fields in O(1). So a witness is O(M) plus the authenticated Runner replay
+over its OOS bars and exit paths. Before D-4782 each witness re-derived the
+cohort identity twice, re-hashed the source's data identity and hashed all
+four streams again to seal its run, so a witness remained Θ(S + Q + D + E) in
+hashing; those streams are owned by the cohort and borrowed immutably by the
+fold, so that re-hash could not see a change, and a changed stored file is
+what the held guards refuse. The full identity re-derivation still runs once
+per fold. Until D-1636 (W2-cli16-1) this paragraph called minting "proportional
+to the replay"; D-1636 stated the per-witness Θ(S + Q + D + E) recomputation,
+D-1684 moved the column fold and alignment out of it, and D-4782 moved the
+hashing out of it. Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 
@@ -13544,6 +13577,20 @@ per vendor answer, after `serde_json` has already parsed the same body,
 over a body capped at `MAX_RESPONSE_BYTES`; every set together holds at
 most every key of that body once, so growth is amortised O(1) per key
 and bounded by the response cap, never by the store.
+
+`cli/candidate_universe.rs` 3 (was 2), D-4780 -- SHAPE 1. The third
+site is `absorb_foreign_completions`'s `fresh`, the map that holds the
+completions another writer appended since a carried Candidate writer
+last measured the files. It is bound `HashMap::new()` and its very next
+statement is `fresh.try_reserve(receipt_count - indexed)`, the
+new-completion count measured from the receipt file under the exclusive
+writer lock and bounded by `max_universes`; no insert precedes it. It
+is kept apart from the handle's index so that nothing is indexed until
+every new completion has verified, and it refuses a universe completed
+twice within the batch, as `api/recovery_journal.rs`'s `fresh` does. The
+index itself is reserved by `try_reserve` before the batch moves in.
+`with_capacity` would abort on allocation failure where this path
+returns a named refusal.
 ~~~~
 
 ### Gate 11 — rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -15472,14 +15519,32 @@ Holding the context until the NIFTY commit does not raise the peak: the old
 route held one context at a time and so does this one.
 
 W2-cli7-2: `ledger-v6-replay` (and every `ledger-v6` rerun) runs the complete
-route before anything decides reuse. Reuse is keyed by data digest, the data
+route before anything decides reuse, and since D-4785 that is a decision, not
+an omission: a replay that trusted its own sealed output would prove nothing
+that output does not already claim. Reuse is keyed by data digest, the data
 digest needs the strict load, and the load is the dominant term, so a rerun
-over fully committed authorities still costs the full Step-4 route: 16 strict
-loads, eight Search V4 sweeps per family and every commit's reopen. That is
-not O(1) and not proportional to new work. Making it so would need a durable
-request-keyed index of committed routes that a replay could consult before
-loading, which is a new authority and a new format; D-1683 does not add one and
-states the cost here instead.
+over fully committed authorities still costs the full Step-4 route. One replay,
+which is one `ledger-v6` run, costs exactly: 16 strict loads (8 rungs x 2
+families), each O(M + B + source bytes); 16 Candidate column builds (NIFTY's is
+the sizing census's, D-4783) and 16 execution projections; 16 Apriori sweeps;
+16 Search V4 walk-forward runs; 16 complete two-sided grid expansions; 16
+Execution V3 replay column rebuilds, memoized to one per family (D-0994); 8
+Statistics bootstraps of B draws each; 8 recomputations each of Admission V4,
+Finalization V4, Population V6, Execution V4 and Selection V6; one writable
+Candidate ledger open plus its catch-ups (D-4780); one Pre-Admission door open
+per family (D-4781); every successor ledger's open and reopen; and the OOS
+witness work, one fold per family cohort and O(M) plus the Runner replay per
+witness (D-4782). That is not O(1) and not proportional to new work. D-4785
+removed the work this re-proof duplicated without trusting anything sealed: a
+production source is validated once, at construction, where it was validated
+three times per family commit and three times per Execution V3 replay, each
+re-hashing every stream, both columns and the data term. The documented
+alternative is G4's §A: a route manifest keyed by both universe ids and every
+policy term, plus a rehydrated selection whose winners are re-derived and
+checked against the sealed digests, would leave 16 loads, 16 column builds and
+at most 200 winner grid evaluations. It is a new authority, a new format and a
+Global Replay V4 contract change, which is an owner decision; D-4785 does not
+take it.
 
 ## A sweep-evidence ranking is buffered whole before its one write — D-1741, 3 October 2026
 
@@ -15723,10 +15788,15 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
 - **`ledger-all` sizing now builds NIFTY's Candidate column for each rung.**
   It used to read one signal span per rung for its length. It now loads the
   signal, one-minute and daily context exactly as the Candidate commit does,
-  and builds that column once to read its swept count. Per command, that is
-  eight extra context loads and column builds. The commit then loads its own
-  copy again. `ledger-v6` already held that context, so it only adds the
-  column build. Not measured; read off the source.
+  and builds that column once to read its swept count. Until D-4784 that was
+  eight extra context loads and column builds per command, because the commit
+  then loaded its own copy again, and until D-4783 `ledger-v6`, which already
+  held that context, built the column twice. Since D-4783 and D-4784 both
+  verbs hand the sizing context and column to the same rung's NIFTY commit,
+  which consumes them, so sizing adds no load and no column build;
+  `ledger-all` sizes each rung at that rung's Candidate phase and holds one
+  sized context at a time. Not measured; read off the source and counted by
+  the tests D-4783 and D-4784 name.
 
 - **The Zerodha day check (D-3001).** `pull::daycheck::compare` folds one
   instrument-month of minute bars to days, O(minutes), and merges two

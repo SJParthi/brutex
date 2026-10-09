@@ -892,10 +892,23 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
     let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
     let tree = LedgerTree::create(request.root)?;
 
-    let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_ALL_VERB)?;
-
     let ranking = RankingPolicyV1::new(Weights::equal())
         .map_err(|why| format!("ranking policy refused: {why:?}"))?;
+
+    // SIZED PER RUNG, AT THAT RUNG'S CANDIDATE PHASE (G4-2, D-4784). The
+    // census loads NIFTY's context and builds its column, and that rung's NIFTY
+    // commit consumes both rather than loading and building them again.
+    let sizing = SizingInputs::new()?;
+    let size = |_: usize, rung: &str| {
+        size_rung(
+            &source_root,
+            vendor,
+            request,
+            LEDGER_ALL_VERB,
+            rung,
+            &sizing,
+        )
+    };
 
     crate::note(&stage_started_event(LEDGER_ALL_VERB, POPULATION_STAGE));
     let population = commit_population(&Stage1 {
@@ -903,7 +916,7 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         tree: &tree,
         vendor,
         request,
-        sweepers: &sweepers,
+        size: &size,
         admission: &admission,
     })
     .inspect_err(|why| {
@@ -1100,7 +1113,7 @@ struct Stage1<'a> {
     tree: &'a LedgerTree,
     vendor: Vendor,
     request: &'a LedgerAllRequest<'a>,
-    sweepers: &'a [Sweeper; 8],
+    size: &'a crate::all_rung_population_v5::SizeRungV1<'a>,
     admission: &'a AdmissionPolicyV1,
 }
 
@@ -1120,16 +1133,6 @@ fn commit_population(
     let request = stage.request;
     let long_exit = exit_policy(Side::Long)?;
     let short_exit = exit_policy(Side::Short)?;
-    let [
-        one_minute_sweeper,
-        two_minute_sweeper,
-        three_minute_sweeper,
-        five_minute_sweeper,
-        ten_minute_sweeper,
-        fifteen_minute_sweeper,
-        thirty_minute_sweeper,
-        sixty_minute_sweeper,
-    ] = stage.sweepers;
 
     commit_all_rung_stored_population_v5(&AllRungStoredPopulationV5Request {
         source_root: stage.source_root,
@@ -1137,14 +1140,7 @@ fn commit_population(
         vendor: stage.vendor,
         from: request.from,
         to: request.to,
-        one_minute_sweeper,
-        two_minute_sweeper,
-        three_minute_sweeper,
-        five_minute_sweeper,
-        ten_minute_sweeper,
-        fifteen_minute_sweeper,
-        thirty_minute_sweeper,
-        sixty_minute_sweeper,
+        sweepers: crate::all_rung_population_v5::AllRungSweepersV1::SizedPerRung(stage.size),
         horizon: Horizon::DEFAULT,
         widths: Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?,
         // ABSENT, and this caller may not derive it: `vwap::availability_of`
@@ -1397,7 +1393,33 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
     .map_err(|why| format!("execution bounds: {why:?}"))
 }
 
-/// One sweeper per rung, each with a support threshold from its OWN bar count.
+/// What every rung's sizing census shares: the load ceilings and the
+/// evaluation inputs the Candidate commit will use.
+pub(crate) struct SizingInputs {
+    bounds: crate::step3_orchestrator::StoredCandidatePreAdmissionBoundsV1,
+    evaluation: crate::candidate_universe::CandidateEvaluationInputsV1,
+}
+
+impl SizingInputs {
+    /// The production ceilings and evaluation inputs `ledger-all` commits with.
+    ///
+    /// # Errors
+    ///
+    /// A refused ceiling or pinned tolerance.
+    pub(crate) fn new() -> Result<Self, String> {
+        Ok(Self {
+            bounds: candidate_bounds()?,
+            evaluation: crate::candidate_universe::CandidateEvaluationInputsV1 {
+                widths: Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?,
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            },
+        })
+    }
+}
+
+/// One rung's sweeper, with a support threshold from that rung's OWN bar
+/// count, and the sized NIFTY context and column its NIFTY commit consumes.
 ///
 /// # Why not one shared threshold
 ///
@@ -1408,79 +1430,77 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
 /// operator's support in ppm and resolving it against each rung's own bars asks
 /// the same question eight times.
 ///
-/// # What it logs, and why the loop may
+/// # Why per rung, and why the context is handed on (G4-2, D-4784)
+///
+/// D-2103 made this census load NIFTY's whole signal, one-minute and daily
+/// context and build its Candidate column, and the eight censuses ran before
+/// the first commit, each dropping its context, so every rung's NIFTY commit
+/// loaded and built the same thing again. The all-rung coordinator now calls
+/// this at the start of each rung's Candidate phase and hands the returned
+/// context and column to that rung's NIFTY commit: one load and one column
+/// build per (family, rung), and no more contexts held at once than before.
+/// A rung whose span is missing is still named, not skipped; it now refuses
+/// when its own rung is reached, after the earlier rungs' receipt-last
+/// appends, which an exact retry reuses.
+///
+/// # What it logs, and why it may
 ///
 /// One event per rung, eight for the whole run, each at the moment that rung's
-/// span has loaded and its threshold is known. The loop is over
-/// [`LEDGER_RUNGS`] -- a fixed eight -- and not over the bars it just counted,
-/// so the event count does not move with the operator's span. Gate 17's rule is
-/// about the loop over bars, and there is none here.
+/// span has loaded and its threshold is known. The coordinator's loop is over
+/// its eight canonical rungs and not over the bars just counted, so the event
+/// count does not move with the operator's span. Gate 17's rule is about the
+/// loop over bars, and there is none here.
 ///
 /// # Errors
 ///
-/// Refuses if a rung's span cannot be loaded or its ladder rejected. A rung
-/// with no stored bars is named, not skipped: a silent skip would produce a
-/// seven-rung answer in an eight-rung report.
-pub(crate) fn build_sweepers(
+/// Refuses if the rung's span cannot be loaded or its ladder rejected.
+pub(crate) fn size_rung(
     root: &Path,
     vendor: Vendor,
     request: &LedgerAllRequest<'_>,
     verb: &str,
-) -> Result<[Sweeper; 8], String> {
-    let mut sweepers = Vec::with_capacity(LEDGER_RUNGS.len());
-    let bounds = candidate_bounds()?;
-    let evaluation = crate::candidate_universe::CandidateEvaluationInputsV1 {
-        widths: Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?,
-        availability: Availability::Absent,
-        thresholds: Thresholds::CLASSICAL,
-    };
-    for rung in LEDGER_RUNGS {
-        // SIZED ON NIFTY'S BARS, and the pair is why that is not a narrowing.
-        // Both families are swept at the same threshold, and the two share a
-        // calendar and a session length, so either one answers "how many bars
-        // does this rung hold over this span". NIFTY is the one the store
-        // actually has.
-        //
-        // SWEPT BARS, NOT RETAINED ONES (D-2103). The support denominator is
-        // the rows NIFTY's Candidate column sweeps, read from the very build
-        // its commit runs, so the warm-up rows no combination can hit do not
-        // raise the threshold.
-        let swept = crate::step3_orchestrator::stored_candidate_swept_v1(
-            root,
-            vendor,
-            ("NIFTY", rung),
-            (request.from, request.to),
-            bounds,
-            &evaluation,
-        )
-        .map_err(|why| {
-            let first = why.lines().next().unwrap_or("").to_owned();
-            let refusal = format!("{rung} span refused: {first}");
-            crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
-            refusal
-        })?;
-        let min_hits = crate::min_hits_for_swept(swept, request.support_ppm);
-        let ladder = crate::ladder_for(min_hits).map_err(|why| {
-            let refusal = format!("{rung} ladder: {why}");
-            crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
-            refusal
-        })?;
-        crate::note(&rung_sized_event(
-            verb,
-            rung,
-            swept,
-            min_hits,
-            request.support_ppm,
-        ));
-        sweepers.push(Sweeper::new(ladder));
-    }
-    // AN ARRAY, so the caller destructures instead of indexing. Eight named
-    // sweepers reached by `sweepers[0]`..`sweepers[7]` is eight chances to
-    // hand the sixty-minute ladder to the one-minute rung, and neither the
-    // compiler nor a reader would catch it.
-    sweepers
-        .try_into()
-        .map_err(|_| "the sweeper phase did not build eight ladders".to_owned())
+    rung: &str,
+    sizing: &SizingInputs,
+) -> Result<(Sweeper, crate::step3_orchestrator::strict::SizedNifty), String> {
+    // SIZED ON NIFTY'S BARS, and the pair is why that is not a narrowing.
+    // Both families are swept at the same threshold, and the two share a
+    // calendar and a session length, so either one answers "how many bars
+    // does this rung hold over this span". NIFTY is the one the store
+    // actually has.
+    //
+    // SWEPT BARS, NOT RETAINED ONES (D-2103). The support denominator is
+    // the rows NIFTY's Candidate column sweeps, read from the very build
+    // its commit consumes, so the warm-up rows no combination can hit do not
+    // raise the threshold.
+    let sized = crate::step3_orchestrator::stored_candidate_swept_v1(
+        root,
+        vendor,
+        ("NIFTY", rung),
+        (request.from, request.to),
+        sizing.bounds,
+        &sizing.evaluation,
+    )
+    .map_err(|why| {
+        let first = why.lines().next().unwrap_or("").to_owned();
+        let refusal = format!("{rung} span refused: {first}");
+        crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
+        refusal
+    })?;
+    let swept = sized.swept();
+    let min_hits = crate::min_hits_for_swept(swept, request.support_ppm);
+    let ladder = crate::ladder_for(min_hits).map_err(|why| {
+        let refusal = format!("{rung} ladder: {why}");
+        crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
+        refusal
+    })?;
+    crate::note(&rung_sized_event(
+        verb,
+        rung,
+        swept,
+        min_hits,
+        request.support_ppm,
+    ));
+    Ok((Sweeper::new(ladder), sized))
 }
 
 #[cfg(test)]

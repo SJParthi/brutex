@@ -324,6 +324,12 @@ fn run_route(
     let bounds = candidate_bounds()?;
 
     let mut committed = Vec::with_capacity(8);
+    // ONE CANDIDATE WRITER FOR THE WHOLE RUN (W2-cli3-4, D-4780). The
+    // Candidate ledger sits at the store root and every run, rung and family
+    // shares it; opening it per append cost O(R_total + C) sixteen times a
+    // run. The writer opens it at the first append and, before each later one,
+    // verifies only what other writers appended since.
+    let mut candidate_writer = crate::candidate_universe::CandidateLedgerWriterV1::new();
     for (index, rung) in LEDGER_RUNGS.into_iter().enumerate() {
         let (sweeper, sizing_inputs, sized) = crate::step3_orchestrator::strict::size_sweeper(
             &source_root,
@@ -376,6 +382,7 @@ fn run_route(
                 },
                 &strict,
                 preloaded,
+                &mut candidate_writer,
             )
             .map_err(|why| {
                 let refusal = format!("v6 {rung} {underlying} refused: {why}");
@@ -711,6 +718,11 @@ pub(crate) fn ledger_v6_replay(
 /// candidates; `docs/06-limits.md` states it (W2-cli7-2, D-1683). Invariant
 /// LBE-11 pins the statement; the route's per-rung load count is
 /// `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_load_once`.
+///
+/// It stays a full re-proof by decision (D-4785): a replay that trusted its
+/// own sealed output would prove nothing that output does not already claim.
+/// The limits state its exact cost bound and the documented cheaper
+/// alternative, which needs an owner decision.
 fn replay_route(
     request: &LedgerAllRequest<'_>,
     from: (u16, u8),

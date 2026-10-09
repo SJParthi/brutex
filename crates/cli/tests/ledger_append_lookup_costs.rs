@@ -51,6 +51,7 @@ const STEP3: &str = include_str!("../src/step3_orchestrator.rs");
 const LEDGER_V6: &str = include_str!("../src/ledger_v6.rs");
 const STRICT_INPUTS: &str = include_str!("../src/strict_v6_inputs.rs");
 const POPULATION_V6: &str = include_str!("../src/population_v6.rs");
+const OOS: &str = include_str!("../src/stored_post_training_oos.rs");
 
 /// The body of one `### §N —` section, up to the next `### ` heading.
 fn section(number: u32) -> &'static str {
@@ -86,15 +87,22 @@ fn function<'a>(source: &'a str, signature: &str) -> &'a str {
 
 #[test]
 fn section_150_states_one_open_per_production_append_and_no_data_hash() {
-    // The source first: what the section must describe.
-    let door = function(CANDIDATE, "fn append_prepared_and_reverify(");
+    // The source first: what the section must describe. The carried writer
+    // opens the ledger once (D-4780), and the per-append commit opens nothing
+    // and re-reads only its block (D-1680).
+    let writer = method(CANDIDATE, "    fn append_with_held_or_opened(");
     assert_eq!(
-        door.matches("CandidateUniverseLedgerV1::open").count(),
+        writer.matches("CandidateUniverseLedgerV1::open").count(),
         1,
-        "the production append door opens the ledger more than once again; \
+        "the carried Candidate writer opens the ledger more than once again; \
          re-measure §150 before changing this test"
     );
-    assert!(door.contains("reverify_committed"));
+    let commit = function(CANDIDATE, "fn commit_and_reverify(");
+    assert!(!commit.contains("CandidateUniverseLedgerV1::open"));
+    assert!(commit.contains("reverify_committed"));
+    let append = method(CANDIDATE, "    fn append_complete_locked(");
+    assert!(append.contains("self.catch_up_locked()?"));
+    assert!(!append.contains("self.require_unchanged()?"));
     let generation = function(CANDIDATE, "fn file_generation(");
     assert!(
         !generation.contains("hash") && !generation.contains("blake3"),
@@ -105,19 +113,56 @@ fn section_150_states_one_open_per_production_append_and_no_data_hash() {
     for stale in [
         "and also hashes the data files",
         "Append, hashing, canonical-order validation and durability are proportional to the new block",
+        "opens the ledger on every call",
     ] {
         assert!(!text.contains(stale), "§150 still says `{stale}`");
     }
     for needed in [
-        "one production append is O(R+C) for that open plus O(new rows)",
+        "The run's first append opens the ledger, so it is O(R+C) for that open plus O(new rows)",
+        "so a later append is O(new rows + foreign new rows)",
+        "16 per run against one root, so a run's Candidate appends now cost one O(R+C) open",
+        "a carried writer does not see such a rewrite",
         "It is metadata only and hashes no data file",
-        "16 per run",
     ] {
         assert!(text.contains(needed), "§150 no longer says `{needed}`");
     }
-    let header = flat(CANDIDATE.get(..2_000).expect("the module header"));
+    let header = flat(CANDIDATE.get(..2_400).expect("the module header"));
     assert!(!header.contains("the sealed internal append is O(new rows)"));
-    assert!(header.contains("one production append costs O(rows + receipts)"));
+    assert!(!header.contains("The production append door opens the ledger once per call"));
+    assert!(header.contains("its first append opens the ledger, so it costs O(rows + receipts)"));
+    assert!(header.contains("instead of opening again (W2-cli3-4, D-4780)"));
+}
+
+#[test]
+fn a_pre_admission_append_door_opens_once_and_section_153_says_so() {
+    let mut doors = 0;
+    let mut rest = PRE_ADMISSION;
+    while let Some(at) = rest.find("    pub(crate) fn append_and_reopen(") {
+        let door = method(rest, "    pub(crate) fn append_and_reopen(");
+        assert_eq!(door.matches("::open(root, bounds)?").count(), 1);
+        assert!(door.contains("ledger.reverify_committed(&committed)?"));
+        assert!(
+            !door.contains("open_read"),
+            "a Pre-Admission append door opens the ledger twice again; re-measure §153"
+        );
+        doors += 1;
+        rest = rest.get(at + 1..).expect("a suffix");
+    }
+    assert_eq!(
+        doors, 2,
+        "Pre-Admission V1 and V2 each have one append door"
+    );
+
+    let text = flat(section(153));
+    for needed in [
+        "One production append door, V1 or V2, runs one full open since D-4781",
+        "two full opens per append",
+        "One append is still O(file bytes)",
+    ] {
+        assert!(text.contains(needed), "§153 no longer says `{needed}`");
+    }
+    let module = flat(PRE_ADMISSION.get(..3_400).expect("the module header"));
+    assert!(module.contains("opens the ledger once and then re-reads only its committed pair"));
 }
 
 /// The body of the method opened by `signature` in `source`, up to the next
@@ -326,8 +371,17 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
         "the route calls the door that always reloads NIFTY"
     );
     let sizing = function(STRICT_INPUTS, "pub(crate) fn size_sweeper(");
-    assert_eq!(sizing.matches("load(").count(), 1);
+    assert_eq!(sizing.matches("census(").count(), 1);
+    assert!(!sizing.contains("load("));
     assert!(sizing.contains("Ok((sweeper, inputs, sized))"));
+    let census = function(STRICT_INPUTS, "pub(super) fn census(");
+    assert_eq!(
+        census
+            .matches("load_bounded_stored_context_from_spec_v1(")
+            .count(),
+        1
+    );
+    assert_eq!(census.matches("PrebuiltSignalColumnV1::build(").count(), 1);
     let replay = function(LEDGER_V6, "fn replay_route(");
     assert!(replay.contains("run_route(request, out)?"));
     let start = LEDGER_V6.find("fn replay_route(").expect("replay_route");
@@ -338,12 +392,34 @@ fn the_ledger_v6_route_and_replay_costs_are_stated() {
             .expect("the rustdoc"),
     );
     assert!(doc.contains("O(full Step-4 route) per call"));
+    assert!(doc.contains("It stays a full re-proof by decision (D-4785)"));
+    for (source, signature) in [
+        (CANDIDATE, "    pub(crate) fn anchored_search_v4("),
+        (CANDIDATE, "fn build_execution_v3_replay_authority("),
+    ] {
+        let body = if signature.starts_with("    ") {
+            method(source, signature)
+        } else {
+            function(source, signature)
+        };
+        assert!(
+            !body.contains("source.validate()?") && !body.contains("self.validate()?"),
+            "`{signature}` re-validates its source again; re-measure the W2-cli7-2 bound"
+        );
+    }
+    let production = function(CANDIDATE, "pub(crate) fn produce_candidate_universe_v1<");
+    assert!(!production.contains("source.validate()?"));
 
     let chapter = chapter(CHAPTER);
     for needed in [
         "One `run_route` now makes 16 strict loads (8 rungs x 2 families)",
         "where before it made 24",
         "a rerun over fully committed authorities still costs the full Step-4 route",
+        "a replay that trusted its own sealed output would prove nothing",
+        "16 Apriori sweeps; 16 Search V4 walk-forward runs; 16 complete two-sided grid expansions",
+        "8 Statistics bootstraps of B draws each",
+        "a production source is validated once, at construction",
+        "The documented alternative is G4's §A",
     ] {
         assert!(
             chapter.contains(needed),
@@ -363,10 +439,18 @@ fn section_169_prices_the_oos_fold_once_per_cohort() {
     let text = flat(section(169));
     for needed in [
         "Since D-1684 Population V6 builds it once per family cohort",
-        "so a witness remains Θ(S + Q + D + E) in hashing",
+        "Since D-4782 (W2-cli3-3's second fix) a witness hashes no stream",
+        "So a witness is O(M) plus the authenticated Runner replay",
     ] {
         assert!(text.contains(needed), "§169 no longer says `{needed}`");
     }
+    let mint = method(CANDIDATE, "    pub(crate) fn mint_witness_recorded(");
+    assert!(mint.contains("ExecutionRunV1::with_digests(&run, &self.run_digests)"));
+    assert!(!mint.contains("new_with_daily_reference"));
+    assert!(!mint.contains("self.require_integrity()"));
+    let witness = method(OOS, "    fn mint_inner(");
+    assert_eq!(witness.matches("cohort.require_current()?").count(), 2);
+    assert!(!witness.contains("require_integrity()?;"));
     assert!(
         !text.contains("Minting every witness is proportional to the authenticated Runner replay")
     );

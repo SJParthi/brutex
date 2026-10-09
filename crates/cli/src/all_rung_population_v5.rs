@@ -64,9 +64,9 @@ use crate::population_v5::{
 use crate::step3_orchestrator::{
     CommittedStoredCandidatePreAdmissionV1, StoredCandidatePreAdmissionBoundsV1,
     StoredCandidatePreAdmissionRequestV1, VerifiedBuildCommitV1,
-    commit_stored_candidate_pre_admission_authority_v1, commit_stored_observation_statistics_v2,
-    commit_stored_population_admission_v3, commit_stored_population_finalization_v3,
-    commit_stored_search_lineage_v4,
+    commit_stored_candidate_pre_admission_authority_carried_v1,
+    commit_stored_observation_statistics_v2, commit_stored_population_admission_v3,
+    commit_stored_population_finalization_v3, commit_stored_search_lineage_v4, strict::SizedNifty,
 };
 
 const RUNG_COUNT: usize = 8;
@@ -86,11 +86,49 @@ const _: () = {
     assert!(CANDIDATE_SIGNAL_RUNGS_SECONDS_V1[7] == 3_600);
 };
 
+/// Eight caller-built Candidate sweepers, one named field per canonical rung.
+///
+/// The eight named fields prevent positional array substitution.
+#[derive(Clone, Copy)]
+pub(crate) struct NamedAllRungSweepersV1<'a> {
+    /// One-minute Candidate sweeper.
+    pub(crate) one_minute: &'a Sweeper,
+    /// Two-minute Candidate sweeper.
+    pub(crate) two_minute: &'a Sweeper,
+    /// Three-minute Candidate sweeper.
+    pub(crate) three_minute: &'a Sweeper,
+    /// Five-minute Candidate sweeper.
+    pub(crate) five_minute: &'a Sweeper,
+    /// Ten-minute Candidate sweeper.
+    pub(crate) ten_minute: &'a Sweeper,
+    /// Fifteen-minute Candidate sweeper.
+    pub(crate) fifteen_minute: &'a Sweeper,
+    /// Thirty-minute Candidate sweeper.
+    pub(crate) thirty_minute: &'a Sweeper,
+    /// Sixty-minute Candidate sweeper.
+    pub(crate) sixty_minute: &'a Sweeper,
+}
+
+/// Sizes one canonical rung, by ordinal and name, on that rung's own NIFTY
+/// Candidate column: the sweeper and the loaded context and built column the
+/// rung's NIFTY commit consumes (G4-2, D-4784).
+pub(crate) type SizeRungV1<'a> = dyn Fn(usize, &str) -> Result<(Sweeper, SizedNifty), String> + 'a;
+
+/// Where each rung's Candidate sweeper comes from.
+#[derive(Clone, Copy)]
+pub(crate) enum AllRungSweepersV1<'a> {
+    /// Eight sweepers the caller built before the transaction.
+    Named(NamedAllRungSweepersV1<'a>),
+    /// Each rung is sized at the start of its own Candidate phase, and its
+    /// NIFTY commit consumes the sizing context and column instead of loading
+    /// and building them again (G4-2, D-4784).
+    SizedPerRung(&'a SizeRungV1<'a>),
+}
+
 /// Complete caller decisions for one canonical stored eight-rung transaction.
 ///
-/// The eight named Sweeper fields prevent positional array substitution.  The
-/// coordinator itself owns the only rung/family topology and reuses each named
-/// Sweeper for NIFTY then BANKNIFTY at that exact rung.
+/// The coordinator itself owns the only rung/family topology and reuses each
+/// rung's sweeper for NIFTY then BANKNIFTY at that exact rung.
 #[derive(Clone, Copy)]
 pub(crate) struct AllRungStoredPopulationV5Request<'a> {
     /// Existing exact stored-market and Candidate ledger root.
@@ -103,22 +141,8 @@ pub(crate) struct AllRungStoredPopulationV5Request<'a> {
     pub(crate) from: (u16, u8),
     /// Inclusive last requested `(year, month)`.
     pub(crate) to: (u16, u8),
-    /// One-minute Candidate sweeper.
-    pub(crate) one_minute_sweeper: &'a Sweeper,
-    /// Two-minute Candidate sweeper.
-    pub(crate) two_minute_sweeper: &'a Sweeper,
-    /// Three-minute Candidate sweeper.
-    pub(crate) three_minute_sweeper: &'a Sweeper,
-    /// Five-minute Candidate sweeper.
-    pub(crate) five_minute_sweeper: &'a Sweeper,
-    /// Ten-minute Candidate sweeper.
-    pub(crate) ten_minute_sweeper: &'a Sweeper,
-    /// Fifteen-minute Candidate sweeper.
-    pub(crate) fifteen_minute_sweeper: &'a Sweeper,
-    /// Thirty-minute Candidate sweeper.
-    pub(crate) thirty_minute_sweeper: &'a Sweeper,
-    /// Sixty-minute Candidate sweeper.
-    pub(crate) sixty_minute_sweeper: &'a Sweeper,
+    /// Every rung's Candidate sweeper.
+    pub(crate) sweepers: AllRungSweepersV1<'a>,
     /// Explicit forward outcome horizon shared by the one requested cohort.
     pub(crate) horizon: Horizon,
     /// Explicit indicator tolerance widths.
@@ -151,7 +175,7 @@ pub(crate) struct AllRungStoredPopulationV5Request<'a> {
     pub(crate) population_bounds: PopulationV5Bounds,
 }
 
-impl AllRungStoredPopulationV5Request<'_> {
+impl<'a> NamedAllRungSweepersV1<'a> {
     /// The sweeper named by one canonical rung ordinal, or `None` past the eighth.
     ///
     /// # It refuses rather than dying, and the arm it replaces could not be covered
@@ -164,20 +188,20 @@ impl AllRungStoredPopulationV5Request<'_> {
     /// no input could enter, which the 100% coverage floor in §9 cannot close: a
     /// panic no caller can provoke is a line no test can reach.
     ///
-    /// `None` is the honest answer instead. Both call sites turn it into a named
+    /// `None` is the honest answer instead. The call site turns it into a named
     /// refusal carrying the ordinal, so an authoring mistake in the phase-one walk
     /// surfaces as a message rather than an abort mid-transaction — which matters
     /// here more than usual, because an abort would strand a receipt-last append.
-    fn sweeper(&self, index: usize) -> Option<&Sweeper> {
+    fn sweeper(&self, index: usize) -> Option<&'a Sweeper> {
         match index {
-            0 => Some(self.one_minute_sweeper),
-            1 => Some(self.two_minute_sweeper),
-            2 => Some(self.three_minute_sweeper),
-            3 => Some(self.five_minute_sweeper),
-            4 => Some(self.ten_minute_sweeper),
-            5 => Some(self.fifteen_minute_sweeper),
-            6 => Some(self.thirty_minute_sweeper),
-            7 => Some(self.sixty_minute_sweeper),
+            0 => Some(self.one_minute),
+            1 => Some(self.two_minute),
+            2 => Some(self.three_minute),
+            3 => Some(self.five_minute),
+            4 => Some(self.ten_minute),
+            5 => Some(self.fifteen_minute),
+            6 => Some(self.thirty_minute),
+            7 => Some(self.sixty_minute),
             _ => None,
         }
     }
@@ -570,18 +594,32 @@ pub(crate) fn commit_all_rung_with_verified_build_v5(
     // Phase one freezes every shared-root Candidate/Base/Pre-Admission append
     // before any successor ledger reader is retained.
     let mut candidate_pairs = Vec::with_capacity(RUNG_COUNT);
+    // ONE CANDIDATE WRITER FOR ALL SIXTEEN APPENDS (W2-cli3-4, D-4780): the
+    // Candidate ledger is the source root's, shared by every run.
+    let mut candidate_writer = crate::candidate_universe::CandidateLedgerWriterV1::new();
     for (index, rung_name) in CANONICAL_RUNG_NAMES_V1.iter().copied().enumerate() {
-        // NAMED, NOT ASSUMED. `CANONICAL_RUNG_NAMES_V1` is `RUNG_COUNT` long and
-        // `sweeper` answers every ordinal below it, so this refusal is unreachable
-        // on the shipped tables -- but it is a refusal and not a panic, for the
-        // reason [`AllRungStoredPopulationV5Request::sweeper`] records.
-        let sweeper = request.sweeper(index).ok_or_else(|| {
-            format!("all-rung ordinal {index} ({rung_name}) names no canonical sweeper")
-        })?;
+        let sized_sweeper: Sweeper;
+        let (sweeper, sized) = match request.sweepers {
+            // NAMED, NOT ASSUMED. `CANONICAL_RUNG_NAMES_V1` is `RUNG_COUNT` long
+            // and `sweeper` answers every ordinal below it, so this refusal is
+            // unreachable on the shipped tables -- but it is a refusal and not a
+            // panic, for the reason [`NamedAllRungSweepersV1::sweeper`] records.
+            AllRungSweepersV1::Named(named) => (
+                named.sweeper(index).ok_or_else(|| {
+                    format!("all-rung ordinal {index} ({rung_name}) names no canonical sweeper")
+                })?,
+                None,
+            ),
+            AllRungSweepersV1::SizedPerRung(size) => {
+                let (sweeper, sized) = size(index, rung_name)?;
+                sized_sweeper = sweeper;
+                (&sized_sweeper, Some(sized))
+            }
+        };
         roots.require_same(&format!(
             "before {rung_name} NIFTY Candidate/Pre-Admission commit"
         ))?;
-        let nifty = commit_stored_candidate_pre_admission_authority_v1(
+        let nifty = commit_stored_candidate_pre_admission_authority_carried_v1(
             StoredCandidatePreAdmissionRequestV1 {
                 root: roots.source.path(),
                 vendor: request.vendor,
@@ -599,13 +637,15 @@ pub(crate) fn commit_all_rung_with_verified_build_v5(
                 bounds: request.candidate_bounds,
             },
             verified_commit,
+            &mut candidate_writer,
+            sized,
         )
         .map_err(|why| format!("all-rung {rung_name} NIFTY refused: {why}"))?;
 
         roots.require_same(&format!(
             "between {rung_name} NIFTY and BANKNIFTY Candidate/Pre-Admission commits"
         ))?;
-        let banknifty = commit_stored_candidate_pre_admission_authority_v1(
+        let banknifty = commit_stored_candidate_pre_admission_authority_carried_v1(
             StoredCandidatePreAdmissionRequestV1 {
                 root: roots.source.path(),
                 vendor: request.vendor,
@@ -623,6 +663,8 @@ pub(crate) fn commit_all_rung_with_verified_build_v5(
                 bounds: request.candidate_bounds,
             },
             verified_commit,
+            &mut candidate_writer,
+            None,
         )
         .map_err(|why| format!("all-rung {rung_name} BANKNIFTY refused: {why}"))?;
         roots.require_same(&format!(
