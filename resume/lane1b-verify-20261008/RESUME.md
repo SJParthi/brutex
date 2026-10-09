@@ -66,3 +66,24 @@ Heads (head/commits/dirty files): a=93489016/5/dirty7 b=fc5291b6/8/dirty0 c=1010
   pre_admission_data; fix to the D-4765 pattern or correct the docs.
 - Adversarial review workflow over each fixer diff + the merge resolutions (worktree /home/claude/wt-review @ a9fee04b).
 - Resume if lost: re-create the merge chain above from the fixer branches' patches (patches/), then continue A, G, H.
+
+## PAUSE 2026-10-09 10:05 UTC (owner: GDFL is the top priority; weekly usage 68%; coordinator: pause until told to resume)
+- PUSHED: `origin/final/all-fixes-xp04wq` @ 3fa8adf7 = fbdabaec + merges B (a3bf5c9e), D (415a5838), E (d0376a9c),
+  C (dac4e954), F (a9fee04b), A (3fa8adf7). NO PR (owner rule: one combined PR, #74). Not yet handed to the PR 74 CI thread.
+- Validated on a9fee04b (B..F): cargo fmt --check clean; .github/*.rs rustfmt clean; workspace clippy --all-targets -D warnings
+  clean; all 29 static gates pass (0,1,1b,1g,1f,1c,1d,2,9,9b,10b,7 skip,13,15,16,17,23,21,22,24,25,27,27b,26,19,10,12,14,11).
+  Full workspace test run on a9fee04b was still compiling at pause (log scratchpad/logs/int-test-2.log; result appended below if it finishes).
+- NOT yet validated: the A merge (3fa8adf7) on the combined tree (A's own tree passed its checks: see fixer A report). pool.rs
+  conflict resolved by keeping both new tests (B/D's ledger-banner test and A's pass-one-order tests).
+- STOPPED mid-work (WIP saved, nothing committed on their branches):
+  - Fixer G (lane1b/fx-g from a9fee04b, D-4769..D-4779, L1FG-): patches/fx-g.uncommitted.patch.md (8 files: api sweeprun,
+    operation_audit/search_checkpoint/operator_boundary/audited_stored tests, web CandidateTrades label + test, docs/19).
+    It was writing item 4's test (W2-cli9-5 torn journal). Items 5 and 6 likely not started.
+  - Fixer H (lane1b/fx-h from a9fee04b, D-4786..D-4795, L1FH-): patches/fx-h.uncommitted.patch.md (19 files). It was implementing
+    the Execution V4 metadata-only generation. Its audit table was not reported.
+  - Adversarial review: REVIEW-PARTIAL.md (reviewers B and C done, 7 findings, unverified; note reviewer C labelled its ids B-1..B-5).
+    review-workflow.js.md is the script; re-run it in a new session against the then-current tree.
+- Resume order: apply G and H patches onto lane1b/fx-g / fx-h (base a9fee04b), finish their items; re-run the review workflow
+  (D, E, F, merges still to do) and fix confirmed findings (start with REVIEW-PARTIAL.md); merge G and H into
+  final/all-fixes-xp04wq; full workspace tests as uid 65534 for root-only failures; static gates; cargo-mutants sample; push;
+  send branch+sha to the PR 74 CI thread; publish the comparison-table artifact.
