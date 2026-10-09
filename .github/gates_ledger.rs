@@ -1398,7 +1398,10 @@ const ALLOW_UNSIZED: Allow = &[
     ("crates/cli/src/population_admission_v2.rs", 6),
     ("crates/cli/src/population_admission_v3.rs", 2),
     ("crates/cli/src/population_admission_v4.rs", 1),
-    ("crates/cli/src/population_base_evidence_ledger_v2.rs", 1),
+    // Two since D-4467 (W2-cli10-0): `audits` and `physical` start empty in
+    // `open_inner` and `scan` try_reserves both to the completion count
+    // before its first insert.
+    ("crates/cli/src/population_base_evidence_ledger_v2.rs", 2),
     ("crates/cli/src/population_base_evidence_v2.rs", 1),
     ("crates/cli/src/population_finalization_v2.rs", 4),
     ("crates/cli/src/population_finalization_v3.rs", 2),
