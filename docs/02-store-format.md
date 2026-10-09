@@ -984,7 +984,18 @@ before 2 leaves the old epoch current and a `.tmp` nobody reads; a crash after
 it leaves the new epoch current with the totals the old one held. No epoch's
 bytes are ever rewritten. Compaction costs one pass over the keys and one sort,
 O(keys · log keys), once per fill — about one in every `capacity − keys`
-appends; an old epoch keeps its bytes (about 280 MB for a full options epoch).
+appends; an old epoch keeps its bytes.
+
+**What an epoch weighs, as arithmetic, not a measurement of the store.** An
+epoch is `32,768 + n_valid × 128` bytes, so a FULL options epoch at the
+`FNO` floor is `32,768 + 8,388,608 × 128` = 1,073,774,592 bytes (1 GiB), and
+that is what each replaced full epoch keeps on disk. A compacted epoch holds
+one entry per key: at the about 2.2 million option contract-months the audit
+estimates, `32,768 + 2,200,000 × 128` = 281,632,768 bytes. A writer's load
+and a reader's whole read of the current epoch are bounded by its `capacity`,
+not by the history of writes: up to 1 GiB for an options epoch just before it
+compacts, against the single file's 268 MB ceiling. D-3316's own "about 280 MB
+for a full options epoch" is the compacted figure, not the full one.
 
 ### 11.9 Migration and recount — `cli census-migrate`, `cli census-recount` (D-3316)
 
