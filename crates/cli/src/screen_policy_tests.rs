@@ -1595,3 +1595,212 @@ fn the_envelope_is_each_floors_minimum_over_its_own_key() {
         (i64::MAX, i64::MAX)
     );
 }
+
+// ---------------------------------------------------------------------------
+// G2-5 (D-4716): a recorded tier walk captures the screens its page shows, not
+// every tier it judged.
+// ---------------------------------------------------------------------------
+
+/// A fresh capture root under the temporary directory, removed on drop.
+struct CaptureRoot(std::path::PathBuf);
+
+impl CaptureRoot {
+    fn new(tag: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "brutex-l1fb-capture-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("a private capture root");
+        Self(path)
+    }
+
+    fn attempt(&self, tag: u8) -> crate::sweep_evidence::Attempt {
+        crate::sweep_evidence::begin(&self.0, [tag; 32], crate::sweep_evidence::Operation::Audit)
+            .expect("a durable audit attempt")
+    }
+}
+
+impl Drop for CaptureRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs `work` on a one-thread pool and returns its answer with every capture
+/// `fsync` it issued: on one worker thread the thread-local counter sees the
+/// parallel recording too.
+fn counting_syncs<T: Send>(work: impl FnOnce() -> T + Send) -> (T, u64) {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("a one-thread pool");
+    pool.install(|| {
+        candidate_trades::DURABLE_SYNCS.with(|count| count.set(0));
+        let answer = work();
+        (
+            answer,
+            candidate_trades::DURABLE_SYNCS.with(std::cell::Cell::get),
+        )
+    })
+}
+
+/// G2-5, D-4716. A RECORDED cascade whose stated rules admit nothing walks
+/// every generated tier (D-1731), and the candidate capture recorded every
+/// tier it judged: one fsynced tier file and, per candidate side, a trade
+/// replay and two fsynced files. On this fixture's 2,520-tier ladder that was
+/// 2,521 captured screens and `2 × 2,521 + 4 × 2 × 2 × 2,521` fsyncs; on an
+/// operator rung the 64 MiB acknowledgement budget refused the whole run
+/// part-way down the ladder.
+///
+/// The capture now records the two screens the page is made of: the
+/// operator's own, and the mildest tier's, whose table the page prints. Its
+/// cost is two screens whatever the ladder's length, and the answer is the
+/// unrecorded cascade's, byte for byte.
+#[test]
+fn a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder() {
+    let fixture = Ranked::of(8);
+    let by_evidence = fixture.by_evidence(2);
+    let bars = &fixture.bars;
+    let column = &fixture.run.column;
+    let facts = runner::trade::SliceFacts::of(bars, column);
+    let mut rules = Rules::elite(400, 25);
+    rules.min_trades = u64::MAX;
+    let ladder = tiers(bars, by_evidence[0].hits);
+    let mildest = ladder
+        .last()
+        .expect("a generated ladder is never empty here")
+        .rules(rules.top, reference_price(bars));
+    assert!(ladder.len() > 2, "fixture: a ladder longer than two tiers");
+
+    let root = CaptureRoot::new("nothing-admits");
+    let attempt = root.attempt(0x45);
+    let capture =
+        candidate_trades::Capture::begin(&root.0, &attempt, bars, column).expect("capture starts");
+    let ((recorded, summary), syncs) = counting_syncs(|| {
+        let recorded = screen_cascade(
+            bars,
+            column,
+            &by_evidence,
+            Horizon::DEFAULT,
+            rules,
+            Pricing {
+                recording: None,
+                capture: Some(&capture),
+            },
+            true,
+            &facts,
+        )
+        .expect("the recorded cascade runs");
+        (recorded, capture.finish().expect("the capture seals"))
+    });
+    let unrecorded = screen_cascade(
+        bars,
+        column,
+        &by_evidence,
+        Horizon::DEFAULT,
+        rules,
+        NO_PRICING,
+        true,
+        &facts,
+    )
+    .expect("the unrecorded cascade runs");
+
+    // THE ANSWER IS THE UNRECORDED ONE: recording changes no byte of it.
+    assert!(
+        recorded.text.contains("NO TIER MET, INCLUDING THE MILDEST"),
+        "fixture: nothing admits\n{}",
+        recorded.text
+    );
+    assert_eq!(recorded.text, unrecorded.text);
+    assert!(!recorded.admitted_any && !unrecorded.admitted_any);
+    assert_eq!(
+        recorded.selected.map(|chosen| chosen.cell),
+        unrecorded.selected.map(|chosen| chosen.cell)
+    );
+
+    // THE CAPTURE IS THE PAGE'S TWO SCREENS, NOT THE LADDER.
+    assert_eq!(
+        summary.tiers,
+        2,
+        "captured screens on a {}-tier ladder",
+        ladder.len()
+    );
+    let yours = candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
+        .expect("the operator's screen");
+    let shown = candidate_trades::tier(&root.0, &summary, 1, candidate_trades::DEFAULT_MAX_BYTES)
+        .expect("the shown tier's screen");
+    assert_eq!(yours.rules, rules, "tier 0 is the operator's own policy");
+    assert_eq!(
+        shown.rules, mildest,
+        "tier 1 is the mildest tier, whose table the page prints"
+    );
+    assert_eq!(
+        summary.candidates,
+        2 * (yours.evaluated + shown.evaluated),
+        "every evaluated candidate side of both screens"
+    );
+    // TWO FSYNCS PER FILE: a tier file per screen, two files per candidate
+    // side, and the catalog.
+    assert_eq!(
+        syncs,
+        2 * summary.tiers + 4 * summary.candidates + 2,
+        "the capture's whole durable cost"
+    );
+}
+
+/// G2-5, D-4716. A recorded walk that MEETS a later tier captures that tier
+/// alone: the strictest unmet tiers before it are judged and named UNMET, and
+/// none of them is recorded. Before, every tier the walk judged was captured.
+#[test]
+fn a_recorded_walk_captures_only_the_tier_it_ends_on() {
+    let slice = Slice::of(8);
+    let none_at_39 = crafted(39, 0, 0);
+    let ladder = vec![
+        none_at_39,
+        crafted(2_000, 5_000, 0),
+        crafted(500, 0, 0),
+        crafted(2_000, 0, 0),
+    ];
+    let by_evidence = slice.fixture.by_evidence(2);
+    let root = CaptureRoot::new("met-later");
+    let attempt = root.attempt(0x46);
+    let capture = candidate_trades::Capture::begin(
+        &root.0,
+        &attempt,
+        &slice.fixture.bars,
+        &slice.fixture.run.column,
+    )
+    .expect("capture starts");
+    let mut unmet = Vec::new();
+    let recorded = walk_tiers(
+        &slice.fixture.bars,
+        &slice.fixture.run.column,
+        &by_evidence,
+        Horizon::DEFAULT,
+        Pricing {
+            recording: None,
+            capture: Some(&capture),
+        },
+        &slice.facts,
+        &ladder,
+        |rank| unmet.push(rank),
+    )
+    .map(|walk| walk_shape(&walk))
+    .expect("the recorded walk runs");
+    let summary = capture.finish().expect("the capture seals");
+    let (unrecorded, unrecorded_unmet, _) = slice.cached(&ladder, 2);
+    assert!(recorded.starts_with("met 2"), "fixture: tier 2 meets");
+    assert_eq!(recorded, unrecorded, "recording changes no answer");
+    assert_eq!(unmet, unrecorded_unmet);
+    assert_eq!(unmet, [0, 1]);
+    assert_eq!(summary.tiers, 1, "only the tier the walk ended on");
+    let captured =
+        candidate_trades::tier(&root.0, &summary, 0, candidate_trades::DEFAULT_MAX_BYTES)
+            .expect("the met tier's screen");
+    assert_eq!(captured.rules, ladder[2].1, "the met tier's policy");
+    assert_eq!(summary.candidates, 2 * captured.evaluated);
+}
+
+// ---------------------------------------------------------------------------

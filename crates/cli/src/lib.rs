@@ -13131,6 +13131,11 @@ where
 /// The answer is the reference walk's, `walk_ladder` with `screen` per tier,
 /// byte for byte: proven by
 /// `cli::screen_policy_tests::the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
+///
+/// A capture records only the tier the walk ENDS on: the met tier, or the last
+/// tier when none admits. Every other tier is judged with no capture, so a
+/// recorded walk writes one captured screen whatever `T` is (G2-5, D-4716):
+/// proven by `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the six slice inputs every screen takes, the ladder, and the unmet sink"
@@ -13153,11 +13158,33 @@ fn walk_tiers<'t, 'a>(
             price_grids(bars, column, by_evidence, horizon, envelope, pricing, facts)
         },
         |grids, (_, rules)| {
-            let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
-            Ok(rows
-                .iter()
-                .any(|row| row.admitted)
-                .then(|| finish_screen(rows, bars, column, horizon, *rules, facts)))
+            // JUDGED UNRECORDED; CAPTURED ONLY WHEN SHOWN (G2-5, D-4716). A
+            // tier that admits nothing is not the answer and its rows are never
+            // shown, so capturing it bought a tier file and four `fsync`s per
+            // candidate side for every one of up to 18,480 tiers, against a
+            // 64 MiB budget that then refused the whole recorded run.
+            let rows = tier_rows(
+                grids,
+                by_evidence,
+                horizon,
+                *rules,
+                Pricing {
+                    capture: None,
+                    ..pricing
+                },
+            )?;
+            if !rows.iter().any(|row| row.admitted) {
+                return Ok(None);
+            }
+            // The met tier is the answer: judged again WITH the capture. The
+            // capture only records, so these rows equal the ones above.
+            let rows = match pricing.capture {
+                Some(_) => tier_rows(grids, by_evidence, horizon, *rules, pricing)?,
+                None => rows,
+            };
+            Ok(Some(finish_screen(
+                rows, bars, column, horizon, *rules, facts,
+            )))
         },
         |grids, (_, rules)| {
             let rows = tier_rows(grids, by_evidence, horizon, *rules, pricing)?;
@@ -13792,8 +13819,9 @@ fn tier_rows<'a>(
     rules: Rules,
     pricing: Pricing<'_>,
 ) -> Result<Vec<Screened<'a>>, String> {
-    // ONE CAPTURE TIER PER POLICY JUDGED, as when every policy priced its own
-    // grids: the capture's tier ordinals follow the walk, not the grid passes.
+    // ONE CAPTURE TIER PER CALL THAT CARRIES A CAPTURE. `walk_tiers` passes
+    // one only for the tier it ends on, so the capture's tier ordinals are the
+    // SHOWN screens, not every tier judged (G2-5, D-4716).
     let captured_tier = pricing
         .capture
         .map(|capture| {

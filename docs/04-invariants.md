@@ -7052,3 +7052,10 @@ old line regex the same input and watched it pass.
 | G18-api-27 | The seek path's `records unreadable` line names the first file that refused a record, not the first file read (D-2046) | `api::bars::window_tests::the_unreadable_line_names_the_first_damaged_file_not_the_first_file` | ✓ |
 | G18-api-28 | The route test's HTTP exchange is bounded at 30 s per read and write, so a server that admits or answers nothing fails it rather than hanging (D-2047) | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end` | ✓ |
 | G18-api-29 | A dropped calendar `Landing` marks its flight `Abandoned` (or answered), removes it from the flight table, and wakes every follower (D-2047) | `api::calendar_of::tests::a_calendar_landing_releases_its_flight_and_wakes_its_followers_when_dropped` | ✓ |
+
+### Lane 1-b finishing fixes, fixer B (D-4716 onward)
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| L1FB-01 | A recorded cascade whose stated policy and whole tier ladder admit nothing captures exactly two screens, the operator's policy and the mildest tier, answers byte for byte as the unrecorded cascade, and costs exactly `2 × tiers + 4 × candidates + 2` `fsync`s, whatever the ladder's length (D-4716; supersedes D-1734's "one tier per policy judged") | `cli::screen_policy_tests::a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder` | ✓ |
+| L1FB-02 | A recorded tier walk that meets a tier captures that tier alone, with its own rules, and answers as the uncaptured cached walk (D-4716) | `cli::screen_policy_tests::a_recorded_walk_captures_only_the_tier_it_ends_on` | ✓ |

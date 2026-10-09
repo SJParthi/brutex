@@ -15560,6 +15560,25 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   anyone should expect to reach, because a key whose envelope admits cells is
   a key whose mildest tier is likely to end the walk.
 
+- **A recorded cascade's capture: at most two screens, whatever `T` is**
+  (G2-5, D-4716, next to D-1734). The bound above is the walk's pricing; a
+  RECORDED walk also writes candidate evidence. Each captured screen is one
+  tier file and two files per candidate side, two `fsync`s each, plus
+  `2 × evaluated` acknowledgement slots of 33 bytes against the capture's
+  64 MiB budget. Until D-4716 every judged tier was captured, so a walk where
+  nothing admits paid `(1 + T) × (2 + 8C) + 2` `fsync`s and `(1 + T) × 2C`
+  replays, and the budget refused the run near `T = 64 MiB / (66 × C)`:
+  about 10,000 tiers at `C = 98` and about 100 at the default
+  `screen_cap()` (derived from the slot size, not measured). Now `walk_tiers`
+  judges every tier with no capture and captures only the tier it ends on,
+  so a cascade captures the operator's own policy and that tier: at most
+  `6 + 16C` `fsync`s, `4C` replays and `4C` slots (`C <= screen_cap()`). The
+  met tier pays one extra `tier_rows` over its cached grids,
+  `O(C × 2 × K)`. COUNTED, not timed:
+  `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
+  measures two captured screens and exactly `2 × tiers + 4 × candidates + 2`
+  `fsync`s on a 2,520-tier ladder (2,521 tiers before the fix).
+
 - **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
   number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
   `grid_rungs`, `max_stop_points`, each once), one

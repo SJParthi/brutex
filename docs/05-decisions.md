@@ -65025,3 +65025,48 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4716 — A recorded tier walk captures the screens it shows, not every tier it judges — 2026-10-09
+
+**Finding.** G2-5, medium. D-1731 made the tier walk judge every tier, and
+D-1734 kept the candidate capture recording "one tier per policy judged". So
+a recorded walk that admits nothing wrote a tier file and two files per
+candidate side for every tier of the ladder: `(1 + T) × (2 + 8C) + 2` `fsync`s and
+`T × 2C` replays, against an acknowledgement budget of 64 MiB that refuses
+the whole recorded run once it is spent. D-1734's bound did not name it, and
+its 3.2 s measurement was the unrecorded path.
+`a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
+measured it on the 8-session fixture before the fix: 2,521 captured tiers
+for a 2,520-tier ladder, where the page shows two screens.
+
+**Decision.** `walk_tiers` judges every tier with no capture (`Pricing {
+capture: None, .. }`). The tier the walk ENDS on is judged again with the
+capture: the met tier inside `judge`, or the last tier in `screen_at`. The
+capture only records, so the re-judged rows equal the unrecorded ones and the
+page, selection and priced map are unchanged byte for byte. A recorded
+cascade therefore captures at most two screens, the operator's own policy and
+the tier the walk ended on: at most `6 + 16C` `fsync`s and `4C` acknowledgement
+slots, whatever `T` is. The met tier pays one extra `tier_rows` over its
+cached grids, `O(C × 2 × K)`.
+
+**What changes in stored results.** Only candidate captures of recorded
+audits and screens whose stated policy admitted nothing and whose ladder was
+walked: their catalog now holds two tiers, not `1 + rank + 1` or `1 + T`, and
+`candidate_side_count` falls with it. Tier ordinals now count SHOWN screens.
+The bytes of every file, the catalog layout and version 1 of
+`docs/19-candidate-trades.md` are unchanged, and every reader pages by the
+tier index it is given, so no format version is cut: a capture made before
+this decision reads exactly as it did. No parent identity, ledger row,
+frontier, report or digest changes. D-1734's sentence that the capture "still
+records one tier per policy judged" is superseded by this entry.
+
+**Proof.** `a_recorded_walk_that_admits_nothing_captures_two_screens_not_the_ladder`
+(recorded text equals unrecorded text; `tiers == 2`, tier 0 the operator's
+rules, tier 1 the mildest tier; `fsync`s `== 2 × tiers + 4 × candidates + 2`)
+and `a_recorded_walk_captures_only_the_tier_it_ends_on` (a met walk captures
+exactly the met tier and answers as the uncaptured cached walk). Both failed
+before the fix: `left: 2521, right: 2` and `left: 3, right: 1`.
+
+**Rejected.** Keeping one capture per judged tier and refusing up front when
+`T × 2C × 33` bytes would exceed the budget: the run would still refuse, only
+sooner, for evidence about tiers the page never shows.
