@@ -7425,6 +7425,57 @@ mod tests {
             "{said}"
         );
     }
+
+    /// **A TIME-INDEX REFUSAL NAMES THE `.tix` AND QUOTES ITS REASON, WORD FOR
+    /// WORD.** R1286-rest-03, D-4151.
+    ///
+    /// `index_refused` is the one door an append's index failure leaves by. A
+    /// cause that is already a store error (`Why::Unreadable`) goes back as
+    /// that error; every other cause becomes `StoreError::TimeIndex`, whose
+    /// sentence leads with the file and then quotes `Why`'s own words. Gate 18
+    /// run 1286 kept the sentence's writer replaced by an empty `Ok` alive,
+    /// because nothing read the sentence.
+    #[test]
+    fn a_time_index_refusal_names_the_index_file_and_quotes_the_reason() {
+        use crate::time_index::Why;
+        let tix = Path::new("store/NSE-NIFTY/1m/2024-06.tix");
+        for (why, reason) in [
+            (
+                Why::Stale,
+                "the .tix time index does not describe the committed bars",
+            ),
+            (
+                Why::Entry { bucket: 7 },
+                "the .tix entry for bucket 7 is missing or fails its checksum",
+            ),
+            (
+                Why::Header("its header fails its checksum"),
+                "the .tix time index is refused: its header fails its checksum",
+            ),
+            (Why::Absent, "the month has no .tix time index"),
+        ] {
+            let refused = super::index_refused(tix, &why);
+            assert_eq!(
+                refused,
+                StoreError::TimeIndex {
+                    path: tix.to_path_buf(),
+                    reason: reason.to_owned(),
+                }
+            );
+            assert_eq!(
+                refused.to_string(),
+                format!("store/NSE-NIFTY/1m/2024-06.tix: time index refused: {reason}")
+            );
+        }
+        let inner = StoreError::Symlinked {
+            path: tix.to_path_buf(),
+        };
+        assert_eq!(
+            super::index_refused(tix, &Why::Unreadable(inner.clone())),
+            inner,
+            "a store error is handed back as itself, not wrapped"
+        );
+    }
 }
 
 /// Open an existing file for reading, creating nothing.

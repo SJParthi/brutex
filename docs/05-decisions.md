@@ -65145,3 +65145,22 @@ and the ceiling. R1286-rest-04 names the shape.
 **Rejected.** Lowering `NEWTON_STEPS` to 8 so the bound would bite. That spends
 the documented margin of twice the measured worst case to make a mutant
 visible.
+
+### D-4151 — The time-index refusal's sentence is asserted word for word — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 left `store::file::write_time_index`
+replaced by `Ok(Default::default())` MISSED, which renders
+`StoreError::TimeIndex` as an empty string. No test rendered that variant. An
+append reaches it in two ways. One is a second failed resume after the index
+was rebuilt from the bars. The other is an `extend` failure that the append
+does not map, and none of today's stamps can yield one. A filesystem test
+cannot provoke either on demand.
+
+**Decided.** A unit test drives `index_refused`, the one door an append's index
+failure leaves by, with four `Why` kinds. It asserts the exact variant and the
+whole sentence: the `.tix` path, `: time index refused: `, then `Why`'s own
+words. It also asserts that `Why::Unreadable` hands back the store error it
+holds, unwrapped. R1286-rest-03.
+
+**Rejected.** A hook to corrupt the rebuilt index between rebuild and resume.
+That adds production code whose only purpose is to reach one sentence.
