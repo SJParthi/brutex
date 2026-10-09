@@ -12,8 +12,12 @@
 //! Those two numbers are `C-12` — `pull::bench::entry_lookup_is_flat` — and
 //! `C-11` — `pull::bench::census_beats_the_scan_it_replaces`; `C-13`,
 //! `pull::bench::append_after_load_is_flat`, is the third and is about the
-//! write side. They are functions in **this file**, which is why the layer is
-//! asserted rather than described.
+//! write side. `C-14`, `pull::bench::census_is_flat_across_a_compaction`, is
+//! the version-4 row (D-3316): one lookup and one append cost the same before
+//! and after a compaction into the next epoch, and a compaction — one pass over
+//! the keys and one sort, O(keys · log keys) — costs the same per entry at ten
+//! times the census, within the ceiling. They are functions in **this file**, which is why the
+//! layer is asserted rather than described.
 //!
 //! # Why no benchmarking framework
 //!
@@ -52,7 +56,7 @@ use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use store::path::{Timeframe, YearMonth};
 
-use pull::manifest::{Commit, ENTRY_LEN, Entry, EntryKey, HEADER_LEN, Held, Manifest};
+use pull::manifest::{Commit, ENTRY_LEN, Entry, EntryKey, FNO_FLOOR, HEADER_LEN, Held, Manifest};
 
 /// [`HEADER_LEN`] as a length, for building a header region.
 const HEADER_LEN_LEN: usize = 32_768;
@@ -541,6 +545,169 @@ fn append_after_load_is_flat() -> bool {
     ok
 }
 
+// ══ Census version 4 across a compaction (D-3316): C-14 ═════════════════════
+
+/// The `n`th invented option contract-month, for a version-4 FNO partition.
+///
+/// Distinct for every `n` below 12 · 10,000,000 — a strike per twelve months —
+/// so a census of any size this harness builds is all distinct keys.
+fn option_key(n: u32) -> EntryKey {
+    let strike = 1_000_000 + u64::from(n / 12) * 100;
+    let Some(contract) =
+        brutex_core::instrument::Contract::parse(&format!("2019-12-26-{strike}-CE"))
+    else {
+        refuse("an invented contract the store refuses")
+    };
+    let (Ok(symbol), Ok(month)) = (
+        Symbol::new("NIFTY"),
+        YearMonth::new(2019, u8::try_from(n % 12 + 1).unwrap_or(1)),
+    ) else {
+        refuse("a symbol or a month this build refuses")
+    };
+    EntryKey {
+        contract: Some(contract),
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        symbol,
+        timeframe: Timeframe::SECOND_1,
+        month,
+    }
+}
+
+/// A version-4 FNO partition's file bytes: `keys` keys, each written `passes`
+/// times with its row count growing, interleaved across keys — the shape an
+/// import day by day leaves behind.
+fn partition_bytes(keys: u32, passes: u32) -> Vec<u8> {
+    let Ok(mut census) = Manifest::partition_genesis(Vendor::Gdfl, Segment::Fno, FNO_FLOOR) else {
+        refuse("a genesis partition")
+    };
+    for pass in 0..passes {
+        for n in 0..keys {
+            let rows = u64::from(pass) + 1;
+            let entry = Entry {
+                key: option_key(n),
+                rows,
+                first_ts_micros: 1_000,
+                last_ts_micros: 1_000 + i64::from(pass),
+            };
+            if census.record(entry).is_err() {
+                refuse("a row the partition would not accept");
+            }
+        }
+    }
+    census.image()
+}
+
+/// The partition in `file`, loaded as a reader loads it.
+fn partition_of(file: &[u8]) -> Manifest {
+    match Manifest::open_partition(Vendor::Gdfl, Segment::Fno, file) {
+        Ok(census) => census,
+        Err(e) => refuse(&e.to_string()),
+    }
+}
+
+/// Picoseconds per append of [`APPEND_BATCH`] new keys to a partition freshly
+/// loaded from `file`, past the keys it holds.
+fn partition_append_ps(file: &[u8], first_index: u32) -> u128 {
+    let mut best = u128::MAX;
+    for _ in 0..APPEND_TRIALS {
+        let mut census = partition_of(file);
+        let mut refused = false;
+        let start = Instant::now();
+        for i in 0..APPEND_BATCH {
+            let entry = Entry {
+                key: option_key(first_index + i),
+                rows: 1,
+                first_ts_micros: 1_000,
+                last_ts_micros: 1_000,
+            };
+            match census.record(entry) {
+                Ok(append) => {
+                    black_box(append);
+                }
+                Err(_) => refused = true,
+            }
+        }
+        let ps = start.elapsed().as_nanos() * 1_000 / u128::from(APPEND_BATCH);
+        if refused {
+            refuse("an append the partition would not accept");
+        }
+        best = best.min(ps);
+    }
+    best
+}
+
+/// C-14 — a lookup and an append cost the same before and after a
+/// compaction, and a compaction costs the same per entry at ten times the
+/// census. D-3316.
+///
+/// The partition before is 20,000 keys written eight times, 160,000 entries;
+/// after, the same 20,000 keys once each. A lookup is one probe of the index
+/// either way and an append one probe, one push and two images either way —
+/// the compaction changes how many entries a LOAD decodes, which is the point
+/// of it, and must not change what one operation costs. A compaction is
+/// O(entries): at 200,000 keys × 8 it must cost the same per entry as at
+/// 20,000 × 8, or it has started to scan more than once.
+fn census_is_flat_across_a_compaction() -> bool {
+    const KEYS: u32 = 20_000;
+    const PASSES: u32 = 8;
+    let before_file = partition_bytes(KEYS, PASSES);
+    let before = partition_of(&before_file);
+    let after = match before.compacted() {
+        Ok(census) => census,
+        Err(e) => refuse(&e.to_string()),
+    };
+    let after_file = after.image();
+    println!(
+        "  {:<44} {} entries over {} keys -> {} entries; file {} -> {} bytes",
+        "C-14 the partition compacted (context)",
+        before.entries(),
+        before.keys(),
+        after.entries(),
+        before_file.len(),
+        after_file.len()
+    );
+
+    let present = option_key(7);
+    let absent = option_key(KEYS + 7);
+    let hit = |m: &Manifest| cost_ps(20_000, || black_box(m).entry(black_box(&present)));
+    let miss = |m: &Manifest| cost_ps(20_000, || black_box(m).entry(black_box(&absent)));
+    let reloaded = partition_of(&after_file);
+    let mut ok = ratio("C-14 lookup, after vs before", hit(&before), hit(&reloaded));
+    ok &= ratio(
+        "C-14 absent lookup, after vs before",
+        miss(&before),
+        miss(&reloaded),
+    );
+    ok &= ratio(
+        "C-14 append, after vs before",
+        partition_append_ps(&before_file, KEYS),
+        partition_append_ps(&after_file, KEYS),
+    );
+    spread("C-14 lookup after compaction (one call)", 2_000, || {
+        black_box(reloaded.entry(black_box(&present)));
+    });
+
+    // Compaction per entry, at 1x and 10x.
+    let per_entry = |keys: u32| {
+        let census = partition_of(&partition_bytes(keys, PASSES));
+        let entries = u128::from(census.entries());
+        let mut best = u128::MAX;
+        for _ in 0..5 {
+            let start = Instant::now();
+            black_box(census.compacted().map_or(0, |c| c.entries()));
+            best = best.min(start.elapsed().as_nanos() * 1_000 / entries.max(1));
+        }
+        best
+    };
+    ok &= ratio(
+        "C-14 compaction per entry, 10x census",
+        per_entry(KEYS),
+        per_entry(KEYS * 10),
+    );
+    ok
+}
+
 // ══ GDFL import lookups (D-2802 to D-2806): C-GI-01, C-GI-02, C-GI-03 ═══════
 
 /// Single-operation latencies, nanoseconds: p50, p99 and max over `n` calls.
@@ -804,6 +971,7 @@ fn main() {
     ok &= entry_lookup_is_flat();
     ok &= entry_lookup_stays_within_its_budget();
     ok &= append_after_load_is_flat();
+    ok &= census_is_flat_across_a_compaction();
     ok &= rate_lookup_is_flat();
     if ok {
         println!("all ratios within the ceiling");

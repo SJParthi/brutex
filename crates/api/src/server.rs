@@ -7048,6 +7048,10 @@ impl BrokerRun {
         self.total.failures.push(pull::ingest::Failure {
             instrument: instrument.to_owned(),
             why: why.clone(),
+            // Carried by pull where it is known (DB-G45, D-3341); WP-34 fills
+            // these from the broker's own window.
+            month: None,
+            day: None,
         });
         self.refused.push(why);
     }
@@ -7081,6 +7085,8 @@ impl BrokerRun {
             self.total.failures.push(pull::ingest::Failure {
                 instrument: "requested basket".to_owned(),
                 why: why.clone(),
+                month: None,
+                day: None,
             });
         }
     }
@@ -7948,6 +7954,8 @@ async fn land_spot(
                     failures: vec![pull::ingest::Failure {
                         instrument: instrument.underlying.to_string(),
                         why,
+                        month: None,
+                        day: None,
                     }],
                     ..pull::ingest::Ingested::default()
                 });
@@ -9716,6 +9724,8 @@ fn note_short_window(instrument: &str, unfetched: Option<&str>, into: &mut pull:
         into.failures.push(pull::ingest::Failure {
             instrument: instrument.to_owned(),
             why: why.to_owned(),
+            month: None,
+            day: None,
         });
     }
 }
@@ -21085,6 +21095,8 @@ mod tests {
                 .map(|why| pull::ingest::Failure {
                     instrument: "DALBHARAT".to_owned(),
                     why: why.to_owned(),
+                    month: None,
+                    day: None,
                 })
                 .collect(),
             ..pull::ingest::Ingested::default()
@@ -33855,6 +33867,8 @@ mod tests {
             &pull::ingest::Failure {
                 instrument: "EMITMEMBER".to_owned(),
                 why: "the store refused the month".to_owned(),
+                month: None,
+                day: None,
             },
             "2026-08",
             &asked,

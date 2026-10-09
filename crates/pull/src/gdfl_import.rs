@@ -811,6 +811,9 @@ fn note_failure(kind: ImportKind, day: Day, about: &str, why: &str) -> Failure {
     Failure {
         instrument: format!("{day} {about}"),
         why: why.to_owned(),
+        // The day the failure is about, carried (DB-G45, D-3341; WP-10).
+        month: day.year_month().ok(),
+        day: Some(day),
     }
 }
 
@@ -1144,6 +1147,8 @@ fn cm_day<S: CmSource>(
             read.refused.push(Failure {
                 instrument: "listing".to_owned(),
                 why: why.to_string(),
+                month: None,
+                day: None,
             });
             return read;
         }
@@ -1197,6 +1202,8 @@ fn cm_day<S: CmSource>(
             Err(why) => read.refused.push(Failure {
                 instrument: file.name().to_owned(),
                 why: why.to_string(),
+                month: None,
+                day: None,
             }),
         }
     }
@@ -1265,6 +1272,8 @@ fn nfo_day<S: NfoSource>(
             read.refused.push(Failure {
                 instrument: "listing".to_owned(),
                 why: why.to_string(),
+                month: None,
+                day: None,
             });
             return read;
         }
@@ -1298,6 +1307,8 @@ fn nfo_day<S: NfoSource>(
                         ticker: ticker.to_owned(),
                     }
                     .to_string(),
+                    month: None,
+                    day: None,
                 });
                 continue;
             }
@@ -1329,6 +1340,8 @@ fn nfo_day<S: NfoSource>(
             Err(why) => read.refused.push(Failure {
                 instrument: ticker.to_owned(),
                 why: why.to_string(),
+                month: None,
+                day: None,
             }),
         }
     }

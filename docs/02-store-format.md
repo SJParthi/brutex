@@ -690,13 +690,19 @@ way this build could misread one if that assumption is ever wrong.
 
 ---
 
-## 11. The census file — `BRUTEXM`, versions 1, 2 and 3
+## 11. The census file — `BRUTEXM`, versions 1, 2, 3 and 4
 
 Everything above is a **bar** file. The per-vendor census at
 `manifest/<vendor>.man` is a different format in the same store, and until
 D-0067 its only description was a module comment in `crates/pull/src/manifest.rs`
 — which made a Rust comment the authority for bytes on a disk. This section is
 the authority now.
+
+Versions 1 to 3 are **one file per vendor**. Version 4 (§11.7, D-3316) is **one
+directory of epochs per (vendor, segment)** at
+`manifest/v4/<vendor>/<SEGMENT>/<epoch>.man`, with each epoch's capacity in its
+own header and compaction into the next epoch (§11.8). A vendor moves from the
+first shape to the second only through `cli census-migrate` (§11.9).
 
 ### 11.1 What is shared with the bar format, and what is not
 
@@ -729,32 +735,33 @@ a constant on the read path. 32768 divides by both strides, so an entry is
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|
-| 0 | 8 | `magic` | `b"BRUTEXM1"` at version 1, `b"BRUTEXM2"` at versions 2 and 3 — the magic names the GEOMETRY, not the version |
-| 8 | 2 | `format_version` | `1`, `2` or `3`. **Selects the geometry and the meaning of reserved bytes.** |
-| 10 | 2 | `entry_stride` | `64` at version 1, `128` at versions 2 and 3. Read it; never assume it, and check it against what the version declares. |
-| 12 | 4 | reserved | written zero |
+| 0 | 8 | `magic` | `b"BRUTEXM1"` at version 1, `b"BRUTEXM2"` at versions 2, 3 and 4 — the magic names the GEOMETRY, not the version |
+| 8 | 2 | `format_version` | `1`, `2`, `3` or `4`. **Selects the geometry and the meaning of reserved bytes.** |
+| 10 | 2 | `entry_stride` | `64` at version 1, `128` at versions 2 to 4. Read it; never assume it, and check it against what the version declares. |
+| 12 | 4 | reserved | written zero at versions 1 to 3; `capacity` at version 4 (§11.7) |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | the commit counter: entries readable |
 | 32 | 8 | `n_keys` | distinct `(instrument, timeframe, month)` keys among them |
 | 40 | 8 | `total_rows` | bars held across every distinct key |
 | 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name. All eight bytes are the vendor's: `truedata` fills them and `zerodha` uses seven |
-| 56 | 4 | reserved | written zero |
+| 56 | 4 | reserved | written zero at versions 1 to 3; `segment` and three refused-if-not-zero bytes at version 4 (§11.7) |
 | 60 | 4 | `crc` | CRC-32C over bytes `0..60`, one contiguous run |
 
-All integers are little-endian. **The two reserved runs are written zero and
-are not checked individually**: the decoder reads neither `12..16` nor
+All integers are little-endian. **At versions 1 to 3 the two reserved runs are
+written zero and are not checked individually**: the decoder reads neither `12..16` nor
 `56..60`, so a non-zero byte there is caught only by the slot's `crc`, which
 covers both. (The bar slot refuses a non-zero reserved field by name, D-1353;
 this one does not.) This table put a reserved row at `54..60` over the last two
 bytes of `vendor` and gave no row for `12..16` until tests-docs-security-pass14
 P14-01 (D-1959).
 
-The slot layout is **identical across all three versions**: only the magic, the
+The slot layout is **identical across versions 1 to 3**: only the magic, the
 version and the stride differ, which is why one decoder reads them all and
-dispatch is a table lookup rather than a second parser.
+dispatch is a table lookup rather than a second parser. Version 4 keeps the
+same offsets and gives the two reserved runs meaning (§11.7).
 
 A slot whose magic is not the one its version declares (`BRUTEXM1` for 1,
-`BRUTEXM2` for 2 and 3) is refused **by version**. There is no way to tell which
+`BRUTEXM2` for 2, 3 and 4) is refused **by version**. There is no way to tell which
 of the two is the lie, and the version field is the thing that selects the
 geometry. This table said the magic's last byte is the version until P1-16-01
 (D-1763); a version-3 slot begins `BRUTEXM2`.
@@ -852,8 +859,10 @@ steps would decode every second entry as the tail of the one before it and
 return plausible integers, which is §9's "a wrong value that is well-formed"
 arriving through the front door.
 
-This build **writes** version 3 only (`Layout::CURRENT`; this said version 2
-until P1-16-01, D-1763). A census loaded from a version-1 file is published at
+For a single file this build **writes** version 3 only (`Layout::CURRENT`;
+this said version 2 until P1-16-01, D-1763), and a partition at version 4 only
+(`Layout::PARTITION`, §11.7). A single file is never promoted to a partition by
+a write. A census loaded from a version-1 file is published at
 version 3, and because the two strides disagree from the first
 entry onward, the publish is a whole-file rewrite rather than a positional
 append — the same path a repair and a first write already take. It is checked
@@ -867,6 +876,166 @@ re-ingested — the census's equality probe covers the closes, so a month whose
 rows have not moved but whose closes have just been read for the first time is a
 change and is recorded, and once recorded it compares equal and the file stops
 moving.
+
+**A single file is bound by `MAX_ENTRIES` = 2,097,152, compiled into every
+reader and writer, and its entry region is an append LOG** — one entry per write,
+not per month. That bound was sized on "~248,000 files" and the log outran it:
+on 6 Oct 2026 `gdfl.man` held 2,096,855 entries over 246,147 keys (8.5 per key)
+and refused every options day from 2019-11-14 while the bars kept landing
+(DB-058, DB-G05, DB-G49). Version 4 exists because of that measurement.
+
+### 11.7 Version 4 — one directory of epochs per (vendor, segment), capacity in the header (D-3316)
+
+```
+manifest/v4/<vendor>/INDEX/000001.man   spot indices, epoch 1
+manifest/v4/<vendor>/INDEX.lock         the INDEX census's lock, beside its directory
+manifest/v4/<vendor>/CASH/000001.man    cash equities
+manifest/v4/<vendor>/FNO/000001.man     option and future contracts
+manifest/v4/<vendor>/FNO/000002.man     the FNO census's next epoch, after a compaction
+manifest/v4/<vendor>/FNO/000003.man.tmp an epoch being written: never read
+manifest/v4/<vendor>/MIGRATED           the migration receipt (§11.9)
+```
+
+**A vendor is version 4 exactly when `manifest/v4/<vendor>/` is a directory.**
+A reader then reads only it, and `manifest/<vendor>.man` otherwise (D-3316
+item 7). A Zerodha write never opens a GDFL file, and option contracts are a
+census of their own.
+
+**The current epoch of a segment is the highest-numbered `<epoch>.man` in its
+directory**, `<epoch>` six decimal digits from `000001`. A `*.man.tmp` is
+incomplete and is never read; any other name is not an epoch. An older epoch is
+an immutable generation: it is never written again and never deleted
+(`CLAUDE.md` §3 rule 8).
+
+**The entry is version 3's, byte for byte** (§11.5a): 128 bytes, two 64-byte
+halves, the contract in the closes half. One decoder serves both versions.
+
+**The header slot keeps §11.3's geometry and spends its two reserved runs:**
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `magic` | `b"BRUTEXM2"` — the slot and entry strides did not change, so neither did the magic |
+| 8 | 2 | `format_version` | `4`: what tells a reader the two runs below hold fields |
+| 10 | 2 | `entry_stride` | `128` |
+| 12 | 4 | `capacity` | `u32`: the most entries this file may hold, `1..=4,294,967,295`. **Reserved at versions 1 to 3** |
+| 16 | 8 | `generation` | as §11.3; it keeps rising across epochs |
+| 24 | 8 | `n_valid` | as §11.3; at most `capacity` |
+| 32 | 8 | `n_keys` | as §11.3 |
+| 40 | 8 | `total_rows` | as §11.3 |
+| 48 | 8 | `vendor` | as §11.3 |
+| 56 | 1 | `segment` | the entry segment code of §11.4: INDEX 1, CASH 2, FNO 3 — a cross-check against the path. **Reserved at versions 1 to 3** |
+| 57 | 3 | reserved | zero, and **refused by name** when not (unlike §11.3's runs, which nothing reads) |
+| 60 | 4 | `crc` | CRC-32C over bytes `0..60` |
+
+**The reader is bound by the file, not by its build** (DB-G08). It reads the
+header region, takes the largest `capacity` any valid version-4 slot declares,
+and reads at most `32,768 + capacity × 128` bytes, refusing a longer file by
+name. A capacity of zero is refused; every other value the 32-bit field carries
+is admitted, and the read is bounded by the file's real length, so a large
+declared capacity is never an allocation. Every entry must carry the header's
+segment; a row of another segment is refused (`ForeignSegment`), and a file in
+a segment's directory whose header is a single file's or another segment's is
+refused (`PartitionMismatch`). An empty epoch file is refused, never read as a
+fresh census: an epoch is installed whole.
+
+**An epoch's capacity** (`pull::manifest::epoch_capacity`) is the larger of its
+segment's floor and twice its key count. Floors: `FNO` 2²³ = 8,388,608, more
+than twice the about 2.2 million option contract-months the audit estimates for
+the GDFL archive 2018-09..2026-09 (DB-G05, DB-G60; an estimate, not a count
+this build made); `INDEX` and `CASH` 2²⁰ = 1,048,576 (the whole Zerodha census
+held 204,249 keys on 6 Oct 2026). A segment with no epoch yet is a census of
+zero entries at its floor.
+
+**Appending is §11.6's**, into the current epoch: one entry at
+`32,768 + n_valid × 128`, a barrier, one slot write, alternating slots. A batch
+is probed first. A single file without room refuses before recording a row,
+naming its own `n_valid`, its capacity, the free slots and the batch size, and
+states that nothing was published (DB-G10); a single file is never compacted
+by a write, because its readers include builds that know no version past 3.
+
+### 11.8 Compaction — the next epoch, installed by rename (D-3316)
+
+A partition is compacted when a batch does not fit its current epoch's
+capacity — once per fill — or when the epoch loaded degraded, so its recovered
+prefix is published as a new epoch rather than over the damaged one. The
+compacted epoch holds **the newest entry of every key, in key order** (the
+derived order of the entry key); `n_valid` becomes `n_keys`, `n_keys` and
+`total_rows` do not move, `generation` advances by the key count, and the
+capacity is recomputed as §11.7 says. If even the compacted epoch has no room
+for the batch, the batch is refused with the numbers above and **no epoch is
+installed**.
+
+The install, under the segment's lock:
+
+1. the compacted image is written to `<epoch+1>.man.tmp` and flushed;
+2. it is renamed to `<epoch+1>.man`, and the directory is flushed;
+3. the batch is appended to the new epoch as §11.6 says.
+
+**A recount publishes its next epoch whole** (§11.9) whenever it changes
+anything: the newest entry of every key, the recounted rows among them, by the
+same rename. A recount offers every month of its span at once, and an append
+costs two flushes per entry (§11.6), so one whole write replaces hundreds of
+thousands of them. The bytes are a compaction's, so a reader needs no rule of
+its own; a recount that changes nothing installs no epoch. An import day still
+appends.
+
+A name already holding `<epoch+1>.man` is refused, never replaced. A crash
+before 2 leaves the old epoch current and a `.tmp` nobody reads; a crash after
+it leaves the new epoch current with the totals the old one held. No epoch's
+bytes are ever rewritten. Compaction costs one pass over the keys and one sort,
+O(keys · log keys), once per fill — about one in every `capacity − keys`
+appends; an old epoch keeps its bytes (about 280 MB for a full options epoch).
+
+### 11.9 Migration and recount — `cli census-migrate`, `cli census-recount` (D-3316)
+
+**`cli census-migrate VENDOR`** takes the single file's lock (the one every
+pre-version-4 writer takes), refuses a census that loaded degraded, splits it
+by segment with the newest row per key, checks the split's keys and rows equal
+the single file's, writes `<SEGMENT>/000001.man` for every segment — an empty
+segment is an empty epoch at its floor — and the receipt into
+`manifest/v4/<vendor>.staging/`, reads every epoch back, renames the staging
+directory to `manifest/v4/<vendor>/`, and flushes `manifest/v4/`. **The single
+file is not touched.** The receipt is `key=value` lines —
+`format=census-migration-v1`, `legacy=`, `legacy_version=`,
+`legacy_generation=`, `legacy_entries=`, `legacy_bytes=`, then one
+`partition=<SEGMENT> epoch=000001.man keys= rows= capacity=` line each — so a
+reader can tell with one `stat` whether a pre-version-4 writer has appended to
+the single file since (`pull::ingest::census_store::legacy_drift`).
+
+Run it only after the API serving the store reads version 4 (WP-30): a reader
+built before version 4 reads the single file and nothing else. Until a vendor is
+migrated its single file is read and written exactly as before.
+
+**`cli census-recount VENDOR --from DAY [--to DAY]`** rebuilds census rows
+from the bar files' own headers — `n_valid`, the first and last stamp — and
+records `0` and `n_valid − 1` for the closes, for every `.bin` month under
+`bars/<vendor>/` that the days overlap. No vendor file is read. Bar files are
+opened read-only under a shared lock, so a month a writer holds is refused by
+name. A row already exact changes nothing; a row that grew is recorded; a row
+the census refuses is named and skipped. A migrated vendor's partition takes
+the recount as its next epoch, whole (§11.8); an unmigrated single file is
+appended to, and refuses up front when the batch does not fit. Each directory is walked in name
+order, so two recounts of one store publish identical bytes: O(files · log d)
+for the walk, `d` the widest directory.
+
+For the `gdfl` feed it then closes the span's census-refused import days in
+`imports/gdfl.journal` (D-3317 item 5): every key whose last line is
+`incomplete`, whose day is in the span and whose line names no `stage=` other
+than `census`, once no file of the day's month was unreadable, no row of it was
+refused, no directory entry under `bars/<vendor>/` went unnamed, and at least one
+instrument-month of the day's own segment (`options` is `FNO`, `indices`
+`INDEX`, `stocks` `CASH`) spans the day. The recount read every bar file of the
+day's month, and a day's bars are filed in its own month, so that is every
+month the day touched. The day's `files=` decides nothing: the import counts
+every file it converted, including one that wrote no bar that day (measured on
+2020-01-01: 3,633 files, 3,632 option months spanning the day, the difference
+one file that wrote no bar), so the receipt prints the comparison and the
+`recounted` line carries `months=`. It appends one `run <id> source=recount
+commit=<sha> started=<unix_s> from=<day> to=<day|open>` line and one
+`recounted <kind> <day> <filter> definition=<n> months=<n> run=<id>` line per
+day, after closing a torn last line (D-2814); it writes nothing when no day
+closes. `--from` is required: the span is what excludes days refused for any
+other reason (2018-11-06 and 2018-11-09).
 
 ---
 

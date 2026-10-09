@@ -2175,9 +2175,17 @@ fn a_slot_that_is_not_a_header_is_named() {
     // at whatever geometry this build happens to write — which is the whole
     // point of the dispatch, and the failure `docs/00-charter.md` prohibition 6
     // is about.
+    //
+    // 5 since version 4 shipped (D-3316). Version 4 IS declared, and a slot
+    // restated as version 4 is read for the capacity its bytes 12..16 hold —
+    // zero in a single file's slot, which no partition may declare.
+    assert_eq!(
+        edit(&|i| i[8..10].copy_from_slice(&5u16.to_le_bytes()), true),
+        ManifestError::UnknownVersion(5)
+    );
     assert_eq!(
         edit(&|i| i[8..10].copy_from_slice(&4u16.to_le_bytes()), true),
-        ManifestError::UnknownVersion(4)
+        ManifestError::CapacityOutOfRange { capacity: 0 }
     );
     // Version 1 IS declared, so this one is refused for the magic instead: the
     // slot says version 1 and begins `BRUTEXM2`, and there is no way to tell
@@ -2362,8 +2370,11 @@ fn the_header_counters_refuse_to_wrap() {
             ..genesis
         }
         .advance(1, 0, 0),
+        // THE CENSUS'S OWN COUNT AND THE BATCH, never the counter one past the
+        // limit (DB-G10, D-3316 item 5): this read `n_valid: MAX_ENTRIES + 1`.
         Err(ManifestError::TooManyEntries {
-            n_valid: MAX_ENTRIES + 1,
+            n_valid: MAX_ENTRIES,
+            batch: 1,
             limit: MAX_ENTRIES
         })
     );
@@ -2395,6 +2406,7 @@ fn the_header_counters_refuse_to_wrap() {
         .validate(u64::MAX),
         Err(ManifestError::TooManyEntries {
             n_valid: MAX_ENTRIES + 1,
+            batch: 0,
             limit: MAX_ENTRIES
         })
     );
@@ -2418,6 +2430,7 @@ fn the_header_counters_refuse_to_wrap() {
         .commit(),
         Err(ManifestError::TooManyEntries {
             n_valid: MAX_ENTRIES + 1,
+            batch: 0,
             limit: MAX_ENTRIES
         })
     );
@@ -2624,6 +2637,17 @@ fn every_manifest_error_prints_something_distinct() {
         ManifestError::NoValidHeader,
         ManifestError::TooManyEntries {
             n_valid: 1,
+            batch: 0,
+            limit: 2,
+        },
+        ManifestError::TooManyEntries {
+            n_valid: 1,
+            batch: 1,
+            limit: 1,
+        },
+        ManifestError::TooManyEntries {
+            n_valid: 1,
+            batch: 2,
             limit: 2,
         },
         ManifestError::CounterExceedsRegion {
@@ -2659,6 +2683,24 @@ fn every_manifest_error_prints_something_distinct() {
             header: 1,
             entries: 2,
         },
+        // Version 4's refusals (D-3316).
+        ManifestError::CapacityOutOfRange { capacity: 0 },
+        ManifestError::UnknownSegmentCode { code: 9 },
+        ManifestError::ReservedNotZero { offset: 58 },
+        ManifestError::PartitionMismatch {
+            asked: Segment::Fno,
+            found: Some(Segment::Cash),
+        },
+        ManifestError::PartitionMismatch {
+            asked: Segment::Fno,
+            found: None,
+        },
+        ManifestError::ForeignSegment {
+            ordinal: 1,
+            partition: Segment::Fno,
+            found: Segment::Index,
+        },
+        ManifestError::SingleFileNotCompacted,
     ];
     let rendered: HashSet<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(rendered.len(), errors.len(), "two refusals read the same");
@@ -2667,7 +2709,13 @@ fn every_manifest_error_prints_something_distinct() {
         assert!(!format!("{error:?}").is_empty());
         let _: &dyn std::error::Error = &error;
     }
+}
 
+/// Every entry fault renders something, and no two render the same thing.
+/// Split from the refusals above when version 4's refusals took that test past
+/// the length a function may have.
+#[test]
+fn every_entry_fault_prints_something_distinct() {
     let faults = [
         EntryFault::TooShort { len: 1 },
         EntryFault::Checksum {
@@ -6659,6 +6707,7 @@ fn the_image_puts_every_byte_where_the_reader_looks_for_it() {
         .commit(),
         Err(ManifestError::TooManyEntries {
             n_valid: MAX_ENTRIES + 1,
+            batch: 0,
             limit: MAX_ENTRIES
         }),
         "one past the ceiling has no image, because it has no commit"
@@ -7299,6 +7348,9 @@ fn version_1_file(vendor: Vendor, entries: &[Entry]) -> Vec<u8> {
         n_valid: n,
         n_keys: keys.len() as u64,
         total_rows: rows,
+        // A single file: the compiled ceiling, and no segment (D-3316).
+        capacity: MAX_ENTRIES,
+        segment: None,
     };
     let mut out = vec![0u8; HEADER_LEN_USIZE];
     out[..IMAGE_LEN].copy_from_slice(&header.image());
@@ -7695,8 +7747,14 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
         .split_once("\n## 12.")
         .expect("§12 follows")
         .0;
-    assert!(census.starts_with(" — `BRUTEXM`, versions 1, 2 and 3"));
-    assert!(census.contains("This build **writes** version 3 only"));
+    // Version 4 (D-3316) is in the same section, and the sentence about what
+    // is written names both shapes rather than claiming one.
+    assert!(census.starts_with(" — `BRUTEXM`, versions 1, 2, 3 and 4"));
+    assert!(census.contains("For a single file this build **writes** version 3 only"));
+    assert!(census.contains("and a partition at version 4 only"));
+    assert!(census.contains("### 11.7 Version 4"));
+    assert!(census.contains("| 12 | 4 | `capacity` |"));
+    assert!(census.contains("| 56 | 1 | `segment` |"));
     assert!(census.contains("| 80 | 24 | `contract` |"));
     assert!(census.contains("| 104 | 1 | `contract_len` |"));
 
@@ -7723,9 +7781,13 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
         slot[12..16].iter().chain(&slot[56..60]).all(|b| *b == 0),
         "reserved bytes are zero and stay zero"
     );
-    assert!(census.contains("| 12 | 4 | reserved | written zero |"));
+    // Reserved at versions 1 to 3, and spent by version 4 (D-3316): the row
+    // says both, so a reader of either version finds its own meaning.
+    assert!(census.contains(
+        "| 12 | 4 | reserved | written zero at versions 1 to 3; `capacity` at version 4"
+    ));
     assert!(census.contains("| 48 | 8 | `vendor` |"));
-    assert!(census.contains("| 56 | 4 | reserved | written zero |"));
+    assert!(census.contains("| 56 | 4 | reserved | written zero at versions 1 to 3; `segment`"));
 
     // The entry's two halves, and the reserved run in the second one.
     let held = Held::new(
@@ -7831,15 +7893,22 @@ fn a_known_manifest_version_keeps_its_stride_after_a_new_one_exists() {
         Layout::for_version(0),
         Err(ManifestError::UnknownVersion(0))
     );
-    // 4 IS THE UNKNOWN ONE NOW. This read 3 until version 3 shipped; the
-    // point of the assertion is that a version this build does not know is
-    // refused by name rather than read at CURRENT's geometry, and that point
-    // needs whatever the next unclaimed number happens to be.
+    // 5 IS THE UNKNOWN ONE NOW. This read 3 until version 3 shipped and 4
+    // until version 4 did (D-3316); the point of the assertion is that a
+    // version this build does not know is refused by name rather than read at
+    // CURRENT's geometry, and that point needs whatever the next unclaimed
+    // number happens to be.
+    assert_eq!(Layout::for_version(4), Ok(Layout::V4));
     assert_eq!(
-        Layout::for_version(4),
-        Err(ManifestError::UnknownVersion(4))
+        Layout::for_version(4).unwrap().entry_stride(),
+        Layout::V3.entry_stride(),
+        "version 4 keeps version 3's entry"
     );
-    assert_eq!(Layout::KNOWN.len(), 3);
+    assert_eq!(
+        Layout::for_version(5),
+        Err(ManifestError::UnknownVersion(5))
+    );
+    assert_eq!(Layout::KNOWN.len(), 4, "versions 1 to 4 (D-3316)");
     assert!(format!("{:?}", Layout::V2).contains(&ENTRY_STRIDE.to_string()));
 }
 

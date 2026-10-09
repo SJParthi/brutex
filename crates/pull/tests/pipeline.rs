@@ -1108,10 +1108,7 @@ fn a_run_balances_only_when_every_row_is_accounted_for() {
     );
 
     let with_failure = Ingested {
-        failures: vec![Failure {
-            instrument: "NIFTY".to_owned(),
-            why: "REFUSED".to_owned(),
-        }],
+        failures: vec![Failure::new("NIFTY", "REFUSED")],
         ..balanced.clone()
     };
     assert!(

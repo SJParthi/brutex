@@ -61,13 +61,19 @@ pub mod audited_range_command;
 mod audited_stored;
 /// The cooperative stop a stopping server asks engine work to honour (D-1551).
 pub mod cancel;
+/// `cli census-migrate` and `cli census-recount`: the census verbs (D-3316).
+mod census_recount;
 /// Independent full-file checksum audit and retained historical admission receipts.
 pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
+/// `cli gdfl-dayflags`: registered for WP-11b, refuses until built (D-3335).
+mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
 mod gdfl_import_command;
+/// `cli tix-rebuild`: registered for WP-15, refuses until built (D-3340).
+mod tix_rebuild;
 // THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
 // compiled only into `build.rs` and an integration test, and cargo-mutants
 // mutates neither, so gate 18 could never mutate it. It is test-only here for
@@ -463,6 +469,27 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    (BRUTEX_GDFL_TICKSTORE) or the vendor zips
                                    (BRUTEX_GDFL_CM_ARCHIVE, BRUTEX_GDFL_NFO_ARCHIVES);
                                    days YYYY-MM-DD; incremental, resumable.
+       cli census-migrate VENDOR
+                                   move VENDOR's single-file census to version
+                                   4: epoch 000001 of one directory per segment
+                                   under manifest/v4/VENDOR/, compacted to one
+                                   row per key, capacity in its own header. The
+                                   single file is left exactly as it was. Run it
+                                   only once the API serving the store reads
+                                   version 4 (D-3316).
+       cli census-recount VENDOR --from DAY [--to DAY]
+                                   rebuild VENDOR's census rows from the bar
+                                   files' own headers for every month the days
+                                   overlap; no vendor file is read. Then close
+                                   the span's census-refused gdfl import days
+                                   with a `recounted` journal line each. DAY is
+                                   YYYY-MM-DD (D-3316, D-3317).
+       cli gdfl-dayflags ARGS...
+                                   registered for WP-11b (D-3335); refuses,
+                                   reading and writing nothing, until built.
+       cli tix-rebuild ARGS...
+                                   registered for WP-15 (D-3340); refuses,
+                                   reading and writing nothing, until built.
        cli top          [VENDOR UNDERLYING]
                                    the ranked TOP COMBINATIONS of the best
                                    complete recorded run, read back from the
@@ -2575,6 +2602,18 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["gdfl-import", arguments @ ..] if arguments.len() >= 4 => {
             gdfl_import_command::command(arguments, out)
         }
+        ["census-migrate", arguments @ ..] if !arguments.is_empty() => {
+            census_recount::migrate(arguments, out)
+        }
+        ["census-recount", arguments @ ..] if !arguments.is_empty() => {
+            census_recount::recount(arguments, out)
+        }
+        ["tix-rebuild", arguments @ ..] if !arguments.is_empty() => {
+            tix_rebuild::command(arguments, out)
+        }
+        ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
+            gdfl_dayflags::command(arguments, out)
+        }
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["top"] => top_arm(out, None),
         ["top", feed, underlying] => top_arm(out, Some((feed, underlying))),
@@ -2640,7 +2679,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 37] = [
+const COMMANDS: [&str; 41] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2653,6 +2692,8 @@ const COMMANDS: [&str; 37] = [
     "boolean-oos-stored",
     "boolean-qualified-campaign-stored",
     "boolean-qualified-search-stored",
+    "census-migrate",
+    "census-recount",
     "checksum-audit-stored",
     "descend",
     "elite",
@@ -2660,6 +2701,7 @@ const COMMANDS: [&str; 37] = [
     "expression-search-stored",
     "expression-stored",
     "fold-audit",
+    "gdfl-dayflags",
     "gdfl-import",
     "ledger-all",
     "ledger-v6",
@@ -2676,6 +2718,7 @@ const COMMANDS: [&str; 37] = [
     "sweep-all",
     "sweep-audited-stored",
     "sweep-stored",
+    "tix-rebuild",
     "top",
     "verify",
 ];

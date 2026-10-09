@@ -856,6 +856,44 @@ fn broker_candles_shifted_thirty_seconds_refuse_before_any_write() {
     assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 0);
 }
 
+/// DB-G45, D-3341 item 1: AN OFF-GRID CANDLE'S FAILURE IS FILED UNDER THE DAY
+/// IT IS ON, NOT THE WINDOW'S FIRST DAY OR MONTH. A two-day window whose second
+/// day carries a candle thirty seconds off its grid: the refusal names
+/// 2025-07-02 and its month, where every such line was stamped with the
+/// window's start.
+#[test]
+fn an_off_grid_candle_s_failure_carries_its_own_day() {
+    let scratch = Scratch::new("broker-shifted-day-two");
+    let req = pull::fetch::BarRequest {
+        window: pull::session::Window::new(
+            pull::session::Day::new(2025, 6, 30).expect("a real day"),
+            pull::session::Day::new(2025, 7, 1).expect("a real day"),
+        )
+        .expect("a legal window"),
+        ..request()
+    };
+    let mut raw = pull::fetch::RawWindow {
+        rows: session_member().rows,
+    };
+    for row in &mut raw.rows {
+        row.timestamp += 30;
+    }
+    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert_eq!(done.bars_committed, 0);
+    assert_eq!(done.failures.len(), 1);
+    assert!(done.failures[0].why.contains("off-grid broker candle"));
+    assert_eq!(
+        done.failures[0].day,
+        Some(pull::session::Day::new(2025, 7, 1).expect("a real day")),
+        "the stamp's own IST day, not the window's 2025-06-30"
+    );
+    assert_eq!(
+        done.failures[0].month,
+        Some(store::path::YearMonth::new(2025, 7).expect("a month")),
+        "and its month, not the window's 2025-06"
+    );
+}
+
 #[test]
 fn an_extra_broker_timestamp_inside_a_minute_refuses_but_archive_seconds_survive() {
     let broker = Scratch::new("broker-extra-second");
@@ -1437,12 +1475,33 @@ fn d_0955_each_census_write_reads_the_whole_census_and_the_register_says_so() {
             "O(offered)",
         ],
     );
-    for head in ["fn from_members_inner(", "fn record_all("] {
-        assert!(
-            item(INGEST, head).contains("read_census(&census_path, vendor)"),
-            "`{head}` reads the whole census on every call"
-        );
-    }
+    // THE COST IS UNCHANGED BY D-3316, AND SO IS WHAT THIS PINS: every call
+    // still reads a whole census. What moved is which one — the vendor's single
+    // file through `read_census`, or once migrated the plan's own segment's
+    // current epoch through `read_epoch` — and the read now sits behind
+    // `census_store::Target::load`, which both doors call.
+    let store = include_str!("../src/census_store.rs");
+    assert!(
+        item(INGEST, "fn from_members_inner(").contains("target.load()"),
+        "`from_members_inner` reads the whole census on every call"
+    );
+    assert!(
+        item(INGEST, "fn record_all(").contains("census_store::record(store_root, vendor, held)"),
+        "`record_all` goes through the census cycle"
+    );
+    assert!(
+        item(store, "pub fn cycle(").contains("target.load()"),
+        "and every cycle reads the whole census"
+    );
+    let reads = store
+        .split_once("pub fn load(&self)")
+        .expect("Target::load exists")
+        .1
+        .split_once("\n    }\n")
+        .expect("Target::load ends")
+        .0;
+    assert!(reads.contains("read_census(&path, self.vendor)"));
+    assert!(reads.contains("read_epoch(&path, self.vendor, segment)"));
     assert!(item(INGEST, "fn read_census(").contains("fs::read(path)"));
     assert!(item(INGEST, "pub fn record_held(").contains("record_all(store_root, vendor, held)"));
     assert!(

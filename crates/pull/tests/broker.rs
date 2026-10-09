@@ -675,6 +675,10 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
     archive_done.failures.push(pull::ingest::Failure {
         instrument: "NIFTY".to_owned(),
         why: "request minute coverage gap on 2025-07-01: 09:19–15:30 IST (end exclusive), 371 missing scheduled minutes; no bars fabricated".to_owned(),
+        // The audit answers sentences, so its gaps carry no day field yet
+        // (DB-G45; `request_minutes` is WP-13b's).
+        month: None,
+        day: None,
     });
     assert_eq!(
         done, archive_done,

@@ -1274,6 +1274,9 @@ fn write_version_1_census(path: &Path, entries: &[Entry]) {
         n_valid: entries.len() as u64,
         n_keys: entries.len() as u64,
         total_rows: entries.iter().map(|e| e.rows).sum(),
+        // A single file: the compiled ceiling, and no segment (D-3316).
+        capacity: pull::manifest::MAX_ENTRIES,
+        segment: None,
     };
     file[..64].copy_from_slice(&header.image());
     for entry in entries {
