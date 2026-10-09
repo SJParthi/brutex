@@ -66573,3 +66573,19 @@ puts `refusalFrom('/backtest/run.json', response)` in its existing sentence;
 the page's two pollers ask their ticket again after the body is read, so a
 replaced read publishes nothing. No reader's resend or launch rule moved: each
 still refuses to resend and still leaves the state `unknown`. OBSV-17.
+
+### D-3217 — A refused launch-configuration read names the server's refusal — 2026-10-09
+
+**What was observed.** `/engine/boolean-launch.json` and
+`/engine/index-stop-launch.json` answer a failed bounded configuration read
+503 with `{"ready":false,"refusal":…}` (`crates/api/src/booleanlaunch.rs` and
+`crates/api/src/indexstoplaunch.rs`, `metadata`). `BooleanLaunch.svelte`
+`readConfiguration` printed "Research configuration returned HTTP 503", and
+`IndexStopLaunch.svelte` printed "The live app does not provide single-stop
+configuration details (HTTP 503)" — a guess about an older server, made for
+every status including the one that names its cause.
+
+**Decided.** Both read a non-2xx through `refusalFrom(<route>, response)` and
+keep their closing clause ("No launch was attempted." / "No sweep was
+submitted."). An older server's 404 now reads "answered HTTP 404 and named no
+reason", which is what was measured. OBSV-18.

@@ -287,3 +287,28 @@ test('an unreadable execution status names the server reason on all three page r
     assert.equal(stale.state().launchAdmission.available, true);
   }
 });
+
+// W7 (OBSV-18, D-3217): `/engine/boolean-launch.json` refuses with
+// `{"ready":false,"refusal":…}` (`crates/api/src/booleanlaunch.rs` `metadata`);
+// the panel printed the status alone. The harness is index-stop-launch.test.js's.
+test('a refused Boolean configuration read names the server refusal; no launch is attempted (W7)', async () => {
+  const node = launchAst.instance?.content.body.find((/** @type {any} */ row) => row.type === 'FunctionDeclaration' && row.id?.name === 'readConfiguration');
+  assert.ok(node);
+  const fields = variable(launchAst, 'fields').init;
+  const mount = new Function('ask', 'refusalFrom', `
+    let config = { phase: 'idle', body: null, why: '' }, configGeneration = 0, configAbort = null;
+    const settings = { horizonBars: '', maxPoints: '', batchPrograms: '', nodeAllowance: '', batchAllowance: '' };
+    const fields = ${launchSource.slice(fields.start, fields.end)}, onTimeframes = () => {};
+    const validateBooleanLaunchMetadata = () => { throw new Error('a refusal is not metadata'); };
+    ${launchSource.slice(node.start, node.end)}
+    return { readConfiguration, config: () => config };
+  `);
+  const refusal = 'bounded configuration read unavailable: Saturated';
+  const app = mount(async () => Response.json({ schema_version: 1, model: 'boolean-qualified-search-launch', ready: false, refusal }, { status: 503 }), refusalFrom);
+  await app.readConfiguration();
+  assert.equal(app.config().phase, 'failed');
+  assert.equal(app.config().why, `/engine/boolean-launch.json answered HTTP 503: ${refusal}. No launch was attempted.`);
+  const silent = mount(async () => new Response('', { status: 404 }), refusalFrom);
+  await silent.readConfiguration();
+  assert.equal(silent.config().why, '/engine/boolean-launch.json answered HTTP 404 and named no reason. No launch was attempted.');
+});

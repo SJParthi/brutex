@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {parse} from 'svelte/compiler';
+import {refusalFrom} from '../src/lib/refusal.js';
 import {validateIndexStopMetadata,indexStopLaunchPlan,indexStopLaunchObservation,indexStopServerMonth,indexStopSplitProposal,indexStopContextMonth,indexStopRewardRiskCaption,createIndexStopLaunch,indexStopQualificationHref} from '../src/lib/index-stop-launch.js';
 import {hex,RUNGS,ATTEMPT,metadata,researchPolicy,input,plan,running,saved,deferred,tick} from './index-stop-fixture.js';
 const reply=(/** @type {any} */ body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
@@ -200,4 +201,27 @@ test('an unreadable exact attempt names the server reason and its launch is not 
   assert.equal(states.at(-1).why,`This exact attempt could not be read: /backtest/run.json answered HTTP 503: ${why}; its launch will not be resent.`);
   assert.equal(calls.filter(c=>c.options?.method==='POST').length,1);
  }finally{ctl.dispose();}
+});
+
+// W7 (OBSV-18, D-3217): `/engine/index-stop-launch.json` refuses with
+// `{"ready":false,"refusal":…}` (`crates/api/src/indexstoplaunch.rs`
+// `metadata`); the panel printed the status and a guess about an old app.
+test('a refused single-stop configuration read names the server refusal; no sweep is submitted (W7)',async()=>{
+ const source=readFileSync(new URL('../src/lib/IndexStopLaunch.svelte',import.meta.url),'utf8'),tree=parse(source);
+ const node=tree.instance?.content.body.find((/** @type {any} */ row)=>row.type==='FunctionDeclaration'&&row.id?.name==='readConfiguration');assert.ok(node);
+ const fields=tree.instance?.content.body.flatMap((/** @type {any} */ row)=>row.declarations??[]).find((/** @type {any} */ row)=>row.id?.name==='fields');assert.ok(fields);
+ const mount=new Function('ask','refusalFrom',`
+  let config={phase:'idle',body:null,why:''},serverMonth=null,settings={maxLossPoints:'',batchPrograms:'',nodeAllowance:'',batchAllowance:''},generation=0,configAbort=null;
+  const fields=${source.slice(fields.init.start,fields.init.end)},onTimeframes=()=>{},validateIndexStopMetadata=()=>{throw new Error('a refusal is not metadata');},indexStopServerMonth=()=>null;
+  ${source.slice(node.start,node.end)}
+  return {readConfiguration,config:()=>config};
+ `);
+ const refusal='bounded configuration read unavailable: Saturated';
+ const app=mount(async()=>Response.json({schema_version:1,ready:false,refusal},{status:503}),refusalFrom);
+ await app.readConfiguration();
+ assert.equal(app.config().phase,'failed');
+ assert.equal(app.config().why,`/engine/index-stop-launch.json answered HTTP 503: ${refusal}. No sweep was submitted.`);
+ const old=mount(async()=>new Response('',{status:404}),refusalFrom);
+ await old.readConfiguration();
+ assert.equal(old.config().why,'/engine/index-stop-launch.json answered HTTP 404 and named no reason. No sweep was submitted.');
 });
