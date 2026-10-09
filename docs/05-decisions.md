@@ -66556,3 +66556,17 @@ covers every held entry may say "verified". Proved by
 `scrub_route_checks_one_page_and_names_the_rest` and
 `scrub_route_opens_no_more_than_a_page_of_a_larger_counter`. FXB1-07.
 
+### D-4436 — A query string is split once per request — 2026-10-09
+
+**What was observed.** o1api-4: `param(query, name)` scanned the whole query
+for every field asked, so a request asking k fields paid k scans of up to
+8,192 bytes.
+
+**Decided.** `server::Query::parse` splits the query once into a map of the
+first value per key (pre-sized for `QUERY_FIELDS_RESERVED` = 32 keys), and
+`Query::param` answers each field with one probe, decoded exactly as `param`
+decodes. The bars window, the addressed bars routes, the instruments page,
+the ingest forms and `/logs.json` use it. Repeated keys keep the FIRST value,
+as `param` did. Proved by `a_split_query_answers_every_field_as_param_does`.
+FXB1-08.
+

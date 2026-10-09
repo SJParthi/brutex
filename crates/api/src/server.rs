@@ -808,6 +808,56 @@ fn field_value<'a>(pair: &'a str, name: &str) -> Option<&'a str> {
     pair.strip_prefix(name)?.strip_prefix('=')
 }
 
+/// How many fields a [`Query`] reserves room for before its first insert.
+///
+/// No route or form this server reads names more than a few dozen fields;
+/// a longer query grows the map, which [`MAX_REQUEST_TARGET_BYTES`] and
+/// [`MAX_FORM_BYTES`] bound. D-4436.
+const QUERY_FIELDS_RESERVED: usize = 32;
+
+/// One query string or form body, split ONCE, read by field name in one hash
+/// probe each.
+///
+/// # Why (o1api-4, D-4436)
+///
+/// [`param`] scans the whole string per call, so a reader of `k` fields paid
+/// `k` scans of up to [`MAX_REQUEST_TARGET_BYTES`] (or a form body's bound).
+/// A reader that names three or more fields parses once here instead: one
+/// scan of the string, then O(1) expected per field, so its cost is one pass
+/// however many fields it reads. Each key keeps its FIRST value, exactly as
+/// `param`'s first match does, and a pair without `=` names nothing, exactly
+/// as `param` reads it;
+/// `api::server::serve_edge_tests::a_split_query_answers_every_field_as_param_does`
+/// holds the two readers equal over every form the existing tests use. A
+/// repeated field is still read with [`params`], one pass, as a list.
+#[derive(Debug)]
+pub struct Query<'a> {
+    first: std::collections::HashMap<&'a str, &'a str>,
+}
+
+impl<'a> Query<'a> {
+    /// Splits `raw` once.
+    #[must_use]
+    pub fn parse(raw: &'a str) -> Self {
+        let mut first = std::collections::HashMap::with_capacity(QUERY_FIELDS_RESERVED);
+        for pair in raw.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                first.entry(key).or_insert(value);
+            }
+        }
+        Self { first }
+    }
+
+    /// The decoded value of `name`, or empty when it is absent: [`param`]'s
+    /// answer, in one hash probe.
+    #[must_use]
+    pub fn param(&self, name: &str) -> String {
+        self.first
+            .get(name)
+            .map_or_else(String::new, |value| percent_decode(value))
+    }
+}
+
 /// EVERY value a repeated field carries, in the order they were sent.
 ///
 /// # Why a second reader and not a wider `param`
@@ -1081,12 +1131,13 @@ async fn page(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> axum::response::Html<String> {
-    let raw = uri.query().unwrap_or("");
-    let typed = parse_query(raw);
-    let sort = param(raw, "sort");
-    let all = param(raw, "all") == "1";
-    let u = param(raw, "u");
-    let page = page_number(raw);
+    // ONE SCAN for all five fields (o1api-4, D-4436).
+    let query = Query::parse(uri.query().unwrap_or(""));
+    let typed = query.param("q");
+    let sort = query.param("sort");
+    let all = query.param("all") == "1";
+    let u = query.param("u");
+    let page = query.param("page").parse().unwrap_or(0);
     axum::response::Html(instruments_html_from(
         &site.universe().read,
         &typed,
@@ -2237,7 +2288,12 @@ fn day_window_bounds(query: &str) -> Result<(Option<i64>, Option<i64>), String> 
 ///
 /// One comparison per known rung — two — so this is constant work.
 fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
-    let raw = param(query, "timeframe");
+    timeframe_value(&param(query, "timeframe"))
+}
+
+/// [`timeframe_param`] over a value already read, for a reader that parsed
+/// its query once ([`Query`]). D-4436.
+fn timeframe_value(raw: &str) -> Result<store::path::Timeframe, String> {
     if raw.is_empty() {
         return Ok(store::path::Timeframe::MINUTE_1);
     }
@@ -2269,7 +2325,12 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
 /// One spelling of one parse, so `month` and the range's `to` cannot disagree
 /// about what a month looks like.
 fn month_param(query: &str, key: &str) -> Result<store::path::YearMonth, String> {
-    let raw = param(query, key);
+    month_value(&param(query, key), key)
+}
+
+/// [`month_param`] over a value already read, for a reader that parsed its
+/// query once ([`Query`]). D-4436.
+fn month_value(raw: &str, key: &str) -> Result<store::path::YearMonth, String> {
     raw.split_once('-')
         .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
         .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
@@ -2312,15 +2373,15 @@ impl Addressed {
     ///
     /// The refusal sentence, ready to render.
     fn parse(query: &str) -> Result<Self, String> {
-        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-            return Err(format!(
-                "{:?} is not a feed this build can read",
-                param(query, "feed")
-            ));
+        // ONE SCAN of the query for all seven fields (o1api-4, D-4436).
+        let query = Query::parse(query);
+        let feed = query.param("feed");
+        let Some(vendor) = ingest::parse_vendor(&feed) else {
+            return Err(format!("{feed:?} is not a feed this build can read"));
         };
         // `YYYY-MM`, the same spelling every other route uses.
-        let month = month_param(query, "month")?;
-        let timeframe = timeframe_param(query)?;
+        let month = month_value(&query.param("month"), "month")?;
+        let timeframe = timeframe_value(&query.param("timeframe"))?;
         // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
         //
         // A spot series has no contract segment and its path is one level
@@ -2331,7 +2392,7 @@ impl Addressed {
         // refuses by name rather than falling back to `None`: falling back would
         // read the UNDERLYING's month and answer with a different instrument's
         // bars, which is the one failure worse than a 400.
-        let raw_contract = param(query, "contract");
+        let raw_contract = query.param("contract");
         let contract = if raw_contract.is_empty() {
             None
         } else {
@@ -2352,9 +2413,9 @@ impl Addressed {
             month,
             timeframe,
             contract,
-            exchange: param(query, "exchange"),
-            segment: param(query, "segment"),
-            symbol: param(query, "symbol"),
+            exchange: query.param("exchange"),
+            segment: query.param("segment"),
+            symbol: query.param("symbol"),
         })
     }
 
@@ -3448,29 +3509,25 @@ struct WindowAsk {
     offset: usize,
     limit: usize,
     want_extremes: bool,
+    /// The three path words, read in the same one scan. D-4436.
+    exchange: String,
+    segment: String,
+    symbol: String,
 }
 
 impl WindowAsk {
     /// Reads one, or names the first thing wrong with it.
     fn parse(query: &str) -> Result<Self, String> {
-        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-            return Err(format!(
-                "{:?} is not a feed this build can read",
-                param(query, "feed")
-            ));
+        // ONE SCAN of the query for all eleven fields (o1api-4, D-4436).
+        let query = Query::parse(query);
+        let feed = query.param("feed");
+        let Some(vendor) = ingest::parse_vendor(&feed) else {
+            return Err(format!("{feed:?} is not a feed this build can read"));
         };
-        let month_of = |key: &str| {
-            let raw = param(query, key);
-            raw.split_once('-')
-                .and_then(|(y, m)| {
-                    store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
-                })
-                .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
-        };
-        let from = month_of("from")?;
-        let to = month_of("to")?;
-        let timeframe = timeframe_param(query)?;
-        let raw_contract = param(query, "contract");
+        let from = month_value(&query.param("from"), "from")?;
+        let to = month_value(&query.param("to"), "to")?;
+        let timeframe = timeframe_value(&query.param("timeframe"))?;
+        let raw_contract = query.param("contract");
         let contract = if raw_contract.is_empty() {
             None
         } else {
@@ -3480,17 +3537,17 @@ impl WindowAsk {
                 })?,
             )
         };
-        let sort = bars::SortKey::parse(&param(query, "sort")).ok_or_else(|| {
+        let asked_sort = query.param("sort");
+        let sort = bars::SortKey::parse(&asked_sort).ok_or_else(|| {
             format!(
-                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi.",
-                param(query, "sort")
+                "{asked_sort:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi."
             )
         })?;
         // A NON-NUMBER IS A REFUSAL, NOT A ZERO. `offset=banana` silently
         // reading from the top would answer a different question than the one
         // asked, and the pager would look right while showing the wrong rows.
         let number = |key: &str, fallback: usize| {
-            let raw = param(query, key);
+            let raw = query.param(key);
             if raw.is_empty() {
                 Ok(fallback)
             } else {
@@ -3502,7 +3559,7 @@ impl WindowAsk {
         // reader of a store asks for first: the newest row. Anything else that
         // is not `asc` or `desc` is refused: `dir=ASC` once answered newest
         // first with a 200 (Z1-slice14-F3, D-1762).
-        let desc = match param(query, "dir").as_str() {
+        let desc = match query.param("dir").as_str() {
             "" | "desc" => true,
             "asc" => false,
             other => {
@@ -3512,7 +3569,7 @@ impl WindowAsk {
             }
         };
         // Same rule: `extremes=yes` once dropped the extremes silently.
-        let want_extremes = match param(query, "extremes").as_str() {
+        let want_extremes = match query.param("extremes").as_str() {
             "" | "0" | "false" => false,
             "1" | "true" => true,
             other => {
@@ -3544,6 +3601,9 @@ impl WindowAsk {
                 }
             },
             want_extremes,
+            exchange: query.param("exchange"),
+            segment: query.param("segment"),
+            symbol: query.param("symbol"),
         })
     }
 }
@@ -3578,9 +3638,9 @@ async fn bars_window_json(
     let window = match bars::window(
         &site.store_root,
         asked.vendor,
-        &param(query, "exchange"),
-        &param(query, "segment"),
-        &param(query, "symbol"),
+        &asked.exchange,
+        &asked.segment,
+        &asked.symbol,
         asked.timeframe,
         asked.contract,
         asked.from,
