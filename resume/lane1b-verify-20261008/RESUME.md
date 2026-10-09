@@ -30,3 +30,13 @@ Do not push to final/all-fixes directly (every push cancels the long Gate 18 run
 into `final/all-fixes-xp04wq`, validate (fmt, clippy, full tests as non-root, static gates, cargo-mutants on
 the diff), push that branch, and send branch + sha to the PR 74 CI thread to land in its one combined push.
 If #74 has merged, open exactly one new PR instead.
+
+## Snapshot 2026-10-09 ~04:50 UTC (usage pacing: save so a stop loses nothing)
+Fixer work saved as patches in `patches/` (base fbdabaec): `fx-<x>.commits.patch.md` = `git format-patch --stdout fbdabaec..HEAD`
+(apply with `git am`), `fx-<x>.uncommitted.patch.md` = uncommitted WIP (`git apply`). Heads at save: A 93489016 (5 commits),
+B 48af6b95 (2, WIP tests+fixes), C 63b2beba (9), D 20577d69 (8), E fa3100b9 (5), F none committed (WIP diff only).
+Baseline on fbdabaec: full workspace tests as root 7,364 passed, 0 failed, 15 ignored.
+Usage rule (owner 2026-10-09): after the in-flight fixers finish, at most 2 agents at a time; any usage-limit error =
+save here, pause, check in just after 09:00 UTC. Resume: re-create worktrees from fbdabaec, `git am` each patch, finish
+each fixer's item list (table above), then merge into `final/all-fixes-xp04wq`, validate, push it, send branch+sha to
+the PR 74 CI thread.

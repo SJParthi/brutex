@@ -36,3 +36,23 @@ and send branch + sha to the PR 74 CI thread, which batches pushes.
   (D-3516..3530). Fixer reports land in /tmp/claude-0/audit/out/<name>-report.md (container only).
 - If stopped: fixer branches are local only until merged and pushed as wip/audit-batch3-integ. Re-run any fixer whose
   branch is missing from GitHub from its item list (out/*.tsv rows not FIXED/DOCUMENTED).
+
+## State 2026-10-09 ~04:50 UTC (usage pacing in force)
+- Pacing (coordinator, at Parthi's request): let the in-flight fixers finish and merge; no new discovery/attack fan-out;
+  afterwards at most 2 agents at a time, only on work that lands in PR #74 (merge, revalidate, mutation survivors);
+  the comparison-table Artifact last, one agent. Any rate/usage-limit error = save here and resume after the reset.
+- `audit/integ` = de932e5b + merge of audit/fx-e (b395d99a), pushed as `wip/audit-fx/integ`. fx-e (srust-1..5,
+  D-4490..D-4494) is DONE; its report: srust-5 needs the owner (are GitHub's Node-based actions a forbidden runtime under
+  CLAUDE.md §2? D-4494 lists them; a gate now refuses any unpinned action and JS outside the web job).
+- Fixer branches pushed for safety under `wip/audit-fx/<name>` (fx-a, fx-d, fx-w, l4 so far); fx-b1, fx-b2, fx-c, fx-r
+  had no commits yet at 04:50 (CPU-bound box, cli/api builds slow).
+- Mutation pre-run (mutwt @ 1c9ec4ca, diff fbdabaec..1c9ec4ca): engine 14 caught/0 missed; runner 41 caught/23 unviable/0
+  missed; api 22 of 86 so far with 2 MISSED: `api/src/answer_memo.rs` Debug for Memo -> Ok(Default) (add a Debug output
+  test) and `api/src/candidatejson.rs` summary_for `&&`->`||` at the identity clause (test: same identity+attempt but
+  different model or root must be cold). cli (166), vocab, pull not yet run.
+- Resume order if stopped: (1) for each fixer branch, finish or re-run from its report/items; (2) merge every fixer
+  branch into audit/integ with merge commits (docs tails: keep both sides); (3) rebuild web/build (Gate W1) if web/src
+  changed; (4) full validation (/tmp scripts are lost with the container: fmt, clippy -D warnings, all test binaries
+  as uid 65534, doctests, gates 10/10b/27/27b/W1); (5) mutation pre-run on `git diff fbdabaec <head> -- crates` per crate,
+  kill survivors; (6) push wip/audit-batch3-integ and send branch+sha to the PR 74 CI thread; (7) Artifact
+  https://claude.ai/artifact/7cvC2yoWTHviHri8zz4TPx from out/*.tsv plus fixer outcomes.
