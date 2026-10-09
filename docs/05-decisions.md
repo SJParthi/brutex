@@ -66459,3 +66459,170 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4445 — An unreadable serve-lock stamp is named, not called unstamped — 2026-10-09
+
+**What was observed.** When a second server is refused because the store's
+`serve.lock` is held, the refusal names the holder from the lock file's
+first line. The read was `read_to_string(path).unwrap_or_default()`, so a
+stamp the OS would not read (a permission error, a directory at that path)
+became the empty string and the refusal said the holder had "not yet stamped
+the file": a read failure reported as a state of the other process. sobs-15.
+
+**Decided.** `holder_named` reads the stamp's first line; an empty file is
+still "an instance that had not yet stamped the file", and a failed read says
+the stamp could not be read, quotes the OS error, and says which instance
+holds the lock is not established.
+
+### D-4446 — The audit journal's first record syncs its directory — 2026-10-09
+
+**What was observed.** `audit::Journal::appended` synced the journal file
+after each record. The first record also creates `audit/` (and the file in
+it), and nothing synced the directory, so a power cut after a reported append
+could lose the journal file whole. sobs-12, api half.
+
+**Decided.** When the file holds no byte yet, the append syncs `audit/` and
+its parent (the store root) before writing; a sync failure refuses the append
+by name and nothing is appended. Later records add no directory sync. A bare
+journal name syncs the working directory.
+
+### D-4447 — Every sweep launch route logs its server refusals — 2026-10-09
+
+**What was observed.** Of the three launch routes, only `/backtest/run`
+logged the unstamped-build refusal; `/backtest/descend` and `/engine/command`
+answered 503 and wrote nothing. The environment-budget refusal (D-0685) wrote
+no event on any route (`docs/06-limits.md` said so). sobs-9.
+
+**Decided.** One function, `sweeprun::refused_for_this_server`, answers both
+refusals on all three routes and writes one `api.sweep` Warn naming the
+route and carrying the refusal's sentence. The old inline emit on
+`/backtest/run` is gone, so the route set has one site.
+
+### D-4448 — A blocked recovery logs its stage and reason — 2026-10-09
+
+**What was observed.** A recovery refused at any stage (a malformed request,
+preparation, preflight, a busy slot, durable activation) kept its BLOCKED
+reason in memory and in the HTTP reply only; `/logs` showed the status code
+and not why. sobs-8.
+
+**Decided.** `recovery::note_blocked` writes one `pull.recovery` "recovery
+blocked" event per refusal, naming the stage, the status, the plan digest
+when there is one, and the reason; Error for a 5xx, Warn otherwise. The
+blocking stages emit inside their blocking closures, once each.
+
+### D-4449 — Every F&O contract that does not land is logged — 2026-10-09
+
+**What was observed.** A named F&O pull counted the contracts that did not
+land and kept the first five reasons for the receipt. No event was written,
+and reasons after the fifth were dropped everywhere. sobs-7.
+
+**Decided.** Every refused fetch and every failed landing writes one
+`api.pull` Error "contract not landed" with its stage (`fetch` or `land`)
+and the reason, with the credential marker stripped. The receipt still
+quotes five and, when more failed, says how many and that every one is in the
+event log under that message.
+
+### D-4450 — A spot run refused before it starts is logged — 2026-10-09
+
+**What was observed.** `broker_run` logged `pull.run` "started" and
+"finished". Its three early refusals (no live broker, a blocked mapping, a
+ladder refusal) returned before "started", so they wrote nothing. L1-R3-2.
+
+**Decided.** `refused_before_start` wraps each early return and writes one
+`pull.run` "refused before it started" with the feed, target, rung, window,
+status and reason; Error for a 5xx, Warn otherwise.
+
+### D-4451 — A log run is scoped to the work that belongs to it — 2026-10-09
+
+**What was observed.** `broker_run` claimed the sink's single ambient run key
+(`Sink::claim_run`), and `Sink::emit` stamped every event with it. While a
+pull held the key, every unrelated event the process wrote (page loads,
+autopilot, sweeps) was filed under that pull, so `/logs?run=` returned a story
+with others spliced in. Probe P9: a claimed run 777 answered
+`["autopilot","api.request","pull.run"]`. sobs-14.
+
+**Decided.** `telemetry::scope` adds a per-thread run scope built from `std`
+alone, so the crate still depends on nothing: `in_run` sets a thread-local
+for the length of each `poll` of a future and restores it after, `enter`
+does the same for a block, `inherit` carries the caller's scope into a
+spawned future, and `current_run` reads it. In `Sink::emit` a scope outranks
+the ambient key and an explicit `emit_for_run` outranks both; outside every
+scope the ambient key still applies, so `cli` is unchanged. `broker_run` now
+runs inside `in_run` with a reserved id (or the caller's), and claims
+nothing. The api carries the scope across its spawns (`inherit`) and its
+blocking pools (`detail::admitted`, `pullrun::off_worker`).
+
+**Rejected.** A task-local: it needs a runtime dependency, which `sink.rs`
+already refused for this crate. Releasing the ambient claim sooner: any
+window in which one run holds a process-wide key splices other work into it.
+
+**Honest limit.** A spawn that is not wrapped runs outside the scope; the
+spawner is the only place that knows the spawned work belongs to the run.
+Cost is one thread-local read per event and one boxed future per scope, not
+timed (UNVERIFIED).
+
+### D-4452 — The pull press logs its legs and its end — 2026-10-09
+
+**What was observed.** `/pull/run`'s coordinator (`pullrun::conduct`) wrote
+no event at all. Leg failures, halted feeds, dead chains and the summary
+lived only in the in-memory progress, and `pull_run` dropped the task's
+handle, so a press that panicked (in a build that unwinds) was written only
+to standard error. sobs-5.
+
+**Decided.** `pullrun::press` runs the coordinator in its own log run and
+under a supervisor. It logs "press started", one event per failed leg (with
+the status and the receipt's reason as bounded text, Error when the feed is
+halted, Warn when the leg is owed another pass), "pass ended with legs owed"
+per pass that leaves retries, "chain stopped abnormally" for a dead chain,
+and "press finished" (Info when clean, Warn otherwise). The supervisor awaits
+the task and logs "press ended abnormally" with the runtime's words when it
+panicked or was cancelled; it writes nothing for a normal end. All under
+`api.pullrun`, once per leg, pass or press.
+
+### D-4453 — The autopilot logs its halts, stalls and end — 2026-10-09
+
+**What was observed.** The backfill task logged pause and resume only. A
+feed's halt, a month passed over, the empty-universe halt, the clock wait
+and the task's own return were status-only, and `run_in` spawned `fly` bare
+and aborted it at shutdown, so a task that panicked left the status page
+drawing the phase it died in. sobs-6.
+
+**Decided.** One `autopilot` event per boundary: "feed halted" and "month
+passed over" (feed, month, reason) per verdict in `settle`; "backfill halted"
+when a pass with nothing to choose moves the phase into halted, gated on the
+transition by `Control::publish_into_halt` so a halt that stands is not
+logged once a minute; "waiting for a usable clock" on the first wait; and the
+supervisor started by `autopilot::launch` logs "backfill task ended" with the
+published reason when the task returns, or "backfill task ended abnormally"
+with the runtime's words when it panicked or was cancelled, and then
+publishes a halt naming that. The supervisor holds the task through a handle
+that aborts on drop, so the shutdown that aborts the supervisor still stops
+the backfill.
+
+### D-4454 — Every store scrub is logged, and `/db` can run one — 2026-10-09
+
+**What was observed.** `/verify.json` is the one check that opens bar files
+against the census. Its answer lived in the reply alone (logged at Debug as a
+200), and no page linked it. sobs-10.
+
+**Decided.** `note_scrub` writes one `api.verify` "scrub" event per scrub
+with the verdict, the counts, the first finding and the server's sentence:
+Info when verified, Warn when it disagreed or held nothing, Error when the
+census could not be read. `/db` gains a "Scrub" panel that runs a scrub for
+the chosen feed on request (never polled, since a scrub opens every counted
+file), draws the verdict, counts and findings, refuses a reply it cannot read
+by name, and links the log. `web/build` is rebuilt (Gate W1).
+
+### D-4455 — Every network retry decision is logged once — 2026-10-09
+
+**What was observed.** `with_retry` (bar windows) and `laddered` (discovery
+and rolling F&O calls) re-asked a vendor up to `THROTTLE_ATTEMPTS` times per
+request on 429, 5xx and transport failures, and logged none of it; only the
+final refusal reached the log, with no sign it was the last of several.
+L1-R3-5.
+
+**Decided.** Each `Step::Again` writes one `pull.http` Warn "retrying a
+refused request" with the feed, the call, the attempt, the status (null when
+nothing answered), the wait, whether the vendor named a throttle, and the
+vendor's words. At most `THROTTLE_ATTEMPTS - 1` per request; every other
+verdict ends the request and stays the caller's event.
