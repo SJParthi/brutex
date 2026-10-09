@@ -12373,10 +12373,18 @@ rule 6); every bound is read from the source.
   file, and the directory again); the terminal is one append and its `fsync`.
   The directory insert at `create_new` and the lookup at each read depend on
   the filesystem and on the directory's entry count, which grows with every
-  audited request ever served. Disk use is O(history). `begin` and the
-  terminal are not timed. The read side, including its directory lookup, is
-  measured to 10^4 invocations by D-3303's section below. No larger directory
-  has been measured.
+  audited request ever served. Disk use is O(history). **Since D-4441
+  `begin` and the terminal are timed together** by
+  `api::operation_audit::tests::latency_audit_begin_and_terminal_by_directory_size`
+  (`api` test build (the workspace's optimized test profile), a shared four-CPU host running other builds; load average beside each, 200 requests at each size, p50 / p99 / max): with 100
+  real invocations already held 31.1 ms / 48.4 ms / 52 ms (n = 200, load 11.73); 1,000 21.5 ms / 128 ms / 132 ms (n = 200, load 12.46); 10,000
+  28 ms / 44 ms / 45.6 ms (n = 200, load 11.28); and, as a proxy for a 10^5-entry directory, 10,200 real
+  invocations beside 90,000 empty files that are not journal entries
+  28 ms / 44 ms / 49.5 ms (n = 200, load 11.15). The read side, including its directory lookup, is measured to
+  10^4 invocations by D-3303's section below. No larger directory of real
+  invocations has been measured. Retention or sharding would be a new journal
+  layout (`invocations-v2`) in `cli`, with its own decision; it is not made
+  here.
   `api::operation_audit::tests::each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed`
   pins the byte and file counts, not the latency.
 - **The terminal is owed, so it is not refused by a full detail pool.**
@@ -16413,7 +16421,7 @@ of this build on this box, labelled as such, not budgets a gate holds.
 | W1-api1-6 | O(C) currency checks per page, C linked catalogs | Each check is the page's proof that catalog is still the one the statistics were computed over; C is fixed when the statistics artifact is written, nothing in a request widens it | not timed here |
 | W1-api2-3 | eight trade-reader slots since D-4434; a ninth candidate in rotation re-reads its trades | Any bounded cache can be made to miss by rotating keys; warm pages are O(page) | warm page 4.11 µs / 9.5 µs / 8.08 ms (n = 4,000, load 11.49); cold open, fixed part 70.2 µs / 8.13 ms / 16.2 ms (n = 1,000, load 11.49) (D-4434) |
 | W1-api6-3 | since D-4433 a persisting `/engine/top.json` refusal costs one record read, not its cold walk | A cached refusal would keep refusing after a repair; re-reading the one damaged record is the proof, and a repair moves the generation | one record read, the class the rows above time; counted, not timed (D-4433) |
-| W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | not timed here |
+| W1-api3-0 | one journal file per audited request | Per request it is O(1) (two 256-byte appends and one create); the growth is the append-only audit record itself (§3 rule 8, D-1445) | `begin` + terminal at 10^4 held 28 ms / 44 ms / 45.6 ms (n = 200, load 11.28); proxy 10^5 entries 28 ms / 44 ms / 49.5 ms (n = 200, load 11.15) (D-4441) |
 | o1api-4 | since D-4436 `Query::parse` splits once and each field is one probe; `param` remains for one-field readers | Bounded by the 8,192-byte query cap and the route's fixed field count, so constant per request | 11 fields of an 8 KiB query: by `param` 170 µs / 4.4 ms / 23 ms (n = 20,000, load 10.73); by `Query` 78.6 µs / 4.15 ms / 16.2 ms (n = 20,000, load 10.73) (D-4436) |
 | W3-engine1-0, ET-o1-proof-coverage-2 | the subset prune is Θ(k) per candidate | Apriori's prune must test the k-2 subsets that are not the join's two parents; C-E-12 times one probe | C-E-12 (engine bench) |
 | W3-engine1-1 | each level is sorted, O(F log F) | Canonical order is what makes a sweep's output byte-identical across runs (§3 rule 5) and what the prefix join walks; the sort is per level, not one of rule 4's five per-operation primitives | not timed here |

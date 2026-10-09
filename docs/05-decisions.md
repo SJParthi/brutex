@@ -66614,3 +66614,14 @@ records. Proved by
 `a_ts_window_with_extremes_reads_each_month_once_until_it_moves` and
 `a_scan_past_its_ceiling_is_refused_by_name`. FXB1-11, FXB1-12.
 
+### D-4441 — The audit journal's per-request cost is measured as its directory grows — 2026-10-09
+
+**What was observed.** W1-api3-0: each audited request creates one file in
+the flat `audit/invocations-v1/` directory, with no retention, rotation or
+sharding; the cost of `begin` and the terminal was never timed.
+
+**Decided.** Measured to 10^4 real invocations and, by a labelled proxy, to
+10^5 directory entries. Sharding or retention is a new journal layout (a new
+version under D-1445 and `docs/02-store-format.md`) in `cli`, and is left to
+the owner. FXB1-14.
+
