@@ -66479,6 +66479,18 @@ list itself (D-1202) is unchanged. Proved by `open_if_asked`'s tests in
 **Rejected.** Dropping the handler. An operator who wants the window keeps it
 with one variable; nothing in the default path runs an outside program.
 
+### D-4431 — An oversized index catalogue is refused for its size before its text — 2026-10-09
+
+**What was observed.** r64-6: `indexmap::Published::read` read at most
+`MAX_CATALOGUE_BYTES + 1` bytes and decoded them as UTF-8 before checking the
+length, so a file larger than the bound whose cut fell inside a multi-byte
+character was refused as "stream did not contain valid UTF-8" rather than for
+its size.
+
+**Decided.** The capped read keeps raw bytes, judges the length first, and
+decodes only a file within the bound. Proved by
+`an_oversized_catalogue_cut_inside_a_character_is_refused_by_size`. FXB1-02.
+
 ### D-4434 — Eight trade readers are kept, and the crate's latency measurements share one harness — 2026-10-09
 
 **What was observed.** W1-api2-3: `/candidate-trades.json`'s exact trade page
