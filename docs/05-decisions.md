@@ -66459,3 +66459,261 @@ returning, as the install refusal already did. OBSV-11.
 
 **Rejected.** Refusing the whole batch louder. The siblings' bars are on disk
 and their rows are sound; dropping them is the loss, not the noise.
+
+### D-4490 — Gates 1 and 1f read a script by what it loads, and refuse a frame, a `srcdoc` and a script or `data:` URL — 2026-10-09
+
+**What was observed (srust-1).** `.github/source_scan.rs` `browser_findings`,
+which gate 1 runs over every tracked `.html` and `.css` outside `web/` and gate
+1f over every production string literal under `crates/`, accepted any
+`<script>` that had a `src`, whatever the value. It never read `srcdoc`, never
+decoded an attribute value, never looked at a frame element, and ended every
+tag at its first `>`, so `<a title=">" onclick=go()>` carried no handler to it.
+The audit's probes, rerun here on a scratch copy of 21443a2a with the gate
+scripts extracted from `ci.yml`: `<script src="data:text/javascript,fetch(..)">`
+and its base64 form as `docs/p6.html`/`docs/p7.html`, `<iframe
+srcdoc="&lt;script&gt;fetch(1)&lt;/script&gt;">` as `docs/p8.html`, the
+`>`-in-quotes handler and `href="&#106;avascript:go()"` as `docs/p6b.html`, and
+the first and third as a `pub const` appended to `crates/api/src/render.rs`
+(P10, P11): gates 1, 1f and 15 all exited 0.
+
+**The decision.** Tags are read as the HTML tokenizer reads them: a name runs to
+whitespace, `/` or `>`; a quoted value runs to its closing quote, a `>` inside it
+included; an unquoted one to whitespace or `>`. Every attribute value is read as
+a browser hands it to a URL parser: numeric references (any number of leading
+zeros), `&colon;`, `&Tab;`, `&NewLine;` and fifteen other named references
+decoded, lowercased, tab and line breaks removed, leading controls trimmed.
+Refused, case-blind, in both places:
+
+- a `javascript:` or `vbscript:` URL anywhere in a decoded value;
+- a `data:` URL in a decoded value — at its start or after `(`, a quote, `,`,
+  `;`, `=` or a space, and followed by something other than a space, so a
+  `title="market data: 5 rows"` and a path `/data:x` pass;
+- a `srcdoc` attribute on any element;
+- `<iframe>`, `<frame>`, `<frameset>`, `<embed>`, `<object>`, `<applet>`,
+  `<portal>`, `<fencedframe>`, and `<base>` (it re-points every relative `src`,
+  the licensed loaders' included);
+- a bare `fetch(` call (not `prefetch(`), beside the existing browser APIs;
+- every `<script>` but the two decisions license: D-0060 licensed the
+  `/typeahead.js` tag and D-1106 named it with `/masters.js`. Each must be
+  exactly `src` (one of the two) and a valueless `defer`, with an empty body.
+  A tracked `.html` or `.css` outside `web/` is licensed no script at all: no
+  decision allows one there, and none is tracked today (`git ls-files` shows
+  every `.html` and `.css` under `web/`).
+
+The real tree passes both gates unchanged (`source_scan browser` over every
+tracked `crates/*.rs` and `source_scan content` over the tracked listing both
+exit 0), and every probe above is refused after the change; the commands and
+outputs are in the fixer's report. Invariant FXE-01.
+
+**What it still cannot see.** Markup assembled at run time from pieces that are
+not one literal or one `concat!`, as D-1106 states. Percent escapes are not
+decoded: no browser decodes them before it reads a scheme, so `data%3a…` is a
+relative path. A `<script>` written as text inside `<style>` or `<textarea>` is
+refused although a browser reads it as text — failing closed.
+
+**Rejected.** Decoding character references in the whole text before the tag
+walk, as the audit suggested. Text content is inert to a browser, and
+`&lt;script&gt;` in text is exactly how `render.rs` escapes operator input —
+`every_page_carries_the_one_script_this_repository_chose_and_no_other` proves
+the injection "arrives escaped" that way (D-0060). Decoding it would refuse the
+escaping that makes a page safe. Values are decoded because that is where a
+browser decodes before it acts. Refusing every `data:` substring: 14 string
+literals under `crates/` (`source_scan strings`, test code included) carry it
+in prose, such as "refused before opening market data:" in
+`crates/cli/src/step3_orchestrator.rs` and "cannot stat Population V6 data:".
+
+### D-4493 — Gate 12's last text program is Rust, and gate 0 refuses the stream editor in every workflow — 2026-10-09
+
+**What was observed (srust-4).** D-2314 moved gate 12's 16 `sed` calls into
+`.github/gates_bounds.rs` because CI is a corner the standing rule covers.
+Commit 46511d59 (D-2105) then added one back, at `ci.yml` line 3347 of
+21443a2a: `xargs -0 -r "$scan" fns < "$work/sources.z" | sed -E
+'s/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/'`. Gate 0 refused `awk` and
+`jq` programs but its own test listed `sed -e 's/a/b/'` as acceptable, so a
+`sed` program of any shape passed; the audit's P13, a branching program
+(`sed -n -e ':a' -e 'N' -e '$!ba' -e 's/\n/ /g'`), passed gate 0 when rerun here
+on a scratch copy of 21443a2a.
+
+**The decision.** Gate 12 pipes the scanner's `fns` output through
+`gates-ledger path-declarations`, the Rust filter gate 10 already uses for the
+same `FILE:LINE:name` to `FILE<TAB>name` rewrite (`path_fn_line` in
+`.github/gates_ledger.rs`); gate 25 builds that binary earlier in the same job.
+Measured on 21443a2a's tree: both filters read the same 24,436 `fns` lines and
+wrote byte-identical output (`cmp` silent; sha256 `d9fd388e…f900f` for both).
+Gate 0's `source_scan workflow` refuses the words `sed` and `gsed` on every
+workflow line that is not a comment, as a program name however it is reached
+(`xargs sed`, `find -exec sed`, `"$(command -v sed)"`, `/usr/bin/sed`). It is a
+refusal, not a ratchet: the count is zero after this edit, and the awk ratchet
+(D-2342) shows a ratchet is only for a count above zero. Invariant FXE-02.
+
+**The cost, stated.** The rule reads a word, not a command shape, so a step
+name or an `echo` may not say the word either. That is the shape gate 15 already
+takes for its own word, and no line of the three workflows says it today
+outside comments.
+
+### D-4491 — No workflow step may hand an action a program: `github-script`, a code input and an `INPUT_` variable are refused — 2026-10-09
+
+**What was observed (srust-2).** Gate 0 read `run:` bodies and `shell:` values
+and never `uses:` or `with:`. The audit's P12 added a step
+`uses: actions/github-script@60a0d830… with: script: | const fs =
+require('fs'); …` to the `language-purity` job; gates 0, 1, 1b, 1g, 1f, 2, 13
+and 15 all exited 0. Rerun here: the base scanner (`source_scan workflow` built
+from 21443a2a) passed that `ci.yml` with exit 0.
+
+**The decision.** `source_scan workflow`, which gate 0 runs over every tracked
+`.yml` under `.github/`, refuses in every workflow and every job:
+
+- any `uses:` whose value names `github-script`, in any case, quoted or in a
+  flow mapping — it runs JavaScript written in the workflow itself;
+- a `with:` input named `script`, `code`, `run`, `command`, `commands`,
+  `entrypoint`, `args`, `pre`, `post` or `main` on any step, flow or block
+  form, the key quoted or bare: each hands an action a program rather than
+  data;
+- any line carrying `INPUT_`: the runner hands an action its inputs as
+  `INPUT_<NAME>` variables, so an `env:` entry of that shape is an input
+  beside `with:` that no input check would read.
+
+D-4494's allowlist refuses `github-script` too (it is not pinned); naming it
+separately keeps the reason in the refusal if the list ever grows, and the
+code-input names are refused even on a pinned action. Invariant FXE-03.
+
+### D-4494 — The seven pinned actions are the only external code CI runs, and Node runs outside the web job only inside five of them — 2026-10-09
+
+**What was observed (srust-5).** `CLAUDE.md` §2 forbids "any interpreted
+runtime, as a dependency, a dev-dependency, or a tool" and allows any toolchain
+under `web/` only. Outside ci.yml's `web` job, CI runs five actions whose code
+is JavaScript run on Node by the hosted runner. Their code is not in this
+repository; D-1457 pinned their commits and is silent on §2, and no gate kept a
+new one out: any `uses:` passed gate 0.
+
+**What runs, measured.** `runs.using` read from each action's own `action.yml`
+at the pinned commit (`curl https://raw.githubusercontent.com/<repo>/<sha>/action.yml`,
+2026-10-09); jobs read from the workflows at 21443a2a:
+
+| action | pinned commit | tag | runs on | where |
+|---|---|---|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | v4 | node20 (`dist/index.js`, and a `post` step) | ci.yml `language-purity`, `build`, `coverage`, `mutant-plan`, `mutants`, `complexity`, `web`; auto-merge.yml `auto-merge`; main-check.yml `dispatch` |
+| `dtolnay/rust-toolchain` | `89b12181fb390509a0842a86cc55eeb8eb928c1d` | stable | composite (bash steps, no Node) | ci.yml `build`, `coverage`, `mutant-plan`, `mutants`, `complexity` |
+| `Swatinem/rust-cache` | `6323deb102c322ba6fcbdcafc7e3dddab59af2b6` | v2 | node24 (`dist/restore.js`, `post` `dist/save.js`) | ci.yml `build`, `mutants`, `complexity` |
+| `actions/cache` | `0057852bfaa89a56745cba8c7296529d2fc39830` | v4 | node20 (`dist/restore/index.js`, `post` `dist/save/index.js`) | ci.yml `mutant-plan`, `mutants` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | v4 | node20 (`dist/upload/index.js`) | ci.yml `coverage`, `mutant-plan`, `mutants` |
+| `actions/download-artifact` | `d3f86a106a0bac45b974a628896c90dbdf5c8093` | v4 | node20 (`dist/index.js`) | ci.yml `mutants` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` | v4 | node20 (`dist/setup/index.js`) | ci.yml `web` only |
+
+**Why each is kept, and what replacing it would cost.** These are the
+fixer's reading of the workflows, not measurements of a replacement, which was
+not built: this audit's instruction for the item was that no existing job's
+checkout, caching or artifact transfer changes, so PR 74's mutation job stays
+green.
+
+- `actions/checkout` fetches the commit under test with the workflow's token
+  (`fetch-depth: 0`, which the gates' `git` history reads need) and, in
+  auto-merge.yml and main-check.yml, checks out `main` with
+  `persist-credentials: false` so the merge rules run from trusted code.
+  Replacing it is `run:` steps of `git init`, an authenticated `git fetch` of
+  the event's ref and `git checkout`, at nine call sites, each re-proving the
+  pull-request merge ref and the credential handling that the action does
+  today.
+- `Swatinem/rust-cache` and `actions/cache` restore the cargo registry, the
+  target directory and the pinned cargo-mutants and nextest binaries. Without
+  them every job, and every mutation shard, rebuilds the dependency graph and
+  reinstalls both tools; correct, slower by an amount not measured here.
+- `actions/upload-artifact` and `actions/download-artifact` carry the mutation
+  plan from `mutant-plan` to every `mutants` shard and keep the coverage and
+  shard outcomes for 35 days. They are the hosted runner's channel between
+  jobs. Whether that service can be reached from a `run:` step at all, so a
+  `.github/*.rs` client could replace them, is **UNVERIFIED** here.
+- `actions/setup-node` installs Node for the `web` job, which §2's `web/`
+  exception covers (D-0052, D-0053).
+
+**The decision.** `source_scan workflow` (gate 0, every tracked `.yml` under
+`.github/`) carries these seven as `ACTIONS`, each with its repository, full
+commit, tag, runtime and the `with:` inputs it may be handed, and refuses:
+a `uses:` that names anything else exactly (a tag or branch in place of the
+commit, another commit, a local action, a `docker://` image, a reusable
+workflow); a pin whose line lost D-1457's tag comment; a `uses:` that is not a
+step's own key, or a second one on the same step; an input its pin does not
+admit, or any input on a step that runs no pinned action; `actions/setup-node`
+anywhere but ci.yml's `web` job; and on any line outside that job, the name of
+a JavaScript runtime or package manager (`node`, `nodejs`, `npm`, `npx`,
+`yarn`, `pnpm`, `pnpx`, `bun`, `bunx`, `deno`, `corepack`, `tsx`, `ts-node`)
+however it is reached. Each line's job is read structurally, and a line in the
+jobs map at less than a job body's indentation that is not a job key is
+refused, so no line can be read as the web job's while GitHub runs it in
+another. Adding an action, or a Node action, is now an edit to `ACTIONS` and a
+decision, never a silent `uses:`. Invariant FXE-04.
+
+**What this does not settle.** Whether a Node-based action that GitHub's runner
+executes counts as "an interpreted runtime … as a tool" of this repository
+under §2's "without exception" is a ruling on the law, and a gate must not
+widen the law to match the tree (gate 1's own comment, D-0210). `CLAUDE.md` is
+not edited here. Until the owner rules, the five Node actions outside the web
+job are named, pinned and fenced, not licensed.
+
+### D-4492 — `.claude/launch.json` is read by a gate and holds exactly the two run configurations, the first a `cargo` invocation — 2026-10-09
+
+**Finding (srust-3, low).** `CLAUDE.md` §2 admits `.json` only under `.claude/`
+on the ground that exactly one tracked file uses it, `.claude/launch.json`,
+carrying the two run configurations `docs/07-plan.md` §0 names. No gate read
+that file: gate 1 and gate 1b matched its path and extension only. Its first
+configuration was `"runtimeExecutable": "sh"` with `["-c", "exec cargo run
+--release -p api -- serve"]` — a shell handed a program written in a tracked
+file outside `web/`. The `sh -c` form dates from the `BRUTEX_COMMIT=$(git
+rev-parse HEAD)` prefix that D-1970 removed; after that it carried only
+`exec`. Any edit could have made it `perl -e …` or `node -e …`, or added a
+second `runtimeExecutable` that a JSON reader keeping the last key would run,
+or an `env` key, and every gate stayed green. Nor did anything hold "exactly
+one tracked file": `.gitignore` ignores `/.claude/*` but `git add -f` tracks
+past it, and a `.claude/settings.json` (whose hooks are shell commands) or a
+`.claude/commands/*.md` passed gates 1 and 1b.
+
+**Probes, before** (scratch copy of base 21443a2a, gates 0, 1, 1b, 1g and 15
+run from `.github/workflows/ci.yml`; all five exit 0 for each): P18 config 1
+`perl` `["-e", "print 1"]`; P19 `node` `["-e", "1"]`; P20 `cargo` with its
+arguments followed by a second `"runtimeExecutable": "sh"` and `"runtimeArgs":
+["-c", "echo probe"]`; P21 a force-added `.claude/settings.json` with a
+`SessionStart` command hook; P22 a force-added `.claude/commands/x.md`; P23 an
+`"env": {"RUSTC_WRAPPER": "/bin/sh"}` key beside a correct `cargo` line.
+
+**The decision.**
+
+1. The first configuration starts `cargo` itself, with `["run", "--release",
+   "-p", "api", "--", "serve"]`. Without a shell, `exec` has nothing to
+   replace; the program and arguments are the ones the shell used to run, and
+   the name text is unchanged. That the preview tools start this form the way
+   they start the second configuration's `npm` is the same `runtimeExecutable`
+   mechanism; it was **not run in a preview tool here** (UNVERIFIED).
+2. `launch` in `.github/gh_json.rs` — the one JSON parser the gates already
+   build and test — reads the file and refuses: anything but one document; a
+   key twice in any object (the parser's `get` answers the first, `JSON.parse`
+   keeps the last); top-level keys other than exactly `version` and
+   `configurations`; a `version` other than `0.0.1`; a count other than two;
+   per configuration, keys other than exactly `name`, `runtimeExecutable`,
+   `runtimeArgs`, `port`, `url`; a name that does not start with §0's name
+   (`brutex — the whole application`, then `web — Vite dev server`, in that
+   order) or carries a control character; a program other than `cargo`, then
+   `npm`; an argument list other than the pinned one; a port other than 8080,
+   then 5173; an address other than `http://127.0.0.1:8080`, then
+   `http://localhost:5173`. Since program and arguments are pinned exactly, a
+   shell, `env`, `perl`, `node`, an absolute path to cargo, a `--config`
+   argument to cargo and an `npm exec` are all refused, not just the ones a
+   list would name.
+3. The second configuration stays: §0 names it, and `npm --prefix web run dev`
+   starts `web/package.json`'s own `dev` script by name — the `web/` exception
+   (D-0052, D-0053) reached by path, not a program carried in this file.
+4. Gate 1b (`gate_1b` in `.github/gates_tree.rs`) also refuses every tracked
+   path outside `web/` with a `.claude` component, in any letter case, other
+   than `.claude/launch.json`. This holds §2's sentence; it does not change
+   it, and `CLAUDE.md` is not edited.
+5. The gate 1b step builds `gh_json` and runs `launch < .claude/launch.json`;
+   gate 0 already runs `gh_json`'s tests.
+
+`crates/cli/src/operator_boundary_tests.rs`'s
+`the_launch_configuration_states_what_build_rs_actually_stamps` asserted the
+old `"exec cargo run --release -p api -- serve"` string and now asserts
+`"runtimeExecutable": "cargo"` and the absence of `"runtimeExecutable":
+"sh"`. Its predicates were checked against the file with `grep -F`; the test
+itself was **not run** here, because this fixer may not build `cli`.
+
+**Probes, after:** each of P18–P23, and P24 (the old `sh -c` shape), is
+refused by gate 1b; the real tree passes. Invariant FXE-05.

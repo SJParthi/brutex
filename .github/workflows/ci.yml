@@ -70,6 +70,13 @@ jobs:
           #     is a second language in a tracked file outside web/ (CLAUDE.md
           #     section 2); such a program lives under web/ and is run by path.
           #     D-2342 widens the forms; awk is a pinned ratchet (06-limits).
+          #   * the stream editor's name on any line that is not a comment:
+          #     every invocation runs a program (D-4493).
+          #   * an action that is not one of the seven `ACTIONS` pins in
+          #     .github/source_scan.rs, a pin without its tag comment, an input
+          #     its pin does not admit, `actions/github-script` or any input or
+          #     `INPUT_` variable that carries a program (D-4491), and setup-node
+          #     or a JavaScript runtime outside this file's `web` job (D-4494).
           # Every tracked .yml under .github/, not only workflows/ (D-2341).
           # An empty listing is refused.
           work=$(mktemp -d)
@@ -181,7 +188,9 @@ jobs:
           #
           #   1. `source_scan content`: outside web/, no NUL byte, nothing that
           #      is not UTF-8, no `.rs` opening with a shebang, and no browser
-          #      code in a `.html` or `.css`. Also no NAME holding a control
+          #      code in a `.html` or `.css`: no `<script>` of any kind, frame,
+          #      `srcdoc`, script or `data:` URL, read as gate 1f reads them
+          #      (D-4490). Also no NAME holding a control
           #      character, a non-ASCII byte, `"` or `\` (git quotes those in
           #      every listing read without `-z`), and no `mutants::skip`
           #      token in crate code: `#[cfg_attr(miri, mutants::skip)]`
@@ -324,13 +333,26 @@ jobs:
           # of failure as a permissive one accepting an illegal file: the gate
           # stopped describing the rule it was written to enforce.
           #
-          # `.claude/` is the run configuration IntelliJ and the preview tools
-          # read. It is operator tooling, not source, and it is not shipped.
+          # `.claude/` is the run configuration the preview tools read (not
+          # IntelliJ; see gate 1). It is operator tooling, not source, and it
+          # is not shipped.
           # The listing first: `git ls-files ... | grep || true` swallowed a git
           # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
           # A git that fails stops the step, and an empty listing is refused.
           # D-2311: the rule is `gate_1b` in .github/gates_tree.rs.
+          #
+          # D-4492 (srust-3): `.claude/launch.json` is the only tracked path
+          # under any `.claude` directory outside web/, and it is READ, not
+          # matched by extension: one JSON document, no key twice, exactly the
+          # two configurations docs/07-plan.md section 0 names, each program and
+          # argument list pinned -- `cargo run --release -p api -- serve` and
+          # `npm --prefix web run dev` -- so no shell or other interpreter is
+          # handed a program there. The reader is `launch` in .github/gh_json.rs,
+          # whose tests gate 0 ran.
           "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1b
+          gj="${RUNNER_TEMP:-/tmp}/gh-json"
+          rustc --edition=2024 -D warnings .github/gh_json.rs -o "$gj"
+          "$gj" launch < .claude/launch.json
 
       - name: Gate 1g — no tracked configuration runs a program
         run: |
@@ -426,6 +448,16 @@ jobs:
           # `cookie`/`write`/`body`, `window.location`, `window.open(`,
           # `addEventListener`, `innerHTML`, `outerHTML`, `XMLHttpRequest`,
           # `await fetch(`, `eval(`).
+          #
+          # D-4490 (srust-1): a `<script src>` used to pass whatever its value,
+          # so `src="data:text/javascript,..."` and `<iframe srcdoc=...>`
+          # passed here and in gate 1. Tags are now read as the HTML tokenizer
+          # reads them (a `>` inside quotes does not end one), every attribute
+          # value is decoded (`&#106;`, `&colon;`, `&Tab;`), and refused are: a
+          # script or `data:` URL, `srcdoc`, a frame or plug-in element,
+          # `<base>`, a bare `fetch(`, and every `<script>` but the two the
+          # decisions license, `/typeahead.js` and `/masters.js`, external,
+          # `defer` and empty. A tracked `.html` outside web/ is licensed none.
           #
           # WHAT IT CANNOT SEE: markup assembled at run time from pieces that
           # are not one literal or one `concat!` -- `format!("<scr{}", "ipt>")`.
@@ -3331,8 +3363,11 @@ jobs:
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
           git ls-files -z -- 'crates/*.rs' > "$work/sources.z"
+          # D-4493 (srust-4): `FILE:LINE:name` becomes `FILE<TAB>name` through
+          # the Rust tool gate 10 already uses, not a sed program; gate 0 now
+          # refuses sed in any workflow. Gate 25 above built the ledger tool.
           xargs -0 -r "$scan" fns < "$work/sources.z" \
-            | sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' > "$work/path-fns"
+            | "${RUNNER_TEMP:-/tmp}/gates-ledger" path-declarations > "$work/path-fns"
           git ls-files -z > "$work/tracked.z"
           "$scan" modules "$work/tracked.z" > "$work/modules"
           xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"
