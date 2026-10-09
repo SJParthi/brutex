@@ -152,3 +152,7 @@ the binding constraint; this thread goes quiet after the handover.
   D-4622); Coverage, Gates 3-6, Gate 8, Gate 18 and every shard were
   SKIPPED, so it has no survivor data. Not re-armed: the branch is handed to
   PR 74, whose CI on the combined push supersedes 1288.
+- 16:53 UTC (coordinator): 614fdc4b is merged into PR 74; final/all-fixes =
+  fe8aefc1, which also fixes purity gates 1d/12/21/23 (D-4182). When the
+  audit resumes, merge its final batch on top of fe8aefc1, not 614fdc4b.
+  Weekly usage 97%; this thread is idle.
