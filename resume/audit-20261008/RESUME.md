@@ -121,3 +121,7 @@ pull/benches/ratio.rs `session_member` needs `skipped: DecodeSkips::default()` a
 Artifact: filled (Dashboard type) with interim numbers; refresh recipe ARTIFACT-REFRESH.md; after.tsv in out/.
 Helper scripts (build-data.py, build-after.py, build-proof.py, check-after.py, merge-fx.sh, union-tail.py,
 validate.sh, gates-doc.sh) are container-local and deliberately untracked; rewrite from these notes if lost.
+- 10:27 UTC: `audit/integ` = 8102ca76 (a7a27dc3 + merge int-u 4a6272e4 + merge int-l), pushed as `wip/audit-fx/integ`.
+  On 8102ca76: fmt clean; gates 27, 27b, 10b, 10 pass. Workspace clippy was stopped unfinished (usage); not run: cli
+  clippy, test suites, mutants. Sent 8102ca76 to the merge-leftover thread (session_01UQpSgcb4nDRnDnd3ajjWJc) as the
+  current, not final, sha. Stopped at 5-hour 80% / weekly 76%; idle until the coordinator says resume.
