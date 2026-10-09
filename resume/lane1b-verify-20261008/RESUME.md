@@ -87,3 +87,4 @@ Heads (head/commits/dirty files): a=93489016/5/dirty7 b=fc5291b6/8/dirty0 c=1010
   (D, E, F, merges still to do) and fix confirmed findings (start with REVIEW-PARTIAL.md); merge G and H into
   final/all-fixes-xp04wq; full workspace tests as uid 65534 for root-only failures; static gates; cargo-mutants sample; push;
   send branch+sha to the PR 74 CI thread; publish the comparison-table artifact.
+- 2026-10-09 test result on a9fee04b (B..F merged), as root: `cargo test --workspace --locked --no-fail-fast` exit 0, 7,424 passed, 0 failed, 15 ignored (baseline fbdabaec: 7,364 / 0 / 15). Log: scratchpad/logs/int-test-2.log.
