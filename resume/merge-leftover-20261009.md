@@ -147,3 +147,8 @@ the binding constraint; this thread goes quiet after the handover.
   rule; a dropped `cli::live::Live` removes its file (D-2641), so fixtures
   must hold views; `target=swept` needs `member=NIFTY` (D-2759); census
   surface is 210 rows (D-3507); IST offset must be `pull::session`'s.
+- Check-in routine for run 1288 fired at 11:46 UTC and was read at 14:18:
+  run 1288 completed 09:36 UTC, failed at Gate 1e (fixed in bff477f0,
+  D-4622); Coverage, Gates 3-6, Gate 8, Gate 18 and every shard were
+  SKIPPED, so it has no survivor data. Not re-armed: the branch is handed to
+  PR 74, whose CI on the combined push supersedes 1288.
