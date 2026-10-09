@@ -366,10 +366,15 @@ pub fn clears_bonferroni_milli(t_milli: i64, observations: u64, trials: u64) -> 
 /// The two-sided Bonferroni bar for `trials` tests on a Student-t statistic
 /// with `df` degrees of freedom: the `|t|` at which [`clears_bonferroni`] turns.
 ///
-/// Found by bisection on [`student_t_two_sided_tail`], which is monotone in
-/// `|t|`, to well inside the two decimals a report prints. Returns 0 for no
-/// trials, as [`bonferroni_t`] does, and NaN for `df == 0`, where the
-/// distribution does not exist.
+/// Found by [`turning_point`] on [`student_t_two_sided_tail`], which is
+/// monotone in `|t|` up to a few ulps of rounding at the root. The answer is a
+/// float where [`clears_bonferroni`] turns exactly: it clears there and not one
+/// ulp below (R1286-rest-01, D-4150). Returns 0 for no trials, as
+/// [`bonferroni_t`] does, and NaN for `df == 0`, where the distribution does
+/// not exist.
+///
+/// One predicate serves the bracket and the bisection, so the two cannot
+/// disagree about which side of the budget a tail is on.
 #[must_use]
 pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
     if df == 0 {
@@ -383,14 +388,48 @@ pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
         reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
     )]
     let budget = FWER / trials as f64;
-    let mut high = bonferroni_t(trials).max(1.0);
-    while student_t_two_sided_tail(high, df) > budget {
+    // Over the budget: `t` does not clear. A NaN tail is not over it, which is
+    // what the two separate comparisons this replaced also said.
+    turning_point(bonferroni_t(trials).max(1.0), |t| {
+        student_t_two_sided_tail(t, df) > budget
+    })
+}
+
+/// The float where `short` stops holding, for a `short` that holds at zero and
+/// fails from its turning point up: a bracket found by doubling from `start`,
+/// then 200 bisection steps, which leave `high` one ulp above a `t` where
+/// `short` holds.
+///
+/// # The bracket is bounded, and a bracket that never closes refuses (D-4150)
+///
+/// From any `start` of at least one, the 1,024th doubling is `+inf`. A Student-t
+/// tail there is exactly 0, which is within every budget a `u64` trial count
+/// makes (at least `0.05 / u64::MAX`), so `f64::MAX_EXP + 1` doublings close
+/// the bracket for every input [`bonferroni_t_student`] can be given; the
+/// widest a real input needs is 65, at one degree of freedom and `u64::MAX`
+/// trials, where the bar is about `2.35e20`. This was an unbounded `while`, and
+/// Gate 18 run 1286 timed out on the two mutants that kept it from closing. A
+/// bracket still open after the bound is NaN, never a bar: at most 1,026 calls
+/// of `short` and then a refusal.
+///
+/// Cost: at most 1,226 calls of `short`, a constant. The Student-t bar takes
+/// 202 to 267: 0 to 65 doublings, each one call, the closing check, the
+/// refusal check and the 200 steps (`tests::the_widest_real_bracket_is_sixty_five_doublings`).
+fn turning_point(start: f64, short: impl Fn(f64) -> bool) -> f64 {
+    let mut high = start;
+    for _ in 0..=f64::MAX_EXP {
+        if !short(high) {
+            break;
+        }
         high *= 2.0;
+    }
+    if short(high) {
+        return f64::NAN;
     }
     let mut low = 0.0;
     for _ in 0..200 {
         let mid = 0.5 * (low + high);
-        if student_t_two_sided_tail(mid, df) > budget {
+        if short(mid) {
             low = mid;
         } else {
             high = mid;
@@ -788,11 +827,12 @@ fn upper_tail_quantile(alpha: f64) -> f64 {
 )]
 mod tests {
     use super::{
-        benjamini_hochberg, bonferroni_t, bonferroni_t_student, clears_bonferroni,
+        FWER, benjamini_hochberg, bonferroni_t, bonferroni_t_student, clears_bonferroni,
         clears_bonferroni_milli, effective_trials, expected_max_bailey, expected_max_t,
         inverse_normal_cdf, normal_cdf, p_value, student_t_two_sided_tail, trials,
-        trials_with_grid,
+        trials_with_grid, turning_point,
     };
+    use core::cell::Cell;
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
 
@@ -1110,6 +1150,181 @@ mod tests {
         assert!(clears_bonferroni(0.0, 30, 0), "no trials is the zero bar");
         assert!(bonferroni_t_student(0, 29).abs() < f64::MIN_POSITIVE);
         assert!(bonferroni_t_student(3_689, 0).is_nan());
+    }
+
+    /// The trial counts the bar tests below walk: the audit's four, the
+    /// smallest three, two more the bar lands exactly on, the old normal-bar
+    /// cliff (`upper_tail_quantile`) and the end of `u64`.
+    const BAR_TRIALS: [u64; 11] = [
+        1,
+        2,
+        3,
+        9,
+        19,
+        316,
+        3_689,
+        1_000_000,
+        61_125_295,
+        450_359_962_737_050,
+        u64::MAX,
+    ];
+
+    /// **THE STUDENT-T BAR IS THE FLOAT WHERE `clears_bonferroni` TURNS.**
+    /// R1286-rest-01, D-4150.
+    ///
+    /// At every point of the grid the bar clears and the float one ulp below
+    /// it does not, by the rule `clears_bonferroni` itself applies. Gate 18 run
+    /// 1286 kept two mutants of the bisection alive that the audit's 2e-3
+    /// comparison above cannot see. The midpoint `0.5 * (low - high)` still
+    /// lands within 1e-6 of the root, because the tail is even in `t` and
+    /// every step still keeps a short side and a clearing side. Reading `>=`
+    /// for `>` moves the bar only where the tail at the bar IS the budget,
+    /// which six points of this grid hit exactly; two are pinned to the bit.
+    #[test]
+    fn the_student_t_bar_is_the_float_where_clears_bonferroni_turns() {
+        for trials in BAR_TRIALS {
+            for df in [1, 2, 3, 5, 29, 59, 1_000, 100_000_000] {
+                let bar = bonferroni_t_student(trials, df);
+                assert!(bar.is_finite() && bar > 1.0, "{trials}, {df} df: {bar}");
+                assert!(
+                    clears_bonferroni(bar, df + 1, trials),
+                    "{trials}, {df} df: the bar {bar:e} must clear"
+                );
+                assert!(
+                    !clears_bonferroni(bar.next_down(), df + 1, trials),
+                    "{trials}, {df} df: one ulp under the bar {bar:e} must not clear"
+                );
+            }
+        }
+        for (trials, df, bits) in [
+            (3, 1, 0x4043_181f_6f2a_b21d_u64),
+            (3, 2, 0x401e_9860_0f3b_8229),
+        ] {
+            let bar = bonferroni_t_student(trials, df);
+            assert_eq!(bar.to_bits(), bits, "{trials}, {df} df: {bar:e}");
+            #[allow(clippy::cast_precision_loss, reason = "three is exact")]
+            let budget = FWER / trials as f64;
+            assert_eq!(
+                student_t_two_sided_tail(bar, df).to_bits(),
+                budget.to_bits(),
+                "the tail at this bar is the budget, to the bit"
+            );
+        }
+    }
+
+    /// **ONE AND TWO DEGREES OF FREEDOM INVERT IN CLOSED FORM, AT EVERY SCALE
+    /// OF `u64`.** R1286-rest-01, D-4150.
+    ///
+    /// One degree of freedom is the Cauchy, whose two-sided tail
+    /// `(2/pi) atan(1/t)` inverts to `1 / tan(pi * budget / 2)`; two invert to
+    /// `(1 - p) sqrt(2 / (p (2 - p)))`. At `u64::MAX` trials the Cauchy bar is
+    /// about `2.35e20`, 65 doublings above the normal bar it starts from, which
+    /// is the widest bracket any input needs. A bracket that grew by adding
+    /// two instead of doubling would still be open after the bound, and NaN.
+    #[test]
+    fn the_bar_at_one_and_two_degrees_of_freedom_is_the_closed_form() {
+        for trials in BAR_TRIALS {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a trial count as a probability denominator"
+            )]
+            let budget = FWER / trials as f64;
+            let cauchy = 1.0 / (core::f64::consts::FRAC_PI_2 * budget).tan();
+            let one = bonferroni_t_student(trials, 1);
+            assert!(
+                ((one - cauchy) / cauchy).abs() < 1e-11,
+                "{trials}, 1 df: {one:e} vs the Cauchy {cauchy:e}"
+            );
+            let two_exact = (1.0 - budget) * (2.0 / (budget * (2.0 - budget))).sqrt();
+            let two = bonferroni_t_student(trials, 2);
+            assert!(
+                ((two - two_exact) / two_exact).abs() < 1e-11,
+                "{trials}, 2 df: {two:e} vs {two_exact:e}"
+            );
+        }
+        let widest = bonferroni_t_student(u64::MAX, 1);
+        assert!(widest > 2.348e20 && widest < 2.349e20, "{widest:e}");
+    }
+
+    /// **THE WIDEST REAL BRACKET IS SIXTY-FIVE DOUBLINGS, SO THE BOUND NEVER
+    /// BITES ON A REAL INPUT.** R1286-rest-02, D-4150.
+    ///
+    /// The bar's own predicate, counted. Every point here takes between 202 and
+    /// 267 calls, and one degree of freedom at `u64::MAX` trials takes exactly
+    /// 267: 65 doublings, the call that closes the bracket, the refusal check
+    /// and 200 bisection steps. The answer is the bar's, to the bit.
+    #[test]
+    fn the_widest_real_bracket_is_sixty_five_doublings() {
+        for trials in BAR_TRIALS {
+            for df in [1, 2, 29, 100_000_000] {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a trial count as a probability denominator"
+                )]
+                let budget = FWER / trials as f64;
+                let calls = Cell::new(0_u32);
+                let bar = turning_point(bonferroni_t(trials).max(1.0), |t| {
+                    calls.set(calls.get() + 1);
+                    student_t_two_sided_tail(t, df) > budget
+                });
+                assert_eq!(
+                    bar.to_bits(),
+                    bonferroni_t_student(trials, df).to_bits(),
+                    "{trials}, {df} df"
+                );
+                assert!(
+                    (202..=267).contains(&calls.get()),
+                    "{trials}, {df} df: {} calls",
+                    calls.get()
+                );
+                if trials == u64::MAX && df == 1 {
+                    assert_eq!(calls.get(), 267, "65 doublings, the widest there is");
+                }
+            }
+        }
+    }
+
+    /// **A BRACKET THAT NEVER CLOSES REFUSES, AFTER A BOUNDED NUMBER OF
+    /// CALLS.** R1286-rest-02, D-4150.
+    ///
+    /// The loop this replaced was `while tail(high) > budget { high *= 2.0 }`.
+    /// A tail that never fell within the budget kept it running for ever: Gate
+    /// 18 run 1286 timed out on the tail replaced by `1.0`, and on the doubling
+    /// replaced by halving, which shrinks `high` towards zero, where the tail
+    /// is 1. Now a predicate that always holds is NaN after exactly 1,026
+    /// calls. The bound is exactly wide enough: a predicate that holds at every
+    /// finite `t` closes only at `+inf`, the 1,025th point, and turns there,
+    /// and one that turns at `2^1022` is found to the bit after 1,022
+    /// doublings. (`2^1023` is not: the midpoint `0.5 * (low + high)` overflows
+    /// above it, which is 2^950 times the widest bar any input has.)
+    #[test]
+    fn a_bracket_that_never_closes_is_nan_after_a_bounded_number_of_calls() {
+        let calls = Cell::new(0_u32);
+        let never = turning_point(1.0, |_| {
+            calls.set(calls.get() + 1);
+            true
+        });
+        assert!(never.is_nan(), "{never}");
+        assert_eq!(calls.get(), 1_026);
+
+        let only_at_infinity = turning_point(1.0, f64::is_finite);
+        assert!(
+            only_at_infinity.is_infinite() && only_at_infinity > 0.0,
+            "{only_at_infinity}"
+        );
+
+        let top = f64::from_bits(0x7fd0_0000_0000_0000);
+        for at in [
+            1.0,
+            5.225,
+            38.188_459_297_034_775,
+            2.348_712_402_626_175e20,
+            1e300,
+            top,
+        ] {
+            let found = turning_point(1.0, |t| t < at);
+            assert_eq!(found.to_bits(), at.to_bits(), "{found:e} for {at:e}");
+        }
     }
 
     #[test]

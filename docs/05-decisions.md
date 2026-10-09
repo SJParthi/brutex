@@ -65025,3 +65025,81 @@ on a live leader would derive a second time and lose the single-flight
 guarantee D-1443 exists for. **Honest limit:** the `Landing` kill depends on
 test order. A rename that sorted a single-flight test ahead of it would
 restore the timeout, so the ordering is pinned in the test's own doc.
+
+### D-4150 — `bonferroni_t_student` brackets within a bound and bisects on one predicate — 2026-10-08
+
+**What was observed.** Gate 18 run 1286 (head fbdabaec) left six mutants alive
+in `runner::significance`:
+
+- `bonferroni_t_student`, the bracket's `while tail(high) > budget` with `>` as
+  `>=` (MISSED), its `high *= 2.0` as `+=` (MISSED) and as `/=` (TIMEOUT);
+- the bisection's midpoint `0.5 * (low + high)` with `+` as `-` (MISSED), and
+  its `tail(mid) > budget` with `>` as `>=` (MISSED);
+- `student_t_two_sided_tail` replaced by `1.0` (TIMEOUT).
+
+Why each lived, measured with an untracked copy of these functions:
+
+- The two TIMEOUTs are one defect. The bracket was an unbounded `while`.
+  Halving drives `high` toward zero, where the tail is 1, and a tail of `1.0`
+  is over every budget, so neither loop ever left.
+- `+=` reaches every bar the tests asked for. They asked only at 29 and
+  10^8 degrees of freedom, where the bar is between 3.8 and 9 and the normal
+  bar it starts from is a few units below it.
+- The midpoint `0.5 * (low - high)` ends 2.9e-8 to 1.0e-6 above the shipped
+  bar at all eight audit points, and positive. The tail is even in `t` (it
+  reads `t * t`). With `low` and `high` of opposite signs the mutated midpoint
+  is the midpoint of their magnitudes, sign flipped, and each step still
+  replaces only the short end or only the clearing end. With equal signs it is
+  half their difference, a small short `|t|`, and that step is wasted. So the
+  walk converges more slowly but still inside 200 steps. At 3,689 trials and
+  29 df it ends at 5.22548953233398450, against 5.22548950345547336. The
+  audit table compares to 2e-3.
+- `>=` for `>` differs only where a tail equals the budget exactly. In the
+  bracket that is a doubling point, which no input was found to hit. At the
+  bar it happens on 457 of 18,483 `(trials, df)` pairs, but on none of the
+  audit table's points.
+
+**Decided.** The bracket and the bisection are now
+`significance::turning_point(start, short)`:
+
+- The bracket is a `for` loop of `f64::MAX_EXP + 1` doublings. From any start
+  of at least one, the 1,024th doubling is `+inf`. The tail there is exactly 0,
+  which is within every budget a `u64` trial count makes. So the bound closes
+  the bracket for every input. A bracket still open after it is NaN, never a
+  bar.
+- One predicate, `tail(t, df) > budget`, serves the bracket and the bisection.
+  The two cannot disagree, and `>=` for that `>` is one mutant, not two.
+
+The bisection's arithmetic is unchanged. Compared with the shipped function
+over 18,483 pairs (df `1..=64` then `3d + 1` up to `u64::MAX`; trials `1..=64`
+then `2t + 1` and `2t` up to `u64::MAX`), the result is bit-identical on every
+pair. The widest bracket any of them needs is 65 doublings, at one degree of
+freedom and `u64::MAX` trials.
+
+Tests:
+
+- R1286-rest-01. On 88 points, the bar clears by `clears_bonferroni`'s own rule
+  and the float one ulp below it does not. Two points where the tail at the bar
+  is the budget to the bit are pinned to the bit. At one and two degrees of
+  freedom the bar matches the closed-form inverse to 1e-11 relative, from 1 to
+  `u64::MAX` trials. The Cauchy bar there is 2.35e20.
+- R1286-rest-02. A predicate that always holds is NaN after exactly 1,026
+  calls. One that holds at every finite `t` turns at `+inf`. One that turns at
+  `2^1022` is found to the bit. The bar's own predicate takes 202 to 267 calls,
+  and exactly 267 at one degree of freedom and `u64::MAX` trials.
+
+**Rejected.**
+
+- Bisecting the bit patterns of `[0, +inf]` in a fixed 63 steps. It needs no
+  bracket at all. But the tail is non-monotone by a few ulps at the root, so it
+  lands on a different crossing in 205 of the 18,483 pairs, 2 to 5 ulps away.
+  The two-decimal report would not show it, but bit-identical results were
+  available, so they were kept.
+- A bound with a refusal inside `bonferroni_t_student` itself. No real tail
+  reaches it, so its arm could not be tested. In `turning_point` the test
+  supplies the predicate that reaches it.
+- Raising the mutation timeout. It only makes each hang cost more.
+
+**Honest limit.** The midpoint `0.5 * (low + high)` overflows above `2^1023`,
+so `turning_point` reports a turning point at or above that as `+inf`. The
+widest Student-t bar any `u64` trial count has is about `2^67.7`.
