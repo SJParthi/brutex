@@ -65258,3 +65258,27 @@ Test: DCC-01, `a_cas_prior_session_is_judged_against_the_shares_dated_close`
 (L1FD-06). It is re-pinned: the eligible share ending at 15:29 names
 "runs past its dated session close" and not "truncated", and the ineligible
 share ending at 15:14 names "Early or truncated" and not "runs past".
+
+### D-4755 — Validation evidence reconciles against the audit's exact placement — 2026-10-09
+
+**Finding.** G3-9 (low, latent). `ValidationEvidenceV1::from_runner` derived
+its fold diagnostic with the legacy adapter: `runner::pbo::place` and
+`probability_of_overfitting`. It refused a supplied `Pbo` that differed. The
+live audit's `Pbo` has been exact since D-1724 (`cli::overfitting_of`, through
+`place_v1` and `anchored_walk_forward_bottom_half_rate_v1`). So wiring this
+constructor with the audit's own figure would refuse on any exact half-rank
+fold.
+
+**Decision.** `derive_anchored_fold_diagnostic` is `crate::overfitting_of`. The
+evidence and the audit page now compute one figure from one function. Its
+absent case is unreachable here, because `from_runner` returns `Unmeasured`
+for no folds and refuses misaligned ones first. It still refuses by name
+rather than defaulting. The PBO admission fields stay `Unmeasured`, as
+before.
+
+**What changes.** No stored output changes, because there is no production
+caller. A test that supplied the legacy figure for a fold where the two
+differ now gets the refusal.
+
+Test: `the_supplied_diagnostic_is_the_audits_exact_placement_not_the_legacy_adapter`
+(L1FD-07). In its one fold the two figures differ.
