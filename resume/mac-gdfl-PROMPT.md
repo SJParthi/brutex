@@ -38,7 +38,7 @@ WORK, in this order (use Workflows; up to 6 agents while usage allows):
    {maxLive:6, niftyFirst:true, niftySkip:[], doneExtra:[every package with a "Merge WP-xx" commit on feat/db-fix],
    priority:[WP-30,WP-50,WP-52,WP-53,WP-32,WP-51,WP-54,WP-56,WP-55,WP-11b,WP-34,WP-37,WP-38b]}.
    Check resume/mac-gdfl-20261009.md (its last "Update" section) for what merged last: 17 of 37 at 16:55 UTC 9 Oct.
-   WP-30 (census serving) had uncommitted work in wt/P-WP-30 and was the last thing running.
+   WP-30 (census serving) was stopped at 98% with 15 uncommitted files in wt/P-WP-30 (backup state/resume-kit/wip-20261009/P-WP-30.*); it is first.
 2. Add the 18 new defects (new-defects-20261009.json) as packages for the next round, NIFTY ones first, including the
    blocking one: sorting a 1s series by price/volume over all months reads all 43.9M bars (4-7 s, 8-12 GB).
 3. As soon as WP-31, WP-50, WP-52 and WP-53 are merged: deploy feat/db-fix to :8080 (fast-forward wt/APP, npm run build
