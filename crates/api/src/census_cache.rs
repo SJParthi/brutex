@@ -22,6 +22,201 @@
 
 use super::Site;
 use crate::census;
+use brutex_core::vendor::Vendor;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// What `Site::census` holds: the last read of every vendor together, and the
+/// per-vendor cache every read is made through. See [`Cached`].
+///
+/// A `Mutex<Option<_>>` so `Site::new` starts it as `Mutex::new(None)`; the
+/// first reader fills it.
+pub type CensusCache = Mutex<Option<Cached>>;
+
+/// The census cache: one entry per vendor, keyed on that vendor's own
+/// manifest stamp, and the all-vendor read assembled from them. D-3327 item 1.
+///
+/// # Why per vendor (DB-059, DB-G06, DB-G79)
+///
+/// This was ONE entry keyed on every vendor's stamp together. The Zerodha
+/// minute pull rewrites `zerodha.man` every 0.5 to 2 s, so every such commit
+/// made the next reader of ANY feed re-read every manifest, `gdfl.man`'s
+/// 268 MB among them, re-sort every held entry, and re-encode and re-hash a
+/// 21 MB `/store.json?feed=gdfl` body whose census had not changed: p50
+/// 700 ms, p99 816 ms, measured during the pull on 6 Oct 2026. Now:
+///
+/// * each vendor has its own cell ([`Vendors`]), keyed on its own manifest's
+///   stamp, so a Zerodha commit leaves the GDFL cell a hit;
+/// * a cell that misses is rebuilt by ONE reader while the others wait for
+///   it (single-flight), and the rebuild extends the previous census by the
+///   appended entries alone wherever that reaches the same census
+///   ([`census::read_vendor_after`]);
+/// * the all-vendor read every older caller takes ([`census_now`]) is
+///   assembled from the cells, so its miss costs the changed vendor's tail
+///   and a few reference counts, and the merged entry list behind it is
+///   sorted only when a caller reads it ([`HeldEntries`]).
+#[derive(Debug, Default)]
+pub struct Cached {
+    /// The last all-vendor read, the stamps it was read under, and its
+    /// entries. What every [`census_now`] caller is handed.
+    every: Option<(
+        CensusStamps,
+        Arc<Vec<census::VendorCensus>>,
+        Arc<HeldEntries>,
+    )>,
+    /// One cell per vendor.
+    vendors: Arc<Vendors>,
+}
+
+impl Cached {
+    /// The stamps the all-vendor read was kept under, if one was kept.
+    #[cfg(test)]
+    pub(crate) fn kept_stamps(&self) -> Option<CensusStamps> {
+        self.every.as_ref().map(|(stamps, _, _)| stamps.clone())
+    }
+
+    /// Whether `vendor`'s own cell keeps a read.
+    #[cfg(test)]
+    pub(crate) fn keeps_vendor(&self, vendor: Vendor) -> bool {
+        self.vendors
+            .cells
+            .get(vendor as usize)
+            .is_some_and(|cell| cell.current().is_some())
+    }
+
+    /// A cache holding exactly this all-vendor read under `stamps`, and no
+    /// vendor cell: what a test plants to pin what a stale key serves.
+    #[cfg(test)]
+    pub(crate) fn planted(
+        stamps: CensusStamps,
+        censuses: Arc<Vec<census::VendorCensus>>,
+        entries: Arc<HeldEntries>,
+    ) -> Self {
+        Self {
+            every: Some((stamps, censuses, entries)),
+            vendors: Arc::default(),
+        }
+    }
+}
+
+/// Every vendor's cell, indexed by `vendor as usize`.
+#[derive(Debug, Default)]
+pub(crate) struct Vendors {
+    cells: [Cell; Vendor::ALL.len()],
+}
+
+/// One vendor's cache: its last kept census, and the lock one rebuild holds.
+#[derive(Debug, Default)]
+struct Cell {
+    slot: Mutex<Option<Kept>>,
+    build: Mutex<()>,
+}
+
+/// A kept read: the slot, and the stamp it is kept under.
+///
+/// The stamp sits beside the slot rather than in it, so a re-read that finds
+/// the census unchanged (a stamp that moved with no entry appended: a
+/// `touch`, a `chmod`, a header rewritten to the same counters) keeps the
+/// SAME slot under the new stamp, and every answer derived from the slot
+/// (the encoded bodies, the facet index, the audit rollup) stays kept.
+#[derive(Debug, Clone)]
+struct Kept {
+    stamp: ManifestStamp,
+    root_is_dir: bool,
+    slot: Arc<Slot>,
+}
+
+impl Cell {
+    fn current(&self) -> Option<Kept> {
+        self.slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// One vendor's census as one read left it.
+///
+/// Shared, never copied: every reader of an unchanged vendor is handed the
+/// same `Arc`, and the derived answers (the sorted entries here, the facet
+/// index and the encoded bodies elsewhere) are kept against it. A new slot
+/// is made only for a census that differs from the kept one
+/// ([`census::VendorCensus::same_read`]).
+#[derive(Debug)]
+pub(crate) struct Slot {
+    census: census::VendorCensus,
+    entries: OnceLock<Arc<Vec<(census::Series, store::path::YearMonth)>>>,
+}
+
+impl Slot {
+    /// A slot no cell keeps, over `census`: what a test of a cache keyed on
+    /// slots stands one read up with.
+    #[cfg(test)]
+    pub(crate) fn detached(census: census::VendorCensus) -> Arc<Self> {
+        Arc::new(Self {
+            census,
+            entries: OnceLock::new(),
+        })
+    }
+
+    /// The census this slot holds.
+    pub(crate) const fn census(&self) -> &census::VendorCensus {
+        &self.census
+    }
+
+    /// This vendor's held entries, newest month first, sorted once per slot
+    /// and shared after that.
+    pub(crate) fn entries(&self) -> Arc<Vec<(census::Series, store::path::YearMonth)>> {
+        Arc::clone(
+            self.entries
+                .get_or_init(|| Arc::new(census::held_entries(std::slice::from_ref(&self.census)))),
+        )
+    }
+}
+
+/// The merged held entries of every vendor, sorted the first time a caller
+/// reads them and never again for the same read.
+///
+/// Most [`census_now`] callers never read them (`/feeds.json`, `/audit.json`,
+/// `/calendar.json`, the pull's row count), and sorting every vendor's
+/// entries on every miss was part of what a Zerodha commit cost them.
+#[derive(Debug)]
+pub struct HeldEntries {
+    censuses: Arc<Vec<census::VendorCensus>>,
+    sorted: OnceLock<Vec<(census::Series, store::path::YearMonth)>>,
+}
+
+impl HeldEntries {
+    fn of(censuses: &Arc<Vec<census::VendorCensus>>) -> Self {
+        Self {
+            censuses: Arc::clone(censuses),
+            sorted: OnceLock::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for HeldEntries {
+    type Target = Vec<(census::Series, store::path::YearMonth)>;
+
+    fn deref(&self) -> &Self::Target {
+        self.sorted
+            .get_or_init(|| census::held_entries(&self.censuses))
+    }
+}
+
+impl PartialEq for HeldEntries {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+/// What [`census_now`] hands back: every vendor's census and their merged
+/// entries, shared not copied.
+///
+/// Named SEPARATELY from [`CensusCache`] because the cache also carries the
+/// stamps that make these two trustworthy, and a caller receiving them without
+/// the stamps cannot tell a current answer from one taken before the last
+/// pull. Two names, two meanings.
+pub type CensusNow = (Arc<Vec<census::VendorCensus>>, Arc<HeldEntries>);
 
 /// The census as it is on disk RIGHT NOW, not as it was at startup.
 ///
@@ -34,58 +229,8 @@ use crate::census;
 /// An operator watching a backfill saw nothing move, which reads as a broken
 /// run rather than a stale cache.
 ///
-/// It is cheap enough to do per request BECAUSE of what the census is: one
-/// header read per vendor plus a mapped entry region, never a directory walk.
-/// That is the whole point of `docs/06-limits.md` §32's layer — answering "what
-/// do I hold" without listing anything.
-///
-/// The cached copy on `Site` stays for the pages that were built against it;
-/// this is for the ones that must be current.
-/// `pub(crate)` so `/audit.json` reads the same fresh census this does, rather
-/// than growing a second spelling of "read the manifests now, not at startup".
-/// The census, the manifest stamps it was read at, and the entries it yielded.
-///
-/// A named type because clippy refuses the inline one, and because the three
-/// parts travel together by necessity: the stamps are what makes the other two
-/// trustworthy, and a reader holding the censuses without them cannot tell a
-/// current answer from one taken before the last pull.
-/// # `Arc` on the two payloads, and it is a cost fix rather than a style one
-///
-/// These were plain `Vec`s, and a cache HIT returned `censuses.clone()` and
-/// `entries.clone()` **from inside the mutex guard**. Both are whole-store
-/// structures — one `/store.json` body for a single feed measures 377,735 bytes
-/// — so six production paths serialised a full memcpy against each other, on a
-/// route the console polls every five seconds.
-///
-/// It also neutralised an optimisation already taken elsewhere: `census::
-/// filtered` was deliberately changed to return `Cow::Borrowed` to avoid
-/// copying entries, and `store_html` calls it on entries `census_now` had
-/// cloned one line earlier.
-///
-/// `Arc` makes a hit a refcount bump. Nothing else changes: the payloads are
-/// read-only after construction, every consumer reaches them through `Deref`,
-/// and the stamps stay plain values because they are small and compared rather
-/// than handed out.
-pub type CensusCache = std::sync::Mutex<
-    Option<(
-        CensusStamps,
-        std::sync::Arc<Vec<crate::census::VendorCensus>>,
-        std::sync::Arc<Vec<(crate::census::Series, store::path::YearMonth)>>,
-    )>,
->;
-
-/// What [`census_now`] hands back: the two cached halves, shared not copied.
-///
-/// Named because clippy refuses the inline tuple, and named SEPARATELY from
-/// [`CensusCache`] because the cache also carries the stamps that make these
-/// two trustworthy, and a caller receiving them without the stamps cannot tell
-/// a current answer from one taken before the last pull. Two aliases, two
-/// meanings.
-pub type CensusNow = (
-    std::sync::Arc<Vec<crate::census::VendorCensus>>,
-    std::sync::Arc<Vec<(crate::census::Series, store::path::YearMonth)>>,
-);
-
+/// Each request stats every vendor's manifest; a vendor whose stamp moved is
+/// re-read through its own cell ([`Cached`]), and only that vendor.
 pub(crate) fn census_now(site: &Site) -> CensusNow {
     census_now_stamped(site).1
 }
@@ -123,7 +268,71 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
 /// next written. So [`CensusStamps::modified`] takes the row as well, and
 /// hands a time only for one its stamp could have read. D-0695.
 pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
-    census_now_reading(site, census::read_all)
+    census_now_reading(site, |root| {
+        census::read_all_through(root, |vendor| {
+            vendor_slot(site, vendor, vendor_stamp(root, vendor), true)
+                .census
+                .clone()
+        })
+    })
+}
+
+/// One vendor's census, read through its own cell.
+///
+/// A hit is one lock and a reference count. A miss takes the cell's build
+/// lock, so concurrent readers of one changed vendor wait for one rebuild
+/// rather than each repeating it, and checks again under it: the reader that
+/// rebuilt has kept a slot every waiter then hits. The rebuild extends the
+/// previous census where it can ([`census::read_vendor_after`]). A census
+/// `stamp` could not have read ([`stamp_could_read`]) is handed to this
+/// reader and not kept, exactly as the all-vendor read is not (D-0695).
+fn vendor_slot(site: &Site, vendor: Vendor, stamp: ManifestStamp, root_is_dir: bool) -> Arc<Slot> {
+    let vendors = {
+        let mut held = site.census.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(&held.get_or_insert_with(Cached::default).vendors)
+    };
+    let fresh = |previous: Option<&census::VendorCensus>| {
+        let root = &site.store_root;
+        census::root_refusal(root).map_or_else(
+            || census::read_vendor_after(root, vendor, previous),
+            |why| census::unreadable_root_row(root, vendor, &why),
+        )
+    };
+    let Some(cell) = vendors.cells.get(vendor as usize) else {
+        // `Vendor::ALL` sizes the array and `vendor as usize` indexes it, so
+        // this cannot be reached; a read that keeps nothing is still right.
+        return Arc::new(Slot {
+            census: fresh(None),
+            entries: OnceLock::new(),
+        });
+    };
+    let matches = |kept: &Kept| kept.stamp == stamp && kept.root_is_dir == root_is_dir;
+    if let Some(kept) = cell.current().filter(|kept| matches(kept)) {
+        return kept.slot;
+    }
+    let _single_flight = cell.build.lock().unwrap_or_else(PoisonError::into_inner);
+    let previous = cell.current();
+    if let Some(kept) = previous.as_ref().filter(|kept| matches(kept)) {
+        return Arc::clone(&kept.slot);
+    }
+    let census = fresh(previous.as_ref().map(|kept| &kept.slot.census));
+    // THE SAME READ IS THE SAME SLOT: a stamp that moved with nothing
+    // appended keeps every answer derived from the kept slot.
+    let slot = match previous {
+        Some(kept) if kept.slot.census.same_read(&census) => kept.slot,
+        _ => Arc::new(Slot {
+            census,
+            entries: OnceLock::new(),
+        }),
+    };
+    if stamp_could_read(stamp, root_is_dir, &slot.census.state) {
+        *cell.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Kept {
+            stamp,
+            root_is_dir,
+            slot: Arc::clone(&slot),
+        });
+    }
+    slot
 }
 
 /// One vendor's census as the cache holds it right now: what
@@ -131,59 +340,67 @@ pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
 ///
 /// # A handle, not a copy
 ///
-/// A held census owns its manifest's whole entry index, so copying one row out
-/// per request would be O(entries), the cost the `Arc` in [`CensusCache`] was
-/// introduced to remove. The handle keeps the shared read alive and lends the
-/// one row out; taking it is a refcount bump.
-///
-/// # The interface the per-vendor cache keeps
-///
-/// Today every vendor shares one cache entry keyed on all five manifests'
-/// stamps, so one vendor's commit makes the next reader of any other vendor
-/// rebuild everything (DB-059, DB-G06). WP-30 keys each vendor on its own stamp
-/// behind this same signature. A caller written against [`vendor_census`] and
-/// [`Self::census`] does not change when it does.
+/// A held census shares its manifest's entry index behind an `Arc`, so the
+/// row here is a few reference counts, and the slot beside it is what the
+/// derived caches (the sorted entries, the facet index, the encoded bodies)
+/// are kept against.
 #[derive(Debug)]
 pub(crate) struct VendorCensusNow {
-    /// The shared read, every vendor's row in it.
-    censuses: std::sync::Arc<Vec<census::VendorCensus>>,
-    /// The vendor this handle answers for.
-    vendor: brutex_core::vendor::Vendor,
+    /// The vendor's row, as this request is to be answered.
+    census: census::VendorCensus,
+    /// The cell's slot it came from.
+    slot: Arc<Slot>,
 }
 
 impl VendorCensusNow {
-    /// The vendor's census row, or `None` when the read yielded no row for it.
+    /// The vendor's census row.
     ///
-    /// One index and one comparison. [`census::read_all`] yields one row per
-    /// `Vendor::ALL` entry, in that order, so the row at the vendor's own index
-    /// is its row; the search behind it runs only for a row out of that order,
-    /// which `read_all` never yields, and is bounded by the vendor count. It
-    /// answers exactly what `censuses.iter().find(|c| c.vendor == vendor)`
-    /// answers, so a caller moved onto this is answered as it was.
-    pub(crate) fn census(&self) -> Option<&census::VendorCensus> {
-        self.censuses
-            .get(self.vendor as usize)
-            .filter(|row| row.vendor == self.vendor)
-            .or_else(|| self.censuses.iter().find(|row| row.vendor == self.vendor))
+    /// Always `Some` since the per-vendor cache (D-3327): the row is read for
+    /// the vendor asked. The `Option` is kept so a caller written against the
+    /// WP-01 interface does not change.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the WP-01 signature every caller was written against; always `Some` now"
+    )]
+    pub(crate) const fn census(&self) -> Option<&census::VendorCensus> {
+        Some(&self.census)
+    }
+
+    /// The slot the row came from: one per kept read of this vendor.
+    pub(crate) const fn slot(&self) -> &Arc<Slot> {
+        &self.slot
     }
 }
 
-/// [`census_now_stamped`], narrowed to one vendor: the stamps the census is no
-/// older than, and that vendor's census.
+/// One vendor's census, read through ITS OWN cell and nothing else, and the
+/// stamps it is no older than.
 ///
-/// The read, its cache and its stamps are exactly [`census_now_stamped`]'s: a
-/// hit is a refcount bump and a miss reads every manifest, as it does for
-/// every caller today. What this adds is the one name later work codes
-/// against, so the per-vendor cache (WP-30) can change what a miss costs
-/// without changing a caller. The stamps come first for the reason
-/// [`census_now_stamped`] gives: a calendar or a body kept from this census is
-/// kept under them ([`CensusStamps::modified`]).
-pub(crate) fn vendor_census(
-    site: &Site,
-    vendor: brutex_core::vendor::Vendor,
-) -> (CensusStamps, VendorCensusNow) {
-    let (stamps, (censuses, _entries)) = census_now_stamped(site);
-    (stamps, VendorCensusNow { censuses, vendor })
+/// # What a caller of one feed pays (D-3327 item 1)
+///
+/// One `stat` per vendor (the stamps, so a calendar kept from this row is
+/// kept under its own manifest's time, [`CensusStamps::modified`]), and this
+/// vendor's cell: a hit, or this vendor's rebuild alone. Another vendor's
+/// commit does not move this vendor's stamp, so `/store.json?feed=gdfl` is a
+/// hit while Zerodha's pull commits. A row its stamp contradicts is handed
+/// over unreadable, by the same rule the all-vendor read applies
+/// ([`refuse_contradicted_absences`]).
+pub(crate) fn vendor_census(site: &Site, vendor: Vendor) -> (CensusStamps, VendorCensusNow) {
+    let stamps = manifest_stamps(&site.store_root);
+    let stamp = stamps
+        .manifests
+        .get(vendor as usize)
+        .copied()
+        .unwrap_or(ManifestStamp::Missing);
+    let slot = vendor_slot(site, vendor, stamp, stamps.root_is_dir);
+    let mut census = slot.census.clone();
+    refuse_contradicted_absences(&stamps, std::slice::from_mut(&mut census));
+    if matches!(census.state, census::Census::Absent) {
+        refuse_contradicted_absences(
+            &manifest_stamps(&site.store_root),
+            std::slice::from_mut(&mut census),
+        );
+    }
+    (stamps, VendorCensusNow { census, slot })
 }
 
 /// What one census probe answers for one instrument-month key.
@@ -196,6 +413,15 @@ pub(crate) fn vendor_census(
 /// which of the two it met asks [`census::VendorCensus::rows_of`] instead, and
 /// cannot fold them together without writing the arm that does it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the WP-01 probe the All sources work (WP-37) codes against. Its \
+                  production caller, `/instruments.json`'s per-symbol fold, now \
+                  reads the facet index (D-3327); the tests below prove the probe"
+    )
+)]
 pub(crate) enum RowsOf {
     /// The census loaded and holds this many rows for the key.
     Held(u64),
@@ -215,6 +441,13 @@ impl census::VendorCensus {
     /// answers from the generation it recovered, as `rows_for` does, and
     /// [`Self::degraded`] says so: degradation is a fact about the census, not
     /// about one key.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "see `RowsOf`: the WP-01 probe kept for WP-37, proven by the tests below"
+        )
+    )]
     pub(crate) fn rows_of(&self, key: &pull::manifest::EntryKey) -> RowsOf {
         match self.state {
             census::Census::Held { ref manifest } => manifest
@@ -297,7 +530,8 @@ pub(super) fn census_now_stamping(
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, censuses, entries)) = held.as_ref()
+        if let Some((at, censuses, entries)) =
+            held.as_ref().and_then(|cached| cached.every.as_ref())
             && *at == stamps
         {
             // A REFCOUNT BUMP, not a whole-store memcpy under the guard. See
@@ -337,7 +571,7 @@ pub(super) fn census_now_stamping(
         refuse_contradicted_absences(&stamp(&site.store_root), &mut censuses);
     }
     let censuses = std::sync::Arc::new(censuses);
-    let entries = std::sync::Arc::new(census::held_entries(&censuses));
+    let entries = std::sync::Arc::new(HeldEntries::of(&censuses));
     // AND ONLY A CENSUS THE STAMPS COULD HAVE READ IS KEPT UNDER THEM. A read
     // that contradicts its own key -- a root gone for this one read, a manifest
     // stamped present and read absent, an I/O error that moved no time -- is
@@ -352,11 +586,12 @@ pub(super) fn census_now_stamping(
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cached = held.get_or_insert_with(Cached::default);
         // Another cold reader may have finished the same manifest snapshot
         // while this request was reading. Keep its canonical Arc: replacing
         // it with identical data would invalidate the encoded-response cache
         // and repeat the full body encoding and hash for every cold reader.
-        if let Some((at, current_censuses, current_entries)) = held.as_ref()
+        if let Some((at, current_censuses, current_entries)) = cached.every.as_ref()
             && *at == stamps
         {
             return (
@@ -367,7 +602,7 @@ pub(super) fn census_now_stamping(
                 ),
             );
         }
-        *held = Some((
+        cached.every = Some((
             stamps.clone(),
             std::sync::Arc::clone(&censuses),
             std::sync::Arc::clone(&entries),
@@ -432,29 +667,154 @@ pub(super) fn census_now_stamping(
 /// same-modified-time gap as well, because every write moves it too; what is
 /// left is two changes inside one tick of the filesystem's clock. D-0695.
 pub(super) fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
-    let dir = store_root.join("manifest");
-    let manifests: Vec<ManifestStamp> = brutex_core::vendor::Vendor::ALL
+    let manifests: Vec<ManifestStamp> = Vendor::ALL
         .iter()
-        .map(|vendor| {
-            match std::fs::metadata(dir.join(format!("{}.man", vendor.as_str()))).and_then(|meta| {
-                Ok(ManifestStamp::At {
-                    modified: meta.modified()?,
-                    changed: status_changed(&meta),
-                })
-            }) {
-                Ok(stamp) => stamp,
-                Err(why) if why.kind() == std::io::ErrorKind::NotFound => ManifestStamp::Missing,
-                Err(why) => ManifestStamp::Faulted(why.kind()),
-            }
-        })
+        .map(|vendor| vendor_stamp(store_root, *vendor))
         .collect();
-    let root_is_dir = manifests
-        .iter()
-        .any(|stamp| matches!(stamp, ManifestStamp::At { .. }))
+    let root_is_dir = manifests.iter().any(ManifestStamp::answered)
         || std::fs::metadata(store_root).is_ok_and(|meta| meta.is_dir());
     CensusStamps {
         manifests,
         root_is_dir,
+    }
+}
+
+/// What one vendor's census files' `stat` calls said: [`manifest_stamps`]'s
+/// entry for one vendor, and what the vendor's own cell is keyed on.
+///
+/// # A migrated vendor is stamped by its partitions (D-3316 item 7)
+///
+/// One `lstat` of `manifest/v4/<vendor>/` comes first, because its existence
+/// decides which census [`census::read_vendor_after`] reads. A directory there
+/// is stamped by itself, each segment directory and each segment's current
+/// epoch ([`PartitionStamp`]): an append moves the epoch's times, a compaction
+/// installs a new epoch by rename and moves its directory's. Anything else at
+/// that name is stamped as the file it is, or as the fault its `lstat` met,
+/// which is what the reader refuses it as. No directory there is the single
+/// file, stamped exactly as before version 4.
+pub(super) fn vendor_stamp(store_root: &std::path::Path, vendor: Vendor) -> ManifestStamp {
+    let v4 = pull::manifest::vendor_dir(store_root, vendor);
+    match std::fs::symlink_metadata(&v4) {
+        Ok(meta) if meta.is_dir() => {
+            ManifestStamp::Partitioned(PartitionStamp::of(store_root, vendor, &meta))
+        }
+        Ok(meta) => stamp_of(Ok(meta)),
+        Err(absent)
+            if matches!(
+                absent.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::NotADirectory
+                    | std::io::ErrorKind::InvalidFilename
+            ) =>
+        {
+            stamp_of(std::fs::metadata(
+                store_root
+                    .join("manifest")
+                    .join(format!("{}.man", vendor.as_str())),
+            ))
+        }
+        Err(why) => ManifestStamp::Faulted(why.kind()),
+    }
+}
+
+/// One file's `stat`, as a stamp: its times, missing, or the fault's kind.
+fn stamp_of(meta: std::io::Result<std::fs::Metadata>) -> ManifestStamp {
+    match meta.and_then(|meta| {
+        Ok(ManifestStamp::At {
+            modified: meta.modified()?,
+            changed: status_changed(&meta),
+        })
+    }) {
+        Ok(stamp) => stamp,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => ManifestStamp::Missing,
+        Err(why) => ManifestStamp::Faulted(why.kind()),
+    }
+}
+
+/// A migrated vendor's stamp: its directory, and each segment's directory
+/// and current epoch, in [`pull::manifest::SEGMENTS`] order. D-3316, D-3327.
+///
+/// Costs one `lstat`, then per segment one listing of a directory that holds
+/// one file per compaction and one `stat` of the current epoch: seven calls
+/// for a migrated vendor, against one for a single file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PartitionStamp {
+    /// The vendor directory's own times.
+    dir: (std::time::SystemTime, StatusChanged),
+    /// Each segment's.
+    segments: [SegmentStamp; 3],
+}
+
+/// One segment's part of a [`PartitionStamp`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentStamp {
+    /// No such directory: an empty partition.
+    Missing,
+    /// Its directory's times, and its current epoch's number and times, or
+    /// `None` when it holds no epoch yet.
+    Listed {
+        dir: (std::time::SystemTime, StatusChanged),
+        epoch: Option<(u32, std::time::SystemTime, StatusChanged)>,
+    },
+    /// The directory or its epoch could not be listed or measured, by kind.
+    Faulted(std::io::ErrorKind),
+}
+
+impl PartitionStamp {
+    fn of(store_root: &std::path::Path, vendor: Vendor, meta: &std::fs::Metadata) -> Self {
+        let times = |meta: &std::fs::Metadata| {
+            meta.modified()
+                .map(|modified| (modified, status_changed(meta)))
+        };
+        let segment = |segment| -> SegmentStamp {
+            let dir = pull::manifest::segment_dir(store_root, vendor, segment);
+            let listed = match std::fs::metadata(&dir) {
+                Ok(listed) => listed,
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                    return SegmentStamp::Missing;
+                }
+                Err(why) => return SegmentStamp::Faulted(why.kind()),
+            };
+            let measured = times(&listed).and_then(|dir_times| {
+                let epoch = match census::current_epoch(&dir)? {
+                    None => None,
+                    Some(epoch) => {
+                        let file = std::fs::metadata(pull::manifest::epoch_path(
+                            store_root, vendor, segment, epoch,
+                        ))?;
+                        let (modified, changed) = times(&file)?;
+                        Some((epoch, modified, changed))
+                    }
+                };
+                Ok(SegmentStamp::Listed {
+                    dir: dir_times,
+                    epoch,
+                })
+            });
+            measured.unwrap_or_else(|why| SegmentStamp::Faulted(why.kind()))
+        };
+        let [index, cash, fno] = pull::manifest::SEGMENTS;
+        Self {
+            dir: times(meta).unwrap_or((std::time::SystemTime::UNIX_EPOCH, status_changed(meta))),
+            segments: [segment(index), segment(cash), segment(fno)],
+        }
+    }
+
+    /// The latest modified time among everything stamped: what a calendar
+    /// derived from this census is kept under ([`CensusStamps::modified`]).
+    /// Every append and every installed epoch sets one of these times to the
+    /// moment it was written, so the latest moves whenever the census does.
+    fn modified(&self) -> std::time::SystemTime {
+        self.segments
+            .iter()
+            .flat_map(|segment| match *segment {
+                SegmentStamp::Listed { dir, epoch } => {
+                    [Some(dir.0), epoch.map(|(_, modified, _)| modified)]
+                }
+                SegmentStamp::Missing | SegmentStamp::Faulted(_) => [None, None],
+            })
+            .flatten()
+            .fold(self.dir.0, std::cmp::max)
     }
 }
 
@@ -544,7 +904,7 @@ pub(super) fn stamp_could_read(
                         | Fault::Io(ErrorKind::PermissionDenied | ErrorKind::IsADirectory),
                     ..
                 },
-                ManifestStamp::At { .. },
+                ManifestStamp::At { .. } | ManifestStamp::Partitioned(_),
             ) => true,
             (
                 Census::Unreadable {
@@ -736,6 +1096,11 @@ impl CensusStamps {
             {
                 Some(modified)
             }
+            Some(stamp @ ManifestStamp::Partitioned(partitions))
+                if stamp_could_read(stamp, self.root_is_dir, &row.state) =>
+            {
+                Some(partitions.modified())
+            }
             _ => None,
         }
     }
@@ -748,6 +1113,11 @@ impl CensusStamps {
 /// and any other error it calls unreadable. Two outcomes sharing one key are two
 /// census states the cache cannot tell apart. D-0695.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a stamp is `Copy` and compared by value on every request, five per request; \
+              boxing the partition stamp would allocate per `stat` to save ~150 bytes"
+)]
 pub(super) enum ManifestStamp {
     /// It exists: last modified then, and its status last changed then.
     At {
@@ -762,6 +1132,16 @@ pub(super) enum ManifestStamp {
     /// Any other error, by kind: `NotADirectory` where a directory on the way
     /// is a file, `PermissionDenied` where one may not be searched.
     Faulted(std::io::ErrorKind),
+    /// A migrated vendor's partitions (D-3316): see [`vendor_stamp`].
+    Partitioned(PartitionStamp),
+}
+
+impl ManifestStamp {
+    /// Whether the `stat` found something there, which proves the store root
+    /// answered: a file's times, or a migrated vendor's directory.
+    const fn answered(&self) -> bool {
+        matches!(self, Self::At { .. } | Self::Partitioned(_))
+    }
 }
 
 /// A manifest's status-change time, `st_ctime` in seconds and nanoseconds.
@@ -826,6 +1206,8 @@ mod tests {
             site.census
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(Cached::kept_stamps)
                 .is_none(),
             "a fresh Site holds no census"
         );
@@ -836,7 +1218,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|(stamps, _, _)| stamps.clone());
+            .and_then(Cached::kept_stamps);
         assert!(
             stamped_after_first.is_some(),
             "the first call fills the cache"
@@ -864,7 +1246,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|(stamps, _, _)| stamps.clone());
+            .and_then(Cached::kept_stamps);
         assert_ne!(
             stamped_after_first, stamped_after_write,
             "writing a manifest must move the key the cache is held on, or a \
@@ -914,7 +1296,7 @@ mod tests {
             state,
         };
         let held = row(census::Census::Held {
-            manifest: Box::new(manifest),
+            manifest: census::Manifests::single(manifest),
         });
         assert_eq!(held.rows_of(&key), RowsOf::Held(375));
         assert_eq!(held.rows_for(&key), Some(375), "the probe is the same one");
@@ -938,7 +1320,8 @@ mod tests {
 
     /// **`vendor_census` LENDS THE CACHED ROW OF THE VENDOR ASKED FOR**, with the
     /// stamps it was read under, and shares the cached read rather than copying
-    /// it. WP-01's first interface.
+    /// it. WP-01's first interface, and since D-3327 a read of that vendor's
+    /// own cell only.
     ///
     /// Over a real store root: one vendor's manifest is written to disk, so the
     /// held row, the absent rows and the stamps all come off the read every
@@ -956,13 +1339,14 @@ mod tests {
         )
         .expect("a manifest on disk");
 
-        let (stamps, (every, _entries)) = census_now_stamped(&site);
+        let (stamps, _every) = census_now_stamped(&site);
         for vendor in Vendor::ALL {
             let (asked_under, now) = vendor_census(&site, vendor);
             assert_eq!(asked_under, stamps, "the stamps the census was read under");
+            let (_, again) = vendor_census(&site, vendor);
             assert!(
-                std::sync::Arc::ptr_eq(&now.censuses, &every),
-                "a hit lends the cached read; it never copies a census"
+                std::sync::Arc::ptr_eq(now.slot(), again.slot()),
+                "a hit lends the kept slot; it never reads again or copies a census"
             );
             let census = now.census().expect("one row per vendor");
             assert_eq!(census.vendor, vendor);
@@ -975,33 +1359,120 @@ mod tests {
         }
     }
 
-    /// **A ROW OUT OF VENDOR ORDER IS STILL FOUND, AND A MISSING ONE IS `None`.**
-    ///
-    /// `census` answers what `censuses.iter().find(|c| c.vendor == vendor)`
-    /// answers, which is what every caller moved onto it relied on. The index
-    /// is the fast path; this pins that it is never the only one, so a read
-    /// yielding rows in another order is answered the same, not as missing.
+    /// **ANOTHER VENDOR'S COMMIT LEAVES THIS VENDOR'S CELL A HIT** (DB-G79):
+    /// the cell is keyed on the vendor's own stamp, so rewriting Zerodha's
+    /// manifest neither re-reads GDFL's nor replaces its slot.
     #[test]
-    fn a_vendor_row_out_of_order_is_still_found_and_a_missing_one_is_none() {
+    fn another_vendors_commit_leaves_this_vendors_cell_a_hit() {
         use brutex_core::vendor::Vendor;
-        let row = |vendor| census::VendorCensus {
-            vendor,
-            path: std::path::PathBuf::from("/nonexistent/census-cache/any.man"),
-            state: census::Census::Absent,
-        };
-        let reversed: Vec<census::VendorCensus> = Vendor::ALL.into_iter().rev().map(row).collect();
-        let shared = std::sync::Arc::new(reversed);
-        for vendor in Vendor::ALL {
-            let now = VendorCensusNow {
-                censuses: std::sync::Arc::clone(&shared),
-                vendor,
-            };
-            assert_eq!(now.census().map(|c| c.vendor), Some(vendor));
-        }
-        let none = VendorCensusNow {
-            censuses: std::sync::Arc::new(vec![row(Vendor::Zerodha)]),
-            vendor: Vendor::Gdfl,
-        };
-        assert!(none.census().is_none(), "a vendor the read did not yield");
+        let dir = crate::scratch::path("vendor-cell-assets");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let site = site("vendor-cell", &dir);
+        let (_key, manifest) = held_nifty();
+        let gdfl = pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl);
+        std::fs::write(&gdfl, manifest.image()).expect("a manifest on disk");
+        let (_, first) = vendor_census(&site, Vendor::Gdfl);
+        let reads = census::manifest_reads::of(&gdfl);
+        std::fs::write(
+            pull::manifest::manifest_path(&site.store_root, Vendor::Zerodha),
+            b"another vendor's commit",
+        )
+        .expect("a second manifest");
+        let (every, _) = census_now(&site);
+        assert_eq!(
+            every.len(),
+            Vendor::ALL.len(),
+            "the all-vendor read still answers"
+        );
+        let (_, after) = vendor_census(&site, Vendor::Gdfl);
+        assert!(
+            std::sync::Arc::ptr_eq(first.slot(), after.slot()),
+            "GDFL's slot survives Zerodha's commit"
+        );
+        assert_eq!(
+            census::manifest_reads::of(&gdfl),
+            reads,
+            "and GDFL's manifest is not read again"
+        );
+    }
+
+    /// **A STAMP THAT MOVES WITH NOTHING APPENDED KEEPS THE SAME SLOT; AN
+    /// APPEND MAKES A NEW ONE, READ BY ITS TAIL** (D-3327 item 1).
+    ///
+    /// Every answer derived from a census (the 21 MB tuples body, the facet
+    /// index, the audit rollup) is kept against its slot. A re-read that found
+    /// the census unchanged made a new slot, so a `touch` of `gdfl.man` made
+    /// the next `/audit.json?feed=gdfl` recount every key and the next tuples
+    /// request encode the body again (measured on a shadow store: a 1.2 s
+    /// `/audit.json` while the stamp moved every 2 s). Now the unchanged read
+    /// is the same slot under the new stamp, nothing is read whole, and only a
+    /// real append makes a new slot, read by its tail alone.
+    #[test]
+    fn a_moved_stamp_with_nothing_appended_keeps_the_same_slot() {
+        use brutex_core::vendor::Vendor;
+        use std::os::unix::fs::FileExt as _;
+        let dir = crate::scratch::path("vendor-cell-same-read-assets");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let site = site("vendor-cell-same-read", &dir);
+        let (key, mut manifest) = held_nifty();
+        let gdfl = pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl);
+        std::fs::write(&gdfl, manifest.image()).expect("a manifest on disk");
+        let (stamped, first) = vendor_census(&site, Vendor::Gdfl);
+        let whole = census::manifest_reads::of(&gdfl);
+        let tails = census::manifest_reads::tails_of(&gdfl).len();
+
+        // THE STAMP MOVES, NOTHING IS APPENDED.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&gdfl)
+            .expect("open");
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_hours(24))
+            .expect("a new modified time");
+        let (moved, _) = vendor_census(&site, Vendor::Gdfl);
+        let (_, again) = vendor_census(&site, Vendor::Gdfl);
+        assert_ne!(moved, stamped, "the stamp moved");
+        assert!(
+            Arc::ptr_eq(first.slot(), again.slot()),
+            "the same read keeps the same slot under the new stamp"
+        );
+        assert_eq!(
+            census::manifest_reads::of(&gdfl),
+            whole,
+            "nothing read whole"
+        );
+
+        // AN APPEND: a new slot, read by its tail of one entry.
+        let append = manifest
+            .record(pull::manifest::Entry {
+                key,
+                rows: 750,
+                first_ts_micros: 1_788_926_700_000_000,
+                last_ts_micros: 1_789_949_140_000_000,
+            })
+            .expect("records");
+        file.write_all_at(&append.bytes, append.offset)
+            .expect("entry");
+        file.write_all_at(&append.commit.bytes, append.commit.offset)
+            .expect("slot");
+        let (_, grown) = vendor_census(&site, Vendor::Gdfl);
+        assert!(
+            !Arc::ptr_eq(first.slot(), grown.slot()),
+            "a new census, a new slot"
+        );
+        assert_eq!(
+            census::manifest_reads::of(&gdfl),
+            whole,
+            "still nothing read whole"
+        );
+        assert_eq!(
+            census::manifest_reads::tails_of(&gdfl).len(),
+            tails + 1,
+            "read by its tail"
+        );
+        assert_eq!(
+            grown.census().and_then(|row| row.rows_for(&key)),
+            Some(750),
+            "the appended row is the newest"
+        );
     }
 }

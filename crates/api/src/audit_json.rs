@@ -63,7 +63,7 @@
 //! p99 0.84 ms for `feed=zerodha`. The GDFL answer adds the import journal's
 //! summary (`crate::server::imports::summary`): p50 8.6 ms, p99 9.3 ms.
 
-use crate::server::{Loaded, Site, census_now, journal_trouble, param, window_text};
+use crate::server::{Loaded, Site, journal_trouble, param, window_text};
 use crate::{audit, ingest, render};
 use brutex_core::vendor::Vendor;
 use pull::session::Day;
@@ -760,41 +760,52 @@ pub(crate) struct FeedRollup {
     bars: u64,
 }
 
-/// [`feed_rollup`]'s answers for ONE census snapshot, one per feed asked.
+/// [`feed_rollup`]'s answers, one per feed asked, each for that feed's census
+/// read.
 ///
 /// # Why a cache and not the walk per request
 ///
-/// The audit console polls `/audit.json` every few seconds, and the census it
-/// reads only changes when a manifest does: `census_now` hands back the SAME
-/// `Arc` until a stamp moves. So the rollup is keyed on that `Arc`, exactly as
-/// `store_wire::Cache` keys `/store.json`'s encoded body, and a request against
-/// an unchanged census pays one lock, one pointer comparison and one map probe
-/// instead of a walk over the feed's entries. A new snapshot replaces every
-/// feed's rollup at once, so none can outlive the census it was counted from.
+/// The audit console polls `/audit.json` every few seconds, and a feed's
+/// census only changes when its manifest does: `vendor_census` hands back the
+/// SAME slot until that feed's stamp moves. So the rollup is keyed on that
+/// slot, exactly as `store_wire::Cache` keys `/store.json`'s encoded body, and
+/// a request against an unchanged census pays one lock, one pointer comparison
+/// and one map probe instead of a walk over the feed's entries. A feed's new
+/// read replaces that feed's rollup, so none can outlive the census it was
+/// counted from, and another feed's commit replaces nothing here (D-3327).
 ///
 /// The lock is not held while a rollup is counted: a miss counts outside it and
 /// then publishes, the same order `census_now` keeps for its own read. Two
 /// requests that miss together may each count; they count the same snapshot,
 /// so either answer is the same bytes.
 #[derive(Default, Debug)]
-pub(crate) struct RollupCache(std::sync::Mutex<Option<Rollups>>);
+pub(crate) struct RollupCache(std::sync::Mutex<Rollups>);
 
-/// The snapshot a [`RollupCache`] holds rollups for, and those rollups.
-#[derive(Debug)]
+/// One rollup per feed, each with the census read it was counted from.
+///
+/// Per feed since D-3327: each feed's census is its own cell's read
+/// (`crate::server::CensusSlot`), so a Zerodha commit replaces Zerodha's
+/// rollup and leaves GDFL's kept. One snapshot for every feed made each
+/// Zerodha commit re-count GDFL's every key on the next `feed=gdfl` request.
+#[derive(Debug, Default)]
 struct Rollups {
-    /// The census `Arc` these were counted from. Weak, so the cache never keeps
-    /// an old census alive.
-    source: std::sync::Weak<Vec<crate::census::VendorCensus>>,
-    /// One rollup per feed asked about since that snapshot.
-    feeds: std::collections::HashMap<Vendor, std::sync::Arc<FeedRollup>>,
+    /// The census read each rollup was counted from (weak, so the cache never
+    /// keeps an old census alive), and the rollup.
+    feeds: std::collections::HashMap<
+        Vendor,
+        (
+            std::sync::Weak<crate::server::CensusSlot>,
+            std::sync::Arc<FeedRollup>,
+        ),
+    >,
 }
 
 impl RollupCache {
-    /// `feed`'s rollup of `source`, counted by `count` only when this snapshot
-    /// has not been counted for `feed` yet.
+    /// `feed`'s rollup of `source`, counted by `count` only when this read of
+    /// that feed's census has not been counted yet.
     fn get(
         &self,
-        source: &std::sync::Arc<Vec<crate::census::VendorCensus>>,
+        source: &std::sync::Arc<crate::server::CensusSlot>,
         feed: Vendor,
         count: impl FnOnce() -> FeedRollup,
     ) -> std::sync::Arc<FeedRollup> {
@@ -804,27 +815,19 @@ impl RollupCache {
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(rollups) = held.as_ref()
-                && rollups.source.ptr_eq(&weak)
-                && let Some(rollup) = rollups.feeds.get(&feed)
+            if let Some((from, rollup)) = held.feeds.get(&feed)
+                && from.ptr_eq(&weak)
             {
                 return std::sync::Arc::clone(rollup);
             }
         }
         let rollup = std::sync::Arc::new(count());
-        let mut held = self
+        let _replaced = self
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !held.as_ref().is_some_and(|r| r.source.ptr_eq(&weak)) {
-            *held = Some(Rollups {
-                source: weak,
-                feeds: std::collections::HashMap::with_capacity(Vendor::ALL.len()),
-            });
-        }
-        if let Some(rollups) = held.as_mut() {
-            rollups.feeds.insert(feed, std::sync::Arc::clone(&rollup));
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .feeds
+            .insert(feed, (weak, std::sync::Arc::clone(&rollup)));
         rollup
     }
 }
@@ -839,15 +842,23 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
     // existing. The `/store` HTML page reads the cached copy and was measured
     // understating this store 6.8× (20.4 M rows against 139.7 M) after four
     // hours of backfill. A monitoring page must never be that page.
-    let (censuses, _every_feed) = census_now(site);
-    let census = censuses.iter().find(|c| c.vendor == feed);
+    //
+    // THIS FEED'S OWN CENSUS CELL (D-3327 item 1, DB-G79): another feed's
+    // commit moves another stamp, so `feed=gdfl` is a hit, and its rollup is
+    // kept, while Zerodha's pull commits. It was the all-vendor read, so every
+    // Zerodha commit re-counted GDFL's every key.
+    let (_stamps, now) = crate::server::vendor_census(site, feed);
+    let census = now.census();
     let rollup = census.map_or_else(
         || std::sync::Arc::new(FeedRollup::default()),
         |census| {
             site.audit_rollup
-                .get(&censuses, feed, || feed_rollup(census))
+                .get(now.slot(), feed, || feed_rollup(census))
         },
     );
+    // HOW FAR THE CENSUS IS BEHIND ITS IMPORT, AND THE WORD FOR IT (D-3327
+    // item 2, DB-G07): the same answer `/store.json`'s headers carry.
+    let behind = crate::server::census_behind(site, feed);
     let FeedRollup {
         ref months,
         instrument_months,
@@ -856,9 +867,10 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
 
     let _ = write!(
         out,
-        r#","store":{{"feed":{},"state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"capacity":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
+        r#","store":{{"feed":{},"state":{},"census_state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"capacity":{},"headroom":{},"behind_days":{},"behind_from":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
         render::json_string(feed.as_str()),
         render::json_string(census.map_or("absent", |c| c.state.name())),
+        render::json_string(census.map_or("absent", |c| c.state_word(behind.days))),
         render::json_string(&census.map_or_else(
             || format!("no census row for {} in this build", feed.as_str()),
             crate::census::VendorCensus::note
@@ -880,6 +892,18 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
             .and_then(committed_at)
             .map_or_else(|| "null".to_owned(), |secs| secs.to_string()),
         capacity(census),
+        census
+            .and_then(crate::census::VendorCensus::room)
+            .map_or_else(|| "null".to_owned(), |room| room.headroom.to_string()),
+        if behind.kept && behind.unread.is_none() {
+            behind.days.to_string()
+        } else {
+            "null".to_owned()
+        },
+        behind.from.map_or_else(
+            || "null".to_owned(),
+            |day| render::json_string(&day.to_string())
+        ),
     );
     for (n, (month, (held, rows))) in months.iter().enumerate() {
         if n > 0 {
@@ -894,8 +918,8 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
     out.push_str("]}");
 }
 
-/// The census's room: the entries this build lets one census hold
-/// (`pull::manifest::MAX_ENTRIES`), the entries committed, and what is left.
+/// The census's room: the entries the census may hold, the entries
+/// committed, and what is left, for the part that refuses an append first.
 /// `null` when the census did not load, never a zero that reads as "empty".
 ///
 /// # Why it is here (DB-G07)
@@ -904,17 +928,34 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
 /// surface said `held`: the import went on writing bars no census counted for
 /// eleven months of option days, and the only trace was an `error` line in the
 /// `cli` log. `free` is the number that would have said so first, and `full`
-/// says it in one word. Two field reads; no walk.
+/// says it in one word. Field reads; no walk.
+///
+/// # The file's own capacity (D-3316, D-3327)
+///
+/// `limit` was `pull::manifest::MAX_ENTRIES`, the constant compiled into this
+/// build. A version-4 partition declares its own capacity in its header, and
+/// a migrated vendor has one per segment, so the limit is now the tightest
+/// part's own ([`crate::census::VendorCensus::room`]), with its `segment` and
+/// `epoch`; a single file's is still `MAX_ENTRIES`, the bound it was written
+/// under.
 fn capacity(census: Option<&crate::census::VendorCensus>) -> String {
-    let Some(committed) = census.and_then(census_commits) else {
+    let Some(room) = census.and_then(crate::census::VendorCensus::room) else {
         return "null".to_owned();
     };
-    let limit = pull::manifest::MAX_ENTRIES;
+    let (limit, committed) = (room.capacity, room.committed);
     format!(
-        r#"{{"limit":{limit},"committed":{committed},"free":{},"over":{},"full":{}}}"#,
+        r#"{{"limit":{limit},"committed":{committed},"free":{},"over":{},"full":{},"segment":{},"epoch":{}}}"#,
         limit.saturating_sub(committed),
         committed.saturating_sub(limit),
         committed >= limit,
+        room.segment.map_or_else(
+            || "null".to_owned(),
+            |segment| render::json_string(segment.as_str())
+        ),
+        room.epoch.map_or_else(
+            || "null".to_owned(),
+            |epoch| render::json_string(&format!("{epoch:06}"))
+        ),
     )
 }
 
@@ -1345,11 +1386,12 @@ mod tests {
         }
     }
 
-    /// **ONE COUNT PER FEED PER CENSUS SNAPSHOT.** A second ask of the same
-    /// snapshot for the same feed is the same `Arc` and counts nothing; another
-    /// feed counts once; a new snapshot counts again (D-0732).
+    /// **ONE COUNT PER FEED PER CENSUS READ OF THAT FEED.** A second ask of
+    /// the same read for the same feed is the same `Arc` and counts nothing;
+    /// another feed counts once; a feed's new read counts that feed again and
+    /// leaves the other feed's rollup kept (D-0732, D-3327).
     #[test]
-    fn the_rollup_is_counted_once_per_feed_per_census_snapshot() {
+    fn the_rollup_is_counted_once_per_feed_per_census_read() {
         let cache = RollupCache::default();
         let counted = std::cell::Cell::new(0u32);
         let count = |bars: u64| {
@@ -1359,27 +1401,34 @@ mod tests {
                 ..FeedRollup::default()
             }
         };
-        let first = std::sync::Arc::new(Vec::new());
-        let a = cache.get(&first, Vendor::Dhan, || count(1));
-        let b = cache.get(&first, Vendor::Dhan, || count(2));
+        let read = |vendor| {
+            crate::server::CensusSlot::detached(crate::census::VendorCensus {
+                vendor,
+                path: std::path::PathBuf::from("/nonexistent/rollup/census.man"),
+                state: crate::census::Census::Absent,
+            })
+        };
+        let (dhan, groww) = (read(Vendor::Dhan), read(Vendor::Groww));
+        let a = cache.get(&dhan, Vendor::Dhan, || count(1));
+        let b = cache.get(&dhan, Vendor::Dhan, || count(2));
         assert!(std::sync::Arc::ptr_eq(&a, &b));
         assert_eq!((counted.get(), b.bars), (1, 1));
-        let other = cache.get(&first, Vendor::Groww, || count(3));
+        let other = cache.get(&groww, Vendor::Groww, || count(3));
         assert_eq!((counted.get(), other.bars), (2, 3));
-        assert_eq!(cache.get(&first, Vendor::Dhan, || count(4)).bars, 1);
+        assert_eq!(cache.get(&dhan, Vendor::Dhan, || count(4)).bars, 1);
         assert_eq!(counted.get(), 2);
 
-        let second = std::sync::Arc::new(Vec::new());
-        let c = cache.get(&second, Vendor::Dhan, || count(5));
+        let dhan_again = read(Vendor::Dhan);
+        let c = cache.get(&dhan_again, Vendor::Dhan, || count(5));
         assert_eq!((counted.get(), c.bars), (3, 5));
-        // The new snapshot replaced the old one's rollups, for every feed.
-        assert_eq!(cache.get(&second, Vendor::Groww, || count(6)).bars, 6);
-        assert_eq!(counted.get(), 4);
+        // Dhan's new read replaced Dhan's rollup and nobody else's.
+        assert_eq!(cache.get(&groww, Vendor::Groww, || count(6)).bars, 3);
+        assert_eq!(counted.get(), 3);
     }
 
     /// **A REQUEST AGAINST AN UNCHANGED CENSUS COUNTS NOTHING, AND A REWRITTEN
     /// MANIFEST IS COUNTED AGAIN.** The first `/audit.json` body leaves the
-    /// asked feed's rollup cached for the census `census_now` hands back, so a
+    /// asked feed's rollup cached for the census `vendor_census` hands back, so a
     /// later ask of that snapshot does not run its counter. A manifest
     /// rewritten under a new modified time is a new census and the next body
     /// carries its months, not the cached ones (D-0732).
@@ -1408,8 +1457,8 @@ mod tests {
             json.contains(r#""instrument_months":1,"bars":3,"months":["#),
             "{json}"
         );
-        let (censuses, _) = census_now(&site);
-        let cached = site.audit_rollup.get(&censuses, Vendor::Dhan, || {
+        let (_, now) = crate::server::vendor_census(&site, Vendor::Dhan);
+        let cached = site.audit_rollup.get(now.slot(), Vendor::Dhan, || {
             panic!("counted again for an unchanged census")
         });
         assert_eq!(cached.bars, 3);

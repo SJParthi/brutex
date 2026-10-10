@@ -751,8 +751,28 @@ const fn key(
 /// and `Unreadable` has no honest answer here at all — it is refused by the
 /// caller before a probe is ever built. Same shape as
 /// `autopilot::next_window`, for the same reason.
-pub fn probing(census: &Manifest) -> impl Fn(&EntryKey) -> bool + '_ {
-    |k| census.entry(k).is_some()
+pub fn probing<C: HoldsKey + ?Sized>(census: &C) -> impl Fn(&EntryKey) -> bool + '_ {
+    |k| census.holds(k)
+}
+
+/// A census [`probing`] can ask: one manifest, or a vendor's census read
+/// through `crate::census::Manifests`, which since D-3316 may be a migrated
+/// vendor's partitions. One hash probe either way.
+pub trait HoldsKey {
+    /// Whether the census holds `key`.
+    fn holds(&self, key: &EntryKey) -> bool;
+}
+
+impl HoldsKey for Manifest {
+    fn holds(&self, key: &EntryKey) -> bool {
+        self.entry(key).is_some()
+    }
+}
+
+impl HoldsKey for crate::census::Manifests {
+    fn holds(&self, key: &EntryKey) -> bool {
+        self.entry(key).is_some()
+    }
 }
 
 #[cfg(test)]

@@ -326,7 +326,7 @@ type HeldMonths = std::collections::BTreeMap<store::path::Timeframe, Vec<store::
 /// the feed holds (W1-api5-5): about 1.5 s on GDFL's census. It now runs once
 /// per feed generation, on a miss.
 fn held_series(
-    manifest: &pull::manifest::Manifest,
+    manifest: &census::Manifests,
     symbol: &str,
 ) -> std::collections::BTreeMap<SpotIdentity, HeldMonths> {
     let mut held: std::collections::BTreeMap<SpotIdentity, HeldMonths> =
@@ -360,7 +360,7 @@ fn held_series(
 /// The census entry of one rung and month of `identity`, as
 /// [`crate::calendar_of::CensusEntry`]: one probe.
 fn entry_of(
-    manifest: &pull::manifest::Manifest,
+    manifest: &census::Manifests,
     identity: SpotIdentity,
 ) -> impl Fn(store::path::Timeframe, store::path::YearMonth) -> Option<crate::calendar_of::CensusEntry>
 + '_ {
@@ -385,7 +385,7 @@ fn entry_of(
 struct Evidence<'a> {
     site: &'a Site,
     feed: Vendor,
-    manifest: &'a pull::manifest::Manifest,
+    manifest: &'a census::Manifests,
 }
 
 impl Evidence<'_> {
@@ -511,7 +511,7 @@ fn build(
         record::withheld(feed.as_str(), asked_rung, target, generation, &reason)
     };
     let Some(manifest) = own.and_then(|row| match row.state {
-        census::Census::Held { ref manifest } => Some(manifest.as_ref()),
+        census::Census::Held { ref manifest } => Some(manifest),
         census::Census::Absent | census::Census::Unreadable { .. } => None,
     }) else {
         // AN ABSENT CENSUS IS THE ORDINARY STATE BEFORE A FIRST PULL, AND IT

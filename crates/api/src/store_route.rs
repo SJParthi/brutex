@@ -11,12 +11,13 @@
 //! No route answers differently because of the move.
 
 use super::{
-    Loaded, Site, Unknown, census_now, hex32, month_before, month_change, no_such_feed_json,
-    note_header, param, store_wire,
+    Loaded, Site, Unknown, hex32, month_before, month_change, no_such_feed_json, note_header,
+    param, store_wire, vendor_census,
 };
 use crate::{census, ingest, render};
 use brutex_core::vendor::Vendor;
 use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 
 /// The state of the selected feed's census, as one stable word.
 ///
@@ -34,6 +35,43 @@ pub const CENSUS_NOTE_HEADER: &str = "x-brutex-census-note";
 /// **always-present, sometimes-empty** value keeps "nothing was stepped over"
 /// and "this build does not say" apart — an absent header is the second.
 pub const CENSUS_DEGRADED_HEADER: &str = "x-brutex-census-degraded";
+
+/// The census's commit counter ([`census::VendorCensus::generation`]), or
+/// empty when no census loaded. D-3327 item 2.
+pub(crate) const CENSUS_GENERATION_HEADER: &str = "x-brutex-census-generation";
+
+/// The entries the tightest part may hold, from its own header. D-3327.
+pub(crate) const CENSUS_CAPACITY_HEADER: &str = "x-brutex-census-capacity";
+
+/// The entries the tightest part has left. D-3327, DB-G07.
+pub(crate) const CENSUS_HEADROOM_HEADER: &str = "x-brutex-census-headroom";
+
+/// Each partition's current epoch, `INDEX=000001,CASH=000001,FNO=000003`
+/// (`none` for a partition with no epoch yet), or empty for a single file.
+/// D-3327, D-3316.
+pub(crate) const CENSUS_EPOCH_HEADER: &str = "x-brutex-census-epoch";
+
+/// Days the import journal closed census-refused and has not recounted
+/// (D-3317), or empty where the feed keeps no import journal. D-3327.
+pub(crate) const CENSUS_BEHIND_DAYS_HEADER: &str = "x-brutex-census-behind-days";
+
+/// The first such day, `YYYY-MM-DD`, or empty. D-3327.
+pub(crate) const CENSUS_BEHIND_FROM_HEADER: &str = "x-brutex-census-behind-from";
+
+/// Why the state is `capped` or `behind`, in a sentence; empty when it is
+/// neither.
+///
+/// # Why not in `x-brutex-census-degraded`
+///
+/// That header means what LOADING stepped over: a damaged generation, so the
+/// rows are an OLDER census than the one committed. Every reader treats a
+/// non-empty value so, and refuses to draw the census at all
+/// (`web/src/lib/store-census.js`, `degradedRefusal`). A census that is
+/// behind its import or near its capacity is the current one, complete for
+/// every month it counts; refusing to draw it would hide the months it does
+/// hold to report the ones it does not. So that fact has its own header and
+/// its own state word, and is never folded into "damaged" (DB-G07, DB-G11).
+pub(crate) const CENSUS_REASON_HEADER: &str = "x-brutex-census-reason";
 
 /// The three census facts, stamped on a JSON response that cannot carry them
 /// in its body.
@@ -53,21 +91,38 @@ pub const CENSUS_DEGRADED_HEADER: &str = "x-brutex-census-degraded";
 /// to show is `x-brutex-census-note`. The response also carries a non-200 for
 /// that state, so a reader that only checks `r.ok` stops calling it empty.
 /// D-0124.
+#[cfg(test)]
 pub(super) fn census_headers(census: Option<&census::VendorCensus>) -> axum::http::HeaderMap {
+    census_headers_with(census, None)
+}
+
+/// [`census_headers`], with what the import journal says about the census
+/// when the caller asked it ([`behind`]). D-3327 item 2.
+///
+/// The state word is [`census::VendorCensus::state_word`]: `held`, `absent`
+/// and `unreadable` as before, and `capped` or `behind` for a census that
+/// loaded and cannot be called complete. Every new header is ALWAYS present,
+/// empty where it does not apply, so "this build says nothing" (no header)
+/// and "nothing to say" (empty) stay apart, as `CENSUS_DEGRADED_HEADER`
+/// already keeps them. The behind headers are absent only when the caller did
+/// not ask the journal.
+pub(super) fn census_headers_with(
+    census: Option<&census::VendorCensus>,
+    behind: Option<&Behind>,
+) -> axum::http::HeaderMap {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
     );
+    let behind_days = behind.map_or(0, |behind| behind.days);
     headers.insert(
         axum::http::HeaderName::from_static(CENSUS_STATE_HEADER),
-        axum::http::HeaderValue::from_static(match census.map(|c| &c.state) {
-            Some(census::Census::Held { .. }) => "held",
-            Some(census::Census::Unreadable { .. }) => "unreadable",
-            // A feed with no row is `absent`, which is what
-            // `audit_json::store_block` already answers for the same input.
-            Some(census::Census::Absent) | None => "absent",
-        }),
+        // A feed with no row is `absent`, which is what
+        // `audit_json::store_block` already answers for the same input.
+        axum::http::HeaderValue::from_static(
+            census.map_or("absent", |census| census.state_word(behind_days)),
+        ),
     );
     headers.insert(
         axum::http::HeaderName::from_static(CENSUS_NOTE_HEADER),
@@ -84,7 +139,207 @@ pub(super) fn census_headers(census: Option<&census::VendorCensus>) -> axum::htt
                 .unwrap_or_default(),
         ),
     );
+    let room = census.and_then(census::VendorCensus::room);
+    let number = |value: Option<u64>| value.map_or_else(String::new, |n| n.to_string());
+    for (name, value) in [
+        (
+            CENSUS_GENERATION_HEADER,
+            number(census.and_then(census::VendorCensus::generation)),
+        ),
+        (
+            CENSUS_CAPACITY_HEADER,
+            number(room.map(|room| room.capacity)),
+        ),
+        (
+            CENSUS_HEADROOM_HEADER,
+            number(room.map(|room| room.headroom)),
+        ),
+        (CENSUS_EPOCH_HEADER, census.map_or_else(String::new, epochs)),
+        (CENSUS_REASON_HEADER, reason(room.as_ref(), behind)),
+    ] {
+        headers.insert(
+            axum::http::HeaderName::from_static(name),
+            note_header(&value),
+        );
+    }
+    if let Some(behind) = behind {
+        headers.insert(
+            axum::http::HeaderName::from_static(CENSUS_BEHIND_DAYS_HEADER),
+            note_header(&if behind.kept {
+                behind.days.to_string()
+            } else {
+                String::new()
+            }),
+        );
+        headers.insert(
+            axum::http::HeaderName::from_static(CENSUS_BEHIND_FROM_HEADER),
+            note_header(&behind.from.map_or_else(String::new, |day| day.to_string())),
+        );
+    }
     headers
+}
+
+/// Each partition's current epoch, as [`CENSUS_EPOCH_HEADER`] spells it.
+fn epochs(census: &census::VendorCensus) -> String {
+    let census::Census::Held { ref manifest } = census.state else {
+        return String::new();
+    };
+    if !manifest.is_partitioned() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (n, part) in manifest.parts().iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{}={}",
+            part.segment().map_or("", |segment| segment.as_str()),
+            part.epoch()
+                .map_or_else(|| "none".to_owned(), |epoch| format!("{epoch:06}"))
+        );
+    }
+    out
+}
+
+/// [`CENSUS_REASON_HEADER`]'s sentence: behind first, then capped, then a
+/// journal that could not be read.
+fn reason(room: Option<&census::Room>, behind: Option<&Behind>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(behind) = behind {
+        if behind.days > 0 {
+            parts.push(format!(
+                "behind: the import journal closed {} day(s) census-refused from {} and has \
+                 not recounted them, so their bars are on disk and not in this census; \
+                 `cli census-recount` counts them from the bar files (D-3316, D-3317)",
+                behind.days,
+                behind.from.map_or_else(String::new, |day| day.to_string())
+            ));
+        }
+        if let Some(why) = &behind.unread {
+            parts.push(format!(
+                "the import journal could not be read ({why}), so whether this census is \
+                 behind its import is not known"
+            ));
+        }
+    }
+    if let Some(capped) = room.and_then(census::Room::capped_reason) {
+        parts.push(capped);
+    }
+    parts.join("; ")
+}
+
+/// How far a feed's census is behind the bars its import wrote. D-3327 item
+/// 2, DB-G03, DB-G11, DB-G60, DB-G78.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Behind {
+    /// Distinct days the import journal closed census-refused and has not
+    /// recounted.
+    pub(crate) days: u64,
+    /// The first of them.
+    pub(crate) from: Option<pull::session::Day>,
+    /// Whether this feed keeps an import journal at all; `false` writes the
+    /// behind-days header empty rather than `0`.
+    pub(crate) kept: bool,
+    /// Why the journal could not be read, when it could not.
+    pub(crate) unread: Option<String>,
+}
+
+/// What [`behind`] last answered, and the journal and log reads it was
+/// derived from: the same `Arc`s again are the same answer.
+#[derive(Debug, Default)]
+pub(super) struct BehindCache(Mutex<Option<BehindKept>>);
+
+/// One kept [`behind`] answer: the journal read, the log read, the answer.
+type BehindKept = (
+    Arc<super::import_journal::Parsed>,
+    Arc<crate::logs::ImportRefusals>,
+    Behind,
+);
+
+/// How far `feed`'s census is behind its import (D-3327 item 2).
+///
+/// # Read from the import journal, never from the bar tree
+///
+/// A day the census refused is closed `incomplete` (or `refused`) by the
+/// importer with `stage=census`, and before D-3317 with no stage at all, the
+/// importer's own `refused` event naming the census instead; the stage is
+/// settled exactly as `/imports.json` settles it (`imports::stage_of`). A day
+/// later closed `recounted` (or `done`) is not behind. Counting the bar
+/// files the census does not hold would be the directory walk the census
+/// exists to avoid (`docs/07-o1-architecture.md` law 3).
+///
+/// # Cost
+///
+/// The journal and the `cli` log are each read through their own tail
+/// (`import_journal::snapshot`, `logs::import_refusals`): a `stat`, and the
+/// new bytes. The count is a walk of the journal's days (2,000 on the
+/// operator's store) made once per change of either, and kept against them;
+/// a request with neither changed is two pointer comparisons.
+pub(crate) fn behind(site: &Site, feed: Vendor) -> Behind {
+    // ONLY GDFL'S IMPORT KEEPS A JOURNAL (`pull::gdfl_import::journal_path`).
+    // A broker pull records its runs in the audit journal, which says nothing
+    // about a census refusal, so every other feed is not measured here and
+    // says so with an empty header rather than a zero.
+    if feed != Vendor::Gdfl {
+        return Behind::default();
+    }
+    let snapshot = match super::import_journal::snapshot(&site.store_root) {
+        Ok(snapshot) => snapshot,
+        Err(why) => {
+            return Behind {
+                kept: true,
+                unread: Some(why),
+                ..Behind::default()
+            };
+        }
+    };
+    let evidence = crate::logs::import_refusals(&site.store_root);
+    let cache = &site.census_wire.behind;
+    if let Ok(held) = cache.0.lock()
+        && let Some((parsed, logged, answer)) = held.as_ref()
+        && Arc::ptr_eq(parsed, &snapshot.parsed)
+        && Arc::ptr_eq(logged, &evidence)
+    {
+        return answer.clone();
+    }
+    let answer = behind_in(&snapshot.parsed, &evidence);
+    if let Ok(mut held) = cache.0.lock() {
+        *held = Some((Arc::clone(&snapshot.parsed), evidence, answer.clone()));
+    }
+    answer
+}
+
+/// [`behind`]'s count over one journal read and one log read.
+fn behind_in(
+    parsed: &super::import_journal::Parsed,
+    evidence: &crate::logs::ImportRefusals,
+) -> Behind {
+    let mut out = Behind {
+        kept: true,
+        ..Behind::default()
+    };
+    let Some((first, last)) = parsed.span() else {
+        return out;
+    };
+    let census_stage = pull::gdfl_import::Stage::Census.as_str();
+    let mut counted: Option<pull::session::Day> = None;
+    for row in parsed.range(first, last) {
+        if row.outcome.is_done() {
+            continue;
+        }
+        let logged = evidence.of(row.kind.as_str(), &row.day.to_string());
+        let refused_by_census =
+            super::imports::stage_of(row, logged).is_some_and(|(stage, _)| stage == census_stage);
+        if !refused_by_census || counted == Some(row.day) {
+            continue;
+        }
+        counted = Some(row.day);
+        out.days = out.days.saturating_add(1);
+        out.from = Some(out.from.map_or(row.day, |from| from.min(row.day)));
+    }
+    out
 }
 
 /// Whether the selected feed's counter refused to load.
@@ -398,8 +653,10 @@ pub(super) fn store_response(
             );
         }
     };
-    let (censuses, entries) = census_now(site);
-    let census = censuses.iter().find(|c| c.vendor == feed);
+    // THIS FEED'S OWN CELL, NOTHING ELSE (D-3327 item 1). Another feed's
+    // commit moves another stamp; this read is a hit while it does.
+    let (_stamps, now) = vendor_census(site, feed);
+    let census = now.census();
     // 503, FOR THE REASON `health` GIVES: a monitor reads the status code and
     // nothing else. The body stays an array so the readers that only want rows
     // are untouched.
@@ -408,19 +665,23 @@ pub(super) fn store_response(
     } else {
         axum::http::StatusCode::OK
     };
-    let mut headers = census_headers(census);
+    let behind = behind(site, feed);
+    let mut headers = census_headers_with(census, Some(&behind));
 
     // HEAD is a header read, not a full census encoding whose body Axum drops.
     // Representation headers that require generating a body are omitted.
     if method == axum::http::Method::HEAD {
         return (code, headers, axum::body::Bytes::new());
     }
-    let encoded = match site
-        .census_wire
-        .get(&censuses, feed, format, || match format {
-            store_wire::Format::Expanded => Ok(store_body(&censuses, &entries, feed)),
-            store_wire::Format::Compact => store_wire::compact(&censuses, &entries, feed),
-        }) {
+    let row = census.map(std::slice::from_ref).unwrap_or_default();
+    let slot = now.slot();
+    let encoded = match site.census_wire.get(slot, feed, format, || {
+        let entries = slot.entries();
+        match format {
+            store_wire::Format::Expanded => Ok(store_body(row, &entries, feed)),
+            store_wire::Format::Compact => store_wire::compact(row, &entries, feed),
+        }
+    }) {
         Ok(encoded) => encoded,
         Err(why) => {
             return (
@@ -739,6 +1000,215 @@ mod tests {
             ),
             "[]"
         );
+    }
+
+    /// One GDFL row of NIFTY 1-second bars, 2019-11, at the census's next
+    /// generation: what the header tests below write. Invented counts.
+    fn gdfl_nifty(manifest: &mut pull::manifest::Manifest, rows: u64) {
+        let _append = manifest
+            .record_held(pull::manifest::Held::new(
+                pull::manifest::Entry {
+                    key: series_at(Segment::Index, "NIFTY", Timeframe::SECOND_1)
+                        .at(month(2019, 11)),
+                    rows,
+                    first_ts_micros: 1_572_580_800_000_000,
+                    last_ts_micros: 1_572_603_000_000_000,
+                },
+                Closes::UNKNOWN,
+            ))
+            .expect("records");
+    }
+
+    /// `/store.json`'s answer to `method` for `query`, over `site`.
+    fn ask(
+        site: &Site,
+        method: &axum::http::Method,
+        query: &str,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap) {
+        let uri: axum::http::Uri = format!("/store.json?{query}").parse().expect("a uri");
+        let (code, headers, _body) =
+            store_response(site, &axum::http::HeaderMap::new(), &uri, method);
+        (code, headers)
+    }
+
+    fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> &'a str {
+        headers
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is always present: {headers:?}"))
+            .to_str()
+            .expect("ascii")
+    }
+
+    /// **A CENSUS BEHIND ITS IMPORT SAYS `behind` ON `/store.json` AND ITS
+    /// HEAD, WITH HOW MANY DAYS AND THE FIRST, AND A RECOUNT CLEARS IT DAY BY
+    /// DAY** (D-3327 item 2; DB-G03, DB-G07, DB-G11, DB-G60, DB-G78).
+    ///
+    /// The operator's census refused every options day from 2019-11-14 while
+    /// these headers said `held` with an empty degraded header. Here the
+    /// journal closes two options days census-refused (the D-3317 shape, with
+    /// `stage=census`), one day `done` between them and a day refused at the
+    /// vendor, which is not a census day. The state is `behind`, two days,
+    /// from the first; `x-brutex-census-degraded` stays empty because the
+    /// census is not damaged. A `recounted` line for the first day leaves one
+    /// day, from the second. Zerodha keeps no import journal, so its
+    /// behind-days header is empty, never `0`. Every new header is present on
+    /// HEAD as on GET.
+    #[test]
+    fn a_census_behind_its_import_says_so_and_a_recount_clears_it() {
+        let dir = crate::server::tests::agreeing("store-behind");
+        let site = crate::server::tests::site("store-behind", &dir);
+        let mut manifest =
+            pull::manifest::Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+        gdfl_nifty(&mut manifest, 375);
+        gdfl_nifty(&mut manifest, 750);
+        std::fs::write(
+            pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl),
+            manifest.image(),
+        )
+        .expect("a census on disk");
+        let journal = pull::gdfl_import::journal_path(&site.store_root);
+        std::fs::create_dir_all(journal.parent().expect("imports/")).expect("mkdir");
+        std::fs::write(
+            &journal,
+            "\
+begin options 2019-11-13 *
+done options 2019-11-13 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0
+begin options 2019-11-15 *
+incomplete options 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000
+begin options 2019-11-18 *
+done options 2019-11-18 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0
+begin options 2019-11-19 *
+incomplete options 2019-11-19 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000
+begin indices 2022-03-07 *
+refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=1791300000
+",
+        )
+        .expect("a journal");
+
+        for method in [axum::http::Method::HEAD, axum::http::Method::GET] {
+            let (code, headers) = ask(&site, &method, "feed=gdfl&encoding=census-tuples-v1");
+            assert_eq!(code, axum::http::StatusCode::OK, "{method}");
+            assert_eq!(header(&headers, CENSUS_STATE_HEADER), "behind", "{method}");
+            assert_eq!(header(&headers, CENSUS_DEGRADED_HEADER), "", "not damaged");
+            assert_eq!(header(&headers, CENSUS_BEHIND_DAYS_HEADER), "2", "{method}");
+            assert_eq!(header(&headers, CENSUS_BEHIND_FROM_HEADER), "2019-11-15");
+            assert_eq!(header(&headers, CENSUS_GENERATION_HEADER), "2");
+            assert_eq!(
+                header(&headers, CENSUS_CAPACITY_HEADER),
+                pull::manifest::MAX_ENTRIES.to_string(),
+                "a single file's capacity is the bound it was written under"
+            );
+            assert_eq!(
+                header(&headers, CENSUS_HEADROOM_HEADER),
+                (pull::manifest::MAX_ENTRIES - 2).to_string()
+            );
+            assert_eq!(header(&headers, CENSUS_EPOCH_HEADER), "", "a single file");
+            let why = header(&headers, CENSUS_REASON_HEADER);
+            assert!(
+                why.starts_with("behind: ") && why.contains("2019-11-15"),
+                "{why}"
+            );
+        }
+
+        // A RECOUNT OF THE FIRST DAY, appended as `cli census-recount` writes it.
+        let mut text = std::fs::read_to_string(&journal).expect("the journal");
+        text.push_str("recounted options 2019-11-15 * definition=2 months=3 run=1791300001\n");
+        std::fs::write(&journal, text).expect("appended");
+        let (_, headers) = ask(&site, &axum::http::Method::HEAD, "feed=gdfl");
+        assert_eq!(header(&headers, CENSUS_STATE_HEADER), "behind");
+        assert_eq!(header(&headers, CENSUS_BEHIND_DAYS_HEADER), "1");
+        assert_eq!(header(&headers, CENSUS_BEHIND_FROM_HEADER), "2019-11-19");
+
+        // AND THE LAST: the census is held, the journal still measured.
+        let mut text = std::fs::read_to_string(&journal).expect("the journal");
+        text.push_str("recounted options 2019-11-19 * definition=2 months=3 run=1791300002\n");
+        std::fs::write(&journal, text).expect("appended");
+        let (_, headers) = ask(&site, &axum::http::Method::HEAD, "feed=gdfl");
+        assert_eq!(header(&headers, CENSUS_STATE_HEADER), "held");
+        assert_eq!(header(&headers, CENSUS_BEHIND_DAYS_HEADER), "0");
+        assert_eq!(header(&headers, CENSUS_BEHIND_FROM_HEADER), "");
+        assert_eq!(header(&headers, CENSUS_REASON_HEADER), "");
+
+        // ZERODHA KEEPS NO IMPORT JOURNAL: not measured, said empty.
+        let (_, headers) = ask(&site, &axum::http::Method::HEAD, "feed=zerodha");
+        assert_eq!(header(&headers, CENSUS_STATE_HEADER), "absent");
+        assert_eq!(header(&headers, CENSUS_BEHIND_DAYS_HEADER), "");
+        assert_eq!(header(&headers, CENSUS_GENERATION_HEADER), "");
+        assert_eq!(header(&headers, CENSUS_CAPACITY_HEADER), "");
+    }
+
+    /// **A MIGRATED CENSUS NEAR ITS OWN CAPACITY SAYS `capped`, WITH THE
+    /// CAPACITY ITS HEADER DECLARES, ITS HEADROOM AND EVERY EPOCH** (D-3327
+    /// item 2, D-3316; DB-G07, DB-G08, DB-G78).
+    ///
+    /// The capacity is the FNO epoch's own, not `MAX_ENTRIES`; the headroom
+    /// is below `CAPPED_HEADROOM`; the degraded header stays empty, because a
+    /// census near its capacity is the current one and complete for every
+    /// month it counts (refusing to draw it would hide them).
+    #[test]
+    fn a_migrated_census_near_its_capacity_says_capped_with_its_own_numbers() {
+        let dir = crate::server::tests::agreeing("store-capped");
+        let site = crate::server::tests::site("store-capped", &dir);
+        let capacity = census::CAPPED_HEADROOM + 1;
+        let mut fno =
+            pull::manifest::Manifest::partition_genesis(Vendor::Gdfl, Segment::Fno, capacity)
+                .expect("a partition");
+        let key = census::Series {
+            contract: Some(
+                brutex_core::instrument::Contract::parse("2019-11-28-1200000-CE")
+                    .expect("a contract"),
+            ),
+            ..series_at(Segment::Fno, "NIFTY", Timeframe::SECOND_1)
+        }
+        .at(month(2019, 11));
+        for rows in [10, 20] {
+            let _append = fno
+                .record_held(pull::manifest::Held::new(
+                    pull::manifest::Entry {
+                        key,
+                        rows,
+                        first_ts_micros: 1_572_580_800_000_000,
+                        last_ts_micros: 1_572_580_800_000_000 + i64::try_from(rows).expect("small"),
+                    },
+                    Closes::UNKNOWN,
+                ))
+                .expect("records");
+        }
+        std::fs::create_dir_all(pull::manifest::segment_dir(
+            &site.store_root,
+            Vendor::Gdfl,
+            Segment::Fno,
+        ))
+        .expect("mkdir");
+        std::fs::write(
+            pull::manifest::epoch_path(&site.store_root, Vendor::Gdfl, Segment::Fno, 1),
+            fno.image(),
+        )
+        .expect("an epoch on disk");
+
+        let (code, headers) = ask(&site, &axum::http::Method::HEAD, "feed=gdfl");
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(header(&headers, CENSUS_STATE_HEADER), "capped");
+        assert_eq!(header(&headers, CENSUS_DEGRADED_HEADER), "", "not damaged");
+        assert_eq!(
+            header(&headers, CENSUS_CAPACITY_HEADER),
+            capacity.to_string()
+        );
+        assert_eq!(
+            header(&headers, CENSUS_HEADROOM_HEADER),
+            (capacity - 2).to_string()
+        );
+        assert_eq!(
+            header(&headers, CENSUS_EPOCH_HEADER),
+            "INDEX=none,CASH=none,FNO=000001"
+        );
+        assert_eq!(
+            header(&headers, CENSUS_BEHIND_DAYS_HEADER),
+            "0",
+            "no journal yet"
+        );
+        let why = header(&headers, CENSUS_REASON_HEADER);
+        assert!(why.starts_with("capped: ") && why.contains("FNO"), "{why}");
     }
 
     #[test]
