@@ -865,6 +865,52 @@ fn install_whole(
     Ok(done)
 }
 
+/// Installs the next epoch of `vendor`'s `segment` partition WITHOUT the keys
+/// `withdrawn` names, the epoch it replaces kept byte for byte (D-3316 item
+/// 4): the census half of the re-key (`crate::gdfl_rekey`, D-3331; WP-12c).
+/// A key withdrawn here is a stored series the current decoder files under
+/// another key or refuses, so the census stops listing it while its bar files
+/// and the replaced epoch keep it as history.
+///
+/// Nothing is written when the census holds none of the keys, so a second
+/// run changes no byte (`CLAUDE.md` §3 rule 5). The partition's lock is held
+/// for the whole read, compaction and install, the order every other cycle
+/// keeps.
+///
+/// # Errors
+///
+/// A census that is a single file (it is never compacted by a write:
+/// `cli census-migrate` first), and the lock's, the read's, the compaction's
+/// or the install's refusal, each naming the census.
+pub fn withdraw(
+    root: &Path,
+    vendor: Vendor,
+    segment: Segment,
+    withdrawn: &dyn Fn(&EntryKey) -> bool,
+) -> Result<Option<Compaction>, String> {
+    let target = target_for(root, vendor, segment)?;
+    if target.segment.is_none() {
+        return Err(format!(
+            "{}'s census is a single file ({}); a key is withdrawn by installing the \
+             partition's next epoch, which only a migrated census has. Run `cli \
+             census-migrate {}` first (D-3316); nothing was written",
+            vendor.as_str(),
+            target.named().display(),
+            vendor.as_str()
+        ));
+    }
+    let lock = target.lock()?;
+    let loaded = target.load()?;
+    if !loaded.census.held_keys().any(withdrawn) {
+        return Ok(None);
+    }
+    let next = loaded
+        .census
+        .compacted_without(withdrawn)
+        .map_err(|refused| format!("{}: {refused}", target.named().display()))?;
+    install_next_epoch(&lock, &target, &loaded, &next, "rekey").map(Some)
+}
+
 /// Publishes what a cycle recorded.
 ///
 /// A single file goes through the parent's [`install_census`]. A partition
@@ -1591,6 +1637,11 @@ pub struct Recount {
     pub not_store_named: Vec<PathBuf>,
     /// Rows built from headers and offered to the census.
     pub offered: u64,
+    /// Rows built from headers and NOT offered, because the GDFL re-key
+    /// ledger names their key superseded or retired (D-3331; WP-12c,
+    /// `crate::gdfl_rekey::withdrawn`): the census stopped listing those
+    /// series on purpose, and a recount must not list them again.
+    pub withdrawn: u64,
     /// One per census written.
     pub cycles: Vec<Cycle>,
     /// What the import journal closing did, for a vendor that has one.
@@ -1699,6 +1750,17 @@ pub fn recount(
                 walk_symbol(&at, &symbol_path, &mut walk)?;
             }
         }
+    }
+    // A KEY THE RE-KEY WITHDREW IS NOT COUNTED BACK (D-3331, WP-12c). Its
+    // bar files are kept and stay readable, so the walk finds them; the
+    // ledger says the series continues under another key, or is refused, and
+    // the census stopped listing it in an epoch of its own. Counted, never
+    // silently dropped.
+    if vendor == Vendor::Gdfl {
+        let withdrawn = crate::gdfl_rekey::withdrawn(root)?;
+        let before = held.len();
+        held.retain(|row| !withdrawn.holds(&row.entry.key));
+        found.withdrawn = u64::try_from(before - held.len()).unwrap_or(u64::MAX);
     }
     found.offered = u64::try_from(held.len()).unwrap_or(u64::MAX);
     found.months_unreadable = unreadable_months.into_iter().collect();

@@ -1775,3 +1775,313 @@ fn the_window_route_alone_may_repeat_key_and_carry_a_thousand_of_them() {
         Some(StatusCode::URI_TOO_LONG)
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-3331, WP-12c (DB-A17, DB-A18): what a reader says of a stored option key
+// the current decoder files under another key, or refuses. Invented bars and
+// an invented ledger; the keys are the shapes the assurance measured.
+// ---------------------------------------------------------------------------
+
+const STATED: &str = "NSE-FNO-NIFTY-2023-06-29-1000000-PE";
+const SETTLED: &str = "NSE-FNO-NIFTY-2023-06-28-1000000-PE";
+const IMPOSSIBLE: &str = "NSE-FNO-NIFTY-2020-06-25-191250000-CE";
+
+/// The re-key's two records for the three keys above, as `cli gdfl-rekey
+/// --apply` writes them.
+fn rekey_ledger() -> String {
+    let nifty = brutex_core::symbol::Symbol::new("NIFTY").expect("symbol");
+    let contract = |key: &str| {
+        pull::gdfl_lineage::parse_option_key(key)
+            .expect("an option key")
+            .1
+    };
+    let superseded = pull::gdfl_lineage::SupersededRecord {
+        underlying: nifty,
+        old: contract(STATED),
+        new: contract(SETTLED),
+        kind: pull::expiry_alias::AliasKind::VendorRedated,
+        months: 1,
+        bars: 2,
+        digest: [3; 32],
+    };
+    let retired = pull::gdfl_lineage::RetiredRecord {
+        underlying: nifty,
+        key: contract(IMPOSSIBLE),
+        why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+        day: Day::new(2019, 5, 30).expect("day"),
+        median: Some(1_200_000),
+        days: 1,
+        bars: 1,
+    };
+    format!("{}\n{}\n", superseded.line(), retired.line())
+}
+
+/// The three keys written as invented one-second bars: the impossible
+/// strike on 2019-05-30, and the stated and the settled put on 2020-06-15.
+fn rekey_store(name: &str) -> Store {
+    let store = Store::new(name);
+    let on = |y, m, d, s| ist(y, m, d, 9, 15, s);
+    for (key, stamps) in [
+        (IMPOSSIBLE, vec![on(2019, 5, 30, 1)]),
+        (STATED, vec![on(2020, 6, 15, 1), on(2020, 6, 15, 2)]),
+        (SETTLED, vec![on(2020, 6, 15, 1), on(2020, 6, 15, 2)]),
+    ] {
+        let parsed = bars::SeriesKey::parse(key).expect("key");
+        let rows: Vec<Bar> = stamps.iter().map(|&ts| bar(ts, 77, 3, 30)).collect();
+        store.write(
+            Vendor::Gdfl,
+            &parsed.segment,
+            &parsed.symbol,
+            parsed
+                .contract
+                .as_ref()
+                .map(brutex_core::instrument::Contract::as_str),
+            Timeframe::SECOND_1,
+            &rows,
+        );
+    }
+    store
+}
+
+/// The re-key's ledger lines written into `store`.
+fn record_rekey(store: &Store) {
+    fs::create_dir_all(store.root.join("imports")).expect("imports");
+    fs::write(
+        store.root.join("imports").join("gdfl.lineage"),
+        rekey_ledger(),
+    )
+    .expect("an invented ledger");
+}
+
+/// **A KEY THE DECODER REFUSES IS REFUSED BY NAME, AND A KEY IT FILES
+/// ELSEWHERE IS SERVED WITH THE KEY IT CONTINUES AS.** Before the re-key ran,
+/// the impossible strike was served like any contract (DB-A18) and the
+/// stated-expiry key carried no word of its decoded key (DB-A17). Before the
+/// ledger records it, the window still says the decoder disagrees
+/// (`recorded: false`); after, it names the recorded successor, and the
+/// retired key is refused by the window and by `bars::open_classified`, the
+/// one door every month read takes.
+#[test]
+fn a_retired_key_is_refused_by_name_and_a_superseded_key_names_its_successor() {
+    let store = rekey_store("rekey-window");
+    let window = |key: &str, from: YearMonth| {
+        bars::window(&store.root, &query(&[key], Timeframe::SECOND_1, from, from))
+    };
+    // BEFORE: the impossible strike is served; the stated key is served and
+    // the decoder's disagreement is said, unrecorded.
+    assert_eq!(window(IMPOSSIBLE, month(2019, 5)).expect("served").total, 1);
+    let pending = window(STATED, month(2020, 6)).expect("served");
+    assert_eq!(pending.total, 2);
+    let expected = |recorded| {
+        vec![bars::SupersededBy {
+            key: STATED.to_owned(),
+            by: SETTLED.to_owned(),
+            kind: "vendor_redated",
+            recorded,
+        }]
+    };
+    assert_eq!(pending.superseded, expected(false));
+    let settled = window(SETTLED, month(2020, 6)).expect("served");
+    assert!(settled.superseded.is_empty());
+
+    // AFTER the re-key's ledger lines.
+    record_rekey(&store);
+    let refused = window(IMPOSSIBLE, month(2019, 5)).expect_err("refused");
+    assert!(
+        refused.starts_with(
+            "contract_refused: NSE-FNO-NIFTY-2020-06-25-191250000-CE is refused by the \
+             current decoder (D-3331): strike implausible"
+        ),
+        "{refused}"
+    );
+    let recorded = window(STATED, month(2020, 6)).expect("still readable");
+    assert_eq!(recorded.total, 2, "the old key's bars are kept and served");
+    assert_eq!(recorded.superseded, expected(true));
+    assert!(recorded.supersedes.is_empty(), "{:?}", recorded.supersedes);
+    // THE KEY THE BARS LANDED IN NAMES WHERE THEY CAME FROM, with the
+    // ledger's count and digest, so the copy is audited from either end.
+    let landed = window(SETTLED, month(2020, 6)).expect("served");
+    assert!(landed.superseded.is_empty(), "{:?}", landed.superseded);
+    assert_eq!(
+        landed.supersedes,
+        vec![bars::Supersedes {
+            key: SETTLED.to_owned(),
+            of: STATED.to_owned(),
+            kind: "vendor_redated",
+            bars: 2,
+            blake3: "03".repeat(32),
+        }]
+    );
+    assert!(recorded.faults.is_empty(), "{:?}", recorded.faults);
+    let parts = PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "NIFTY",
+        contract: brutex_core::instrument::Contract::parse("2020-06-25-191250000-CE"),
+        timeframe: Timeframe::SECOND_1,
+        month: month(2019, 5),
+        file: FileKind::Bars,
+    };
+    let door = bars::open_classified(&store.root, parts).expect_err("refused at the door");
+    assert!(
+        door.message.starts_with("contract_refused:"),
+        "{}",
+        door.message
+    );
+}
+
+/// The same through the routes: `410` and the refusal for the retired key on
+/// `/bars/window.json` and `/bars.json`, and the pointer on the wire for the
+/// superseded one (`null` for every other series).
+#[tokio::test]
+async fn the_routes_answer_a_retired_key_gone_and_carry_the_successor() {
+    let store = rekey_store("rekey-routes");
+    record_rekey(&store);
+    let site = store.site();
+    let (status, body) = window_get(
+        &site,
+        &format!("feed=gdfl&timeframe=1s&key={IMPOSSIBLE}&from=2019-05&to=2019-05"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("why")
+            .starts_with("contract_refused:"),
+        "{body}"
+    );
+    let (status, body) = month_get(
+        &site,
+        "feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract=2020-06-25-191250000-CE&timeframe=1s&month=2019-05",
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    // `/greeks.json` reads the contract through the same door, and answers
+    // the same 410 with the same sentence, not a 400 (it answered cells
+    // before the ledger named the key).
+    let greeks = |root: &std::path::Path| {
+        optiongreeks::respond(
+            root,
+            &format!(
+                "feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract=2020-06-25-191250000-CE&timeframe=1s&month=2019-05&t={}",
+                ist(2019, 5, 30, 9, 15, 1) / 1_000_000
+            ),
+            &optiongreeks::RateTable::from_var(None),
+        )
+    };
+    let unrecorded = rekey_store("rekey-greeks-before");
+    let (status, _, body) = greeks(&unrecorded.root);
+    assert_eq!(status, StatusCode::OK, "before the ledger names it: {body}");
+    let (status, _, body) = greeks(&store.root);
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    let said: Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        pull::gdfl_lineage::is_contract_refused(said["error"].as_str().expect("why")),
+        "{body}"
+    );
+    let (status, body) = window_get(
+        &site,
+        &format!("feed=gdfl&timeframe=1s&key={STATED}&from=2020-06&to=2020-06"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["superseded_by"][0]["by"], SETTLED);
+    assert_eq!(body["superseded_by"][0]["recorded"], true);
+    assert!(body["supersedes"].is_null(), "{body}");
+    let (status, body) = window_get(
+        &site,
+        &format!("feed=gdfl&timeframe=1s&key={SETTLED}&from=2020-06&to=2020-06"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["superseded_by"].is_null(), "{body}");
+    assert_eq!(body["supersedes"][0]["of"], STATED, "{body}");
+    assert_eq!(body["supersedes"][0]["bars"], 2, "{body}");
+}
+
+/// The re-key's records are read by the change rules too: they are not
+/// counted as lines that do not parse, and a superseded key's lineage events
+/// label the key it continues as.
+#[test]
+fn the_rekey_records_parse_and_carry_lineage_events_to_the_successor() {
+    let lineage = format!(
+        "lineage {STATED} NSE-FNO-NIFTY-2023-06-29-1100000-PE ex=2020-06-16 factor=2/1 lot_old=75 lot_new=150 oi_unadjusted_until=0 v=1\n"
+    );
+    let text = format!("{}{lineage}", rekey_ledger());
+    let (events, unreadable) = bars::test_access::lineage_ledger_counts(&text);
+    assert_eq!(unreadable, 0, "both re-key lines parse");
+    assert_eq!(events, 1);
+    let (said, _) = bars::test_access::lineage_ledger_status(&text, STATED);
+    assert_eq!(said, format!("superseded by {SETTLED} (vendor_redated)"));
+    let (said, _) = bars::test_access::lineage_ledger_status(&text, IMPOSSIBLE);
+    assert!(said.starts_with("retired: contract_refused:"), "{said}");
+    // An event labelling the OLD key also labels its successor.
+    let carried = format!(
+        "{}lineage NSE-FNO-NIFTY-2023-06-29-1100000-PE {STATED} ex=2020-06-16 factor=2/1 lot_old=75 lot_new=150 oi_unadjusted_until=0 v=1\n",
+        rekey_ledger()
+    );
+    let (_, on_old) = bars::test_access::lineage_ledger_status(&carried, STATED);
+    let (_, on_new) = bars::test_access::lineage_ledger_status(&carried, SETTLED);
+    assert_eq!((on_old, on_new), (1, 1));
+}
+
+/// `/provenance.json` names the re-key on all three kinds of key: the copied
+/// month says whose import days its reconstruction shows, the superseded one
+/// says where its bars went, and the retired one quotes its refusal. A key
+/// the ledger does not name gains no note.
+#[test]
+fn provenance_names_the_rekey_for_a_copied_a_superseded_and_a_retired_key() {
+    let store = rekey_store("rekey-provenance");
+    let notes = |key: &str, month: &str| {
+        let asked = provenance::asked(&format!(
+            "feed=gdfl&instrument={key}&timeframe=1s&month={month}"
+        ))
+        .expect("a provenance question");
+        let answer = provenance::answer(&store.root, &asked);
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        answer.body["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .map(|note| note.as_str().expect("a sentence").to_owned())
+            .collect::<Vec<_>>()
+    };
+    // Before the ledger names them, none of the three gains a note.
+    for (key, month) in [
+        (SETTLED, "2020-06"),
+        (STATED, "2020-06"),
+        (IMPOSSIBLE, "2019-05"),
+    ] {
+        assert!(
+            !notes(key, month)
+                .iter()
+                .any(|note| note.contains("gdfl-rekey")
+                    || pull::gdfl_lineage::is_contract_refused(note)),
+            "{key}"
+        );
+    }
+    record_rekey(&store);
+    let copied = notes(SETTLED, "2020-06");
+    assert!(
+        copied.iter().any(|note| note.starts_with(&format!(
+            "the bars of {STATED} were copied into {SETTLED} by `cli gdfl-rekey`"
+        )) && note.contains(&"03".repeat(32))),
+        "{copied:?}"
+    );
+    let moved = notes(STATED, "2020-06");
+    assert!(
+        moved
+            .iter()
+            .any(|note| note.starts_with(&format!("{STATED} is superseded by {SETTLED}"))),
+        "{moved:?}"
+    );
+    let retired = notes(IMPOSSIBLE, "2019-05");
+    assert!(
+        retired
+            .iter()
+            .any(|note| pull::gdfl_lineage::is_contract_refused(note)),
+        "{retired:?}"
+    );
+}

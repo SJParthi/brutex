@@ -226,6 +226,14 @@ fn render_recount(
         let _ = writeln!(out, "    {}", path.display());
     }
     let _ = writeln!(out, "  rows offered        {}", found.offered);
+    if found.withdrawn > 0 {
+        let _ = writeln!(
+            out,
+            "  rows withdrawn      {} (keys the gdfl re-key ledger names superseded or \
+             retired; not counted back, D-3331)",
+            found.withdrawn
+        );
+    }
     for cycle in &found.cycles {
         render_cycle(out, cycle);
     }

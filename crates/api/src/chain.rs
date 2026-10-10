@@ -507,7 +507,13 @@ impl LineageIndex {
                     true
                 })
             } else {
+                // The re-key's `superseded` and `retired` records (D-3331;
+                // WP-12c) are read, and change no rung: the census's epoch
+                // installed with them no longer lists either key, so neither
+                // is a stored strike here.
                 pull::expiry_alias::AliasRecord::parse(line).is_some()
+                    || pull::gdfl_lineage::SupersededRecord::parse(line).is_some()
+                    || pull::gdfl_lineage::RetiredRecord::parse(line).is_some()
             };
             if read {
                 index.records = index.records.saturating_add(1);

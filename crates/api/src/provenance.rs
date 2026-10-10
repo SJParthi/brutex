@@ -539,6 +539,12 @@ fn provenance(root: &Path, asked: &Asked, month: &Month<'_>, sidecar: &SidecarRe
              every bar below is {RECONSTRUCTED}: {why}"
         ));
     }
+    // A KEY THE RE-KEY MOVED, COPIED INTO OR RETIRED IS SAID (D-3331;
+    // WP-12c): a copied month's import days are those of the key it was
+    // copied from, and the reconstruction below cannot tell that by itself.
+    if let Some(note) = crate::bars::rekey_note(root, asked.feed, &asked.key()) {
+        notes.push(note);
+    }
     let header = month.bars.header();
     let records = sidecar.records();
     let unrecorded = unrecorded(records, header.n_valid);

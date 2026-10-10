@@ -74,7 +74,10 @@
 //! * [`StitchedRecord`]: `stitched <key> ex=<YYYY-MM-DD> before=<contract|->
 //!   after=<contract|-> v=1`, in the same ledger;
 //! * [`LotRecord`]: `lot <instrument_key> from=<YYYY-MM-DD> lot=<n>
-//!   basis=ltq_gcd v=1`, in `<store>/imports/gdfl.lots`.
+//!   basis=ltq_gcd v=1`, in `<store>/imports/gdfl.lots`;
+//! * [`SupersededRecord`] and [`RetiredRecord`], the re-key's (WP-12c,
+//!   `crate::gdfl_rekey`): a stored key the current decoder files under
+//!   another key, and one it refuses on every day, in `gdfl.lineage`.
 //!
 //! A key is the census's instrument text, `NSE-FNO-<underlying>-<contract>`
 //! ([`option_key`]), the text `/store.json` lists.
@@ -114,6 +117,7 @@ use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
 use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
 
+use crate::expiry_alias::AliasKind;
 use crate::gdfl_nfo::OptionTicker;
 use crate::session::{Day, IST_OFFSET_SECS, SECS_PER_DAY};
 
@@ -558,13 +562,7 @@ pub fn parse_option_key(text: &str) -> Option<(Symbol, Contract)> {
     let mm = fields.next()?;
     let yyyy = fields.next()?;
     let under = fields.next()?;
-    let expiry = parse_day(&format!("{yyyy}-{mm}-{dd}"))?;
-    let side = match side {
-        "CE" => OptionSide::Call,
-        "PE" => OptionSide::Put,
-        _ => return None,
-    };
-    let strike = i64::try_from(digits(strike)?).ok()?;
+    let (expiry, strike, side) = option_fields(&format!("{yyyy}-{mm}-{dd}"), strike, side)?;
     let contract = ContractDay {
         expiry,
         strike,
@@ -578,6 +576,40 @@ pub fn parse_option_key(text: &str) -> Option<(Symbol, Contract)> {
         .ok()
         .filter(|symbol| symbol.as_str() == under)?;
     (option_key(underlying, contract) == text).then_some((underlying, contract))
+}
+
+/// The three fields of an option's contract segment, read: the day, the
+/// strike in paisa and the side, or `None` when any is not the store's own
+/// spelling.
+fn option_fields(day: &str, strike: &str, side: &str) -> Option<(Day, i64, OptionSide)> {
+    let side = match side {
+        "CE" => OptionSide::Call,
+        "PE" => OptionSide::Put,
+        _ => return None,
+    };
+    Some((parse_day(day)?, i64::try_from(digits(strike)?).ok()?, side))
+}
+
+/// An option's store contract segment (`YYYY-MM-DD-<paisa>-CE|PE`) as its
+/// expiry, strike in paisa and side, or `None` for a future or any segment
+/// that does not render back to itself. What the re-key (D-3331,
+/// `crate::gdfl_rekey`) reads a stored key's identity from. O(segment).
+#[must_use]
+pub fn contract_parts(contract: Contract) -> Option<(Day, i64, OptionSide)> {
+    let text = contract.as_str();
+    let (day, rest) = text.split_at_checked(10)?;
+    let (strike, side) = rest.strip_prefix('-')?.split_once('-')?;
+    let (expiry, strike, side) = option_fields(day, strike, side)?;
+    let back = ContractDay {
+        expiry,
+        strike,
+        side,
+        lot: LotEvidence::NoTrade,
+        first_oi: None,
+        close_oi: None,
+    }
+    .contract()?;
+    (back == contract).then_some((expiry, strike, side))
 }
 
 /// Plain decimal digits as a number.
@@ -810,6 +842,271 @@ impl LotRecord {
         };
         (basis == LotEvidence::BASIS && version == RECORD_VERSION && record.line() == line)
             .then_some(record)
+    }
+}
+
+/// One `superseded` record: a store key the current decoder files under
+/// ANOTHER key (D-3331 decision 1, the settled expiry), whose bars the
+/// re-key (`crate::gdfl_rekey`, WP-12c) published under that key as new
+/// files. The old key's files stay where they are and stay readable; this
+/// line is the named pointer from it to the key it continues as. In
+/// `<store>/imports/gdfl.lineage`, D-3317's line rules:
+///
+/// `superseded <old_key> by=<new_key> kind=<closed_day|vendor_redated> months=<n> bars=<n> blake3=<hex> v=1`
+///
+/// `kind` is why the expiry moved (the settlement's own word); `months` and
+/// `bars` are what was published under `by` from `old_key`; `blake3` is the
+/// digest of those bars' 56-byte records in the order they were written, so
+/// an auditor can prove the new files hold exactly the old ones' bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SupersededRecord {
+    /// The underlying both keys name.
+    pub underlying: Symbol,
+    /// The stored key's contract segment, under its pre-D-3331 expiry.
+    pub old: Contract,
+    /// The key the current decoder gives, which now holds the bars.
+    pub new: Contract,
+    /// Why the expiry moved.
+    pub kind: AliasKind,
+    /// Month files published under `new` from `old`.
+    pub months: u64,
+    /// Bars published under `new` from `old`.
+    pub bars: u64,
+    /// BLAKE3 of those bars' records, in write order.
+    pub digest: [u8; 32],
+}
+
+/// 32 bytes as 64 lowercase hex digits.
+fn hex32(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// [`hex32`] read back; `None` for anything but 64 lowercase hex digits.
+fn unhex32(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let nibble = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    };
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let (&[hi, lo], _) = pair.split_first_chunk::<2>()?;
+        *slot = (nibble(hi)? << 4) | nibble(lo)?;
+    }
+    Some(out)
+}
+
+impl SupersededRecord {
+    /// [`Self::digest`] as the 64 lower-case hex digits the line carries.
+    #[must_use]
+    pub fn digest_hex(&self) -> String {
+        hex32(&self.digest)
+    }
+
+    /// The line, no trailing newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "superseded {} by={} kind={} months={} bars={} blake3={} v={RECORD_VERSION}",
+            option_key(self.underlying, self.old),
+            option_key(self.underlying, self.new),
+            self.kind.as_str(),
+            self.months,
+            self.bars,
+            self.digest_hex(),
+        )
+    }
+
+    /// The record [`Self::line`] wrote, or `None` for any other text: two
+    /// underlyings, a key superseded by itself, nothing published, or a
+    /// value not in its canonical spelling. Never repaired.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (&[kind, old], rest) = fields.split_first_chunk::<2>()?;
+        if kind != "superseded" {
+            return None;
+        }
+        let [by, why, months, bars, digest, version] =
+            named(rest, ["by", "kind", "months", "bars", "blake3", "v"])?;
+        let (underlying, old) = parse_option_key(old)?;
+        let (also, new) = parse_option_key(by)?;
+        let record = Self {
+            underlying,
+            old,
+            new,
+            kind: AliasKind::parse(why)?,
+            months: digits(months).filter(|&n| n > 0)?,
+            bars: digits(bars).filter(|&n| n > 0)?,
+            digest: unhex32(digest)?,
+        };
+        (also == underlying && old != new && version == RECORD_VERSION && record.line() == line)
+            .then_some(record)
+    }
+}
+
+/// The word every reader's refusal of a RETIRED key starts with, followed by
+/// `:` ([`RetiredRecord::refusal`]): what an HTTP route matches to answer
+/// `410 Gone` rather than `400`, so the status cannot drift from the
+/// sentence (D-3331; WP-12c, DB-A18).
+pub const CONTRACT_REFUSED: &str = "contract_refused";
+
+/// Whether `why` is a [`RetiredRecord::refusal`] sentence: it starts with
+/// [`CONTRACT_REFUSED`] and a colon. O(1).
+#[must_use]
+pub fn is_contract_refused(why: &str) -> bool {
+    why.strip_prefix(CONTRACT_REFUSED)
+        .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// Why a stored key is retired: the current decoder refuses every day of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetiredWhy {
+    /// [`crate::gdfl_nfo::NfoRefusal::StrikeImplausible`] on every bar day.
+    StrikeImplausible,
+    /// [`crate::gdfl_nfo::NfoRefusal::ExpiryUnsettled`] on every bar day.
+    ExpiryUnsettled,
+}
+
+impl RetiredWhy {
+    /// The wire word: the import journal's cause code for the same refusal
+    /// (`crate::gdfl_import::nfo_cause`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StrikeImplausible => "strike_implausible",
+            Self::ExpiryUnsettled => "expiry_unsettled",
+        }
+    }
+
+    /// The word back; `None` for any other text.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "strike_implausible" => Some(Self::StrikeImplausible),
+            "expiry_unsettled" => Some(Self::ExpiryUnsettled),
+            _ => None,
+        }
+    }
+}
+
+/// One `retired` record: a store key whose every bar day the current decoder
+/// refuses (D-3331), so no reader serves or lists it. Its files are kept,
+/// byte for byte; this line is the named refusal every reader quotes. In
+/// `<store>/imports/gdfl.lineage`, D-3317's line rules:
+///
+/// `retired <key> why=<strike_implausible|expiry_unsettled> day=<YYYY-MM-DD> median=<paisa|-> days=<n> bars=<n> v=1`
+///
+/// `day` is the first refused day; `median` is that day's lower median strike
+/// of the underlying (D-3331 decision 2) for a strike refusal and `-` for an
+/// expiry refusal; `days` and `bars` are what the key holds, all refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RetiredRecord {
+    /// The underlying.
+    pub underlying: Symbol,
+    /// The retired key's contract segment.
+    pub key: Contract,
+    /// Why.
+    pub why: RetiredWhy,
+    /// The first refused day.
+    pub day: Day,
+    /// That day's lower median strike, paisa, for a strike refusal.
+    pub median: Option<i64>,
+    /// IST days the key holds bars on, every one refused.
+    pub days: u64,
+    /// Bars the key holds.
+    pub bars: u64,
+}
+
+impl RetiredRecord {
+    /// The line, no trailing newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "retired {} why={} day={} median={} days={} bars={} v={RECORD_VERSION}",
+            option_key(self.underlying, self.key),
+            self.why.as_str(),
+            self.day,
+            self.median
+                .map_or_else(|| "-".to_owned(), |median| median.to_string()),
+            self.days,
+            self.bars,
+        )
+    }
+
+    /// The sentence a reader refuses the key with.
+    #[must_use]
+    pub fn refusal(&self) -> String {
+        let key = option_key(self.underlying, self.key);
+        match (self.why, self.median) {
+            (RetiredWhy::StrikeImplausible, Some(median)) => format!(
+                "{CONTRACT_REFUSED}: {key} is refused by the current decoder (D-3331): strike \
+                 implausible, more than {} times the day's median strike {median} paisa on {} \
+                 and on every other day it holds ({} day(s), {} bar(s)); its files are kept \
+                 and are not served",
+                crate::gdfl_nfo::STRIKE_PLAUSIBLE_MULTIPLE,
+                self.day,
+                self.days,
+                self.bars
+            ),
+            _ => format!(
+                "{CONTRACT_REFUSED}: {key} is refused by the current decoder (D-3331): {} from {} \
+                 on every day it holds ({} day(s), {} bar(s)); its files are kept and are not \
+                 served",
+                self.why.as_str(),
+                self.day,
+                self.days,
+                self.bars
+            ),
+        }
+    }
+
+    /// The record [`Self::line`] wrote, or `None` for any other text: a
+    /// median where the reason has none or none where it needs one, a strike
+    /// the median admits, nothing held, or a value not in its canonical
+    /// spelling. Never repaired.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (&[kind, key], rest) = fields.split_first_chunk::<2>()?;
+        if kind != "retired" {
+            return None;
+        }
+        let [why, day, median, days, bars, version] =
+            named(rest, ["why", "day", "median", "days", "bars", "v"])?;
+        let (underlying, key) = parse_option_key(key)?;
+        let why = RetiredWhy::parse(why)?;
+        let median = match median {
+            "-" => None,
+            text => Some(i64::try_from(digits(text)?).ok()?),
+        };
+        let (_, strike, _) = contract_parts(key)?;
+        let consistent = match (why, median) {
+            (RetiredWhy::StrikeImplausible, Some(median)) => {
+                crate::gdfl_nfo::strike_implausible(strike, median)
+            }
+            (RetiredWhy::ExpiryUnsettled, None) => true,
+            _ => false,
+        };
+        let record = Self {
+            underlying,
+            key,
+            why,
+            day: parse_day(day)?,
+            median,
+            days: digits(days).filter(|&n| n > 0)?,
+            bars: digits(bars).filter(|&n| n > 0)?,
+        };
+        (consistent && version == RECORD_VERSION && record.line() == line).then_some(record)
     }
 }
 

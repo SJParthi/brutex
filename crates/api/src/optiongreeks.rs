@@ -779,6 +779,16 @@ pub fn respond(store_root: &std::path::Path, query: &str, rate: &RateTable) -> A
     };
     let (cells, faults) = match asked.answer(store_root, rate) {
         Ok(answered) => answered,
+        // A CONTRACT THE DECODER REFUSES IS GONE, as on `/bars/window.json`
+        // and `/bars.json`: 410 and the refusal the re-key recorded, never a
+        // 400 that reads as a malformed question (D-3331; WP-12c, DB-A18).
+        Err(why) if pull::gdfl_lineage::is_contract_refused(&why) => {
+            return (
+                axum::http::StatusCode::GONE,
+                json_headers(),
+                format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+            );
+        }
         Err(why) => return bad_request(&why),
     };
     let status = if faults.is_empty() {

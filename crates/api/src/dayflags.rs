@@ -606,7 +606,8 @@ fn days_between(first: Day, last: Day) -> Vec<Day> {
 struct LineageIndex {
     /// Each key's records, as the answer carries them.
     by_key: HashMap<String, Vec<Value>>,
-    /// Lines that are neither `alias`, `lineage` nor `stitched` records.
+    /// Lines that are none of `alias`, `lineage`, `stitched` and the
+    /// re-key's `superseded` and `retired` records.
     unreadable: usize,
 }
 
@@ -623,7 +624,9 @@ type LineageMemo = HashMap<PathBuf, (FileStamp, Arc<LineageIndex>)>;
 /// One ledger text, indexed by the census key each record is about. A
 /// `lineage` record is filed under both keys (the old key `continues_as` the
 /// new one, the new key is `renamed_from` the old), a `stitched` record under
-/// its key. `alias` records are the decoder's (D-3331 item 1), not a key's.
+/// its key, a re-key `superseded` record under both (`superseded_by`,
+/// `supersedes`) and a `retired` record under its key (D-3331; WP-12c).
+/// `alias` records are the decoder's (D-3331 item 1), not a key's.
 fn index_lineage(text: &str) -> LineageIndex {
     let mut index = LineageIndex::default();
     let key = pull::gdfl_lineage::option_key;
@@ -655,6 +658,37 @@ fn index_lineage(text: &str) -> LineageIndex {
                 .push(json!({
                     "kind": "stitched", "ex": record.ex_date.to_string(),
                     "before": other(record.before), "after": other(record.after),
+                }));
+        } else if let Some(record) = pull::gdfl_lineage::SupersededRecord::parse(line) {
+            // THE RE-KEY'S RECORDS ARE READ, never "unreadable" (D-3331;
+            // WP-12c, DB-A17): the stated key is `superseded_by` the key the
+            // decoder files it under, which `supersedes` it with a copy of its
+            // bars, the count and BLAKE3 as the ledger states them.
+            let (old, new) = (
+                key(record.underlying, record.old),
+                key(record.underlying, record.new),
+            );
+            let (why, digest) = (record.kind.as_str(), record.digest_hex());
+            index.by_key.entry(old.clone()).or_default().push(json!({
+                "kind": "superseded_by", "key": new, "why": why,
+                "months": record.months, "bars": record.bars, "blake3": digest,
+            }));
+            index.by_key.entry(new).or_default().push(json!({
+                "kind": "supersedes", "key": old, "why": why,
+                "months": record.months, "bars": record.bars, "blake3": digest,
+            }));
+        } else if let Some(record) = pull::gdfl_lineage::RetiredRecord::parse(line) {
+            // AND A KEY THE DECODER REFUSES ON EVERY DAY (DB-A18), with the
+            // sentence every reader refuses it by.
+            index
+                .by_key
+                .entry(key(record.underlying, record.key))
+                .or_default()
+                .push(json!({
+                    "kind": "retired", "why": record.why.as_str(),
+                    "day": record.day.to_string(), "median": record.median,
+                    "days": record.days, "bars": record.bars,
+                    "refusal": record.refusal(),
                 }));
         } else {
             index.unreadable = index.unreadable.saturating_add(1);
@@ -2791,6 +2825,16 @@ fn open_month(
         Ok(path) => path,
         Err(why) => return Opened::Refused(format!("{} {month:?}: {why}", inst.key())),
     };
+    // A KEY THE RE-KEY RETIRED IS NOT COUNTED (D-3331; WP-12c, DB-A18): its
+    // files are kept, and this reader refuses it by the ledger's sentence, as
+    // every bar route does with 410. One `stat` and one hash probe.
+    if feed == Vendor::Gdfl
+        && inst.segment == Segment::Fno
+        && inst.contract.is_some()
+        && let Some(why) = crate::bars::retired_refusal(root, feed, &inst.key())
+    {
+        return Opened::Refused(why);
+    }
     match BarFile::open_existing(root, path, symbol_id(&inst.symbol)) {
         Ok(file) => Opened::File(Box::new(file)),
         Err(StoreError::Missing { path: missing, .. }) if missing == path.to_path_buf(root) => {
@@ -4743,6 +4787,67 @@ mod tests {
         );
     }
 
+    /// **THE RE-KEY'S RECORDS ARE READ AND NAMED ON EACH KEY** (D-3331;
+    /// WP-12c, DB-A17, DB-A18): the stated key is `superseded_by` the
+    /// decoded one, the decoded key `supersedes` it, and a retired key says
+    /// so with its refusal -- never counted as unreadable ledger lines.
+    #[test]
+    fn the_rekeys_records_are_read_and_named_on_each_key() {
+        let root = root_of("lineage-rekey");
+        let stated = "NSE-FNO-ZZIDX-2023-06-29-1000000-PE";
+        let settled = "NSE-FNO-ZZIDX-2023-06-28-1000000-PE";
+        let refused = "NSE-FNO-ZZIDX-2020-06-25-191250000-CE";
+        let parse = |key: &str| pull::gdfl_lineage::parse_option_key(key).expect("an option key");
+        let (under, old) = parse(stated);
+        let moved = pull::gdfl_lineage::SupersededRecord {
+            underlying: under,
+            old,
+            new: parse(settled).1,
+            kind: pull::expiry_alias::AliasKind::VendorRedated,
+            months: 2,
+            bars: 3,
+            digest: [7; 32],
+        };
+        let retired = pull::gdfl_lineage::RetiredRecord {
+            underlying: under,
+            key: parse(refused).1,
+            why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+            day: day("2019-05-30"),
+            median: Some(1_170_000),
+            days: 1,
+            bars: 5,
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n{}\n", moved.line(), retired.line()),
+        );
+        let lineage_of = |key: &str, from: &str| {
+            answer(
+                &root,
+                &ask(&format!("feed=gdfl&instrument={key}&from={from}")),
+            )["lineage"]
+                .clone()
+        };
+        let old_side = lineage_of(stated, "2020-06-15");
+        assert_eq!(old_side["unreadable_lines"], 0, "{old_side:#}");
+        let record = &old_side["records"][0];
+        assert_eq!(record["kind"], "superseded_by");
+        assert_eq!(record["key"], settled);
+        assert_eq!(record["why"], "vendor_redated");
+        assert_eq!(
+            (record["months"].clone(), record["bars"].clone()),
+            (json!(2), json!(3))
+        );
+        assert_eq!(record["blake3"], moved.digest_hex());
+        let new_side = lineage_of(settled, "2020-06-15");
+        assert_eq!(new_side["records"][0]["kind"], "supersedes");
+        assert_eq!(new_side["records"][0]["key"], stated);
+        let gone = lineage_of(refused, "2019-05-30");
+        assert_eq!(gone["records"][0]["kind"], "retired");
+        assert_eq!(gone["records"][0]["why"], "strike_implausible");
+        assert_eq!(gone["records"][0]["refusal"], retired.refusal());
+    }
+
     /// **A ZERODHA SHARE'S ZERO-VOLUME MINUTES ARE HELD, NOT TRADED** (DB-B16).
     /// A circuit-locked or illiquid share's day reads complete by count: 375
     /// minute bars, most with no trade in them. The record counts them apart;
@@ -5559,6 +5664,61 @@ mod tests {
         assert_eq!(kind["import"]["refusals"]["this_count"], 2);
         assert_eq!(kind["held"]["why"], "no_contract");
         assert_eq!(kind["peer"]["why"], "no_contract");
+    }
+
+    #[test]
+    fn a_key_the_rekey_retired_is_refused_by_the_ledgers_sentence() {
+        // D-3331; WP-12c, DB-A18. An INVENTED strike far past any ladder,
+        // one bar, and a neighbour the ledger never names.
+        let root = root_of("rekey-retired");
+        let retired_key = "NSE-FNO-NIFTY-2019-03-28-90000000-CE";
+        let kept_key = "NSE-FNO-NIFTY-2019-03-28-1150000-CE";
+        for key in [retired_key, kept_key] {
+            file_bars(
+                &root,
+                Vendor::Gdfl,
+                key,
+                Timeframe::SECOND_1,
+                vec![bar("2019-03-19", 34_000, [500; 4], 75)],
+            );
+        }
+        let asked = |key: &str| ask(&format!("feed=gdfl&instrument={key}&from=2019-03-19"));
+        // BEFORE THE RE-KEY RECORDS IT, the bar is counted like any other.
+        let before = answer(&root, &asked(retired_key));
+        assert_eq!(record(&before, "2019-03-19")["held"]["bars"], 1);
+        let record_line = pull::gdfl_lineage::RetiredRecord {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            key: Contract::parse("2019-03-28-90000000-CE").expect("a contract"),
+            why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+            day: day("2019-03-19"),
+            median: Some(1_150_000),
+            days: 1,
+            bars: 1,
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n", record_line.line()),
+        );
+        // AFTER: not counted, and the ledger's own sentence says why.
+        let after = answer(&root, &asked(retired_key));
+        let one = record(&after, "2019-03-19");
+        assert_eq!(one["held"]["bars"], Value::Null, "{one:#}");
+        assert_eq!(one["held"]["why"], "unreadable");
+        let notes: Vec<&str> = after["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let refusal = record_line.refusal();
+        assert!(
+            notes.iter().any(|note| note.ends_with(&refusal)),
+            "{refusal:?} not in {notes:#?}"
+        );
+        assert!(pull::gdfl_lineage::is_contract_refused(&refusal));
+        // A KEY THE LEDGER DOES NOT NAME is counted as before.
+        let kept = answer(&root, &asked(kept_key));
+        assert_eq!(record(&kept, "2019-03-19")["held"]["bars"], 1);
     }
 
     // ── The Zerodha pull journal ──────────────────────────────────────────
