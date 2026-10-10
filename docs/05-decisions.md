@@ -66512,3 +66512,176 @@ any document under `docs/`.
 
 **Proof.** `grep` for a vendor row's shape under `docs/` returns nothing; the
 charter rows each name their date, path and count.
+
+### D-4808 — Verdicts live in an append-only store family: immutable day images under a two-slot year index — 2026-10-10
+
+**Implemented by** IA-5 (`store::verdict`, `docs/02-store-format.md` §35).
+The writers (IA-6, IA-7, IA-9) and readers (IA-10b) are later packages.
+**Design** `ingest-automation.md` §6.5 (rounds 1 and 2), O1-01, VERIFY-12,
+ATTACK-10; the round-2 critic judged IA-5 ready to build.
+
+**Decision.**
+
+1. What verification finds is kept per (feed, instrument, day, timeframe) as
+   one fixed 160-byte record, in an immutable **day image** per (feed,
+   segment, timeframe, day, generation) at
+   `<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNN>.vdt`,
+   under a **year index** `<yyyy>.vdi` that commits through two slots, the bar
+   file's own rule. A separate tree, because per-instrument sidecars would add
+   a 32 KiB header region to each of about 20,000 option contract-months a day.
+2. **One generation per (feed, segment, timeframe, day) per run.** A run that
+   verified only some keys of a day (a Zerodha window, a filtered GDFL run)
+   carries every other key of the committed generation whole, each keeping its
+   own run; a whole-day run carries nothing. The commit lock is held across
+   reading the slot, carrying, linking the image and committing the slot
+   (D-4865), so two writers on one day never both carry from one generation.
+3. Every image ever linked is kept; re-verification is a new generation and
+   the year index points at it. No record is mutated (`CLAUDE.md` §3 rule 8).
+4. Nothing in this family is an input to a bar reader, writer or bar-serving
+   route (D-4807).
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`a_reverified_day_is_a_new_generation_and_the_old_is_kept`,
+`two_writers_on_one_day_never_lose_a_record`,
+`a_partial_run_carries_the_others_whole`.
+
+### D-4809 — Verdict codes, flags, detail kinds and reasons are numbered append-only; `store` holds the reason and detail kinds as opaque numbers — 2026-10-10
+
+**Implemented by** IA-5 (codes, flags, the store's byte values and the one
+detail kind it writes); IA-6 (`pull::gdfl_verify::REASONS` and `DETAILS`, and
+the test that every cause code has a number). **Design** §6.4, VERIFY-09,
+CODE-14.
+
+**Decision.**
+
+1. The verdict codes are 1 to 17 with the words and the severity order of
+   `docs/02-store-format.md` §35.6; code 0 is unset and never written. Round
+   1's code 7 (two opposite facts) and code 3 (a vendor gap) are split there.
+2. The flags are 20 bits of a u64, verification facts only (D-4841 withdrew
+   the per-day quality bits before any was minted).
+3. The reason table and the detail-kind table live in `pull`, where the
+   causes are defined; `store` cannot name `pull` (`CLAUDE.md` §5), so a
+   record's reason and a detail's kind are opaque u16s to it. **One
+   exception:** `store` itself writes detail kind 1 (`name`) when it cuts a
+   stem longer than the key field (D-4844), so `pull`'s `DETAILS` must number
+   `name` 1.
+4. Once format version 1 is written, a code, a flag bit, a detail kind and a
+   reason number are never renamed or reused; a later one is appended. A
+   reader that meets a value it does not know refuses it
+   (`written_by_newer_build`); a writer refuses a flag bit it does not know.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`the_codes_and_their_severity_are_the_designs`,
+`format_v1_holds_every_fact_it_names`.
+
+### D-4844 — Verdict format version 1: a 512-byte header and day block, a tagged table, 160-byte records, a detail section, 24-byte year entries — 2026-10-10
+
+**Implemented by** IA-5. **Design** §6.5, §6.6, VERIFY-19, ATTACK-20; the
+round-2 critic's N-1 and N-2 are taken (below).
+
+**Decision.** The bytes are `docs/02-store-format.md` §35, packed
+little-endian with explicit offsets. In short:
+
+1. **Image**: magic `BRUTEXVD`, a 256-byte header (CRC-32C), a 256-byte day
+   block (CRC-32C), a table of c + 7 tagged 8-byte slots, n records of 160
+   bytes sorted by (code, key text, key hash), a detail section of at most
+   4 MiB, and a 32-byte BLAKE3 trailer.
+2. **Table**: `MAX_PROBE` = 8 with 7 overflow slots, so a probe window never
+   wraps; c starts at max(16, the power of two ≥ 2n) and doubles until every
+   key sits within its window with no repeated tag; past c = 2^20 the day is
+   refused `table_too_large`.
+3. **Keys**: an instrument key over 64 bytes is refused `key_too_long`, never
+   cut; a stem over 64 bytes is cut at a character boundary with `name_cut`,
+   and its whole name is kept in the detail section. The key hash is BLAKE3
+   of the whole text, so a lookup matches the hash and the kept text.
+4. **Year index**: magic `BRUTEXVI`, two 8,812-byte slots at 0 and 16,384,
+   each 366 entries of 24 bytes; a reader takes the valid slot with the
+   highest commit generation.
+5. **Lookup**: at most 5 positional reads and 2 opens, through a 64-handle
+   cache, least recently used out. A run id past `u32::MAX` is refused
+   `run_id_overflow`.
+6. **N-1 (critic).** "Every mismatch of a day is one contiguous slice" was
+   false under the (code, key) order: code 6 sits between 5 and 7, so the
+   mismatches are two slices (codes 2..5 and 7..9). Each code's slice is
+   located from the header's counts; paging stays O(page).
+7. **N-2 (critic).** The BLAKE3 trailer has one named reader,
+   `store::verdict::scrub`, which checks every byte of an image; a lookup
+   never reads it.
+
+**Measured limit, said plainly.** With an 8-slot window the table needs a
+load well below 1/2: format version 1 holds about 150,000 records a day
+(137,900 synthetic keys fit at c = 2^20; 275,800 are refused
+`table_too_large`), about 5x the largest day the design measured (26,820).
+The design's IA-VD-01 and C-VD-01 asked for 100x a 2,758-record day; that
+size is past the format, so the tests and the bench measure at 1x, 10x and
+50x and pin the 100x refusal by name. The images are also larger than the
+design extrapolated for L-IA-7: measured, an average options day (10,428
+records) is 2,193,368 bytes and the largest (26,820) 6,388,952 bytes, against
+about 1.9 MB and 4.8 MB, because the table needs c = 65,536 and 262,144
+slots there; `crates/store/benches/ratio.rs` prints these sizes on every
+run.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`a_verdict_is_found_by_one_bounded_probe_at_every_day_size`,
+`a_long_key_is_refused_and_a_long_stem_is_kept_whole`,
+`one_codes_records_are_one_contiguous_slice`,
+`every_detail_survives_and_the_cap_is_named`,
+`format_v1_holds_every_fact_it_names`,
+`the_bytes_sit_at_the_offsets_section_35_states`,
+`a_flipped_byte_is_refused_by_the_scrub_and_the_lookup`,
+`the_handle_cache_is_bounded`; bench C-VD-01, C-VD-02, C-VD-04.
+
+### D-4845 — A verdict's staleness is computed at lookup, never stored, and a stale or unchecked verdict is never shown fresh — 2026-10-10
+
+**Implemented by** IA-5 (the record's offsets 124 to 143 and
+`store::verdict::Answer::staleness`); IA-6 (the month probe through the
+newest-generation reader and the `.tix`); IA-10b (shown on `/verify` and the
+`/db` badge). **Design** §6.6 step 5, ATTACK-14, VERIFY-13, the critic's
+"stale verdicts".
+
+**Decision.** A verdict reads stale, checked in this order, when the image's
+verifier version is older than the running build's; when the day's journal
+close now names another definition than the record's rule set was chosen for;
+when the record carries `deferred_pending`; or when the instrument's month now
+says another (generation, day's first row, day's row count) than the record
+holds (a resume appended the rest of a day, a repair published a generation,
+or a re-key moved the contract). A month with no `.tix` reads
+`stale: unknown`, never fresh. A check the caller could not make is named,
+and such an answer is not fresh; an answer from the day block has no row range
+to compare, so its month check is always named as not made.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`a_verdict_whose_store_or_verifier_changed_reads_stale` (the record half of
+IA-VD-11; IA-6 adds the month half).
+
+### D-4865 — Crash consistency outside the bar files: link, never rename over; born whole; repaired by the next writer — 2026-10-10
+
+**Implemented by** IA-5 (verdict images and the year index); IA-16 (the
+`.auc` sidecar rule); IA-8 (kept-answer bodies and receipts). **Design**
+§6.5, ATTACK-09b, ATTACK-09c, VERIFY-11.
+
+**Decision.**
+
+1. **Verdict images** are written to a writer-unique temporary
+   (`<name>.<pid>-<run>.tmp`), made durable, and published with
+   `std::fs::hard_link`, which fails rather than replace a file. A link that
+   meets an existing image (one a crash left linked and uncommitted) steps to
+   the next generation, at most 16 times, then refuses
+   `generation_collision` with nothing committed. An image left that way is
+   kept, never overwritten. No reader opens a `.tmp`.
+2. **A `.vdi` is born whole** by the same temporary and link; a loser of the
+   creation race reads the winner's file; nothing opens a `.vdi` with create,
+   and one shorter than 32,768 bytes, or with no valid slot, is refused by
+   name.
+3. **The `.auc` sidecar**: bytes past the last whole record are an
+   interrupted append, overwritten by the next under the sidecar's lock; a
+   file shorter than its header or all zero is unborn and written again (the
+   `provenance.rs` and D-1520 rules). IA-16.
+4. **Kept-answer bodies and receipts** follow D-4859's order (body, then
+   receipt, each made durable) and readers trust receipts only. IA-8.
+
+**Proof.** For the verdict half, `crates/store/tests/verdict.rs`
+(`a_crash_between_link_and_commit_never_overwrites_an_image`,
+`a_temporary_day_image_is_never_read`, `a_year_index_is_born_whole`) and the
+crash-seam unit tests in `crates/store/src/verdict_tests.rs`, which stop a
+writer after its temporary, after its link and before its slot.

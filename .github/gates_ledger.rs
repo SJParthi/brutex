@@ -1501,6 +1501,10 @@ const ALLOW_SORT: Allow = &[
     // in one order and publish identical bytes. Never on a request path.
     ("crates/pull/src/census_store.rs", 1),
     ("crates/store/src/catalog.rs", 1),
+    // D-4844 (IA-5): a verdict day image sorts its records once by (code,
+    // key) so one code is one slice and the bytes do not depend on arrival
+    // order; O(n log n) per image written (L-IA-4), never on a lookup.
+    ("crates/store/src/verdict.rs", 1),
     ("crates/cli/src/boolean_statistics_v1.rs", 1),
     ("crates/pull/src/ingest.rs", 1),
     ("crates/api/src/recovery.rs", 2),

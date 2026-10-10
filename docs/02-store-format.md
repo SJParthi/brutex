@@ -2669,6 +2669,283 @@ A naturally extinct family has no candidate rows and no numeric statistic.
 `cli::population_statistics_v3::tests::the_store_format_doc_states_the_statistics_v3_this_build_writes`
 binds this section to the constants.
 
+## 35. Verdict store — `verify/`, day image version 1 and year index version 1 (D-4808, D-4844, D-4865)
+
+What automatic verification found, per (feed, instrument, day, timeframe):
+one fixed 160-byte record per key verified that day, in an immutable **day
+image** per (feed, segment, timeframe, day, generation), under a **year
+index** per (feed, segment, timeframe, year) that commits through two slots.
+`store::verdict` writes and reads every byte below; D-4808 is the store,
+D-4844 the format, D-4845 the staleness rule, D-4865 the crash rules, and
+D-4809 the append-only numbering. The writers are `pull::gdfl_verify` and
+`pull::zerodha_verify` (ingest-automation packages IA-6, IA-7, IA-9); the
+readers are `/verify` and `/dayflags.json` (IA-10b). Nothing in this family
+is an input to any bar reader, writer or bar-serving route (D-4807).
+
+Every layout is packed **little-endian** with the explicit offsets below; no
+field relies on alignment.
+
+### 35.1 Paths
+
+```
+<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi                         year index
+<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                    commit lock
+<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNN>.vdt   day image, one per generation
+```
+
+`<feed>` is `gdfl` or `zerodha` (the vendor's own segment), `<SEGMENT>` is
+`INDEX`, `CASH` or `FNO`, and `<tf>` is a `store::path::Timeframe` word
+(`1s`, `1min` … `60min`, `1day`). Every segment comes from a closed set, so no
+path can leave `<store>/verify/`. `NNNNNN` is the generation, zero-padded to
+at least six digits. A Zerodha run's spool (`verify/spool/<run>/…`) is IA-9's
+work file and is not specified here (the critic's BL-7: its record layout
+and torn-tail rule land with IA-9). A writer's temporary is
+`<final name>.<pid>-<run>.tmp`; **no reader ever opens a `.tmp`**.
+
+### 35.2 Day image, version 1 (magic `BRUTEXVD`)
+
+Never opened for writing once linked into place.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXVD` |
+| 8 | 2 | version = 1 |
+| 10 | 2 | record stride = 160 |
+| 12 | 1 | feed: one more than the vendor's position in `Vendor::ALL` (`gdfl` 4, `zerodha` 5) |
+| 13 | 1 | segment (`INDEX` 1, `CASH` 2, `FNO` 3) |
+| 14 | 1 | timeframe (`1s` 1, `1min` 2, `2min` 3, `3min` 4, `5min` 5, `10min` 6, `15min` 7, `30min` 8, `60min` 9, `1day` 10) |
+| 15 | 1 | unit of every count (0 second for `1s`, 1 minute for the minute rungs, 2 day for `1day`) |
+| 16 | 4 | day, as days since 1970-01-01 (a day before it is refused `day_out_of_range`) |
+| 20 | 4 | generation (≥ 1) |
+| 24 | 4 | records n |
+| 28 | 4 | table capacity c: a power of two, ≥ 2n, ≥ 16, ≤ 2^20; the table holds c + 7 slots |
+| 32 | 96 | records per verdict code 0..23 (24 × u32; code 0 and codes 18..23 are zero) |
+| 128 | 8 | run id of this generation |
+| 136 | 8 | written at (unix s; excluded from every byte-identity test) |
+| 144 | 2 | verifier version |
+| 146 | 1 | mode (1 inline, 2 cold, 3 completeness, 4 deferred, 5 unverified import, 6 Zerodha merge, 7 Zerodha cold) |
+| 147 | 1 | the day's rule set (0 = not applicable) |
+| 148 | 4 | previous generation: the one the carry read (0 = none) |
+| 152 | 4 | records carried unchanged from it |
+| 156 | 16 | origin digest prefix |
+| 172 | 4 | detail section offset (absolute; 0 = none) |
+| 176 | 4 | detail section bytes |
+| 180 | 4 | detail entries |
+| 184 | 68 | reserved, zero |
+| 252 | 4 | header CRC-32C over bytes 0..252 |
+| 256 | 256 | day block (§35.2a) |
+| 512 | 8(c + 7) | hash table (§35.4) |
+| 512 + 8(c + 7) | 160n | records (§35.3), sorted by (code, key text, key hash) |
+| after the records | detail bytes | detail section (§35.5) |
+| end | 32 | BLAKE3 of every byte before it |
+
+A version or an enumeration byte this build does not know is refused
+`written_by_newer_build`, never read as something else.
+
+#### 35.2a Day block (256 bytes; offsets from its start)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | calendar kind (the calendar's own code; opaque to `store`) |
+| 1 | 1 | source held (0 no, 1 yes, 2 unknown) |
+| 2 | 1 | `_v3` manifest (0 absent or its variable unset, 1 agrees, 2 disagrees, 3 unverified) |
+| 3 | 1 | journal outcome (0 none, 1 done, 2 done with refusals, 3 incomplete, 4 refused) |
+| 4 | 1 | day state (0 complete, 1 stopped, 2 `source_lost`, 3 `disk_full`, 4 census, 5 `held_back_cap`, 6 not imported, 7 verify off) |
+| 5 | 1 | worst code over the day's own findings and every record; for states 1..5 at least `day_partial` (D-4854) |
+| 6 | 2 | the journal close's reason (`pull`'s `REASONS`; opaque to `store`) |
+| 8 | 8 | day flags (§35.6), `details_capped` included when the cap was reached |
+| 16 | 4 | listing entries |
+| 20 | 4 | files read |
+| 24 | 4 | skipped |
+| 28 | 4 | refused |
+| 32 | 4 | not reached (wanted files the run never read) |
+| 36 | 32 | skip census, 8 × u32 |
+| 68 | 8 | journal seconds (the close's own filter) |
+| 76 | 8 | stored seconds (the same scope) |
+| 84 | 8 | oracle seconds |
+| 92 | 4 | shares absent |
+| 96 | 156 | reserved, zero |
+| 252 | 4 | CRC-32C over the block's bytes 0..252 |
+
+### 35.3 Record, version 1 (160 bytes)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | key hash: BLAKE3 of the **whole** key text, first 8 bytes |
+| 8 | 64 | key text, UTF-8, zero-padded; never empty, never holding NUL |
+| 72 | 1 | verdict code (§35.6) |
+| 73 | 1 | rule set (0 = not applicable) |
+| 74 | 2 | reason (`pull`'s `REASONS`; an opaque u16 to `store`) |
+| 76 | 4 | run id that wrote this record (a carried record keeps its own) |
+| 80 | 8 | flags (§35.6) |
+| 88 | 4 | source units |
+| 92 | 4 | store units |
+| 96 | 4 | missing |
+| 100 | 4 | extra |
+| 104 | 4 | value diff |
+| 108 | 4 | volume diff |
+| 112 | 4 | OI diff |
+| 116 | 4 | first differing unit of the day (`u32::MAX` = none) |
+| 120 | 4 | this record's first detail entry's offset in the section, plus 1 (0 = none) |
+| 124 | 4 | the month generation read (0 = the original file) |
+| 128 | 4 | the day's first stored row in the month (`u32::MAX` = none) |
+| 132 | 4 | the day's stored row count |
+| 136 | 4 | first stored unit of the day (`u32::MAX` = none) |
+| 140 | 4 | last stored unit of the day (`u32::MAX` = none) |
+| 144 | 12 | reserved, zero |
+| 156 | 4 | CRC-32C over bytes 0..156 |
+
+**Keys.** An instrument key is at most 64 bytes; a longer one is refused
+`key_too_long`, never cut. A refused file whose name resolves to no
+instrument is keyed by its stem as listed; a stem over 64 bytes keeps its
+first bytes up to a character boundary, its record carries `name_cut`, and
+its whole name is the record's first detail entry, kind 1 (`name`) — the one
+detail kind `store` writes itself. The hash is of the whole name, so two
+stems that share their first 64 bytes are two keys. A lookup matches both the
+hash and the kept text. One generation naming a key twice is refused
+`duplicate_key`. A run id past `u32::MAX` is refused `run_id_overflow`.
+
+### 35.4 The table and the probe
+
+Each of the c + 7 slots is 8 bytes: {u32 record ordinal + 1 (0 = empty), u32
+tag = bits 32..63 of the key hash}. A key's home slot is `hash & (c − 1)`; its
+record sits within `MAX_PROBE` = 8 slots of home, and the 7 slots after slot
+c − 1 are overflow, so a probe window never wraps. The builder places the
+records in ordinal order by linear probing, starting at c = max(16, the
+power of two ≥ 2n), and doubles c until every key sits within its window
+**and** no other occupied slot of its window carries its tag; past c = 2^20 it
+refuses `table_too_large` by name and writes nothing. So the first slot of a
+key's window that carries its tag is the key's record, or the key has none.
+
+**Measured capacity.** With an 8-slot window the doubling stops well below
+load 1/2. Measured by `crates/store/benches/ratio.rs` (C-VD-01, C-VD-04) on
+synthetic keys, 10 Oct 2026: 2,758 records take c = 8,192 (image 507,416
+bytes); 10,428 (the design's average options day) c = 65,536 (2,193,368
+bytes); 26,820 (the largest day the design measured) c = 262,144 (6,388,952
+bytes); 137,900 c = 2^20 (30,453,208 bytes). So the table is about a third of
+the largest day's image, and the images are larger than the design's
+extrapolation (L-IA-7 said about 1.9 MB and 4.8 MB). Format version 1 holds
+roughly 150,000 records a day (a simulation with uniform hashes fitted
+150,000 at c = 2^20 in 5 of 5 runs and 200,000 in 1 of 5):
+`crates/store/tests/verdict.rs` writes 137,900 (50x a 2,758-record day) and
+pins that 275,800 (100x) is refused `table_too_large`.
+
+### 35.5 Detail section
+
+Entries of {u32 owner: record ordinal + 1, or 0 for the day; u16 kind
+(`pull`'s `DETAILS`, never 0); u16 length; payload}, packed, the day's first
+and then each record's in ordinal order, so a record's entries are
+consecutive and its offset (record offset 120) points at the first. The
+section is at most 4 MiB. Each owner's entries are kept all or nothing: once
+one owner does not fit, it and every later owner keep their counts only, each
+such record carries `details_capped`, and so does the day. A detail of kind
+0, or longer than 65,535 bytes, is refused `detail_invalid`.
+
+### 35.6 Codes, flags and their order
+
+Verdict codes (byte, word, severity rank; 1 is the worst): 9
+`store_unreadable` 1, 2 `value_mismatch` 2, 3 `missing_in_store` 3, 4
+`extra_in_store` 4, 7 `store_without_source` 5, 8 `absent_from_store` 6, 5
+`count_mismatch` 7, 16 `day_partial` 8, 6 `source_refused` 9, 12
+`source_lacks_day` 10, 13 `vendor_hole` 11, 14 `withheld_by_rule` 12, 17
+`no_ledger` 13, 15 `built_under_earlier_rule` 14, 10 `no_response_kept` 15, 11
+`not_compared` 16, 1 `match` 17. Code 0 is unset and never written. The
+"mismatches" are codes 2, 3, 4, 5, 7, 8 and 9; under the (code, key) order
+they are two slices of an image (codes 2..5 and 7..9), because code 6 sits
+between them, and each code's slice is located from the header's counts.
+
+Flags, u64, bit order: 0 `tix_absent`, 1 `spot_missing`, 2
+`after_index_close`, 3 `spot_unavailable`, 4 `peer_minute_absent`, 5
+`peer_unavailable`, 6 `body_not_kept`, 7 `source_changed_since_import`, 8
+`archive_day_on_closed_day`, 9 `v3_manifest_disagrees`, 10
+`lineage_unrecorded`, 11 `details_capped`, 12 `name_cut`, 13 `dup_minutes`,
+14 `vendor_revised`, 15 `expiry_after_close`, 16 `quality_differs`, 17
+`deferred_pending`, 18 `daycheck_differs`, 19 `serve_path_differs`. A writer
+refuses any other bit (`flag_unknown`). Codes, bits, detail kinds and reasons
+are appended and never renamed or reused (D-4809).
+
+### 35.7 Year index, version 1 (magic `BRUTEXVI`)
+
+32,768 bytes: two slots, at 0 and at 16,384 (the bar file's slot stride).
+Each slot uses 8,812 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXVI` |
+| 8 | 2 | version = 1 |
+| 10 | 2 | reserved, zero |
+| 12 | 2 | year |
+| 14 | 2 | reserved, zero |
+| 16 | 8 | commit generation |
+| 24 | 8,784 | 366 day entries of 24 bytes, 1 January first: {u32 day generation (0 = never verified), u8 worst code, u8 day state, u16 verifier version, u32 records, u32 mismatches, u64 flags (the OR of the day's record and day flags)} |
+| 8,808 | 4 | CRC-32C over bytes 0..8,808 |
+
+Commit g writes slot g mod 2 and makes it durable. A reader takes the valid
+slot (magic, version, year and CRC-32C) with the highest commit generation,
+slot 0 on a tie; with no valid slot it refuses `index_unreadable`, and a file
+shorter than 32,768 bytes is refused `index_short` (no file this protocol
+links is). `/verify/days.json` reads everything it shows from the `.vdi`.
+
+### 35.8 Genesis and the commit protocol (D-4865)
+
+**Genesis.** A `.vdi` is born whole: both slots (commit generation 0, every
+entry zero) are written to `<yyyy>.vdi.<pid>-<run>.tmp`, made durable, and
+linked into place with `hard_link`, which fails if the file exists; the
+temporary is removed and the directory made durable. The loser of a creation
+race reads the winner's file. Nothing opens a `.vdi` with create.
+
+**Commit.** One generation per (feed, segment, timeframe, day) per run
+(D-4808). The commit lock (`<yyyy>.vdi.lock`, exclusive, blocking) is held
+across the whole write:
+
+1. read the year index and take the day's committed generation g;
+2. for a run that verified only some keys (a Zerodha window, a filtered
+   run), read image g whole and carry every record whose key the run did not
+   verify, with its own run, flags and details (the header counts them); a
+   whole-day run carries nothing;
+3. build the image (the one sort, O(n log n));
+4. write it to `<day>.g<g'>.vdt.<pid>-<run>.tmp` and make it durable, then
+   publish it with `hard_link` as g' = g + 1; a link that meets an existing
+   image (one a crash left linked and uncommitted) removes the temporary and
+   tries g' + 1, at most 16 times, then refuses `generation_collision` with
+   nothing committed;
+5. remove the temporary and make the directory durable;
+6. write the next slot of the year index and make it durable.
+
+So a crash between the link and the slot leaves an uncommitted image that is
+**kept**, never overwritten, and the next writer steps past it; two writers
+on one day never both carry from g. Three `sync_all`s per generation (on
+macOS, `F_FULLFSYNC`). Every image ever linked is kept: re-verification is a
+new generation and the old one stays byte for byte.
+
+### 35.9 Lookup, staleness and the scrub
+
+**Lookup** (`store::verdict::Reader::lookup`): 2 positional reads of the
+`.vdi`'s slots, 1 read of the image's 512-byte header and day block, 1 read
+of the 64-byte probe window at `512 + 8 × home`, and, when a slot carries the
+key's tag, 1 read of the 160-byte record (its CRC-32C checked, its hash and
+text compared): **at most 5 reads and 2 opens**, whatever the day size, the
+year or the history. A key with no record answers from the day block (its
+worst code and state), so a key the run never reached reads `day_partial` on
+a partial day. A bounded cache of 64 handles, least recently used out, holds
+the `.vdi` and `.vdt` handles; images are immutable and the slots are re-read
+on every lookup, so a cached handle never serves a stale commit.
+
+**Staleness** is computed at lookup, never stored (D-4845): an image written
+by an older verifier, a day whose definition moved, a record carrying
+`deferred_pending`, or a month whose (generation, day's first row, day's row
+count) now differ from the record's offsets 124..135 reads stale; a month
+with no `.tix` reads `stale: unknown`; a check the caller could not make is
+named, and such an answer is never fresh. The month probe itself is
+`pull`'s (IA-6).
+
+**The scrub** (`store::verdict::scrub`) is the one reader of the BLAKE3
+trailer: it reads an image whole and checks the trailer, both CRC-32Cs of
+the header and day block, every record's CRC-32C, the (code, key) order, the
+per-code counts, that the table finds every record where a lookup would and
+holds nothing else, and the detail section's shape. A lookup never reads the
+trailer.
+
 ## Dated NSE cash-session cache (D-0519)
 
 Runtime `session-masters/NSE_CM_security_ddmmyyyy.csv.gz` retains the exact

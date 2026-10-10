@@ -16,6 +16,7 @@
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
 //! | [`flock`] | the advisory-lock guard, released by unlock and never by close |
 //! | [`provenance`] | where a month's bars came from: the `.prv` sidecar (D-3334) |
+//! | [`verdict`] | what verification found: day images and year indexes (D-4808) |
 //!
 //! # Seven properties the types enforce rather than document
 //!
@@ -77,6 +78,10 @@ pub mod path;
 pub mod provenance;
 pub mod repair;
 pub mod time_index;
+/// What verification found, per (feed, instrument, day, timeframe): immutable
+/// day images under a two-slot year index (D-4808, D-4844, D-4845, D-4865;
+/// `docs/02-store-format.md` §35).
+pub mod verdict;
 
 /// Proof that this crate's nine `telemetry::emit` sites — `store.flock`'s
 /// unreleased-lock note among them (D-0693) — reach a file, driven
