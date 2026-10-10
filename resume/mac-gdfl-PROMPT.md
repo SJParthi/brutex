@@ -1,4 +1,7 @@
-# Paste prompt for the next account: GDFL NIFTY on /db + ingest automation (Mac) - refreshed 10 Oct 2026
+# Paste prompt for the next account: GDFL NIFTY on /db + ingest automation (Mac) - refreshed 10 Oct 2026 19:00 IST
+
+For the fresh account starting 11 Oct 2026, 12:30 IST. The 10 Oct account may still merge packages until its weekly limit;
+read git (feat/db-fix "Merge WP-"/"Merge IA-" commits) for the true state, not this note.
 
 Paste everything between the two lines as the first message of a project thread that runs on the operator's Mac
 (folder /Volumes/WD_BLACK/brutex). Prefer a Claude desktop-app session in BYPASS PERMISSIONS mode (a Remote Control
@@ -12,6 +15,14 @@ READ FIRST, in order (newest commit of each, branch fix-queue): resume/mac-gdfl-
 the end), then resume/mac-gdfl-20261009.md, then this file. Memory: ~/.claude/projects/-Volumes-WD-BLACK-brutex/memory/
 (MEMORY.md, gdfl-nifty-db-20261010.md, goal-self-sufficient-ingest.md). Add /Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925
 as a session folder first.
+
+HAND-OFF FACTS (10 Oct 19:00 IST): 29 of 50 /db packages merged and LIVE on :8080 (build tgt/app8, see
+work-20260925/state/fix/deploys.log). Committed but not merged at hand-off: WP-39 (1s sort), WP-81 (ops safety), IA-5 (verdict
+store), WP-12c (option re-key); half-done in worktrees: WP-16 (import speed) and others. The last run was wf_22e529d2-a94 on
+the old account - it cannot be resumed from a new account: relaunch db-fix-round-1b.js FRESH. Store steps done: census
+migrate+recount (2020 NIFTY options live), time index for 142 NIFTY/BANKNIFTY months. Zerodha repair code live (plan:
+GET /pull/repair.json?feed=zerodha&instrument=NIFTY&from=2018-01-01&to=2026-09-30 lists 42 sessions); running it needs that
+day's Kite access token.
 
 STATE (local, never pushed): branch feat/db-fix in work-20260925/wt/DBFIX; each package fix/db-<WP> in work-20260925/wt/P-<WP>
 (half-done work stays there; the fix prompt reuses it). Plan state/board/fix-plan.json; findings state/board/audit-result.json
