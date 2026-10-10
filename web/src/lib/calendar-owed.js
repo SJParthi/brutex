@@ -177,24 +177,116 @@ export function denseOwed(body) {
 }
 
 /**
+ * How many times a `"building"` calendar is asked for again before the page
+ * shows it as still building: at the server's 250 ms hint, about half a
+ * minute, longer than the slowest first build measured (6.55 s, DB-N19).
+ */
+export const CALENDAR_BUILDING_TRIES = 120;
+
+/**
+ * Wait `ms`, or until `signal` aborts.
+ *
+ * @param {number} ms
+ * @param {AbortSignal | undefined} signal
+ * @returns {Promise<void>}
+ */
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error('aborted'));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error('aborted'));
+      },
+      { once: true }
+    );
+  });
+}
+
+/**
+ * `/calendar.json` for `feed`, asked again while the server answers `202`
+ * `"building"` (DB-N19): it builds a calendar off the request path and names
+ * that state rather than holding the request for seconds. The last response
+ * and, when it was read, its body.
+ *
+ * @param {string} url
+ * @param {(url: string, init: RequestInit) => Promise<Response>} request
+ * @param {AbortSignal} signal
+ * @param {(ms: number, signal: AbortSignal) => Promise<void>} wait
+ * @returns {Promise<{ response: Response, body: any }>}
+ */
+async function settledCalendar(url, request, signal, wait) {
+  for (let asked = 1; ; asked += 1) {
+    const response = await request(url, { cache: 'no-store', signal });
+    if (response.status !== 202) return { response, body: undefined };
+    const body = await response.json();
+    if (body?.status !== 'building' || asked >= CALENDAR_BUILDING_TRIES) return { response, body };
+    const hint = Number(body.retry_after_ms);
+    await wait(Number.isFinite(hint) && hint >= 50 ? hint : 250, signal);
+  }
+}
+
+/**
+ * `/calendar.json` at `url` for any page, asked again while the server answers
+ * `202` `"building"` (DB-N19), at its hint, at most [`CALENDAR_BUILDING_TRIES`]
+ * times. `/db` reads its calendar of record through this (WP-50's date
+ * fields): read once with a bare `fetch`, a `202` is `ok`, so the first click
+ * after a restart showed "answered with no day string" for good instead of
+ * the calendar a moment later.
+ *
+ * The last response, and its body: the parsed JSON of an `ok` answer -- a
+ * calendar, or one still `"building"` after every try, which the caller must
+ * show as building -- and `null` for a refusal, whose body is left unread for
+ * the caller's own reason. Throws what the request or the wait throws (an
+ * abort among them).
+ *
+ * @param {string} url
+ * @param {(url: string, init: RequestInit) => Promise<Response>} request
+ * @param {AbortSignal} signal
+ * @param {(ms: number, signal: AbortSignal) => Promise<void>} [wait]
+ * @returns {Promise<{ response: Response, body: any }>}
+ */
+export async function askCalendar(url, request, signal, wait = pause) {
+  const { response, body } = await settledCalendar(url, request, signal, wait);
+  if (!response.ok) return { response, body: null };
+  return { response, body: body ?? (await response.json()) };
+}
+
+/**
  * Read one feed's `/calendar.json` into the page's calendar. Never throws: a
- * refusal or a failure is an empty calendar that names its reason.
+ * refusal or a failure is an empty calendar that names its reason. A calendar
+ * the server is still building is asked for again at its hint, and one still
+ * building after [`CALENDAR_BUILDING_TRIES`] is shown empty with the server's
+ * own reason — never as a calendar with no sessions.
  *
  * @param {string} feed
  * @param {(url: string, init: RequestInit) => Promise<Response>} request
  * @param {AbortSignal} signal
+ * @param {(ms: number, signal: AbortSignal) => Promise<void>} [wait]
  * @returns {Promise<Calendar>}
  */
-export async function readCalendar(feed, request, signal) {
+export async function readCalendar(feed, request, signal, wait = pause) {
   try {
-    const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
-      cache: 'no-store',
-      signal
-    });
+    const { response, body: building } = await settledCalendar(
+      `/calendar.json?feed=${encodeURIComponent(feed)}`,
+      request,
+      signal,
+      wait
+    );
     // THE REASON IS READ, NOT DROPPED (CE-83, D-1789): a 429 names the
     // derivation ceiling and a 400 the unknown feed, and both say what to do.
     if (!response.ok) return emptyCalendar(await refusalFrom('/calendar.json', response));
-    const body = await response.json();
+    if (building?.status === 'building') {
+      return emptyCalendar(
+        `the server is still building this calendar: ${building.reason ?? 'no reason given'}`
+      );
+    }
+    const body = building ?? (await response.json());
     /** @type {Map<string, number|null>} */
     let owed = new Map();
     /** @type {Map<string, number|null>} */

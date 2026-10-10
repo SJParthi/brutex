@@ -679,6 +679,123 @@ pub struct Landed {
     /// length-unmeasured, so the list is bounded by that table's compile-time
     /// length (five), never by the window.
     pub refused_days: Vec<RefusedDay>,
+    /// Every OTHER row [`land_rows`] refused, by cause and day: a stamp the
+    /// calendar cannot judge, a share's closing-auction eligibility unknown on
+    /// its day, a price that does not fit the paisa grid (D-3351, DB-N23).
+    ///
+    /// **The row, never the answer.** Each of these refused the whole window
+    /// with `?`, so one bad candle in a 60-day Zerodha minute answer refused
+    /// all 60 days — and when the next answer landed, the month between them
+    /// was opened part-way and its first days could never be appended
+    /// (DB-N20). Now each refused row is counted against its (cause, day),
+    /// the first is named in its own words, and every other row lands. Neither
+    /// stored nor counted in [`Self::census`]; the caller names each group.
+    pub refused: Refused,
+}
+
+/// Why a row of a vendor answer was refused by name rather than landed
+/// (D-3351). The codes are the receipt's and the log's; never renamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowCause {
+    /// A stamp the session calendar cannot judge, other than a day of
+    /// unmeasured length (which is [`Landed::refused_days`]).
+    Timestamp,
+    /// A share's closing-auction eligibility is not known for its day (D-3320).
+    CashEligibility,
+    /// A price that does not land on the paisa grid after conversion.
+    Price,
+    /// A broker candle that does not start on the requested grid.
+    OffGrid,
+    /// Two candles at one stamp with different values: neither is kept.
+    Conflicting,
+}
+
+impl RowCause {
+    /// The code a receipt line and a log event carry.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Timestamp => "timestamp_refused",
+            Self::CashEligibility => "cash_eligibility_unknown",
+            Self::Price => "price_off_grid",
+            Self::OffGrid => "off_grid_candle",
+            Self::Conflicting => "conflicting_candles",
+        }
+    }
+}
+
+/// One group of refused rows: one cause on one IST day, the first named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedRows {
+    /// Why.
+    pub cause: RowCause,
+    /// The IST day, as days from the epoch, when the stamp names one.
+    pub day: Option<u32>,
+    /// Rows of this cause on this day.
+    pub rows: u32,
+    /// The first such row's position in the answer.
+    pub first_row: usize,
+    /// Its stamp, in the vendor's encoding.
+    pub first_raw: i64,
+    /// The first row's refusal, in its own words.
+    pub why: String,
+}
+
+/// The rows of one answer refused by name (D-3351): groups for the receipt,
+/// and every refused row's IST-local second for the gap ledger, which must
+/// count those minutes as missing from the store and say why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Refused {
+    /// One entry per (cause, day), in first-occurrence order.
+    pub groups: Vec<RefusedRows>,
+    /// IST-local epoch seconds of every refused row, in answer order.
+    pub local_seconds: Vec<i64>,
+}
+
+impl Refused {
+    /// Count one refused row. The group is found among the last groups of the
+    /// same day — rows arrive in time order, and a day has at most one group
+    /// per [`RowCause`] — so this is O(1) per row; only a group's first row
+    /// pays for its sentence.
+    pub fn note(
+        &mut self,
+        cause: RowCause,
+        (row, raw): (usize, i64),
+        local_second: i64,
+        why: impl FnOnce() -> String,
+    ) {
+        let day = u32::try_from(local_second.div_euclid(86_400)).ok();
+        self.local_seconds.push(local_second);
+        for group in self.groups.iter_mut().rev() {
+            if group.day != day {
+                break;
+            }
+            if group.cause == cause {
+                group.rows = group.rows.saturating_add(1);
+                return;
+            }
+        }
+        self.groups.push(RefusedRows {
+            cause,
+            day,
+            rows: 1,
+            first_row: row,
+            first_raw: raw,
+            why: why(),
+        });
+    }
+
+    /// Fold another answer's refusals into these.
+    pub fn absorb(&mut self, other: Self) {
+        self.groups.extend(other.groups);
+        self.local_seconds.extend(other.local_seconds);
+    }
+
+    /// How many rows were refused.
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        self.local_seconds.len()
+    }
 }
 
 /// One day [`land_rows`] refused, and how many of the window's rows fell on it.
@@ -800,9 +917,13 @@ pub fn land_with_cash_schedule(
 /// now runs through this one body, so the two entry points cannot drift.
 ///
 /// # Errors
-/// Returns timestamp, price, or unresolved cash-session errors. A bar on a
-/// day of unmeasured session length is NOT one: that day alone is refused and
-/// reported in [`Landed::refused_days`] (D-3344).
+///
+/// None today: every refusal is a ROW's (D-3351). A bar on a day of unmeasured
+/// session length refuses that day ([`Landed::refused_days`], D-3344); a stamp
+/// the calendar cannot judge, a share's closing-auction eligibility unknown on
+/// its day and a price off the paisa grid each refuse that row by name
+/// ([`Landed::refused`]), and every other row lands. The `Result` is kept for
+/// the callers that match on it.
 pub fn land_rows(
     rows: &[RawRow],
     request: &BarRequest,
@@ -814,6 +935,7 @@ pub fn land_rows(
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
     let mut refused_days = Vec::new();
+    let mut refused = Refused::default();
     // OPEN INTEREST APPLIES TO A CONTRACT AND TO NOTHING ELSE (D-3322). Asked
     // once per window, of the segment these bars are filed under, so the loop
     // below reads one `bool` per row.
@@ -853,16 +975,40 @@ pub fn land_rows(
                 note_refused(&mut refused_days, days);
                 continue;
             }
+            // ANY OTHER STAMP THE CALENDAR CANNOT JUDGE REFUSES ITS ROW, by
+            // name, and the rest of the answer lands (D-3351, DB-N23). It
+            // refused the whole answer, and a whole answer refused while the
+            // next landed is how a month was opened part-way for ever.
             Err(why) => {
-                return Err(FetchError::TimestampRefused {
+                let why = FetchError::TimestampRefused {
                     row: i,
                     raw: row.timestamp,
                     why,
-                });
+                };
+                refused.note(
+                    RowCause::Timestamp,
+                    (i, row.timestamp),
+                    local_second(epoch_utc),
+                    || why.to_string(),
+                );
+                continue;
             }
         };
         if verdict.is_none() {
-            verdict = cash_close_verdict(epoch_utc, request, cash_schedule)?;
+            // A SHARE'S CLOSE UNKNOWN ON ITS DAY REFUSES THAT ROW, not the
+            // answer (D-3351): the day's eligibility is the day's fact.
+            match cash_close_verdict(epoch_utc, request, cash_schedule) {
+                Ok(close) => verdict = close,
+                Err(why) => {
+                    refused.note(
+                        RowCause::CashEligibility,
+                        (i, row.timestamp),
+                        local_second(epoch_utc),
+                        || format!("row {i}: {why}"),
+                    );
+                    continue;
+                }
+            }
         }
         // KEPT ON A DAY THE CALENDAR CANNOT CLASSIFY, AND COUNTED BY NAME
         // (P-03, D-2673). Dropping it would invent a closed day; keeping it
@@ -946,21 +1092,22 @@ pub fn land_rows(
             continue;
         }
 
-        let price = |raw: i64, field: &'static str| {
-            to_paisa(raw, scale).ok_or(FetchError::PriceRefused { row: i, field, raw })
+        // A STAMP OR A PRICE THAT CANNOT BE HELD REFUSES ITS ROW (D-3351).
+        let (ts_micros, [open, high, low, close]) = match held_values(row, i, epoch_utc, scale) {
+            Ok(held) => held,
+            Err((why, cause)) => {
+                refused.note(cause, (i, row.timestamp), local_second(epoch_utc), || {
+                    why.to_string()
+                });
+                continue;
+            }
         };
         let bar = Bar {
-            ts_micros: epoch_utc
-                .checked_mul(1_000_000)
-                .ok_or(FetchError::TimestampRefused {
-                    row: i,
-                    raw: row.timestamp,
-                    why: SessionError::TimestampOutOfRange { secs: epoch_utc },
-                })?,
-            open: price(row.open, "open")?,
-            high: price(row.high, "high")?,
-            low: price(row.low, "low")?,
-            close: price(row.close, "close")?,
+            ts_micros,
+            open,
+            high,
+            low,
+            close,
             volume: row.volume,
             // ABSENT IS NOT ZERO. `i64::MIN` is the null sentinel; a vendor
             // sending a literal 0 means zero open interest, which is a
@@ -1020,12 +1167,72 @@ pub fn land_rows(
     // different places — the caller's chunking and the vendor's clock.
     emit_landed(rows.len(), bars.len(), &census, interest);
     interest.warn_if_measured(request);
+    note_refused_rows(&refused);
     Ok(Landed {
         bars,
         census,
         outside_session,
         refused_days,
+        refused,
     })
+}
+
+/// The IST-local epoch second of a UTC epoch second: the space the gap
+/// ledger's minutes are counted in.
+const fn local_second(epoch_utc: i64) -> i64 {
+    epoch_utc.saturating_add(crate::session::IST_OFFSET_SECS)
+}
+
+/// A row's stamp in micros and its prices in paisa, or the refusal of the
+/// first that cannot be held, with its cause.
+fn held_values(
+    row: &RawRow,
+    i: usize,
+    epoch_utc: i64,
+    scale: PriceScale,
+) -> Result<(i64, [i64; 4]), (FetchError, RowCause)> {
+    let ts = epoch_utc.checked_mul(1_000_000).ok_or((
+        FetchError::TimestampRefused {
+            row: i,
+            raw: row.timestamp,
+            why: SessionError::TimestampOutOfRange { secs: epoch_utc },
+        },
+        RowCause::Timestamp,
+    ))?;
+    let ohlc = paisa_of(row, i, scale).map_err(|why| (why, RowCause::Price))?;
+    Ok((ts, ohlc))
+}
+
+/// A row's open, high, low and close in paisa, or the first that does not
+/// land on the grid, named by its field.
+fn paisa_of(row: &RawRow, i: usize, scale: PriceScale) -> Result<[i64; 4], FetchError> {
+    let price = |raw: i64, field: &'static str| {
+        to_paisa(raw, scale).ok_or(FetchError::PriceRefused { row: i, field, raw })
+    };
+    Ok([
+        price(row.open, "open")?,
+        price(row.high, "high")?,
+        price(row.low, "low")?,
+        price(row.close, "close")?,
+    ])
+}
+
+/// One `pull.land` warning per refused group, never per row: the first row
+/// named in its own words with the group's count. A window holds at most a
+/// few groups a day, so this is bounded by the window, not by its rows.
+fn note_refused_rows(refused: &Refused) {
+    for group in &refused.groups {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.land",
+                "rows refused by name; the rest of the answer lands",
+            )
+            .with("cause", telemetry::Value::Str(group.cause.code()))
+            .with("rows", telemetry::Value::Uint(u64::from(group.rows)))
+            .with("first_row", telemetry::Value::Uint(group.first_row as u64))
+            .with("first", telemetry::Value::Str(&group.why)),
+        );
+    }
 }
 
 /// Open-interest cells a vendor sent for a bar that carries none (D-3322).

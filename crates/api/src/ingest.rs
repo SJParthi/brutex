@@ -1164,6 +1164,12 @@ pub struct SpotRequest {
     /// it, so the default is reached only by a hand-built request. Naming an
     /// unknown one still refuses: see [`parse_granularity`].
     pub granularity: pull::vendor::Granularity,
+    /// `Some(reason)` when this pull is a VERSIONED REPAIR (D-3350, WP-13c):
+    /// a month the append-only store refuses is published as a new
+    /// generation, journaled with this reason. Only `POST /pull/repair` sends
+    /// the field (`repair_reason`); `POST /pull/spot` refuses a body that
+    /// carries it, so an ordinary pull never repairs by accident.
+    pub repair: Option<String>,
 }
 
 /// One expired-derivative pull, validated.
@@ -1552,6 +1558,11 @@ fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
             let raw = param(body, "granularity");
             parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?
         },
+        // THE ROUTE DECIDES WHETHER THIS FIELD MAY BE PRESENT (D-3350): see
+        // `server::pull_repair` and `server::pull_spot`.
+        repair: Some(param(body, "repair_reason"))
+            .map(|reason| reason.trim().to_owned())
+            .filter(|reason| !reason.is_empty()),
     })
 }
 

@@ -74,6 +74,10 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/logs.json", DATA),
     ("/pull/spot", DATA),
     ("/pull/fno", DATA),
+    // The versioned repair and its read-only plan (D-3350, WP-13c): a pull
+    // route, journaled in `audit/pull.journal` and `audit/<feed>.repairs`.
+    ("/pull/repair", DATA),
+    ("/pull/repair.json", DATA),
     ("/pull/run", DATA),
     ("/pull/recovery", DATA),
     ("/pull/recovery.json", DATA),

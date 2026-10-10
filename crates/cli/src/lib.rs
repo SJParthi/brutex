@@ -74,6 +74,10 @@ mod gdfl_dayflags;
 mod gdfl_import_command;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuild;
+/// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
+/// for every series, or repaired to a new generation from bars another store
+/// holds (D-3350, WP-13c).
+mod zerodha_repair;
 // THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
 // compiled only into `build.rs` and an integration test, and cargo-mutants
 // mutates neither, so gate 18 could never mutate it. It is test-only here for
@@ -501,6 +505,18 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    a month not held is not created, a month
                                    another process holds is refused. --dry-run
                                    writes nothing (D-3340).
+       cli zerodha-repair INSTRUMENT|ALL FROM TO [--segment INDEX|CASH]
+                          [--rung RUNG] [--from-store ROOT --reason TEXT]
+                                   the Zerodha month holes (FROM, TO are
+                                   YYYY-MM-DD): per month the generation served
+                                   and each session of record it lacks, front
+                                   and interior ones only a versioned repair
+                                   fills, with the POST /pull/repair body; ALL
+                                   counts every series. Nothing is written
+                                   unless --from-store names a store holding the
+                                   bars: then each month is repaired to a new
+                                   generation, held bars kept and never changed,
+                                   journaled in audit/zerodha.repairs (D-3350).
        cli top          [VENDOR UNDERLYING]
                                    the ranked TOP COMBINATIONS of the best
                                    complete recorded run, read back from the
@@ -2623,6 +2639,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["tix-rebuild", arguments @ ..] if !arguments.is_empty() => {
             tix_rebuild::command(arguments, out)
         }
+        ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
+            zerodha_repair::command(arguments, out)
+        }
         ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
             gdfl_dayflags::command(arguments, out)
         }
@@ -2691,7 +2710,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 41] = [
+const COMMANDS: [&str; 42] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2733,6 +2752,7 @@ const COMMANDS: [&str; 41] = [
     "tix-rebuild",
     "top",
     "verify",
+    "zerodha-repair",
 ];
 
 /// Whether this canonical CLI verb performs sweep or strategy computation.

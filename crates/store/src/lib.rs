@@ -67,6 +67,9 @@ pub mod file;
 /// released by `File::unlock`, never by close (D-0693).
 pub mod flock;
 pub mod format;
+/// Which generation of a bar month every reader opens: the original, or a
+/// repair revision promoted by an append-only pointer (D-3350, WP-13c).
+pub mod generation;
 pub mod header;
 pub mod layout;
 /// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).

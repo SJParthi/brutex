@@ -3748,6 +3748,9 @@ async fn tick(
         window: unit.window,
         feed: state.feed,
         granularity,
+        // THE AUTOPILOT APPENDS; IT NEVER REPAIRS. A versioned repair is the
+        // operator's act, on `POST /pull/repair` (D-3350).
+        repair: None,
     };
     let now = std::time::SystemTime::now();
     let started = std::time::Instant::now();

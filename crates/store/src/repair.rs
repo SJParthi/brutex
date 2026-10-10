@@ -3,8 +3,15 @@
 //! See `crates/store/REPAIR.md` for the publication protocol, format, invariants,
 //! and the integration deliberately left to the calendar and ingest owners.
 //! All month filenames still come from [`StorePath`]. The separate revision
-//! root is outside the ordinary catalog's `bars/` tree. No current pointer,
-//! rename, deletion, overlay copy, or change to append semantics is involved.
+//! root is outside the ordinary catalog's `bars/` tree. No rename, deletion,
+//! overlay copy, or change to append semantics is involved.
+//!
+//! **Served by every reader once promoted (D-3350, WP-13c).** A published
+//! revision is inert until [`crate::generation::promote`] appends the month's
+//! pointer record; from then on `BarFile::open_existing` opens it for every
+//! reader and the writer door refuses the original. [`repair_month`] is the
+//! whole repair: the served month's bars plus the offered ones, a held bar never
+//! dropped and never changed, published at the next free ordinal and promoted.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -54,6 +61,13 @@ impl Revision {
     }
 }
 
+/// `<root>/bar-revisions-v1/<n>`: the root a revision's month files are
+/// rendered under by the unmodified [`StorePath`].
+#[must_use]
+pub fn revision_root(root: &Path, revision: Revision) -> PathBuf {
+    revision.root(root)
+}
+
 /// Named refusals from the repair boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepairError {
@@ -75,6 +89,25 @@ pub enum RepairError {
     Incomplete(PathBuf),
     /// The receipt is damaged, foreign, or disagrees with the bar header.
     InvalidReceipt(PathBuf),
+    /// An offered bar at a stamp the served month holds carries other values.
+    /// The held bar is never changed by a repair; the month is refused whole,
+    /// naming the first such bar, and nothing is written (D-3350).
+    HeldBarDiffers {
+        /// The stamp both carry.
+        ts_micros: i64,
+        /// What the served month holds.
+        held: Box<Bar>,
+        /// What was offered.
+        offered: Box<Bar>,
+    },
+    /// The offered bars share no stamp with the served month, so nothing
+    /// proves they are on the price basis its held bars are on (a vendor that
+    /// back-adjusts as of the pull date, D-3323). Widen the window to include
+    /// a held session (D-3350).
+    NoBasisWitness,
+    /// A sibling indexed by record (an overlay or greeks file) exists beside
+    /// the month: inserting bars would shift every row it describes.
+    IndexedSibling(PathBuf),
     /// A filesystem operation failed. Once receipt writing starts the complete
     /// revision may be visible even if crash durability was not established.
     Io {
@@ -103,6 +136,34 @@ impl fmt::Display for RepairError {
                 write!(f, "incomplete repair at {}; preserved", path.display())
             }
             Self::InvalidReceipt(path) => write!(f, "invalid repair receipt at {}", path.display()),
+            Self::HeldBarDiffers {
+                ts_micros,
+                held,
+                offered,
+            } => write!(
+                f,
+                "repair refused: the held bar at {ts_micros} would change (held o={} h={} l={} c={} v={} oi={}; offered o={} h={} l={} c={} v={} oi={}); a repair never changes a held bar, and nothing was written",
+                held.open,
+                held.high,
+                held.low,
+                held.close,
+                held.volume,
+                held.open_interest,
+                offered.open,
+                offered.high,
+                offered.low,
+                offered.close,
+                offered.volume,
+                offered.open_interest
+            ),
+            Self::NoBasisWitness => f.write_str(
+                "repair refused: no offered bar shares a stamp with the month's held bars, so nothing proves the vendor's price basis is unchanged since they were stored; widen the window to include a held session",
+            ),
+            Self::IndexedSibling(path) => write!(
+                f,
+                "repair refused: {} is indexed by record and inserting bars would shift every row it describes",
+                path.display()
+            ),
             Self::Io {
                 path,
                 operation,
@@ -296,6 +357,199 @@ pub fn publish(
     Ok(published)
 }
 
+/// How [`repair_month`] compares an offered bar with the held bar at the same
+/// stamp. Fixed by the caller from what the instrument IS, never from the bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// Open interest is a measurement for this instrument. When it is not —
+    /// an index or a share (D-3322) — a held `0` and an offered null are the
+    /// same absence, and the held one is kept.
+    pub open_interest_applies: bool,
+    /// The vendor adjusts its prices as of the pull date (D-3323): the
+    /// offered bars must share at least one stamp with the held ones and agree
+    /// there, or nothing proves the two pulls are on one basis.
+    pub basis_witness: bool,
+}
+
+/// What [`repair_month`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonthRepair {
+    /// Every offered bar is already held, with the same values. Nothing was
+    /// written; the month is served as it was.
+    NothingNew {
+        /// The generation served: `0` is the original.
+        ordinal: u32,
+        /// Its committed records.
+        n_valid: u64,
+    },
+    /// A new generation is served: the held bars and the added ones.
+    Repaired {
+        /// The generation it replaced: `0` is the original.
+        from: u32,
+        /// The revision now served.
+        to: Revision,
+        /// Bars the replaced generation held, every one of them kept.
+        held: u64,
+        /// Bars added.
+        added: u64,
+        /// The stamps of the bars added, ascending: what the repair filled,
+        /// for a caller's ledger.
+        added_at: Vec<i64>,
+        /// The new generation's committed header.
+        header: Header,
+        /// Whether this call wrote the revision or found it already complete
+        /// (a crash between publication and promotion, resumed).
+        published: Published,
+        /// The promotion.
+        promoted: crate::generation::Promoted,
+        /// Ordinals stepped over because they hold another request or an
+        /// unfinished one, each with why. Never reused, never overwritten.
+        skipped: Vec<(u32, String)>,
+    },
+}
+
+/// Repair one month: serve a new generation holding every bar the served
+/// generation holds plus every offered bar it lacks. D-3350, WP-13c.
+///
+/// * **Never in place.** The served generation's files are not opened for
+///   writing; the new one is published under `bar-revisions-v1/<n>` by
+///   [`publish`] and made the served one by [`crate::generation::promote`].
+/// * **Never drops a held bar**, and never changes one: an offered bar at a
+///   held stamp must carry the held values ([`Policy`]), or the month is
+///   refused whole, naming the bar ([`RepairError::HeldBarDiffers`]).
+/// * **Idempotent and resumable.** Offered bars that are all held answer
+///   [`MonthRepair::NothingNew`]. A revision published and not promoted (a
+///   crash between the two) is found complete at its ordinal and promoted. An
+///   ordinal that holds another request or an unfinished one is stepped over
+///   and named, never reused.
+///
+/// A month that does not exist is [`StoreError::Missing`]: an ordinary append
+/// creates it, and a repair has nothing to keep.
+///
+/// # Cost
+///
+/// O(held + offered) to read and merge, bounded by [`MAX_ROWS`], plus what
+/// [`publish`] states; one probe per stepped-over ordinal, at most
+/// [`MAX_REVISIONS`]. Not O(1), and not on a read path.
+///
+/// # Errors
+///
+/// Every refusal of [`publish`] and [`crate::generation::promote`], the
+/// month's own read refusals, [`RepairError::HeldBarDiffers`],
+/// [`RepairError::NoBasisWitness`] and [`RepairError::IndexedSibling`].
+pub fn repair_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    offered: &[Bar],
+    policy: Policy,
+) -> Result<MonthRepair, RepairError> {
+    check_kind(path)?;
+    if offered.len() > MAX_ROWS {
+        return Err(RepairError::RowLimit);
+    }
+    survey(offered)?;
+    Admission::new(path.month(), path.timeframe().secs()).admit(offered)?;
+    let served = crate::generation::served(root, path)?;
+    let served_root = served.root(root);
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let sibling = path.with_file(kind).to_path_buf(&served_root);
+        if exists(&sibling)? {
+            return Err(RepairError::IndexedSibling(sibling));
+        }
+    }
+    let (header, merged, added_at, witnessed) = {
+        let source = BarFile::open_existing(root, path, symbol_id)?;
+        let header = source.header();
+        check_header(header)?;
+        let held = usize::try_from(header.n_valid).map_err(|_| RepairError::RowLimit)?;
+        let mut merged = Vec::with_capacity(held.saturating_add(offered.len()));
+        let mut offer = offered.iter().peekable();
+        let mut witnessed = 0u64;
+        let mut added_at = Vec::new();
+        for index in 0..header.n_valid {
+            let bar = source.read_record(index)?;
+            while let Some(early) = offer.next_if(|o| o.ts_micros < bar.ts_micros) {
+                added_at.push(early.ts_micros);
+                merged.push(*early);
+            }
+            if let Some(same) = offer.next_if(|o| o.ts_micros == bar.ts_micros) {
+                if !agrees(&bar, same, policy) {
+                    return Err(RepairError::HeldBarDiffers {
+                        ts_micros: bar.ts_micros,
+                        held: Box::new(bar),
+                        offered: Box::new(*same),
+                    });
+                }
+                witnessed += 1;
+            }
+            merged.push(bar);
+        }
+        for late in offer {
+            added_at.push(late.ts_micros);
+            merged.push(*late);
+        }
+        (header, merged, added_at, witnessed)
+    };
+    let added = added_at.len() as u64;
+    if added == 0 {
+        return Ok(MonthRepair::NothingNew {
+            ordinal: served.ordinal(),
+            n_valid: header.n_valid,
+        });
+    }
+    if policy.basis_witness && header.n_valid > 0 && witnessed == 0 {
+        return Err(RepairError::NoBasisWitness);
+    }
+    let mut skipped = Vec::new();
+    for ordinal in served.ordinal().saturating_add(1)..=MAX_REVISIONS {
+        let revision = Revision::new(ordinal)?;
+        match publish(root, path, symbol_id, revision, header, &merged) {
+            Ok(published) => {
+                let promoted = crate::generation::promote(root, path, symbol_id, revision)?;
+                let now = promoted.pointer();
+                let header = RevisionReader::open(root, path, symbol_id, now.revision)?.header();
+                return Ok(MonthRepair::Repaired {
+                    from: served.ordinal(),
+                    to: revision,
+                    held: (merged.len() as u64).saturating_sub(added),
+                    added,
+                    added_at,
+                    header,
+                    published,
+                    promoted,
+                    skipped,
+                });
+            }
+            // ANOTHER REQUEST OR AN UNFINISHED ONE HOLDS THIS ORDINAL. It is
+            // never reopened or overwritten; the next is tried, and this one
+            // is named to the caller.
+            Err(
+                why @ (RepairError::Conflict
+                | RepairError::Incomplete(_)
+                | RepairError::InvalidReceipt(_)),
+            ) => skipped.push((ordinal, why.to_string())),
+            Err(why) => return Err(why),
+        }
+    }
+    Err(RepairError::RevisionLimit)
+}
+
+/// Whether an offered bar says what the held bar at its stamp says.
+const fn agrees(held: &Bar, offered: &Bar, policy: Policy) -> bool {
+    let interest = held.open_interest == offered.open_interest
+        || (!policy.open_interest_applies
+            && (held.open_interest == 0 || held.open_interest == crate::format::OI_NULL)
+            && (offered.open_interest == 0 || offered.open_interest == crate::format::OI_NULL));
+    held.ts_micros == offered.ts_micros
+        && held.open == offered.open
+        && held.high == offered.high
+        && held.low == offered.low
+        && held.close == offered.close
+        && held.volume == offered.volume
+        && interest
+}
+
 fn retain_timestamps(source: &BarFile, merged: &[Bar]) -> Result<(), RepairError> {
     let mut offered = merged.iter().peekable();
     let mut previous = None;
@@ -448,7 +702,9 @@ fn read_receipt(path: &Path) -> Result<[u8; RECEIPT_LEN], RepairError> {
     Ok(bytes)
 }
 
-fn shared_lock(path: PathBuf) -> Result<Flock<File>, RepairError> {
+/// The lock at `path`, taken shared and non-blocking; a missing lock file is
+/// refused, never created.
+pub(crate) fn shared_lock(path: PathBuf) -> Result<Flock<File>, RepairError> {
     let file = io_at(File::open(&path), &path, "open required lock", false)?;
     match Flock::try_lock_shared(file, path.clone()) {
         Ok(held) => Ok(held),

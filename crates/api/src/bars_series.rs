@@ -63,12 +63,23 @@ const DAY_SECS: i64 = 86_400;
 /// expiry measured is 566, and a cap is what keeps one request's work bounded.
 pub const MAX_SERIES: usize = 1_024;
 
-/// Entries each process-wide memo holds before it is emptied and refilled.
+/// Entries each process-wide memo holds, across its two generations.
 ///
-/// Emptied whole rather than evicted one at a time: an eviction order is a
-/// second structure to keep, and a memo that forgets everything costs one
-/// re-read per file on the next request, which is what it cost before it
-/// existed.
+/// # Evicted by generation, never emptied whole (DB-B57)
+///
+/// This memo was emptied whole when it filled: after about 675 distinct
+/// time-of-day windows over NIFTY's 97 one-second months, every run of every
+/// month was dropped in one `clear`, and the next request paid the first
+/// request's O(days) again — a p99 cliff nothing announced. It now keeps two
+/// generations of at most half the cap each. A new entry goes into the young
+/// one; when that is full, the old generation is dropped and the young one
+/// becomes the old. A hit in the old generation moves the entry back into the
+/// young one, so whatever was used since the last turn survives it. At most
+/// the older half is ever dropped at once, and a lookup or an insert stays
+/// O(1): two hash probes and, once per half-cap inserts, the move of one map
+/// (freed after the lock is released). No telemetry line is written from
+/// here: this file emits nothing, by the shape test in `bars.rs`, so a turn
+/// is counted in [`Memo::turns`] instead.
 const MEMO_CAP: usize = 65_536;
 
 /// One series, as the census names it: `NSE-FNO-NIFTY-2019-03-28-1150000-CE`,
@@ -207,9 +218,40 @@ impl Stamp {
     }
 }
 
-/// A bounded process-wide memo. See [`MEMO_CAP`].
+/// A bounded process-wide memo of two generations. See [`MEMO_CAP`].
 pub(super) struct Memo<K, V> {
-    map: OnceLock<Mutex<HashMap<K, V>>>,
+    map: OnceLock<Mutex<Generations<K, V>>>,
+    /// Turns taken since the process started.
+    turned: std::sync::atomic::AtomicU64,
+}
+
+/// The two generations behind a [`Memo`].
+struct Generations<K, V> {
+    /// Entries put, or hit, since the last turn.
+    young: HashMap<K, V>,
+    /// The generation before; dropped whole at the next turn.
+    old: HashMap<K, V>,
+}
+
+/// The generation one turn dropped, handed out of the lock so it is freed
+/// after the lock is released.
+struct Turned<K, V> {
+    dropped: HashMap<K, V>,
+}
+
+impl<K: Eq + Hash, V> Generations<K, V> {
+    /// Puts `value` into the young generation, turning the generations first
+    /// when the young one is full and `key` is new to it.
+    fn admit(&mut self, key: K, value: V) -> Option<Turned<K, V>> {
+        let mut turned = None;
+        if !self.young.contains_key(&key) && self.young.len() >= MEMO_CAP / 2 {
+            let older = std::mem::replace(&mut self.young, HashMap::with_capacity(1_024));
+            let dropped = std::mem::replace(&mut self.old, older);
+            turned = Some(Turned { dropped });
+        }
+        self.young.insert(key, value);
+        turned
+    }
 }
 
 impl<K: Eq + Hash, V: Clone> Memo<K, V> {
@@ -217,28 +259,69 @@ impl<K: Eq + Hash, V: Clone> Memo<K, V> {
     pub(super) const fn new() -> Self {
         Self {
             map: OnceLock::new(),
+            turned: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<K, V>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Generations<K, V>> {
         self.map
-            .get_or_init(|| Mutex::new(HashMap::with_capacity(1_024)))
+            .get_or_init(|| {
+                Mutex::new(Generations {
+                    young: HashMap::with_capacity(1_024),
+                    old: HashMap::new(),
+                })
+            })
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The value held for `key`, cloned.
+    /// The value held for `key`, cloned. A hit in the old generation moves
+    /// the entry into the young one, so a key in use survives the next turn.
     pub(super) fn get(&self, key: &K) -> Option<V> {
-        self.lock().get(key).cloned()
+        let mut gens = self.lock();
+        if let Some(value) = gens.young.get(key) {
+            return Some(value.clone());
+        }
+        let (key, value) = gens.old.remove_entry(key)?;
+        let out = value.clone();
+        let turned = gens.admit(key, value);
+        drop(gens);
+        self.announce(turned);
+        Some(out)
     }
 
-    /// Holds `value` for `key`, emptying the memo first when it is full.
+    /// Holds `value` for `key`, turning the generations when the young one is
+    /// full: the older half is dropped, never the whole memo.
     pub(super) fn put(&self, key: K, value: V) {
-        let mut map = self.lock();
-        if map.len() >= MEMO_CAP {
-            map.clear();
-        }
-        map.insert(key, value);
+        let mut gens = self.lock();
+        gens.old.remove(&key);
+        let turned = gens.admit(key, value);
+        drop(gens);
+        self.announce(turned);
+    }
+
+    /// Counts a turn and frees the generation it dropped, outside the lock.
+    fn announce(&self, turned: Option<Turned<K, V>>) {
+        let Some(turned) = turned else {
+            return;
+        };
+        self.turned
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        drop(turned.dropped);
+    }
+
+    /// How many times the generations have turned: each turn dropped at most
+    /// the older half, never the whole memo.
+    #[cfg(test)]
+    pub(super) fn turns(&self) -> u64 {
+        self.turned.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Entries held across both generations.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        let gens = self.lock();
+        gens.young.len() + gens.old.len()
     }
 }
 
@@ -294,6 +377,45 @@ pub(super) fn held_months(dir: &Path) -> Result<Arc<[YearMonth]>, String> {
     let held: Arc<[YearMonth]> = months.into_iter().collect::<Vec<_>>().into();
     DIRS.put(dir.to_path_buf(), (stamp, Arc::clone(&held)));
     Ok(held)
+}
+
+/// The first and last month a series is owed in, or `None` when nothing is.
+///
+/// # An index has no expiry to be outside of (DB-B47)
+///
+/// A contract lives from its listing to its expiry, so a month before its
+/// first file or after its last is an expected absence, and that stays. An
+/// `INDEX` never expires: a month after its newest file, inside the feed's
+/// own span — the archive it was bought as, else the operator's window
+/// (D-3338) — is a month not yet pulled or imported, a HOLE the feed owes.
+/// Before this, GDFL INDIAVIX 1s (files to 2025-10, archive to 2026-09) read
+/// its eleven newest missing months as `months_outside_life` and named none,
+/// so its completeness read whole.
+///
+/// # What is not claimed
+///
+/// The START stays the first held month: an index launched inside the span
+/// (NIFTYMIDSELECT's first file is 2022-03) and history never imported look
+/// the same from the store, and no launch date is sourced here, so a month
+/// before the first file is not called a hole. A `CASH` share keeps its held
+/// life at both ends: a delisting, a merger or a rename (HDFC's last file is
+/// 2023-07) ends a share's months exactly as a missing pull would, and no
+/// lifecycle source tells them apart on this path. Both stay counted as
+/// expected absences rather than invented as holes.
+fn life_of(key: &SeriesKey, vendor: Vendor, held: &[YearMonth]) -> Option<(YearMonth, YearMonth)> {
+    use brutex_core::instrument::Segment;
+    let held_life = held.first().copied().zip(held.last().copied());
+    let never_expires =
+        key.contract.is_none() && matches!(Segment::parse(&key.segment), Ok(Segment::Index));
+    let Some((born, died)) = held_life.filter(|_| never_expires) else {
+        return held_life;
+    };
+    let span_end = pull::vendor::Feed::ALL
+        .into_iter()
+        .find(|feed| feed.store_vendor() == Some(vendor))
+        .and_then(|feed| feed.descriptor().archive.or(feed.descriptor().window))
+        .and_then(|span| span.to.year_month().ok());
+    Some((born, span_end.map_or(died, |to| to.max(died))))
 }
 
 /// `YYYY-MM` as a month, or `None`.
@@ -506,12 +628,12 @@ impl SeriesPlan {
             outside_life: 0,
             faults: Vec::new(),
         };
-        let life = held_all.first().copied().zip(held_all.last().copied());
+        let life = life_of(&plan.key, vendor, &held_all);
         let mut held = held_all.iter().copied().peekable();
         for &month in months {
             while held.next_if(|&at| at < month).is_some() {}
             if held.next_if_eq(&month).is_none() {
-                if life.is_some_and(|(born, died)| born < month && month < died) {
+                if life.is_some_and(|(born, died)| born <= month && month <= died) {
                     plan.holes.push(month);
                 } else {
                     plan.outside_life = plan.outside_life.saturating_add(1);
@@ -553,7 +675,16 @@ impl SeriesPlan {
         let Ok(address) = StorePath::new(parts) else {
             return;
         };
-        let path = address.to_path_buf(root);
+        // THE FILE EVERY READER OPENS, which a repair makes a revision's
+        // (D-3350): the header and runs memos are keyed by it, so a promotion
+        // is a new key and never a stale hit on the original's stamp.
+        let path = match store::generation::served_bars_path(root, address) {
+            Ok(path) => path,
+            Err(why) => {
+                self.faults.push(format!("{month}: {why}"));
+                return;
+            }
+        };
         match header_of(root, parts, &path) {
             Ok(Some((held, stamp, file))) => self.slots.push(Slot {
                 month,
@@ -1043,4 +1174,101 @@ fn months_between(first: YearMonth, month: YearMonth) -> usize {
 /// 00:00 IST of the IST day `day`, UTC micros.
 pub(super) const fn day_start(day: i64) -> i64 {
     (day * DAY_SECS - pull::session::IST_OFFSET_SECS) * MICROS
+}
+
+#[cfg(test)]
+mod generation_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    /// **A FULL MEMO DROPS ITS OLDER HALF, NEVER EVERYTHING, AND A KEY IN USE
+    /// SURVIVES.** DB-B57: `put` emptied the whole map at 65,536 entries, so
+    /// about 675 distinct time-of-day windows over NIFTY's 97 one-second
+    /// months dropped every cached run at once and the next request paid the
+    /// first request's O(days) again.
+    #[test]
+    fn a_full_memo_turns_a_generation_and_keeps_what_is_in_use() {
+        let memo: Memo<u64, u64> = Memo::new();
+        let cap = MEMO_CAP as u64;
+        memo.put(u64::MAX, 7);
+        for key in 0..cap * 2 {
+            memo.put(key, key);
+            // THE KEY IN USE: read every thousand inserts, as a month asked
+            // about again is.
+            if key % 1_000 == 0 {
+                assert_eq!(memo.get(&u64::MAX), Some(7), "lost at insert {key}");
+            }
+            assert!(memo.len() <= MEMO_CAP, "held {} past the cap", memo.len());
+        }
+        assert!(memo.turns() >= 3, "{} turns", memo.turns());
+        // NEVER EMPTIED: right after a turn the newer half is still held.
+        assert!(
+            memo.len() >= MEMO_CAP / 2,
+            "only {} held after {} turns",
+            memo.len(),
+            memo.turns()
+        );
+        // THE NEWEST ENTRIES ARE ALWAYS THERE, the oldest are not.
+        assert_eq!(memo.get(&(cap * 2 - 1)), Some(cap * 2 - 1));
+        assert_eq!(memo.get(&0), None);
+        // A FRESHER VALUE SUPERSEDES ONE HELD IN THE OLD GENERATION.
+        let held_old = cap * 2 - cap / 2 - 10;
+        memo.put(held_old, 1);
+        assert_eq!(memo.get(&held_old), Some(1));
+    }
+
+    fn months(text: &[&str]) -> Vec<YearMonth> {
+        text.iter()
+            .map(|m| month_of_text(m).expect("a month"))
+            .collect()
+    }
+
+    /// **AN INDEX IS OWED ITS FEED'S SPAN AFTER ITS NEWEST FILE; A CONTRACT
+    /// AND A SHARE ONLY THEIR HELD LIFE.** DB-B47.
+    #[test]
+    fn an_index_is_owed_the_feeds_span_after_its_newest_file() {
+        let held = months(&["2019-01", "2019-03"]);
+        let index = SeriesKey::parse("NSE-INDEX-INDIAVIX").expect("key");
+        let share = SeriesKey::parse("NSE-CASH-BAJAJ-AUTO").expect("key");
+        let option = SeriesKey::parse("NSE-FNO-NIFTY-2019-03-28-1150000-CE").expect("key");
+        let span = |from: &str, to: &str| {
+            Some((
+                month_of_text(from).expect("m"),
+                month_of_text(to).expect("m"),
+            ))
+        };
+        // ZERODHA: the operator's window ends 2026-09 (D-3338).
+        assert_eq!(
+            life_of(&index, Vendor::Zerodha, &held),
+            span("2019-01", "2026-09")
+        );
+        // GDFL: the archive it was bought as ends 2026-09-24.
+        assert_eq!(
+            life_of(&index, Vendor::Gdfl, &held),
+            span("2019-01", "2026-09")
+        );
+        // A MONTH HELD PAST THE SPAN KEEPS ITS PLACE: the span never shortens.
+        let late = months(&["2019-01", "2026-11"]);
+        assert_eq!(
+            life_of(&index, Vendor::Zerodha, &late),
+            span("2019-01", "2026-11")
+        );
+        // A SHARE AND A CONTRACT LIVE FROM THEIR FIRST FILE TO THEIR LAST.
+        assert_eq!(
+            life_of(&share, Vendor::Zerodha, &held),
+            span("2019-01", "2019-03")
+        );
+        assert_eq!(
+            life_of(&option, Vendor::Gdfl, &held),
+            span("2019-01", "2019-03")
+        );
+        // A FEED WITH NO RECORDED SPAN, AND A SERIES HOLDING NOTHING, CLAIM
+        // NOTHING MORE THAN WHAT IS HELD.
+        assert_eq!(
+            life_of(&index, Vendor::Dhan, &held),
+            span("2019-01", "2019-03")
+        );
+        assert_eq!(life_of(&index, Vendor::Zerodha, &[]), None);
+    }
 }

@@ -182,6 +182,47 @@ impl Index {
         self.underlyings.iter()
     }
 
+    /// The generation of the census part these sums equal. Read by
+    /// `/chain.json` (WP-32, D-3329), which names the census its chain was
+    /// counted from.
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Whether `symbol` is an underlying of this segment on `exchange`: one
+    /// map probe.
+    pub(crate) fn holds(&self, exchange: Exchange, symbol: Symbol) -> bool {
+        self.underlyings.contains_key(&(exchange, symbol))
+    }
+
+    /// One expiry's option contracts, each as (strike paisa, `true` for a
+    /// call, the earliest stamp the census holds for it in microseconds), in
+    /// strike order, or `None` when the census holds no such expiry. Two
+    /// probes and the expiry's own contracts, never a walk of the census:
+    /// `/chain.json`'s point-in-time chain (WP-32, D-3329).
+    pub(crate) fn expiry_options(
+        &self,
+        exchange: Exchange,
+        symbol: Symbol,
+        expiry: Day,
+    ) -> Option<Vec<(i64, bool, Option<i64>)>> {
+        let chain = self
+            .underlyings
+            .get(&(exchange, symbol))?
+            .expiries
+            .get(&expiry)?;
+        Some(
+            chain
+                .contracts
+                .iter()
+                .filter_map(|(id, agg)| match *id {
+                    ContractId::Option { strike, call } => Some((strike, call, agg.first)),
+                    ContractId::Future => None,
+                })
+                .collect(),
+        )
+    }
+
     /// One key moved from `old` to `new`.
     fn apply(&mut self, old: Option<&Held>, new: &Held) {
         let key = new.entry.key;
