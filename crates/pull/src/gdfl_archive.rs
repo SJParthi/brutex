@@ -527,7 +527,8 @@ impl<B: ReadAt> CmSource for Archive<B> {
             base: inner.header,
             len: inner.len,
         };
-        let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));
+        let mut listing =
+            DayListing::scoped(kind, day, Arc::clone(&self.scope)).with_member_bytes(inner.len);
         for entry in central_directory(&span)? {
             let locator = ZipLocator {
                 base: inner.header,

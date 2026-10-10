@@ -53,3 +53,41 @@ test('a ready feed keeps the four survey states and carries no note', () => {
   assert.ok(none.title.includes('has not been surveyed'));
   assert.equal(none.disabled, false);
 });
+
+import { offeredFeeds, excludedSentence } from '../src/lib/feed-row.js';
+
+test('THE REGRESSION: the picker lists only the offered feeds, and says which are excluded (D-3338)', () => {
+  const list = [
+    { wire: 'dhan', display: 'Dhan', ready: false, offered: false, excluded_by: 'operator', excluded_on: '2026-10-06' },
+    { wire: 'groww', display: 'Groww', ready: false, offered: false, excluded_by: 'operator', excluded_on: '2026-10-06' },
+    { wire: 'truedata', display: 'TrueData', ready: false, offered: false, excluded_by: 'operator', excluded_on: '2026-10-06' },
+    { wire: 'gdfl', display: 'Global Datafeeds', ready: true, offered: true },
+    { wire: 'zerodha', display: 'Zerodha', ready: true, offered: true }
+  ];
+  assert.deepEqual(offeredFeeds(list).map((f) => f.wire), ['gdfl', 'zerodha']);
+  assert.equal(
+    excludedSentence(list),
+    'Dhan, Groww and TrueData are excluded by the operator since 2026-10-06, so they are not offered here (D-3338).'
+  );
+  assert.equal(excludedSentence(offeredFeeds(list)), '');
+  // An older API with no `offered` field hides nothing.
+  assert.deepEqual(offeredFeeds([{ wire: 'x', display: 'X', ready: true }]).map((f) => f.wire), ['x']);
+});
+
+test("a feed's title states its archive or window from its descriptor, not a folder probe", () => {
+  const g = {
+    ...gdfl,
+    ready: true,
+    why: '',
+    archive: { from: '2018-09-03', to: '2026-09-24', source: 'imported by cli gdfl-import (D-2804)' }
+  };
+  const row = feedPickerRow(g, { cells: 246_147, bars: 3_259_842_252, error: null }, fmt);
+  assert.match(row.title, /Its archive runs 2018-09-03 to 2026-09-24 \(imported by cli gdfl-import \(D-2804\)\)\./);
+  assert.equal(row.why, undefined);
+  const z = feedPickerRow(
+    { wire: 'zerodha', display: 'Zerodha', ready: true, why: '', window: { from: '2018-01-01', to: '2026-09-30' } },
+    { cells: 250_025, bars: 451_629_928, error: null },
+    fmt
+  );
+  assert.match(z.title, /Your window for it is 2018-01-01 to 2026-09-30; .*labelled outside your window/);
+});

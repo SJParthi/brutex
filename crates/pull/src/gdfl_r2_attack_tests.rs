@@ -288,6 +288,31 @@ fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect>
             }
         }
     }
+    // ADAPTED (D-3342, WP-11b): an option second's open interest is the OI
+    // of the LAST row placed in it, traded or not: every row's second by the
+    // same placement, the last in file order winning.
+    if oi {
+        let placed_at: Vec<Option<u32>> = (0..n)
+            .map(|i| {
+                if in_order(i) {
+                    Some(rows[i].sod)
+                } else {
+                    (i + 1..n).find(|&j| in_order(j)).map(|j| rows[j].sod)
+                }
+            })
+            .collect();
+        for bar in &mut out.bars {
+            let last = rows
+                .iter()
+                .zip(&placed_at)
+                .filter(|(_, at)| at.map(|s| utc_micros(on, s)) == Some(bar.ts_micros))
+                .map(|(r, _)| r)
+                .next_back();
+            if let Some(r) = last {
+                bar.open_interest = i64::try_from(r.oi).unwrap();
+            }
+        }
+    }
     for (bar, sum) in out.bars.iter_mut().zip(sums) {
         bar.volume = i64::try_from(sum).ok()?;
     }

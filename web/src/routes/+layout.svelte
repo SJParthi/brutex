@@ -43,6 +43,7 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { watchVisible } from '$lib/page-requests.js';
+  import { firstCheck, apiTitle } from '$lib/api-status.js';
   import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
@@ -686,16 +687,22 @@
     }
   }
 
+  /* THE FIRST CHECK RUNS AT LOAD EVEN IN A TAB THAT IS NOT YET VISIBLE
+     (DB-N01): `watchVisible` alone skipped it, and the button read "Checking
+     API…" until clicked. See `$lib/api-status.js`. */
   $effect(() => {
-    const watching = watchVisible(probe, PROBE_MS, {
+    const options = {
       visible: () => document.visibilityState === 'visible',
+      /** @param {() => void} wake */
       listen: (wake) => {
         document.addEventListener('visibilitychange', wake);
         return () => document.removeEventListener('visibilitychange', wake);
       }
-    });
+    };
+    const watching = watchVisible(probe, PROBE_MS, options);
+    const first = firstCheck(probe, options);
     refreshProbe = watching.refresh;
-    return () => { watching(); refreshProbe = () => {}; };
+    return () => { watching(); first(); refreshProbe = () => {}; };
   });
 
   /* ====================================================================
@@ -906,9 +913,7 @@
       class:bad={api.state === 'down'}
       type="button"
       onclick={() => refreshProbe()}
-      title={api.state === 'down'
-        ? `Probing /feeds.json failed: ${api.why}`
-        : `Round trip to /feeds.json. Checked ${stampLabel(api.at)}. Click to re-check.`}
+      title={apiTitle(api, stampLabel)}
     >
       <span
         class="dot"

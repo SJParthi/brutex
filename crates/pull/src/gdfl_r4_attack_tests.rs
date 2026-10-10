@@ -788,9 +788,12 @@ fn r4_11_a_journal_this_branch_wrote_before_definition_existed_is_resumed_as_its
     // The other keys of the old journal are done too, by their own kind and
     // filter.
     let loaded = Journal::load(journal_path(&root)).unwrap();
-    assert!(loaded.done.contains(&key("options", 1, "BANKNIFTY,NIFTY")));
-    assert!(loaded.done.contains(&key("indices", 1, "*")));
-    assert!(loaded.restated.is_empty() && loaded.open.is_empty() && loaded.incomplete.is_empty());
+    // ADAPTED (D-3342, WP-11b): an options day built under definition 2 is
+    // restated, its open interest built by the rule definition 3 replaced;
+    // an index day is current under 2, its bars the same under both.
+    let options = key("options", 1, "BANKNIFTY,NIFTY");
+    assert!(loaded.restated.iter().eq([&options]) && loaded.open.is_empty());
+    assert!(loaded.done.contains(&key("indices", 1, "*")) && loaded.incomplete.is_empty());
     std::fs::remove_dir_all(&root).unwrap();
 }
 

@@ -29,6 +29,7 @@ export const DB_PAGE_FILES = [
   '../src/routes/db/DbChart.svelte',
   '../src/routes/db/db.css',
   '../src/lib/db/selection.svelte.js',
+  '../src/lib/db/selection-model.js',
   '../src/lib/db/notes-controls.js',
   '../src/lib/db/search.js',
   '../src/lib/db/bars-plan.js',

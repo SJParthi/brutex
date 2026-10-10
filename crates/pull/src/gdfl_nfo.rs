@@ -752,6 +752,9 @@ pub struct NfoDay<L> {
     /// Each underlying's median strike over the day's decodable names,
     /// computed on the first ask and dropped by every [`Self::push`].
     medians: OnceLock<HashMap<Box<str>, i64>>,
+    /// The day zip's own size, where the source read one (D-3335's
+    /// `member_bytes`); `None` for the tick store, which holds no zip.
+    member_bytes: Option<u64>,
 }
 
 impl<L> NfoDay<L> {
@@ -766,7 +769,23 @@ impl<L> NfoDay<L> {
             duplicates: HashSet::with_capacity(1),
             skipped: 0,
             medians: OnceLock::new(),
+            member_bytes: None,
         }
+    }
+
+    /// This listing, read from a day zip of `bytes` stored bytes (D-3335's
+    /// `member_bytes`).
+    #[must_use]
+    pub const fn with_member_bytes(mut self, bytes: u64) -> Self {
+        self.member_bytes = Some(bytes);
+        self
+    }
+
+    /// The day zip's size, when the source read one: `None` for the tick
+    /// store, which keeps each member and not the zip.
+    #[must_use]
+    pub const fn member_bytes(&self) -> Option<u64> {
+        self.member_bytes
     }
 
     /// Appends one entry in source order. An option file of the day folder is
@@ -1059,7 +1078,7 @@ pub fn listing_in<B: ReadAt>(
     };
     let (base, span) = stored_span(&**file, &inner)?;
     let members = zip_entries(&**file, base, span)?;
-    let mut listing = NfoDay::new(day, members.len());
+    let mut listing = NfoDay::new(day, members.len()).with_member_bytes(span);
     for entry in members {
         listing.push(
             &entry.name,
@@ -1095,6 +1114,15 @@ pub struct NfoRow {
 pub struct NfoFile {
     /// Every row, none dropped, none moved.
     pub rows: Vec<NfoRow>,
+    /// Rows whose bid or ask is not zero. A file with rows and none of these
+    /// is D-3335's `zero_quote_files` (30 May 2019: 10,435 of 10,453 traded
+    /// files); counted, never a refusal.
+    pub quoted_rows: u32,
+}
+
+/// Whether `text`, a plain decimal already checked, is zero: every digit `0`.
+fn is_zero_decimal(text: &str) -> bool {
+    text.bytes().all(|b| b == b'0' || b == b'.')
 }
 
 /// `HH:MM:SS` as a second of the day.
@@ -1148,6 +1176,7 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
     }
     let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
     let mut rows = Vec::new();
+    let mut quoted_rows = 0_u32;
     for (index, raw) in lines.enumerate() {
         let line = u32::try_from(index.saturating_add(2)).unwrap_or(u32::MAX);
         if rows.len() >= cap {
@@ -1182,6 +1211,9 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         if !(is_decimal(bid) && is_decimal(ask) && is_digits(bid_qty) && is_digits(ask_qty)) {
             return Err(malformed);
         }
+        if !(is_zero_decimal(bid) && is_zero_decimal(ask)) {
+            quoted_rows = quoted_rows.saturating_add(1);
+        }
         let ltq: u64 = if is_digits(ltq) {
             ltq.parse().ok()
         } else {
@@ -1215,7 +1247,7 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
             oi,
         });
     }
-    Ok(NfoFile { rows })
+    Ok(NfoFile { rows, quoted_rows })
 }
 
 /// One option file of a day, located, fetched, checked and decoded.

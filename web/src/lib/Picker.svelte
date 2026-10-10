@@ -192,6 +192,24 @@
   let up = $state(false);
   let pmax = $state(380);
 
+  /**
+   * THE SEARCH BOX TAKES THE KEYBOARD WHEN THE LIST OPENS (DB-N08).
+   *
+   * Opening a filtered list left focus on the button, so "11600" typed straight
+   * after opening went nowhere — on every picker on /db (Instrument, Expiry,
+   * Strike, the minutes). The box is focused as the menu mounts, and the
+   * previous search is cleared when the menu closes, so a list does not
+   * reopen pre-filtered by a query typed last time ("10:00" hid even "Any").
+   */
+  /** @type {HTMLInputElement | null} */
+  let pq = $state(null);
+  $effect(() => {
+    if (open && pq) pq.focus({ preventScroll: true });
+  });
+  $effect(() => {
+    if (!open) q = '';
+  });
+
   $effect(() => {
     if (!open || !menu || !btn) return;
     const b = btn.getBoundingClientRect();
@@ -412,6 +430,7 @@
               type="text"
               placeholder="Search {label}"
               aria-label="Filter {label}"
+              bind:this={pq}
               bind:value={q}
               onclick={(e) => e.stopPropagation()}
             />

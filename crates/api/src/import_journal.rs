@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use pull::gdfl_import::{BAR_DEFINITION, ImportKind, Outcome};
+use pull::gdfl_import::{ImportKind, Outcome, definition_is_current};
 use pull::session::Day;
 
 /// The most foreign or torn line numbers one snapshot keeps by name; the rest
@@ -173,14 +173,16 @@ pub(crate) struct DayRow {
 
 impl DayRow {
     /// Whether the deciding line is `done` under a definition other than this
-    /// build's: the importer imports it again (D-2822).
+    /// build's: the importer imports it again (D-2822). A capital-market day
+    /// built under 2 is current: definition 3 changed only an option second's
+    /// open interest (D-3342, `pull::gdfl_import::definition_is_current`).
     pub(crate) fn restated(&self) -> bool {
         self.outcome.is_done()
             && !self.recounted
             && self
                 .stats
                 .definition
-                .is_some_and(|definition| definition != u64::from(BAR_DEFINITION))
+                .is_some_and(|definition| !definition_is_current(self.kind, definition))
     }
 }
 

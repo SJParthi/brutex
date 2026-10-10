@@ -45,6 +45,10 @@ fn d3() -> Day {
 const NINE_FIFTEEN: u32 = 9 * 3_600 + 15 * 60;
 const CLOSE: u32 = 15 * 3_600 + 30 * 60;
 
+/// An invented build commit in the shape a provenance record takes: forty
+/// lower-case hexadecimal digits (D-3334).
+const COMMIT: &str = "0123abcd0123abcd0123abcd0123abcd0123abcd";
+
 fn tick(sod: u32, ltp: i64, ltq: u64) -> Tick {
     Tick {
         sod,
@@ -110,8 +114,13 @@ fn a_stock_or_option_second_uses_traded_rows_only_and_sums_their_quantity() {
     }
 }
 
+/// D-3342 (the operator's answer: bar-close semantics), `BAR_DEFINITION` 3: an
+/// option second's open interest is the OI of the LAST row placed in it,
+/// traded or not; its prices and volume stay the traded rows'. The shape of
+/// DB-083's BANKNIFTY28MAR1926500CE at 14:14:30, a later untraded row in the
+/// second carrying another OI, with invented values.
 #[test]
-fn an_option_second_carries_the_last_open_interest_of_its_traded_rows() {
+fn an_option_second_carries_the_open_interest_of_its_last_row_traded_or_not() {
     let with = |sod, ltp, ltq, oi| Tick {
         sod,
         ltp,
@@ -125,12 +134,43 @@ fn an_option_second_carries_the_last_open_interest_of_its_traded_rows() {
             with(NINE_FIFTEEN, 5, 1, 100),
             with(NINE_FIFTEEN, 6, 2, 0),
             with(NINE_FIFTEEN, 7, 0, 999),
+            // A second whose only rows are untraded has no bar, whatever its
+            // OI says.
+            with(NINE_FIFTEEN + 1, 8, 0, 4_242),
+            // A late untraded row lands in the next in-order row's second
+            // and is that second's last row.
+            with(NINE_FIFTEEN + 3, 9, 4, 300),
+            with(NINE_FIFTEEN + 2, 1, 0, 777),
+            with(NINE_FIFTEEN + 3, 10, 1, 301),
+            with(NINE_FIFTEEN + 3, 11, 0, 302),
         ],
     )
     .unwrap();
+    let ois: Vec<i64> = got.seconds.iter().map(|bar| bar.open_interest).collect();
+    assert_eq!(ois, [999, 302], "{:?}", got.seconds);
+    let closes: Vec<i64> = got.seconds.iter().map(|bar| bar.close).collect();
+    assert_eq!(closes, [6, 10], "prices are the traded rows'");
+    let volumes: Vec<i64> = got.seconds.iter().map(|bar| bar.volume).collect();
+    assert_eq!(volumes, [3, 5], "volume is the traded rows'");
+    // Zero is zero: an untraded last row of OI 0 sets it.
+    let zero = convert(
+        ImportKind::Options,
+        d1(),
+        &[with(NINE_FIFTEEN, 5, 1, 100), with(NINE_FIFTEEN, 6, 0, 0)],
+    )
+    .unwrap();
+    assert_eq!(zero.seconds[0].open_interest, 0);
+    // An index or a share is untouched: no row carries an OI.
+    let spot = convert(
+        ImportKind::Stocks,
+        d1(),
+        &[tick(NINE_FIFTEEN, 5, 1), tick(NINE_FIFTEEN, 6, 0)],
+    )
+    .unwrap();
+    assert_eq!(spot.seconds[0].open_interest, OI_NULL);
     assert_eq!(
-        got.seconds[0].open_interest, 0,
-        "zero is zero, the last traded row's"
+        BAR_DEFINITION, 3,
+        "D-3342 changed the bars an option file builds"
     );
 }
 
@@ -568,17 +608,18 @@ fn the_run_stops_at_the_first_day_whose_batch_does_not_fit_the_census() {
     assert!(lines[0].starts_with("run "), "{journal}");
     for d in ["2024-04-01", "2024-04-02", "2024-04-03"] {
         assert!(
-            lines.iter().any(|l| l
-                .starts_with(&format!("done options {d} * definition=2 files=3 "))
-                && !l.contains(" stage=")
+            lines.iter().any(|l| l.starts_with(&format!(
+                "done options {d} * definition={BAR_DEFINITION} files=3 "
+            )) && !l.contains(" stage=")
                 && !l.contains(" vendor_refused=")),
             "{journal}"
         );
     }
     let last = lines.last().unwrap();
     assert!(
-        last.starts_with("incomplete options 2024-04-04 * definition=2 files=3 ")
-            && last.contains(" failures=1 ")
+        last.starts_with(&format!(
+            "incomplete options 2024-04-04 * definition={BAR_DEFINITION} files=3 "
+        )) && last.contains(" failures=1 ")
             && last.contains(" stage=census reason=too_many_entries run="),
         "{journal}"
     );
@@ -767,8 +808,10 @@ fn a_day_whose_every_file_is_refused_is_journalled_refused_with_its_reason() {
     let line = line_of(&store, "indices", "2024-04-01");
     assert_eq!(
         without_run(&line),
-        "refused indices 2024-04-01 * definition=2 stage=vendor reason=index_ends_in_session \
-         failures=2",
+        format!(
+            "refused indices 2024-04-01 * definition={BAR_DEFINITION} stage=vendor \
+             reason=index_ends_in_session failures=2"
+        ),
     );
     assert!(got.closed_with_refusals.is_empty());
     let journal = std::fs::read_to_string(journal_path(&store)).unwrap();
@@ -809,8 +852,10 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
     assert_eq!(special.days_refused, 1);
     assert_eq!(
         without_run(&line_of(&store, "indices", "2017-12-29")),
-        "refused indices 2017-12-29 * definition=2 stage=calendar reason=calendar_unmeasured \
-         failures=1"
+        format!(
+            "refused indices 2017-12-29 * definition={BAR_DEFINITION} stage=calendar \
+             reason=calendar_unmeasured failures=1"
+        )
     );
     let missing = import(&root, Src::Store, ImportKind::Stocks, d1(), d2(), &store);
     assert_eq!(missing.days_missing, vec![d2()]);
@@ -820,7 +865,10 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
     );
     assert_eq!(
         without_run(&line_of(&store, "stocks", "2024-04-02")),
-        "refused stocks 2024-04-02 * definition=2 stage=vendor reason=day_not_held failures=0"
+        format!(
+            "refused stocks 2024-04-02 * definition={BAR_DEFINITION} stage=vendor \
+             reason=day_not_held failures=0"
+        )
     );
     assert!(line_of(&store, "stocks", "2024-04-01").starts_with("done stocks 2024-04-01 "));
     let before = std::fs::read_to_string(journal_path(&store)).unwrap();
@@ -853,7 +901,7 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
     assert_eq!(unmeasured.days_refused, 1);
     assert_eq!(
         without_run(&line_of(&store, "stocks", "2011-01-03")),
-        "refused stocks 2011-01-03 * definition=2 stage=calendar reason=calendar_unmeasured \
+        "refused stocks 2011-01-03 * definition=3 stage=calendar reason=calendar_unmeasured \
          failures=1"
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -889,7 +937,7 @@ fn a_day_with_only_vendor_refusals_closes_done_and_is_not_read_again() {
     assert!(got.closed_incomplete.is_empty());
     let line = line_of(&store, "options", "2024-04-01");
     let want = format!(
-        "done options 2024-04-01 * definition=2 files=3 seconds={} failures=1 late={} \
+        "done options 2024-04-01 * definition={BAR_DEFINITION} files=3 seconds={} failures=1 late={} \
          late_unresolved={} max_back_s={} vendor_refused=1 reason=price_refused",
         got.seconds, got.late_rows, got.late_unresolved, got.max_back_s
     );
@@ -1102,7 +1150,10 @@ fn a_days_close_follows_its_failures() {
         late_unresolved: 0,
         max_back_s: 4,
     };
-    let stats = "definition=2 files=2 seconds=9 failures=1 late=3 late_unresolved=0 max_back_s=4";
+    let stats = format!(
+        "definition={BAR_DEFINITION} files=2 seconds=9 failures=1 late=3 late_unresolved=0 \
+         max_back_s=4"
+    );
     assert_eq!(
         closing_line("k 1 *", Close::Done, &counts),
         format!("done k 1 * {stats}")
@@ -1117,7 +1168,9 @@ fn a_days_close_follows_its_failures() {
     );
     assert_eq!(
         closing_line("k 1 *", Close::Refused(calendar.cause), &counts),
-        "refused k 1 * definition=2 stage=calendar reason=expiry_passed failures=1"
+        format!(
+            "refused k 1 * definition={BAR_DEFINITION} stage=calendar reason=expiry_passed failures=1"
+        )
     );
 }
 
@@ -1484,7 +1537,7 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
     world(&root, &[d1()]);
     let store = root.join("S");
     let ts = root.join("ts");
-    let mut origin = Origin::measure(SourceKind::TickStore, &ts, Some("0123abcd"));
+    let mut origin = Origin::measure(SourceKind::TickStore, &ts, Some(COMMIT));
     origin.started = 1_750_000_000;
     let run = Run {
         kind: ImportKind::Stocks,
@@ -1503,7 +1556,7 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
     assert_eq!(
         lines[0],
         format!(
-            "run 1750000000 source=tickstore archive={} archive_bytes={} commit=0123abcd \
+            "run 1750000000 source=tickstore archive={} archive_bytes={} commit={COMMIT} \
              started=1750000000 format_sha256=unmeasured",
             encoded(ts.as_os_str().as_encoded_bytes()),
             origin.archive_bytes
@@ -1871,6 +1924,28 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
     let mut tb = tree(&b);
     let at = PathBuf::from("imports/gdfl.journal");
     assert!(ta.remove(&at).is_some() && tb.remove(&at).is_some());
+    // ADAPTED (D-3335): the day ledger's `member_bytes` is the day zip's
+    // size, which the tick store cannot measure; every other field agrees.
+    let flags = PathBuf::from("imports/gdfl.dayflags");
+    let (fa, fb) = (ta.remove(&flags).unwrap(), tb.remove(&flags).unwrap());
+    assert_eq!(
+        crate::gdfl_fixtures::as_compared(&flags, fa.clone()),
+        crate::gdfl_fixtures::as_compared(&flags, fb.clone())
+    );
+    let (fa, fb) = (
+        String::from_utf8(fa).unwrap(),
+        String::from_utf8(fb).unwrap(),
+    );
+    assert!(
+        fa.lines()
+            .all(|l| l.contains(" member_bytes=0 ") && l.ends_with(" member_src=none")),
+        "{fa}"
+    );
+    assert!(
+        fb.lines()
+            .all(|l| !l.contains(" member_bytes=0 ") && l.ends_with(" member_src=zip")),
+        "{fb}"
+    );
     assert_eq!(ta, tb, "byte for byte, census included");
     // Only the one-second rung exists, for every kind (D-2802).
     let files = tree(&a);
@@ -2430,8 +2505,9 @@ fn a_census_that_will_not_publish_stops_the_run_at_that_day_by_name() {
     let journal = std::fs::read_to_string(journal_path(&store)).unwrap();
     let last = journal.lines().last().unwrap();
     assert!(
-        last.starts_with("incomplete indices 2024-04-01 * definition=2 files=2 ")
-            && last.contains(" stage=census reason=census_refused run="),
+        last.starts_with(&format!(
+            "incomplete indices 2024-04-01 * definition={BAR_DEFINITION} files=2 "
+        )) && last.contains(" stage=census reason=census_refused run="),
         "{journal}"
     );
     assert!(!journal.contains("2024-04-02"), "{journal}");
@@ -2515,6 +2591,8 @@ fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
     // The clock is every row; the bar is the kept rows (D-2812).
     let kept = ticks;
     let mut placed: Vec<(u32, Tick)> = Vec::new();
+    // Every row at its placed second, untraded ones included (D-3342).
+    let mut every: Vec<(u32, Tick)> = Vec::new();
     for (i, t) in kept.iter().enumerate() {
         let max_before = kept[..i].iter().map(|x| x.sod).max();
         let late = max_before.is_some_and(|m| t.sod < m);
@@ -2533,6 +2611,9 @@ fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
         } else {
             Some(t.sod)
         };
+        if let Some(s) = second {
+            every.push((s, *t));
+        }
         if let Some(s) = second.filter(|_| kind.every_row_counts() || t.ltq > 0) {
             placed.push((s, *t));
         }
@@ -2564,6 +2645,20 @@ fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
                 volume,
                 open_interest: oi,
             }),
+        }
+    }
+    // D-3342: an option second's open interest is its LAST placed row's,
+    // traded or not.
+    if kind == ImportKind::Options {
+        for bar in &mut out {
+            if let Some(oi) = every
+                .iter()
+                .filter(|(s, _)| micros_at(day, *s) == bar.ts_micros)
+                .filter_map(|(_, t)| t.oi)
+                .next_back()
+            {
+                bar.open_interest = oi;
+            }
         }
     }
     out
@@ -2784,5 +2879,1412 @@ fn the_done_line_states_the_days_exact_counts() {
         (2, 2),
         "two files, one late row each"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ══ WP-11b: the day ledger (D-3335), the lineage (D-3331, D-3343) and the
+// provenance (D-3334). Every row below is invented at run time; the shapes
+// follow the audit's measured days (DB-026, DB-029, DB-030, DB-056, DB-G56,
+// DB-G71, DB-G72, DB-G77, DB-G96) without copying a vendor row, and the
+// prices are ones no instrument of those days traded at.
+
+/// Which tree a fixture file belongs to.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Tree {
+    Indices,
+    Stocks,
+    Options,
+}
+
+/// One day of one tree and its files, as [`world_of`] writes it.
+type DayPlan = (Day, Tree, Vec<(String, Vec<u8>)>);
+
+/// The second of the day `h:m:s`.
+const fn hms_at(h: u32, m: u32, s: u32) -> u32 {
+    h * 3_600 + m * 60 + s
+}
+
+/// One invented capital-market file of `(second, LTP text, LTQ)` rows, its
+/// quotes zero.
+fn cm_csv(stem: &str, d: Day, rows: &[(u32, String, u64)]) -> Vec<u8> {
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(sod, ltp, ltq)| row(stem, d, *sod, ltp, *ltq, 0))
+        .collect();
+    csv(&lines)
+}
+
+/// One invented row of `stem` with its quotes.
+fn quoted_row(
+    stem: &str,
+    d: Day,
+    sod: u32,
+    ltp: &str,
+    (bid, ask): (&str, &str),
+    (ltq, oi): (u64, u64),
+) -> String {
+    format!(
+        "{stem},{:02}/{:02}/{:04},{},{ltp},{bid},10,{ask},10,{ltq},{oi}",
+        d.day(),
+        d.month(),
+        d.year(),
+        crate::gdfl_fixtures::hms(sod)
+    )
+}
+
+/// One invented option file of `(second, LTP text, LTQ, OI)` rows, every
+/// row quoted `quotes`.
+fn nfo_csv(ticker: &str, d: Day, quotes: (&str, &str), rows: &[(u32, &str, u64, u64)]) -> Vec<u8> {
+    let stem = format!("{ticker}.NFO");
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|&(sod, ltp, ltq, oi)| quoted_row(&stem, d, sod, ltp, quotes, (ltq, oi)))
+        .collect();
+    csv(&lines)
+}
+
+/// The entry name of `stem`'s file of `tree` on `d`.
+fn entry_of(tree: Tree, d: Day, stem: &str) -> String {
+    match tree {
+        Tree::Indices => format!(
+            "{}/{stem}.csv",
+            crate::gdfl_cm::day_folder_name(CmKind::Indices, d)
+        ),
+        Tree::Stocks => format!(
+            "{}/{stem}.csv",
+            crate::gdfl_cm::day_folder_name(CmKind::Stocks, d)
+        ),
+        Tree::Options => format!(
+            "{}\\Options\\{stem}.NFO.csv",
+            crate::gdfl_nfo::day_folder_name(d)
+        ),
+    }
+}
+
+/// Writes each `(day, tree, files)` into a tick store (`ts/`) and into the
+/// vendor's zips (`zips/cm.zip`, `zips/options/<yyyy>.zip`) under `root`,
+/// as `world` does for its fixed files, and answers each day zip's size.
+fn world_of(root: &Path, plan: &[DayPlan]) -> BTreeMap<(Day, Tree), u64> {
+    let mut sizes = BTreeMap::new();
+    let mut cm_outer: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut nfo_outer: BTreeMap<u16, Vec<(String, Vec<u8>)>> = BTreeMap::new();
+    for (d, tree, entries) in plan {
+        let d = *d;
+        let month = format!("{}_{:04}", mon(d), d.year());
+        let methods: Vec<(&str, &[u8], Method)> = entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice(), Method::Deflated))
+            .collect();
+        let day_zip = zip(&methods);
+        sizes.insert((d, *tree), u64::try_from(day_zip.len()).unwrap());
+        let rel = match tree {
+            Tree::Indices => format!(
+                "INDICES/{:04}/{month}/GFDLCM_INDICES_TICK_{}",
+                d.year(),
+                ddmmyyyy(d)
+            ),
+            Tree::Stocks => format!(
+                "STOCKS/{:04}/{month}/GFDLCM_STOCK_TICK_{}",
+                d.year(),
+                ddmmyyyy(d)
+            ),
+            Tree::Options => format!("{:04}/{month}/GFDLNFO_TICK_{}", d.year(), ddmmyyyy(d)),
+        };
+        if *tree == Tree::Options {
+            put(
+                root,
+                &format!("ts/options/{rel}.bts"),
+                &bts(&as_refs(entries)),
+            );
+            nfo_outer
+                .entry(d.year())
+                .or_default()
+                .push((format!("{month}/GFDLNFO_TICK_{}.zip", ddmmyyyy(d)), day_zip));
+        } else {
+            put(root, &format!("ts/cm/{rel}.bts"), &bts(&as_refs(entries)));
+            cm_outer.push((format!("{rel}.zip"), day_zip));
+        }
+    }
+    let stored: Vec<(&str, &[u8], Method)> = cm_outer
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice(), Method::Stored))
+        .collect();
+    put(root, "zips/cm.zip", &zip(&stored));
+    std::fs::create_dir_all(root.join("zips/options")).unwrap();
+    for (year, inner) in nfo_outer {
+        let stored: Vec<(&str, &[u8], Method)> = inner
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice(), Method::Stored))
+            .collect();
+        put(root, &format!("zips/options/{year:04}.zip"), &zip(&stored));
+    }
+    sizes
+}
+
+/// Where a run of `kind` from `src` reads under `root`, and the source kind.
+fn source_path(root: &Path, src: Src, kind: ImportKind) -> (SourceKind, PathBuf) {
+    match (src, kind) {
+        (Src::Store, _) => (SourceKind::TickStore, root.join("ts")),
+        (Src::Zips, ImportKind::Options) => (SourceKind::Zip, root.join("zips/options")),
+        (Src::Zips, _) => (SourceKind::Zip, root.join("zips/cm.zip")),
+    }
+}
+
+/// The run of `kind` over `(from, to)` from `src` under `root` into `store`,
+/// filtered to `only`, its origin measured (with the invented [`COMMIT`])
+/// when `origin` is set.
+fn run_from(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    (store, only): (&Path, &[String]),
+    origin: bool,
+) -> Report {
+    let run = Run {
+        kind,
+        from,
+        to,
+        only,
+        store_root: store,
+    };
+    let (source_kind, path) = source_path(root, src, kind);
+    let measured = Origin::measure(source_kind, &path, Some(COMMIT));
+    let options = RunOptions {
+        origin: origin.then_some(&measured),
+        retry_refused: false,
+    };
+    match (src, kind) {
+        (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
+        (Src::Zips, ImportKind::Options) => run_nfo_from(&NfoZips::new(&path), &run, options),
+        (Src::Store, _) => run_cm_from(&TickStore::new(&path), &run, options),
+        (Src::Zips, _) => run_cm_from(&Archive::open(&path).unwrap(), &run, options),
+    }
+    .unwrap()
+}
+
+/// The day ledger's lines.
+fn flags_lines(store: &Path) -> Vec<String> {
+    std::fs::read_to_string(quality::dayflags_path(store))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A ledger's lines.
+fn ledger_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `line` with its `member_bytes` and `member_src` for a zip of `bytes`.
+fn from_zip(line: &str, bytes: u64) -> String {
+    line.replace(" member_bytes=0 ", &format!(" member_bytes={bytes} "))
+        .replace(" member_src=none", " member_src=zip")
+}
+
+/// Every bar of one instrument-month, the month `on`'s.
+fn bars_on(
+    store: &Path,
+    (segment, symbol, contract): (&str, &str, Option<Contract>),
+    on: Day,
+) -> Vec<Bar> {
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment,
+        symbol,
+        contract,
+        timeframe: Timeframe::SECOND_1,
+        month: on.year_month().unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    let file = BarFile::open_existing(store, path, symbol_id_of(symbol)).unwrap();
+    (0..file.header().n_valid)
+        .map(|i| file.read_record(i).unwrap())
+        .collect()
+}
+
+/// The index files of 30 May 2019's shape (DB-026): NIFTY one row a minute,
+/// stamped `HH:MM:59`. BANKNIFTY with 2018-09-03's 34-second hole (DB-030),
+/// twelve rows of 2020-10-15's UTC burst (DB-029), one second holding two
+/// values 20 bps apart (DB-G96) and one zero-LTP row the reader refuses by
+/// name (D-3318).
+fn index_shapes(on: Day) -> Vec<(String, Vec<u8>)> {
+    let mut nifty: Vec<(u32, String, u64)> = (0..375)
+        .map(|m| {
+            (
+                NINE_FIFTEEN + m * 60 + 59,
+                format!("1234.{:02}", m % 100),
+                0,
+            )
+        })
+        .collect();
+    nifty.push((CLOSE + 59, "1234.00".to_owned(), 0));
+    let mut bank: Vec<(u32, String, u64)> = Vec::new();
+    for s in 0..22_500 {
+        let sod = NINE_FIFTEEN + s;
+        if (hms_at(12, 21, 40)..hms_at(12, 22, 14)).contains(&sod) {
+            continue;
+        }
+        let stamp = if (hms_at(11, 31, 28)..hms_at(11, 31, 40)).contains(&sod) {
+            sod - 19_800
+        } else {
+            sod
+        };
+        bank.push((stamp, format!("5000.{:02}", s % 100), 0));
+        if sod == hms_at(13, 30, 29) {
+            bank.push((sod, "5010.30".to_owned(), 0));
+        }
+        if sod == hms_at(10, 0, 0) {
+            bank.push((sod, "0".to_owned(), 0));
+        }
+    }
+    bank.push((CLOSE + 30, "5000.00".to_owned(), 0));
+    vec![
+        (
+            entry_of(Tree::Indices, on, "NIFTY 50.NSE_IDX"),
+            cm_csv("NIFTY 50.NSE_IDX", on, &nifty),
+        ),
+        (
+            entry_of(Tree::Indices, on, "NIFTY BANK.NSE_IDX"),
+            cm_csv("NIFTY BANK.NSE_IDX", on, &bank),
+        ),
+    ]
+}
+
+/// The two index lines [`index_shapes`] makes, from the tick store.
+const INDEX_SHAPE_LINES: [&str; 2] = [
+    "flags indices 2019-05-30 BANKNIFTY v=1 src=import definition=3 member_bytes=0 late=12 \
+     max_back_s=19799 deferred_s=1 rows_refused=1 rows=22468 seconds=22454 session_s=22500 \
+     ss_distinct=60 holes_5s=2 hole_max_s=34 hole_max_at=12:21:40 dual_spread_s=1 \
+     dual_spread_max_bps=20 zero_ltp_rows=1 max_defer_s=19812 member_src=none",
+    "flags indices 2019-05-30 NIFTY v=1 src=import definition=3 member_bytes=0 late=0 \
+     max_back_s=0 deferred_s=0 rows_refused=0 rows=376 seconds=375 session_s=22500 \
+     ss_distinct=1 holes_5s=375 hole_max_s=59 hole_max_at=09:15:00 dual_spread_s=0 \
+     dual_spread_max_bps=0 zero_ltp_rows=0 max_defer_s=0 member_src=none",
+];
+
+/// D-3335's index line, every count exact, for 30 May 2019's minute-stamped
+/// NIFTY and a BANKNIFTY carrying a hole, a UTC burst, a dual value and a
+/// refused row. The bars are the ones the agreed definition builds; nothing
+/// the ledger counts changes them.
+#[test]
+fn the_day_ledger_counts_a_minute_stamped_index_holes_late_rows_and_dual_values() {
+    let on = day(2019, 5, 30);
+    let root = scratch("wp11b-index");
+    let sizes = world_of(&root, &[(on, Tree::Indices, index_shapes(on))]);
+    let store = root.join("S");
+    let got = run_from(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    assert_eq!(got.flags_lines, 2, "{:?}", got.failures);
+    assert_eq!(flags_lines(&store), INDEX_SHAPE_LINES);
+    // The bars: NIFTY's 375 minute rows at their own seconds; BANKNIFTY's
+    // twelve UTC rows deferred into 11:31:40, merged with its own row.
+    let nifty = bars_on(&store, ("INDEX", "NIFTY", None), on);
+    assert_eq!(nifty.len(), 375);
+    assert!(
+        nifty
+            .iter()
+            .all(|bar| second_of(bar.ts_micros, on) % 60 == 59)
+    );
+    let bank = bars_on(&store, ("INDEX", "BANKNIFTY", None), on);
+    assert_eq!(bank.len(), 22_454);
+    let at = |sod: u32| {
+        bank.iter()
+            .find(|bar| second_of(bar.ts_micros, on) == sod)
+            .copied()
+            .unwrap()
+    };
+    let merged = at(hms_at(11, 31, 40));
+    assert_eq!(
+        (merged.open, merged.high, merged.low, merged.close),
+        (500_088, 500_099, 500_000, 500_000)
+    );
+    let dual = at(hms_at(13, 30, 29));
+    assert_eq!(
+        (dual.open, dual.high, dual.low, dual.close),
+        (500_029, 501_030, 500_029, 501_030),
+        "the fold is faithful; the ledger names the spread"
+    );
+    assert!(bank.iter().all(|bar| {
+        !(hms_at(12, 21, 40)..hms_at(12, 22, 14)).contains(&second_of(bar.ts_micros, on))
+    }));
+    // From the zips, the same lines with the day zip's size measured.
+    let zipped = root.join("Z");
+    run_from(
+        &root,
+        (Src::Zips, ImportKind::Indices),
+        (on, on),
+        (&zipped, &[]),
+        false,
+    );
+    let bytes = sizes[&(on, Tree::Indices)];
+    assert_eq!(
+        flags_lines(&zipped),
+        INDEX_SHAPE_LINES.map(|line| from_zip(line, bytes))
+    );
+    // A re-run writes nothing: the day is done.
+    let before = flags_lines(&store);
+    let again = run_from(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    assert_eq!((again.days_skipped, again.flags_lines), (1, 0));
+    assert_eq!(flags_lines(&store), before);
+    // A filtered run writes the index lines it read in whole: an index line
+    // is one index's.
+    let filtered = root.join("F");
+    let only = ["NIFTY".to_owned()];
+    run_from(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (on, on),
+        (&filtered, &only),
+        false,
+    );
+    assert_eq!(flags_lines(&filtered), [INDEX_SHAPE_LINES[1]]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// One invented share file of the 30 May 2019 shape: untraded pre-open
+/// rows, the first trade at 11:57:48 carrying a cumulative volume, an LTQ =
+/// 0 row after it with a new price and one with the same price, then a
+/// trade a minute.
+fn late_share(stem: &str, d: Day) -> Vec<u8> {
+    let mut rows = vec![
+        (hms_at(9, 0, 0), "100.00".to_owned(), 0),
+        (hms_at(11, 57, 48), "100.50".to_owned(), 3_240_155),
+        (hms_at(11, 57, 49), "101.00".to_owned(), 0),
+        (hms_at(11, 57, 50), "100.50".to_owned(), 0),
+    ];
+    let mut sod = hms_at(11, 58, 48);
+    while sod < CLOSE {
+        rows.push((sod, "100.50".to_owned(), 10));
+        sod += 60;
+    }
+    cm_csv(stem, d, &rows)
+}
+
+/// One invented share file of the 2022-03-07 shape: a trade a second from
+/// the open to 09:16:43, none from 09:16:44 to 09:39:22 unless `through`
+/// (then one every 30 s), then one every 30 s from 09:39:23.
+fn holed_share(stem: &str, d: Day, through: bool) -> Vec<u8> {
+    let mut rows: Vec<(u32, String, u64)> = (NINE_FIFTEEN..=hms_at(9, 16, 43))
+        .map(|sod| (sod, "200.00".to_owned(), 5))
+        .collect();
+    if through {
+        rows.extend(
+            (hms_at(9, 16, 44)..hms_at(9, 39, 23))
+                .step_by(30)
+                .map(|sod| (sod, "200.05".to_owned(), 5)),
+        );
+    }
+    rows.extend(
+        (hms_at(9, 39, 23)..CLOSE)
+            .step_by(30)
+            .map(|sod| (sod, "200.10".to_owned(), 5)),
+    );
+    cm_csv(stem, d, &rows)
+}
+
+/// D-3335's stocks line: 30 May 2019's late first trades (the median first
+/// trade 11:57:48, the morning one hole every file shares) and its LTQ = 0
+/// rows carrying a new price (DB-056); 2022-03-07's 23-minute hole, shared by
+/// ten of eleven files, at least 90%, so counted (DB-030).
+#[test]
+fn the_day_ledger_counts_late_first_trades_shared_holes_and_new_untraded_prices() {
+    let degraded = day(2019, 5, 30);
+    let hole = day(2022, 3, 7);
+    let root = scratch("wp11b-stocks");
+    let shares = [
+        "RELIANCE",
+        "SBIN",
+        "INFY",
+        "HDFCBANK",
+        "ICICIBANK",
+        "TCS",
+        "ITC",
+        "LT",
+        "AXISBANK",
+        "KOTAKBANK",
+    ];
+    let mut late = Vec::new();
+    let mut holed = Vec::new();
+    for share in shares {
+        let stem = format!("{share}.NSE");
+        late.push((
+            entry_of(Tree::Stocks, degraded, &stem),
+            late_share(&stem, degraded),
+        ));
+        holed.push((
+            entry_of(Tree::Stocks, hole, &stem),
+            holed_share(&stem, hole, false),
+        ));
+    }
+    holed.push((
+        entry_of(Tree::Stocks, hole, "IDEA.NSE"),
+        holed_share("IDEA.NSE", hole, true),
+    ));
+    world_of(
+        &root,
+        &[(degraded, Tree::Stocks, late), (hole, Tree::Stocks, holed)],
+    );
+    let store = root.join("S");
+    for on in [degraded, hole] {
+        let got = run_from(
+            &root,
+            (Src::Store, ImportKind::Stocks),
+            (on, on),
+            (&store, &[]),
+            false,
+        );
+        assert!(got.failures.is_empty(), "{:?}", got.failures);
+    }
+    assert_eq!(
+        flags_lines(&store),
+        [
+            "flags stocks 2019-05-30 * v=1 src=import definition=3 member_bytes=0 late=0 \
+             max_back_s=0 deferred_s=0 rows_refused=0 files=10 files_traded=10 \
+             first_trade_p50=11:57:48 shared_holes=1 shared_hole_max_s=9768 \
+             shared_hole_max_at=09:15:00 ltq0_new_ltp_rows=10 auction_prints=0 max_defer_s=0 \
+             member_src=none",
+            "flags stocks 2022-03-07 * v=1 src=import definition=3 member_bytes=0 late=0 \
+             max_back_s=0 deferred_s=0 rows_refused=0 files=11 files_traded=11 \
+             first_trade_p50=09:15:00 shared_holes=1 shared_hole_max_s=1359 \
+             shared_hole_max_at=09:16:44 ltq0_new_ltp_rows=0 auction_prints=0 max_defer_s=0 \
+             member_src=none",
+        ]
+    );
+    // The cumulative first print is filed as the bar it is: flagged, never
+    // altered (D-3335, the operator's answer).
+    let reliance = bars_on(&store, ("CASH", "RELIANCE", None), degraded);
+    assert_eq!(reliance[0].volume, 3_240_155);
+    assert_eq!(
+        second_of(reliance[0].ts_micros, degraded),
+        hms_at(11, 57, 48)
+    );
+    // A filtered share run writes no line: `*` is the whole kind-day.
+    let filtered = root.join("F");
+    let only = ["SBIN".to_owned()];
+    let got = run_from(
+        &root,
+        (Src::Store, ImportKind::Stocks),
+        (degraded, degraded),
+        (&filtered, &only),
+        false,
+    );
+    assert_eq!((got.files, got.flags_lines), (1, 0));
+    assert!(flags_lines(&filtered).is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 30 May 2019's options shape (DB-026): files whose every row carries zero
+/// bid and ask and that lead with LTQ = 1 marker rows, beside a quoted file
+/// and an untraded one; and an LTQ = 0 row with a new price (DB-056).
+#[test]
+fn the_day_ledger_counts_zero_quote_files_and_leading_marker_rows() {
+    let on = day(2019, 5, 30);
+    let root = scratch("wp11b-options");
+    let zero = ("0", "0.00");
+    let quotes = ("10.00", "10.50");
+    let files = vec![
+        (
+            entry_of(Tree::Options, on, "ACC30MAY191700PE"),
+            nfo_csv(
+                "ACC30MAY191700PE",
+                on,
+                zero,
+                &[
+                    (hms_at(9, 15, 11), "8.70", 1, 24_000),
+                    (hms_at(9, 15, 12), "8.70", 1, 24_000),
+                    (hms_at(9, 20, 0), "9.00", 400, 24_400),
+                ],
+            ),
+        ),
+        (
+            entry_of(Tree::Options, on, "NIFTY30MAY1911900CE"),
+            nfo_csv(
+                "NIFTY30MAY1911900CE",
+                on,
+                zero,
+                &[
+                    (hms_at(9, 15, 30), "50.00", 1, 9_000),
+                    (hms_at(9, 16, 0), "51.00", 75, 9_075),
+                    (hms_at(9, 16, 5), "52.00", 0, 9_075),
+                ],
+            ),
+        ),
+        (
+            entry_of(Tree::Options, on, "SBIN30MAY19340CE"),
+            nfo_csv(
+                "SBIN30MAY19340CE",
+                on,
+                zero,
+                &[
+                    (hms_at(9, 16, 0), "3.00", 1, 3_000),
+                    (hms_at(9, 16, 1), "3.00", 1, 3_000),
+                    (hms_at(9, 16, 2), "3.00", 1, 3_000),
+                    (hms_at(9, 30, 0), "3.10", 3_000, 6_000),
+                ],
+            ),
+        ),
+        (
+            entry_of(Tree::Options, on, "RELIANCE30MAY191300CE"),
+            nfo_csv(
+                "RELIANCE30MAY191300CE",
+                on,
+                quotes,
+                &[
+                    (hms_at(9, 17, 0), "10.20", 505, 1_010),
+                    (hms_at(9, 17, 5), "10.20", 0, 1_010),
+                ],
+            ),
+        ),
+        (
+            entry_of(Tree::Options, on, "INFY30MAY19700PE"),
+            nfo_csv(
+                "INFY30MAY19700PE",
+                on,
+                quotes,
+                &[(hms_at(9, 15, 0), "0", 0, 0)],
+            ),
+        ),
+    ];
+    let sizes = world_of(&root, &[(on, Tree::Options, files)]);
+    let store = root.join("S");
+    let got = run_from(
+        &root,
+        (Src::Store, ImportKind::Options),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    let want = "flags options 2019-05-30 * v=1 src=import definition=3 member_bytes=0 late=0 \
+                max_back_s=0 deferred_s=0 rows_refused=0 files=5 files_traded=4 \
+                zero_quote_files=3 ltq1_lead_files=3 ltq1_lead_rows=6 ltq0_new_ltp_rows=1 \
+                first_trade_p50=09:15:30 max_defer_s=0 member_src=none";
+    assert_eq!(flags_lines(&store), [want]);
+    let zipped = root.join("Z");
+    run_from(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (on, on),
+        (&zipped, &[]),
+        false,
+    );
+    assert_eq!(
+        flags_lines(&zipped),
+        [from_zip(want, sizes[&(on, Tree::Options)])]
+    );
+    // The marker rows stay in the bars: flagged only (the operator's
+    // answer). ACC's first bar is its two LTQ = 1 rows, volume 2.
+    let acc = bars_on(
+        &store,
+        (
+            "FNO",
+            "ACC",
+            Some(Contract::parse("2019-05-30-170000-PE").unwrap()),
+        ),
+        on,
+    );
+    assert_eq!((acc[0].volume, acc[1].volume), (1, 1));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// `cli gdfl-dayflags` (D-3335 §1): a rescan of days already imported writes
+/// the same counts as the import, `src=rescan`, writes nothing else, reads
+/// no day the journal does not record as imported, and a second rescan
+/// writes nothing; a line that says something new replaces the key's last.
+#[test]
+fn a_rescan_writes_the_import_s_counts_and_nothing_else() {
+    let on = day(2019, 5, 30);
+    let root = scratch("wp11b-rescan");
+    world_of(&root, &[(on, Tree::Indices, index_shapes(on))]);
+    let store = root.join("S");
+    run_from(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    let flags = quality::dayflags_path(&store);
+    std::fs::remove_file(&flags).unwrap();
+    let held = tree(&store);
+    let source = TickStore::new(&root.join("ts"));
+    let range = (day(2019, 5, 29), day(2019, 5, 31));
+    let done = rescan_cm(&source, ImportKind::Indices, range, &store).unwrap();
+    assert_eq!(
+        (done.days_read, done.days_not_imported, done.flags_lines),
+        (1, 2, 2),
+        "{done:?}"
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(
+        flags_lines(&store),
+        INDEX_SHAPE_LINES.map(|line| line.replace(" src=import ", " src=rescan "))
+    );
+    let mut after = tree(&store);
+    assert!(
+        after
+            .remove(&PathBuf::from("imports/gdfl.dayflags"))
+            .is_some()
+    );
+    assert_eq!(after, held, "nothing but the day ledger was written");
+    let again = rescan_cm(&source, ImportKind::Indices, range, &store).unwrap();
+    assert_eq!((again.flags_lines, again.flags_unchanged), (0, 2));
+    // A key whose last line says otherwise is written again.
+    let text = std::fs::read_to_string(&flags).unwrap();
+    std::fs::write(&flags, text.replace("holes_5s=375", "holes_5s=374")).unwrap();
+    let mended = rescan_cm(&source, ImportKind::Indices, range, &store).unwrap();
+    assert_eq!((mended.flags_lines, mended.flags_unchanged), (1, 1));
+    assert_eq!(
+        flags_lines(&store).last().map(String::as_str),
+        Some(
+            INDEX_SHAPE_LINES[1]
+                .replace(" src=import ", " src=rescan ")
+                .as_str()
+        )
+    );
+    // An options rescan of the kind is its own: no options day was imported.
+    let none = rescan_nfo(&NfoTickStore::new(&root.join("ts")), range, &store, true).unwrap();
+    assert_eq!((none.days_read, none.days_not_imported), (0, 3));
+    assert!(!crate::gdfl_lineage::lineage_path(&store).exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A gzip of `text`, as an NSE security master arrives.
+fn gzip(text: &str) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(text.as_bytes()).unwrap();
+    enc.finish().unwrap()
+}
+
+/// D-3320 and D-3335: a closing-auction print is counted in the day's
+/// `auction_prints`; the import files it in its sidecar, and a rescan,
+/// which files nothing, never writes one.
+#[test]
+fn a_rescan_counts_the_closing_auction_and_never_writes_its_sidecar() {
+    let on = day(2026, 9, 24);
+    let root = scratch("wp11b-cas");
+    let stem = "RELIANCE.NSE";
+    let mut rows: Vec<String> = (0..10)
+        .map(|i| {
+            quoted_row(
+                stem,
+                on,
+                hms_at(15, 5, 0) + i * 50,
+                &format!("4444.{i}5"),
+                ("4444.00", "4444.90"),
+                (3, 0),
+            )
+        })
+        .collect();
+    for _ in 0..2 {
+        rows.push(quoted_row(
+            stem,
+            on,
+            hms_at(15, 28, 7),
+            "4446.65",
+            ("0", "0.00"),
+            (98_765, 0),
+        ));
+    }
+    world_of(
+        &root,
+        &[(
+            on,
+            Tree::Stocks,
+            vec![(entry_of(Tree::Stocks, on, stem), csv(&rows))],
+        )],
+    );
+    let masters = root.join("masters");
+    let at = brutex_core::universe::FNO_INDEX
+        .position("RELIANCE")
+        .unwrap();
+    let isin = brutex_core::universe::FNO_UNDERLYINGS_ISIN[at];
+    let master = format!(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{isin},1\n"
+    );
+    crate::cash_session_cache::install(&masters, on, &gzip(&master)).unwrap();
+    let scope = std::sync::Arc::new(
+        crate::gdfl_cm::CmScope::stored(std::iter::empty::<&str>())
+            .unwrap()
+            .with_masters(masters.clone()),
+    );
+    let source = TickStore::new(&root.join("ts")).with_scope(scope);
+    let store = root.join("S");
+    let run = Run {
+        kind: ImportKind::Stocks,
+        from: on,
+        to: on,
+        only: &[],
+        store_root: &store,
+    };
+    let got = run_cm(&source, &run).unwrap();
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    let key = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "RELIANCE",
+    )
+    .unwrap();
+    let sidecar = crate::gdfl_cm::auction::path(&store, &key, on).unwrap();
+    assert!(sidecar.exists());
+    let line = flags_lines(&store).pop().unwrap();
+    assert!(line.contains(" auction_prints=1 "), "{line}");
+    std::fs::remove_file(&sidecar).unwrap();
+    std::fs::remove_file(quality::dayflags_path(&store)).unwrap();
+    let done = rescan_cm(&source, ImportKind::Stocks, (on, on), &store).unwrap();
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert!(
+        !sidecar.exists(),
+        "a rescan files nothing, not even a print"
+    );
+    assert_eq!(
+        flags_lines(&store),
+        [line.replace(" src=import ", " src=rescan ")]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A day ledger that will not take a day's lines leaves the day
+/// `incomplete`, named, so the next run writes them; one that cannot be
+/// read refuses the run before any day.
+#[test]
+fn a_day_ledger_that_will_not_take_a_line_leaves_the_day_open() {
+    let on = day(2019, 5, 30);
+    let root = scratch("wp11b-ledger-fault");
+    world_of(&root, &[(on, Tree::Indices, index_shapes(on))]);
+    let store = root.join("S");
+    let flags = put(&store, "imports/gdfl.dayflags", b"");
+    let mut perms = std::fs::metadata(&flags).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o444);
+    std::fs::set_permissions(&flags, perms.clone()).unwrap();
+    let got = run_from(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    assert_eq!(got.closed_incomplete, vec![on]);
+    assert!(
+        got.failures
+            .iter()
+            .any(|f| f.instrument.ends_with("day ledger")),
+        "{:?}",
+        got.failures
+    );
+    assert!(line_of(&store, "indices", "2019-05-30").contains(" stage=journal reason=day_ledger "));
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o644);
+    std::fs::set_permissions(&flags, perms).unwrap();
+    let again = run_from(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    assert!(again.failures.is_empty(), "{:?}", again.failures);
+    assert_eq!(flags_lines(&store), INDEX_SHAPE_LINES);
+    // A ledger that is not a file refuses the run, by name, before any day.
+    let broken = root.join("B");
+    std::fs::create_dir_all(quality::dayflags_path(&broken)).unwrap();
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: on,
+        to: on,
+        only: &[],
+        store_root: &broken,
+    };
+    let refused = run_cm(&TickStore::new(&root.join("ts")), &run).unwrap_err();
+    assert_eq!(refused.code(), "day_ledger");
+    assert!(!journal_path(&broken).exists(), "no day began");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ── D-3334: a provenance record per landing ────────────────────────────────
+
+/// The sidecar of `NIFTY04APR2422000CE`'s April month.
+fn nifty_ce_sidecar(store: &Path) -> Option<store::provenance::Sidecar> {
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "NIFTY",
+        contract: Some(nifty_ce()),
+        timeframe: Timeframe::SECOND_1,
+        month: d1().year_month().unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    match store::provenance::read(store, path).unwrap() {
+        store::provenance::Found::Present(sidecar) => Some(sidecar),
+        _ => None,
+    }
+}
+
+/// The line number, from 1, of `line` in the journal.
+fn journal_line_of(store: &Path, line: &str) -> u64 {
+    let text = std::fs::read_to_string(journal_path(store)).unwrap();
+    let at = text.lines().position(|l| l == line).unwrap();
+    u64::try_from(at + 1).unwrap()
+}
+
+/// DB-G56, D-3334: every landing of a run that names its origin is recorded
+/// beside its month: the archive member (`<year zip>!<day zip>!<entry>`, its
+/// size and CRC-32) or the tick-store day file, the day, the bars appended,
+/// the bar definition, the journal's `begin` line and the commit. A re-run
+/// appends no record; a run with no origin writes no sidecar; the bars are
+/// the same bytes either way.
+#[test]
+fn every_landing_of_a_run_with_an_origin_records_its_provenance() {
+    let root = scratch("wp11b-provenance");
+    world(&root, &[d1(), d2()]);
+    let (zipped, ticked, bare) = (root.join("Z"), root.join("T"), root.join("N"));
+    let z = run_from(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1(), d2()),
+        (&zipped, &[]),
+        true,
+    );
+    assert!(z.failures.is_empty(), "{:?}", z.failures);
+    assert_eq!(z.provenance_records, 6, "three files a day, two days");
+    let sidecar = nifty_ce_sidecar(&zipped).unwrap();
+    let records = sidecar.records();
+    assert_eq!(records.len(), 2);
+    let first = &records[0];
+    let entry = format!(
+        "{}\\Options\\NIFTY04APR2422000CE.NFO.csv",
+        crate::gdfl_nfo::day_folder_name(d1())
+    );
+    let name = format!(
+        "{}!APR_2024/GFDLNFO_TICK_01042024.zip!{entry}",
+        root.join("zips/options/2024.zip").display()
+    );
+    assert_eq!(
+        first.source_kind,
+        store::provenance::SourceKind::ArchiveMember
+    );
+    assert_eq!(
+        first.source_name_blake3,
+        brutex_core::blake3::hash(name.as_bytes())
+    );
+    assert!(
+        name.starts_with(&first.source_name),
+        "{}",
+        first.source_name
+    );
+    let member = option_file("NIFTY04APR2422000CE", d1(), "101.5");
+    assert_eq!(first.source_bytes, u64::try_from(member.len()).unwrap());
+    assert_eq!(first.source_crc32, crate::gdfl_archive::crc32(&member));
+    assert_eq!(first.day.to_string(), "2024-04-01");
+    assert_eq!(first.bar_definition, BAR_DEFINITION);
+    assert_eq!(
+        first.journal_ordinal,
+        journal_line_of(&zipped, "begin options 2024-04-01 *")
+    );
+    assert_eq!(first.commit_hex().as_deref(), Some(COMMIT));
+    let held = bars(&zipped, "FNO", "NIFTY", Some(nifty_ce()));
+    assert_eq!(first.first_index, 0);
+    assert_eq!(records[1].first_index, first.n_bars);
+    assert_eq!(
+        records[1].first_index + records[1].n_bars,
+        u64::try_from(held.len()).unwrap()
+    );
+    assert_eq!(
+        records[1].journal_ordinal,
+        journal_line_of(&zipped, "begin options 2024-04-02 *")
+    );
+    // The tick store: its day file, below its root.
+    let t = run_from(
+        &root,
+        (Src::Store, ImportKind::Options),
+        (d1(), d2()),
+        (&ticked, &[]),
+        true,
+    );
+    assert!(t.failures.is_empty(), "{:?}", t.failures);
+    let sidecar = nifty_ce_sidecar(&ticked).unwrap();
+    let ts = &sidecar.records()[0];
+    assert_eq!(ts.source_kind, store::provenance::SourceKind::TickstoreDay);
+    assert_eq!(
+        ts.source_name,
+        "options/2024/APR_2024/GFDLNFO_TICK_01042024.bts"
+    );
+    let bts_len =
+        std::fs::metadata(root.join("ts/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts"))
+            .unwrap()
+            .len();
+    assert_eq!((ts.source_bytes, ts.source_crc32), (bts_len, 0));
+    // A re-run appends nothing.
+    let before = tree(&zipped);
+    let again = run_from(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1(), d2()),
+        (&zipped, &[]),
+        true,
+    );
+    assert_eq!((again.days_skipped, again.provenance_records), (2, 0));
+    assert_eq!(tree(&zipped), before);
+    // No origin, no sidecar; the bars are the same bytes.
+    let n = run_from(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1(), d2()),
+        (&bare, &[]),
+        false,
+    );
+    assert_eq!(n.provenance_records, 0);
+    assert!(nifty_ce_sidecar(&bare).is_none());
+    let bars_of = |store: &Path| -> BTreeMap<PathBuf, Vec<u8>> {
+        tree(store)
+            .into_iter()
+            .filter(|(p, _)| p.starts_with("bars") && p.extension().is_none_or(|ext| ext != "prv"))
+            .collect()
+    };
+    assert_eq!(bars_of(&zipped), bars_of(&bare));
+    assert_eq!(bars_of(&ticked), bars_of(&bare));
+    // An index landing names its capital-market member.
+    let cm = run_from(
+        &root,
+        (Src::Zips, ImportKind::Indices),
+        (d1(), d1()),
+        (&zipped, &[]),
+        true,
+    );
+    assert_eq!(cm.provenance_records, 2, "{:?}", cm.failures);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A provenance record the sidecar refuses (here a commit that is not forty
+/// hexadecimal digits) is a named failure that leaves the day open; the bars
+/// are filed, and unrecorded.
+#[test]
+fn a_refused_provenance_record_is_named_and_leaves_the_day_open() {
+    let root = scratch("wp11b-provenance-refused");
+    world(&root, &[d1()]);
+    let store = root.join("S");
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: d1(),
+        to: d1(),
+        only: &[],
+        store_root: &store,
+    };
+    let origin = Origin::measure(SourceKind::TickStore, &root.join("ts"), Some("abc"));
+    let options = RunOptions {
+        origin: Some(&origin),
+        retry_refused: false,
+    };
+    let got = run_cm_from(&TickStore::new(&root.join("ts")), &run, options).unwrap();
+    assert_eq!(got.closed_incomplete, vec![d1()]);
+    assert!(
+        got.failures
+            .iter()
+            .all(|f| f.why.contains("provenance record was refused")),
+        "{:?}",
+        got.failures
+    );
+    assert!(got.seconds_committed > 0, "the bars are filed");
+    assert!(line_of(&store, "indices", "2024-04-01").contains(" stage=file reason=provenance "),);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The journal names the line a `begin` lands on even when another process
+/// appended to it since this run last wrote, and when a load closed a torn
+/// tail (D-3334's `journal_ordinal`).
+#[test]
+fn the_journal_counts_its_lines_across_other_writers() {
+    let root = scratch("wp11b-journal-lines");
+    let path = journal_path(&root);
+    put(
+        &root,
+        "imports/gdfl.journal",
+        b"begin indices 2024-04-01 *\nbegin indices 2024-04-02 *\nbegin indi",
+    );
+    let journal = Journal::load(path.clone()).unwrap();
+    assert_eq!(journal.append("begin indices 2024-04-03 *").unwrap(), 4);
+    let mut other = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(
+        &mut other,
+        b"begin stocks 2024-04-01 *\nbegin stocks 2024-04-02 *\n",
+    )
+    .unwrap();
+    assert_eq!(journal.append("begin indices 2024-04-04 *").unwrap(), 7);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text.lines().nth(6),
+        Some("begin indices 2024-04-04 *"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ── D-3331, D-3343: the corporate-action lineage, wired ────────────────────
+
+/// The pre-ex day, the ex-date and the day after, of an invented x1.2
+/// adjustment in DB-G71's shape (NTPC's lot 4,000 to 4,800).
+fn ex_days() -> (Day, Day, Day) {
+    (day(2019, 3, 18), day(2019, 3, 19), day(2019, 3, 20))
+}
+
+/// The options files of [`ex_days`]: five pre-ex contracts at a lot of
+/// 4,000; on the ex-date each renamed to its strike / 1.2 at a lot of 4,800,
+/// `135PE` carrying the pre-ex OI unadjusted until 11:00:00 (DB-G77) and
+/// `150CE` the text of a different pre-ex contract (DB-G71); the day after,
+/// the retired text `150PE` traded again by another contract.
+fn ex_world(root: &Path) {
+    let (d1, d2, d3) = ex_days();
+    let q = ("1.00", "1.10");
+    let file = |d: Day, ticker: &str, rows: &[(u32, &str, u64, u64)]| {
+        (
+            entry_of(Tree::Options, d, ticker),
+            nfo_csv(ticker, d, q, rows),
+        )
+    };
+    world_of(
+        root,
+        &[
+            (
+                d1,
+                Tree::Options,
+                vec![
+                    file(
+                        d1,
+                        "NTPC28MAR19150PE",
+                        &[
+                            (hms_at(9, 20, 0), "5.00", 4_000, 100_000),
+                            (hms_at(10, 0, 0), "5.10", 8_000, 104_000),
+                        ],
+                    ),
+                    file(
+                        d1,
+                        "NTPC28MAR19162PE",
+                        &[
+                            (hms_at(9, 21, 0), "9.00", 4_000, 50_000),
+                            (hms_at(10, 1, 0), "9.20", 4_000, 52_000),
+                        ],
+                    ),
+                    file(
+                        d1,
+                        "NTPC28MAR19168PE",
+                        &[(hms_at(9, 22, 0), "12.00", 4_000, 30_000)],
+                    ),
+                    file(
+                        d1,
+                        "NTPC28MAR19150CE",
+                        &[(hms_at(9, 23, 0), "20.00", 4_000, 200_000)],
+                    ),
+                    file(
+                        d1,
+                        "NTPC28MAR19180CE",
+                        &[(hms_at(9, 24, 0), "4.00", 4_000, 96_000)],
+                    ),
+                ],
+            ),
+            (
+                d2,
+                Tree::Options,
+                vec![
+                    file(
+                        d2,
+                        "NTPC28MAR19125PE",
+                        &[(hms_at(9, 15, 25), "6.00", 4_800, 124_800)],
+                    ),
+                    file(
+                        d2,
+                        "NTPC28MAR19135PE",
+                        &[
+                            (hms_at(9, 15, 30), "11.00", 4_800, 52_000),
+                            (hms_at(11, 0, 0), "11.10", 4_800, 62_400),
+                        ],
+                    ),
+                    file(
+                        d2,
+                        "NTPC28MAR19140PE",
+                        &[(hms_at(9, 16, 0), "14.00", 4_800, 36_000)],
+                    ),
+                    file(
+                        d2,
+                        "NTPC28MAR19125CE",
+                        &[(hms_at(9, 17, 0), "24.00", 4_800, 240_000)],
+                    ),
+                    file(
+                        d2,
+                        "NTPC28MAR19150CE",
+                        &[(hms_at(9, 18, 0), "4.80", 4_800, 115_200)],
+                    ),
+                ],
+            ),
+            (
+                d3,
+                Tree::Options,
+                vec![
+                    file(
+                        d3,
+                        "NTPC28MAR19150PE",
+                        &[(hms_at(9, 30, 0), "1.00", 4_800, 4_800)],
+                    ),
+                    file(
+                        d3,
+                        "NTPC28MAR19125PE",
+                        &[(hms_at(9, 31, 0), "6.50", 4_800, 130_000)],
+                    ),
+                ],
+            ),
+        ],
+    );
+}
+
+/// The lineage ledger [`ex_world`] must leave: every alias row once, then
+/// the five renamed contracts, the reused `150CE` on the ex-date and the
+/// reused `150PE` the day after.
+fn ex_lineage() -> Vec<String> {
+    let (_, d2, _) = ex_days();
+    let stale_until = i64::from(d2.days_from_epoch()) * 86_400 + i64::from(hms_at(11, 0, 0))
+        - crate::session::IST_OFFSET_SECS;
+    let mut want: Vec<String> = crate::expiry_alias::alias_records()
+        .unwrap()
+        .iter()
+        .map(crate::expiry_alias::AliasRecord::line)
+        .collect();
+    let k = |strike: &str, side: &str| format!("NSE-FNO-NTPC-2019-03-28-{strike}-{side}");
+    for (old, new, until) in [
+        (k("15000", "CE"), k("12500", "CE"), 0),
+        (k("15000", "PE"), k("12500", "PE"), 0),
+        (k("16200", "PE"), k("13500", "PE"), stale_until),
+        (k("16800", "PE"), k("14000", "PE"), 0),
+        (k("18000", "CE"), k("15000", "CE"), 0),
+    ] {
+        want.push(format!(
+            "lineage {old} {new} ex=2019-03-19 factor=6/5 lot_old=4000 lot_new=4800 \
+             oi_unadjusted_until={until} v=1"
+        ));
+    }
+    want.push(format!(
+        "stitched {} ex=2019-03-19 before=2019-03-28-12500-CE after=2019-03-28-18000-CE v=1",
+        k("15000", "CE")
+    ));
+    want.push(format!(
+        "stitched {} ex=2019-03-19 before=2019-03-28-12500-PE after=- v=1",
+        k("15000", "PE")
+    ));
+    want
+}
+
+/// The lot ledger [`ex_world`] must leave: each contract when first seen,
+/// and each reused text again when its new contract first trades.
+fn ex_lots() -> Vec<String> {
+    let k = |strike: &str, side: &str| format!("NSE-FNO-NTPC-2019-03-28-{strike}-{side}");
+    let mut want = Vec::new();
+    for (strike, side) in [
+        ("15000", "PE"),
+        ("16200", "PE"),
+        ("16800", "PE"),
+        ("15000", "CE"),
+        ("18000", "CE"),
+    ] {
+        want.push(format!(
+            "lot {} from=2019-03-18 lot=4000 basis=ltq_gcd v=1",
+            k(strike, side)
+        ));
+    }
+    for (strike, side) in [
+        ("12500", "PE"),
+        ("13500", "PE"),
+        ("14000", "PE"),
+        ("12500", "CE"),
+        ("15000", "CE"),
+    ] {
+        want.push(format!(
+            "lot {} from=2019-03-19 lot=4800 basis=ltq_gcd v=1",
+            k(strike, side)
+        ));
+    }
+    want.push(format!(
+        "lot {} from=2019-03-20 lot=4800 basis=ltq_gcd v=1",
+        k("15000", "PE")
+    ));
+    want
+}
+
+/// DB-G71, DB-G72, DB-G77 (D-3331, D-3343): the options import detects the
+/// adjustment from the data and writes, never splits: a `lineage` record
+/// per renamed contract (old key, new key, factor, both inferred lots, and
+/// how long the vendor's OI stayed unadjusted), a `stitched` record per
+/// reused text, every `alias` row once, and the lots. The bars are not
+/// touched: the reused `150PE` holds both contracts, as the record says.
+/// A re-run writes nothing; a run that starts on the ex-date reads the day
+/// before to know what was renamed; a rescan writes the same records.
+#[test]
+fn the_options_import_records_a_renamed_contract_and_a_reused_key() {
+    let root = scratch("wp11b-lineage");
+    ex_world(&root);
+    let (d1, d2, d3) = ex_days();
+    let store = root.join("S");
+    let got = run_from(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1, d3),
+        (&store, &[]),
+        false,
+    );
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    let lineage = crate::gdfl_lineage::lineage_path(&store);
+    let lots = crate::gdfl_lineage::lots_path(&store);
+    assert_eq!(ledger_lines(&lineage), ex_lineage());
+    assert_eq!(ledger_lines(&lots), ex_lots());
+    assert_eq!(got.adjustments, 1);
+    assert_eq!((got.lineage_lines, got.lot_lines), (ex_lineage().len(), 11));
+    // Every record reads back as the API reads it.
+    for line in ledger_lines(&lineage) {
+        assert!(
+            line.starts_with("alias ")
+                || crate::gdfl_lineage::LineageRecord::parse(&line).is_some()
+                || crate::gdfl_lineage::StitchedRecord::parse(&line).is_some(),
+            "{line}"
+        );
+    }
+    // The bars are never altered or split: 150PE holds the pre-ex contract's
+    // two bars and the post-ex one's.
+    let reused = bars_on(
+        &store,
+        (
+            "FNO",
+            "NTPC",
+            Some(Contract::parse("2019-03-28-15000-PE").unwrap()),
+        ),
+        d1,
+    );
+    assert_eq!(
+        reused.iter().map(|bar| bar.close).collect::<Vec<_>>(),
+        [500, 510, 100]
+    );
+    // A re-run writes nothing.
+    let again = run_from(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1, d3),
+        (&store, &[]),
+        false,
+    );
+    assert_eq!(
+        (again.lineage_lines, again.lot_lines, again.days_skipped),
+        (0, 0, 3)
+    );
+    assert_eq!(ledger_lines(&lineage), ex_lineage());
+    // A run that starts on the ex-date folds the day before in, read-only.
+    let late = root.join("L");
+    let from_ex = run_from(
+        &root,
+        (Src::Store, ImportKind::Options),
+        (d2, d3),
+        (&late, &[]),
+        false,
+    );
+    assert!(from_ex.failures.is_empty(), "{:?}", from_ex.failures);
+    assert_eq!(
+        ledger_lines(&crate::gdfl_lineage::lineage_path(&late)),
+        ex_lineage()
+    );
+    assert_eq!(
+        ledger_lines(&crate::gdfl_lineage::lots_path(&late)),
+        ex_lots()
+    );
+    assert!(
+        bars_tree_has_no_day(&late, d1),
+        "the warm-up day is read, never filed"
+    );
+    // `cli gdfl-dayflags options ... --lineage` writes the same records for
+    // days already imported, and the day ledger.
+    std::fs::remove_file(&lineage).unwrap();
+    std::fs::remove_file(&lots).unwrap();
+    let rescan = rescan_nfo(
+        &NfoZips::new(&root.join("zips/options")),
+        (d1, d3),
+        &store,
+        true,
+    )
+    .unwrap();
+    assert!(rescan.failures.is_empty(), "{:?}", rescan.failures);
+    assert_eq!((rescan.days_read, rescan.adjustments), (3, 1));
+    assert_eq!(ledger_lines(&lineage), ex_lineage());
+    assert_eq!(ledger_lines(&lots), ex_lots());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Whether no bar of `store` lies on `on`.
+fn bars_tree_has_no_day(store: &Path, on: Day) -> bool {
+    let start = micros_at(on, 0);
+    let end = micros_at(on, 86_399);
+    tree(store)
+        .into_keys()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "bin"))
+        .all(|path| {
+            let rel = path.to_string_lossy().into_owned();
+            let parts: Vec<&str> = rel.split('/').collect();
+            // bars/gdfl/NSE/FNO/<under>/<contract>/1s/<yyyy-mm>.bin
+            let (Some(under), Some(contract)) = (parts.get(4), parts.get(5)) else {
+                return true;
+            };
+            bars_on(store, ("FNO", under, Contract::parse(contract)), on)
+                .iter()
+                .all(|bar| bar.ts_micros < start || bar.ts_micros > end)
+        })
+}
+
+/// A day none of whose files was read clean writes no kind-day line: there
+/// is nothing to count, and the journal names why (D-3317's `refused`).
+#[test]
+fn a_day_with_no_file_read_writes_no_ledger_line() {
+    let on = day(2019, 5, 30);
+    let root = scratch("wp11b-nothing-read");
+    let bad = nfo_csv(
+        "NIFTY30MAY1911900CE",
+        on,
+        ("1.00", "1.10"),
+        &[(hms_at(9, 20, 0), "50.125", 75, 9_000)],
+    );
+    world_of(
+        &root,
+        &[(
+            on,
+            Tree::Options,
+            vec![(entry_of(Tree::Options, on, "NIFTY30MAY1911900CE"), bad)],
+        )],
+    );
+    let store = root.join("S");
+    let got = run_from(
+        &root,
+        (Src::Store, ImportKind::Options),
+        (on, on),
+        (&store, &[]),
+        false,
+    );
+    assert_eq!((got.files, got.files_refused), (0, 1));
+    assert_eq!(got.closed_refused, vec![on]);
+    assert_eq!(got.flags_lines, 0);
+    assert!(flags_lines(&store).is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
