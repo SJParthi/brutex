@@ -664,7 +664,7 @@ fn run(entry: &audit::Entry, out: &mut String) {
                 //
                 // `Kind::label` already existed for the Rust page and had no
                 // second caller. This is that caller.
-                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"version":{},"note_capacity":{},"kept_unclassified_day":{},"drops":["#,
+                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"note_whole":{},"note_whole_error":{},"version":{},"note_capacity":{},"kept_unclassified_day":{},"drops":["#,
                 entry.ordinal,
                 render::json_string(r.kind.label()),
                 r.at_unix_secs,
@@ -683,6 +683,17 @@ fn run(entry: &audit::Entry, out: &mut String) {
                 r.source_bytes,
                 render::json_string(&r.note),
                 r.note_bytes,
+                // THE WHOLE REASON, where the record kept it beside the journal
+                // (D-3341, DB-G23), or why it could not be read. Both null for
+                // a record that names none.
+                match entry.whole_note {
+                    Some(Ok(ref whole)) => render::json_string(whole),
+                    _ => "null".to_owned(),
+                },
+                match entry.whole_note {
+                    Some(Err(ref why)) => render::json_string(why),
+                    _ => "null".to_owned(),
+                },
                 r.version,
                 r.note_capacity(),
                 // NULL, NOT ZERO, on a version-1 record: that build kept these

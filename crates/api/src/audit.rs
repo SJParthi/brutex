@@ -160,6 +160,25 @@ pub const VERSION: u16 = 2;
 /// and decode as `None`.
 pub const VERSION_ONE: u16 = 1;
 
+/// **Version 3 (D-3341, DB-G23): a member failure whose whole note is kept.**
+///
+/// Version 2's layout byte for byte, written only for a
+/// [`Kind::MemberFailure`] whose reason was longer than [`NOTE_CAPACITY`] and
+/// whose whole reason reached the notes file beside the journal
+/// ([`Journal::notes_path`]). The eight bytes at [`OFF_COUNTED`], zero on every
+/// member record by design (the counters belong to the run), hold the byte
+/// offset of that whole note, so reading it is one seek and two reads however
+/// long either file is.
+///
+/// Measured on the operator's journal on 9 Oct 2026: 4,217,015 member records,
+/// and every one of them carries a reason longer than the field (2,909,596 of
+/// 256 to 319 bytes; 45,928 of 1,280 or more), so every one was cut. A month
+/// cell that wanted to say *why* Zerodha refused 2020-11-14 had 60 bytes of it.
+///
+/// Every other record is still written as [`VERSION`]: a build that knows only
+/// versions 1 and 2 refuses these records by name and still reads every run.
+pub const VERSION_WHOLE_NOTE: u16 = 3;
+
 /// The longest source this record keeps, in bytes.
 const SOURCE_CAPACITY: usize = 64;
 
@@ -222,6 +241,35 @@ const _: () = assert!(OFF_CLOSED_DAY + 4 == OFF_UNCLASSIFIED_KEPT);
 const _: () = assert!(OFF_UNCLASSIFIED_KEPT + 4 == OFF_NOTE);
 const _: () = assert!(OFF_NOTE + NOTE_CAPACITY == OFF_CRC);
 const _: () = assert!(OFF_CRC + 4 == RECORD_LEN);
+
+// THE NOTES FILE (D-3341, DB-G23): one entry per version-3 member failure, at
+// the byte offset that record names. An entry is
+//
+//   0..4    `BXNT`
+//   4..6    entry layout version, little-endian (`NOTE_ENTRY_VERSION`)
+//   6..8    zero
+//   8..16   the ordinal of the journal record it belongs to
+//   16..20  the reason's length in bytes before any cut
+//   20..24  the bytes kept, at most `MAX_WHOLE_NOTE`
+//   24..    the kept bytes, UTF-8
+//   then    CRC-32C of every byte before it, little-endian
+//
+// Variable length, so it is addressed by the offset its record carries and
+// never by arithmetic; the ordinal inside it is what a reader checks, so an
+// offset that lands on another record's note is refused, never shown.
+
+/// The four bytes a whole-note entry starts with.
+const NOTE_MAGIC: [u8; 4] = *b"BXNT";
+
+/// The entry layout this build writes and reads.
+const NOTE_ENTRY_VERSION: u16 = 1;
+
+/// An entry's fixed head, in bytes, before its text.
+const NOTE_HEAD: usize = 24;
+
+/// The longest reason an entry keeps, in bytes: 16 KiB, cut on a character
+/// boundary past it, with the whole length still stated in the head.
+pub const MAX_WHOLE_NOTE: usize = 16 * 1024;
 
 /// Which shape a record is: the run itself, or one member that did not land.
 ///
@@ -364,6 +412,17 @@ pub enum Outcome {
     NotStarted,
     /// Something ran and did not finish clean.
     Failed,
+    /// A broker run began: its source and window, written before its first
+    /// member (D-3341, DB-055, DB-G46).
+    ///
+    /// Not a verdict. The run's member failures follow this record as each
+    /// member lands, and its own closing record (one of the five above) follows
+    /// them. Before it existed a run wrote nothing until it ended, so a stock
+    /// pass that ran for hours had no durable trace until its last instrument,
+    /// and one whose process stopped had none at all. An opened record with no
+    /// closing record after its failures is that case, and the journal now
+    /// shows it rather than nothing.
+    Opened,
 }
 
 impl Outcome {
@@ -372,7 +431,7 @@ impl Outcome {
     ///
     /// Raising this is what forces a new variant into [`Self::ALL`]: the
     /// literal below stops being the right length until it is listed.
-    const COUNT: u8 = 5;
+    const COUNT: u8 = 6;
 
     /// Every outcome, in stored-byte order — which is not declaration order,
     /// because [`Self::Empty`] was appended to the code space and reads best
@@ -385,6 +444,7 @@ impl Outcome {
         Self::NotStarted,
         Self::Failed,
         Self::Empty,
+        Self::Opened,
     ];
 
     /// The byte this outcome is stored as.
@@ -399,6 +459,7 @@ impl Outcome {
             // append-only journal: renumbering would re-read every record
             // written before today as a different outcome.
             Self::Empty => 4,
+            Self::Opened => 5,
         }
     }
 
@@ -411,6 +472,7 @@ impl Outcome {
             2 => Some(Self::NotStarted),
             3 => Some(Self::Failed),
             4 => Some(Self::Empty),
+            5 => Some(Self::Opened),
             _ => None,
         }
     }
@@ -424,6 +486,7 @@ impl Outcome {
             Self::Refused => "REFUSED",
             Self::NotStarted => "NOT STARTED",
             Self::Failed => "FAILED",
+            Self::Opened => "OPENED",
         }
     }
 
@@ -434,7 +497,10 @@ impl Outcome {
         // is something the operator has to look at — and the whole reason it
         // needed its own variant is that reporting it quietly as `Stored` is
         // how a backfill gap survives.
-        !matches!(self, Self::Stored)
+        //
+        // `Opened` is NOT loud: it states that a run began, and the run's
+        // verdict is its closing record's to give.
+        !matches!(self, Self::Stored | Self::Opened)
     }
 }
 
@@ -672,6 +738,15 @@ pub struct Record {
     pub note: String,
     /// How long `note` was before it was cut, in bytes.
     pub note_bytes: u16,
+    /// Where this member failure's whole reason is in the notes file beside
+    /// the journal ([`Journal::notes_path`]), as a byte offset.
+    ///
+    /// `Some` only on a [`VERSION_WHOLE_NOTE`] member failure — one whose reason
+    /// did not fit [`NOTE_CAPACITY`] and reached that file. [`None`] on every
+    /// run, on every member failure whose reason fit, on every record older
+    /// than D-3341, and on one whose whole reason could not be written (its
+    /// `note_bytes` still says how much was cut). D-3341, DB-G23.
+    pub note_at: Option<u64>,
 }
 
 impl Record {
@@ -704,6 +779,7 @@ impl Record {
             source_bytes: saturating_len(source),
             note: keep(note, NOTE_CAPACITY),
             note_bytes: saturating_len(note),
+            note_at: None,
         }
     }
 
@@ -828,6 +904,7 @@ impl Record {
             source_bytes: saturating_len(source),
             note: keep(&note, NOTE_CAPACITY),
             note_bytes: saturating_len(&note),
+            note_at: None,
         }
     }
 
@@ -879,7 +956,31 @@ impl Record {
             source_bytes: saturating_len(instrument),
             note: keep(why, NOTE_CAPACITY),
             note_bytes: saturating_len(why),
+            note_at: None,
         }
+    }
+
+    /// The first record of a broker run, written before its first member.
+    ///
+    /// # Why a run now opens a record (D-3341, DB-055, DB-G46)
+    ///
+    /// A run wrote its record and its member failures only when it ended. The
+    /// operator's swept 1min pass started at 19:31 IST and `pull.journal` was
+    /// last written at 19:00, at the end of the indices run before it: for the
+    /// hours a stock pass runs, nothing durable named a single refusal, and the
+    /// rolling log that did wrapped in 6 to 10 minutes. Now the run's member
+    /// failures are appended as each member lands, and this record goes first
+    /// so that they are filed under the run they belong to.
+    ///
+    /// `source` is what the run is fetched from — the endpoint, carried through
+    /// the cash-identity policy exactly as the closing record's is — because a
+    /// member failure belongs to the run record before it, and that run's
+    /// source is how `/audit.json` names its vendor. The counters are zero:
+    /// nothing has landed yet, and the closing record carries what did.
+    #[must_use]
+    pub fn opened(scope: Scope, at: SystemTime, source: &str, window: Window, of: usize) -> Self {
+        let note = format!("opened for {of} instruments; failures follow as they land");
+        Self::refused(scope, Outcome::Opened, at, source, &note).with_window(window)
     }
 
     /// Whether the source on the page is shorter than the one that was asked
@@ -909,8 +1010,18 @@ impl Record {
     #[must_use]
     pub fn image(&self) -> [u8; RECORD_LEN] {
         let mut out = [0u8; RECORD_LEN];
+        // VERSION 3 ONLY FOR A MEMBER FAILURE THAT NAMES ITS WHOLE NOTE; every
+        // other record is version 2, byte for byte as before (D-3341).
+        let whole = match (self.kind, self.note_at) {
+            (Kind::MemberFailure, Some(at)) => Some(at),
+            _ => None,
+        };
         write_at(&mut out, OFF_MAGIC, MAGIC);
-        write_at(&mut out, OFF_VERSION, VERSION.to_le_bytes());
+        write_at(
+            &mut out,
+            OFF_VERSION,
+            whole.map_or(VERSION, |_| VERSION_WHOLE_NOTE).to_le_bytes(),
+        );
         write_at(&mut out, OFF_SCOPE, [self.scope.code()]);
         write_at(&mut out, OFF_OUTCOME, [self.outcome.code()]);
         write_at(&mut out, OFF_KIND, [self.kind.code()]);
@@ -920,7 +1031,13 @@ impl Record {
         write_at(&mut out, OFF_ROWS_READ, self.rows_read.to_le_bytes());
         write_at(&mut out, OFF_BARS_STORED, self.bars_stored.to_le_bytes());
         write_at(&mut out, OFF_ROWS_FOLDED, self.rows_folded.to_le_bytes());
-        write_at(&mut out, OFF_COUNTED, self.counted.to_le_bytes());
+        // A member failure's `counted` is zero by design, so version 3 keeps
+        // the whole note's offset in those eight bytes.
+        write_at(
+            &mut out,
+            OFF_COUNTED,
+            whole.unwrap_or(self.counted).to_le_bytes(),
+        );
         write_at(
             &mut out,
             OFF_BEFORE_OPEN,
@@ -989,10 +1106,11 @@ impl Record {
             return Err(RecordFault::Checksum { stored, computed });
         }
         let version = u16::from_le_bytes(le2(image, OFF_VERSION));
-        if version != VERSION && version != VERSION_ONE {
+        if version != VERSION && version != VERSION_ONE && version != VERSION_WHOLE_NOTE {
             return Err(RecordFault::UnknownVersion { version });
         }
-        let current = version == VERSION;
+        // Versions 2 and 3 share one layout; only version 1's note is longer.
+        let current = version != VERSION_ONE;
         let scope_code = byte(image, OFF_SCOPE);
         let Some(scope) = Scope::of_code(scope_code) else {
             return Err(RecordFault::UnknownScope { code: scope_code });
@@ -1008,6 +1126,14 @@ impl Record {
         let Some(kind) = Kind::of_code(kind_code) else {
             return Err(RecordFault::UnknownKind { code: kind_code });
         };
+        // A WHOLE-NOTE OFFSET IS A MEMBER FAILURE'S ALONE. A run carrying
+        // version 3 would have its census count read as an offset, so it is
+        // refused by name rather than decoded either way.
+        let whole = version == VERSION_WHOLE_NOTE;
+        if whole && kind != Kind::MemberFailure {
+            return Err(RecordFault::WholeNoteOnARun);
+        }
+        let counted = u64::from_le_bytes(le8(image, OFF_COUNTED));
         let source = text(
             image,
             OFF_SOURCE,
@@ -1037,7 +1163,7 @@ impl Record {
             rows_read: u64::from_le_bytes(le8(image, OFF_ROWS_READ)),
             bars_stored: u64::from_le_bytes(le8(image, OFF_BARS_STORED)),
             rows_folded: u64::from_le_bytes(le8(image, OFF_ROWS_FOLDED)),
-            counted: u64::from_le_bytes(le8(image, OFF_COUNTED)),
+            counted: if whole { 0 } else { counted },
             drops: Drops {
                 before_open: u64::from_le_bytes(le8(image, OFF_BEFORE_OPEN)),
                 after_close: u64::from_le_bytes(le8(image, OFF_AFTER_CLOSE)),
@@ -1053,6 +1179,7 @@ impl Record {
             source,
             note_bytes: u16::from_le_bytes(le2(image, OFF_NOTE_LEN)),
             note,
+            note_at: whole.then_some(counted),
         })
     }
 }
@@ -1103,6 +1230,8 @@ pub enum RecordFault {
     },
     /// Text that is not UTF-8.
     NotText,
+    /// A version-3 record that is not a member failure (D-3341).
+    WholeNoteOnARun,
 }
 
 impl std::fmt::Display for RecordFault {
@@ -1115,8 +1244,10 @@ impl std::fmt::Display for RecordFault {
             Self::UnknownVersion { version } => {
                 write!(
                     f,
-                    "record version {version}; this build writes {VERSION} and reads \
-                     {VERSION_ONE} and {VERSION}"
+                    "record version {version}; this build writes {VERSION} \
+                     ({VERSION_WHOLE_NOTE} for a member failure whose whole note \
+                     is kept) and reads {VERSION_ONE}, {VERSION} and \
+                     {VERSION_WHOLE_NOTE}"
                 )
             }
             Self::UnknownScope { code } => {
@@ -1137,6 +1268,10 @@ impl std::fmt::Display for RecordFault {
                 write!(f, "kept length {kept} past a {capacity}-byte field")
             }
             Self::NotText => f.write_str("a text field is not UTF-8"),
+            Self::WholeNoteOnARun => f.write_str(
+                "a version-3 record that is not a member failure: only a member \
+                 failure carries a whole-note offset, so this record is not read",
+            ),
         }
     }
 }
@@ -1185,6 +1320,30 @@ impl Log {
             Self::Held { torn, .. } => torn.is_some(),
             Self::Absent => false,
         }
+    }
+}
+
+/// One run's place in the journal: its opening record, that record's ordinal,
+/// and the ordinal of the last record the run appended. Made by
+/// [`Journal::open_run`] and moved on by [`Journal::append_failure`]. D-3341.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thread {
+    head: Record,
+    first: u64,
+    last: u64,
+}
+
+impl Thread {
+    /// The ordinal of the run's opening record.
+    #[must_use]
+    pub const fn first(&self) -> u64 {
+        self.first
+    }
+
+    /// The ordinal of the last record this run appended.
+    #[must_use]
+    pub const fn last(&self) -> u64 {
+        self.last
     }
 }
 
@@ -1281,8 +1440,130 @@ impl Journal {
         //
         // Bounded by the append, which is bounded by the run and its failed
         // members — never by rows. See [`Kind::MemberFailure`].
-        self.appended(record)
+        self.appended(record, None)
             .inspect_err(|why| note_append_failed(&self.path, record, why))
+    }
+
+    /// Appends one member failure, keeping its WHOLE reason beside it when the
+    /// record's note field cut it (D-3341, DB-G23).
+    ///
+    /// `whole` is the reason `record` was built from. When it is longer than
+    /// the note the record kept, it is appended to [`Self::notes_path`] first,
+    /// under that file's own lock and while this journal's is held, and the
+    /// record is written as [`VERSION_WHOLE_NOTE`] naming where it went. The
+    /// note entry carries this record's ordinal, so a reader that follows the
+    /// offset checks it landed on the right reason.
+    ///
+    /// # A whole note that cannot be written does not lose the record
+    ///
+    /// The record is the fact that the member failed; the whole note is its
+    /// detail. When the note cannot be written the record is still appended,
+    /// as version 2 with its cut note and `note_bytes` saying by how much, and
+    /// the refusal is logged at `Error` (`api.audit` / `whole note not
+    /// appended`), which the audit stream keeps. Losing the record because its
+    /// detail failed would be the worse of the two losses.
+    ///
+    /// # Cost
+    ///
+    /// One more locked append and `fsync` than [`Self::append`] when the note
+    /// was cut, none when it fit. Constant per failure, bounded by the member
+    /// count, never by rows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`]: the record itself not reaching the journal.
+    pub fn append_member(&self, record: &Record, whole: &str) -> Result<(), String> {
+        self.appended(record, Some(whole))
+            .inspect_err(|why| note_append_failed(&self.path, record, why))
+    }
+
+    /// The file each version-3 member failure's whole reason is kept in: the
+    /// journal's own name with `.notes` for `.journal`, beside it in `audit/`.
+    #[must_use]
+    pub fn notes_path(&self) -> PathBuf {
+        self.path.with_extension("notes")
+    }
+
+    /// Opens a run in the journal: appends its [`Outcome::Opened`] record and
+    /// answers the [`Thread`] its member failures are appended through.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`]: the opening record did not reach the journal.
+    pub fn open_run(&self, head: &Record) -> Result<Thread, String> {
+        self.appended_images(|_ordinal| head.image().to_vec())
+            .map(|first| Thread {
+                head: head.clone(),
+                first,
+                last: first,
+            })
+            .inspect_err(|why| note_append_failed(&self.path, head, why))
+    }
+
+    /// Appends one member failure of the run `thread` opened, with its whole
+    /// reason kept as [`Self::append_member`] keeps it — and the run's opening
+    /// record again first, whenever another writer appended since this run's
+    /// last record (D-3341, DB-055).
+    ///
+    /// # Why the opening record is repeated
+    ///
+    /// A member failure carries no vendor and no run of its own: `/audit.json`
+    /// and `/dayflags.json` file it under the run record before it. A run that
+    /// appended its failures only when it ended wrote them in one burst behind
+    /// its own record, so that held. Appended as each member lands, two runs
+    /// of two feeds interleave, and a failure would be filed under the other
+    /// run's feed. So the check is made under the journal's lock, where it is
+    /// exact: if the record before this one is not this run's last, the
+    /// opening record is written again ("continues ...") in the same write as
+    /// the failure. A run that has the journal to itself never repeats it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`]: the record did not reach the journal. Nothing of
+    /// this call is then on disk, and `thread` is unchanged.
+    pub fn append_failure(
+        &self,
+        thread: &mut Thread,
+        record: &Record,
+        whole: &str,
+    ) -> Result<(), String> {
+        let mut written = 1u64;
+        let first = self
+            .appended_images(|ordinal| {
+                let mut out = Vec::with_capacity(2 * RECORD_LEN);
+                let mut at = ordinal;
+                if ordinal != thread.last.saturating_add(1) {
+                    let mut again = thread.head.clone();
+                    let note = format!("continues the run opened at record {}", thread.first);
+                    again.note = keep(&note, NOTE_CAPACITY);
+                    again.note_bytes = saturating_len(&note);
+                    out.extend_from_slice(&again.image());
+                    at = at.saturating_add(1);
+                    written = 2;
+                }
+                out.extend_from_slice(&self.with_whole_note(record, Some(whole), at).image());
+                out
+            })
+            .inspect_err(|why| note_append_failed(&self.path, record, why))?;
+        thread.last = first.saturating_add(written).saturating_sub(1);
+        Ok(())
+    }
+
+    /// `record`, carrying where its whole reason went when it was a member
+    /// failure whose note was cut and the reason reached [`Self::notes_path`]
+    /// as the entry of record `ordinal`. A note that cannot be written leaves
+    /// the record as it was and is logged ([`note_whole_failed`]).
+    fn with_whole_note(&self, record: &Record, whole: Option<&str>, ordinal: u64) -> Record {
+        let mut record = record.clone();
+        if let Some(whole) = whole
+            .filter(|whole| record.kind == Kind::MemberFailure && whole.len() > record.note.len())
+        {
+            match self.append_note(ordinal, whole) {
+                Ok(at) => record.note_at = Some(at),
+                Err(why) => note_whole_failed(&self.notes_path(), &record, &why),
+            }
+        }
+        record
     }
 
     /// The append itself, so the refusal has exactly one place to be noticed.
@@ -1290,7 +1571,30 @@ impl Journal {
     /// # Errors
     ///
     /// As [`Self::append`], which is the only caller and adds the line.
-    fn appended(&self, record: &Record) -> Result<(), String> {
+    fn appended(&self, record: &Record, whole: Option<&str>) -> Result<(), String> {
+        // THE WHOLE NOTE FIRST, while this journal's lock fixes the ordinal the
+        // record will have. Only for a member failure whose note was cut.
+        self.appended_images(|ordinal| {
+            self.with_whole_note(record, whole, ordinal)
+                .image()
+                .to_vec()
+        })
+        .map(|_first| ())
+    }
+
+    /// Writes the records `build` makes, whole, at the end of the journal and
+    /// makes them durable; answers the ordinal of the first.
+    ///
+    /// `build` is called with that ordinal while this journal's exclusive lock
+    /// is held, so what it decides from it (a whole note's owner, whether a run
+    /// must restate its opening record) cannot be overtaken by another writer.
+    /// Its bytes are one `write_all`: a failed or short write is rolled back to
+    /// the length measured under the lock, all of it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`].
+    fn appended_images(&self, build: impl FnOnce(u64) -> Vec<u8>) -> Result<u64, String> {
         let named =
             |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", self.path.display());
         // ONE LEVEL, NEVER THE ROOT. `create_dir_all` made every missing
@@ -1345,11 +1649,13 @@ impl Journal {
                 bytes / RECORD_LEN_U64,
             ));
         }
+        let first = bytes / RECORD_LEN_U64;
+        let images = build(first);
         write_rolled_back(
             &mut file,
             &self.path,
             bytes,
-            &record.image(),
+            &images,
             std::io::Write::write_all,
         )?;
         file.sync_all()
@@ -1360,7 +1666,69 @@ impl Journal {
         // this append's error, it said a synced record was not in the journal.
         // See `append`'s doc. D-0695.
         drop(file);
-        Ok(())
+        Ok(first)
+    }
+
+    /// Appends one whole-note entry for journal record `ordinal` and makes it
+    /// durable, answering the byte offset it starts at.
+    ///
+    /// The caller holds the journal's append lock; this takes the notes file's
+    /// own. A failed or short write is truncated back to the length measured
+    /// under that lock, as [`write_rolled_back`] does for a record, so a later
+    /// entry's offset is never preceded by this call's partial bytes.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be opened, locked, measured, written or synced, in the
+    /// failure's own words.
+    fn append_note(&self, ordinal: u64, whole: &str) -> Result<u64, String> {
+        let path = self.notes_path();
+        let named = |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", path.display());
+        let mut file = Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&path)
+                .map_err(|e| named("cannot open the notes file", &e))?,
+            path.as_path(),
+        )
+        .map_err(|e| {
+            format!(
+                "{}: cannot take the notes append lock — {e}",
+                path.display()
+            )
+        })?;
+        let at = file
+            .metadata()
+            .map_err(|e| named("cannot measure the locked notes file", &e))?
+            .len();
+        write_rolled_back(
+            &mut file,
+            &path,
+            at,
+            &note_image(ordinal, whole),
+            std::io::Write::write_all,
+        )?;
+        file.sync_all()
+            .map_err(|e| named("the note was written and not synced", &e))?;
+        drop(file);
+        Ok(at)
+    }
+
+    /// The whole reason of journal record `ordinal`, read at `at` in the notes
+    /// file: one seek and two reads.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read there, or what is there is not an entry, fails
+    /// its checksum, or belongs to another record — each by name. Nothing is
+    /// guessed: an offset that lands on the wrong reason is refused, never shown.
+    pub fn whole_note(&self, ordinal: u64, at: u64) -> Result<String, String> {
+        let path = self.notes_path();
+        let mut file =
+            std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        read_note(&mut file, &path, ordinal, at)
     }
 
     /// One page of records, newest first.
@@ -1438,14 +1806,34 @@ impl Journal {
             )
         })?;
         let mut out = Vec::with_capacity(span / RECORD_LEN);
+        // THE NOTES FILE IS OPENED ONCE PER PAGE, and only when a record on it
+        // names a whole note. Each such record then costs one seek and two
+        // reads, so a page stays bounded by `MAX_PAGE_RECORDS` (D-3341).
+        let mut notes: Option<Result<std::fs::File, String>> = None;
         for (i, chunk) in buf.chunks_exact(RECORD_LEN).enumerate() {
             let mut image = [0u8; RECORD_LEN];
             for (dst, src) in image.iter_mut().zip(chunk.iter()) {
                 *dst = *src;
             }
+            let ordinal = start.saturating_add(as_u64(i));
+            let decoded = Record::decode(&image);
+            let whole_note = decoded
+                .as_ref()
+                .ok()
+                .and_then(|record| record.note_at)
+                .map(|at| {
+                    let path = self.notes_path();
+                    match notes.get_or_insert_with(|| {
+                        std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))
+                    }) {
+                        Ok(file) => read_note(file, &path, ordinal, at),
+                        Err(why) => Err(why.clone()),
+                    }
+                });
             out.push(Entry {
-                ordinal: start.saturating_add(as_u64(i)),
-                decoded: Record::decode(&image),
+                ordinal,
+                decoded,
+                whole_note,
             });
         }
         out.reverse();
@@ -1605,6 +1993,104 @@ pub struct Entry {
     pub ordinal: u64,
     /// The record, or why it could not be believed.
     pub decoded: Result<Record, RecordFault>,
+    /// The record's whole reason from the notes file, when it names one, or
+    /// why it could not be read. [`None`] for a record that names none
+    /// ([`Record::note_at`]). D-3341, DB-G23.
+    pub whole_note: Option<Result<String, String>>,
+}
+
+/// One whole-note entry's bytes: the head, the reason (cut on a character
+/// boundary past [`MAX_WHOLE_NOTE`]) and its checksum.
+fn note_image(ordinal: u64, whole: &str) -> Vec<u8> {
+    let kept = keep(whole, MAX_WHOLE_NOTE);
+    let mut out = Vec::with_capacity(NOTE_HEAD.saturating_add(kept.len()).saturating_add(4));
+    out.extend_from_slice(&NOTE_MAGIC);
+    out.extend_from_slice(&NOTE_ENTRY_VERSION.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&ordinal.to_le_bytes());
+    out.extend_from_slice(&u32::try_from(whole.len()).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(kept.len()).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(kept.as_bytes());
+    let crc = crc32c(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// The entry at `at` in an open notes file, checked to belong to `ordinal`.
+///
+/// A reason the entry had to cut past [`MAX_WHOLE_NOTE`] comes back with the
+/// cut said in words, never passed off as whole.
+fn read_note(
+    file: &mut std::fs::File,
+    path: &Path,
+    ordinal: u64,
+    at: u64,
+) -> Result<String, String> {
+    let named = |what: &str| format!("{}: the note at byte {at} {what}", path.display());
+    file.seek(std::io::SeekFrom::Start(at))
+        .map_err(|e| named(&format!("cannot be reached — {e}")))?;
+    let mut head = [0u8; NOTE_HEAD];
+    file.read_exact(&mut head)
+        .map_err(|e| named(&format!("cannot be read — {e}")))?;
+    let field = |from: usize, to: usize| head.get(from..to).unwrap_or(&[]);
+    if field(0, 4) != NOTE_MAGIC {
+        return Err(named("is not a note entry"));
+    }
+    let version = <[u8; 2]>::try_from(field(4, 6)).map_or(0, u16::from_le_bytes);
+    if version != NOTE_ENTRY_VERSION {
+        return Err(named(&format!(
+            "has entry layout {version}; this build reads {NOTE_ENTRY_VERSION}"
+        )));
+    }
+    let owner = <[u8; 8]>::try_from(field(8, 16)).map_or(u64::MAX, u64::from_le_bytes);
+    if owner != ordinal {
+        return Err(named(&format!(
+            "belongs to record {owner}, not record {ordinal}, so it is not shown"
+        )));
+    }
+    let whole = <[u8; 4]>::try_from(field(16, 20)).map_or(0, u32::from_le_bytes);
+    let kept = <[u8; 4]>::try_from(field(20, 24)).map_or(u32::MAX, u32::from_le_bytes);
+    let kept = usize::try_from(kept)
+        .ok()
+        .filter(|kept| *kept <= MAX_WHOLE_NOTE)
+        .ok_or_else(|| {
+            named(&format!(
+                "claims {kept} bytes, past the {MAX_WHOLE_NOTE} kept"
+            ))
+        })?;
+    let mut rest = vec![0u8; kept.saturating_add(4)];
+    file.read_exact(&mut rest)
+        .map_err(|e| named(&format!("ends early — {e}")))?;
+    let (text, stored) = rest.split_at(kept);
+    let stored = <[u8; 4]>::try_from(stored).map_or(0, u32::from_le_bytes);
+    let mut covered = head.to_vec();
+    covered.extend_from_slice(text);
+    let computed = crc32c(&covered);
+    if stored != computed {
+        return Err(named(&format!(
+            "fails its checksum ({stored:#010x} != {computed:#010x})"
+        )));
+    }
+    let text = std::str::from_utf8(text).map_err(|_ignored| named("is not UTF-8"))?;
+    if u64::from(whole) > as_u64(kept) {
+        return Ok(format!("{text}… (cut from {whole} bytes)"));
+    }
+    Ok(text.to_owned())
+}
+
+/// A whole note that could not be written, said where it survives: its
+/// record still lands, cut, and this line names why the rest did not.
+fn note_whole_failed(path: &Path, record: &Record, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("api.audit", "whole note not appended")
+            .with("path", telemetry::Value::Str(&path.display().to_string()))
+            .with("instrument", telemetry::Value::Str(&record.source))
+            .with(
+                "note_bytes",
+                telemetry::Value::Uint(u64::from(record.note_bytes)),
+            )
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1921,6 +2407,204 @@ mod tests {
             record,
             "round-trips field for field"
         );
+    }
+
+    /// A reason in the shape the operator's journal holds for NIFTY on
+    /// 2020-11-14 (145 bytes, cut to 60): synthetic wording, longer than the
+    /// note field. D-3341, DB-G23.
+    const LONG_WHY: &str = "request minute coverage UNVERIFIED on 2020-11-14: exceptional \
+         session on a Saturday whose length no record states; 0 minute row(s) withheld";
+
+    /// **THE WHOLE REASON SURVIVES THE 60-BYTE NOTE** (D-3341, DB-G23).
+    ///
+    /// Every one of the operator's 4.2 million member records was cut, so a
+    /// month cell that wanted to say why Zerodha refused 2020-11-14 had 60 bytes
+    /// of it. A member failure whose reason does not fit now keeps the whole
+    /// reason in `pull.notes`, names its offset, and is written as version 3;
+    /// one whose reason fits, and every run, stays version 2 byte for byte.
+    #[test]
+    fn a_cut_member_reason_is_kept_whole_beside_the_journal_and_read_back() {
+        let root = scratch("audit-whole-note");
+        let journal = Journal::at(&root);
+        let cut = Record::member_failure(Scope::Spot, at(5), "NIFTY", window(), LONG_WHY);
+        assert!(cut.note_was_cut(), "the premise: the note field cuts it");
+        journal.append_member(&cut, LONG_WHY).expect("appends");
+        let short = Record::member_failure(Scope::Spot, at(6), "NIFTY", window(), "refused");
+        journal.append_member(&short, "refused").expect("appends");
+        journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Refused,
+                at(7),
+                "run",
+                "r",
+            ))
+            .expect("appends");
+
+        let records = journal.look().records();
+        assert_eq!(records, 3, "one record each, at the same stride");
+        let page = journal.page(records, 0, 10).expect("a page");
+        let [run, fits, whole] = page.as_slice() else {
+            panic!("three entries: {page:?}");
+        };
+        let whole_record = whole.decoded.clone().expect("decodes");
+        assert_eq!(whole_record.version, VERSION_WHOLE_NOTE);
+        assert_eq!(
+            whole_record.counted, 0,
+            "the offset is never read as a count"
+        );
+        assert_eq!(
+            whole_record.note_at,
+            Some(0),
+            "the first entry of the notes file"
+        );
+        assert_eq!(
+            whole.whole_note,
+            Some(Ok(LONG_WHY.to_owned())),
+            "the whole reason, read back by its offset"
+        );
+        let fits_record = fits.decoded.clone().expect("decodes");
+        assert_eq!(
+            fits_record.version, VERSION,
+            "a reason that fits is version 2"
+        );
+        assert_eq!((fits_record.note_at, &fits.whole_note), (None, &None));
+        assert_eq!(
+            run.decoded.clone().expect("decodes").version,
+            VERSION,
+            "a run is never version 3"
+        );
+        assert_eq!(
+            journal.whole_note(2, 0),
+            Err(format!(
+                "{}: the note at byte 0 belongs to record 0, not record 2, so it is not shown",
+                journal.notes_path().display()
+            )),
+            "an offset followed from the wrong record is refused, never shown"
+        );
+    }
+
+    /// A version-3 image is a member failure's alone: a run carrying it would
+    /// have its census count read as an offset, so it is refused by name.
+    #[test]
+    fn a_whole_note_version_on_a_run_is_refused_rather_than_decoded() {
+        let record = Record::of_run(Scope::Spot, at(1), 2, "src", window(), &run());
+        let mut image = record.image();
+        write_at(&mut image, OFF_VERSION, VERSION_WHOLE_NOTE.to_le_bytes());
+        let crc = crc32c(&covered(&image));
+        write_at(&mut image, OFF_CRC, crc.to_le_bytes());
+        assert_eq!(Record::decode(&image), Err(RecordFault::WholeNoteOnARun));
+    }
+
+    /// A reason past [`MAX_WHOLE_NOTE`] is kept to that bound and comes back
+    /// saying it was cut, with its whole length — never passed off as whole.
+    #[test]
+    fn a_reason_past_the_whole_note_bound_says_it_was_cut() {
+        let root = scratch("audit-whole-note-bound");
+        let journal = Journal::at(&root);
+        let why = "x".repeat(MAX_WHOLE_NOTE + 10);
+        let record = Record::member_failure(Scope::Spot, at(5), "NIFTY", window(), &why);
+        journal.append_member(&record, &why).expect("appends");
+        let page = journal.page(1, 0, 1).expect("a page");
+        let read = page
+            .first()
+            .and_then(|entry| entry.whole_note.clone())
+            .expect("a whole note")
+            .expect("reads");
+        assert!(
+            read.ends_with(&format!("… (cut from {} bytes)", MAX_WHOLE_NOTE + 10)),
+            "{}",
+            &read[read.len().saturating_sub(40)..]
+        );
+        assert_eq!(
+            read.len(),
+            MAX_WHOLE_NOTE + "… (cut from 16394 bytes)".len()
+        );
+    }
+
+    /// **A RUN IS ON THE JOURNAL WHILE IT RUNS, AND ITS FAILURES STAY FILED
+    /// UNDER IT** (D-3341, DB-055, DB-G46).
+    ///
+    /// The run opens with an `OPENED` record; each failure follows as its
+    /// member lands. When another writer appends in between — a second run of
+    /// another feed — the opening record is restated before the next failure,
+    /// so a reader that files a member under the run record before it never
+    /// files this run's failure under the other run's feed.
+    #[test]
+    fn a_run_opens_before_its_members_and_restates_itself_after_another_writer() {
+        let root = scratch("audit-thread");
+        let journal = Journal::at(&root);
+        let head = Record::opened(Scope::Spot, at(1), "https://api.kite.trade/x", window(), 2);
+        assert_eq!(head.kind, Kind::Run);
+        assert_eq!(head.outcome, Outcome::Opened);
+        assert!(!head.outcome.is_loud(), "a run beginning is not a verdict");
+        let mut thread = journal.open_run(&head).expect("opens");
+        assert_eq!((thread.first(), thread.last()), (0, 0));
+
+        let first = Record::member_failure(Scope::Spot, at(2), "NIFTY", window(), LONG_WHY);
+        journal
+            .append_failure(&mut thread, &first, LONG_WHY)
+            .expect("appends");
+        assert_eq!(thread.last(), 1, "straight behind its opening record");
+
+        journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Refused,
+                at(3),
+                "other feed",
+                "x",
+            ))
+            .expect("another writer");
+
+        let second = Record::member_failure(Scope::Spot, at(4), "BANKNIFTY", window(), "refused");
+        journal
+            .append_failure(&mut thread, &second, "refused")
+            .expect("appends");
+        assert_eq!(thread.last(), 4, "the restated head at 3, the failure at 4");
+
+        let records = journal.look().records();
+        let page = journal.page(records, 0, 10).expect("a page");
+        let decoded: Vec<Record> = page
+            .iter()
+            .rev()
+            .map(|entry| entry.decoded.clone().expect("decodes"))
+            .collect();
+        let shape: Vec<(Kind, Outcome, &str)> = decoded
+            .iter()
+            .map(|r| (r.kind, r.outcome, r.source.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Kind::Run, Outcome::Opened, "https://api.kite.trade/x"),
+                (Kind::MemberFailure, Outcome::Failed, "NIFTY"),
+                (Kind::Run, Outcome::Refused, "other feed"),
+                (Kind::Run, Outcome::Opened, "https://api.kite.trade/x"),
+                (Kind::MemberFailure, Outcome::Failed, "BANKNIFTY"),
+            ]
+        );
+        assert_eq!(
+            decoded.get(3).map(|r| r.note.as_str()),
+            Some("continues the run opened at record 0")
+        );
+        assert_eq!(
+            page.iter().rev().nth(1).and_then(|e| e.whole_note.clone()),
+            Some(Ok(LONG_WHY.to_owned())),
+            "and the threaded failure keeps its whole reason"
+        );
+    }
+
+    /// The new outcome round-trips at the code appended for it, and every code
+    /// before it still means what it meant.
+    #[test]
+    fn the_opened_outcome_is_appended_to_the_code_space() {
+        assert_eq!(Outcome::Opened.code(), 5);
+        assert_eq!(Outcome::of_code(5), Some(Outcome::Opened));
+        assert_eq!(Outcome::of_code(4), Some(Outcome::Empty));
+        assert_eq!(Outcome::Opened.label(), "OPENED");
+        let head = Record::opened(Scope::Spot, at(1), "src", window(), 7);
+        assert_eq!(Record::decode(&head.image()), Ok(head));
     }
 
     /// A journal written before `Kind` existed must decode unchanged.
@@ -2670,8 +3354,10 @@ mod tests {
     #[test]
     fn nothing_after_the_sync_can_refuse_an_append() {
         let body = include_str!("audit.rs")
-            .split_once("    fn appended(&self, record: &Record) -> Result<(), String> {\n")
-            .expect("`appended` is in this file")
+            .split_once(
+                "    fn appended_images(&self, build: impl FnOnce(u64) -> Vec<u8>) -> Result<u64, String> {\n",
+            )
+            .expect("`appended_images` is in this file")
             .1
             .split_once("\n    }\n")
             .expect("`appended` ends")
@@ -2690,7 +3376,7 @@ mod tests {
             .collect();
         assert_eq!(
             code,
-            ["drop(file);", "Ok(())"],
+            ["drop(file);", "Ok(first)"],
             "after the sync: {after_sync}"
         );
     }
@@ -2928,11 +3614,10 @@ mod tests {
         assert_eq!(again.note.len(), NOTE_CAPACITY);
         assert!(again.note_was_cut());
         assert_eq!(again.drops.on_closed_day, Some(0));
-        assert!(
-            RecordFault::UnknownVersion { version: 3 }
-                .to_string()
-                .contains("reads 1 and 2")
-        );
+        // VERSION 3 IS READ SINCE D-3341 (a member failure whose whole note
+        // is kept), so the first version this build does not know is 4.
+        let unknown = RecordFault::UnknownVersion { version: 4 }.to_string();
+        assert!(unknown.contains("reads 1, 2 and 3"), "{unknown}");
     }
 
     /// ITERATED, NOT HAND-LISTED. This test used to name four outcomes and then

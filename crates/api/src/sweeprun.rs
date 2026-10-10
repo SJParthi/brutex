@@ -2458,7 +2458,7 @@ fn browser_attempt_unknown(attempt: Option<u64>, why: &str) -> String {
 
 fn external_observation(dir: Option<&std::path::Path>, now: i64) -> ExternalObservation {
     dir.map_or_else(
-        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, unterminated: None, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
+        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, unterminated: None, quiet: None, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
         |dir| observe_elsewhere(dir, now),
     )
 }
@@ -2491,7 +2491,15 @@ fn observed_status_with_admission(
         },
         Ok(()) => (true, "The store execution lease is currently free. A launch rechecks and claims it atomically. Historical status is separate; this does not establish that older binaries or bypassing callers are idle.".to_owned()),
     };
-    let mut body = observed_status(local, external);
+    // NO SWEEP HAS RUN, SAID AS SUCH (D-3341, DB-G31) — only from evidence
+    // that can carry it: no sweep this process started, no results ledger in
+    // this store, and a retained CLI lifecycle log read whole that names no
+    // sweep command. Anything less keeps the answer it had.
+    let mut body = match (local, external.quiet.as_ref()) {
+        (None, Some(quiet)) => no_sweep_has_run(root, quiet),
+        _ => None,
+    }
+    .unwrap_or_else(|| observed_status(local, external));
     // Every local status serializer above produces one complete JSON object.
     // Add a separate authority; never rewrite unknown history into completion.
     body.pop();
@@ -2514,7 +2522,232 @@ struct ExternalObservation {
     /// terminal marker after it: that id and the command word. Only a caller
     /// HOLDING the store's execution lease may act on it. D-2764.
     unterminated: Option<(u64, String)>,
+    /// What a lifecycle window that holds NO sweep marker held, when it was
+    /// read whole and clean — the CLI log's half of "no sweep has run".
+    /// `None` whenever a marker was found or the window could hide one.
+    /// D-3341, DB-G31.
+    quiet: Option<Quiet>,
     body: String,
+}
+
+/// A whole, clean CLI lifecycle window with no sweep in it: how many events it
+/// held, the oldest one's time, the commands that logged a start and no finish
+/// in it, and the newest command named. D-3341, DB-G31.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Quiet {
+    /// Lifecycle events the window held — every one the retained log holds.
+    events: usize,
+    /// When the oldest of them was written, as the log stamps it (UTC).
+    oldest: Option<Stamp>,
+    /// Each command whose `command started` has no `command finished` of the
+    /// same invocation after it, newest first.
+    unfinished: Vec<Logged>,
+    /// The newest lifecycle event that names a command.
+    newest: Option<Logged>,
+}
+
+/// When a lifecycle event was written: milliseconds since the epoch, and the
+/// log's own UTC rendering of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    millis: i64,
+    utc: String,
+}
+
+/// One lifecycle event that names a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Logged {
+    command: String,
+    message: String,
+    run: u64,
+    at: Stamp,
+}
+
+impl Logged {
+    /// `record` when it names a command; `None` for one that names none.
+    fn of(record: &telemetry::Record) -> Option<Self> {
+        let command = match record.field("command") {
+            Some(telemetry::OwnedValue::Str(command)) if !command.is_empty() => command.clone(),
+            _ => return None,
+        };
+        Some(Self {
+            command,
+            message: record.message.clone(),
+            run: record.run,
+            at: Stamp::of(record),
+        })
+    }
+
+    /// The payload's object for this event.
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": self.command,
+            "message": self.message,
+            "run": self.run.to_string(),
+            "sweep": cli::is_sweep_command(&self.command),
+            "at_unix_millis": self.at.millis,
+            "at_utc": self.at.utc,
+        })
+    }
+}
+
+impl Stamp {
+    fn of(record: &telemetry::Record) -> Self {
+        Self {
+            millis: record.at_unix_millis,
+            utc: record.at_utc.clone(),
+        }
+    }
+}
+
+impl Quiet {
+    /// The window, read newest first, when it holds every retained lifecycle
+    /// event and at least one; `None` when it may have been cut short of the
+    /// oldest, when it is empty (the payload's `running: null` already says
+    /// nothing was observed), or when the newest `cli` record of any kind is
+    /// one a sweep could have written.
+    ///
+    /// # Why the newest `cli` record is checked too
+    ///
+    /// A sweep stamps its progress on `cli.audit`, `cli.sweep`, `cli.auto`,
+    /// `cli.pool`, `cli.ledger` and `cli.checksum`, and a binary older than the
+    /// lifecycle markers stamped only those. So a newest record on any target
+    /// but the two every command writes (`cli.lifecycle`, `cli.output`) may be
+    /// a sweep's, and nothing is concluded from the markers' silence.
+    ///
+    /// # Cost
+    ///
+    /// One pass over the window already read, at most [`LIFECYCLE_WINDOW`]
+    /// records; the finished set is at most that many run ids.
+    fn of(lifecycle: &telemetry::Tail, newest_cli: Option<&telemetry::Record>) -> Option<Self> {
+        if lifecycle.hit_scan_cap
+            || lifecycle.records.is_empty()
+            || lifecycle.records.len() >= LIFECYCLE_WINDOW
+        {
+            return None;
+        }
+        if newest_cli.is_some_and(|record| !COMMAND_TARGETS.contains(&record.target.as_str())) {
+            return None;
+        }
+        let mut finished = std::collections::HashSet::new();
+        let mut unfinished = Vec::new();
+        for record in &lifecycle.records {
+            match record.message.as_str() {
+                "command finished" => {
+                    finished.insert(record.run);
+                }
+                "command started" if !finished.contains(&record.run) => {
+                    unfinished.extend(Logged::of(record));
+                }
+                _ => {}
+            }
+        }
+        Some(Self {
+            events: lifecycle.records.len(),
+            oldest: lifecycle.records.last().map(Stamp::of),
+            unfinished,
+            newest: lifecycle.records.iter().find_map(Logged::of),
+        })
+    }
+}
+
+/// How many lifecycle events the status reads: the bounded window every
+/// marker search walks.
+const LIFECYCLE_WINDOW: usize = 256;
+
+/// The `cli` targets every command writes, sweep or not: its lifecycle
+/// markers and its output. Any other `cli` target may be a sweep's progress.
+const COMMAND_TARGETS: [&str; 2] = ["cli.lifecycle", "cli.output"];
+
+/// `/backtest/run.json`'s answer when no sweep has run in this store, or
+/// `None` when the results ledger exists (or cannot be shown absent), so a
+/// sweep has recorded something. D-3341, DB-G31.
+///
+/// # What it replaces
+///
+/// `{"status":"unknown","why":"latest CLI event: command started … no
+/// authoritative sweep-command marker; completion and current activity are
+/// unknown"}` — on a store with no `results/runs.bin` and a lifecycle log of
+/// eight events, every one `gdfl-import` or a command with no word. Nothing
+/// about a sweep was unknown: none had run, and the command the log named was
+/// an import.
+///
+/// # What it still does not claim
+///
+/// That every process on the machine is idle; that a command which logged a
+/// start and no finish is still alive (one stopped by the operator looks the
+/// same, and the sentence says so); or that no sweep ran before the retained
+/// log begins and recorded nothing. The sentence names the log's oldest event
+/// and the ledger's path, which are the whole of the evidence.
+fn no_sweep_has_run(root: &std::path::Path, quiet: &Quiet) -> Option<String> {
+    let results = crate::backtest::path_in(root);
+    match std::fs::symlink_metadata(&results) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return None,
+    }
+    let lead = match (quiet.unfinished.split_first(), quiet.newest.as_ref()) {
+        (Some((active, older)), _) => {
+            let mut lead = format!(
+                "No sweep has run; the active CLI command is {} (not a sweep): it logged its \
+                 start at {} and no finish, so it is running or was stopped without logging one.",
+                active.command, active.at.utc
+            );
+            if !older.is_empty() {
+                let mut names: Vec<&str> = Vec::new();
+                for name in older.iter().map(|o| o.command.as_str()) {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                let _ = write!(
+                    lead,
+                    " {} older start(s) logged no finish either ({}); none is a sweep.",
+                    older.len(),
+                    names.join(", ")
+                );
+            }
+            lead
+        }
+        (None, Some(last)) => format!(
+            "No sweep has run; no CLI command is active — the last was {} (not a sweep), \
+             whose newest lifecycle event is \"{}\" at {}.",
+            last.command, last.message, last.at.utc
+        ),
+        (None, None) => {
+            "No sweep has run; the retained CLI lifecycle log names no command.".to_owned()
+        }
+    };
+    let why = format!(
+        "{lead} There is no results ledger at {} (a sweep creates it with its first \
+         finished rung), and the retained CLI lifecycle log, read whole — {} event(s){} — \
+         names no sweep command. This does not establish that a sweep never ran before \
+         that log begins without recording one, or that every process is idle.",
+        results.display(),
+        quiet.events,
+        quiet
+            .oldest
+            .as_ref()
+            .map_or_else(String::new, |at| format!(", the oldest at {}", at.utc)),
+    );
+    Some(
+        serde_json::json!({
+            "running": {
+                "where": "cli",
+                "status": "no_sweep_has_run",
+                "in_flight": false,
+                "why": why,
+                "active_command": quiet.unfinished.first().map(|active| active.command.clone()),
+                "unfinished_commands": quiet.unfinished.iter().map(Logged::json).collect::<Vec<_>>(),
+                "last_command": quiet.newest.as_ref().map(Logged::json),
+                "lifecycle_events": quiet.events,
+                "oldest_at_unix_millis": quiet.oldest.as_ref().map(|at| at.millis),
+                "results": results.display().to_string(),
+                "refusal": null,
+                "report": null,
+            }
+        })
+        .to_string(),
+    )
 }
 
 fn unknown_status(why: &str) -> String {
@@ -2648,6 +2881,7 @@ fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservati
         in_flight: false,
         launch_clear: false,
         unterminated: None,
+        quiet: None,
         body: unknown_status(why),
     }
 }
@@ -2656,7 +2890,7 @@ fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservati
 /// marker, the window trimmed to end at that marker when damage behind it is
 /// all that would otherwise refuse (CE-11, D-1914).
 fn newest_sweep_marker(dir: &std::path::Path) -> (telemetry::Tail, Option<usize>) {
-    let mut lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
+    let mut lifecycle = status_tail(dir, "cli.lifecycle", None, LIFECYCLE_WINDOW);
     let mut found = None;
     for (index, record) in lifecycle.records.iter().enumerate() {
         let is_marker = matches!(
@@ -2719,6 +2953,12 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             in_flight: false,
             launch_clear,
             unterminated: None,
+            // CLEAN BOTH WAYS, or nothing is concluded from the silence.
+            quiet: if launch_clear {
+                Quiet::of(&lifecycle, legacy.records.first())
+            } else {
+                None
+            },
             body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
         };
     };
@@ -2784,6 +3024,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
         in_flight: status == "running",
         launch_clear: matches!(status, "completed" | "refused"),
         unterminated,
+        quiet: None,
         body,
     }
 }
@@ -7057,6 +7298,122 @@ mod tests {
         assert!(!newer.launch_clear, "{}", newer.body);
         drop(sink);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **NO SWEEP HAS RUN, SAID AS SUCH** (D-3341, DB-G31).
+    ///
+    /// The operator's store on 7 Oct: no `results/runs.bin`, and a CLI
+    /// lifecycle log of eight events, every one `gdfl-import` or a command
+    /// with no word. `/backtest/run.json` answered `status: unknown` — "no
+    /// authoritative sweep-command marker". Now the same evidence answers
+    /// `no_sweep_has_run` and names the import as the active command; and each
+    /// thing that could hide a sweep (a results ledger, a newest record on a
+    /// target a sweep stamps) keeps the old answer.
+    #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "reads named fields of a parsed JSON status; a missing one is Null and fails the assertion"
+    )]
+    fn a_store_with_only_non_sweep_commands_says_no_sweep_has_run() {
+        let root = crate::scratch::path("sweep-none-store");
+        let dir = crate::scratch::path("sweep-none-log");
+        for path in [&root, &dir] {
+            let _ = std::fs::remove_dir_all(path);
+            std::fs::create_dir_all(path).expect("a scratch directory");
+        }
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let lifecycle = |run: u64, message, phase, command: &str| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", command)
+                .with("sweep_command", false);
+            assert_eq!(sink.emit_for_run(run, &event), telemetry::Emitted::Written);
+        };
+        lifecycle(7, "command started", "running", "gdfl-import");
+        lifecycle(7, "command finished", "completed", "gdfl-import");
+        lifecycle(8, "command started", "running", "");
+        lifecycle(8, "command finished", "completed", "");
+        lifecycle(9, "command started", "running", "gdfl-import");
+        let status = |root: &std::path::Path| -> serde_json::Value {
+            serde_json::from_str(&super::observed_status_with_admission(
+                root,
+                None,
+                Some(dir.as_path()),
+                i64::MAX,
+            ))
+            .expect("one JSON object")
+        };
+
+        let body = status(&root);
+        let running = &body["running"];
+        assert_eq!(running["status"], "no_sweep_has_run", "{body}");
+        assert_eq!(running["in_flight"], false, "{body}");
+        assert_eq!(running["active_command"], "gdfl-import", "{body}");
+        assert_eq!(running["lifecycle_events"], 5, "{body}");
+        assert!(
+            running["why"].as_str().is_some_and(|why| why.starts_with(
+                "No sweep has run; the active CLI command is gdfl-import (not a sweep)"
+            )),
+            "{body}"
+        );
+        assert!(
+            body["admission"].is_object(),
+            "the admission still travels: {body}"
+        );
+
+        // EVERY COMMAND FINISHED: none is active, and the last is named.
+        lifecycle(9, "command finished", "completed", "gdfl-import");
+        let body = status(&root);
+        assert!(
+            body["running"]["why"].as_str().is_some_and(|why| why.starts_with(
+                "No sweep has run; no CLI command is active — the last was gdfl-import (not a sweep)"
+            )),
+            "{body}"
+        );
+        assert!(body["running"]["active_command"].is_null(), "{body}");
+
+        // TWO STARTS AND NO FINISH (one was stopped by the operator): the
+        // newest is named as active, with the doubt said, and the older one
+        // is counted rather than called a second active command.
+        lifecycle(10, "command started", "running", "gdfl-import");
+        lifecycle(11, "command started", "running", "gdfl-import");
+        let body = status(&root);
+        let why = body["running"]["why"].as_str().unwrap_or_default();
+        assert!(
+            why.starts_with(
+                "No sweep has run; the active CLI command is gdfl-import (not a sweep)"
+            ) && why.contains("so it is running or was stopped without logging one.")
+                && why.contains(
+                    " 1 older start(s) logged no finish either (gdfl-import); none is a sweep."
+                ),
+            "{body}"
+        );
+        assert_eq!(
+            body["running"]["unfinished_commands"][0]["run"], "11",
+            "{body}"
+        );
+        assert_eq!(
+            body["running"]["unfinished_commands"][1]["run"], "10",
+            "{body}"
+        );
+
+        // A RESULTS LEDGER IS A SWEEP'S RECORD: the old answer stands.
+        let results = crate::backtest::path_in(&root);
+        std::fs::create_dir_all(results.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&results, b"").expect("a ledger file");
+        assert_eq!(status(&root)["running"]["status"], "unknown");
+        std::fs::remove_file(&results).expect("removed");
+
+        // A NEWEST RECORD A SWEEP COULD HAVE STAMPED: nothing is concluded.
+        assert_eq!(
+            sink.emit(&telemetry::Event::info("cli.audit", "rung entered")),
+            telemetry::Emitted::Written
+        );
+        assert_eq!(status(&root)["running"]["status"], "unknown");
+
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
