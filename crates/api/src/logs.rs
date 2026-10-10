@@ -1573,20 +1573,23 @@ pub const DB_READS: [&str; 16] = [
 
 /// The query names an access record keeps: the selection, never anything
 /// else a query may carry. At most [`telemetry::MAX_FIELDS`] less the four an
-/// access record always carries are kept, in this order.
+/// access record always carries are kept, in this order: the names `/db`
+/// sends (`DbBarsGrid`'s window: feed, exchange, segment, symbol, contract,
+/// timeframe, from, to) first, so `symbol` is kept and the audit index files
+/// the read under its instrument.
 pub const ACCESS_KEYS: [&str; 12] = [
     "feed",
-    "instrument",
     "symbol",
+    "instrument",
     "segment",
+    "exchange",
     "contract",
-    "expiry",
-    "strike",
-    "right",
     "timeframe",
     "month",
     "day",
     "from",
+    "to",
+    "key",
 ];
 
 /// An access record's window.
@@ -5347,6 +5350,23 @@ mod tests {
                 ("feed", "gdfl".to_owned()),
                 ("instrument", "NSE-INDEX-NIFTY".to_owned()),
                 ("month", "2019-03".to_owned()),
+            ]
+        );
+        // THE WINDOW /db ASKS: its symbol is kept, so the index files the read
+        // under its instrument; the paging names are not a selection.
+        assert_eq!(
+            selection_of(
+                "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&contract=&timeframe=1s\
+                 &from=2022-03&to=2022-03&sort=ts&dir=desc&offset=0&limit=50&extremes=1"
+            ),
+            [
+                ("feed", "gdfl".to_owned()),
+                ("symbol", "NIFTY".to_owned()),
+                ("segment", "INDEX".to_owned()),
+                ("exchange", "NSE".to_owned()),
+                ("timeframe", "1s".to_owned()),
+                ("from", "2022-03".to_owned()),
+                ("to", "2022-03".to_owned()),
             ]
         );
         assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
