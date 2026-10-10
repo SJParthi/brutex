@@ -39,9 +39,9 @@
 //! D-1501), the DB-066 stall class the other store routes were moved off:
 //! 246,147 file opens for GDFL on the operator's store, each on a Tokio
 //! worker. Since WP-33c (DB-A35) `/verify.json` runs it through
-//! [`vendor_off_worker`]: on the blocking pool, at most
-//! [`MAX_SCRUBS_CONCURRENT`] at once, and a request past that is a named 429,
-//! never a queue. This said "O(1) per entry" and named no log walk until
+//! [`vendor_off_worker`]: on the blocking pool, behind the store reads'
+//! admission (`crate::detail::run_store_read`), and a request past it is a
+//! named 429, never a queue. This said "O(1) per entry" and named no log walk until
 //! D-1501 (W1-api6-0).
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
@@ -50,7 +50,6 @@
 //! measurement, however sound it is.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use brutex_core::vendor::Vendor;
 use pull::scrub::{self, Tally};
@@ -268,47 +267,17 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     report
 }
 
-/// How many whole-vendor scrubs run at once (WP-33c, DB-A35): one. A scrub
-/// opens one bar file per held month (246,147 for GDFL on the operator's
-/// store), so two at once only halve each other's speed and hold two blocking
-/// threads; a second request while one runs is refused by name.
-pub const MAX_SCRUBS_CONCURRENT: usize = 1;
-
-/// Scrubs running now.
-static SCRUBS: AtomicUsize = AtomicUsize::new(0);
-
-/// A held scrub seat of a counter, given back however the scrub ends.
-struct Seat(&'static AtomicUsize);
-
-impl Seat {
-    /// A seat of `seats`, or `None` when [`MAX_SCRUBS_CONCURRENT`] are taken.
-    /// One compare-and-swap loop over one counter: O(1).
-    fn take(seats: &'static AtomicUsize) -> Option<Self> {
-        seats
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
-                (held < MAX_SCRUBS_CONCURRENT).then(|| held.saturating_add(1))
-            })
-            .ok()
-            .map(|_| Self(seats))
-    }
-}
-
-impl Drop for Seat {
-    fn drop(&mut self) {
-        let _released = self
-            .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
-                Some(held.saturating_sub(1))
-            });
-    }
-}
-
 /// [`vendor`], off the async workers (WP-33c, DB-A35): on Tokio's blocking
-/// pool, behind its own seat, so a scrub never holds a runtime worker and
-/// never takes a slot the `/db` reads share. A seat that is taken answers 429
-/// naming the bound; a task that cannot be joined, 503. Both bodies are JSON
-/// `{"error": ...}`, as every other admission refusal is
-/// (`crate::detail::admission_refused`).
+/// pool through [`crate::detail::run_store_read`], the admission every other
+/// store route takes, so a scrub never holds a runtime worker and at most
+/// [`crate::detail::MAX_STORE_READ_CONCURRENT`] store reads (a scrub among
+/// them) run at once. A full pool answers 429 naming the bound, a task that
+/// cannot be joined 503, both as `{"error": ...}`
+/// (`crate::detail::admission_refused`), never a queue.
+///
+/// A scrub holds its slot for its whole walk (one bar file opened per held
+/// month: 246,147 for GDFL on the operator's store), so while one runs the
+/// `/db` reads share one slot fewer. Said rather than hidden.
 ///
 /// # Errors
 ///
@@ -317,36 +286,15 @@ pub(crate) async fn vendor_off_worker(
     root: PathBuf,
     census: VendorCensus,
 ) -> Result<Report, (axum::http::StatusCode, String)> {
-    scrub_seated(&SCRUBS, root, census).await
-}
-
-/// [`vendor_off_worker`] over the seats `seats` counts: the process's
-/// [`SCRUBS`], or a test's own, so a test holding a seat never refuses
-/// another test's scrub.
-async fn scrub_seated(
-    seats: &'static AtomicUsize,
-    root: PathBuf,
-    census: VendorCensus,
-) -> Result<Report, (axum::http::StatusCode, String)> {
-    let Some(seat) = Seat::take(seats) else {
-        return Err(crate::detail::admission_refused(
-            "vendor scrub",
-            MAX_SCRUBS_CONCURRENT,
-            &crate::detail::RunError::Saturated,
-        ));
-    };
-    tokio::task::spawn_blocking(move || {
-        let _seat = seat;
-        vendor(&root, &census)
-    })
-    .await
-    .map_err(|why| {
-        crate::detail::admission_refused(
-            "vendor scrub",
-            MAX_SCRUBS_CONCURRENT,
-            &crate::detail::RunError::Join(why.to_string()),
-        )
-    })
+    crate::detail::run_store_read(move || vendor(&root, &census))
+        .await
+        .map_err(|why| {
+            crate::detail::admission_refused(
+                "vendor scrub",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            )
+        })
 }
 
 #[cfg(test)]
@@ -354,18 +302,16 @@ mod tests {
     use super::*;
     use pull::scrub::Finding;
 
-    /// **THE SCRUB RUNS OFF THE WORKERS, ONE AT A TIME** (WP-33c, DB-A35): a
-    /// seat held is a named 429 for the next scrub, given back when the scrub
-    /// ends, and a scrub over a counter that could not be read answers its
-    /// refusal from the blocking pool exactly as the inline call did.
-    #[tokio::test]
+    /// **THE SCRUB RUNS OFF THE WORKERS** (WP-33c, DB-A35): on the blocking
+    /// pool, from a current-thread runtime whose one worker the scrub would
+    /// otherwise hold, and it answers what the inline call answered.
+    #[tokio::test(flavor = "current_thread")]
     #[allow(
         clippy::expect_used,
         reason = "a test that cannot panic cannot fail, and these lints exist to keep panics \
                   out of the crate rather than out of its tests"
     )]
-    async fn a_scrub_runs_off_the_workers_and_one_at_a_time() {
-        static OWN: AtomicUsize = AtomicUsize::new(0);
+    async fn a_scrub_runs_off_the_workers() {
         let unread = VendorCensus {
             vendor: Vendor::Zerodha,
             path: PathBuf::from("/nowhere/manifest"),
@@ -374,22 +320,21 @@ mod tests {
                 fault: crate::census::Fault::Refused,
             },
         };
-        let held = Seat::take(&OWN).expect("a free seat");
-        let refused = scrub_seated(&OWN, PathBuf::from("/nowhere"), unread.clone())
+        let worker = std::thread::current().id();
+        let ran_on = crate::detail::run_store_read(move || std::thread::current().id())
             .await
-            .expect_err("the only seat is held");
-        assert_eq!(refused.0, axum::http::StatusCode::TOO_MANY_REQUESTS);
-        assert!(refused.1.contains("vendor scrub"), "{}", refused.1);
-        drop(held);
-        let report = scrub_seated(&OWN, PathBuf::from("/nowhere"), unread)
+            .expect("admitted");
+        assert_ne!(ran_on, worker, "the pool is not the runtime's worker");
+        let inline = vendor(Path::new("/nowhere"), &unread);
+        let report = vendor_off_worker(PathBuf::from("/nowhere"), unread)
             .await
-            .expect("the seat is free again");
+            .expect("admitted");
+        assert_eq!(report.refused, inline.refused);
         assert!(
             report
                 .refused
                 .is_some_and(|why| why.contains("could not be read"))
         );
-        assert_eq!(OWN.load(Ordering::Acquire), 0, "the seat is given back");
     }
 
     /// Nothing checked is never "verified".
