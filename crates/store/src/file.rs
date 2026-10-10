@@ -763,6 +763,23 @@ pub enum StoreError {
         /// Which disagreement.
         conflict: Conflict,
     },
+    /// The month's generation pointer cannot say which generation is served.
+    /// D-3350, WP-13c. See [`crate::generation`].
+    Generation {
+        /// The pointer file.
+        path: PathBuf,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// The writer door was asked to open a month served from a repair
+    /// revision. An append to the original would land where no reader looks,
+    /// so it is refused; the month grows only by a further repair. D-3350.
+    Superseded {
+        /// The original month's bar file.
+        path: PathBuf,
+        /// The revision every reader opens instead.
+        ordinal: u32,
+    },
 }
 
 /// How an offered overlap disagrees with the records a month holds.
@@ -1111,6 +1128,8 @@ impl fmt::Display for StoreError {
                 ts_micros,
                 conflict,
             } => write_overlap(f, path, *at, *ts_micros, *conflict),
+            Self::Generation { path, reason } => write_generation(f, path, reason),
+            Self::Superseded { path, ordinal } => write_superseded(f, path, *ordinal),
         }
     }
 }
@@ -1476,6 +1495,11 @@ impl BarFile {
             .file()
             .checksums()
             .ok_or(StoreError::NotABarPath { found: path.file() })?;
+        // A MONTH SERVED FROM A REPAIR REVISION IS NOT APPENDED TO (D-3350).
+        // Its original is a generation no reader opens; bars appended there
+        // would be stored and never served. Asked before anything is created
+        // or locked: one `open` that is `ENOENT` for a month never repaired.
+        crate::generation::refuse_superseded(root, path)?;
         let timeframe_secs = path.timeframe().secs();
         // THE GEOMETRY THIS FILE IS BORN AT AND RESOLVED AGAINST, decided once
         // from the file kind so creation and reopen cannot disagree.
@@ -1533,6 +1557,13 @@ impl BarFile {
             lock_path.clone(),
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        // ASKED AGAIN UNDER THE LOCK (D-3350). A promotion holds this month's
+        // lock shared while it writes the pointer
+        // (`crate::generation::promote`), so a writer that passed the first
+        // question before a promotion and took the lock after it is refused
+        // here, before a byte is appended to a generation no reader opens.
+        // The guard's drop unlocks explicitly (`crate::flock`).
+        crate::generation::refuse_superseded(root, path)?;
 
         // Whether the month file was THERE before this open. Only a file that
         // existed can have been truncated or zeroed; one this open creates was
@@ -1671,7 +1702,51 @@ impl BarFile {
     /// it, [`StoreError::NotARegularFile`] (or [`StoreError::IsADirectory`])
     /// when the bars, the `.lock` or the `.crc` is not a regular file — refused
     /// at once, never waited on — and whatever `Self::validated` refuses.
+    ///
+    /// # The generation served (D-3350)
+    ///
+    /// A bar month a versioned repair promoted is opened from its revision,
+    /// under `bar-revisions-v1/<n>/`, and only after its header is checked
+    /// against the pointer record that promoted it
+    /// ([`crate::generation::Pointer::describes`]); a revision that moved is
+    /// [`StoreError::Generation`], never served. Every reader of the store
+    /// comes through this door, so all of them read one generation. A month
+    /// never repaired costs one more `open`, which is `ENOENT`.
     pub fn open_existing(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+    ) -> Result<Self, StoreError> {
+        match crate::generation::served(root, path)? {
+            crate::generation::Served::Original => Self::open_existing_at(root, path, symbol_id),
+            crate::generation::Served::Revision(pointer) => {
+                let served = crate::generation::Served::Revision(pointer).root(root);
+                let file = Self::open_existing_at(&served, path, symbol_id)?;
+                if !pointer.describes(&file.header) {
+                    return Err(StoreError::Generation {
+                        path: crate::generation::pointer_path(root, path),
+                        reason: format!(
+                            "revision {} holds {} record(s) {}..{} at header generation {}, and its promotion recorded {} record(s) {}..{} at {}; it was written outside the repair protocol and is not served",
+                            pointer.revision.ordinal(),
+                            file.header.n_valid,
+                            file.header.first_ts_micros,
+                            file.header.last_ts_micros,
+                            file.header.generation,
+                            pointer.n_valid,
+                            pointer.first_ts_micros,
+                            pointer.last_ts_micros,
+                            pointer.header_generation
+                        ),
+                    });
+                }
+                Ok(file)
+            }
+        }
+    }
+
+    /// [`Self::open_existing`] for the files under `root` exactly, with no
+    /// generation resolved: the original month, or one revision's own files.
+    fn open_existing_at(
         root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
@@ -1780,7 +1855,9 @@ impl BarFile {
     /// [`StoreError::Missing`] (or another open refusal) when the month's bar
     /// file is not a readable regular file; [`StoreError::Locked`] when
     /// another holder has the month; whatever `Self::validated` refuses about
-    /// the month; and whatever writing the `.tix` refuses.
+    /// the month; whatever writing the `.tix` refuses; and
+    /// [`StoreError::Generation`] when the month's served generation cannot be
+    /// told, or its revision is not the one its promotion recorded (D-3350).
     pub fn index_existing(
         root: &Path,
         path: StorePath<'_>,
@@ -1789,9 +1866,17 @@ impl BarFile {
         if path.file() != FileKind::Bars {
             return Err(StoreError::NotABarPath { found: path.file() });
         }
+        // THE GENERATION EVERY READER OPENS is the one indexed (D-3350,
+        // WP-13c): a repaired month's `.tix` is its revision's, and rebuilding
+        // the original's would report a month indexed that no reader reads.
+        // The links are still refused from the store root down.
+        let store_root = root;
+        let served = crate::generation::served(store_root, path)?;
+        let served_root = served.root(store_root);
+        let root = served_root.as_path();
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
-        refuse_links_below(root, &bars_path)?;
+        refuse_links_below(store_root, &bars_path)?;
         // READ-ONLY AND NEVER CREATED. `open_read` has no `create`, so a month
         // that is not there is `ENOENT`, named, before the lock is touched.
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
@@ -1820,6 +1905,17 @@ impl BarFile {
             // outcome can be reported.
             Access::Read,
         )?;
+        if let crate::generation::Served::Revision(pointer) = served
+            && !pointer.describes(&file.header)
+        {
+            return Err(StoreError::Generation {
+                path: crate::generation::pointer_path(store_root, path),
+                reason: format!(
+                    "revision {} is not the one its promotion recorded; not indexed",
+                    pointer.revision.ordinal()
+                ),
+            });
+        }
         let outcome = file.index_on_open()?;
         Ok(IndexedMonth {
             n_valid: file.header.n_valid,
@@ -1842,6 +1938,9 @@ impl BarFile {
         if path.file() != FileKind::Bars {
             return Err("strict historical checksum audit requires a bar path".to_owned());
         }
+        // THE GENERATION EVERY READER OPENS is the one audited (D-3350).
+        let served = crate::generation::served(root, path).map_err(|why| why.to_string())?;
+        let root = &served.root(root);
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
         let lock = Flock::try_lock_shared(
@@ -1852,7 +1951,7 @@ impl BarFile {
         let bars =
             crate::checksum_audit::open_regular(&bars_path).map_err(|why| why.to_string())?;
         let len = bars.metadata().map_err(|why| why.to_string())?.len();
-        Self::validated(
+        let file = Self::validated(
             bars,
             bars_path,
             Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
@@ -1865,8 +1964,17 @@ impl BarFile {
             table_of(path.file()),
             Access::Audit,
         )
-        .map_err(|why| why.to_string())?
-        .audit_checksums(max_bytes)
+        .map_err(|why| why.to_string())?;
+        if let crate::generation::Served::Revision(pointer) = served
+            && !pointer.describes(&file.header)
+        {
+            return Err(format!(
+                "repair revision {} of {} is not the one its promotion recorded; not audited",
+                pointer.revision.ordinal(),
+                file.bars_path.display()
+            ));
+        }
+        file.audit_checksums(max_bytes)
     }
 
     /// The checks both doors perform, once.
@@ -4476,6 +4584,24 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
         },
         TryLockError::Error(host) => classify(path, Action::Lock, &host),
     }
+}
+
+/// [`StoreError::Generation`]'s sentence.
+fn write_generation(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(
+        f,
+        "{}: the month's generation pointer refused: {reason}",
+        path.display()
+    )
+}
+
+/// [`StoreError::Superseded`]'s sentence.
+fn write_superseded(f: &mut fmt::Formatter<'_>, path: &Path, ordinal: u32) -> fmt::Result {
+    write!(
+        f,
+        "{} is served from repair revision {ordinal} (bar-revisions-v1/{ordinal}); an append to the original would land where no reader looks, so the writer refuses it. Add to this month with a further versioned repair (D-3350)",
+        path.display()
+    )
 }
 
 /// [`StoreError::Symlinked`]'s sentence.

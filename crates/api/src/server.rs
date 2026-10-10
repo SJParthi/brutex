@@ -1595,6 +1595,9 @@ mod gaps_route;
 mod instruments_route;
 #[path = "month_change.rs"]
 mod month_change;
+// `/pull/repair.json` and the plan behind `POST /pull/repair` (D-3350, WP-13c).
+#[path = "repair_route.rs"]
+mod repair_route;
 #[path = "store_route.rs"]
 mod store_route;
 #[cfg(test)]
@@ -1620,6 +1623,7 @@ pub use instruments_route::{MASTER_NOTE_HEADER, MASTER_STATE_HEADER, UNIVERSE_ST
 use instruments_route::{instruments_json, universe_reach_json};
 pub(crate) use month_change::{Unknown, basis_points};
 use month_change::{month_before, month_change};
+use repair_route::repair_plan_json;
 pub(crate) use store_route::behind as census_behind;
 #[cfg(test)]
 use store_route::census_headers;
@@ -1850,7 +1854,12 @@ async fn verify_json(
         );
     };
 
-    let report = crate::verify::vendor(&site.store_root, census);
+    // OFF THE ASYNC WORKERS, ONE SCRUB AT A TIME (WP-33c, DB-A35).
+    let report =
+        match crate::verify::vendor_off_worker(site.store_root.clone(), census.clone()).await {
+            Ok(report) => report,
+            Err((status, body)) => return (status, headers, body),
+        };
     // A DISAGREEMENT IS NOT A SERVER FAULT, so it is 200 with the finding in
     // the body: the request was answered correctly and the ANSWER is bad news.
     // A refusal — a counter that could not be read at all — is 503, because
@@ -3107,6 +3116,15 @@ async fn spot_answer(
             // bar length would leave an operator unable to say which of two
             // directories a run wrote to.
             facts.push(("Bar length", asked.granularity.to_string()));
+            // A REPAIR SAYS SO ON ITS RECEIPT, with why (D-3350).
+            if let Some(reason) = asked.repair.as_deref() {
+                facts.push((
+                    "Landing",
+                    format!(
+                        "VERSIONED REPAIR (D-3350): a month the append-only store refuses is published as a new generation of its held and offered bars, a held bar never changed; reason: {reason}"
+                    ),
+                ));
+            }
             facts.push((
                 "Cash identity assurance",
                 asked.cash_identity.label().to_owned(),
@@ -3285,7 +3303,7 @@ fn land_bodies_scheduled(
         site,
         cash_schedule,
         bodies,
-        observed_calendar.as_deref(),
+        (observed_calendar.as_deref(), None),
     )
 }
 
@@ -3313,7 +3331,7 @@ fn land_bodies_observed(
     site: &Site,
     cash_schedule: Option<&pull::cash_auction::Schedule>,
     bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
-    observed_calendar: Option<&pull::calendar::Calendar>,
+    (observed_calendar, repair): (Option<&pull::calendar::Calendar>, Option<&str>),
 ) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
@@ -3394,13 +3412,26 @@ fn land_bodies_observed(
             request: &request,
             ..plan
         };
-        done.absorb(pull::ingest::from_window(
-            body,
-            &landed.instrument,
-            &landed.origin,
-            &site.store_root,
-            plan,
-        ));
+        // THE REPAIR DOOR, only for `POST /pull/repair` (D-3350): a month the
+        // append-only store refuses becomes a new generation. Every other
+        // pull lands through the append door alone.
+        done.absorb(match repair {
+            None => pull::ingest::from_window(
+                body,
+                &landed.instrument,
+                &landed.origin,
+                &site.store_root,
+                plan,
+            ),
+            Some(reason) => pull::ingest::repair_window(
+                body,
+                &landed.instrument,
+                &landed.origin,
+                &site.store_root,
+                plan,
+                reason,
+            ),
+        });
     }
     done
 }
@@ -4854,7 +4885,7 @@ async fn land_broker_member(
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
     asked: &ingest::SpotRequest,
 ) -> pull::ingest::Ingested {
-    let mut landed_one = land_spot(landed, instrument, site, dated).await;
+    let mut landed_one = land_spot(landed, instrument, site, dated, asked.repair.as_deref()).await;
     note_short_window(
         &landed.instrument,
         landed.unfetched.as_deref(),
@@ -4889,6 +4920,7 @@ async fn land_spot(
     instrument: &brutex_core::instrument::InstrumentKey,
     site: &Site,
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
+    repair: Option<&str>,
 ) -> pull::ingest::Ingested {
     let mut done = pull::ingest::Ingested::default();
     // ONE OBSERVATION PER INSTRUMENT, NOT ONE PER BODY. Each body's append
@@ -4910,7 +4942,7 @@ async fn land_spot(
                     site,
                     schedule.as_ref(),
                     bodies,
-                    observed_calendar.as_deref(),
+                    (observed_calendar.as_deref(), repair),
                 )
             })),
             Err(why) => {
@@ -8818,6 +8850,15 @@ pub(crate) async fn pull_spot(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
 ) -> SpotAnswer {
+    // AN ORDINARY PULL NEVER REPAIRS (D-3350): `repair_reason` is
+    // `/pull/repair`'s field, and a body carrying it here is refused rather
+    // than read as an append that the store would then refuse month by month.
+    if !param(&body, "repair_reason").is_empty() {
+        return repair_refusal(
+            "Spot pull",
+            "repair_reason belongs to POST /pull/repair; POST /pull/spot only appends, so nothing was requested",
+        );
+    }
     let (code, page) = detached_pull("Spot pull", async move {
         let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body).await;
         (code, page)
@@ -8830,6 +8871,65 @@ pub(crate) async fn pull_spot(
             SPOT_RECEIPT,
         )],
         axum::response::Html(page),
+    )
+}
+
+/// `POST /pull/repair`: `/pull/spot`'s form plus a `repair_reason`, landed
+/// through the repair door (`pull::ingest::repair_window`, D-3350, WP-13c).
+///
+/// The same seat, credential, budget, chunking, receipt and journal as a spot
+/// pull — [`spot_pull_held`] runs it — with one difference at the write: a
+/// month the append-only store refuses is published as a new generation of
+/// held and offered bars, and every reader opens it. The reason is required,
+/// one line of at most [`MAX_REPAIR_REASON`] bytes, and is journaled with
+/// every repair in `audit/<feed>.repairs`.
+pub(crate) async fn pull_repair(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    body: String,
+) -> SpotAnswer {
+    let reason = param(&body, "repair_reason");
+    let reason = reason.trim();
+    if reason.is_empty() || reason.len() > MAX_REPAIR_REASON || reason.chars().any(char::is_control)
+    {
+        return repair_refusal(
+            "Repair pull",
+            "a repair names why it is run: repair_reason, one line of at most 200 bytes; nothing was requested",
+        );
+    }
+    let (code, page) = detached_pull("Repair pull", async move {
+        let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body).await;
+        (code, page)
+    })
+    .await;
+    (
+        code,
+        [(
+            axum::http::HeaderName::from_static(RECEIPT_HEADER),
+            SPOT_RECEIPT,
+        )],
+        axum::response::Html(page),
+    )
+}
+
+/// The longest `repair_reason` a repair takes, in bytes.
+const MAX_REPAIR_REASON: usize = 200;
+
+/// A repair-field refusal: nothing requested, nothing written.
+fn repair_refusal(scope: &'static str, why: &str) -> SpotAnswer {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        [(
+            axum::http::HeaderName::from_static(RECEIPT_HEADER),
+            SPOT_RECEIPT,
+        )],
+        axum::response::Html(render::receipt_page(&render::Receipt {
+            scope,
+            verdict: "REFUSED",
+            reason: why,
+            good: false,
+            facts: &[],
+            footnote: "Nothing here was written to the store.",
+        })),
     )
 }
 
@@ -14094,20 +14194,23 @@ fn reads_json_body(path: &str) -> bool {
 
 /// The body bound [`one_value_per_form_field`] reads within, by route.
 ///
-/// The two member routes carry their own larger `DefaultBodyLimit`,
-/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499), and the two leg routes
+/// The three member routes carry their own larger `DefaultBodyLimit`,
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499; `/pull/repair`, D-3350),
+/// and the two leg routes
 /// [`crate::pullrun::MAX_RUN_FORM_BYTES`] (D-1769). This middleware runs
 /// outside every route layer, so reading at the shared [`MAX_FORM_BYTES`] here
 /// answered 750 ticked members with a 413 before the route's own bound was
 /// ever consulted (D-1592). Every other route keeps the shared bound, which its
-/// extractor enforces again. O(1): four comparisons against literal paths.
+/// extractor enforces again. O(1): five comparisons against literal paths.
 /// Which route gets which bound is proven by
 /// `api::server::form_read_bound_is_wide_only_on_the_member_routes`; the
 /// constant cost is by construction and UNVERIFIED by any measurement
 /// (`docs/06-limits.md`, D-1459).
 fn form_read_bound(path: &str) -> usize {
     match path {
-        "/ingest/queue" | "/pull/spot" => crate::ingest::MAX_MEMBER_FORM_BYTES,
+        // `/pull/repair` is `/pull/spot`'s member form plus its reason, and
+        // carries the same route bound (D-3350, WP-13c).
+        "/ingest/queue" | "/pull/spot" | "/pull/repair" => crate::ingest::MAX_MEMBER_FORM_BYTES,
         // The two leg routes read the run bound for the same reason (P3-01-01,
         // D-1769); their own `DefaultBodyLimit` is that bound too.
         "/pull/run" | "/pull/recovery" => crate::pullrun::MAX_RUN_FORM_BYTES,
@@ -14355,6 +14458,16 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
                 crate::ingest::MAX_MEMBER_FORM_BYTES,
             )),
         )
+        // THE VERSIONED REPAIR (D-3350, WP-13c): `/pull/spot`'s form plus a
+        // `repair_reason`, landing through the repair door; and the read-only
+        // plan of what it would do, for the `/ingest` page.
+        .route(
+            "/pull/repair",
+            axum::routing::post(pull_repair).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ingest::MAX_MEMBER_FORM_BYTES,
+            )),
+        )
+        .route("/pull/repair.json", axum::routing::get(repair_plan_json))
         .route("/pull/fno", axum::routing::post(pull_fno))
         // THE ONE PRESS. `/pull/spot` and `/pull/fno` above are unchanged and
         // still serve one leg each; this starts a run that drives them itself,
@@ -17290,6 +17403,10 @@ async fn run_in_over(
                 say!("  masters: {}", dir.display());
                 say!("  store:   {}", store_root.display());
                 announce_log(logging.as_ref(), &level_note);
+                // THE PULL JOURNAL'S INDEX, BUILT ONCE IN THE BACKGROUND when
+                // it is absent or behind (WP-33c; DB-A32, DB-A34): the readers
+                // then cost O(runs), and until it lands they walk and say so.
+                let _index_build_detached = crate::audit::ensure_index(&store_root);
                 // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart
@@ -19150,7 +19267,7 @@ mod tests {
         )
         .unwrap();
         let mut dated = std::collections::HashMap::new();
-        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        let done = super::land_spot(&landed, &key, &site, &mut dated, None).await;
         assert_eq!(done.rows_read, 2);
         assert_eq!(done.bars_committed, 1);
         assert!(
@@ -19158,7 +19275,7 @@ mod tests {
                 .iter()
                 .any(|failure| failure.why.contains("incomplete cash-session cache"))
         );
-        let again = super::land_spot(&landed, &key, &site, &mut dated).await;
+        let again = super::land_spot(&landed, &key, &site, &mut dated, None).await;
         assert_eq!(again.rows_read, 2);
         assert_eq!(again.bars_committed, 0);
         assert!(!again.failures.is_empty());
@@ -19428,7 +19545,7 @@ mod tests {
         assert!(warm.sessions() > 0);
         let base = census::manifest_reads::any_of(&manifest);
         let mut dated = std::collections::HashMap::new();
-        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        let done = super::land_spot(&landed, &key, &site, &mut dated, None).await;
         assert_eq!(done.members, 5, "every body landed: {done:?}");
         assert_eq!(done.bars_committed, 4 * 375, "{:?}", done.failures);
         assert_eq!(
@@ -19598,7 +19715,7 @@ mod tests {
         assert_eq!(schedule.close(day(2026, 8, 24)).unwrap(), 915);
         assert_eq!(dated.len(), 2, "only actual source/response dates");
         assert!(schedule.close(day(2026, 8, 4)).is_err());
-        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        let done = super::land_spot(&landed, &key, &site, &mut dated, None).await;
         assert_eq!(done.bars_committed, 0);
         assert!(done.derived_files > 0);
         assert!(done.failures.is_empty(), "{:?}", done.failures);
@@ -19627,7 +19744,7 @@ mod tests {
             } else {
                 std::fs::write(&receipt, "corrupt fixture receipt").unwrap();
             }
-            let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+            let done = super::land_spot(&landed, &key, &site, &mut dated, None).await;
             assert_eq!(done.bars_committed, 0);
             assert_eq!(done.derived_files, 0);
             assert_eq!(done.rows_read, 360);
@@ -22173,10 +22290,13 @@ mod tests {
             form_read_bound("/ingest/queue"),
             crate::ingest::MAX_MEMBER_FORM_BYTES
         );
-        assert_eq!(
-            form_read_bound("/pull/spot"),
-            crate::ingest::MAX_MEMBER_FORM_BYTES
-        );
+        for path in ["/pull/spot", "/pull/repair"] {
+            assert_eq!(
+                form_read_bound(path),
+                crate::ingest::MAX_MEMBER_FORM_BYTES,
+                "{path}"
+            );
+        }
         for path in ["/pull/run", "/pull/recovery"] {
             assert_eq!(
                 form_read_bound(path),
@@ -22186,6 +22306,7 @@ mod tests {
         }
         for path in [
             "/pull/fno",
+            "/pull/repair.json",
             "/ingest/queue/",
             "/pull/run/",
             "/pull",
@@ -26316,9 +26437,10 @@ mod tests {
     /// published NO cap for has no number to chunk by, and the month is the
     /// only bound left.
     ///
-    /// Groww therefore needs 81 one-minute requests (its 30-day cap) and 14
-    /// daily ones (its 180-day cap) for this 80-month window, and Dhan, which
-    /// publishes no day cap, still needs 80 daily ones. A first doc block on
+    /// Groww therefore needs 118 one-minute requests (its 30-day cap, in whole
+    /// months, D-3351) and 16 daily ones (its 180-day cap) for this 80-month
+    /// window, and Dhan, which publishes no day cap, still needs 80 daily
+    /// ones. A first doc block on
     /// this test said the daily split was "the month alone" and counted 126
     /// and 80 for Groww — D-0055's rule, which D-0320 and D-1370 removed —
     /// while the body asserted 81 and 14. Deleted by tests-docs-security-pass18
@@ -26344,18 +26466,22 @@ mod tests {
         };
 
         for (feed, minute_cap, minute_chunks, daily_cap, daily_chunks) in [
-            // Groww publishes both: 30 days at minute, 180 at day.
+            // Groww publishes both: 30 days at minute, 180 at day. Chunks are
+            // whole months up to the cap (D-3351, WP-13c), so a 31-day month
+            // at a 30-day cap is two requests: 118 at minute (81 when the cut
+            // was the cap alone) and 16 at day (14).
             (
                 pull::vendor::Feed::Groww,
                 Some(30_u32),
-                81_usize,
+                118_usize,
                 Some(180_u32),
-                14_usize,
+                16_usize,
             ),
             // Dhan publishes a minute cap and NO day cap — so its day rung is
             // still one request per month, which is the branch the clamp is
-            // kept for.
-            (pull::vendor::Feed::Dhan, Some(90), 27, None, 80),
+            // kept for. Its 90-day minute cap holds two or three whole months:
+            // 37 requests (27 when the cut was the cap alone).
+            (pull::vendor::Feed::Dhan, Some(90), 37, None, 80),
         ] {
             let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
                 panic!("{} declares no HTTP transport", feed.display());

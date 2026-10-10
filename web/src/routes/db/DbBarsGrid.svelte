@@ -16,23 +16,19 @@
    *
    * Owner after WP-00: WP-52 (bars data path, pager, go-to, extremes, export).
    */
-  import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, pooled, IN_FLIGHT, WINDOW_SORTS, paisaText, daysBetween, minuteOf, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
+  import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, IST_OFFSET_MS, wireSort, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, seriesPlan, windowQuery, rowKey, parseGoto, pageOfIndex, censusBehind, localComparator, paisaText, daysBetween, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
   import { untrack } from 'svelte';
   import { TF_SECS, txt, tfCmp, fmt } from '$lib/db/notes-labels.js';
   import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText } from '$lib/db/notes-bars.js';
   import { dayWindowApplies } from '$lib/db/notes-controls.js';
-  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
-  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
-  // threaded through every call site.
-  import { ask } from '$lib/ask.js';
   import { feeds } from '$lib/feeds.svelte.js';
-  import { readDatabasePage } from '$lib/database-pages.js';
-  import { basisPoints, dirOf, bpsText } from '$lib/bps.js';
+  import { readWindowPage, readAllRows } from '$lib/database-pages.js';
+  import { dirOf, bpsText } from '$lib/bps.js';
   import { timeLabel, stampLabel, dayLabel, barTimeLabel } from '$lib/dates.js';
   import { refreshStore } from '$lib/store.svelte.js';
   import Picker from '$lib/Picker.svelte';
   import DbChart from './DbChart.svelte';
-  import DbExtremes from './DbExtremes.svelte';
+  import DbExtremes, { extremesState } from './DbExtremes.svelte';
   import DbDayFlags from './DbDayFlags.svelte';
   import DbOptionCells from './DbOptionCells.svelte';
   import DbProvenance from './DbProvenance.svelte';
@@ -117,6 +113,13 @@
         which depends on the reader's window, their font size and how many rungs
         the strip wrapped onto a second line. */
     let barBoxH = $state(0);
+    /** The box height Fit sizes the page by: taken from a SETTLED reading only
+        (250 ms after the selection settles or the fold changes, and on every
+        window resize), so paging cannot change the page size (DB-N11). */
+    let fitBoxH = $state(0);
+    /** Whether a settled reading has been taken. In Fit mode the grid reads
+        nothing before it, so a load asks for one page size, once (DB-N02). */
+    let fitLatched = $state(false);
     /** @type {HTMLElement | null} */
     let barBox = $state(null);
     /** @type {HTMLElement | null} */
@@ -205,7 +208,15 @@
          reflects the STORE and not the paging, and nothing above the grid counts
          rows any more. The two fixes are one fix, and this one must not be kept
          if the other is ever reverted. */
-      void db.barPlanKeys;
+      /* NOT ON EVERY READ ANY MORE (DB-N02, DB-N11). Re-measuring after every
+         fetch made the page size follow the chrome: a note line under the
+         grid on one page and not the next turned five rows into four between
+         two clicks, so page N stopped meaning the same rows, and the first
+         load asked for 4, then 3, then 8 rows. The box is measured when the
+         selection settles, when the fold changes and when the window is
+         resized — the reader's acts — and the Fit size is LATCHED from the
+         settled reading below. */
+      void db.settled;
       /* `settled` — WHETHER THIS READ IS ENTITLED TO AN OPINION ON OVERFLOW.
          ---------------------------------------------------------------------
          The box's height can be read at any moment: it comes from `flex` against
@@ -238,6 +249,14 @@
            computed from, and that is the whole of `Fit`. Only the fold term
            went. */
       };
+      /** The settled reading: what Fit sizes the page by, until the next one. */
+      const latch = () => {
+        measure();
+        if (el.clientHeight > 0) {
+          fitBoxH = el.clientHeight;
+          fitLatched = true;
+        }
+      };
       measure();
       const settle = setTimeout(measure, 0);
       /* A THIRD READ, LATER, AND IT IS KEPT THOUGH THE THING IT WAS WRITTEN FOR
@@ -257,10 +276,10 @@
          rewrapping — latches the same way. It costs one timer per mount and it is
          the difference between a fit that is right and a fit that was right at
          the moment it was taken. */
-      const afterFold = setTimeout(measure, 250);
-      window.addEventListener('resize', measure);
+      const afterFold = setTimeout(latch, 250);
+      window.addEventListener('resize', latch);
       return () => {
-        window.removeEventListener('resize', measure);
+        window.removeEventListener('resize', latch);
         clearTimeout(settle);
         clearTimeout(afterFold);
       };
@@ -284,7 +303,7 @@
        The BOX'S HEIGHT is safe to read at any moment: it comes from `flex`
        against a column the viewport sizes, so it does not depend on what is in
        it. That read belongs with every layout change, including every new fetch,
-       which is why the effect above takes `barPlanKeys` as a dependency.
+       which is why the effect above re-measures when the selection settles.
 
        The PAGE'S OVERFLOW is content against container. During a read the content
        is briefly whatever the old rows and the new state make between them, and
@@ -425,7 +444,7 @@
        `settledRows` divides by it too and is written above this point. The
        reasoning stays here, where the 24 was measured. */
     const rowsThatFit = $derived(
-      Math.max(1, Math.floor((barBoxH - HEAD - FIT_SLACK) / ROW))
+      Math.max(1, Math.floor(((fitBoxH || barBoxH) - HEAD - FIT_SLACK) / ROW))
     );
 
     Object.defineProperties(db, {
@@ -441,7 +460,9 @@
       settledRows: { get: () => settledRows },
       autoFolded: { get: () => autoFolded, set: (v) => (autoFolded = v) },
       readerChose: { get: () => readerChose, set: (v) => (readerChose = v) },
-      rowsThatFit: { get: () => rowsThatFit }
+      rowsThatFit: { get: () => rowsThatFit },
+      fitBoxH: { get: () => fitBoxH },
+      fitLatched: { get: () => fitLatched }
     });
   }
 
@@ -549,610 +570,213 @@
       }
       return head;
     });
-    /* THE DEFAULT IS EVERY MATCHED MONTH, and it was six.
+    /* THE READ BUDGET IS GONE AS A CONTROL, AND STAYS AS A NAME.
      *
-     * Operator's rule, 2026-08-19: the grid shows what the QUERY selected — the
-     * chosen feed, universe, segments, timeframes and date range — not a slice of
-     * it. A default of six read the six NEWEST months and rendered the rest as
-     * "absent rather than empty", so a January-to-August query opened on March
-     * and an operator reasonably read that as January never having been pulled.
-     * It had been: 7,500 bars, on disk, structurally perfect.
-     *
-     * A page that answers a narrower question than the one it was asked is worse
-     * than a slow one, because nothing on it is wrong — it is just not the
-     * answer. The budget stays as a CONTROL for anyone who wants to cap a very
-     * wide query; it is no longer the default. */
+     * It capped how many month FILES the grid opened when the grid opened
+     * files. The grid now asks the server one question per page (D-3326), and
+     * every matched month is in that question, so there is nothing left to
+     * cap. `readBudget` is still published, at 0 ("every one"), because the
+     * selection's page-reset effect reads it. */
     let readBudget = $state(0);
 
     /**
-     * The instrument-months the bar grid would read, NEWEST MONTH FIRST.
+     * The matched census rows, and nothing more is decided here: which series,
+     * which months and which bounds the request names is `plan` below.
      *
-     * Newest first because a store is read forward: the question an operator
-     * opens this grid with is "what landed", and the newest month is where it
-     * landed. "Backfill runs oldest-first" is a rule about WRITING and has no
-     * bearing on which file a reader opens first.
+     * `read` and `held` keep their shape for the readers that still count
+     * them; nothing is held back.
      */
     const barPlan = $derived.by(() => {
       // Default pickers settle after a census arrives. Until their initial
-      // instrument, segment and rung fields settle, planning every series sorts
-      // the entire census and may open unrelated files before those effects run.
+      // instrument, segment and rung fields settle, planning would read a
+      // selection nobody chose.
       if (db.view !== 'bars' || !db.filter || !db.kind || !db.timeframe) {
         return { all: [], read: [], held: 0 };
       }
-      /* MONTHS THE WINDOW CANNOT CONTAIN ARE NOT READ AT ALL.
-
-         A day window forces the exact-plan fallback — the note below says why —
-         and the fallback read EVERY matched instrument-month. With the window on
-         August, that opened January through July as well: seven files fetched,
-         parsed, and discarded whole by `barWindowed`, which is the exact waste
-         the prefix-sum plan exists to avoid, reintroduced by the one control
-         that disables it.
-
-         They were not merely wasted. Each contributed a manifest disagreement —
-         "returned 0 bar(s), the census claims 575" — because a month outside the
-         window contributes nothing while the census still counts it. The guard
-         on `barDisagree` stops the accusation; this stops the read that produced
-         it.
-
-         MONTH GRAIN, AND ONLY WHOLLY-OUTSIDE MONTHS GO. A month is `YYYY-MM` and
-         the bounds are `YYYY-MM-DD`, so comparing the first seven characters is
-         an ISO-safe overlap test: the partial months at each end are kept whole
-         and `barWindowed` trims them by day, exactly as before. Nothing that
-         could contribute a row is dropped. */
-      const lo = dayWindowNarrows && db.fromDay ? db.fromDay.slice(0, 7) : '';
-      const hi = dayWindowNarrows && db.toDay ? db.toDay.slice(0, 7) : '';
-      const inWindow = (/** @type {any} */ r) =>
-        (!lo || r.month >= lo) && (!hi || r.month <= hi);
-      const all = [...db.matched].filter(inWindow).sort(
-        (/** @type {any} */ a, /** @type {any} */ b) =>
-          txt(b.month, a.month) || txt(a.instrument, b.instrument) || tfCmp(a.timeframe, b.timeframe)
-      );
-      const take = readBudget === 0 ? all.length : Math.min(readBudget, all.length);
-      return { all, read: all.slice(0, take), held: all.length - take };
+      const all = db.matched;
+      return { all, read: all, held: 0 };
     });
+
+    /**
+     * IS THE DAY WINDOW NARROWING ANYTHING? The fields open seeded at the
+     * selection's own census span (WP-50, DB-045), so only a value differing
+     * from that span narrows.
+     */
+    const dayWindowNarrows = $derived(dayWindowApplies && db.dayNarrowing);
+
+    /**
+     * IS A TIME BOUND NARROWING ANYTHING. Suppressed on a day rung, where every
+     * bar opens at the same minute and the Time column is hidden.
+     */
+    const timeNarrows = $derived(!dayRung && Boolean(db.fromTime || db.toTime));
+    /* KEPT FOR ITS READERS: whether the day window narrows, under its old name. */
+    const dayNarrows = $derived(dayWindowNarrows);
+
+    /**
+     * THE BOUNDS THE SERVER APPLIES, to every month of every series (DB-004,
+     * DB-G91, DB-063). They used to reach only the one or two files the page
+     * opened, and the pager counted that subset as the answer: "of 6,120 rows"
+     * for GDFL NIFTY 1s 09:15–09:20, every one of them from the newest month.
+     */
+    const bounds = $derived({
+      fromDay: dayWindowNarrows ? db.fromDay : '',
+      toDay: dayWindowNarrows ? db.toDay : '',
+      fromTime: timeNarrows ? db.fromTime : '',
+      toTime: timeNarrows ? db.toTime : ''
+    });
+
+    /** The request's series, rung and months (D-3326), narrowed by the day window. */
+    const plan = $derived(seriesPlan(barPlan.all, bounds.fromDay, bounds.toDay));
+    /** The same selection unbounded, for the facts that describe it whole. */
+    const planAll = $derived(seriesPlan(barPlan.all));
+
+    /** The row set's identity — series, rung, months and bounds; never the page or the order. */
+    const setKey = $derived(
+      [feeds.active ?? '', plan.timeframe, plan.from, plan.to, plan.keys.join(','),
+        bounds.fromDay, bounds.toDay, bounds.fromTime, bounds.toTime, db.nonce].join('|')
+    );
 
     /* ---------------------------------------------------------------------
-       WHETHER THE DAY WINDOW EXCLUDES ANYTHING, WHICH IS NOT THE SAME QUESTION
-       `pageExact` ANSWERS.
-
-       `pageExact` is false for either of two unrelated reasons — a sort no index
-       covers, or a day window that narrows — and the window route can serve the
-       first but NOT the second. `/bars/window.json` takes a MONTH range; it has
-       no day filter and cannot have one without the store gaining a day index.
-
-       WHAT THAT COST, measured by typing a window into the date fields: with the
-       grid sorted by CLOSE and the range set to 2016 — entirely before this
-       store's first bar in 2019-12 — the route returned its fifty rows for the
-       month range, `barWindowed` filtered every one of them out on the day, and
-       the grid drew NOTHING under a pager still reading `4,49,751-4,50,000 of
-       6,23,498`. The empty-state then blamed "a disagreement between" the file
-       and the census, which is not what happened at all: the filter did it.
-
-       So the day window sends the read back to the full path, where the client
-       holds every row and can filter them itself. Slower, and it answers. */
-    const dayNarrows = $derived.by(() => {
-      if (!dayWindowApplies || (!db.fromDay && !db.toDay)) return false;
-      for (const r of barPlan.read) {
-        const lo = r.first_ts;
-        const hi = r.last_ts;
-        /* NO SPAN MEANS IT CANNOT BE PROVED HARMLESS, so it is treated as
-           narrowing — the same conservative reading `pageExact` takes. */
-        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return true;
-        if (db.fromDay && istDayKey(lo / 1000) < db.fromDay) return true;
-        if (db.toDay && istDayKey(hi / 1000) > db.toDay) return true;
-      }
-      return false;
-    });
-
-    /* WHETHER THE PREFIX SUM CAN BE TRUSTED - read by both derivations below,
-       so the two can never disagree about which mode the grid is in.
-
-       A WINDOW BEING SET IS NOT A WINDOW NARROWING ANYTHING, and treating the
-       two as one is what made this fall back on every load: the date controls
-       open populated - 01 Jan 2015 to today on this build - so `fromDay ||
-       toDay` is true before the operator has touched either, and the exact path
-       would never once have run.
-
-       What matters is whether the window EXCLUDES a row, and the census answers
-       that without opening a file: every entry carries the span it actually
-       covers, so a month lying wholly inside the window loses nothing and its
-       census count still predicts its rows. A month that straddles either edge,
-       or falls outside entirely, does not - and that is the fallback's case,
-       because no count in the census says how many of a month's rows sit on one
-       side of a day. */
-    const pageExact = $derived.by(() => {
-      if (barSortKey !== 'ts') return false;
-      if (!dayWindowApplies || (!db.fromDay && !db.toDay)) return true;
-      for (const r of barPlan.read) {
-        /* THE WIRE'S OWN SPELLING, AND ONLY IT. `store.rows` is the array as
-           `/store.json` sent it, so the span is `first_ts`/`last_ts`. A first
-           attempt read `first`/`last` - the names `$lib/store.svelte.js` gives
-           its NORMALISED cells, which are a different array - found `undefined`
-           on every row and fell back on every load, which is the silent
-           fallback this branch exists to avoid. `svelte-check` names the type's
-           real field as `firstAt`, so neither alternative spelling belongs
-           here and both are gone rather than left as a dead `??`. */
-        const lo = r.first_ts;
-        const hi = r.last_ts;
-        /* AN ENTRY WITH NO SPAN CANNOT BE PROVED TO SURVIVE, so it is not
-           assumed to. Older census images predate the two timestamps. */
-        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return false;
-        /* MICROSECONDS IN, MILLISECONDS OUT, AND THE DIVISION IS NOT OPTIONAL.
-           The census writes microseconds - `crates/api`'s unit, which
-           `$lib/store.svelte.js` documents and `$lib/dates.js` refuses to sniff -
-           and `istDayKey` hands its argument straight to `new Date`, which reads
-           milliseconds. Passing the census figure raw dated every month to the
-           year 58555, so `istDayKey(hi) > toDay` was true on every row and the
-           exact path never once ran. A thousand-fold unit error does not throw;
-           it just quietly answers the wrong question. */
-        if (db.fromDay && istDayKey(lo / 1000) < db.fromDay) return false;
-        if (db.toDay && istDayKey(hi / 1000) > db.toDay) return false;
-      }
-      return true;
-    });
-
-    /* THE ROW COUNT THE PAGER COUNTS IN, AND IT MUST NOT DEPEND ON THE PAGE.
-       `pageTotal` feeds `pageCount` feeds `pageNow`, and `pagePlan` reads
-       `pageNow` - so computing the total inside `pagePlan` closes a cycle that
-       Svelte resolves by throwing. Summed here, from the census alone, the total
-       is a property of the QUERY and the cycle does not exist. */
-    const barTotalRows = $derived.by(() => {
-      if (!pageExact) return null;
-      let t = 0;
-      for (const r of barPlan.read) t += Number(r.rows) || 0;
-      return t;
-    });
-
-    const pagePlan = $derived.by(() => {
-      const all = barPlan.read;
-      if (!pageExact) {
-        return { files: all, base: 0, exact: false };
-      }
-      /* NEWEST FIRST IS THE PLAN'S ORDER, which is `ts` DESCENDING. Ascending
-         asks for the same files from the other end, so the list is walked
-         reversed rather than re-sorted. */
-      const order = barDesc ? all : [...all].reverse();
-      const first = (pageNow - 1) * db.pageSize;
-      const last = first + db.pageSize - 1;
-      /** @type {any[]} */
-      const need = [];
-      let seen = 0;
-      let base = 0;
-      for (const r of order) {
-        const n = Number(r.rows) || 0;
-        if (n === 0) continue;
-        const lo = seen;
-        const hi = seen + n - 1;
-        seen += n;
-        if (hi < first) continue;
-        /* PAST THE PAGE, SO NOTHING FURTHER CAN OVERLAP IT. The list is walked
-           in row order, so once a file starts after the last row wanted, every
-           file behind it does too. `barTotalRows` already has the count, so
-           there is nothing left for this loop to learn. */
-        if (lo > last) break;
-        if (need.length === 0) base = lo;
-        need.push(r);
-      }
-      return { files: need, base, exact: true };
-    });
-
-    /** A PRIMITIVE, so the fetch effect re-runs when the SET changes and not
-        on every keystroke that leaves the same set standing.
-     *
-     * THE PAGE IS PART OF THE KEY ON THE WINDOW ROUTE, AND LEAVING IT OUT SHOWED
-     * THE WRONG ROWS UNDER THE RIGHT PAGER.
-     *
-     * On the seek route the file set IS the page — turn to page 6,000 and a
-     * different month is wanted, so this string changes and the effect re-runs.
-     * On the window route it is not: every matched month is named whatever page
-     * you are on, because the server does the slicing. So the key held still, the
-     * effect never re-ran, and the request that had already been made — `offset=0`
-     * — remained the only one.
-     *
-     * MEASURED: page 6,000 of a CLOSE-sorted grid drew `2,99,951-3,00,000 of
-     * 6,23,498` over the fifty rows of page ONE, having sent exactly one request
-     * for offset 0. The pager was right, the rows were wrong, and nothing said so
-     * — which is worse than an empty grid, because an empty grid cannot be
-     * misread.
-     *
-     * `page` AND NOT `pageNow`. `pageNow` is clamped through `pageCount` from
-     * `pageTotal`, which on this route reads `windowSaid`, which reads the files
-     * this effect WRITES. Keying on it would close a loop through the effect:
-     * fetch, new total, new clamp, new key, fetch again. `page` is raw `$state`
-     * and depends on nothing downstream, so it triggers without feeding back. */
-    /* `$derived.by` AND NOT `$derived`, for a reason about the CHECKER rather
-       than the runtime. `barSortKey` and `barDesc` are declared further down this
-       file, and both forms read them lazily, so both work. But svelte-check reads
-       `$derived(expr)` as an expression evaluated HERE and reports "Block-scoped
-       variable 'barSortKey' used before its declaration", while it reads
-       `$derived.by(() => …)` as the deferred body it is — which is why
-       `pageExact`, a hundred lines above and reading the same variable, was never
-       flagged. Same semantics; one of them provable. */
-    const barPlanKeys = $derived.by(() => {
-      const files = pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n');
-      if (pageExact && timeNarrows) return files;
-      return `${files} ${db.page}|${db.pageSize}|${barSortKey}|${barDesc}`;
-    });
-
-    /* A `barSetKey` OF THE FILES ALONE WAS WRITTEN HERE AND REMOVED, and the
-       reasoning is kept because it is convincing and wrong. It was meant to
-       answer "are these different rows" for the entrance direction — the files
-       look like the set, and a re-sort of one instrument-month is the same bars
-       in a new order. But sorting by Close cannot be answered from the census
-       prefix sums, so the grid opens a DIFFERENT set of files in order to sort
-       globally: the files change because of the sort, which is the single case
-       the test existed to distinguish. Measured — the sort reported `set`.
-       `pageTotal` is what carries that fact; see `barMove`. */
-
-    /* ---------------------------------------------------------------------
-       THE READ. One request per instrument-month, cached for as long as the
-       feed and the Refresh nonce hold still, so narrowing the query does not
-       re-ask for a file already in memory.
+       THE BAR GRID'S SORT. `barSortKey` is the GRID's column key; `wireSort`
+       translates it for the server (`vol` is `v`), and a column the server
+       does not order is ordered here, under a budget (DB-B50).
        --------------------------------------------------------------------- */
-    /** @type {Map<string, any>} */
-    const barCache = new Map();
-    let barCacheStamp = '';
-    /** @type {{ loading: boolean, error: string | null, files: any[] }} */
-    let barState = $state.raw({ loading: false, error: null, files: [] });
+    let barSortKey = $state('ts');
+    let barDesc = $state(true);
+    /** Why the last sort asked for was refused, said beside the grid until the next header press. */
+    let sortWhy = $state('');
+
+    /* ---------------------------------------------------------------------
+       THE READ. ONE REQUEST A PAGE, for one series or a thousand.
+       --------------------------------------------------------------------- */
+    /** @type {{ loading: boolean, error: string | null, answer: any, rows: any[], local: boolean }} */
+    let barState = $state.raw({ loading: false, error: null, answer: null, rows: [], local: false });
     let barToken = 0;
+    /** How long the last page read took, request to rows, in milliseconds. */
+    let pageMs = $state(0);
+    /** The last full read a local sort made, by row-set identity: page turns of that sort read nothing. */
+    let localCache = { key: '', rows: /** @type {any[]} */ ([]), answer: /** @type {any} */ (null) };
 
     /**
-     * One month file, for one series — CACHED ON THE PROMISE, NOT ON THE ANSWER.
+     * One page in an order the server keeps: one request, whatever the number
+     * of series, months or bounds (D-3326; DB-002, DB-003, DB-G82, DB-G92,
+     * DB-G93, DB-G102, DB-B49). The total is the server's, the files' own
+     * count after the bounds — so it is the same in every order (DB-G02,
+     * DB-G61) — and no extremes are folded on a page turn (DB-G83).
      *
-     * THE DUPLICATE THIS REMOVES. `barCache` held finished reads, so two askers
-     * for the same file deduplicated only if the first had already COME BACK.
-     * The fetch effect re-runs as the query settles, and those runs overlap:
-     * measured on a fresh pull, page 1 fired seven requests where the settled
-     * plan needs three — BANKNIFTY's 2026-08 and 2026-07 were each fetched twice,
-     * because the second ask was made while the first was still in flight and the
-     * cache was therefore still empty.
-     *
-     * Caching the PROMISE closes that: the second asker joins the first request
-     * instead of starting a second one. Deduplication becomes a property of
-     * asking rather than of timing.
-     *
-     * ONLY SUCCESSES SURVIVE, which is the rule the old cache kept and this one
-     * must not lose. A refusal is a VALUE here, not a rejection — one unreadable
-     * file must not blank the twelve that read — so the entry is dropped once a
-     * failed read resolves, and the next ask is a real retry rather than the same
-     * failure served from memory for ever.
-     *
-     * @param {string} feed
-     * @param {any} r
-     * @param {AbortSignal} signal
-     * @returns {Promise<any>}
+     * @param {string} feed @param {any} p @param {any} b @param {string} wire
+     * @param {boolean} desc @param {number} page @param {number} size @param {AbortSignal} signal
      */
-    function readBarFile(feed, r, signal) {
-      const hit = barCache.get(r.key);
-      if (hit && !hit.signal?.aborted) return hit.promise ?? Promise.resolve(hit);
-      /** @type {{signal:AbortSignal,promise:Promise<any>|null}} */
-      const inflight = { signal, promise: null };
-      inflight.promise = fetchBarFile(feed, r, signal).then((out) => {
-        if (barCache.get(r.key) !== inflight) return out;
-        if (!signal.aborted && out && out.error === null) barCache.set(r.key, out);
-        else barCache.delete(r.key);
-        return out;
-      });
-      barCache.set(r.key, inflight);
-      return inflight.promise;
+    async function readServerPage(feed, p, b, wire, desc, page, size, signal) {
+      const offset = (page - 1) * size;
+      const answer = await readWindowPage(windowQuery(feed, p, { ...b, sort: wire, desc, offset, limit: size }), size, signal);
+      return { loading: false, error: null, answer, rows: answer.bars, local: false };
     }
 
     /**
-     * The read itself. Called only by [`readBarFile`], which owns the cache.
+     * One page in an order only this page can compute — a change column, or a
+     * contract column — from every kept row, read in time order through the
+     * window route, under `LOCAL_SORT_BUDGET` rows (DB-063, DB-N16, DB-A29,
+     * DB-B50). The count is asked first, one seek, so a selection past the
+     * budget is refused before a single row of it is read.
      *
-     * A FAILURE IS A VALUE HERE, NOT A REJECTION: one unreadable file must not
-     * blank the twelve that read, so the grid lists each refusal under its own
-     * instrument-month.
-     *
-     * @param {string} feed
-     * @param {any} r
+     * @param {string} feed @param {any} p @param {any} b @param {string} key
      * @param {AbortSignal} signal
      */
-    async function fetchBarFile(feed, r, signal) {
-      /* EXCHANGE-SEGMENT-SYMBOL, AND THE SYMBOL KEEPS ITS OWN HYPHENS. The
-         store's series name is `Exchange-Segment-Symbol`, and a symbol is
-         legally `ABB-III` or `NIFTY-2026-08-27-2500000-CE`. Only the FIRST
-         TWO separators are structural; everything after them is the symbol.
-         Splitting on the last one instead is how `-CE` becomes a segment. */
-      const parts = String(r.instrument).split('-');
-      /* THE CONTRACT IS ITS OWN SEGMENT, AND THIS USED TO SWALLOW IT.
-         `symbol: parts.slice(2).join('-')` put everything after the segment into
-         the symbol, so an option asked for
-         `symbol=BANKNIFTY-2026-07-28-5410000-CE` — 31 bytes against the store's
-         24-byte cap. Measured 2026-08-20, journal seq 910–922: thirteen 400s in
-         three seconds, one per contract this page tried to draw, every one
-         reading "path segment symbol is 31 bytes, max 24". The store's refusal
-         was correct; the question was malformed, and had been since F&O bars
-         could not exist to ask about.
-         WHERE THE SPLIT IS: a contract segment always opens with a `YYYY-MM-DD`
-         triple — `crates/core/src/instrument.rs` renders it `{:04}-{:02}-{:02}`
-         before the strike and side. So the symbol runs until a four-digit part
-         FOLLOWED BY two two-digit parts, and the contract is everything from
-         there. Matching on the four-digit year alone would be looser than it
-         needs to be; requiring the whole triple means an instrument whose name
-         merely contains digits cannot be split in the middle.
-         No triple means no contract, which is spot — and spot's path is one
-         level shallower, so an empty `contract` is the right answer rather than
-         a missing one. */
-      const two = (/** @type {string} */ s) => /^\d{2}$/.test(s);
-      let at = -1;
-      for (let i = 2; i + 2 < parts.length; i += 1) {
-        if (/^\d{4}$/.test(parts[i] ?? '') && two(parts[i + 1] ?? '') && two(parts[i + 2] ?? '')) {
-          at = i;
-          break;
-        }
+    async function readLocalPage(feed, p, b, key, signal) {
+      if (localCache.key === key) {
+        return { loading: false, error: null, answer: localCache.answer, rows: localCache.rows, local: true };
       }
-      const q = new URLSearchParams({
-        feed,
-        exchange: parts[0] ?? '',
-        segment: parts[1] ?? '',
-        symbol: at === -1 ? parts.slice(2).join('-') : parts.slice(2, at).join('-'),
-        contract: at === -1 ? '' : parts.slice(at).join('-'),
-        /* THE RUNG THE ROW ITSELF CARRIES. Omitted, the server defaults to
-           `1min`, and a daily file is then asked for at a rung that has no
-           file - the exact refusal /markets already paid for once. */
-        timeframe: r.timeframe,
-        month: r.month,
-        /* THE DAY WINDOW GOES ON THE WIRE, and until it did this page asked for
-           a whole MONTH per row and threw ~98% of it away in the browser.
-
-           Measured on this build: 81 bytes a bar, so a one-minute month is about
-           670 KB, and `/db` reads one row per instrument-month — 549 of them on
-           the operator's store. Asking for a single day therefore moved roughly
-           370 MB and parsed every byte of it to render about 375 bars. That is
-           what "the page is stuck" was: not a hang, arithmetic.
-
-           Empty strings are omitted rather than sent blank, because the server
-           treats an unparseable day as "no bound" and a blank one would read as a
-           typo it is right to ignore — sending nothing says the same thing
-           without relying on that. */
-        ...(db.fromDay ? { from: db.fromDay } : {}),
-        ...(db.toDay ? { to: db.toDay } : {})
-      });
-      try {
-        signal.throwIfAborted();
-        const res = await ask(`/bars.json?${q}`, { signal });
-        let body = null;
-        try {
-          body = await res.json();
-        } catch {
-          return {
-            key: r.key,
-            row: r,
-            bars: [],
-            faults: null,
-            error: `HTTP ${res.status}, and the body was not JSON`
-          };
-        }
-        /* THE SERVER'S OWN SENTENCE, not a status code. `/bars.json` refuses
-           with `{"error":"...2026-08.bin does not exist, opening it"}`, which
-           names the file; "HTTP 400" names nothing and sends the operator to
-           the logs. */
-        if (body && typeof body === 'object' && !Array.isArray(body) && body.error) {
-          return { key: r.key, row: r, bars: [], faults: null, error: String(body.error) };
-        }
-        if (!res.ok && res.status !== 206) {
-          return { key: r.key, row: r, bars: [], faults: null, error: `HTTP ${res.status}` };
-        }
-        /* A PARTIAL read answers 206 with `{bars, faults}`. Both shapes are
-           handled and a faulty record is surfaced, never silently dropped - a
-           grid with an unexplained hole is worse than one with a warning. */
-        const out = {
-          key: r.key,
-          row: r,
-          bars: Array.isArray(body) ? body : (body?.bars ?? []),
-          faults: Array.isArray(body) ? null : (body?.faults ?? null),
-          error: null
-        };
-        /* NOT CACHED HERE ANY MORE — `readBarFile` owns the cache, and writing it
-           from both places is how the two spellings drift. */
-        return out;
-      } catch (why) {
-        const w = /** @type {any} */ (why);
-        return {
-          key: r.key,
-          row: r,
-          bars: [],
-          faults: null,
-          error: String(w && w.message ? w.message : w)
-        };
+      const head = await readWindowPage(windowQuery(feed, p, { ...b, sort: 'ts', desc: false, offset: 0, limit: 1 }), 1, signal);
+      if (head.total > LOCAL_SORT_BUDGET) {
+        return { refused: head.total, answer: head };
       }
-    }
-
-    /**
-       ONE REQUEST FOR A PAGE NO INDEX CAN ANSWER.
-
-       Sorting by a price column is the one question the prefix sum cannot serve:
-       the store is indexed by TIME — the path IS the index, and `CLAUDE.md` §4
-       bans a query planner because there is no second path to choose — so "the
-       fifty largest closes" cannot be known without reading the closes.
-
-       The browser used to read them ALL. MEASURED: 76 requests and 9.4 seconds
-       for one sorted page, and the network was never the cost — parsing 623,498
-       rows into objects to keep fifty was. `/bars/window.json` answers the same
-       question against files already on local disk: MEASURED at 1.23s for the
-       identical sort, moving 4 KB instead of ~50 MB, and returning the same top
-       rows the browser found.
-
-       ONE INSTRUMENT PER CALL, because the endpoint is keyed on one series. A
-       query matching three instruments is three calls, not 2,187 — still a
-       constant per instrument rather than a file per month.
-
-       THE CHANGE COLUMN COMES BACK WITH THE ROWS. It is folded server-side in
-       time order before the sort (D-0265), which is the only place it can be
-       computed for a sorted page. `barRows` prefers the wire's value wherever the
-       wire sent one.
-       ------------------------------------------------------------------------
-       @param {string} feed
-       @param {any[]} plan every matched instrument-month, for the series it names
-       @param {number} offset @param {number} limit
-       @param {AbortSignal} signal
-       @returns {Promise<any[]>} one synthetic file, in `barState.files` shape */
-    async function readWindow(feed, plan, offset, limit, signal) {
-      if (plan.length === 0) return [];
-      /* THE SERIES IS ONE PER CALL AND THE PLAN MAY NAME SEVERAL. Grouped by the
-         instrument key the census carries, so each series asks once for its own
-         slice and the page stitches them. */
-      /** @type {Map<string, any[]>} */
-      const bySeries = new Map();
-      for (const r of plan) {
-        const k = `${r.instrument}|${r.timeframe}`;
-        if (!bySeries.has(k)) bySeries.set(k, []);
-        (bySeries.get(k) ?? []).push(r);
-      }
-      const series = [...bySeries.values()];
-      const out = await pooled(series, IN_FLIGHT, async (group) => {
-        const first = group[0];
-        const months = group.map((g) => String(g.month)).sort();
-        const parts = String(first.instrument).split('-');
-        const two = (/** @type {string} */ s) => /^\d{2}$/.test(s);
-        let at = -1;
-        for (let i = 2; i + 2 < parts.length; i += 1) {
-          if (/^\d{4}$/.test(parts[i] ?? '') && two(parts[i + 1] ?? '') && two(parts[i + 2] ?? '')) {
-            at = i;
-            break;
-          }
-        }
-        const q = new URLSearchParams({
-          feed,
-          exchange: parts[0] ?? '',
-          segment: parts[1] ?? '',
-          symbol: at === -1 ? parts.slice(2).join('-') : parts.slice(2, at).join('-'),
-          contract: at === -1 ? '' : parts.slice(at).join('-'),
-          timeframe: first.timeframe,
-          from: months[0],
-          to: months[months.length - 1],
-          sort: barSortKey === 'ts' ? 'ts' : barSortKey,
-          dir: barDesc ? 'desc' : 'asc',
-          offset: String(offset),
-          limit: String(limit),
-          extremes: '1'
-        });
-        try {
-          const res = await ask(`/bars/window.json?${q}`, { signal });
-          const body = await res.json();
-          if (!res.ok && !body?.bars) {
-            return { key: `${first.key}|window`, row: first, bars: [], faults: null,
-                     error: body?.error ?? `HTTP ${res.status}` };
-          }
-          return {
-            key: `${first.key}|window`,
-            row: first,
-            bars: body.bars ?? [],
-            faults: body.faults ?? null,
-            error: null,
-            /* CARRIED SO THE PAGER AND THE SCALE CAN READ THEM WITHOUT A SECOND
-               CALL. `total` is every row the window holds, not the page. */
-            total: body.total ?? 0,
-            extremes: body.extremes ?? null,
-            scanned: body.scanned === true
-          };
-        } catch (why) {
-          const w = /** @type {any} */ (why);
-          return { key: `${first.key}|window`, row: first, bars: [], faults: null,
-                   error: String(w && w.message ? w.message : w) };
-        }
-      }, signal);
-      return out.filter(Boolean);
+      const got = await readAllRows(
+        (offset, limit) => windowQuery(feed, p, { ...b, sort: 'ts', desc: false, offset, limit }),
+        head.total, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, signal
+      );
+      const answer = { ...head, faults: got.faults.length ? got.faults.join('; ') : null };
+      localCache = { key, rows: got.bars, answer };
+      return { loading: false, error: null, answer, rows: got.bars, local: true };
     }
 
     $effect(() => {
       const active = db.view === 'bars';
       const feed = feeds.active;
-      const keys = barPlanKeys;
-      void db.nonce;
-      /* THE CACHE IS KEYED ON THE FEED AND THE NONCE. Refresh means "read the
-         store again", and a cache that survived it would answer the re-read
-         out of the copy the re-read was asked to replace. */
-      const stampNow = `${feed ?? ''} ${db.nonce} ${db.fromDay}|${db.toDay}`;
-      if (barCacheStamp !== stampNow) {
-        barCache.clear();
-        barCacheStamp = stampNow;
-      }
-      if (!active || !feed || keys === '') {
-        barState = { loading: false, error: null, files: [] };
+      const p = plan;
+      const b = bounds;
+      const key = barSortKey;
+      const desc = barDesc;
+      const set = setKey;
+      const page = Math.max(1, Math.trunc(Number(db.page)) || 1);
+      const size = db.pageSize;
+      /* NOTHING IS READ BEFORE THE FIT HAS SETTLED AND BEEN APPLIED (DB-N02).
+         The box measured 4, then 3, then 8 rows on one load, and each was a
+         request. In Fit mode the page waits for the settled measurement AND
+         for the page size to have taken it — measured without the second
+         half, a load still sent one 50-row request and aborted it for the
+         9-row one — and then asks once. */
+      const ready = db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit);
+      if (!active || !feed || p.keys.length === 0) {
+        barState = { loading: false, error: null, answer: null, rows: [], local: false };
         return;
       }
-      const want = untrack(() => pagePlan.files);
-      const exact = untrack(() => pagePlan.exact);
-      const first = untrack(() => (pageNow - 1) * db.pageSize);
-      const take = untrack(() => db.pageSize);
-      const base = untrack(() => pagePlan.base);
-      const bounded = exact && !untrack(() => timeNarrows);
+      if (p.why) {
+        barState = { loading: false, error: p.why, answer: null, rows: [], local: false };
+        return;
+      }
+      if (!ready) return;
       const controller = new AbortController();
       const mine = ++barToken;
-      let dead = false;
-      barState = { loading: true, error: null, files: untrack(() => barState.files) };
-      /* TWO ROUTES, AND THE PLAN ALREADY KNOWS WHICH. `exact` is the prefix sum's
-         own verdict: true when the grid is in the store's order and nothing
-         filters after the fetch, which is when one file answers one page. False
-         is the sort no index covers, and that is what the window endpoint is for
-         — one request per series rather than one per instrument-month. */
-      /* THE WINDOW ROUTE ONLY FOR AN ORDER IT CAN TAKE. A derived column — the
-         change columns, the expiry arithmetic, the greeks — is not a field the
-         store holds, so the endpoint cannot order by it and answers 400. Falling
-         back to the full read is slower and returns the right rows; sending the
-         key anyway returned none. */
-      /* AND NOT WHEN THE DAY WINDOW NARROWS. The route has a month range and no
-         day filter, so it would answer the wider question and let the client
-         throw the difference away — which drew an empty grid under a full
-         pager. */
-      const canWindow = !exact && !untrack(() => dayNarrows) && WINDOW_SORTS.has(barSortKey);
-      (bounded
-        ? readDatabasePage(feed, want, first, take, base, barDesc, controller.signal)
-        : canWindow
-        ? readWindow(feed, want, first, take, controller.signal)
-        : pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r, controller.signal), controller.signal)
+      barState = { ...untrack(() => barState), loading: true, error: null };
+      const wire = wireSort(key);
+      const started = performance.now();
+      (wire
+        ? readServerPage(feed, p, b, wire, desc, page, size, controller.signal)
+        : readLocalPage(feed, p, b, set, controller.signal)
       )
-        .then((files) => {
-          if (dead || mine !== barToken) return;
-          barState = { loading: false, error: null, files };
+        .then((/** @type {any} */ next) => {
+          if (mine !== barToken || controller.signal.aborted) return;
+          pageMs = Math.round(performance.now() - started);
+          if (next.refused !== undefined) {
+            /* REFUSED BEFORE ANY ROW WAS READ, AND THE GRID GOES BACK TO TIME
+               ORDER — a sort the selection cannot afford is not kept (DB-B50). */
+            sortWhy = `${BAR_META[key]?.label ?? key} cannot be ordered here: this query keeps ${fmt(next.refused)} bar(s), and the browser orders at most ${fmt(LOCAL_SORT_BUDGET)} of a column the server cannot sort. Narrow to a day, a time of day, a strike or a side — or sort by a stored column (Date, Time, Open, High, Low, Close, Volume, Open interest), which the server orders over any number.`;
+            barSortKey = 'ts';
+            barDesc = true;
+            return;
+          }
+          barState = next;
+          /* A PAGE PAST THE END OF A SHORTER ANSWER GOES TO THE LAST PAGE, so a
+             narrowing never strands the reader on a blank page. */
+          const total = next.answer?.total ?? 0;
+          if (total > 0 && (page - 1) * size >= total) db.page = pageOfIndex(total - 1, size);
         })
         .catch((why) => {
-          if (dead || mine !== barToken) return;
-          /* NAMED, NOT SHRUGGED. `readBarFile` returns its failures as values,
-             so reaching here at all is this page failing rather than a file. */
+          if (mine !== barToken || controller.signal.aborted) return;
           barState = {
             loading: false,
             error: String(why && why.message ? why.message : why),
-            files: []
+            answer: null,
+            rows: [],
+            local: false
           };
         });
-      return () => { dead = true; controller.abort(); };
+      return () => controller.abort();
     });
 
-    /** Files that answered with a refusal rather than with bars. */
-    const barFails = $derived(barState.files.filter((/** @type {any} */ f) => f.error !== null));
-    /** Files that answered 206 - read in part, with the part that failed named. */
-    const barFaults = $derived(barState.files.filter((/** @type {any} */ f) => f.faults));
+    /** The read's refusal, as a list, for the notes under the grid. */
+    const barFails = $derived(barState.error ? [{ key: 'read', error: barState.error }] : []);
+    /** A read answered in part (206): the rows are real, the set is not whole, and the fault is named. */
+    const barFaults = $derived(barState.answer?.faults ? [{ key: 'faults', faults: barState.answer.faults }] : []);
 
     /* ======================================================================
        THE DIGITS THAT REPEAT DOWN EVERY ROW EARN NONE OF THEIR WEIGHT
        ======================================================================
-       This is the `dayrep` rule applied to prices, and prices need it more. A
-       page of BANKNIFTY minute bars reads `57,647.65` / `57,647.65` /
-       `57,761.95`: eight characters, of which the first four are the same on
-       every row and in all four price columns. The eye has to walk past the part
-       that never changes to reach the part that does, on every cell, forty times
-       a page — and the part that changes is the entire reason the column exists.
-
-       So the shared opening is dimmed. DIMMED, NOT REMOVED, for exactly the
-       reasons the day column already states: the text stays in the cell, so a
-       copy, an export and a screen reader all still get the whole number, and
-       only its weight in the eye changes. Nothing is hidden and no figure is
-       rounded — `CLAUDE.md` §7 keeps the value, this changes how it is drawn.
-
-       ONE PREFIX ACROSS ALL FOUR PRICE COLUMNS, not one per column. They are the
-       same instrument at the same magnitude, so a shared prefix makes the dimmed
-       run line up across the row and the bright tails sit in a column of their
-       own — which is what turns four numbers into a shape a reader can scan
-       DOWN. Per-column prefixes would each be a different length and the effect
-       would be noise.
-
-       IT IS COMPUTED FROM THE PAGE, NOT THE STORE, and that is the honest scope:
-       it says "these rows open alike", which is a fact about what is on screen.
-       Cost is the page's own row count times a short string — the same order as
-       drawing them. */
+       The shared opening of the four prices is dimmed — DIMMED, NOT REMOVED:
+       the text stays in the cell, so a copy, an export and a screen reader all
+       still get the whole number. Computed from the page, which is the honest
+       scope: "these rows open alike". */
     const pricePfx = $derived.by(() => {
       if (barPage.length === 0) return '';
       /** @type {string | null} */
@@ -1172,181 +796,92 @@
           pfx = pfx.slice(0, i);
         }
       }
-      /* FOUR CHARACTERS ARE NEVER DIMMED, whatever the data says. On a run of
-         genuinely identical bars — which this store has, at the flat tail of a
-         session — the common prefix IS the whole number, and dimming all of it
-         would draw a grid of ghosts. The cap keeps a bright tail on every cell,
-         so "nothing changed here" reads as a quiet column rather than a broken
-         one. */
+      /* FOUR CHARACTERS ARE NEVER DIMMED, so a run of identical bars reads as
+         a quiet column rather than a grid of ghosts. */
       const cap = Math.max(0, shortest - 4);
       const out = (pfx ?? '').slice(0, cap);
-      /* A ONE-CHARACTER DIM IS NOT WORTH THE TWO-TONE CELL IT COSTS. */
       return out.length >= 2 ? out : '';
     });
 
     /** One price, split into the run every row shares and the part that is this
-        row's own. Returns `['', whole]` when there is nothing worth dimming.
-        @param {number | null | undefined} v */
+        row's own. @param {number | null | undefined} v */
     function priceSplit(v) {
       const s = paisaText(v);
-      return pricePfx && s.startsWith(pricePfx)
-        ? [pricePfx, s.slice(pricePfx.length)]
-        : ['', s];
+      return pricePfx && s.startsWith(pricePfx) ? [pricePfx, s.slice(pricePfx.length)] : ['', s];
     }
 
-    const barRows = $derived.by(() => {
+    /**
+     * THE ROWS, FROM THE WIRE. Every derived figure the server decides travels
+     * with the bar and is taken as it came — the change and its reason folded
+     * against the previous stored bar wherever it lies (D-3325; DB-011,
+     * DB-G65, DB-G90), open interest `null` with `not_a_derivative` for an
+     * index or a share (D-3322; DB-036, DB-G28, DB-G44, DB-G100), and an
+     * index's volume with `index_no_volume` (DB-057). The contract fields come
+     * from the census row of the bar's own series; the month is the bar's own
+     * IST month, so its spot and greeks are asked in it.
+     */
+    /**
+     * Wire bars as grid rows, under the plan that asked for them. Published
+     * as `barRowsOf` so a whole-query export builds the same rows the grid
+     * draws, not a second spelling of them.
+     * @param {any[]} wire @param {any} [asked] the plan; the current one by default
+     */
+    function barRowsOf(wire, asked = plan) {
       /** @type {any[]} */
       const out = [];
-      for (const f of barState.files) {
-        if (f.error !== null) continue;
-        const r = f.row;
-        const bars = f.bars;
-        for (let i = 0; i < bars.length; i++) {
-          const b = bars[i];
-          const before = i > 0 ? bars[i - 1] : null;
-          /* `typeof ... === 'number'` AND NEVER A TRUTHINESS TEST. The server
-             writes `null` for `i64::MIN` and the integer for everything else,
-             so `0` is a STORED ZERO and `b.oi || null` would erase it. */
-          const oi = typeof b.oi === 'number' ? b.oi : null;
-          const prevOi = before && typeof before.oi === 'number' ? before.oi : null;
-          const ts = b.t * 1000;
-          const day = istDayKey(ts);
-          /* THE WIRE'S OWN CHANGE WINS WHERE THE WIRE SENT ONE.
-             `/bars/window.json` folds the change against the previous bar IN TIME,
-             per file, before it sorts — which is the only place that number can be
-             computed for a PRICE-ORDERED page, because fifty rows sorted by close
-             are fifty rows from fifty different minutes and none of them is the
-             neighbour of the one above it.
-             `/bars.json` sends no such field, so the local fold below still runs
-             for every read on that route. `undefined` is the test and not `null`:
-             null is a real answer from the server — "no change, and here is why" —
-             and treating it as absent would recompute a value the server has
-             already refused. */
-          const wireChg = b.chg !== undefined || b.chg_why !== undefined;
-          const chgWhy = wireChg
-            ? (b.chg_why ?? null)
-            : before === null
-              ? 'first_bar_in_file'
-              : before.c === 0
-                ? 'previous_close_zero'
-                : null;
-          const oiWhy = wireChg
-            ? (b.oichg_why ?? null)
-            : oi === null
-              ? 'oi_null'
-              : before === null
-                ? 'first_bar_in_file'
-                : prevOi === null
-                  ? 'oi_null_before'
-                  : prevOi === 0
-                    ? 'previous_oi_zero'
-                    : null;
-          /* THE ENGINE'S ROUNDING AND THE ENGINE'S OVERFLOW VERDICT, BOTH.
-             `basisPoints` rounds half away from zero the way
-             `server.rs::basis_points` does — `Math.round` rounded a half toward
-             +Infinity here, so a gain and its mirror-image loss printed
-             different magnitudes in a column that sorts. It returns `null` where
-             the engine returns `Unknown::Overflow`, and that null has to become
-             a REASON rather than a bare dash: `WHY.overflow` already holds the
-             sentence, and a cell nobody can compute must say why. */
-          const chgBps = wireChg
-            ? (b.chg ?? null)
-            : chgWhy === null
-              ? basisPoints(before.c, b.c)
-              : null;
-          const oichgBps = wireChg
-            ? (b.oichg ?? null)
-            : oiWhy === null
-              ? basisPoints(prevOi, oi)
-              : null;
-          out.push({
-            /* THE KEY IS THE SERIES, THE MONTH, THE RUNG AND THE BAR'S OWN
-               SECOND. An `{#each}` key: unique across every file on screen and
-               stable across a re-sort. */
-            rk: `${r.key} ${b.t} ${i}`,
-            instrument: r.instrument,
-            head: r.head,
-            sym: r.sym,
-            month: r.month,
-            ts,
-            day,
-            tf: r.timeframe,
-            o: b.o,
-            h: b.h,
-            l: b.l,
-            c: b.c,
-            vol: b.v,
-            chg: chgBps,
-            chgWhy: chgWhy ?? (chgBps === null ? 'overflow' : null),
-            oi,
-            oichg: oichgBps,
-            oichgWhy: oiWhy ?? (oichgBps === null ? 'overflow' : null),
-            /* THE RAW ISO DAY, which is what the sort compares and what the
-               expiry arithmetic reads. `dayLabel` is applied at the text node
-               and nowhere else. */
-            exp: r.expiry,
-            dte: r.expiry === null ? null : daysBetween(day, r.expiry),
-            side: r.side,
-            strike: r.strike
-          });
-        }
+      const only = asked.keys.length === 1 ? asked.keys[0] : null;
+      for (const b of wire) {
+        const key = typeof b.key === 'string' ? b.key : only;
+        if (key === null) continue;
+        const c = asked.series.get(key)?.census ?? null;
+        const ts = b.t * 1000;
+        const day = istDayKey(ts);
+        const exp = c?.expiry ?? null;
+        const oi = typeof b.oi === 'number' ? b.oi : null;
+        out.push({
+          rk: rowKey(key, b.t),
+          key,
+          instrument: key,
+          head: c?.head,
+          sym: c?.sym,
+          month: typeof b.month === 'string' ? b.month : day.slice(0, 7),
+          ts,
+          day,
+          tod: (b.t + IST_OFFSET_MS / 1000) % 86400,
+          tf: asked.timeframe,
+          o: b.o,
+          h: b.h,
+          l: b.l,
+          c: b.c,
+          vol: b.v,
+          vWhy: b.v_why ?? null,
+          chg: typeof b.chg === 'number' ? b.chg : null,
+          chgWhy: typeof b.chg === 'number' ? null : (b.chg_why ?? null),
+          oi,
+          /* WHY THE OPEN INTEREST IS NOT A NUMBER: not applicable, or the null
+             sentinel. A ZERO IS A ZERO and carries no reason. */
+          oiWhy: b.oichg_why === 'not_a_derivative' ? 'not_a_derivative' : oi === null ? 'oi_null' : null,
+          oichg: typeof b.oichg === 'number' ? b.oichg : null,
+          oichgWhy: typeof b.oichg === 'number' ? null : (b.oichg_why ?? null),
+          phase: b.phase ?? null,
+          segment: c?.kind ?? null,
+          exp,
+          dte: exp === null ? null : daysBetween(day, exp),
+          side: c?.side ?? null,
+          strike: c?.strike ?? null
+        });
       }
       return out;
-    });
+    }
+    const barRows = $derived(barRowsOf(barState.rows, plan));
 
-    /** Bars actually read, and what the census claimed for the same files.
-        A PARTITION, and both halves are printed under the grid. */
+    /** Bars on this page, and what the census claimed for the same series. */
     const barsRead = $derived(barRows.length);
-    const barsClaimed = $derived(
-      barState.files.reduce(
-        (/** @type {number} */ a, /** @type {any} */ f) => a + (f.error === null ? f.row.rows : 0),
-        0
-      )
-    );
-
-    /* ---------------------------------------------------------------------
-       THE BAR GRID'S SORT. Three-way on the KEY, never on the formatted text,
-       and an unknown sorts LAST IN BOTH DIRECTIONS - a dash is not a very
-       small number, it is not a number.
-       --------------------------------------------------------------------- */
-    let barSortKey = $state('ts');
-    let barDesc = $state(true);
-
-    /* THE DAY WINDOW, APPLIED TO BARS AND NOT TO INSTRUMENT-MONTHS.
-     *
-     * `scoped` and everything above it counts instrument-MONTHS; a day window
-     * over those could only ever narrow to whole months. The question is "show me
-     * the 12th", so it is answered where days exist, which is here. */
-    /**
-     * IS A TIME BOUND ACTUALLY NARROWING ANYTHING.
-     *
-     * `dayRung` suppresses it rather than testing it: every bar at `1day` opens
-     * at the same minute, so a time window there keeps everything or empties the
-     * grid, and the Time column is already hidden.
-     *
-     * Read by the filter AND by the row count, which is the point of naming it —
-     * see `pageTotal`, where getting these two out of step drew an empty grid
-     * under the words "6,18,296 rows".
-     */
-    const timeNarrows = $derived(!dayRung && Boolean(db.fromTime || db.toTime));
+    const barsClaimed = $derived([...plan.series.values()].reduce((a, s) => a + s.rows, 0));
 
     /**
-     * EVERY MINUTE THE LOADED ROWS ACTUALLY HOLD, newest logic aside — sorted,
-     * with how many bars open on each.
-     *
-     * THE LIST IS THE DATA, NOT A CLOCK. A generic 24x60 picker offers 1,440
-     * minutes of which a trading day has 375, so nine out of ten choices would
-     * land on nothing and the control would spend most of its surface being
-     * wrong. Folding the loaded rows means every row offered is a row that
-     * exists, and the count beside it says how many days share that minute.
-     *
-     * IT SIZES ITSELF TO THE RUNG for free: 375 entries at `1min`, 25 at
-     * `15min`, and `Picker`'s filter box handles the long case — the same
-     * control, and the same interaction, as every other rung on this strip.
-     *
-     * O(barRows) AND ONLY WHEN THEY CHANGE. It is a `$derived`, so the walk
-     * happens on a new read and not on a re-render; the rows it walks are the
-     * ones already in memory for the grid.
+     * EVERY MINUTE THE LOADED ROWS HOLD, for the time pickers' extra entries
+     * (pre-open or closing-auction minutes). O(rows on the page).
      */
     const timeOptions = $derived.by(() => {
       if (dayRung) return [];
@@ -1357,54 +892,19 @@
         if (t === '—') continue;
         seen.set(t, (seen.get(t) ?? 0) + 1);
       }
-      return [...seen.keys()].sort().map((t) => ({
-        key: t,
-        name: t,
-        detail: `${fmt(seen.get(t) ?? 0)} bar(s)`
-      }));
+      return [...seen.keys()].sort().map((t) => ({ key: t, name: t, detail: `${fmt(seen.get(t) ?? 0)} bar(s)` }));
     });
+    const timeBounds = $derived([{ key: '', name: 'Any', detail: 'no bound' }, ...timeOptions]);
 
-    /**
-     * THE SAME LIST WITH AN EXPLICIT WAY OUT.
-     *
-     * `Picker` shows its bulk header only in multi-select, so a `single` menu has
-     * no Clear all — and a bound you can set but not unset is a trap. `Any` is a
-     * row like the others, in the place a reader already looks, rather than a
-     * second gesture they have to know about.
-     */
-    const timeBounds = $derived([
-      { key: '', name: 'Any', detail: 'no bound' },
-      ...timeOptions
-    ]);
-
-    const barWindowed = $derived.by(() => {
-      /* THE TIME PAIR IS PART OF THE SAME WINDOW AND IS APPLIED IN THE SAME
-         PASS. A second `.filter` would walk the rows twice to answer one
-         question, and on a month of one-minute bars that is 6,840 extra
-         comparisons for nothing. */
-      const useTime = timeNarrows;
-      if (!dayWindowApplies || (!db.fromDay && !db.toDay && !useTime)) return barRows;
-      return barRows.filter((b) => {
-        if (db.fromDay && b.day < db.fromDay) return false;
-        if (db.toDay && b.day > db.toDay) return false;
-        if (!useTime) return true;
-        /* AT THE RUNG'S RESOLUTION (WP-50, DB-074): a 1s bound is HH:MM:SS. */
-        const at = barTimeLabel(b.ts, TF_SECS.get(db.timeframe));
-        if (db.fromTime && at < db.fromTime) return false;
-        if (db.toTime && at > db.toTime) return false;
-        return true;
-      });
-    });
+    /* THE BOUNDS ARE APPLIED ON THE SERVER, so the rows that came back are the
+       rows the bounds keep; nothing is filtered after the fetch. */
+    const barWindowed = $derived(barRows);
     const spanCeil = $derived(istDayKey(Date.now()));
 
     const dayBounds = $derived.by(() => {
       let lo = '';
       let hi = '';
       for (const b of barRows) {
-        /* String compare is sound and deliberate: `YYYY-MM-DD` is
-           lexicographically ordered, which is the same reason line 216's
-           comparison is written this way. No `Date`, so no timezone can move a
-           day. */
         if (!b.day) continue;
         if (lo === '' || b.day < lo) lo = b.day;
         if (hi === '' || b.day > hi) hi = b.day;
@@ -1412,50 +912,21 @@
       return [lo, hi];
     });
 
-
-    const barSorted = $derived.by(() => {
-      const k = barSortKey;
-      const dir = barDesc ? -1 : 1;
-      return [...barWindowed].sort((a, b) => {
-        const A = a[k];
-        const B = b[k];
-        let d = 0;
-        if (A === null || A === undefined) {
-          if (B === null || B === undefined) d = 0;
-          else return 1;
-        } else if (B === null || B === undefined) {
-          return -1;
-        } else if (k === 'tf') {
-          /* BY DURATION, NOT BY SPELLING. `txt` here would order the rungs
-             15min, 1day, 1min, 30min - the same defect as a month column
-             ordered by `Apr`. */
-          d = tfCmp(A, B);
-        } else if (typeof A === 'string' || typeof B === 'string') {
-          /* `exp` IS THE RAW ISO DAY, so this comparison is chronological. On
-             `29 Oct 2026` it would be alphabetical, and wrong. */
-          d = txt(String(A), String(B));
-        } else {
-          /* THREE-WAY, AND NEVER `A - B`. A subtraction hands a comparator a
-             magnitude where it asked for a sign, and it is the shape that
-             returns a non-zero for two equal values the moment either end
-             stops being a small integer. */
-          d = A < B ? -1 : A > B ? 1 : 0;
-        }
-        if (d !== 0) return dir * d;
-        /* Deterministic tie-break, NOT inverted with the direction, so two
-           runs of one sort produce byte-identical order. */
-        return (
-          txt(a.instrument, b.instrument) ||
-          (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0) ||
-          txt(a.rk, b.rk)
-        );
-      });
-    });
+    /**
+     * THE ORDER ON SCREEN. A server-ordered page is drawn in the server's
+     * order and never re-sorted here — re-sorting a page is how a page of
+     * contract 1 and a page of contract 2 were once shown as one order
+     * (DB-002). A locally ordered sort orders every row it read.
+     */
+    const barSorted = $derived(
+      barState.local ? [...barRows].sort(localComparator(barSortKey, barDesc)) : barRows
+    );
 
     /** @param {string} key */
     function barHead(key) {
       const col = BAR_COLS.find((c) => c.key === key);
       if (!col || col.none || col.nosort) return; /* nothing to order, and the button says why */
+      sortWhy = '';
       if (barSortKey === key) barDesc = !barDesc;
       else {
         barSortKey = key;
@@ -1468,247 +939,214 @@
     const barAriaSort = (key) => (barSortKey === key ? (barDesc ? 'descending' : 'ascending') : 'none');
 
     /* ---------------------------------------------------------------------
-       PAGING - the same arithmetic for both grids, so the readout under one
-       cannot mean something different under the other.
+       PAGING — the server's total, the same arithmetic for both grids.
        --------------------------------------------------------------------- */
-    /* THE CENSUS COUNT WHEN THE GRID READS ONE PAGE AT A TIME, because
-       `barSorted` then holds only the page's own rows and paging by it would
-       report "1-50 of 50" over a store of four million bars. When the prefix sum
-       does not apply every matched row is in memory and `barSorted` IS the
-       count. */
-    /* WHAT THE WINDOW ROUTE ALREADY DECIDED, read back off the files it returned.
-       `total` is every row the window holds and `extremes` is the widest move in
-       it — both folded server-side, so the pager and the magnitude scale get them
-       without a second request. Null when the seek route ran.
-
-       DECLARED ABOVE `pageTotal`, WHICH READS IT. `const` is hoisted but not
-       initialised, so a derivation evaluated before this line hits the temporal
-       dead zone — svelte-check named it exactly: "Block-scoped variable
-       'windowSaid' used before its declaration". Order is not decoration where
-       one derivation feeds another.
-
-       `pageExact` AND NOT `pagePlan.exact`, AND THE DIFFERENCE IS A CRASH.
-       `pagePlan` reads `pageNow`, `pageNow` comes from `pageCount` which comes
-       from `pageTotal` — and `pageTotal` reads THIS. Reading `pagePlan` here
-       closes that ring, and Svelte resolves it by recursing until `RangeError:
-       Maximum call stack size exceeded` and a blank page. It was hit, and the
-       page went white. `pageExact` is the same verdict computed one step earlier,
-       from the sort key and the day window alone, and depends on no paging state
-       — it exists because this cycle was already hit once, on `barTotalRows`. */
-    const windowSaid = $derived.by(() => {
-      if (pageExact) return null;
-      const f = barState.files.find((/** @type {any} */ x) => x && x.total !== undefined);
-      return f
-        ? { total: Number(f.total) || 0, extremes: f.extremes ?? null, scanned: f.scanned === true }
-        : null;
-    });
-
-    /**
-     * A TIME BOUND IS APPLIED IN THE BROWSER, SO ONLY THE BROWSER CAN COUNT IT.
-     *
-     * MEASURED, and it is why this arm exists: with a time bound of 09:15–09:20
-     * against a page holding 15:26–15:29, the grid drew NOTHING and the line
-     * under it read `1–0 of 6,18,296 rows · page 1 of 1,54,574`. Every one of
-     * those numbers came from the server, which had never heard of the bound.
-     * An empty table under a six-lakh count is the worst reading on this page:
-     * it says the store lost the rows.
-     *
-     * `windowSaid` cannot be made to answer this. It holds the total for the
-     * SLICE the window route returned, and the route has no time parameter —
-     * see `timePartial` for what that costs and what the page says about it.
-     */
-    const pageTotal = $derived(
-      db.view === 'bars'
-        ? timeNarrows
-          ? barSorted.length
-          : /* THE WINDOW'S OWN TOTAL WHERE IT RAN. Without it the pager counts
-               the fifty rows in memory and reports "1-50 of 50" over a store of
-               four million — the same defect `barTotalRows` fixes on the seek
-               route, arriving by the other road. */
-            (windowSaid?.total ?? barTotalRows ?? barSorted.length)
-        : db.sorted.length
+    /** The server's answer as the controls read it: its total and whether it scanned. */
+    const windowSaid = $derived(
+      barState.answer
+        ? { total: Number(barState.answer.total) || 0, extremes: null, scanned: barState.answer.scanned === true }
+        : null
     );
 
     /**
-     * THE TIME BOUND SAW ONE PAGE, NOT THE QUERY.
-     *
-     * `/bars/window.json` pages by offset and takes no time parameter, so when
-     * it answered, the rows in memory ARE the page — and a bound applied here
-     * filters those and nothing else. That is a real limit, not a bug to hide:
-     * the same bound over a whole-month read is complete, and the difference is
-     * whether the day window is narrow enough to have forced the exact path.
-     *
-     * Naming it lets the control say which of the two it is doing instead of
-     * quietly meaning different things on different days.
+     * THE ROWS THE QUERY KEEPS, FROM THE SERVER — after every bound, over every
+     * matched month and series (DB-004, DB-G02, DB-G61, DB-G93). A local sort
+     * orders exactly those rows, so its total is the same number.
      */
-    const timePartial = $derived(timeNarrows && windowSaid !== null);
+    const pageTotal = $derived(
+      db.view === 'bars' ? (windowSaid?.total ?? 0) : db.sorted.length
+    );
+
+    /* THE TIME BOUND IS THE SERVER'S NOW, over the whole query, so it is never
+       partial. Kept as a name for the control that used to warn about it. */
+    const timePartial = $derived(false);
     const pageCount = $derived(Math.max(1, Math.ceil(pageTotal / db.pageSize)));
     const pageNow = $derived(Math.min(Math.max(1, db.page), pageCount));
     const pageFrom = $derived(pageTotal === 0 ? 0 : (pageNow - 1) * db.pageSize + 1);
     const pageTo = $derived(Math.min(pageNow * db.pageSize, pageTotal));
-    /* THE SLICE IS RELATIVE TO WHAT WAS FETCHED, NOT TO THE WHOLE QUERY.
-       `pagePlan.base` is the global row index the first fetched file opens on,
-       so page 900's rows sit at the FRONT of `barSorted` and not 44,950 rows
-       into it. Subtracting the base is what turns a global ordinal into an
-       offset within the two files actually in memory; without it every page past
-       the first slices past the end and the grid draws nothing. */
-    /* ======================================================================
-       THE MANIFEST DISAGREEMENT — AND IT MUST NOT BE ASKED ON THE WINDOW ROUTE
-       ======================================================================
-       A file whose bars do not number what the census manifest claims is a fact
-       about the STORE and one of the few things this page can notice on the
-       operator's behalf, so it is drawn as a warning under the grid.
 
-       THE TEST IS ONLY MEANINGFUL WHEN THE WHOLE MONTH WAS READ. `f.bars.length`
-       against `f.row.rows` compares what came back to what the month should
-       hold — true for a full read, and nonsense on the window route, where the
-       ENDPOINT slices and deliberately returns one page. Measured after sorting
-       by Close: "the file returned 9 bar(s) and the census manifest claims
-       5,625" — nine being the page size. A false alarm about store integrity,
-       raised by the page's own paging.
-
-       It also cost a row. The warning is 38px where the empty notes strip is 17,
-       so it pushed `.bnotes` up by 21 and the fit came back with nine rows
-       instead of ten — a false warning charging the reader real space.
-
-       `windowSaid !== null` is the same condition `barPage` below uses to decide
-       the server already sliced, and for the same reason: it is the one signal
-       that says the rows in hand are a page rather than a file. That is why this
-       block had to move down here — it now depends on a value declared above
-       `barPage` and below where it used to sit. */
     /**
-     * IS THE DAY WINDOW NARROWING ANYTHING? One definition, read by the
-     * disagreement test below and by `filtered`.
-     *
-     * NOT "are the fields set": both date controls open seeded at the store's own
-     * floor and ceiling, so they are ALWAYS set, and "set" would be true before
-     * the operator had touched either. Only a value differing from the full span
-     * narrows.
+     * THE CENSUS AGAINST THE FILES, BY SERIES (DB-G02, DB-G61, DB-022). The
+     * pager counts the files; a census row behind them (an import running, a
+     * month written after the census was read) is said here, as a lag, never
+     * as a corrupt store. Asked only when no bound narrows the read.
      */
-    /* AGAINST THE SPAN THE FIELDS WERE SEEDED WITH (WP-50, DB-045): they open
-       on the census span of the selection now, not on 2015 and today. */
-    const dayWindowNarrows = $derived(dayWindowApplies && db.dayNarrowing);
-
-    /* AND A DAY WINDOW IS THE SECOND CONDITION THIS TEST CANNOT SURVIVE.
-       The paragraph above has the principle exactly right — the comparison means
-       something only when the WHOLE MONTH was read — and then guards one of the
-       two ways that stops being true.
-
-       `barPlan`'s own notes state the other: "a day window — `barWindowed`
-       filters AFTER the fetch, so the census count for a month stops predicting
-       how many of its rows survive." Every matched instrument-month is read,
-       INCLUDING months lying wholly outside the window, and each of those
-       contributes nothing while the census still claims its full count.
-
-       Measured on the operator's screen: ADANIENT 15min narrowed to
-       03–28 Aug 2026 drew seven warnings at once — `2026-07` "returned 0 bar(s)
-       and the census manifest claims 575", then 06, 05, 04, 03, 02 and 01, each
-       with its own number. Seven accusations of a corrupt store, produced
-       entirely by the reader's own date filter, under a grid that was answering
-       the question correctly. The same false alarm the sort-by-Close case
-       raised, arriving by the other road.
-
-       The store fact this exists to catch is not lost: clear the window and the
-       whole month is read again, and a real shortfall still says so. */
     const barDisagree = $derived(
-      windowSaid !== null || dayWindowNarrows
-        ? []
-        : barState.files.filter(
-            (/** @type {any} */ f) => f.error === null &&
-              (f.paged ? f.held !== f.row.rows : f.bars.length !== f.row.rows)
-          )
+      !barState.answer || dayWindowNarrows || timeNarrows ? [] : censusBehind(barState.answer.series_totals, plan.series)
     );
 
-    const barPage = $derived.by(() => {
-      /* THE SERVER ALREADY SLICED, SO THE CLIENT MUST NOT SLICE AGAIN — BUT ONLY
-         WHERE THE SERVER ACTUALLY ANSWERED.
-         On the window route `barSorted` holds the fifty rows that were asked for
-         and nothing else, so an offset of 2,99,950 into fifty rows is the empty
-         set and the grid would draw nothing on every page but the first.
-         `windowSaid` AND NOT `!pagePlan.exact`, because those are no longer the
-         same condition: a sort on a derived column is not exact AND does not use
-         the window route, so it comes back as a full read that still needs
-         slicing. Keying on `!exact` there would pin the grid to page one for
-         every column the endpoint cannot order by. */
-      if (windowSaid !== null || barState.files.some((f) => f.paged)) return barSorted.slice(0, db.pageSize);
-      const first = (pageNow - 1) * db.pageSize;
-      const start = Math.max(0, first - pagePlan.base);
-      return barSorted.slice(start, start + db.pageSize);
+    /** Months inside a series' span with no file — the holes the server names. */
+    const holeMonths = $derived(
+      barState.answer
+        ? Math.max(0, (Number(barState.answer.months_missing) || 0) - (Number(barState.answer.months_outside_life) || 0))
+        : 0
+    );
+
+    /**
+     * WHY AN EMPTY ANSWER IS EMPTY (DB-016): the days a narrowing window asked
+     * for, each as the exchange calendar of record calls it — closed, a
+     * session, or beyond its reach — so an empty grid names its reason and
+     * never accuses the store of what a weekend explains. At most 62 days are
+     * named; a wider empty window is said as a window.
+     */
+    const emptyNote = $derived.by(() => {
+      const a = barState.answer;
+      if (db.view !== 'bars' || barState.loading || barState.error || !a || a.total > 0) return null;
+      if (!dayWindowNarrows && !timeNarrows) return { kind: 'none', closed: [], open: [], unknown: [] };
+      /** @type {string[]} */
+      const days = [];
+      if (bounds.fromDay && bounds.toDay) {
+        const from = Date.parse(`${bounds.fromDay}T00:00:00Z`);
+        const to = Date.parse(`${bounds.toDay}T00:00:00Z`);
+        for (let at = from; Number.isFinite(at) && at <= to && days.length < 62; at += 86_400_000) {
+          days.push(new Date(at).toISOString().slice(0, 10));
+        }
+      }
+      const said = days.map((d) => ({ d, closed: db.dayClosed(d) }));
+      return {
+        kind: 'window',
+        closed: said.filter((x) => x.closed === true).map((x) => x.d),
+        open: said.filter((x) => x.closed === false).map((x) => x.d),
+        unknown: said.filter((x) => x.closed === null).map((x) => x.d)
+      };
+    });
+
+    const barPage = $derived(
+      barState.local
+        ? barSorted.slice((pageNow - 1) * db.pageSize, pageNow * db.pageSize)
+        : barSorted
+    );
+
+    /* ---------------------------------------------------------------------
+       THE NEWEST STORED BAR OF THE SELECTION — one seek per selection, never
+       the first row of a page (DB-007). It describes the selection whole, so
+       it ignores the day and time bounds, as the "on disk" range beside it
+       does.
+       --------------------------------------------------------------------- */
+    let newestClose = $state.raw(/** @type {{ bar: any, key: string } | { why: string } | null} */ (null));
+    $effect(() => {
+      const feed = feeds.active;
+      const p = planAll;
+      void db.nonce;
+      if (db.view !== 'bars' || !feed || p.keys.length === 0 || p.why) {
+        newestClose = null;
+        return;
+      }
+      const controller = new AbortController();
+      readWindowPage(windowQuery(feed, p, { sort: 'ts', desc: true, offset: 0, limit: 1 }), 1, controller.signal)
+        .then((answer) => {
+          if (controller.signal.aborted) return;
+          const bar = answer.bars[0];
+          newestClose = bar ? { bar, key: typeof bar.key === 'string' ? bar.key : p.keys[0] } : { why: 'no bar is stored for this selection' };
+        })
+        .catch((why) => {
+          if (controller.signal.aborted) return;
+          newestClose = { why: String(why && why.message ? why.message : why) };
+        });
+      return () => controller.abort();
     });
 
     /** What the last jump has to say — a refusal, or how far it had to go. */
     let jumpWhy = $state('');
 
     /**
-     * PUT THE PAGE ON THE BAR NEAREST A MOMENT. It filters nothing.
+     * GO TO AN INSTANT (DB-005): the page holding the first bar at or after it
+     * (ascending) or at or before it (descending), across the WHOLE query.
      *
-     * NEAREST, NOT EXACT, because an exact match is not guaranteed to exist and
-     * the honest failure is not "no rows". A halted session, a rung coarser than
-     * a minute, or a market that simply had no print at 14:32 all mean the same
-     * thing to a reader: show me around there. So it lands on the closest loaded
-     * bar and SAYS how far it moved, rather than returning nothing and letting
-     * the operator conclude the store is missing the day.
+     * The server finds it — `at=` answers the global index in one rank per
+     * series — and the page is that index over the page size. It used to search
+     * only the fifty rows in memory and turn to a page computed from the first
+     * FILE's offset, landing about 17,450 one-second bars from where it said.
+     * The row it lands on is marked; when no bar opens exactly there, the line
+     * under the strip says which bar was taken and how far away it is.
      *
-     * IT CAN ONLY REACH WHAT IS IN MEMORY, and that limit is stated rather than
-     * worked around. The bars view is server-paged: when the window route
-     * answered, `barSorted` IS the page, so there is nothing off-screen to land
-     * on and the note says which control fixes that. When the read was whole
-     * months, every minute in them is reachable and the page is arithmetic —
-     * `pagePlan.base` is the offset of the first loaded row, so the page holding
-     * row N is a division, not a search.
+     * A value sort has no position in time, so a jump puts the grid back in
+     * time order first and says so.
+     *
+     * @param {number} at unix seconds @param {string} label the instant as typed
+     * @param {string} [key] the series whose bar at `at` is meant, when the
+     *   caller knows it (an extreme): several series can share one second
      */
-    /**
-     * @param {string} [at] the minute to land on. Defaults to `goTime` so the
-     *   parameter is only ever passed by the control that HAS the new value —
-     *   a `$state` write and a read of it in the same handler is a sequencing
-     *   question nobody should have to answer while reading a click handler.
-     */
-    function jumpToTime(at = db.goTime) {
+    async function jumpToInstant(at, label, key = '') {
       db.landedRk = '';
       jumpWhy = '';
-      const want = minuteOf(at);
-      if (want === null) {
-        /* UNREACHABLE FROM THE CONTROL, KEPT FOR THE FUNCTION. The picker offers
-           only minutes folded out of the loaded rows, so it cannot produce a
-           value this rejects. This is a function boundary, and the next caller
-           is not required to have read the picker. */
-        jumpWhy = `“${String(at).trim()}” is not a time. It must be HH:MM on a 24-hour clock — 14:32.`;
+      const feed = feeds.active;
+      const p = plan;
+      if (!feed || p.keys.length === 0 || p.why) {
+        jumpWhy = p.why ?? 'No selection is read, so there is nothing to go to.';
         return;
       }
+      const resorted = barSortKey !== 'ts';
+      if (resorted) {
+        barSortKey = 'ts';
+        barDesc = true;
+      }
+      const desc = barDesc;
+      try {
+        const answer = await readWindowPage(
+          windowQuery(feed, p, { ...bounds, sort: 'ts', desc, at, limit: 1 }), 1, new AbortController().signal
+        );
+        const index = Number(answer.at_index);
+        const total = Number(answer.total);
+        const side = desc ? 'at or before' : 'at or after';
+        if (total === 0) {
+          jumpWhy = 'No bar is kept by this query, so there is nothing to land on.';
+          return;
+        }
+        if (!Number.isSafeInteger(index) || index >= total) {
+          db.page = pageOfIndex(total - 1, db.pageSize);
+          jumpWhy = `No bar lies ${side} ${label} in this query: it ${desc ? 'begins after' : 'ends before'} that instant. Showing its ${desc ? 'oldest' : 'newest'} page.`;
+          return;
+        }
+        const bar = answer.bars[0];
+        db.page = pageOfIndex(index, db.pageSize);
+        if (bar) {
+          db.landedRk = key && bar.t === at ? rowKey(key, at) : rowKey(typeof bar.key === 'string' ? bar.key : p.keys[0], bar.t);
+        }
+        const lead = resorted ? 'The grid is back in time order, which is the order an instant has a place in. ' : '';
+        jumpWhy = !bar || bar.t === at
+          ? lead
+          : `${lead}No bar opens at ${label}. Landed on ${dayLabel(bar.t * 1000)} ${barTimeLabel(bar.t * 1000, 1)} IST, the first bar ${side} it, ${fmt(Math.abs(bar.t - at))} second(s) away — row ${fmt(index + 1)} of ${fmt(total)}.`;
+      } catch (why) {
+        jumpWhy = `Go to could not be answered: ${String(/** @type {any} */ (why)?.message ?? why)}`;
+      }
+    }
+
+    /**
+     * THE TIME PICKER'S GO TO: a minute (or, on 1s, a second) on the day the
+     * reader is looking at — the first row on screen — else the window's own
+     * last day. `HH:MM` and `HH:MM:SS` are both accepted (DB-005).
+     *
+     * @param {string} [at] the time to land on
+     */
+    function jumpToTime(at = db.goTime) {
       if (dayRung) {
         jumpWhy = `Every bar at ${db.timeframe} opens at the same minute, so there is no minute to choose between them.`;
         return;
       }
-      if (barSorted.length === 0) {
-        jumpWhy = 'No bar is loaded, so there is nothing to land on.';
+      const day = barPage[0]?.day ?? (db.toDay || db.fromDay || '');
+      const got = parseGoto(String(at ?? ''), day);
+      if ('why' in got) {
+        jumpWhy = got.why;
         return;
       }
-      let bestIdx = -1;
-      let bestGap = Infinity;
-      for (let i = 0; i < barSorted.length; i++) {
-        const at = minuteOf(timeLabel(barSorted[i].ts));
-        if (at === null) continue;
-        const gap = Math.abs(at - want);
-        if (gap < bestGap) {
-          bestGap = gap;
-          bestIdx = i;
-        }
-      }
-      if (bestIdx < 0) {
-        jumpWhy = 'No loaded bar carries a minute to compare against.';
+      void jumpToInstant(got.at, got.label);
+    }
+
+    /**
+     * THE GO-TO BOX'S TEXT: `YYYY-MM-DD HH:MM[:SS]`, or a time alone for the
+     * day on screen.
+     * @param {string} text
+     */
+    function jumpToText(text) {
+      const day = barPage[0]?.day ?? (db.toDay || db.fromDay || '');
+      const got = parseGoto(text, day);
+      if ('why' in got) {
+        db.landedRk = '';
+        jumpWhy = got.why;
         return;
       }
-      const hit = barSorted[bestIdx];
-      db.landedRk = hit.rk;
-      if (windowSaid !== null) {
-        jumpWhy = `The server paged this read, so only the ${fmt(barSorted.length)} row(s) on screen could be searched. Narrow the dates until the day is read whole, and every minute in it becomes reachable.`;
-        return;
-      }
-      db.page = Math.floor((pagePlan.base + bestIdx) / db.pageSize) + 1;
-      jumpWhy =
-        bestGap === 0
-          ? ''
-          : `No bar opens at ${String(at).trim()}. Landed on ${timeLabel(hit.ts)} — the nearest loaded, ${fmt(bestGap)} minute(s) away.`;
+      void jumpToInstant(got.at, got.label);
     }
 
     /** @param {number} n */
@@ -1716,66 +1154,56 @@
       const want = Number(n);
       db.page = Math.min(pageCount, Math.max(1, Number.isFinite(want) ? Math.trunc(want) : 1));
     }
-    /** Keep the reader's PLACE across a page-size change, not their ordinal:
-        the row they were standing on stays on screen.
-        @param {number} n */
-    function setPageSize(n) {
+
+    /** The global row a page-size change promised to keep on screen, until it is shown. */
+    let anchorRow = $state(-1);
+    /**
+     * KEEP THE READER'S PLACE ACROSS A PAGE-SIZE CHANGE, NOT THEIR ORDINAL: the
+     * row they were standing on — the first row of the old page — is on the
+     * new page, and it is scrolled into view and marked when the page arrives
+     * (DB-N06, DB-N12). It used to land on the right page with the box
+     * scrolled to the top, the row 92 rows below it, off screen.
+     * @param {number} n @param {boolean} [anchor] whether the reader chose it
+     */
+    function setPageSize(n, anchor = true) {
       const firstRow = (pageNow - 1) * db.pageSize;
       db.pageSize = Number(n);
       db.page = Math.floor(firstRow / db.pageSize) + 1;
+      anchorRow = anchor && pageTotal > 0 ? firstRow : -1;
     }
+    $effect(() => {
+      const want = anchorRow;
+      const rows = barPage;
+      const box = db.barBox;
+      if (want < 0 || barState.loading || !box || rows.length === 0) return;
+      const index = want - (pageNow - 1) * db.pageSize;
+      untrack(() => {
+        anchorRow = -1;
+        const row = rows[index];
+        if (!row) return;
+        db.landedRk = row.rk;
+        /* AFTER THE ROWS ARE IN THE DOCUMENT: the next turn of the loop. */
+        setTimeout(() => {
+          const tr = /** @type {HTMLElement | null} */ (box.querySelectorAll('tbody tr.brow')[index] ?? null);
+          if (!tr) return;
+          box.scrollTop = Math.max(0, tr.offsetTop - HEAD - Math.max(0, (box.clientHeight - HEAD - tr.offsetHeight) / 2));
+        }, 0);
+      });
+    });
 
-    /* ONE SCALE PER RUNG, because a rung is what makes two moves comparable.
+    /* ONE SCALE PER RUNG, because a rung is what makes two moves comparable,
+     * and each is measured ON THIS PAGE — said so on every title (DB-049).
      *
-     * A single scale over the whole selection was the second draft and it was
-     * also wrong: with 1min and 1day rows matched together the daily move — the
-     * whole session in one bar — set full width, and every minute row drew at
-     * under a tenth of it. The column went blank again for the rung anybody
-     * actually scans.
-     *
-     * A minute bar and a daily bar are not two sizes of the same thing, so they
-     * do not share a ruler. Keyed on `tf`, each rung is measured against its own
-     * largest move and the bar answers "big for a bar of this length".
-     */
-    /* VOLUME AND RANGE GET THEIR OWN PER-RUNG SCALES, for the reason the change
-     * scale has one: a minute's volume and a day's are not two sizes of the same
-     * thing, so they do not share a ruler. Folded over `barRows` and never
-     * `barPage`, so the scale is every row LOADED and not only the fifty drawn -
-     * which since `pagePlan` is the page's own month rather than the whole
-     * query. See the change-scale block above for why that trade was taken and
-     * what it costs. */
-    /* THE SPAN, NOT THE CEILING — AND THE RULER IS LOGARITHMIC. MEASURED.
-     *
-     * This fold used to keep only the largest volume at each rung and `volMag`
-     * divided by it. Against one real page — NSE-INDEX-NIFTY 1min 2026-08, 250
-     * rows — the volumes run 2,68,832 to 2,65,70,396: a 98.8x spread around a
-     * median of 6,18,458. Divide by the ceiling and the median row gets 2.3% of
-     * 56px, which rounds to ONE PIXEL. Measured across those 250 rows:
-     *
-     *     linear   median  1px   147 of 250 at or under 1px    8 distinct widths
-     *     log      median 10px     6 of 250 at or under 1px   30 distinct widths
-     *
-     * So the bar was drawn on every row and told 59% of them nothing. One
-     * afternoon's spike set the ruler for the whole month. A quantity that moves
-     * over two orders of magnitude has no linear picture.
-     *
-     * WHAT THE LOG RULER COSTS, and it is named on the cell rather than left for
-     * the reader to assume: a bar twice as long is NOT twice the volume. Reading
-     * it as linear is the same error D-0377 deleted a chart for, so the `title`
-     * says "log" and gives both ends of the ruler in figures.
-     *
-     * The floor is the window's own smallest volume rather than zero, because
-     * `log(0)` is not a number and a floor of 1 would spend most of the bar's
-     * length on decades no bar in the window occupies.
-     */
+     * Volume: a LOG ruler over the page's own span. A quantity that moves over
+     * two orders of magnitude has no linear picture; the title names the
+     * ruler and both its ends. */
     const volFullByTf = $derived.by(() => {
       /** @type {Map<string, { lo: number, hi: number }>} */
       const span = new Map();
-      for (const b of barRows) {
+      for (const b of barPage) {
+        if (b.vWhy === 'index_no_volume') continue;
         const v = b.vol ?? 0;
-        /* ZERO IS OUT OF THE RULER, NOT CLAMPED INTO IT. A zero volume is a real
-           reading — a minute in which nothing traded — and it has no logarithm.
-           It draws no bar, which is the truthful picture of it. */
+        /* ZERO IS OUT OF THE RULER, NOT CLAMPED INTO IT: it has no logarithm. */
         if (!(v > 0)) continue;
         const s = span.get(b.tf);
         if (s === undefined) span.set(b.tf, { lo: v, hi: v });
@@ -1788,92 +1216,74 @@
     });
 
     /**
-     * Where one volume sits on its rung's log ruler, 0..100.
-     *
-     * O(1): one Map probe and two logarithms, whatever the window holds.
-     *
+     * Where one volume sits on its rung's log ruler, 0..100. O(1).
      * @param {number} v @param {string} tf
      */
     function volMag(v, tf) {
       const s = volFullByTf.get(tf);
       if (s === undefined || !(v > 0)) return 0;
-      /* ONE DISTINCT VOLUME IN THE WINDOW IS A FULL BAR, NOT A DIVISION BY ZERO.
-         Every row carries the same figure, so every row is the largest. */
       if (s.hi <= s.lo) return 100;
-      /* A FLOOR OF 4%, BECAUSE THE SMALLEST VOLUME IN THE WINDOW IS NOT NO
-         VOLUME. Mapping straight onto 0..100 gives the minimum row exactly zero
-         width — the same picture a bar with no trades gets from the early return
-         above. Two different readings, one appearance, which is the collision
-         this whole change exists to remove. 4% of 56px is 2px: visible as a mark,
-         too short to be mistaken for a quantity. Zero still draws nothing, and
-         now that means only zero. */
+      /* A FLOOR OF 4%, so the smallest volume on the page is a mark and only
+         zero draws nothing. */
       const FLOOR = 4;
       const lo = Math.log(s.lo);
       const x = Math.log(Math.min(Math.max(v, s.lo), s.hi));
       return FLOOR + Math.round(((x - lo) / (Math.log(s.hi) - lo)) * (100 - FLOOR));
     }
 
-    /**
-     * The volume cell's inline scale, computed ONCE.
-     *
-     * The markup called `volMag` twice for the same number — once for `--vmag`
-     * and once for `--vmagpx`. Two logarithms per cell for one answer.
-     *
-     * @param {number} v @param {string} tf
-     */
+    /** @param {number} v @param {string} tf */
     function volStyle(v, tf) {
       const m = volMag(v, tf);
       return `--vmag:${m}%;--vmagpx:${Math.round((m / 100) * 56)}px`;
     }
 
     /**
-     * WHAT THE BAR IN THE VOLUME CELL MEANS, IN WORDS, BECAUSE IT IS NOT LINEAR.
+     * WHAT THE VOLUME CELL MEANS, IN ITS UNITS (D-3343, DB-057, DB-G76).
      *
-     * A reader who assumes a linear bar reads every ratio wrong, and a picture
-     * that invites that is the defect D-0377 removed a chart for. This names the
-     * ruler and both its ends, so the bar can be checked rather than trusted.
+     * A share's and an option's or a future's volume is in SHARES of the
+     * underlying — GDFL's last traded quantity is shares, not lots — and no lot
+     * is shown: no lot size is served to this page, from `costs::lot` or from
+     * the inferred-lot ledger, so a lots figure would be a number this page
+     * invented. An index has no traded volume at all.
      *
-     * @param {number} v @param {string} tf
+     * @param {any} b the row
      */
-    function volTitle(v, tf) {
+    function volTitle(b) {
+      const v = b.vol;
+      const tf = b.tf;
+      if (b.vWhy === 'index_no_volume') {
+        return `Not applicable: an index has no traded volume (D-2802, D-3322). The store holds ${fmt(v)} here, which is not a measurement.`;
+      }
+      const unit = b.side
+        ? 'shares of the underlying (an option’s traded quantity, lots × lot size — not lots). No lot is shown: no lot size is served for this contract, sourced or inferred (D-3343)'
+        : b.exp
+          ? 'shares of the underlying (a future’s traded quantity, not lots). No lot is shown (D-3343)'
+          : 'shares';
       const s = volFullByTf.get(tf);
       if (s === undefined || !(v > 0)) {
         return v === 0
-          ? 'No volume in this bar. Zero has no place on a log ruler, so no bar is drawn — this is a reading, not a gap.'
-          : `${fmt(v)} shares.`;
+          ? `0 ${unit}: nothing traded in this bar. Zero has no place on a log ruler, so no bar is drawn — this is a reading, not a gap.`
+          : `${fmt(v)} ${unit}.`;
       }
       return (
-        `${fmt(v)} shares. The bar is a LOG scale across every ${tf} row loaded — ` +
-        `${fmt(s.lo)} at no bar to ${fmt(s.hi)} at full width — so a bar twice as ` +
-        `long is far more than twice the volume. Linear was tried and put 147 of ` +
-        `250 rows under one pixel.`
+        `${fmt(v)} ${unit}. The bar is a LOG scale across the ${tf} rows ON THIS PAGE — ` +
+        `${fmt(s.lo)} at no bar to ${fmt(s.hi)} at full width — so a bar twice as long is far more ` +
+        `than twice the volume, and turning the page can change what a full bar means.`
       );
     }
 
     /* THE BAR'S OWN RANGE, high minus low, as a share of the widest range at that
-     * rung. This is what the spine down the left edge is scaled by: a doji reads
-     * as a short tick and a wide bar as a tall one, so the column answers "where
-     * did anything actually happen" before a single figure is read. */
+     * rung ON THIS PAGE — raised to the query's widest when the extremes panel
+     * has answered, since a page is a subset of the query and its own widest
+     * can never legitimately exceed it. */
     const rngFullByTf = $derived.by(() => {
       /** @type {Map<string, number>} */
       const top = new Map();
-      for (const b of barRows) {
+      for (const b of barPage) {
         const r = b.h - b.l;
         if (r > (top.get(b.tf) ?? 0)) top.set(b.tf, r);
       }
-      /* THE WINDOW'S OWN WIDEST RANGE, WHERE THE WINDOW ANSWERED.
-         D-0260 traded this away: the seek route reads one month, so the scale
-         became "widest move among the bars LOADED" rather than "in the query",
-         and both comment blocks here say so. `extremes=1` buys it back — the
-         server folds the widest high-low over every month in the window while it
-         is already reading them for the sort, and sends one number.
-         MEASURED on the running store: 1,50,700 paisa — Rs 1,507.00 — against
-         623,498 bars, for no request of its own.
-         IT ONLY RAISES. The loaded rows are a SUBSET of the window, so their own
-         maximum can never legitimately exceed it; taking the larger of the two
-         means a scale that is correct when the server answered and unchanged when
-         it did not, rather than a second source of truth. */
-      const wide = windowSaid?.extremes?.range;
+      const wide = db.extremesNow?.range;
       if (typeof wide === 'number' && wide > 0) {
         for (const tf of top.keys()) {
           if (wide > (top.get(tf) ?? 0)) top.set(tf, wide);
@@ -1886,19 +1296,18 @@
     function rngMag(r, tf) {
       const full = rngFullByTf.get(tf) ?? 0;
       if (full <= 0) return MIN_SPINE;
-      /* SQUARE ROOT, NOT LINEAR. Measured on the real page: against the widest
-       * 1-minute range in the month, an ordinary minute is under a fifth of it,
-       * so a linear scale put all fifty rows on the floor — distinct values: 1.
-       * A range is a length and the eye compares lengths by area, so the square
-       * root is the honest curve here: it keeps the ordering exact and spends the
-       * height where the rows actually are. The widest bar is still full height. */
+      /* SQUARE ROOT, NOT LINEAR: it keeps the order exact and spends the
+         height where the rows are. The widest bar is still full height. */
       return Math.max(MIN_SPINE, Math.sqrt(Math.min(r, full) / full));
     }
 
+    /* THE CHANGE SCALE IS THE LARGEST MOVE ON THIS PAGE, per rung (DB-049). The
+       header used to say "scaled across every matched row rather than this
+       page" while the fold read only the page; it now says what it does. */
     const chgFullByTf = $derived.by(() => {
       /** @type {Map<string, number>} */
       const top = new Map();
-      for (const b of barRows) {
+      for (const b of barPage) {
         if (b.chg === null) continue;
         const a = Math.abs(b.chg);
         if (a > (top.get(b.tf) ?? 0)) top.set(b.tf, a);
@@ -1908,14 +1317,9 @@
     });
 
     /** The rungs on screen and their scales, for the header's own explanation. */
-    const chgScaleText = $derived(
-      [...chgFullByTf].map(([tf, v]) => `${tf} ${fmt(v)} bps`).join(', ')
-    );
+    const chgScaleText = $derived([...chgFullByTf].map(([tf, v]) => `${tf} ${fmt(v)} bps`).join(', '));
 
-    /**
-     * @param {number} bps
-     * @param {string} tf
-     */
+    /** @param {number} bps @param {string} tf */
     function chgMag(bps, tf) {
       const full = chgFullByTf.get(tf) ?? CHG_FLOOR_BPS;
       return Math.round((Math.min(Math.abs(bps), full) / full) * 100);
@@ -1931,26 +1335,23 @@
       readBudget: { get: () => readBudget, set: (v) => (readBudget = v) },
       barPlan: { get: () => barPlan },
       dayNarrows: { get: () => dayNarrows },
-      pageExact: { get: () => pageExact },
-      barTotalRows: { get: () => barTotalRows },
-      pagePlan: { get: () => pagePlan },
-      barPlanKeys: { get: () => barPlanKeys },
-      barCache: { get: () => barCache },
-      barCacheStamp: { get: () => barCacheStamp, set: (v) => (barCacheStamp = v) },
+      barQueryPlan: { get: () => plan },
+      barQueryAll: { get: () => planAll },
+      barBounds: { get: () => bounds },
+      barSetKey: { get: () => setKey },
       barState: { get: () => barState, set: (v) => (barState = v) },
-      barToken: { get: () => barToken, set: (v) => (barToken = v) },
-      readBarFile: { get: () => readBarFile },
-      fetchBarFile: { get: () => fetchBarFile },
-      readWindow: { get: () => readWindow },
       barFails: { get: () => barFails },
       barFaults: { get: () => barFaults },
+      pageMs: { get: () => pageMs },
       pricePfx: { get: () => pricePfx },
       priceSplit: { get: () => priceSplit },
       barRows: { get: () => barRows },
+      barRowsOf: { get: () => barRowsOf },
       barsRead: { get: () => barsRead },
       barsClaimed: { get: () => barsClaimed },
       barSortKey: { get: () => barSortKey, set: (v) => (barSortKey = v) },
       barDesc: { get: () => barDesc, set: (v) => (barDesc = v) },
+      sortWhy: { get: () => sortWhy, set: (v) => (sortWhy = v) },
       timeNarrows: { get: () => timeNarrows },
       timeOptions: { get: () => timeOptions },
       timeBounds: { get: () => timeBounds },
@@ -1970,8 +1371,13 @@
       dayWindowNarrows: { get: () => dayWindowNarrows },
       barDisagree: { get: () => barDisagree },
       barPage: { get: () => barPage },
+      barHoleMonths: { get: () => holeMonths },
+      emptyNote: { get: () => emptyNote },
+      newestClose: { get: () => newestClose },
       jumpWhy: { get: () => jumpWhy, set: (v) => (jumpWhy = v) },
       jumpToTime: { get: () => jumpToTime },
+      jumpToText: { get: () => jumpToText },
+      jumpToInstant: { get: () => jumpToInstant },
       goPage: { get: () => goPage },
       setPageSize: { get: () => setPageSize },
       volFullByTf: { get: () => volFullByTf },
@@ -1984,6 +1390,10 @@
       chgScaleText: { get: () => chgScaleText },
       chgMag: { get: () => chgMag }
     });
+
+    /* THE EXTREMES PANEL'S STATE (DbExtremes, DB-G95), created here so it reads
+       the plan and the bounds above and runs in the shell's order. */
+    extremesState(db);
   }
 
   /**
@@ -2020,10 +1430,12 @@
          Measured, with the tab in the background so the measurement was late.
          Until the first read lands the page keeps its declared default, which is
          a sane grid rather than a broken one. */
-      if (db.barBoxH <= 0) return;
+      if (!db.fitLatched) return;
       const want = db.rowsThatFit;
       untrack(() => {
-        if (want > 0 && want !== db.pageSize) db.setPageSize(want);
+        /* NO ANCHOR: the reader did not ask for this size, so no row is marked
+           or scrolled to — the place is kept by the arithmetic alone. */
+        if (want > 0 && want !== db.pageSize) db.setPageSize(want, false);
       });
     });
   }
@@ -2103,7 +1515,7 @@
          anyway. */
       /* Read, not tested: this is what changes when a fetch is needed, so reading
          it keeps the entrance firing on one. */
-      void db.barPlanKeys;
+      void db.barSetKey;
       /* THE SORT IS TESTED FIRST, AND IT TOOK THREE TRIES TO PUT IT THERE.
          -------------------------------------------------------------------
          Each earlier order led with a proxy for "is this a different set" and
@@ -2380,7 +1792,7 @@
                     : c.nosort
                       ? `${c.label} — ${c.why}. Not sortable: ${c.nosort}`
                       : c.key === 'chg'
-                      ? `${c.label} — ${c.why}. The bar behind each figure is that figure's size against the largest move in this selection, measured PER RUNG so a minute bar is never judged against a daily one (${db.chgScaleText}). Scaled across every matched row rather than this page, so turning the page does not change what a full bar means. Click to sort; click again to reverse.`
+                      ? `${c.label} — ${c.why}. The bar behind each figure is that figure's size against the largest move ON THIS PAGE, measured PER RUNG so a minute bar is never judged against a daily one (${db.chgScaleText || 'no move on this page'}). It is the page's scale, not the query's: turning the page can change what a full bar means. Click to sort; click again to reverse — the browser orders this column itself, over at most ${fmt(LOCAL_SORT_BUDGET)} bars.`
                       : `${c.label} — ${c.why}. Click to sort; click again to reverse.`}
                   onclick={() => db.barHead(c.key)}
                 >
@@ -2402,11 +1814,12 @@
             <tr class="bstate">
               <td colspan={BAR_COLS.length}>
                 <div class="bnone" role="alert">
-                  <h3>The bar files could not be read</h3>
+                  <h3>This page of bars could not be read</h3>
                   <p class="err">{db.barState.error}</p>
                   <p>
                     Nothing is drawn rather than a plausible blank: a grid with no rows and no
-                    reason reads as an empty store, and this is a failed read.
+                    reason reads as an empty store, and this is a failed or refused read. The
+                    sentence above is the server's own.
                   </p>
                   <button class="btn" onclick={() => refreshStore()}>Try again</button>
                 </div>
@@ -2444,52 +1857,53 @@
             <tr class="bstate">
               <td colspan={BAR_COLS.length}>
                 <div class="bnone">
-                  <!-- THE DAY WINDOW GETS ITS OWN BRANCH, ABOVE THE ONE
-                       THAT ACCUSES THE STORE.
+                  <!-- WHY NO BAR CAME BACK, AND IT IS NEVER A STORE ACCUSATION
+                       WHEN A WINDOW EXPLAINS IT (DB-016).
 
-                       MEASURED by typing a 2016 range into the date fields
-                       over a store whose first bar is 2019-12: the read
-                       worked, 81 files opened, 6,23,498 bars arrived, and
-                       `barWindowed` then filtered every one of them out on
-                       the day. The message drawn was:
-
-                         "6,23,498 bar(s) arrived. The file(s) opened and
-                          held no record. The census says they hold
-                          6,23,498, so this is a disagreement between the
-                          manifest and the file, not an empty query."
-
-                       Self-contradictory in its first two sentences — bars
-                       arrived AND no record was held — and then it accuses
-                       the store of CORRUPTION for what a filter did. An
-                       operator reading that would go looking for a damaged
-                       file that is perfectly intact.
-
-                       The bars-arrived count is what separates the two: if
-                       rows came back and none survived, the window is the
-                       answer, and the store is not in question at all. -->
-                  <h3>
-                    {db.barsRead > 0 && db.dayNarrows
-                      ? 'No bar in this date window'
-                      : 'No bar came back'}
-                  </h3>
-                  <p>
-                    {fmt(db.barPlan.read.length)} instrument-month(s) were read and
-                    <b>{fmt(db.barsRead)}</b> bar(s) arrived.
-                    {#if db.barFails.length}
-                      {fmt(db.barFails.length)} of those file(s) refused — each refusal is named
-                      under the grid.
-                    {:else if db.barsRead > 0 && db.dayNarrows}
-                      Every one of them falls outside <b>{db.fromDay || 'the start'}</b> to
-                      <b>{db.toDay || 'the end'}</b>, so the grid has nothing to draw. The files
-                      and the census agree — it is the date window above that is empty, and
-                      widening it brings these {fmt(db.barsRead)} bar(s) back.
-                    {:else}
-                      The file(s) opened and held no record. The census says they hold {fmt(
-                        db.barsClaimed
-                      )}, so this is a disagreement between the manifest and the file, not an
-                      empty query.
-                    {/if}
-                  </p>
+                       The bounds go to the server, so an empty window is an
+                       empty ANSWER: 0 bars for a day nothing traded on. This
+                       branch used to read "1 instrument-month(s) were read and
+                       0 bar(s) arrived … a disagreement between the manifest
+                       and the file" for GDFL NIFTY 1s on 2024-03-02, a
+                       Saturday, accusing an intact file of what the calendar
+                       explains. It now names the days asked for and what the
+                       exchange calendar says of each. -->
+                  {#if db.emptyNote?.kind === 'window'}
+                    <h3>No bar in this window</h3>
+                    <p>
+                      Nothing is stored for <b>{db.barBounds.fromDay || 'the start'}</b> to
+                      <b>{db.barBounds.toDay || 'the end'}</b>{#if db.barBounds.fromTime || db.barBounds.toTime}, between
+                        <b>{db.barBounds.fromTime || '00:00'}</b> and <b>{db.barBounds.toTime || '23:59'}</b> IST{/if}
+                      in this selection.
+                      {#if db.emptyNote.closed.length}
+                        The exchange calendar marks {db.emptyNote.closed.map((/** @type {string} */ d) => dayLabel(d)).join(', ')} closed — a
+                        weekend or a holiday — so no bar is owed there.
+                      {/if}
+                      {#if db.emptyNote.open.length}
+                        {db.emptyNote.open.map((/** @type {string} */ d) => dayLabel(d)).join(', ')}
+                        {db.emptyNote.open.length === 1 ? 'was a session' : 'were sessions'}, and this selection
+                        stores no bar there: the import may have refused the day, or the store has a gap. The day
+                        flags name a refusal where one was recorded.
+                      {/if}
+                      {#if db.emptyNote.unknown.length}
+                        The exchange calendar does not reach {db.emptyNote.unknown.map((/** @type {string} */ d) => dayLabel(d)).join(', ')}, so
+                        whether a session was owed there is not known here.
+                      {/if}
+                      Widening the window brings the selection's other bars back.
+                    </p>
+                  {:else}
+                    <h3>No bar came back</h3>
+                    <p>
+                      {#if db.barsClaimed > 0}
+                        The census counts <b>{fmt(db.barsClaimed)}</b> bar(s) for this selection and the files
+                        it names hold none. That is a disagreement between the census and the files, not an
+                        empty query — read again, and if it stands, the census has run ahead of a file that
+                        was replaced.
+                      {:else}
+                        No bar is stored for this selection.
+                      {/if}
+                    </p>
+                  {/if}
                   <button class="btn" onclick={() => refreshStore()}>Read again</button>
                 </div>
               </td>
@@ -2595,7 +2009,16 @@
                        that forced it off linear, and D-0377 for what an
                        unlabelled scale costs. `volStyle` folds what used to
                        be two identical `volMag` calls into one. -->
-                  <td class="bn bvol" style={db.volStyle(b.vol, b.tf)} title={db.volTitle(b.vol, b.tf)}>{fmt(b.vol)}</td>
+                  {#if b.vWhy === 'index_no_volume'}
+                    <!-- AN INDEX HAS NO TRADED VOLUME (D-2802, D-3322; DB-057):
+                         the stored figure is not a measurement, so it is not
+                         printed as one. -->
+                    <td class="bn na" title={db.volTitle(b)}
+                      ><span class="unk" aria-label="Volume: not applicable — {db.volTitle(b)}">n/a</span></td
+                    >
+                  {:else}
+                    <td class="bn bvol" style={db.volStyle(b.vol, b.tf)} title={db.volTitle(b)}>{fmt(b.vol)}</td>
+                  {/if}
 
                   <!-- PRE-MARKET %: no source on this wire. -->
                   <td class="bn na"
@@ -2637,7 +2060,16 @@
                        ZERO and renders as one — the two are different facts
                        and this column has to keep them apart. -->
                   <td class="bn">
-                    {#if b.oi === null}
+                    {#if b.oiWhy === 'not_a_derivative'}
+                      <!-- N/A, NOT A DERIVATIVE (D-3322; DB-036, DB-G28,
+                           DB-G44, DB-G100): an index or a share has no open
+                           interest on any feed, whatever was stored. -->
+                      <span
+                        class="unk"
+                        title={barWhyText('not_a_derivative')}
+                        aria-label="Open interest: {barWhyText('not_a_derivative')}">n/a</span
+                      >
+                    {:else if b.oi === null}
                       <span
                         class="unk"
                         title={barWhyText('oi_null')}
@@ -2646,8 +2078,8 @@
                     {:else}
                       <span
                         title={b.oi === 0
-                          ? 'zero, and stored as zero — not the null sentinel'
-                          : 'open interest, as stored'}>{fmt(b.oi)}</span
+                          ? 'zero contracts open, in shares of the underlying, stored as zero — not the null sentinel'
+                          : 'open interest as stored, in SHARES of the underlying — not lots (D-3343). No lot is shown: no lot size is served for this contract.'}>{fmt(b.oi)}</span
                       >
                     {/if}
                   </td>
@@ -2703,33 +2135,37 @@
       </table>
     </div>
 
-    <!-- EVERY REFUSAL, EVERY PARTIAL READ AND EVERY DISAGREEMENT, NAMED.
-         None of these is allowed to be a shorter grid. -->
-    {#if db.barFails.length || db.barFaults.length || db.barDisagree.length || db.barsRead > 0}
+    <!-- EVERY REFUSED SORT, PARTIAL READ, LAG AND HOLE, NAMED. A refused or
+         failed read is the grid's own state above, in the server's words, so
+         it is not said twice here. None of these is allowed to be a shorter
+         grid. -->
+    {#if db.sortWhy || db.barFaults.length || db.barDisagree.length || db.barHoleMonths > 0}
       <div class="bnotes">
-        {#if db.barsRead > 0}
-  <!-- THE COLUMNS NOTE IS GONE. "10 of 24 columns drawn, the rest have
-       nothing to put in them" is a sentence about the page rather than
-       about the store, and the columns that are drawn are self-evident. -->
-
+        {#if db.sortWhy}
+          <p class="bnote warn">{db.sortWhy}</p>
         {/if}
-        {#each db.barDisagree as f (f.key)}
-          <p class="bnote warn">
-            <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — the file reports {fmt(
-              f.paged ? f.held : f.bars.length
-            )} bar(s) and the census manifest claims {fmt(f.row.rows)}. The grid shows what the
-            FILE returned; its recorded total differs from the census.
+        {#if db.barDisagree.length}
+          <!-- THE CENSUS IS BEHIND THE FILE, SAID AS A LAG (DB-G02, DB-G61,
+               DB-022). The pager counts the files, so no bar past the census
+               count is unreachable; the census is the snapshot the page read,
+               and a running import moves a file ahead of it. -->
+          <p class="bnote">
+            The census differs from the files for <b>{fmt(db.barDisagree.length)}</b> series —
+            <b>{db.barDisagree[0].key}</b>: the file holds {fmt(db.barDisagree[0].file)} bar(s), the census
+            counted {fmt(db.barDisagree[0].census)}{#if db.barDisagree.length > 1}, and {fmt(db.barDisagree.length - 1)} more{/if}.
+            The pager counts the files' own rows, so every bar is reachable in either order; the census
+            is the snapshot this page read, and an import running since moves a file ahead of it.
           </p>
-        {/each}
+        {/if}
+        {#if db.barHoleMonths > 0}
+          <p class="bnote">
+            <b>{fmt(db.barHoleMonths)}</b> month(s) inside a series' span hold no file{#if db.barState.answer?.missing_months?.length}:
+              {db.barState.answer.missing_months.join(', ')}{#if db.barHoleMonths > db.barState.answer.missing_months.length} and more{/if}{/if}.
+            {#if db.barState.answer?.months_outside_life}{fmt(db.barState.answer.months_outside_life)} more lie outside a contract's life and are not owed.{/if}
+          </p>
+        {/if}
         {#each db.barFaults as f (f.key)}
-          <p class="bnote warn">
-            <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — read in part: {f.faults}
-          </p>
-        {/each}
-        {#each db.barFails as f (f.key)}
-          <p class="bnote err">
-            <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — {f.error}
-          </p>
+          <p class="bnote warn">Read in part: {f.faults}</p>
         {/each}
       </div>
     {/if}
@@ -2841,6 +2277,27 @@
       />
       <span class="pgof2">of {fmt(db.pageCount)}</span>
     </label>
+
+    {#if db.view === 'bars'}
+      <!-- GO TO AN INSTANT, ACROSS THE WHOLE QUERY (DB-005). A day and a
+           time, to the second — `2019-03-20 12:33:38` — or a time alone for
+           the day on screen. The server finds the page that holds it; the row
+           it lands on is marked. -->
+      <label class="pgjump pgat">
+        <span>Go to</span>
+        <input
+          type="text"
+          inputmode="numeric"
+          placeholder={db.secondRung ? '2019-03-20 12:33:38' : '2019-03-20 12:33'}
+          disabled={db.pageTotal === 0}
+          title="An instant to open the page of: a day and a time to the second, 2019-03-20 12:33:38, or a time alone for the day on screen. Lands on the first bar at or after it (oldest first) or at or before it (newest first), across every month and series of the query, and marks it. Press Enter."
+          onkeydown={(e) => {
+            if (e.key === 'Enter') db.jumpToText(e.currentTarget.value);
+          }}
+        />
+      </label>
+      {#if db.jumpWhy}<span class="pgof2 pgwhy">{db.jumpWhy}</span>{/if}
+    {/if}
 
     <span class="pgnav">
       <button
@@ -3209,7 +2666,11 @@
   .tbl {
     flex: 1;
     flex: 1;
-    min-height: 220px;
+    /* TEN ROWS AT LEAST (DB-N11). 220px held four option rows at 1440x900,
+       and Fit then paged a 1,53,107-row contract four rows at a time. The
+       floor is the sticky head, the fit's slack and ten 40px rows; on a window
+       too short for it the page scrolls, which is the honest outcome. */
+    min-height: calc(30px + 24px + 10 * 40px);
     display: flex;
     flex-direction: column;
     position: relative;
@@ -4006,9 +3467,6 @@
   .bnote.warn {
     color: var(--warn);
   }
-  .bnote.err {
-    color: var(--down);
-  }
 
   /* ---- THE PAGER ---- */
   .pgbar {
@@ -4086,6 +3544,13 @@
     font-variant-numeric: tabular-nums;
     padding: 10px 12px;
     text-align: right;
+  }
+  .pgat input {
+    width: 200px;
+    text-align: left;
+  }
+  .pgwhy {
+    flex-basis: 100%;
   }
   .pgjump input:disabled {
     opacity: 0.45;

@@ -389,10 +389,42 @@ fn broker_duplicates_do_not_double_volume_and_conflicts_are_refused() {
     assert!(repeated.failures.is_empty(), "{:?}", repeated.failures);
     assert!(repeated.balances());
     raw.rows[1].volume += 1;
+    // TWO CANDLES AT ONE STAMP THAT DISAGREE: both are refused by name, and
+    // every other minute of the answer lands (D-3351, WP-13c; DB-N23). The
+    // whole answer was refused, which is how a month was opened part-way.
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &conflict.0, plan(&req));
-    assert_eq!(done.bars_committed, 0);
-    assert!(done.failures[0].why.contains("conflicting vendor candles"));
-    assert!(!month_file(&conflict.0, Timeframe::MINUTE_1).exists());
+    assert_eq!(done.bars_committed, 374, "{:?}", done.failures);
+    let conflicts: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.contains("conflicting vendor candles"))
+        .collect();
+    assert_eq!(conflicts.len(), 1, "{:?}", done.failures);
+    assert!(
+        conflicts[0].why.contains("2 row(s) refused"),
+        "{}",
+        conflicts[0].why
+    );
+    assert!(
+        conflicts[0]
+            .why
+            .contains(&raw.rows[0].timestamp.to_string()),
+        "the stamp is named: {}",
+        conflicts[0].why
+    );
+    // EVERY OTHER FAILURE IS A DERIVED RUNG WITHHOLDING THE 09:15 BUCKET the
+    // refused minute leaves incomplete (D-3321), each named.
+    assert!(
+        done.failures
+            .iter()
+            .filter(|f| !f.why.contains("conflicting vendor candles"))
+            .all(|f| f.why.contains("incomplete or invalid minute coverage")
+                && f.why.contains("withheld")),
+        "{:?}",
+        done.failures
+    );
+    assert!(!done.balances(), "a refusal is never a balanced book");
+    assert!(month_file(&conflict.0, Timeframe::MINUTE_1).exists());
 }
 
 #[test]
@@ -919,8 +951,16 @@ fn broker_candles_shifted_thirty_seconds_refuse_before_any_write() {
     assert_eq!(done.failures.len(), 1);
     assert!(done.failures[0].why.contains("off-grid broker candle"));
     assert!(done.failures[0].why.contains(&(OPEN_UTC + 30).to_string()));
+    assert!(
+        done.failures[0].why.contains("375 row(s) refused"),
+        "every row is refused by name, each counted: {}",
+        done.failures[0].why
+    );
     assert_eq!(raw, original, "no invented timestamps");
-    assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 0);
+    // NO BAR IS WRITTEN. Since D-3351 each row is refused rather than the
+    // answer, so the census and the gap ledger are consulted as for any
+    // landing; the store's bars are untouched.
+    assert!(!scratch.0.join("bars").exists());
 }
 
 /// DB-G45, D-3341 item 1: AN OFF-GRID CANDLE'S FAILURE IS FILED UNDER THE DAY
@@ -947,15 +987,21 @@ fn an_off_grid_candle_s_failure_carries_its_own_day() {
     }
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
     assert_eq!(done.bars_committed, 0);
-    assert_eq!(done.failures.len(), 1);
-    assert!(done.failures[0].why.contains("off-grid broker candle"));
+    // ONE OFF-GRID GROUP (D-3351); the window's first day, which the vendor
+    // sent nothing for, is the request audit's own coverage line.
+    let off_grid: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.contains("off-grid broker candle"))
+        .collect();
+    assert_eq!(off_grid.len(), 1, "{:?}", done.failures);
     assert_eq!(
-        done.failures[0].day,
+        off_grid[0].day,
         Some(pull::session::Day::new(2025, 7, 1).expect("a real day")),
         "the stamp's own IST day, not the window's 2025-06-30"
     );
     assert_eq!(
-        done.failures[0].month,
+        off_grid[0].month,
         Some(store::path::YearMonth::new(2025, 7).expect("a month")),
         "and its month, not the window's 2025-06"
     );
@@ -973,11 +1019,18 @@ fn an_extra_broker_timestamp_inside_a_minute_refuses_but_archive_seconds_survive
     let raw = pull::fetch::RawWindow {
         rows: member.rows.clone(),
     };
+    // THE OFF-GRID CANDLE IS REFUSED BY NAME AND THE 375 ON THE GRID LAND
+    // (D-3351, WP-13c; DB-N23): it refused the whole answer.
     let done = pull::ingest::from_window(&raw, "NIFTY", "test", &broker.0, plan(&req));
-    assert_eq!(done.bars_committed, 0);
-    assert_eq!(done.failures.len(), 1);
+    assert_eq!(done.bars_committed, 375, "{:?}", done.failures);
+    assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
     assert!(done.failures[0].why.contains("off-grid broker candle"));
-    assert_eq!(fs::read_dir(&broker.0).unwrap().count(), 0);
+    assert!(
+        done.failures[0].why.contains("row 1:"),
+        "{}",
+        done.failures[0].why
+    );
+    assert!(done.failures[0].why.contains("1 row(s) refused"));
     let done = pull::ingest::from_members(&[member], &archive.0, plan(&req));
     assert!(done.failures.is_empty(), "{:?}", done.failures);
     assert_eq!(done.bars_committed, 375);
@@ -1056,9 +1109,10 @@ fn broker_grid_uses_requested_width_and_preserves_millisecond_precision() {
             into,
         );
         assert_eq!(done.bars_committed, 0);
-        assert_eq!(done.failures.len(), 1);
+        assert_eq!(done.failures.len(), 1, "{tag}: {:?}", done.failures);
         assert!(done.failures[0].why.contains("off-grid broker candle"));
-        assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 0);
+        // NO BAR IS WRITTEN: the row is refused by name (D-3351).
+        assert!(!scratch.0.join("bars").exists(), "{tag}");
     }
 }
 
@@ -1515,8 +1569,14 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
         .split_once("write_month(")
         .expect("one writes the pulled rung");
     assert!(
-        after_write.contains("failures.extend(derive_all("),
+        after_write.contains("failures.extend(derive_month("),
         "derivation runs after the write, whatever it wrote"
+    );
+    // `derive_month` is `derive_all` for an ordinary landing; a versioned
+    // repair refolds the month as now served instead (D-3350, WP-13c).
+    assert!(
+        item(INGEST, "fn derive_month(").contains("Mode::Append => derive_all("),
+        "an ordinary landing derives through `derive_all`"
     );
     assert!(
         item(INGEST, "fn write_month(").contains("write_and_count("),

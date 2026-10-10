@@ -34,17 +34,22 @@
 //! offsets, none of which grows with the size of the file. Before that,
 //! `Manifest::newest` walks the census's whole append log once to find the
 //! newest write of each key: O(log length). So one scrub is O(log length +
-//! E_v) with E_v file opens, and it runs on the request's own task, blocking
-//! that runtime worker for the whole walk (`docs/06-limits.md`, W1-api5-7 and
-//! D-1501). This said "O(1) per entry" and named no log walk until D-1501
-//! (W1-api6-0).
+//! E_v) with E_v file opens. It ran on the request's own task, blocking that
+//! runtime worker for the whole walk (`docs/06-limits.md`, W1-api5-7 and
+//! D-1501), the DB-066 stall class the other store routes were moved off:
+//! 246,147 file opens for GDFL on the operator's store, each on a Tokio
+//! worker. Since WP-33c (DB-A35) `/verify.json` runs it through
+//! [`vendor_off_worker`]: on the blocking pool, behind the store reads'
+//! admission (`crate::detail::run_store_read`), and a request past it is a
+//! named 429, never a queue. This said "O(1) per entry" and named no log walk until
+//! D-1501 (W1-api6-0).
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
 //! `CLAUDE.md` §3 rule 6: a structural argument is not a
 //! measurement, however sound it is.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use brutex_core::vendor::Vendor;
 use pull::scrub::{self, Tally};
@@ -262,10 +267,75 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     report
 }
 
+/// [`vendor`], off the async workers (WP-33c, DB-A35): on Tokio's blocking
+/// pool through [`crate::detail::run_store_read`], the admission every other
+/// store route takes, so a scrub never holds a runtime worker and at most
+/// [`crate::detail::MAX_STORE_READ_CONCURRENT`] store reads (a scrub among
+/// them) run at once. A full pool answers 429 naming the bound, a task that
+/// cannot be joined 503, both as `{"error": ...}`
+/// (`crate::detail::admission_refused`), never a queue.
+///
+/// A scrub holds its slot for its whole walk (one bar file opened per held
+/// month: 246,147 for GDFL on the operator's store), so while one runs the
+/// `/db` reads share one slot fewer. Said rather than hidden.
+///
+/// # Errors
+///
+/// The status and body to answer instead of a report.
+pub(crate) async fn vendor_off_worker(
+    root: PathBuf,
+    census: VendorCensus,
+) -> Result<Report, (axum::http::StatusCode, String)> {
+    crate::detail::run_store_read(move || vendor(&root, &census))
+        .await
+        .map_err(|why| {
+            crate::detail::admission_refused(
+                "vendor scrub",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pull::scrub::Finding;
+
+    /// **THE SCRUB RUNS OFF THE WORKERS** (WP-33c, DB-A35): on the blocking
+    /// pool, from a current-thread runtime whose one worker the scrub would
+    /// otherwise hold, and it answers what the inline call answered.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::expect_used,
+        reason = "a test that cannot panic cannot fail, and these lints exist to keep panics \
+                  out of the crate rather than out of its tests"
+    )]
+    async fn a_scrub_runs_off_the_workers() {
+        let unread = VendorCensus {
+            vendor: Vendor::Zerodha,
+            path: PathBuf::from("/nowhere/manifest"),
+            state: Census::Unreadable {
+                reason: "a fixture counter".to_owned(),
+                fault: crate::census::Fault::Refused,
+            },
+        };
+        let worker = std::thread::current().id();
+        let ran_on = crate::detail::run_store_read(move || std::thread::current().id())
+            .await
+            .expect("admitted");
+        assert_ne!(ran_on, worker, "the pool is not the runtime's worker");
+        let inline = vendor(Path::new("/nowhere"), &unread);
+        let report = vendor_off_worker(PathBuf::from("/nowhere"), unread)
+            .await
+            .expect("admitted");
+        assert_eq!(report.refused, inline.refused);
+        assert!(
+            report
+                .refused
+                .is_some_and(|why| why.contains("could not be read"))
+        );
+    }
 
     /// Nothing checked is never "verified".
     ///

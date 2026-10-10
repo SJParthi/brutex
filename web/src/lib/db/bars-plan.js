@@ -95,26 +95,289 @@ export const BOARD_GAP = 8;
 export const MIN_USEFUL_ROWS = 10;
 
 /* ---------------------------------------------------------------------
-   WHICH COLUMNS `/bars/window.json` CAN ORDER BY, AND IT IS NOT ALL OF THEM.
+   WHICH COLUMNS `/bars/window.json` ORDERS, IN THE GRID'S KEYS AND THE WIRE'S.
 
-   `bars::SortKey::parse` accepts exactly these seven — they are the fields a
-   stored `Bar` HAS. This grid draws twenty-five columns, and the other
-   eighteen are derived here: the change columns, the expiry arithmetic, the
-   moneyness, every greek. The endpoint has no way to order by a number the
-   store never held.
+   `bars::SortKey::parse` accepts `ts`, `tod`, `o`, `h`, `l`, `c`, `v` and
+   `oi` — the fields a stored `Bar` has, and its IST second of the day. The
+   grid's own column keys are not all spelled that way, and the difference
+   cost a full read: the Volume column is `vol`, `WINDOW_SORTS` held `v`, so
+   `WINDOW_SORTS.has('vol')` was false and a Volume sort over GDFL NIFTY 1s
+   asked for every one of 97 month files whole, about 3.5 GB of JSON, to sort
+   them in the browser (DB-062, DB-G94). The Time column (`tod`) was not in the
+   set either, and no row carried `tod`, so its arrows flipped the caret and
+   not the rows (DB-006, DB-N05).
 
-   WHAT HAPPENED WITHOUT THIS GUARD, measured by clicking the column: sorting
-   on OI CHG % sent `sort=oichg`, the server answered **400 — "oichg" is not a
-   column this grid sorts on** — and the grid emptied. Fifty rows became none,
-   on a store holding 623,498 bars, because a control the page offers asked a
-   question the route it now uses cannot take.
+   So the grid's key is TRANSLATED here, once, for every reader: the request
+   and the test of whether the server can order a column read the same table.
+   D-3326. */
+export const WIRE_SORT = Object.freeze({
+  ts: 'ts',
+  tod: 'tod',
+  o: 'o',
+  h: 'h',
+  l: 'l',
+  c: 'c',
+  vol: 'v',
+  oi: 'oi'
+});
+/** The grid's column keys the server orders. */
+export const WINDOW_SORTS = new Set(Object.keys(WIRE_SORT));
 
-   A COLUMN THE GRID OFFERS MUST NOT EMPTY THE GRID. The window route is for
-   the seven the store can order; everything else keeps the read-and-sort-here
-   path it always had, which is slower and correct. `CLAUDE.md` §4: degrade
-   loudly and name the reason, or refuse — never a control that silently
-   returns nothing. */
-export const WINDOW_SORTS = new Set(['ts', 'o', 'h', 'l', 'c', 'v', 'oi']);
+/**
+ * The wire spelling of a grid column key the server orders, or `null` for a
+ * column it does not.
+ * @param {string} key
+ * @returns {string | null}
+ */
+export function wireSort(key) {
+  return Object.hasOwn(WIRE_SORT, key) ? /** @type {any} */ (WIRE_SORT)[key] : null;
+}
+
+/* ---------------------------------------------------------------------
+   THE COLUMNS THE BROWSER ORDERS, AND THE CEILING ON WHAT IT WILL READ TO DO IT.
+
+   The change columns are folded on the server per bar, against the previous
+   stored bar in time, and travel with the rows; the contract columns are one
+   value per series. Neither is a field the server can order a window by. The
+   page used to answer such a sort by reading EVERY matched month whole
+   through `/bars.json` — 97 requests and 3.55 GB for NIFTY 1s, 603 requests
+   and 563 MB for one option expiry, a renderer crash under a carried-over
+   sort (DB-063, DB-N16, DB-A29, DB-B50).
+
+   NOW IT IS BOUNDED BEFORE ANYTHING IS READ. The server's own count of the
+   rows the query keeps decides it: at or under `LOCAL_SORT_BUDGET` the rows
+   are read in time order through the window route, at most
+   `LOCAL_SORT_BUDGET / WINDOW_PAGE_MAX` requests, and ordered here; past it
+   the sort is REFUSED by name with the count, and the grid stays in time
+   order. `/bars.json` is not called by /db at all any more. */
+export const LOCAL_SORTS = new Set(['chg', 'oichg', 'exp', 'dte', 'side', 'strike']);
+/** The most rows the browser reads to order a column the server cannot. */
+export const LOCAL_SORT_BUDGET = 20_000;
+/** The largest page `/bars/window.json` serves (`bars::MAX_WINDOW_LIMIT`). */
+export const WINDOW_PAGE_MAX = 1000;
+/** The most series one window request names (`bars::MAX_SERIES`). */
+export const MAX_SERIES = 1024;
+/** The most months one window request spans (`bars::MAX_WINDOW_MONTHS`). */
+export const MAX_WINDOW_MONTHS = 240;
+/** The most rows the whole-query export writes. */
+export const EXPORT_CAP = 20_000;
+
+/**
+ * Months from `a` to `b` inclusive, both `YYYY-MM`; `0` when `b` is before `a`.
+ * @param {string} a @param {string} b
+ */
+export function monthSpan(a, b) {
+  const ya = Number(a.slice(0, 4));
+  const ma = Number(a.slice(5, 7));
+  const yb = Number(b.slice(0, 4));
+  const mb = Number(b.slice(5, 7));
+  const n = (yb - ya) * 12 + (mb - ma) + 1;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * THE SELECTION AS ONE WINDOW REQUEST NAMES IT (D-3326): its rung, every
+ * series it reaches, and the month range — narrowed to the day window's months
+ * when one narrows. Each series' census rows are kept beside it so the census
+ * can be compared with the file's own count when the answer arrives.
+ *
+ * `why` is a refusal said before any request: more series than one request
+ * reads, a range longer than the server spans, more than one rung, or a day
+ * window wholly outside the held months.
+ *
+ * O(matched rows), once per change of the selection — never per page.
+ *
+ * @param {any[]} rows the matched census rows
+ * @param {string} [fromDay] the day window's first day, when it narrows
+ * @param {string} [toDay] the day window's last day, when it narrows
+ */
+export function seriesPlan(rows, fromDay = '', toDay = '') {
+  /** @type {Map<string, {rows: number, census: any}>} */
+  const series = new Map();
+  const rungs = new Set();
+  let lo = '';
+  let hi = '';
+  for (const r of rows) {
+    rungs.add(r.timeframe);
+    const held = series.get(r.instrument);
+    if (held) held.rows += Number(r.rows) || 0;
+    else series.set(r.instrument, { rows: Number(r.rows) || 0, census: r });
+    if (lo === '' || r.month < lo) lo = r.month;
+    if (hi === '' || r.month > hi) hi = r.month;
+  }
+  const keys = [...series.keys()].sort();
+  const timeframe = rungs.size === 1 ? String([...rungs][0]) : '';
+  let from = lo;
+  let to = hi;
+  if (fromDay && fromDay.slice(0, 7) > from) from = fromDay.slice(0, 7);
+  if (toDay && toDay.slice(0, 7) < to) to = toDay.slice(0, 7);
+  /** @type {string | null} */
+  let why = null;
+  if (keys.length === 0) why = null;
+  else if (rungs.size > 1) {
+    why = `this selection reaches ${fmt(rungs.size)} rungs (${[...rungs].join(', ')}); a page is read at one rung, so choose one`;
+  } else if (keys.length > MAX_SERIES) {
+    why = `too_many_series: this selection reaches ${fmt(keys.length)} series and one window request reads at most ${fmt(MAX_SERIES)} — choose an expiry, a strike or a side`;
+  } else if (from > to) {
+    why = `the date window ${fromDay || '…'} to ${toDay || '…'} lies outside the held months ${lo} to ${hi}, so there is nothing to read`;
+  } else if (monthSpan(from, to) > MAX_WINDOW_MONTHS) {
+    why = `the months ${from} to ${to} span ${fmt(monthSpan(from, to))}, past the ${fmt(MAX_WINDOW_MONTHS)} one window request reads — narrow the dates`;
+  }
+  return { keys, series, timeframe, from, to, why };
+}
+
+/**
+ * A time bound as the wire spells it, `HH:MM:SS`.
+ *
+ * THE TO END OF A MINUTE IS ITS FIFTY-NINTH SECOND (DB-B48). The server reads
+ * `tod_to=15:29` as `15:29:00`, inclusive, so on one-second bars it kept one
+ * of the minute's sixty bars while this page's own picker meant the whole
+ * minute. A minute is therefore sent as `HH:MM:00` at the From end and
+ * `HH:MM:59` at the To end; a bound that already carries its second is sent
+ * as it is. Anything else is `''`, no bound.
+ *
+ * @param {string} t @param {'from' | 'to'} end
+ */
+export function todWire(t, end) {
+  const s = String(t ?? '').trim();
+  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:${end === 'to' ? '59' : '00'}`;
+  if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
+  return '';
+}
+
+/**
+ * The query string of one `/bars/window.json` request over a planned
+ * selection: every series as a `key=`, the month range, the day and
+ * time-of-day bounds, the order, and either a page (`offset`, `limit`) or an
+ * instant to find (`at`, no offset).
+ *
+ * `extremes` is sent only when asked: a fold is a scan (DB-G83), and a page
+ * turn must cost a seek.
+ *
+ * @param {string} feed
+ * @param {{keys: string[], timeframe: string, from: string, to: string}} plan
+ * @param {{sort?: string, desc?: boolean, offset?: number, limit?: number,
+ *   fromDay?: string, toDay?: string, fromTime?: string, toTime?: string,
+ *   at?: number | null, extremes?: boolean}} o
+ */
+export function windowQuery(feed, plan, o) {
+  const q = new URLSearchParams();
+  q.set('feed', feed);
+  q.set('timeframe', plan.timeframe);
+  q.set('from', plan.from);
+  q.set('to', plan.to);
+  for (const k of plan.keys) q.append('key', k);
+  q.set('sort', o.sort ?? 'ts');
+  q.set('dir', o.desc === false ? 'asc' : 'desc');
+  if (o.at !== undefined && o.at !== null) q.set('at', String(o.at));
+  else q.set('offset', String(o.offset ?? 0));
+  q.set('limit', String(o.limit ?? 50));
+  if (o.fromDay) q.set('from_day', o.fromDay);
+  if (o.toDay) q.set('to_day', o.toDay);
+  const tf = todWire(o.fromTime ?? '', 'from');
+  const tt = todWire(o.toTime ?? '', 'to');
+  if (tf) q.set('tod_from', tf);
+  if (tt) q.set('tod_to', tt);
+  q.set('extremes', o.extremes ? '1' : '0');
+  return q.toString();
+}
+
+/**
+ * The identity of one stored bar on the page: its series and its second. A
+ * series holds one bar per stamp, so this is unique across a merged page and
+ * stable across a re-sort — which is what a highlight and an `{#each}` key
+ * need.
+ * @param {string} key @param {number} t unix seconds
+ */
+export const rowKey = (key, t) => `${key}|${t}`;
+
+/**
+ * An IST wall-clock instant as unix seconds, or `null` when either part is
+ * not a day or a time.
+ * @param {string} day `YYYY-MM-DD` @param {string} time `HH:MM` or `HH:MM:SS`
+ */
+export function istInstant(day, time) {
+  const d = String(day ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const t = String(time ?? '').match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!d || !t) return null;
+  const [h, m, s] = [Number(t[1]), Number(t[2]), Number(t[3] ?? 0)];
+  if (h > 23 || m > 59 || s > 59) return null;
+  const midnight = Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3]));
+  if (!Number.isFinite(midnight) || istDayKey(midnight - IST_OFFSET_MS) !== `${d[1]}-${d[2]}-${d[3]}`) return null;
+  return (midnight - IST_OFFSET_MS) / 1000 + h * 3600 + m * 60 + s;
+}
+
+/**
+ * WHAT THE GO-TO BOX TYPED, as an instant (DB-005).
+ *
+ * `YYYY-MM-DD HH:MM[:SS]` names the day; a bare `HH:MM[:SS]` takes `day`, the
+ * day the reader is looking at. Seconds are accepted on every rung and are the
+ * point on a one-second rung, where sixty bars share a minute.
+ *
+ * @param {string} text @param {string} day the default day, `YYYY-MM-DD`
+ * @returns {{at: number, label: string} | {why: string}}
+ */
+export function parseGoto(text, day) {
+  const s = String(text ?? '').trim().replace('T', ' ');
+  const both = s.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)$/);
+  const only = s.match(/^(\d{2}:\d{2}(?::\d{2})?)$/);
+  const d = both ? both[1] : day;
+  const t = both ? both[2] : only ? only[1] : '';
+  if (!t) {
+    return { why: `“${s}” is not an instant. Type a day and a time, 2019-03-20 12:33:38, or a time alone, 12:33:38, for the day on screen.` };
+  }
+  if (!d) return { why: `“${s}” names no day and no bar is on screen to take one from. Type the day too: 2019-03-20 ${t}.` };
+  const at = istInstant(d, t);
+  if (at === null) return { why: `“${s}” is not a real IST instant: the day must exist and the time be 00:00:00 to 23:59:59.` };
+  return { at, label: `${d} ${t.length === 5 ? `${t}:00` : t}` };
+}
+
+/** The 1-based page holding 0-based row `index` at `size` rows a page. @param {number} index @param {number} size */
+export const pageOfIndex = (index, size) => Math.floor(Math.max(0, index) / Math.max(1, size)) + 1;
+
+/**
+ * WHERE THE CENSUS AND THE FILE DISAGREE, by series (DB-G02, DB-G61, DB-022).
+ *
+ * The pager counts the FILE's own rows — the server's `series_totals` — so a
+ * census behind a running import no longer strands the bars past its count.
+ * The census is still compared, so its lag is said rather than hidden: one
+ * entry per series whose census rows differ from the file's.
+ *
+ * Only meaningful when no day or time bound narrows the read: under a bound
+ * the server's total is the kept rows, not the file's.
+ *
+ * @param {{key: string, total: number}[]} totals @param {Map<string, {rows: number}>} census
+ */
+export function censusBehind(totals, census) {
+  /** @type {{key: string, file: number, census: number}[]} */
+  const out = [];
+  for (const t of totals ?? []) {
+    const c = census.get(t.key);
+    if (c && Number.isSafeInteger(t.total) && c.rows !== t.total) out.push({ key: t.key, file: t.total, census: c.rows });
+  }
+  return out;
+}
+
+/**
+ * A grid column's values compared for a local sort: nulls last in BOTH
+ * directions, then the value, then a deterministic tie-break that does not
+ * invert with the direction.
+ * @param {string} k @param {boolean} desc
+ */
+export function localComparator(k, desc) {
+  const dir = desc ? -1 : 1;
+  return (/** @type {any} */ a, /** @type {any} */ b) => {
+    const A = a[k];
+    const B = b[k];
+    const na = A === null || A === undefined;
+    const nb = B === null || B === undefined;
+    if (na !== nb) return na ? 1 : -1;
+    let d = 0;
+    if (!na) d = typeof A === 'string' || typeof B === 'string' ? (String(A) < String(B) ? -1 : String(A) > String(B) ? 1 : 0) : A < B ? -1 : A > B ? 1 : 0;
+    if (d !== 0) return dir * d;
+    return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.rk < b.rk ? -1 : a.rk > b.rk ? 1 : 0;
+  };
+}
 
 /* ---------------------------------------------------------------------
    HOW MANY OF THOSE REQUESTS ARE IN FLIGHT AT ONCE - and it is a constant,

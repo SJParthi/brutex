@@ -1007,7 +1007,9 @@ impl std::error::Error for ProvenanceError {
 
 /// The sidecar beside the month `path` names, if there is one.
 ///
-/// `path` may name any sibling of the month; the sidecar is its `.prv`. One
+/// `path` may name any sibling of the month; the sidecar is its `.prv`, beside
+/// the generation of the month every reader opens (`crate::generation`): a
+/// repaired month's revision has its own, or none. One
 /// `open` (never through a final symlink), one `fstat` and one positional read
 /// of at most [`MAX_FILE_LEN`] bytes. Takes no lock: records are self-checked
 /// and append-only, so a landing being written as this reads shows up as tail
@@ -1020,6 +1022,18 @@ impl std::error::Error for ProvenanceError {
 /// a valid one after it, a record with an impossible field, or records out of
 /// bar order.
 pub fn read(root: &Path, path: StorePath<'_>) -> Result<Found, ProvenanceError> {
+    // THE GENERATION EVERY READER OPENS (D-3350, WP-13c). A repaired month's
+    // bars are its revision's, and the original's records index the
+    // original's bars: read beside the bars that are served, or not at all.
+    let served =
+        crate::generation::served(root, path.with_file(FileKind::Bars)).map_err(|why| {
+            ProvenanceError::Io {
+                path: crate::generation::pointer_path(root, path),
+                action: "resolving the month's served generation",
+                source: io::Error::other(why.to_string()),
+            }
+        })?;
+    let root = &served.root(root);
     let at = path.with_file(FileKind::Provenance).to_path_buf(root);
     let file = match crate::open_flags::open_read_no_follow(&at) {
         Ok(file) => file,

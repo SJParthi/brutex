@@ -27,7 +27,9 @@ import { parse } from 'svelte/compiler';
 import { DB_PAGE_FILES, dbSource } from './database-page-fixture.js';
 
 const SHELL = '../src/routes/db/+page.svelte';
-const PLACEHOLDERS = ['DbExtremes', 'DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge', 'DbChart'];
+// DbExtremes WAS FILLED BY ITS OWNER, WP-52 (DB-G95), and left this list in
+// the same change, as the note above asks; it stays mounted exactly once.
+const PLACEHOLDERS = ['DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge', 'DbChart'];
 const COMPONENTS = DB_PAGE_FILES.filter((path) => path.endsWith('.svelte'));
 
 /** The number of times `<Name {db} />` is written across the page's components. */
@@ -46,7 +48,7 @@ test('the shell stays under 400 lines', () => {
 });
 
 test('every placeholder is mounted exactly once, by a component of this page', () => {
-  for (const name of PLACEHOLDERS) assert.equal(mounts(name), 1, `${name} is mounted ${mounts(name)} times`);
+  for (const name of [...PLACEHOLDERS, 'DbExtremes']) assert.equal(mounts(name), 1, `${name} is mounted ${mounts(name)} times`);
   assert.equal(mounts('DbCensusBanner'), 1);
   assert.match(dbSource(SHELL), /<DbCensusBanner \{db\} \/>/);
 });

@@ -1637,10 +1637,10 @@ impl Journal {
                 self.path.display()
             )
         })?;
-        let bytes = file
+        let meta = file
             .metadata()
-            .map_err(|e| named("cannot measure the locked journal", &e))?
-            .len();
+            .map_err(|e| named("cannot measure the locked journal", &e))?;
+        let bytes = meta.len();
         let torn = bytes % RECORD_LEN_U64;
         if torn != 0 {
             return Err(format!(
@@ -1665,8 +1665,29 @@ impl Journal {
         // unlock `store.flock` logs as a Warn naming the journal. Returned as
         // this append's error, it said a synced record was not in the journal.
         // See `append`'s doc. D-0695.
+        //
+        // THE INDEX FOLLOWS, under the same lock (WP-33c; DB-A32, DB-A34). It
+        // returns nothing, so it cannot refuse the append either.
+        self.index_after_sync(&meta, first, &images);
         drop(file);
         Ok(first)
+    }
+
+    /// Files the records just appended at `first` into the journal's index
+    /// and moves its cover, under the append lock the caller holds; builds the
+    /// index first when it is absent or not this file's (WP-33c).
+    ///
+    /// Returns nothing on purpose: an index that cannot be written is logged
+    /// at `Error` ([`note_index`]) and never refuses the append. The record is
+    /// the fact and the index is derived from it; every reader then walks the
+    /// journal and says why.
+    fn index_after_sync(&self, meta: &std::fs::Metadata, first: u64, images: &[u8]) {
+        use std::os::unix::fs::MetadataExt as _;
+        let total = first.saturating_add(as_u64(images.len()) / RECORD_LEN_U64);
+        let indexed = self.index_locked((meta.dev(), meta.ino()), first, total, images);
+        if indexed.as_ref().map_or(true, |built| built.from_scratch) {
+            note_index(&self.path, &indexed);
+        }
     }
 
     /// Appends one whole-note entry for journal record `ordinal` and makes it
@@ -2103,7 +2124,7 @@ fn note_whole_failed(path: &Path, record: &Record, why: &str) {
 /// the one direction a count must never be wrong in. On every host this builds
 /// for `usize` is 64 bits and the conversion cannot fail, so the arm is a
 /// backstop and not a live path.
-fn as_u64(n: usize) -> u64 {
+pub(crate) fn as_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
@@ -2226,6 +2247,733 @@ fn covered(image: &[u8; RECORD_LEN]) -> [u8; OFF_CRC] {
         *dst = *src;
     }
     head
+}
+
+// ===========================================================================
+// THE JOURNAL'S INDEX (WP-33c; DB-A32, DB-A34)
+// ===========================================================================
+//
+// # Why
+//
+// The journal keeps no index of its own, so the two readers that need to know
+// which run a record belongs to (`/audit.json`'s feed scope) or which records
+// refused one instrument (`/dayflags.json`'s Zerodha front) decoded every
+// record the first time a process asked: 4,217,027 records, 1,079,558,912
+// bytes on the operator's store on 9 Oct 2026, 1.33 s under a mutex on the
+// first `/audit.json` request and the same walk again under another on the
+// first `/dayflags.json`. Neither cost was a constant, and both grew with
+// every pull.
+//
+// # What it is
+//
+// Beside the journal, `pull.journal.idx/`, written by the journal's own
+// append under the journal's exclusive lock, AFTER the record is synced:
+//
+// * `runs` -- one 32-byte entry per run record: its ordinal, its stamp and
+//   the vendor its source names (`crate::audit_json::vendor_of_source`).
+// * `refusals/<source>.idx` -- one 16-byte entry per member failure whose note
+//   may name a refusal ([`may_name_a_refusal`]), filed by its source (the
+//   store symbol it pulled).
+// * `faults` -- one 16-byte entry per record that would not decode.
+// * `cover` -- how many of the journal's records all of the above cover: one
+//   16-byte image, CRC-checked, rewritten in place after every append (a
+//   counter, like a manifest's, not history). Each entry file is synced before
+//   the cover moves past it, so a cover can never claim an entry the disk
+//   does not hold; a cover lost to a crash is behind, never ahead, and the
+//   next append re-indexes the gap. An entry written twice that way is the
+//   same entry; readers keep one per ordinal.
+// * `ident` -- the device and inode of the journal the index was built from:
+//   an index of another file (a journal replaced) is refused, never read.
+//
+// # What it costs
+//
+// Per append: the record's kind byte and a decode of the records just
+// written (one or two), at most one synced entry append, and one 16-byte
+// write of the cover. Constant. A reader: one read of `ident` and `cover`,
+// one read of `runs` (O(runs): 12 on the operator's store), one read of one
+// `refusals` file (O(refusals of one instrument): 20 for NIFTY), and a decode
+// of the records the cover does not reach yet (none, after an append).
+//
+// # Built once for a journal that predates it
+//
+// A journal written before this index exists has none. The first append under
+// this build builds it ([`Journal::build_index`], under the lock it already
+// holds), and so does `api serve` at startup, in the background, when the
+// lock is free: one pass over the whole journal, the 1.33 s the readers used
+// to pay per process, paid once, ever. Until then a reader says it walked the
+// journal and why (`index: absent`); it never guesses.
+
+/// What the index directory is called beside a journal: the journal's file
+/// name and `.idx`.
+pub const INDEX_SUFFIX: &str = "idx";
+
+/// One `runs` entry.
+const RUN_ENTRY: usize = 32;
+/// One `refusals` or `faults` entry, and the cover.
+const ORDINAL_ENTRY: usize = 16;
+/// The marks closing each entry kind.
+const MARK_RUN: [u8; 4] = *b"BXRI";
+const MARK_REFUSAL: [u8; 4] = *b"BXRF";
+const MARK_FAULT: [u8; 4] = *b"BXFT";
+const MARK_COVER: [u8; 4] = *b"BXCV";
+/// The rule a `runs` entry's vendor was attributed by. An entry of another
+/// rule is re-attributed from its record, never trusted.
+const ATTRIBUTION_RULE: u8 = 1;
+/// How many records a backfill decodes per read.
+const INDEX_CHUNK_RECORDS: u64 = 16_384;
+
+/// The notes a member failure carries when its whole window was refused
+/// before append. Moved here from `dayflags` so the index and its reader name
+/// one list.
+pub(crate) const WHOLE_WINDOW_NOTES: [&str; 2] = [
+    "conflicting vendor candles at ",
+    "off-grid broker candle at ",
+];
+
+/// Whether a member failure's note may name a refusal: it says `refused`, or
+/// it opens with a whole-window refusal. A superset of what `/dayflags.json`
+/// keeps (it then reads the note for the day); never a subset.
+pub(crate) fn may_name_a_refusal(note: &str) -> bool {
+    note.contains("refused") || WHOLE_WINDOW_NOTES.iter().any(|p| note.starts_with(p))
+}
+
+/// One record read by its ordinal: the ordinal, and the record or why it
+/// would not decode.
+pub(crate) type Decoded = (u64, Result<Record, RecordFault>);
+
+/// What the index says about a journal's first `covered` records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Indexed {
+    /// Records the index covers, from the first.
+    pub(crate) covered: u64,
+    /// Every run record among them, `(ordinal, vendor)`, in file order.
+    pub(crate) runs: Vec<(u64, Option<brutex_core::vendor::Vendor>)>,
+    /// Records among them that would not decode.
+    pub(crate) faults: u64,
+    /// Index entries that would not decode, skipped.
+    pub(crate) malformed: u64,
+}
+
+impl Indexed {
+    /// The vendor of the run a record at `ordinal` belongs to: the run record
+    /// before it. O(log runs).
+    pub(crate) fn vendor_before(&self, ordinal: u64) -> Option<brutex_core::vendor::Vendor> {
+        let at = self.runs.partition_point(|(run, _)| *run < ordinal);
+        at.checked_sub(1)
+            .and_then(|at| self.runs.get(at))
+            .and_then(|(_, vendor)| *vendor)
+    }
+}
+
+/// What one index build or catch-up did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexBuilt {
+    /// Records decoded.
+    pub records: u64,
+    /// Entries written, by kind.
+    pub runs: u64,
+    /// See [`Self::runs`].
+    pub refusals: u64,
+    /// See [`Self::runs`].
+    pub faults: u64,
+    /// The index was built from the first record (it was absent, or of another
+    /// file, or its cover was unreadable).
+    pub from_scratch: bool,
+    /// Why it was built from scratch, when it was.
+    pub why: Option<String>,
+    /// The cover written.
+    pub covered: u64,
+    /// The lock was held by a writer, so nothing was done: that writer builds
+    /// it under the lock it holds.
+    pub busy: bool,
+    /// Wall time, microseconds.
+    pub micros: u64,
+}
+
+/// One `runs` entry's image.
+fn run_entry(
+    ordinal: u64,
+    at: i64,
+    vendor: Option<brutex_core::vendor::Vendor>,
+) -> [u8; RUN_ENTRY] {
+    let mut out = [0u8; RUN_ENTRY];
+    let code = vendor
+        .and_then(|v| {
+            brutex_core::vendor::Vendor::ALL
+                .iter()
+                .position(|held| *held == v)
+        })
+        .and_then(|n| u8::try_from(n.saturating_add(1)).ok())
+        .unwrap_or(0);
+    let parts: [&[u8]; 4] = [
+        &ordinal.to_le_bytes(),
+        &at.to_le_bytes(),
+        &[code, ATTRIBUTION_RULE, 0, 0, 0, 0, 0, 0],
+        &MARK_RUN,
+    ];
+    let mut at_byte = 0usize;
+    for part in parts {
+        for (dst, src) in out.iter_mut().skip(at_byte).zip(part) {
+            *dst = *src;
+        }
+        at_byte = at_byte.saturating_add(part.len());
+    }
+    let crc = crc32c(out.get(..RUN_ENTRY - 4).unwrap_or(&[]));
+    for (dst, src) in out.iter_mut().skip(RUN_ENTRY - 4).zip(crc.to_le_bytes()) {
+        *dst = src;
+    }
+    out
+}
+
+/// A `runs` entry: `(ordinal, vendor code, rule)`, or `None` when it is not one.
+fn read_run_entry(bytes: &[u8]) -> Option<(u64, u8, u8)> {
+    if bytes.len() != RUN_ENTRY || bytes.get(24..28) != Some(MARK_RUN.as_slice()) {
+        return None;
+    }
+    let crc = u32::from_le_bytes(<[u8; 4]>::try_from(bytes.get(28..32)?).ok()?);
+    if crc != crc32c(bytes.get(..28)?) {
+        return None;
+    }
+    let ordinal = u64::from_le_bytes(<[u8; 8]>::try_from(bytes.get(..8)?).ok()?);
+    Some((ordinal, *bytes.get(16)?, *bytes.get(17)?))
+}
+
+/// The vendor a code names: `Ok(None)` for code 0 (no vendor), `Err` with the
+/// code for one this build does not know.
+fn vendor_of_code(code: u8) -> Result<Option<brutex_core::vendor::Vendor>, u8> {
+    if code == 0 {
+        return Ok(None);
+    }
+    brutex_core::vendor::Vendor::ALL
+        .get(usize::from(code.saturating_sub(1)))
+        .copied()
+        .map(Some)
+        .ok_or(code)
+}
+
+/// An ordinal entry's image, closed by `mark`.
+fn ordinal_entry(ordinal: u64, mark: [u8; 4]) -> [u8; ORDINAL_ENTRY] {
+    let mut out = [0u8; ORDINAL_ENTRY];
+    for (dst, src) in out
+        .iter_mut()
+        .zip(ordinal.to_le_bytes().iter().chain(&mark))
+    {
+        *dst = *src;
+    }
+    let crc = crc32c(out.get(..12).unwrap_or(&[]));
+    for (dst, src) in out.iter_mut().skip(12).zip(crc.to_le_bytes()) {
+        *dst = src;
+    }
+    out
+}
+
+/// An ordinal entry closed by `mark`, or `None` when it is not one.
+fn read_ordinal_entry(bytes: &[u8], mark: [u8; 4]) -> Option<u64> {
+    if bytes.len() != ORDINAL_ENTRY || bytes.get(8..12) != Some(mark.as_slice()) {
+        return None;
+    }
+    let crc = u32::from_le_bytes(<[u8; 4]>::try_from(bytes.get(12..16)?).ok()?);
+    if crc != crc32c(bytes.get(..12)?) {
+        return None;
+    }
+    Some(u64::from_le_bytes(
+        <[u8; 8]>::try_from(bytes.get(..8)?).ok()?,
+    ))
+}
+
+/// A source as a file name: every byte outside `A-Z a-z 0-9 - _` as `%XX`, so
+/// no source names a path outside `refusals/`. `None` when empty.
+fn source_file(source: &str) -> Option<String> {
+    if source.is_empty() {
+        return None;
+    }
+    let mut name = String::with_capacity(source.len().saturating_add(4));
+    for byte in source.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            name.push(char::from(byte));
+        } else {
+            name.push('%');
+            for nibble in [byte >> 4, byte & 0x0f] {
+                name.push(char::from(
+                    b"0123456789ABCDEF"
+                        .get(usize::from(nibble))
+                        .copied()
+                        .unwrap_or(b'0'),
+                ));
+            }
+        }
+    }
+    name.push_str(".idx");
+    Some(name)
+}
+
+/// The entries one batch of records adds, gathered so each file is written
+/// once per batch.
+#[derive(Debug, Default)]
+struct Batch {
+    runs: Vec<u8>,
+    faults: Vec<u8>,
+    refusals: std::collections::BTreeMap<String, Vec<u8>>,
+    built: IndexBuilt,
+}
+
+impl Batch {
+    /// Files one record image of ordinal `ordinal`.
+    fn file(&mut self, ordinal: u64, image: &[u8; RECORD_LEN]) {
+        self.built.records = self.built.records.saturating_add(1);
+        match Record::decode(image) {
+            Err(_) => {
+                self.faults
+                    .extend_from_slice(&ordinal_entry(ordinal, MARK_FAULT));
+                self.built.faults = self.built.faults.saturating_add(1);
+            }
+            Ok(record) if record.kind == Kind::Run => {
+                let vendor = crate::audit_json::vendor_of_source(&record.source);
+                self.runs
+                    .extend_from_slice(&run_entry(ordinal, record.at_unix_secs, vendor));
+                self.built.runs = self.built.runs.saturating_add(1);
+            }
+            Ok(record) => {
+                if may_name_a_refusal(&record.note)
+                    && let Some(name) = source_file(&record.source)
+                {
+                    self.refusals
+                        .entry(name)
+                        .or_default()
+                        .extend_from_slice(&ordinal_entry(ordinal, MARK_REFUSAL));
+                    self.built.refusals = self.built.refusals.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// Writes every entry gathered into the index at `dir`, each file synced.
+    fn write(&mut self, dir: &Path) -> Result<(), String> {
+        append_synced(&dir.join("runs"), &self.runs)?;
+        append_synced(&dir.join("faults"), &self.faults)?;
+        for (name, bytes) in &self.refusals {
+            append_synced(&dir.join("refusals").join(name), bytes)?;
+        }
+        self.runs.clear();
+        self.faults.clear();
+        self.refusals.clear();
+        Ok(())
+    }
+}
+
+/// Appends `bytes` to `path` and syncs it; nothing for nothing.
+fn append_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("{}: cannot create — {e}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .map_err(|e| format!("{}: cannot open — {e}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("{}: cannot append an index entry — {e}", path.display()))
+}
+
+/// Writes the cover: `covered` records indexed. In place, one 16-byte write.
+fn write_cover(dir: &Path, covered: u64) -> Result<(), String> {
+    use std::os::unix::fs::FileExt as _;
+    let path = dir.join("cover");
+    let image = ordinal_entry(covered, MARK_COVER);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .and_then(|file| file.write_all_at(&image, 0))
+        .map_err(|e| format!("{}: cannot write the cover — {e}", path.display()))
+}
+
+/// The device and inode of the journal, as `ident` holds them.
+fn ident_text(identity: (u64, u64)) -> String {
+    format!("{} {}\n", identity.0, identity.1)
+}
+
+impl Journal {
+    /// The journal's index directory: `pull.journal.idx` beside it.
+    #[must_use]
+    pub fn index_dir(&self) -> PathBuf {
+        let name = self
+            .path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        self.path.with_file_name(format!("{name}.{INDEX_SUFFIX}"))
+    }
+
+    /// How many records the index at `dir` covers, when it is an index of
+    /// the journal of `identity`.
+    ///
+    /// # Errors
+    ///
+    /// Absent, of another file, or a cover that will not read, by name.
+    fn cover_of(dir: &Path, identity: (u64, u64)) -> Result<u64, String> {
+        let ident = dir.join("ident");
+        let held = match std::fs::read_to_string(&ident) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("no index at {}", dir.display()));
+            }
+            Err(e) => return Err(format!("{}: {e}", ident.display())),
+        };
+        if held != ident_text(identity) {
+            return Err(format!(
+                "{} is the index of another file (device and inode {:?}, the journal's are \
+                 {identity:?}): a journal replaced, never read through a stale index",
+                dir.display(),
+                held.trim()
+            ));
+        }
+        let cover = dir.join("cover");
+        let bytes = std::fs::read(&cover).map_err(|e| format!("{}: {e}", cover.display()))?;
+        bytes
+            .get(..ORDINAL_ENTRY)
+            .and_then(|head| read_ordinal_entry(head, MARK_COVER))
+            .ok_or_else(|| format!("{}: not a cover this build wrote", cover.display()))
+    }
+
+    /// The journal file's identity and whole records now.
+    fn measured(&self) -> Result<((u64, u64), u64), String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta =
+            std::fs::metadata(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        Ok(((meta.dev(), meta.ino()), meta.len() / RECORD_LEN_U64))
+    }
+
+    /// What the index says about the journal's first `total` records, read
+    /// without a lock: `ident`, `cover`, `runs` and `faults`. See the section
+    /// header for the cost.
+    ///
+    /// # Errors
+    ///
+    /// No index, an index of another file, a cover past `total` (a journal
+    /// shorter than its index), or a file that is there and cannot be read,
+    /// each by name. A reader then walks the journal and says so.
+    pub(crate) fn read_index(&self, total: u64) -> Result<Indexed, String> {
+        let (identity, _) = self.measured()?;
+        let dir = self.index_dir();
+        let covered = Self::cover_of(&dir, identity)?;
+        if covered > total {
+            return Err(format!(
+                "{} covers {covered} records and the journal holds {total}: an index ahead of \
+                 its journal is refused",
+                dir.display()
+            ));
+        }
+        let mut out = Indexed {
+            covered,
+            ..Indexed::default()
+        };
+        let runs = read_or_empty(&dir.join("runs"))?;
+        for chunk in runs.chunks_exact(RUN_ENTRY) {
+            match read_run_entry(chunk) {
+                Some((ordinal, _, _)) if ordinal >= covered => {}
+                Some((ordinal, code, rule)) => {
+                    let vendor = if rule == ATTRIBUTION_RULE {
+                        vendor_of_code(code)
+                    } else {
+                        Err(code)
+                    };
+                    match vendor {
+                        Ok(vendor) => out.runs.push((ordinal, vendor)),
+                        Err(_) => match self.records_at(&[ordinal])?.pop() {
+                            Some((_, Ok(record))) => out.runs.push((
+                                ordinal,
+                                crate::audit_json::vendor_of_source(&record.source),
+                            )),
+                            _ => out.malformed = out.malformed.saturating_add(1),
+                        },
+                    }
+                }
+                None => out.malformed = out.malformed.saturating_add(1),
+            }
+        }
+        // ONE PER ORDINAL: an entry a crash made the next append re-write is
+        // the same entry.
+        out.runs.sort_by_key(|run| run.0);
+        out.runs.dedup_by_key(|run| run.0);
+        let faults = read_or_empty(&dir.join("faults"))?;
+        let mut fault_ordinals: Vec<u64> = faults
+            .chunks_exact(ORDINAL_ENTRY)
+            .filter_map(|chunk| read_ordinal_entry(chunk, MARK_FAULT))
+            .filter(|ordinal| *ordinal < covered)
+            .collect();
+        fault_ordinals.sort_unstable();
+        fault_ordinals.dedup();
+        out.faults = as_u64(fault_ordinals.len());
+        Ok(out)
+    }
+
+    /// The ordinals the index files under `source` below `covered`: every
+    /// member failure of that source whose note may name a refusal. One read
+    /// of one file, O(its entries).
+    ///
+    /// # Errors
+    ///
+    /// The file is there and cannot be read.
+    pub(crate) fn refusal_ordinals(&self, source: &str, covered: u64) -> Result<Vec<u64>, String> {
+        let Some(name) = source_file(source) else {
+            return Ok(Vec::new());
+        };
+        let bytes = read_or_empty(&self.index_dir().join("refusals").join(name))?;
+        let mut out: Vec<u64> = bytes
+            .chunks_exact(ORDINAL_ENTRY)
+            .filter_map(|chunk| read_ordinal_entry(chunk, MARK_REFUSAL))
+            .filter(|ordinal| *ordinal < covered)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// The records at `ordinals`, each with its ordinal: one open and one
+    /// positional read per record, whatever the journal's length.
+    ///
+    /// # Errors
+    ///
+    /// The journal cannot be opened, or a record cannot be read whole.
+    pub(crate) fn records_at(&self, ordinals: &[u64]) -> Result<Vec<Decoded>, String> {
+        use std::os::unix::fs::FileExt as _;
+        if ordinals.is_empty() {
+            return Ok(Vec::new());
+        }
+        let file =
+            std::fs::File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let mut out = Vec::with_capacity(ordinals.len());
+        let mut image = [0u8; RECORD_LEN];
+        for &ordinal in ordinals {
+            file.read_exact_at(&mut image, ordinal.saturating_mul(RECORD_LEN_U64))
+                .map_err(|e| {
+                    format!(
+                        "{}: cannot read record {ordinal} — {e}",
+                        self.path.display()
+                    )
+                })?;
+            out.push((ordinal, Record::decode(&image)));
+        }
+        Ok(out)
+    }
+
+    /// Builds or catches up the index, taking the journal's append lock for
+    /// the time it takes. A lock another writer holds is no failure: that
+    /// writer indexes under its own hold ([`IndexBuilt::busy`]).
+    ///
+    /// # Errors
+    ///
+    /// The journal or the index cannot be read or written, by name.
+    pub fn build_index(&self) -> Result<IndexBuilt, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let file = match std::fs::OpenOptions::new().read(true).open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(IndexBuilt::default());
+            }
+            Err(e) => return Err(format!("{}: {e}", self.path.display())),
+        };
+        let Ok(locked) = Flock::try_lock(file, self.path.as_path()) else {
+            return Ok(IndexBuilt {
+                busy: true,
+                ..IndexBuilt::default()
+            });
+        };
+        let meta = locked
+            .metadata()
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let total = meta.len() / RECORD_LEN_U64;
+        let built = self.index_locked((meta.dev(), meta.ino()), total, total, &[])?;
+        drop(locked);
+        Ok(built)
+    }
+
+    /// The index brought to `first + images` records, under the journal's
+    /// lock: rebuilt from scratch when absent or not this file's, caught up
+    /// from the journal when behind `first`, then `images` (the records just
+    /// appended at `first`) filed, then the cover moved.
+    fn index_locked(
+        &self,
+        identity: (u64, u64),
+        first: u64,
+        total: u64,
+        images: &[u8],
+    ) -> Result<IndexBuilt, String> {
+        let started = std::time::Instant::now();
+        let dir = self.index_dir();
+        let mut built = IndexBuilt::default();
+        let covered = match Self::cover_of(&dir, identity) {
+            Ok(covered) if covered <= first => covered,
+            Ok(covered) => {
+                let why =
+                    format!("the index covered {covered} records and the journal held {first}");
+                built = self.rebuild(identity, first, &why)?;
+                first
+            }
+            Err(why) => {
+                built = self.rebuild(identity, first, &why)?;
+                first
+            }
+        };
+        let mut batch = Batch::default();
+        if covered < first {
+            self.file_range(covered, first, &mut batch, &dir)?;
+        }
+        for (n, chunk) in images.chunks_exact(RECORD_LEN).enumerate() {
+            let mut image = [0u8; RECORD_LEN];
+            for (dst, src) in image.iter_mut().zip(chunk) {
+                *dst = *src;
+            }
+            batch.file(first.saturating_add(as_u64(n)), &image);
+        }
+        batch.write(&dir)?;
+        write_cover(&dir, total)?;
+        built.records = built.records.saturating_add(batch.built.records);
+        built.runs = built.runs.saturating_add(batch.built.runs);
+        built.refusals = built.refusals.saturating_add(batch.built.refusals);
+        built.faults = built.faults.saturating_add(batch.built.faults);
+        built.covered = total;
+        built.micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        Ok(built)
+    }
+
+    /// Files the journal's records `[from, to)` into `batch`, read in
+    /// [`INDEX_CHUNK_RECORDS`] reads and written to `dir` after each.
+    fn file_range(&self, from: u64, to: u64, batch: &mut Batch, dir: &Path) -> Result<(), String> {
+        let mut file =
+            std::fs::File::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        file.seek(std::io::SeekFrom::Start(
+            from.saturating_mul(RECORD_LEN_U64),
+        ))
+        .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let mut at = from;
+        let mut buf = Vec::new();
+        while at < to {
+            let count = to.saturating_sub(at).min(INDEX_CHUNK_RECORDS);
+            buf.clear();
+            (&mut file)
+                .take(count.saturating_mul(RECORD_LEN_U64))
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("{}: {e}", self.path.display()))?;
+            let whole = as_u64(buf.len()) / RECORD_LEN_U64;
+            if whole == 0 {
+                return Err(format!(
+                    "{}: the file ended at record {at} of {to}",
+                    self.path.display()
+                ));
+            }
+            for (n, chunk) in buf.chunks_exact(RECORD_LEN).enumerate() {
+                let mut image = [0u8; RECORD_LEN];
+                for (dst, src) in image.iter_mut().zip(chunk) {
+                    *dst = *src;
+                }
+                batch.file(at.saturating_add(as_u64(n)), &image);
+            }
+            batch.write(dir)?;
+            at = at.saturating_add(whole);
+        }
+        Ok(())
+    }
+
+    /// Builds the index of the journal's first `upto` records from scratch in
+    /// a directory of its own, then puts it in place: an old index is moved
+    /// aside under a name with its replacement's time, never deleted.
+    fn rebuild(&self, identity: (u64, u64), upto: u64, why: &str) -> Result<IndexBuilt, String> {
+        let dir = self.index_dir();
+        let building = dir.with_extension(format!("{INDEX_SUFFIX}.building"));
+        // A BUILD A CRASH LEFT HALF-WRITTEN is derived bytes nobody reads:
+        // it is cleared, never finished.
+        match std::fs::remove_dir_all(&building) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("{}: {e}", building.display()));
+            }
+            _ => {}
+        }
+        std::fs::create_dir_all(&building)
+            .and_then(|()| std::fs::write(building.join("ident"), ident_text(identity)))
+            .map_err(|e| format!("{}: {e}", building.display()))?;
+        let mut batch = Batch::default();
+        self.file_range(0, upto, &mut batch, &building)?;
+        write_cover(&building, upto)?;
+        if dir.exists() {
+            let nanos = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            // A NAME OF ITS OWN, so a second replacement in one instant never
+            // lands on the first one's.
+            let aside = (0u32..1_000)
+                .map(|n| dir.with_extension(format!("{INDEX_SUFFIX}.replaced-{nanos}-{n}")))
+                .find(|aside| !aside.exists())
+                .ok_or_else(|| format!("{}: no free name to set it aside", dir.display()))?;
+            std::fs::rename(&dir, &aside).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::rename(&building, &dir).map_err(|e| format!("{}: {e}", building.display()))?;
+        let mut built = batch.built;
+        built.from_scratch = true;
+        built.why = Some(why.to_owned());
+        built.covered = upto;
+        Ok(built)
+    }
+}
+
+/// The whole of a small file, or nothing when it is not there.
+fn read_or_empty(path: &Path) -> Result<Vec<u8>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Builds the journal's index under `root` in the background, once, when it
+/// is absent or behind: what `api serve` calls at startup (WP-33c). The
+/// outcome is logged ([`note_index`]); a lock a pull holds leaves the build to
+/// that pull's append. Returns the thread so a test can wait on it.
+#[must_use = "the thread is detached when its handle is dropped; a test waits on it"]
+pub fn ensure_index(root: &Path) -> Option<std::thread::JoinHandle<()>> {
+    let journal = Journal::at(root);
+    if !journal.path.exists() {
+        return None;
+    }
+    std::thread::Builder::new()
+        .name("audit-index".to_owned())
+        .spawn(move || note_index(&journal.path, &journal.build_index()))
+        .ok()
+}
+
+/// The index's own line: built from scratch (with why and what it took), or
+/// not written at all. `Info` with a lifecycle word when built, so the audit
+/// stream keeps it; `Error` when it failed, which degrades every reader to a
+/// walk it names. Silent for a catch-up of a few records and for a busy lock:
+/// that is every append, and it is no news.
+fn note_index(path: &Path, outcome: &Result<IndexBuilt, String>) {
+    let event = match *outcome {
+        Ok(ref built) if built.from_scratch => {
+            telemetry::Event::info("api.audit", "journal index build finished")
+                .with("records", telemetry::Value::Uint(built.records))
+                .with("runs", telemetry::Value::Uint(built.runs))
+                .with("refusals", telemetry::Value::Uint(built.refusals))
+                .with("faults", telemetry::Value::Uint(built.faults))
+                .with("micros", telemetry::Value::Uint(built.micros))
+                .with(
+                    "why",
+                    telemetry::Value::Str(built.why.as_deref().unwrap_or("")),
+                )
+        }
+        Ok(_) => return,
+        Err(ref why) => telemetry::Event::error("api.audit", "journal index not written")
+            .with("why", telemetry::Value::Str(why)),
+    };
+    let shown = path.display().to_string();
+    let _dropped_when_filtered =
+        telemetry::emit(&event.with("path", telemetry::Value::Str(&shown)));
 }
 
 #[cfg(test)]
@@ -3374,9 +4122,15 @@ mod tests {
             .map(str::trim)
             .filter(|line| !line.starts_with("//"))
             .collect();
+        // THE INDEX CALL RETURNS `()` (WP-33c): it logs its own failure and
+        // cannot carry one back, so it is the one other line allowed here.
         assert_eq!(
             code,
-            ["drop(file);", "Ok(first)"],
+            [
+                "self.index_after_sync(&meta, first, &images);",
+                "drop(file);",
+                "Ok(first)"
+            ],
             "after the sync: {after_sync}"
         );
     }
@@ -3711,5 +4465,218 @@ mod tests {
             .records(),
             3
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // THE JOURNAL'S INDEX (WP-33c; DB-A32, DB-A34)
+    // -----------------------------------------------------------------------
+
+    /// A run record whose source names Zerodha by its policy.
+    fn zerodha_run(secs: i64) -> Record {
+        Record::refused(
+            Scope::Spot,
+            Outcome::Failed,
+            at(secs),
+            "zerodha_nse_checked fixture",
+            "fixture run",
+        )
+    }
+
+    /// A member failure of `symbol` with `note`.
+    fn member(symbol: &str, note: &str) -> Record {
+        Record::member_failure(Scope::Spot, at(1_791_266_622), symbol, window(), note)
+    }
+
+    /// **EVERY APPEND KEEPS THE INDEX, AND A READER GETS THE RUNS FROM IT**:
+    /// the runs with the vendor their source names, a member failure that may
+    /// name a refusal filed under its symbol, one that does not filed nowhere,
+    /// and the cover at the journal's length, all without a walk.
+    #[test]
+    fn every_append_keeps_the_index_and_the_runs_are_read_from_it() {
+        let root = scratch("audit-index-append");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        journal
+            .append(&member(
+                "ZZOIL",
+                "2020-11-14: 60 minute row(s) refused: fixture",
+            ))
+            .unwrap();
+        journal
+            .append(&member(
+                "ZZOIL",
+                "request minute coverage UNVERIFIED on 2018-11-07",
+            ))
+            .unwrap();
+        journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Failed,
+                at(2_000),
+                "Reference indices",
+                "no vendor",
+            ))
+            .unwrap();
+        journal
+            .append(&member(
+                "ZZOTHER",
+                "conflicting vendor candles at 1578853800",
+            ))
+            .unwrap();
+        let indexed = journal.read_index(5).expect("an index");
+        assert_eq!(indexed.covered, 5);
+        assert_eq!(
+            indexed.runs,
+            vec![(0, Some(brutex_core::vendor::Vendor::Zerodha)), (3, None)]
+        );
+        assert_eq!(
+            indexed.vendor_before(1),
+            Some(brutex_core::vendor::Vendor::Zerodha)
+        );
+        assert_eq!(indexed.vendor_before(4), None);
+        assert_eq!(indexed.faults, 0);
+        assert_eq!(journal.refusal_ordinals("ZZOIL", 5).unwrap(), vec![1]);
+        assert_eq!(journal.refusal_ordinals("ZZOTHER", 5).unwrap(), vec![4]);
+        assert!(journal.refusal_ordinals("NOBODY", 5).unwrap().is_empty());
+        assert_eq!(
+            journal.refusal_ordinals("ZZOTHER", 4).unwrap(),
+            Vec::<u64>::new(),
+            "nothing past the cover asked"
+        );
+        let read = journal.records_at(&[1, 4]).unwrap();
+        assert_eq!(read[0].0, 1);
+        assert_eq!(read[1].1.as_ref().unwrap().source, "ZZOTHER");
+    }
+
+    /// **A JOURNAL WRITTEN BEFORE THE INDEX IS INDEXED ONCE, WHOLE**: a
+    /// journal with no index (the operator's, before WP-33c) is built by
+    /// `build_index` from its first record; a second call has nothing to do;
+    /// a record appended behind the index's back (an older build) is caught up
+    /// by the next build and by the next append.
+    #[test]
+    fn a_journal_with_no_index_is_built_once_and_caught_up() {
+        let root = scratch("audit-index-backfill");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        journal
+            .append(&member("ZZOIL", "refused: fixture"))
+            .unwrap();
+        std::fs::remove_dir_all(journal.index_dir()).unwrap();
+        assert!(
+            journal
+                .read_index(2)
+                .is_err_and(|why| why.contains("no index")),
+            "absent is said, never read as empty"
+        );
+        let built = journal.build_index().unwrap();
+        assert!(built.from_scratch);
+        assert_eq!(
+            (built.records, built.runs, built.refusals, built.covered),
+            (2, 1, 1, 2)
+        );
+        let again = journal.build_index().unwrap();
+        assert!(!again.from_scratch);
+        assert_eq!((again.records, again.covered), (0, 2));
+        // A RECORD WRITTEN BY A BUILD WITH NO INDEX: past the cover.
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&member("ZZOIL", "refused: late").image());
+        std::fs::write(&journal.path, &bytes).unwrap();
+        assert_eq!(journal.read_index(3).unwrap().covered, 2);
+        journal.append(&member("ZZOIL", "refused: next")).unwrap();
+        let indexed = journal.read_index(4).unwrap();
+        assert_eq!(indexed.covered, 4);
+        assert_eq!(journal.refusal_ordinals("ZZOIL", 4).unwrap(), vec![1, 2, 3]);
+    }
+
+    /// **AN INDEX OF ANOTHER FILE, OR AHEAD OF ITS JOURNAL, IS REFUSED, AND THE
+    /// NEXT BUILD REPLACES IT, KEEPING THE OLD ONE ASIDE**; an unreadable cover
+    /// is refused by name; a record that will not decode is counted.
+    #[test]
+    fn a_stale_index_is_refused_and_replaced_never_trusted() {
+        let root = scratch("audit-index-stale");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        journal
+            .append(&member("ZZOIL", "refused: fixture"))
+            .unwrap();
+        // ANOTHER FILE: the journal replaced by a copy (a new inode).
+        let copy = journal.path.with_extension("copy");
+        std::fs::copy(&journal.path, &copy).unwrap();
+        std::fs::rename(&copy, &journal.path).unwrap();
+        assert!(
+            journal
+                .read_index(2)
+                .is_err_and(|why| why.contains("another file")),
+        );
+        let rebuilt = journal.build_index().unwrap();
+        assert!(rebuilt.from_scratch);
+        assert!(rebuilt.why.unwrap().contains("another file"));
+        assert_eq!(journal.read_index(2).unwrap().covered, 2);
+        let aside = std::fs::read_dir(journal.path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".idx.replaced-")
+            })
+            .count();
+        assert_eq!(aside, 1, "the old index is kept aside, never deleted");
+        // AHEAD OF ITS JOURNAL: a reader asked about fewer records.
+        assert!(
+            journal
+                .read_index(1)
+                .is_err_and(|why| why.contains("ahead of its journal")),
+        );
+        // A TORN COVER.
+        std::fs::write(journal.index_dir().join("cover"), b"torn").unwrap();
+        assert!(
+            journal
+                .read_index(2)
+                .is_err_and(|why| why.contains("not a cover")),
+        );
+        // A RECORD THAT WILL NOT DECODE is counted.
+        assert!(journal.build_index().unwrap().from_scratch);
+        let mut broken = member("ZZOIL", "refused: broken").image();
+        broken[60] ^= 0xff;
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&broken);
+        std::fs::write(&journal.path, &bytes).unwrap();
+        let caught = journal.build_index().unwrap();
+        assert_eq!((caught.records, caught.faults), (1, 1));
+        assert_eq!(journal.read_index(3).unwrap().faults, 1);
+    }
+
+    /// **AN INDEX ENTRY IS ITS OWN, BY MARK AND CHECKSUM**: a run entry and an
+    /// ordinal entry round-trip; a flipped bit or another kind's mark is not
+    /// read; a source is a file name that cannot leave `refusals/`; a vendor
+    /// code this build does not know is not read as any vendor.
+    #[test]
+    fn an_index_entry_is_read_only_when_it_is_one() {
+        let run = run_entry(7, 1_000, Some(brutex_core::vendor::Vendor::Gdfl));
+        let (ordinal, code, rule) = read_run_entry(&run).unwrap();
+        assert_eq!((ordinal, rule), (7, ATTRIBUTION_RULE));
+        assert_eq!(
+            vendor_of_code(code),
+            Ok(Some(brutex_core::vendor::Vendor::Gdfl))
+        );
+        assert_eq!(vendor_of_code(0), Ok(None));
+        assert_eq!(vendor_of_code(250), Err(250));
+        let mut flipped = run;
+        flipped[3] ^= 1;
+        assert_eq!(read_run_entry(&flipped), None);
+        let refusal = ordinal_entry(9, MARK_REFUSAL);
+        assert_eq!(read_ordinal_entry(&refusal, MARK_REFUSAL), Some(9));
+        assert_eq!(read_ordinal_entry(&refusal, MARK_FAULT), None);
+        assert_eq!(read_ordinal_entry(&refusal[..15], MARK_REFUSAL), None);
+        assert_eq!(source_file("M&M").as_deref(), Some("M%26M.idx"));
+        assert_eq!(source_file("../x").as_deref(), Some("%2E%2E%2Fx.idx"));
+        assert_eq!(source_file(""), None);
+        assert!(may_name_a_refusal(
+            "2020-11-14: 60 minute row(s) refused: x"
+        ));
+        assert!(may_name_a_refusal("off-grid broker candle at 1578853800"));
+        assert!(!may_name_a_refusal("request minute coverage UNVERIFIED"));
     }
 }

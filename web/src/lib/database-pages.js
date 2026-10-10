@@ -1,80 +1,126 @@
 import { ask } from './ask.js';
-import { parseKey } from './instrument.js';
 
-/** Read only the displayed rows from the already addressed month files.
- * The census has selected these files and their global base; each native read
- * seeks directly to its local offset. No extrema request triggers a history
- * scan. Transfer and bar work are bounded by the page size (plus one native
- * predecessor read per file). Finding the months in the census remains O(files).
- * @param {string} feed
- * @param {any[]} files Files in displayed time order.
- * @param {number} first Global zero-based page offset.
- * @param {number} limit Number of displayed rows.
- * @param {number} base Global offset of the first file in files.
- * @param {boolean} desc
+/* ======================================================================
+   ONE PAGE OF THE BAR GRID, READ IN ONE REQUEST (D-3326)
+   ----------------------------------------------------------------------
+   This file used to read a page FILE BY FILE: the census said which month
+   files held global rows N..N+50, and each was asked for its own slice with
+   `from=to=<its month>`. Every defect of that shape was a defect of /db:
+
+   * the offsets came from the CENSUS's row counts, so a month whose file had
+     outgrown its census row (NIFTY 2019-11-28 12000 CE: census 60,070, file
+     192,062) left most of its bars unreachable, and ascending and descending
+     showed different bars (DB-G02, DB-G61);
+   * several series were read one after another, never merged by time, so a
+     CE+PE pair was stacked and "newest first" was false (DB-002, DB-G92);
+   * each month was read alone, so the first bar of every month lost its
+     change (DB-011, DB-G65).
+
+   The server now does all of it: `key=` names every series, the merge and the
+   paging are on the server, the total is the files' own, and the change of a
+   page's first bar is measured against the stored bar before it wherever it
+   lies. So this file asks once and checks what came back.
+   ====================================================================== */
+
+/** Attempts at a request the server's scan pool refused as saturated. */
+export const SATURATED_TRIES = 4;
+
+/**
+ * A pause that ends early, and throws, when `signal` aborts.
+ * @param {number} ms @param {AbortSignal} signal
+ */
+export function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason); }, { once: true });
+  });
+}
+
+/**
+ * ONE WINDOW REQUEST, CHECKED, WITH A BOUNDED RETRY WHEN THE SCAN POOL IS FULL.
+ *
+ * `/bars/window.json` runs a scan (a value sort, a time-of-day bound, an
+ * extremes fold) in a pool of two and REFUSES the third with 429 rather than
+ * queueing it. A burst of those once took 466 of 596 requests of one page
+ * (DB-B49). With one request a page that burst is gone, and the rare 429 that
+ * remains — another tab, the extremes fold beside a sort — is retried after a
+ * jittered pause, at most `SATURATED_TRIES` times. Past that it is a failure
+ * with the server's own sentence, never an empty page.
+ *
+ * The answer is checked before it is believed: a total that is not a whole
+ * number, more rows than were asked for, or rows short of the total with no
+ * fault named is a failure, not a page.
+ *
+ * @param {string} query the query string `windowQuery` built
+ * @param {number} limit the rows asked for
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait]
+ * @returns {Promise<any>} the parsed, checked answer
  */
-export async function readDatabasePage(feed, files, first, limit, base, desc, signal, request = ask) {
-  if (![first, limit, base].every(Number.isSafeInteger) || first < 0 || base < 0 || base > first || limit < 1 || limit > 1000) {
-    throw new Error('The database page must have exact bounded row offsets and a size from 1 through 1000.');
-  }
-  signal.throwIfAborted();
-  const end = first + limit;
-  if (!Number.isSafeInteger(end)) throw new Error('The database page end exceeds exact row addressing.');
-  /** @type {{row:any,offset:number,limit:number}[]} */
-  const pages = [];
-  let seen = base;
-  for (const row of files) {
-    if (!Number.isSafeInteger(row.rows) || row.rows < 0 || !Number.isSafeInteger(seen + row.rows)) {
-      throw new Error('The stored month has an invalid row count for page addressing.');
+export async function readWindowPage(query, limit, signal, request = ask, wait = pause) {
+  for (let attempt = 1; ; attempt += 1) {
+    signal.throwIfAborted();
+    const response = await request(`/bars/window.json?${query}`, { signal });
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      signal.throwIfAborted();
+      throw new Error(`HTTP ${response.status}, and the body was not JSON`);
     }
-    const offset = Math.max(0, first - seen);
-    const take = Math.max(0, Math.min(row.rows, end - seen) - offset);
-    if (take > 0) pages.push({ row, offset, limit: take });
-    seen += row.rows;
-    if (seen >= end) break;
+    signal.throwIfAborted();
+    if (response.status === 429 && attempt < SATURATED_TRIES) {
+      await wait(250 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250), signal);
+      continue;
+    }
+    if (!response.ok) throw new Error(String(body?.error ?? `HTTP ${response.status}`));
+    const offset = Number(body?.offset);
+    if (!body || !Array.isArray(body.bars) || !Number.isSafeInteger(body.total) || body.total < 0 ||
+        !Number.isSafeInteger(offset) || offset < 0 || body.bars.length > limit ||
+        !Array.isArray(body.series_totals) ||
+        (body.faults !== null && body.faults !== undefined && typeof body.faults !== 'string')) {
+      throw new Error('The server did not return the bounded bar page that was asked for.');
+    }
+    const due = Math.min(limit, Math.max(0, body.total - offset));
+    if (!body.faults && response.status === 200 && body.bars.length !== due) {
+      throw new Error(`The bar page holds ${body.bars.length} row(s) where ${due} were due, and the server named no fault.`);
+    }
+    return body;
+  }
+}
+
+/**
+ * EVERY KEPT ROW OF A SELECTION, IN TIME ORDER, for a sort the browser does
+ * itself or a whole-query export — refused before any read past `budget`.
+ *
+ * `total` is the server's own count of the rows the query keeps; the read is
+ * `ceil(total / page)` requests of `page` rows, sequential, so the cost is
+ * stated before it is paid and is never a month file's whole JSON.
+ *
+ * @param {(offset: number, limit: number) => string} queryAt the query for one slice
+ * @param {number} total @param {number} budget @param {number} page
+ * @param {AbortSignal} signal
+ * @param {typeof ask} [request]
+ * @param {(read: number) => void} [progress]
+ * @returns {Promise<{bars: any[], faults: string[]}>}
+ */
+export async function readAllRows(queryAt, total, budget, page, signal, request = ask, progress = () => {}) {
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error('The selection has no count to read against.');
+  if (total > budget) {
+    throw new Error(`over_budget: the query keeps ${total} rows and the browser reads at most ${budget} to order or write them`);
   }
   /** @type {any[]} */
-  const out = new Array(pages.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < pages.length) {
-      signal.throwIfAborted();
-      const index = next++;
-      const { row, offset, limit: take } = pages[index];
-      const parsed = parseKey(row.instrument);
-      const prefix = `${parsed.exchange}-${parsed.segment}-${parsed.underlying}`;
-      const result = { key: row.key, row, bars: [], faults: null, error: null, paged: true, held: null };
-      try {
-        if (parsed.why || !parsed.exchange || !parsed.segment || !parsed.underlying) throw new Error(parsed.why ?? 'The stored month has no address.');
-        const query = new URLSearchParams({ feed, exchange: parsed.exchange, segment: parsed.segment,
-          symbol: parsed.underlying, contract: parsed.kind === 'spot' ? '' : parsed.key.slice(prefix.length + 1),
-          timeframe: row.timeframe, from: row.month, to: row.month, sort: 'ts',
-          dir: desc ? 'desc' : 'asc', offset: String(offset), limit: String(take), extremes: '0' });
-        const response = await request(`/bars/window.json?${query}`, { signal });
-        const body = await response.json();
-        signal.throwIfAborted();
-        if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`);
-        if (body?.months_read !== 1 || body?.months_missing !== 0) {
-          throw new Error(`The stored month ${row.instrument} ${row.month} could not be opened for this page.`);
-        }
-        if (!body || !Array.isArray(body.bars) || body.bars.length > take ||
-            !Number.isSafeInteger(body.total) || body.total < 0 || body.scanned !== false ||
-            (body.faults !== null && typeof body.faults !== 'string')) {
-          throw new Error('The server did not return the bounded stored bar page that was requested.');
-        }
-        if (body.faults === null && body.bars.length !== Math.min(take, Math.max(0, body.total - offset))) {
-          throw new Error('The stored bar page is incomplete and the server supplied no fault reason.');
-        }
-        out[index] = { ...result, bars: body.bars, faults: body.faults, held: body.total };
-      } catch (why) {
-        signal.throwIfAborted();
-        out[index] = { ...result, error: String(why instanceof Error ? why.message : why) };
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(6, pages.length) }, worker));
-  signal.throwIfAborted();
-  return out;
+  const bars = [];
+  /** @type {string[]} */
+  const faults = [];
+  for (let offset = 0; offset < total; offset += page) {
+    const body = await readWindowPage(queryAt(offset, page), page, signal, request);
+    for (const b of body.bars) bars.push(b);
+    if (body.faults) faults.push(body.faults);
+    progress(bars.length);
+    if (body.bars.length === 0) break;
+  }
+  return { bars, faults };
 }
