@@ -20,7 +20,7 @@ use brutex_core::instrument::Segment;
 
 use super::{
     Carry, Code, Day, DayBlock, Entry, Facts, Feed, Generation, Key, Mode, Reader, Series,
-    VerdictError, commit, day_of_year, days_from_civil, epoch_day, scrub, table,
+    VerdictError, check_trailer, commit, day_of_year, days_from_civil, epoch_day, table,
 };
 use crate::path::Timeframe;
 
@@ -158,7 +158,7 @@ fn a_year_index_is_born_whole() {
     let len = fs::metadata(series.year_index(2031)).unwrap().len();
     assert_eq!(len, 32_768, "the index is born at its whole length");
     let found = reader.lookup(&series, day(), &key).unwrap();
-    assert_eq!(found.answer.unwrap().code(), Code::Match);
+    assert_eq!(found.answer.unwrap().code(), Some(Code::Match));
 }
 
 /// IA-VD-05: a writer killed after writing an image's temporary and before
@@ -184,15 +184,15 @@ fn a_temporary_day_image_is_never_read_unit() {
     let left = names(&year_dir);
     assert!(
         left.iter()
-            .any(|n| n.ends_with(".g000002.vdt.") || n.contains(".g000002.vdt.")),
+            .any(|n| n.starts_with("2031-03-04.g0000000002.vdt.") && n.ends_with("-22.tmp")),
         "the crashed writer's temporary is left: {left:?}"
     );
-    assert!(!year_dir.join("2031-03-04.g000002.vdt").exists());
+    assert!(!year_dir.join("2031-03-04.g0000000002.vdt").exists());
     let mut reader = Reader::new();
     let answer = reader.lookup(&series, day(), &key).unwrap().answer.unwrap();
     assert_eq!(
         answer.code(),
-        Code::Match,
+        Some(Code::Match),
         "the temporary's mismatch is never read"
     );
     assert_eq!(answer.header.generation, 1);
@@ -221,7 +221,7 @@ fn a_crash_between_link_and_commit_never_overwrites_an_image_unit() {
     let orphan = series.image_path(day(), 2);
     let before = fs::read(&orphan).unwrap();
     assert_eq!(
-        scrub(&orphan).unwrap().generation,
+        check_trailer(&orphan).unwrap().generation,
         2,
         "the orphan is a whole image"
     );
@@ -248,7 +248,7 @@ fn a_crash_between_link_and_commit_never_overwrites_an_image_unit() {
     );
     let answer = reader.lookup(&series, day(), &key).unwrap().answer.unwrap();
     assert_eq!(answer.header.generation, 3);
-    assert_eq!(answer.code(), Code::CountMismatch);
+    assert_eq!(answer.code(), Some(Code::CountMismatch));
 }
 
 /// The seam fires once and only at its own point.

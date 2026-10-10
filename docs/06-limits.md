@@ -14148,6 +14148,16 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     doubles only while the dedup rejects rows, so what is ordered is the
     written page plus what was rejected to fill it, never the
     unselected rest of the K retained rows.
+  store/verdict.rs 1 -- D-4844, IA-5 (D-4861: the reason lands with the
+    code). `build` sorts one verdict day image's records once, by (code,
+    key text, key hash), so one code's records are one contiguous slice
+    a page reads in one positional read, and the image's bytes do not
+    depend on the order the entries arrived in. O(n log n) per image
+    WRITTEN, n at most 27,000 on the largest real day and at most the
+    format's record ceiling (L-IA-33); one image per (feed, segment,
+    timeframe, day) per run (L-IA-4). Never on a lookup, a page or any
+    request path: a lookup is at most 5 reads (IA-VD-01). The detail
+    section is written in record order and needs no sort of its own.
 ~~~~
 
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
@@ -16061,3 +16071,25 @@ a neighbour (PROOF.md, scratch state).
   minutes of the share pull when this was measured, so the index pull's own
   lines were gone; the classification above is from the store and a replay of
   the shipped derive over it, and from the share pull's surviving lines.
+
+## Ingest automation, D-4800 to D-4887
+
+Each ingest-automation package appends its own rows here, in the same change
+as its code (D-4861), and never edits another's. Every measurement below was
+taken in release on the operator's Mac on 10 Oct 2026, on a machine shared
+with about 12 agents building at once, so the tails (p99, max) carry that
+load; an extrapolation is labelled as one.
+
+### The verdict store (IA-5; D-4808, D-4844, D-4865)
+
+`store::verdict`, `docs/02-store-format.md` §35. A lookup is O(1) and is not
+a limit here: at most 5 positional reads and 2 opens (IA-VD-01, C-VD-01).
+The sort a day image's build makes has its gate 11 reason under "Gate 11 —
+rule 4" above (`store/verdict.rs 1`).
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA-4 | Building and committing a day image | one sort of the day's records by (code, key) and a table built by doubling, then three `sync_all`s (`F_FULLFSYNC` on macOS): the image's temporary, its directory after the link, and the year index's slot | O(n log n) per image, n at most 26,820 on the largest real options day and at most the record ceiling (L-IA-33); one image per (feed, segment, timeframe, day) per run. Never on a lookup. **Measured, C-VD-04, the commit alone** (p50 / p99 / max), temporary files on WD_BLACK: 343 records 11.6 / 14.5 / 34.0 ms; 3,430 17.7 / 22.5 / 24.4 ms; 10,428 28.2 / 32.7 / 36.9 ms; 26,820 61.3 / 71.8 / 83.4 ms; on the internal disk 25.4 / 45.5 / 86.9, 28.0 / 43.5 / 45.0, 39.7 / 54.2 / 55.9 and 76.8 / 87.5 / 94.4 ms. The cost per record at 10x (27,580) was 0.288x that at 1x (2,758). Over the real store's 25 FNO months, one image of each month's contract set (8,582 to 19,000 real keys) committed in 24 to 143 ms on WD_BLACK | IA-5 |
+| L-IA-7 | Verdict images on disk | one immutable image per (feed, segment, timeframe, day) per run, never overwritten; the table needs about 3n to 10n slots under the 8-slot window with no repeated tag | **Measured** (C-VD-01, C-VD-04, synthetic keys): 343 records c = 1,024, 63,672 B; 2,758 c = 8,192, 507,416 B; 3,430 c = 16,384, 680,472 B; 10,428 (the average options day) c = 65,536, **2,193,368 B**; 26,820 (the largest) c = 262,144, **6,388,952 B**; 27,580 c = 262,144, 6,510,552 B; 137,900 c = 2^20, 30,453,208 B. On the real store's FNO keys, each month's contract set took c = 3.8n to 9.4n, images of 1,635,864 to 4,089,176 B. One full pass over the 1,997 options days is about 1,997 × 2.19 MB ≈ **4.4 GB** (an extrapolation from the measured average day). **Every re-verification, deferred pass or filtered run that touches a day adds a full copy of that day's image.** Zerodha: 186 B a record at 343 instruments and 198 B at 3,430 (measured), so a full backfill of about 5.0M records is about 0.9 to 1.0 GB (an extrapolation at those rates) | IA-5 |
+| L-IA-22 | Detail section | per-record parameters and refusal texts of any length up to 65,535 bytes | at most 4 MiB per image; past it the day and each owner that did not fit carry `details_capped` and keep their counts only (IA-VD-12). Reading one record's details is two positional reads per entry it owns and one more head, so at most its own entries' bytes and never the rest of the section; `/verify/day.json` only | IA-5 |
+| L-IA-33 | Records per day image (format version 1) | every key must sit within `MAX_PROBE` = 8 slots of home with no repeated tag in a table of at most 2^20 slots, and whether a key set fits depends on its hashes, so the ceiling is a measurement, not a proof | **Measured**: 137,900 synthetic records placed (50x a 2,758-record day) and 275,800 (100x) refused `table_too_large` (IA-VD-01, C-VD-01); all 213,365 real FNO contract keys of the store in one image refused, with nothing written. A simulation of the placement with uniform random hashes (5 seeds each, the tag rule left out) placed 150,000 in 5 of 5, 175,000 in 4 of 5 and 200,000 in 1 of 5. The largest real day, 26,820 records, is 5.1x under the measured 137,900. A day over the ceiling is refused by name with nothing written (a whole-day commit makes no directory, lock, index or image; a carrying one leaves only its directories and lock file), the day's journal close stands, and the day reads "verdict pending"; the error event and the `verdict_refused:<run>` alert are IA-7's | IA-5 |

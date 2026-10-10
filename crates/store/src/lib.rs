@@ -81,9 +81,6 @@ pub mod path;
 pub mod provenance;
 pub mod repair;
 pub mod time_index;
-/// What verification found, per (feed, instrument, day, timeframe): immutable
-/// day images under a two-slot year index (D-4808, D-4844, D-4845, D-4865;
-/// `docs/02-store-format.md` §35).
 pub mod verdict;
 
 /// Proof that this crate's nine `telemetry::emit` sites — `store.flock`'s

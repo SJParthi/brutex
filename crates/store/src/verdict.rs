@@ -3,19 +3,28 @@
 //!
 //! `docs/02-store-format.md` §35 is the authority for every byte here. The
 //! decisions are D-4808 (the store), D-4809 (append-only numbering), D-4844
-//! (format version 1), D-4845 (staleness is computed at lookup) and D-4865
-//! (images are linked from a writer-unique temporary, never renamed over).
-//! Package IA-5 of the ingest-automation design builds it; the verifiers that
-//! write it (`pull::gdfl_verify`, `pull::zerodha_verify`) and the routes that
-//! read it are later packages.
+//! (format version 1: its codes, flags, the no-record answer, the record
+//! ceiling and the month answers a staleness probe hands a lookup), D-4865
+//! (images are linked from a writer-unique temporary, never renamed over),
+//! D-4879 (code 18, `owed`) and D-4861 (the ledger rows land with the code).
+//! The staleness rule itself, and the month probe that computes it, are
+//! IA-6's (its decision lands with it); this module only compares what the
+//! probe read with what a record holds. Package IA-5 of the
+//! ingest-automation design builds it; the verifiers that write it
+//! (`pull::gdfl_verify`, `pull::zerodha_verify`) and the routes that read it
+//! are later packages.
 //!
 //! # Layout
 //!
 //! ```text
-//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi                        year index
-//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                   commit lock
-//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNN>.vdt  day image
+//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi                            year index
+//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                       commit lock
+//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt  day image
 //! ```
+//!
+//! The generation in an image's name is zero-padded to 10 digits, the width
+//! of `u32::MAX`, so every generation has one name and one day's names sort in
+//! generation order.
 //!
 //! A day image holds one 160-byte [`Record`] per key verified that day,
 //! sorted by (code, key), a tagged open-addressing table that finds a key's
@@ -39,10 +48,12 @@
 //! index, 1 read of the image's 512-byte header and day block, 1 read of the
 //! 64-byte probe window and 1 read of a 160-byte record. Each answer carries
 //! its own [`Cost`], and `crates/store/tests/verdict.rs`
-//! (`a_verdict_is_found_by_one_bounded_probe_at_every_day_size`) asserts it
-//! at 1x, 10x and 100x a day's records; `crates/store/benches/ratio.rs`
-//! (C-VD-01) times it. [`commit`] is not constant: it sorts the day's records
-//! once, O(n log n) for n records, and makes 3 `sync_all`s (L-IA-4).
+//! (`a_verdict_is_found_by_one_bounded_probe_at_every_day_size`, IA-VD-01)
+//! asserts it at 1x, 10x and 50x a day's records; `crates/store/benches/ratio.rs`
+//! (C-VD-01) times it. 100x is past the format's record ceiling and is
+//! refused `table_too_large` with nothing written (L-IA-33). [`commit`] is
+//! not constant: it sorts the day's records once, O(n log n) for n records,
+//! and makes 3 `sync_all`s (L-IA-4; C-VD-04).
 //!
 //! # What `store` does not know
 //!
@@ -52,8 +63,8 @@
 //! writes itself when it cuts a stem longer than a record's key field.
 //! Whether a verdict is stale against the month it describes needs the month
 //! (`pull`'s probe, IA-6): [`Answer::staleness`] compares what the caller
-//! read with what the record holds, and says which checks the caller did not
-//! make.
+//! read ([`MonthNow`]) with what the record holds, and says which checks the
+//! caller did not make.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -111,6 +122,9 @@ pub const MAX_PROBE: usize = 8;
 pub const MIN_CAPACITY: usize = 16;
 
 /// The largest table capacity; past it a day is refused `table_too_large`.
+/// With an 8-slot window and no repeated tag, the table needs about 3n to
+/// 10n slots, so this caps the records one image holds: a named, measured
+/// ceiling (L-IA-33: 137,900 records placed, 275,800 refused), not a proof.
 pub const MAX_CAPACITY: usize = 1 << 20;
 
 /// Bytes of a record's key field.
@@ -186,7 +200,9 @@ pub enum Code {
     Match = 1,
     /// An OHLC, volume or OI value differs on a unit both hold.
     ValueMismatch = 2,
-    /// The source had the unit and the store lacks it.
+    /// The store lacks a unit that a close in scope says was imported, or a
+    /// Zerodha minute a covering gap ledger does not explain. A unit no
+    /// import has landed yet is [`Code::Owed`], never this (D-4879).
     MissingInStore = 3,
     /// The store holds a unit the oracle did not make from that day's source.
     ExtraInStore = 4,
@@ -217,11 +233,15 @@ pub enum Code {
     DayPartial = 16,
     /// Zerodha owed minutes missing, with no gap ledger to say why.
     NoLedger = 17,
+    /// The source holds the unit, today's scope owes it, and no import has
+    /// landed it yet: never green and never a store defect (D-4879).
+    Owed = 18,
 }
 
 impl Code {
-    /// Every code version 1 mints, in code order.
-    pub const ALL: [Self; 17] = [
+    /// Every code version 1 mints, in code order: codes 1 to 18 (D-4844,
+    /// D-4879). Code 0 is unset and never written.
+    pub const ALL: [Self; 18] = [
         Self::Match,
         Self::ValueMismatch,
         Self::MissingInStore,
@@ -239,6 +259,7 @@ impl Code {
         Self::BuiltUnderEarlierRule,
         Self::DayPartial,
         Self::NoLedger,
+        Self::Owed,
     ];
 
     /// The byte on disk.
@@ -269,6 +290,7 @@ impl Code {
             15 => Self::BuiltUnderEarlierRule,
             16 => Self::DayPartial,
             17 => Self::NoLedger,
+            18 => Self::Owed,
             _ => return None,
         })
     }
@@ -294,11 +316,13 @@ impl Code {
             Self::BuiltUnderEarlierRule => "built_under_earlier_rule",
             Self::DayPartial => "day_partial",
             Self::NoLedger => "no_ledger",
+            Self::Owed => "owed",
         }
     }
 
-    /// The severity rank, 1 the worst (D-4844). It decides a day's worst
-    /// code, the year index's per-day worst and every badge's colour.
+    /// The severity rank, 1 the worst (D-4844, with code 18 `owed` placed
+    /// at 9 by D-4879). It decides a day's worst code, the year index's
+    /// per-day worst and every badge's colour.
     #[must_use]
     pub const fn severity(self) -> u8 {
         match self {
@@ -310,15 +334,16 @@ impl Code {
             Self::AbsentFromStore => 6,
             Self::CountMismatch => 7,
             Self::DayPartial => 8,
-            Self::SourceRefused => 9,
-            Self::SourceLacksDay => 10,
-            Self::VendorHole => 11,
-            Self::WithheldByRule => 12,
-            Self::NoLedger => 13,
-            Self::BuiltUnderEarlierRule => 14,
-            Self::NoResponseKept => 15,
-            Self::NotCompared => 16,
-            Self::Match => 17,
+            Self::Owed => 9,
+            Self::SourceRefused => 10,
+            Self::SourceLacksDay => 11,
+            Self::VendorHole => 12,
+            Self::WithheldByRule => 13,
+            Self::NoLedger => 14,
+            Self::BuiltUnderEarlierRule => 15,
+            Self::NoResponseKept => 16,
+            Self::NotCompared => 17,
+            Self::Match => 18,
         }
     }
 
@@ -347,7 +372,18 @@ impl fmt::Display for Code {
 
 /// Verdict flags: verification facts only, bits appended and never reused
 /// (D-4809, D-4841).
+///
+/// Format version 1 names bits 0 to 21 and no others (D-4844). **A writer
+/// refuses a record carrying any bit it does not name** (`flag_unknown`,
+/// nothing written), so no build can write a fact it cannot name. **A reader
+/// never refuses or drops a bit it does not name**: an image a later build
+/// wrote with bit 22 or above reads whole, and [`flags::words`] names the bit
+/// `flag_<n>`, because bits are appended and a newer image must stay readable
+/// by an older reader. A later bit is appended to [`flags::ALL`] by the package that
+/// first sets it, in the same change.
 pub mod flags {
+    use std::borrow::Cow;
+
     /// The month has no `.tix` time index.
     pub const TIX_ABSENT: u64 = 1;
     /// Option seconds without a spot second.
@@ -389,9 +425,16 @@ pub mod flags {
     pub const DAYCHECK_DIFFERS: u64 = 1 << 18;
     /// The serve path differed from the stored rows.
     pub const SERVE_PATH_DIFFERS: u64 = 1 << 19;
+    /// The lineage hand-over detector has not landed, so a hand-over cannot
+    /// be judged (WP-12f's detector; set by IA-6).
+    pub const LINEAGE_UNCHECKED: u64 = 1 << 20;
+    /// The stored day has no archive-member landing record (`.prv`) to
+    /// compare its source CRC with, so [`SOURCE_CHANGED_SINCE_IMPORT`]
+    /// cannot be judged (set by IA-6).
+    pub const SOURCE_CRC_UNRECORDED: u64 = 1 << 21;
 
     /// Every bit version 1 names, with its word, in bit order.
-    pub const ALL: [(u64, &str); 20] = [
+    pub const ALL: [(u64, &str); 22] = [
         (TIX_ABSENT, "tix_absent"),
         (SPOT_MISSING, "spot_missing"),
         (AFTER_INDEX_CLOSE, "after_index_close"),
@@ -412,18 +455,42 @@ pub mod flags {
         (DEFERRED_PENDING, "deferred_pending"),
         (DAYCHECK_DIFFERS, "daycheck_differs"),
         (SERVE_PATH_DIFFERS, "serve_path_differs"),
+        (LINEAGE_UNCHECKED, "lineage_unchecked"),
+        (SOURCE_CRC_UNRECORDED, "source_crc_unrecorded"),
     ];
 
-    /// Every bit version 1 names. A writer refuses any other.
-    pub const KNOWN: u64 = (1 << 20) - 1;
+    /// Every bit version 1 names. A writer refuses any other; a reader keeps
+    /// it.
+    pub const KNOWN: u64 = (1 << 22) - 1;
 
-    /// The words of the known bits set in `bits`, in bit order.
+    /// The bits of `bits` this build does not name: a later build's
+    /// appended facts, kept by every reader.
     #[must_use]
-    pub fn words(bits: u64) -> Vec<&'static str> {
-        ALL.iter()
-            .filter(|(bit, _)| bits & bit != 0)
-            .map(|(_, word)| *word)
-            .collect()
+    pub const fn unnamed(bits: u64) -> u64 {
+        bits & !KNOWN
+    }
+
+    /// The word of every bit set in `bits`, in bit order: a named bit's
+    /// word, and `flag_<n>` for a bit this build does not name. Never
+    /// omits a set bit. At most 64 words.
+    #[must_use]
+    pub fn words(bits: u64) -> Vec<Cow<'static, str>> {
+        let mut out = Vec::with_capacity(usize::try_from(bits.count_ones()).unwrap_or(64));
+        for at in 0..64u32 {
+            let bit = 1u64 << at;
+            if bits & bit == 0 {
+                continue;
+            }
+            // `ALL` is in bit order, entry i naming bit i, so the word is one
+            // index away (`format_v1_holds_every_fact_it_names` pins it).
+            let named = usize::try_from(at)
+                .ok()
+                .and_then(|i| ALL.get(i))
+                .filter(|(b, _)| *b == bit)
+                .map(|(_, word)| *word);
+            out.push(named.map_or_else(|| Cow::Owned(format!("flag_{at}")), Cow::Borrowed));
+        }
+        out
     }
 }
 
@@ -742,12 +809,15 @@ impl Series<'_> {
         self.dir().join(format!("{year:04}.vdi.lock"))
     }
 
-    /// One generation's image, `<dir>/<yyyy>/<yyyy-mm-dd>.g<NNNNNN>.vdt`.
+    /// One generation's image, `<dir>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt`:
+    /// the generation zero-padded to 10 digits, the width of `u32::MAX`, so
+    /// every generation has exactly one name and one day's names sort in
+    /// generation order (D-4844).
     #[must_use]
     pub fn image_path(&self, day: Day, generation: u32) -> PathBuf {
         self.dir()
             .join(format!("{:04}", day.year()))
-            .join(format!("{day}.g{generation:06}.vdt"))
+            .join(format!("{day}.g{generation:010}.vdt"))
     }
 
     /// The codes this series writes into every image header, or the refusal.
@@ -1148,6 +1218,25 @@ impl ImageHeader {
             .fold(0u32, |sum, n| sum.saturating_add(*n));
         (start, self.counts.get(at).copied().unwrap_or(0))
     }
+
+    /// Every mismatch of the day as at most two contiguous slices of
+    /// `(first ordinal, records)`: codes 2 to 5, then codes 7 to 9. Code 6
+    /// (`source_refused`, not a mismatch) sorts between them. O(1) from the
+    /// header's counts; reading a page of either is O(page)
+    /// (`crates/store/tests/verdict.rs`,
+    /// `one_codes_records_are_one_contiguous_slice`, IA-VD-06).
+    #[must_use]
+    pub fn mismatch_slices(&self) -> [(u32, u32); 2] {
+        let span = |from: Code, to: Code| {
+            let (start, _) = self.slice_of(from);
+            let (last, n) = self.slice_of(to);
+            (start, last.saturating_add(n).saturating_sub(start))
+        };
+        [
+            span(Code::ValueMismatch, Code::CountMismatch),
+            span(Code::StoreWithoutSource, Code::StoreUnreadable),
+        ]
+    }
 }
 
 // ------------------------------------------------------------------ errors --
@@ -1169,7 +1258,8 @@ pub enum VerdictError {
         key: String,
     },
     /// `table_too_large`: no table of at most [`MAX_CAPACITY`] slots holds
-    /// the day's keys within [`MAX_PROBE`] slots with no repeated tag.
+    /// the day's keys within [`MAX_PROBE`] slots with no repeated tag. A day
+    /// over the record ceiling (L-IA-33) is refused whole, never cut.
     TableTooLarge {
         /// The day's records.
         records: usize,
@@ -1185,7 +1275,8 @@ pub enum VerdictError {
         /// The image path of the last generation tried.
         path: PathBuf,
     },
-    /// `flag_unknown`: a flag bit version 1 does not name.
+    /// `flag_unknown`: a writer was handed a flag bit version 1 does not
+    /// name. Only a writer refuses it; a reader keeps it (D-4844).
     FlagUnknown {
         /// The unknown bits.
         bits: u64,
@@ -1243,6 +1334,13 @@ pub enum VerdictError {
         /// Which check.
         why: String,
     },
+    /// `trailer_mismatch`: an image's bytes do not hash to its BLAKE3
+    /// trailer, so at least one byte changed since it was linked. Only
+    /// [`check_trailer`] reads the trailer; a lookup never does.
+    TrailerMismatch {
+        /// The image path.
+        path: PathBuf,
+    },
     /// `record_corrupt`: a record's CRC-32C does not match.
     RecordCorrupt {
         /// The image path.
@@ -1293,6 +1391,7 @@ impl VerdictError {
             Self::IndexUnreadable { .. } => "index_unreadable",
             Self::ImageMissing { .. } => "image_missing",
             Self::ImageCorrupt { .. } => "image_corrupt",
+            Self::TrailerMismatch { .. } => "trailer_mismatch",
             Self::RecordCorrupt { .. } => "record_corrupt",
             Self::Symlinked { .. } => "symlinked",
             Self::Io { .. } => "io",
@@ -1314,7 +1413,7 @@ impl fmt::Display for VerdictError {
             Self::DuplicateKey { key } => write!(f, "{word}: one generation names {key} twice"),
             Self::TableTooLarge { records } => write!(
                 f,
-                "{word}: no table of at most {MAX_CAPACITY} slots holds {records} keys within {MAX_PROBE} slots of home with no repeated tag"
+                "{word}: no table of at most {MAX_CAPACITY} slots holds {records} keys within {MAX_PROBE} slots of home with no repeated tag (format version 1's record ceiling); nothing was written and the day's verdict is pending"
             ),
             Self::RunIdOverflow { run } => {
                 write!(
@@ -1330,7 +1429,7 @@ impl fmt::Display for VerdictError {
             Self::FlagUnknown { bits } => {
                 write!(
                     f,
-                    "{word}: flag bits {bits:#x} are not named by format version 1"
+                    "{word}: flag bits {bits:#x} are not named by format version 1, and a writer never writes a fact it cannot name"
                 )
             }
             Self::DetailInvalid { kind, len } => write!(
@@ -1367,6 +1466,11 @@ impl fmt::Display for VerdictError {
                 path.display()
             ),
             Self::ImageCorrupt { path, why } => write!(f, "{word}: {}: {why}", path.display()),
+            Self::TrailerMismatch { path } => write!(
+                f,
+                "{word}: {} does not hash to its BLAKE3 trailer; a byte changed after it was linked",
+                path.display()
+            ),
             Self::RecordCorrupt { path, ordinal } => write!(
                 f,
                 "{word}: record {ordinal} of {} fails its CRC-32C",
@@ -2178,13 +2282,20 @@ pub struct Image {
     pub day_details: Vec<Detail>,
 }
 
-/// Decodes and checks a whole image: the BLAKE3 trailer, the header, the day
-/// block, every record's CRC-32C, the (code, key) order, the per-code
-/// counts, that the table finds every record where a lookup would, and the
-/// detail section's shape. O(image bytes).
+/// Decodes and checks a whole image: the BLAKE3 trailer first (so one byte
+/// changed anywhere is refused [`VerdictError::TrailerMismatch`]), then the
+/// header, the day block, every record's CRC-32C, the (code, key) order, the
+/// per-code counts, that the table finds every record where a lookup would,
+/// and the detail section's shape. O(image bytes).
 fn parse(bytes: &[u8], path: &Path) -> Result<Image, VerdictError> {
     if bytes.len() < TABLE_OFFSET + TRAILER_LEN {
         return Err(corrupt(path, "shorter than a header and a day block"));
+    }
+    let end = bytes.len() - TRAILER_LEN;
+    if blake3::hash(bytes.get(..end).unwrap_or_default()) != take::<32>(bytes, end) {
+        return Err(VerdictError::TrailerMismatch {
+            path: path.to_path_buf(),
+        });
     }
     let header = decode_header(bytes, path)?;
     let day = decode_day(
@@ -2197,10 +2308,6 @@ fn parse(bytes: &[u8], path: &Path) -> Result<Image, VerdictError> {
             path,
             format!("{} bytes where the header implies {}", bytes.len(), geo.len),
         ));
-    }
-    let end = bytes.len() - TRAILER_LEN;
-    if blake3::hash(bytes.get(..end).unwrap_or_default()) != take::<32>(bytes, end) {
-        return Err(corrupt(path, "the BLAKE3 trailer does not match"));
     }
     let n = usize_of(u64::from(header.records));
     let mut records = Vec::with_capacity(n);
@@ -2383,14 +2490,14 @@ struct Owned {
     per: Vec<Vec<Detail>>,
 }
 
-/// Reads and checks a whole image file. O(image bytes): the scrub, the
-/// carry of a partial generation, and the tests read through it; a lookup
-/// never does.
+/// Reads and checks a whole image file. O(image bytes): [`check_trailer`],
+/// the carry of a partial generation, and the tests read through it; a
+/// lookup never does.
 ///
 /// # Errors
 ///
 /// [`VerdictError::Io`] when the file cannot be read, and every refusal
-/// [`scrub`] names.
+/// [`check_trailer`] names.
 pub fn read_image(path: &Path) -> Result<Image, VerdictError> {
     let file = open_read(path)?;
     let len = file
@@ -2403,9 +2510,9 @@ pub fn read_image(path: &Path) -> Result<Image, VerdictError> {
     parse(&bytes, path)
 }
 
-/// What a scrub of one image found.
+/// What [`check_trailer`] found in one whole image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Scrubbed {
+pub struct Checked {
     /// Its generation.
     pub generation: u32,
     /// Its records.
@@ -2414,19 +2521,22 @@ pub struct Scrubbed {
     pub details: u32,
 }
 
-/// The scrub of one day image: every byte read once, the BLAKE3 trailer and
-/// every CRC-32C checked, the order, the counts, the table and the detail
-/// section verified. This is the one reader of the trailer; a lookup never
-/// reads it. O(image bytes).
+/// The scrub of one day image, and the one reader of its BLAKE3 trailer
+/// (IA-VD-14; WP-81's store scrub calls it over `verify/`): every byte read
+/// once, the trailer checked first, so one byte changed anywhere is refused
+/// [`VerdictError::TrailerMismatch`]; then every CRC-32C, the order, the
+/// counts, the table and the detail section. A lookup never reads the
+/// trailer. O(image bytes).
 ///
 /// # Errors
 ///
-/// Every check names its refusal: [`VerdictError::ImageCorrupt`],
-/// [`VerdictError::RecordCorrupt`], [`VerdictError::Unknown`],
+/// Every check names its refusal: [`VerdictError::TrailerMismatch`],
+/// [`VerdictError::ImageCorrupt`], [`VerdictError::RecordCorrupt`],
+/// [`VerdictError::Unknown`], [`VerdictError::Symlinked`],
 /// [`VerdictError::Io`].
-pub fn scrub(path: &Path) -> Result<Scrubbed, VerdictError> {
+pub fn check_trailer(path: &Path) -> Result<Checked, VerdictError> {
     let image = read_image(path)?;
-    Ok(Scrubbed {
+    Ok(Checked {
         generation: image.header.generation,
         records: image.header.records,
         details: image.header.detail_entries,
@@ -2666,21 +2776,10 @@ fn remove_tmp(path: &Path) -> Result<(), VerdictError> {
     }
 }
 
-/// The year index of `series` and `year`, born whole when absent (D-4865):
-/// both slots written to a writer-unique temporary, made durable, and linked
-/// into place with `hard_link`, which never replaces a file. The loser of a
-/// creation race reads the winner's.
-fn year_file(series: &Series<'_>, year: u16, run: u64) -> Result<File, VerdictError> {
-    let path = series.year_index(year);
-    match open_existing(&path) {
-        Err(VerdictError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
-            genesis(series, year, run)
-        }
-        other => other,
-    }
-}
-
-/// Builds a year index beside its final name and links it into place.
+/// Builds a year index beside its final name and links it into place: born
+/// whole (D-4865), both slots written to a writer-unique temporary, made
+/// durable, and linked with `hard_link`, which never replaces a file. The
+/// loser of a creation race reads the winner's.
 fn genesis(series: &Series<'_>, year: u16, run: u64) -> Result<File, VerdictError> {
     let path = series.year_index(year);
     let tmp = tmp_of(&path, run);
@@ -2875,6 +2974,16 @@ fn publish(
 /// index's next slot and make it durable. Two writers on one day never both
 /// carry from `g`, and no linked image is ever overwritten.
 ///
+/// Every refusal is made before anything is published. The inputs are
+/// checked before any file is touched; a whole-day generation's records are
+/// its entries alone, so it is also planned and built then (`duplicate_key`,
+/// and `table_too_large` when it cannot be placed, L-IA-33): a refused
+/// whole-day commit writes nothing, no directory, lock, index or image. A
+/// carrying generation can only be planned and built under the lock; its
+/// refusal leaves the series' directories and the lock file, never a year
+/// index or an image (a missing `.vdi` is born only once the image is
+/// built).
+///
 /// Cost: O(n log n) for the one sort of n records, and 3 `sync_all`s
 /// (L-IA-4); not a lookup's bound, and `crates/store/benches/ratio.rs`
 /// (C-VD-04) times it.
@@ -2884,10 +2993,18 @@ fn publish(
 /// Every input refusal ([`VerdictError::DuplicateKey`],
 /// [`VerdictError::RunIdOverflow`], [`VerdictError::FlagUnknown`],
 /// [`VerdictError::DetailInvalid`], [`VerdictError::TableTooLarge`],
-/// [`VerdictError::DayOutOfRange`]), [`VerdictError::GenerationCollision`],
-/// a refusal reading the committed image for the carry, and the host's.
+/// [`VerdictError::DayOutOfRange`], [`VerdictError::TimeframeUnknown`]),
+/// [`VerdictError::GenerationCollision`], a refusal reading the year index
+/// or the committed image for the carry, and the host's.
 pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed, VerdictError> {
     let run = validate(series, generation)?;
+    let early = match generation.carry {
+        Carry::WholeDay => {
+            let (planned, _) = plan(series, generation, run, 0)?;
+            Some(build(series, generation, planned, 0, 0)?)
+        }
+        Carry::Others => None,
+    };
     let year = generation.day.year();
     make_dirs(series, year)?;
     let lock_path = series.lock_path(year);
@@ -2895,9 +3012,23 @@ pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed,
         .map_err(|why| io_error(&lock_path, "lock", why))?;
 
     let index_path = series.year_index(year);
-    let index = year_file(series, year, generation.run)?;
-    index_len(&index, &index_path)?;
-    let current = read_year(&index, &index_path, year, &mut Cost::default())?;
+    let held = match open_existing(&index_path) {
+        Ok(file) => Some(file),
+        Err(VerdictError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => None,
+        Err(other) => return Err(other),
+    };
+    let current = match &held {
+        Some(file) => {
+            index_len(file, &index_path)?;
+            read_year(file, &index_path, year, &mut Cost::default())?
+        }
+        None => YearIndex {
+            year,
+            commit: 0,
+            slot: 0,
+            days: vec![DayEntry::default(); YEAR_DAYS],
+        },
+    };
     let doy = day_of_year(generation.day);
     let committed = current
         .days
@@ -2906,8 +3037,20 @@ pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed,
         .unwrap_or_default()
         .generation;
 
-    let (planned, carried) = plan(series, generation, run, committed)?;
-    let mut built = build(series, generation, planned, committed, carried)?;
+    let (mut built, carried) = if let Some(built) = early {
+        (built, 0)
+    } else {
+        let (planned, carried) = plan(series, generation, run, committed)?;
+        (
+            build(series, generation, planned, committed, carried)?,
+            carried,
+        )
+    };
+    built.header.previous = committed;
+    let index = match held {
+        Some(file) => file,
+        None => genesis(series, year, generation.run)?,
+    };
     let (g, path, stepped_past) = publish(series, generation, &mut built, committed)?;
     #[cfg(test)]
     tests::crash("image linked")?;
@@ -2970,9 +3113,90 @@ pub enum Found {
         /// The record.
         record: Record,
     },
-    /// The key has no record: the day block's worst code and state answer
-    /// (a key the run never reached reads at least `day_partial`).
-    DayBlock,
+    /// The image holds no record for the key: the key's own answer, from the
+    /// day block's state, never the day's worst code (D-4844).
+    NoRecord(NoRecord),
+}
+
+/// The answer for a key a day's image holds no record for (D-4844; §6.6
+/// step 4 of the design). It comes from the day block's state and source
+/// fields, which the lookup's one 512-byte read already holds, and is never
+/// the day block's worst code: a share absent from the source on a day
+/// another share is `value_mismatch` reads [`NoRecord::NotInDay`], never that
+/// mismatch (IA-VD-16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoRecord {
+    /// `day_partial`: the day closed stopped, `source_lost`, `disk_full`, at
+    /// the census or `held_back_cap`, and this key was not reached (D-4854:
+    /// a partial day is never green).
+    DayPartial,
+    /// `source_lacks_day`: the source does not hold the day.
+    SourceLacksDay,
+    /// `owed (not_imported)`: the day was not imported (D-4879).
+    NotImported,
+    /// `not_compared (verify_off)`: the day was imported with verification
+    /// off.
+    VerifyOff,
+    /// `no_record`: a complete day whose verification holds no record for
+    /// the key (the source listed no file for it that day, or the key is
+    /// outside the scope verified). Shown as "not in this day's
+    /// verification": never green, and never another key's code.
+    NotInDay,
+}
+
+impl NoRecord {
+    /// The answer a day block gives a key it holds no record for, checked in
+    /// this order: a partial state, a source that lacks the day, a day not
+    /// imported, verification off, and otherwise a complete day.
+    #[must_use]
+    pub const fn of(day: &DayBlock) -> Self {
+        if day.state.is_partial() {
+            Self::DayPartial
+        } else if matches!(day.source_held, SourceHeld::No) {
+            Self::SourceLacksDay
+        } else if matches!(day.state, DayState::NotImported) {
+            Self::NotImported
+        } else if matches!(day.state, DayState::VerifyOff) {
+            Self::VerifyOff
+        } else {
+            Self::NotInDay
+        }
+    }
+
+    /// The verdict code it shows, or `None` for `no_record`, which is a
+    /// lookup answer and not a code.
+    #[must_use]
+    pub const fn code(self) -> Option<Code> {
+        match self {
+            Self::DayPartial => Some(Code::DayPartial),
+            Self::SourceLacksDay => Some(Code::SourceLacksDay),
+            Self::NotImported => Some(Code::Owed),
+            Self::VerifyOff => Some(Code::NotCompared),
+            Self::NotInDay => None,
+        }
+    }
+
+    /// The word a route shows: the code's word, or `no_record`.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self.code() {
+            Some(code) => code.word(),
+            None => "no_record",
+        }
+    }
+
+    /// The reason beside the code where the design names one: `not_imported`
+    /// for `owed`, `verify_off` for `not_compared`. `pull`'s `REASONS`
+    /// numbers them; a no-record answer has no record to hold the number, so
+    /// `store` gives the word.
+    #[must_use]
+    pub const fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::NotImported => Some("not_imported"),
+            Self::VerifyOff => Some("verify_off"),
+            Self::DayPartial | Self::SourceLacksDay | Self::NotInDay => None,
+        }
+    }
 }
 
 /// One answer of [`Reader::lookup`].
@@ -2982,24 +3206,42 @@ pub struct Answer {
     pub header: ImageHeader,
     /// The image's day block.
     pub day: DayBlock,
-    /// The record, or the day block.
+    /// The key's record, or the key's own answer when it has none.
     pub found: Found,
 }
 
 impl Answer {
-    /// The code this answer shows: the record's, or the day block's worst.
+    /// The code this answer shows: the record's own, or the no-record
+    /// answer's, which is `None` for `no_record`. Never the day block's worst
+    /// code for a key with no record (D-4844).
     #[must_use]
-    pub const fn code(&self) -> Code {
+    pub const fn code(&self) -> Option<Code> {
         match &self.found {
-            Found::Record { record, .. } => record.facts.code,
-            Found::DayBlock => self.day.worst,
+            Found::Record { record, .. } => Some(record.facts.code),
+            Found::NoRecord(none) => none.code(),
         }
     }
 
-    /// Whether the verdict is stale (D-4845), computed now, never stored.
-    /// Checked in order: the verifier, the day's definition, a pending
-    /// cross-kind input, the month. A check the caller could not make is
-    /// named in [`Staleness::unchecked`], and the answer is then not fresh.
+    /// The flags this answer carries: the record's, or the day's for a key
+    /// with no record. A bit this build does not name is kept (D-4844).
+    #[must_use]
+    pub const fn flags(&self) -> u64 {
+        match &self.found {
+            Found::Record { record, .. } => record.facts.flags,
+            Found::NoRecord(_) => self.day.flags,
+        }
+    }
+
+    /// Whether the verdict is stale, computed now and never stored. Checked
+    /// in order: the verifier (the image's verifier version is older than
+    /// the running build's), a pending cross-kind input (`deferred_pending`),
+    /// and the month (IA-6's probe, handed in as [`MonthNow`]: another served
+    /// generation, or another first row or row count for the day). A month
+    /// with no `.tix`, or one a writer holds, is `stale: unknown`, never
+    /// fresh. A check the caller did not make is named in
+    /// [`Staleness::unchecked`], and the answer is then not fresh. The
+    /// staleness rule and its probe are IA-6's; this compares what the probe
+    /// read with what the record holds (offsets 124 to 135).
     #[must_use]
     pub fn staleness(&self, now: &Now) -> Staleness {
         let mut out = Staleness::default();
@@ -3009,21 +3251,17 @@ impl Answer {
                 running: now.verifier,
             });
         }
-        match now.definition_moved {
-            Some(true) => out.stale.push(Stale::Definition),
-            Some(false) => {}
-            None => out.unchecked.push(Check::Definition),
-        }
-        let flags = match &self.found {
-            Found::Record { record, .. } => record.facts.flags,
-            Found::DayBlock => self.day.flags,
-        };
-        if flags & flags::DEFERRED_PENDING != 0 {
+        if self.flags() & flags::DEFERRED_PENDING != 0 {
             out.stale.push(Stale::CrossKindPending);
         }
         match (&self.found, now.month) {
-            (Found::DayBlock, _) | (_, MonthNow::NotChecked) => out.unchecked.push(Check::Month),
-            (Found::Record { .. }, MonthNow::NoTix) => out.stale.push(Stale::StoreUnknown),
+            (Found::NoRecord(_), _) | (_, MonthNow::NotChecked) => out.unchecked.push(Check::Month),
+            (Found::Record { .. }, MonthNow::NoTix) => {
+                out.stale.push(Stale::StoreUnknown(Unknown::NoTix));
+            }
+            (Found::Record { .. }, MonthNow::Busy) => {
+                out.stale.push(Stale::StoreUnknown(Unknown::MonthBusy));
+            }
             (
                 Found::Record { record, .. },
                 MonthNow::Read {
@@ -3054,32 +3292,53 @@ impl Answer {
 pub struct Now {
     /// The running build's verifier version.
     pub verifier: u16,
-    /// Whether the day's journal close names another definition than the
-    /// record's rule set was chosen for; `None` when the caller has no
-    /// journal sets loaded.
-    pub definition_moved: Option<bool>,
     /// What the instrument's month says for the day now.
     pub month: MonthNow,
 }
 
-/// The instrument's month for the day, as the caller's probe read it
-/// (`pull`'s newest-generation reader and the `.tix`).
+/// The instrument's month for the day, as the caller's probe read it (IA-6:
+/// `BarFile::open_existing`, which resolves the served generation, and the
+/// `.tix`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonthNow {
     /// Not probed.
     NotChecked,
-    /// The month has no `.tix`, so its day range has no positional index
-    /// to read: the answer is `stale: unknown`.
+    /// The month has no `.tix`, so its day range has no positional index to
+    /// read: `stale: unknown (no .tix)`.
     NoTix,
+    /// A writer holds the month: the probe's shared lock failed at once, and
+    /// a page lookup never waits on a writer or retries: `stale: unknown
+    /// (month busy)`, never fresh (D-4844).
+    Busy,
     /// Read.
     Read {
-        /// The month generation read.
+        /// The month generation read (0 = the original file).
         generation: u32,
         /// The day's first row.
         first_row: u32,
         /// The day's row count.
         rows: u32,
     },
+}
+
+/// Why a month's state is unknown to a staleness check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Unknown {
+    /// The month has no `.tix`.
+    NoTix,
+    /// A writer holds the month.
+    MonthBusy,
+}
+
+impl Unknown {
+    /// The words shown in `stale: unknown (<words>)`.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::NoTix => "no .tix",
+            Self::MonthBusy => "month busy",
+        }
+    }
 }
 
 /// One reason a verdict is stale.
@@ -3092,8 +3351,6 @@ pub enum Stale {
         /// The running build's.
         running: u16,
     },
-    /// The day's definition moved.
-    Definition,
     /// A cross-kind input is still pending.
     CrossKindPending,
     /// The month changed since: (generation, first row, rows) then and now.
@@ -3103,16 +3360,39 @@ pub enum Stale {
         /// What the month says now.
         now: (u32, u32, u32),
     },
-    /// The month has no `.tix`: `stale: unknown`, never fresh.
-    StoreUnknown,
+    /// The month could not be checked, because it has no `.tix` or a writer
+    /// holds it: `stale: unknown (...)`, never fresh.
+    StoreUnknown(Unknown),
+}
+
+impl Stale {
+    /// The word a route shows: `verifier`, `cross_kind_pending`,
+    /// `store_changed`, or `unknown`.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Verifier { .. } => "verifier",
+            Self::CrossKindPending => "cross_kind_pending",
+            Self::StoreChanged { .. } => "store_changed",
+            Self::StoreUnknown(_) => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for Stale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StoreUnknown(why) => write!(f, "stale: unknown ({})", why.word()),
+            other => write!(f, "stale: {}", other.word()),
+        }
+    }
 }
 
 /// A check the caller did not make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
-    /// The day's definition.
-    Definition,
-    /// The month.
+    /// The month: not probed, or the answer has no record whose row range
+    /// could be compared.
     Month,
 }
 
@@ -3254,8 +3534,10 @@ impl Reader {
 
     /// The verdict of one key on one day: at most 5 positional reads and 2
     /// opens (`crates/store/tests/verdict.rs`,
-    /// `a_verdict_is_found_by_one_bounded_probe_at_every_day_size`). A key
-    /// with no record answers from the day block ([`Found::DayBlock`]).
+    /// `a_verdict_is_found_by_one_bounded_probe_at_every_day_size`, IA-VD-01;
+    /// bench C-VD-01). A key with no record gets its own answer from the day
+    /// block's state ([`Found::NoRecord`], IA-VD-16), never the day's worst
+    /// code, and costs no more reads.
     ///
     /// # Errors
     ///
@@ -3281,7 +3563,7 @@ impl Reader {
         file.read_exact_at(&mut window, off(TABLE_OFFSET + SLOT_LEN * home))
             .map_err(|why| io_error(&path, "read", why))?;
         cost.reads += 1;
-        let mut found = Found::DayBlock;
+        let mut found = Found::NoRecord(NoRecord::of(&block));
         if let Some(ordinal) = first_tagged(&window, key.tag()) {
             if ordinal >= usize_of(u64::from(header.records)) {
                 return Err(corrupt(
@@ -3412,8 +3694,9 @@ impl Reader {
     }
 
     /// The details of a record (or of the day, for `None`) of a day's
-    /// generation: one read of the entry heads and payloads it owns, at
-    /// most the section's bytes.
+    /// generation: two reads per entry it owns (its 8-byte head, then its
+    /// payload) and one more head, so the bytes read are its own entries,
+    /// bounded by the 4 MiB section; `/verify/day.json` only.
     ///
     /// # Errors
     ///
@@ -3437,22 +3720,33 @@ impl Reader {
             return Ok(Vec::new());
         }
         let section_len = usize_of(u64::from(header.detail_bytes));
-        let mut bytes = vec![0u8; section_len.saturating_sub(from)];
+        let section_at = u64::from(header.detail_offset);
         let Some((file, _)) = self.handle(&path, &mut cost)? else {
             return Err(VerdictError::ImageMissing { path });
         };
-        file.read_exact_at(&mut bytes, u64::from(header.detail_offset) + off(from))
-            .map_err(|why| io_error(&path, "read", why))?;
+        // Entry by entry: a head, then its payload, while the owner is this
+        // one. So the bytes read are this owner's entries and one more head,
+        // never the rest of the section (a page of records reads only its
+        // own details, C-VD-06).
         let mut out = Vec::new();
-        let mut at = 0usize;
-        while at + DETAIL_HEAD_LEN <= bytes.len() && u32_at(&bytes, at) == owner {
-            let size = usize::from(u16_at(&bytes, at + 6));
-            let payload = bytes
-                .get(at + DETAIL_HEAD_LEN..at + DETAIL_HEAD_LEN + size)
-                .ok_or_else(|| corrupt(&path, "a detail entry runs past the section"))?;
+        let mut at = from;
+        while at + DETAIL_HEAD_LEN <= section_len {
+            let mut head = [0u8; DETAIL_HEAD_LEN];
+            file.read_exact_at(&mut head, section_at + off(at))
+                .map_err(|why| io_error(&path, "read", why))?;
+            if u32_at(&head, 0) != owner {
+                break;
+            }
+            let size = usize::from(u16_at(&head, 6));
+            if at + DETAIL_HEAD_LEN + size > section_len {
+                return Err(corrupt(&path, "a detail entry runs past the section"));
+            }
+            let mut payload = vec![0u8; size];
+            file.read_exact_at(&mut payload, section_at + off(at + DETAIL_HEAD_LEN))
+                .map_err(|why| io_error(&path, "read", why))?;
             out.push(Detail {
-                kind: u16_at(&bytes, at + 4),
-                payload: payload.to_vec(),
+                kind: u16_at(&head, 4),
+                payload,
             });
             at += DETAIL_HEAD_LEN + size;
         }

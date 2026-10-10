@@ -1,5 +1,7 @@
-//! `store::verdict` through real files: IA-VD-01 to IA-VD-13 of the
-//! ingest-automation design (D-4808, D-4809, D-4844, D-4845, D-4865).
+//! `store::verdict` through real files: IA-VD-01 to IA-VD-07, IA-VD-09,
+//! IA-VD-10, IA-VD-11 (the record half), IA-VD-12, IA-VD-13, IA-VD-14 and
+//! IA-VD-16 of the ingest-automation design (D-4808, D-4809, D-4844, D-4865,
+//! D-4879).
 //!
 //! Every test builds its own store root under the temporary directory and
 //! writes invented verdicts: every key is a synthetic `ZZ`-prefixed name no
@@ -26,8 +28,8 @@ use store::provenance::Day;
 use store::verdict::{
     self, Carry, Check, Code, Committed, DETAIL_CAP, DETAIL_NAME, DayBlock, DayState, Detail,
     Entry, Facts, Feed, Found, Generation, INDEX_LEN, JournalOutcome, KEY_LEN, Key, MAX_LINK_TRIES,
-    Mode, MonthNow, NONE, Now, RECORD_STRIDE, Reader, Series, SourceHeld, Stale, Unit, V3Manifest,
-    VerdictError, flags,
+    Mode, MonthNow, NONE, NoRecord, Now, RECORD_STRIDE, Reader, Series, SourceHeld, Stale, Unit,
+    Unknown, V3Manifest, VerdictError, flags,
 };
 
 const FORMAT_DOC: &str = include_str!("../../../docs/02-store-format.md");
@@ -122,7 +124,7 @@ fn day_of(n: usize) -> Vec<Entry> {
 fn found(answer: &verdict::Answer) -> &verdict::Record {
     match &answer.found {
         Found::Record { record, .. } => record,
-        Found::DayBlock => panic!("expected a record, got the day block"),
+        Found::NoRecord(none) => panic!("expected a record, got the no-record answer {none:?}"),
     }
 }
 
@@ -149,6 +151,11 @@ fn a_verdict_is_found_by_one_bounded_probe_at_every_day_size() {
         Err(VerdictError::TableTooLarge { records }) => assert_eq!(records, 275_800),
         other => panic!("100x must be refused table_too_large, got {other:?}"),
     }
+    assert_eq!(
+        fs::read_dir(&root.0).unwrap().count(),
+        0,
+        "a refused day writes nothing: no directory, lock, index or image"
+    );
     assert_eq!(
         Reader::new()
             .lookup(&root.series(), day(), &Key::instrument(&name(0)).unwrap())
@@ -187,7 +194,8 @@ fn a_verdict_is_found_by_one_bounded_probe_at_every_day_size() {
             assert_eq!(warm.cost.reads, 5);
         }
 
-        // An absent key: the day block answers, in at most 5 reads.
+        // An absent key: its own answer from the day block's state, in at
+        // most 5 reads.
         let absent = Key::instrument("NSE-FNO-ZZABSENT-1").unwrap();
         let mut reader = Reader::new();
         let got = reader.lookup(&series, day(), &absent).unwrap();
@@ -197,7 +205,8 @@ fn a_verdict_is_found_by_one_bounded_probe_at_every_day_size() {
             got.cost
         );
         let answer = got.answer.unwrap();
-        assert_eq!(answer.found, Found::DayBlock);
+        assert_eq!(answer.found, Found::NoRecord(NoRecord::NotInDay));
+        assert_eq!(answer.code(), None, "no_record is no code");
         let capacity = answer.header.capacity;
 
         // Colliding keys: every pair of records sharing a home slot.
@@ -237,9 +246,15 @@ fn a_verdict_is_found_by_one_bounded_probe_at_every_day_size() {
                 .lookup(&series, day(), &Key::instrument(&absent).unwrap())
                 .unwrap();
             assert!(got.cost.reads <= 5);
-            assert_eq!(got.answer.unwrap().found, Found::DayBlock);
+            assert_eq!(
+                got.answer.unwrap().found,
+                Found::NoRecord(NoRecord::NotInDay)
+            );
         }
-        assert_eq!(verdict::scrub(&done.path).unwrap().records, done.records);
+        assert_eq!(
+            verdict::check_trailer(&done.path).unwrap().records,
+            done.records
+        );
     }
 }
 
@@ -274,7 +289,7 @@ fn a_reverified_day_is_a_new_generation_and_the_old_is_kept() {
         .unwrap();
     assert_eq!(answer.header.generation, 2);
     assert_eq!(answer.header.previous, 1);
-    assert_eq!(answer.code(), Code::ValueMismatch);
+    assert_eq!(answer.code(), Some(Code::ValueMismatch));
     let year = reader.year(&series, 2031).unwrap().unwrap();
     let entry = year.entry(day());
     assert_eq!(entry.generation, 2);
@@ -317,7 +332,7 @@ fn a_torn_year_index_slot_falls_back_to_the_other() {
         answer.header.generation, 1,
         "slot 1 still commits generation 1"
     );
-    assert_eq!(answer.code(), Code::Match);
+    assert_eq!(answer.code(), Some(Code::Match));
     let year = reader.year(&series, 2031).unwrap().unwrap();
     assert_eq!((year.commit, year.slot), (1, 1));
 
@@ -455,14 +470,14 @@ fn a_temporary_day_image_is_never_read() {
     .unwrap();
     let stray = first
         .path
-        .with_file_name("2031-03-04.g000002.vdt.99999-82.tmp");
+        .with_file_name("2031-03-04.g0000000002.vdt.99999-82.tmp");
     fs::copy(&decoy.path, &stray).unwrap();
     let stray_bytes = fs::read(&stray).unwrap();
 
     let key = Key::instrument("NSE-FNO-ZZTMP-A").unwrap();
     let mut reader = Reader::new();
     let answer = reader.lookup(&series, day(), &key).unwrap().answer.unwrap();
-    assert_eq!(answer.code(), Code::Match);
+    assert_eq!(answer.code(), Some(Code::Match));
     assert_eq!(answer.header.generation, 1);
 
     let next = verdict::commit(
@@ -483,7 +498,7 @@ fn a_temporary_day_image_is_never_read() {
             .answer
             .unwrap()
             .code(),
-        Code::NotCompared
+        Some(Code::NotCompared)
     );
 }
 
@@ -554,6 +569,24 @@ fn one_codes_records_are_one_contiguous_slice() {
     assert_eq!(total, u32::try_from(n).unwrap());
     let year = reader.year(&series, 2031).unwrap().unwrap();
     assert_eq!(year.entry(day()).mismatches, mismatches);
+
+    // Every mismatch is in at most two slices, located from the counts: codes
+    // 2 to 5, then 7 to 9, with code 6 (not a mismatch) between them.
+    let [low, high] = image.header.mismatch_slices();
+    assert_eq!(low.1 + high.1, mismatches);
+    for (start, count) in [low, high] {
+        let from = usize::try_from(start).unwrap();
+        let to = usize::try_from(start + count).unwrap();
+        assert!(
+            image.records[from..to]
+                .iter()
+                .all(|(r, _)| r.facts.code.is_mismatch()),
+            "a mismatch slice holds only mismatches"
+        );
+    }
+    let (six, sixes) = image.header.slice_of(Code::SourceRefused);
+    assert!(sixes > 0, "the fixture has source_refused records");
+    assert_eq!((low.0 + low.1, six + sixes), (six, high.0));
     let past = reader
         .page(&series, day(), Code::NoLedger, 1_000, 5)
         .unwrap()
@@ -608,7 +641,7 @@ fn two_writers_on_one_day_never_lose_a_record() {
     for g in 1..=entry.generation {
         let path = series.image_path(day(), g);
         assert_eq!(
-            verdict::scrub(&path).unwrap().records,
+            verdict::check_trailer(&path).unwrap().records,
             g,
             "generation {g} carried all before it"
         );
@@ -717,7 +750,7 @@ fn a_crash_between_link_and_commit_never_overwrites_an_image() {
             .answer
             .unwrap()
             .code(),
-        Code::VendorHole
+        Some(Code::VendorHole)
     );
 
     // Every generation the next writer could take is already linked.
@@ -789,9 +822,13 @@ fn a_year_index_is_born_whole() {
 }
 
 /// IA-VD-11 (the record half; the month probe is IA-6's) — a verdict whose
-/// verifier is older, whose day's definition moved, whose cross-kind input is
-/// pending, or whose month changed reads stale; a month with no `.tix` reads
-/// `stale: unknown`; a check not made is named and the answer is not fresh.
+/// month was appended to, repaired or re-keyed after its verification reads
+/// stale, and so does one an older verifier wrote or whose cross-kind input
+/// is pending; a month with no `.tix` reads `stale: unknown (no .tix)` and a
+/// month a writer holds (`MonthNow::Busy`) reads `stale: unknown (month
+/// busy)`, never fresh; a check not made is named and the answer is not
+/// fresh. There is no definition check (round 4, BL-F): a later close that
+/// changed the stored bars is `store_changed`.
 #[test]
 fn a_verdict_whose_store_or_verifier_changed_reads_stale() {
     let root = Root::new();
@@ -832,7 +869,6 @@ fn a_verdict_whose_store_or_verifier_changed_reads_stale() {
     };
     let now = Now {
         verifier: 3,
-        definition_moved: Some(false),
         month: same,
     };
     assert!(a.staleness(&now).is_fresh(), "nothing changed");
@@ -845,14 +881,22 @@ fn a_verdict_whose_store_or_verifier_changed_reads_stale() {
             running: 4
         }]
     );
-    let appended = a.staleness(&Now {
+    assert!(!older.is_fresh());
+    let newer = a.staleness(&Now { verifier: 2, ..now });
+    assert!(
+        newer.is_fresh(),
+        "a newer image than the build is not stale"
+    );
+
+    let read = |generation, first_row, rows| Now {
         month: MonthNow::Read {
-            generation: 2,
-            first_row: 4_000,
-            rows: 22_500,
+            generation,
+            first_row,
+            rows,
         },
         ..now
-    });
+    };
+    let appended = a.staleness(&read(2, 4_000, 22_500));
     assert_eq!(
         appended.stale,
         vec![Stale::StoreChanged {
@@ -861,37 +905,68 @@ fn a_verdict_whose_store_or_verifier_changed_reads_stale() {
         }],
         "a resume appended the rest of the day"
     );
-    let repaired = a.staleness(&Now {
-        month: MonthNow::Read {
-            generation: 3,
-            first_row: 4_000,
-            rows: 375,
-        },
-        ..now
-    });
-    assert!(
-        matches!(repaired.stale[..], [Stale::StoreChanged { .. }]),
+    let repaired = a.staleness(&read(3, 4_000, 375));
+    assert_eq!(
+        repaired.stale,
+        vec![Stale::StoreChanged {
+            verified: (2, 4_000, 375),
+            now: (3, 4_000, 375)
+        }],
         "a repair published a generation"
     );
-    let moved = a.staleness(&Now {
-        definition_moved: Some(true),
-        ..now
-    });
-    assert_eq!(moved.stale, vec![Stale::Definition]);
+    let rekeyed = a.staleness(&read(2, 9_100, 375));
+    assert_eq!(
+        rekeyed.stale,
+        vec![Stale::StoreChanged {
+            verified: (2, 4_000, 375),
+            now: (2, 9_100, 375)
+        }],
+        "a re-key moved the day's rows"
+    );
+    for changed in [appended, repaired, rekeyed] {
+        assert!(!changed.is_fresh());
+        assert_eq!(changed.stale[0].to_string(), "stale: store_changed");
+    }
+
     let no_tix = a.staleness(&Now {
         month: MonthNow::NoTix,
         ..now
     });
-    assert_eq!(no_tix.stale, vec![Stale::StoreUnknown]);
+    assert_eq!(no_tix.stale, vec![Stale::StoreUnknown(Unknown::NoTix)]);
+    assert_eq!(no_tix.stale[0].to_string(), "stale: unknown (no .tix)");
     assert!(!no_tix.is_fresh());
+    let busy = a.staleness(&Now {
+        month: MonthNow::Busy,
+        ..now
+    });
+    assert_eq!(busy.stale, vec![Stale::StoreUnknown(Unknown::MonthBusy)]);
+    assert_eq!(busy.stale[0].to_string(), "stale: unknown (month busy)");
+    assert!(!busy.is_fresh(), "a month a writer holds is never fresh");
+    assert!(busy.unchecked.is_empty(), "the probe ran; it met a writer");
+
     let unchecked = a.staleness(&Now {
         verifier: 3,
-        definition_moved: None,
         month: MonthNow::NotChecked,
     });
     assert!(unchecked.stale.is_empty());
-    assert_eq!(unchecked.unchecked, vec![Check::Definition, Check::Month]);
+    assert_eq!(unchecked.unchecked, vec![Check::Month]);
     assert!(!unchecked.is_fresh(), "an unchecked verdict is never fresh");
+
+    // Every reason at once, in check order.
+    let all = a.staleness(&Now {
+        verifier: 9,
+        month: MonthNow::Busy,
+    });
+    assert_eq!(
+        all.stale,
+        vec![
+            Stale::Verifier {
+                image: 3,
+                running: 9
+            },
+            Stale::StoreUnknown(Unknown::MonthBusy)
+        ]
+    );
 
     let b = reader
         .lookup(
@@ -902,15 +977,12 @@ fn a_verdict_whose_store_or_verifier_changed_reads_stale() {
         .unwrap()
         .answer
         .unwrap();
-    let b_now = Now {
-        month: MonthNow::Read {
-            generation: 0,
-            first_row: NONE,
-            rows: 0,
-        },
-        ..now
-    };
+    let b_now = read(0, NONE, 0);
     assert_eq!(b.staleness(&b_now).stale, vec![Stale::CrossKindPending]);
+    assert_eq!(
+        b.staleness(&b_now).stale[0].to_string(),
+        "stale: cross_kind_pending"
+    );
 
     let none = reader
         .lookup(
@@ -921,64 +993,105 @@ fn a_verdict_whose_store_or_verifier_changed_reads_stale() {
         .unwrap()
         .answer
         .unwrap();
-    assert_eq!(none.found, Found::DayBlock);
+    assert_eq!(none.found, Found::NoRecord(NoRecord::NotInDay));
     assert_eq!(
         none.staleness(&now).unchecked,
         vec![Check::Month],
-        "a day-block answer has no row range to compare"
+        "a no-record answer has no row range to compare"
     );
+    assert!(!none.staleness(&now).is_fresh());
 }
 
-/// IA-VD-12 — the detail section round-trips every kind, and past 4 MiB the
+/// IA-VD-12 — the detail section round-trips entries of any u16 kind and any
+/// length up to 65,535 bytes (`DETAILS` lives in `pull`, which `store` cannot
+/// name, so the named kinds are IA-GV-27's), for a record and for the day,
+/// through the whole-image read and through the reader; and past 4 MiB the
 /// day says `details_capped`: the owners that did not fit keep their counts
 /// only and carry the flag.
 #[test]
 fn every_detail_survives_and_the_cap_is_named() {
     let root = Root::new();
     let series = root.series();
-    let all_kinds: Vec<Detail> = (1..=15u16)
-        .map(|kind| Detail {
-            kind,
-            payload: (0..usize::from(kind) * 3)
-                .map(|b| u8::try_from(b).unwrap())
-                .collect(),
+    let pattern = |kind: u16, len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|i| u8::try_from((i + usize::from(kind)) % 251).unwrap())
+            .collect()
+    };
+    let shapes: [(u16, usize); 12] = [
+        (1, 0),
+        (2, 1),
+        (18, 2),
+        (19, 240),
+        (255, 241),
+        (256, 1_000),
+        (0x1234, 4_096),
+        (0x7FFF, 65_534),
+        (0x8000, 65_535),
+        (0xFFFE, 7),
+        (u16::MAX, 65_535),
+        (3, 0),
+    ];
+    let every: Vec<Detail> = shapes
+        .iter()
+        .map(|(kind, len)| Detail {
+            kind: *kind,
+            payload: pattern(*kind, *len),
         })
         .collect();
-    let mut g = generation(151, day_of(3));
-    g.entries[1].details = all_kinds.clone();
-    g.day_details = vec![Detail {
-        kind: 6,
-        payload: b"ZZ/first/path".to_vec(),
+    let mut g = generation(151, day_of(4));
+    g.entries[1].details = every.clone();
+    g.entries[3].details = vec![Detail {
+        kind: u16::MAX,
+        payload: Vec::new(),
     }];
+    g.day_details = vec![
+        Detail {
+            kind: u16::MAX,
+            payload: pattern(9, 65_535),
+        },
+        Detail {
+            kind: 6,
+            payload: b"ZZ/first/path".to_vec(),
+        },
+    ];
     let done = verdict::commit(&series, &g).unwrap();
     assert!(!done.details_capped);
     let image = verdict::read_image(&done.path).unwrap();
     assert_eq!(image.day_details, g.day_details);
-    let (record, details) = image
-        .records
-        .iter()
-        .find(|(r, _)| r.key.text() == name(1))
-        .unwrap();
-    assert_eq!(details, &all_kinds);
+    assert_eq!(image.header.detail_entries, 12 + 1 + 2);
     let mut reader = Reader::new();
-    let ordinal = u32::try_from(
-        image
-            .records
-            .iter()
-            .position(|(r, _)| r.key.text() == name(1))
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        reader
-            .details(&series, day(), 1, Some((ordinal, record)))
-            .unwrap(),
-        all_kinds
-    );
     assert_eq!(
         reader.details(&series, day(), 1, None).unwrap(),
-        g.day_details
+        g.day_details,
+        "the day's own entries"
     );
+    for (i, want) in [
+        (0usize, vec![]),
+        (1, every.clone()),
+        (2, vec![]),
+        (3, g.entries[3].details.clone()),
+    ] {
+        let ordinal = image
+            .records
+            .iter()
+            .position(|(r, _)| r.key.text() == name(i))
+            .unwrap();
+        let (record, details) = &image.records[ordinal];
+        assert_eq!(details, &want, "record {i}, whole image");
+        assert_eq!(record.detail_at == 0, want.is_empty());
+        assert_eq!(
+            reader
+                .details(
+                    &series,
+                    day(),
+                    1,
+                    Some((u32::try_from(ordinal).unwrap(), record))
+                )
+                .unwrap(),
+            want,
+            "record {i}, through the reader"
+        );
+    }
 
     // Past the cap: 100 records of 3 × 60,000 bytes each is about 18 MB.
     let big = Detail {
@@ -1017,26 +1130,54 @@ fn every_detail_survives_and_the_cap_is_named() {
     for (r, d) in &image.records {
         assert_eq!(d.is_empty(), r.detail_at == 0);
     }
+    let units: u32 = image
+        .records
+        .iter()
+        .map(|(r, _)| r.facts.source_units)
+        .sum();
+    assert_eq!(
+        units,
+        (0..100).sum::<u32>(),
+        "every record keeps its counts"
+    );
     let year = reader.year(&series, 2031).unwrap().unwrap();
     assert_ne!(year.entry(day()).flags & flags::DETAILS_CAPPED, 0);
 }
 
-/// IA-VD-13 — every flag bit and every parameter of §6.4 is held by format
-/// version 1: a record with all 20 flags and every field set, the day block
-/// with every field set, and every detail kind read back whole.
+/// IA-VD-13 — every flag bit and every code of the v1 table is held by the
+/// format: `flags::ALL` names exactly the 22 bits 0 to 21 and `KNOWN` is
+/// `(1 << 22) - 1`; a record with all 22 named bits set and every field set
+/// reads back whole, with the largest detail payload (65,535 bytes); a writer
+/// refuses bit 22, and any other unnamed bit, `flag_unknown` with nothing
+/// written; a reader given an image whose record carries bit 22 (bytes as a
+/// later build would write them) reads it whole, names the bit `flag_22` and
+/// never drops it, not even when a later commit carries the record; and code
+/// 18 `owed` sorts and colours by D-4879's severity.
 #[test]
 fn format_v1_holds_every_fact_it_names() {
-    assert_eq!(flags::ALL.len(), 20);
+    assert_eq!(flags::ALL.len(), 22);
     let mut union = 0u64;
     for (i, (bit, word)) in flags::ALL.iter().enumerate() {
         assert_eq!(*bit, 1u64 << i, "{word} is bit {i}");
         union |= bit;
     }
     assert_eq!(union, flags::KNOWN);
+    assert_eq!(flags::KNOWN, (1u64 << 22) - 1);
+    assert_eq!(
+        (flags::ALL[20].1, flags::ALL[21].1),
+        ("lineage_unchecked", "source_crc_unrecorded")
+    );
     assert_eq!(
         flags::words(flags::NAME_CUT | flags::TIX_ABSENT),
         vec!["tix_absent", "name_cut"]
     );
+    assert_eq!(
+        flags::words(flags::SOURCE_CRC_UNRECORDED | 1 << 22 | 1 << 63),
+        vec!["source_crc_unrecorded", "flag_22", "flag_63"],
+        "an unnamed bit is named by its number, never omitted"
+    );
+    assert_eq!(flags::words(flags::KNOWN).len(), 22);
+    assert_eq!(flags::unnamed(flags::KNOWN | 1 << 22), 1 << 22);
 
     let facts = Facts {
         code: Code::BuiltUnderEarlierRule,
@@ -1057,12 +1198,18 @@ fn format_v1_holds_every_fact_it_names() {
         first_unit: 12,
         last_unit: u32::MAX - 1,
     };
-    let details: Vec<Detail> = (1..=15u16)
-        .map(|kind| Detail {
-            kind,
-            payload: vec![u8::try_from(kind).unwrap(); 240],
-        })
-        .collect();
+    let details = vec![
+        Detail {
+            kind: 2,
+            payload: vec![0x5A; 240],
+        },
+        Detail {
+            kind: u16::MAX,
+            payload: (0..65_535usize)
+                .map(|i| u8::try_from(i % 253).unwrap())
+                .collect(),
+        },
+    ];
     let day_block = DayBlock {
         calendar_kind: 9,
         source_held: SourceHeld::Yes,
@@ -1071,7 +1218,7 @@ fn format_v1_holds_every_fact_it_names() {
         state: DayState::Complete,
         worst: Code::Match,
         close_reason: 0xBEEF,
-        flags: flags::ARCHIVE_DAY_ON_CLOSED_DAY,
+        flags: flags::KNOWN,
         listing_entries: 21,
         files_read: 22,
         skipped: 23,
@@ -1128,8 +1275,137 @@ fn format_v1_holds_every_fact_it_names() {
     );
     assert_eq!(h.origin, *b"0123456789abcdef");
     assert_eq!(h.counts[15], 1);
+    let year = Reader::new().year(&series, 2031).unwrap().unwrap();
+    assert_eq!(year.entry(day()).flags, flags::KNOWN);
 
-    // The refusals of inputs version 1 cannot hold.
+    // A writer refuses every bit it does not name, and writes nothing.
+    let mut bad = generation(5, vec![entry("NSE-FNO-ZZALL-B", Code::Match)]);
+    for bit in [22u32, 23, 40, 63] {
+        bad.entries[0].facts.flags = flags::KNOWN | 1 << bit;
+        match verdict::commit(&series, &bad) {
+            Err(VerdictError::FlagUnknown { bits }) => assert_eq!(bits, 1 << bit),
+            other => panic!("bit {bit}: expected flag_unknown, got {other:?}"),
+        }
+    }
+    bad.entries[0].facts.flags = 0;
+    bad.day_block.flags = 1 << 22;
+    assert_eq!(
+        verdict::commit(&series, &bad).unwrap_err().word(),
+        "flag_unknown",
+        "a day flag is held to the same rule"
+    );
+    bad.day_block.flags = 0;
+    assert_eq!(
+        Reader::new().year(&series, 2031).unwrap().unwrap().commit,
+        1,
+        "no refused writer committed"
+    );
+    let left: Vec<String> = fs::read_dir(series.dir().join("2031"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        left,
+        vec!["2031-03-04.g0000000001.vdt".to_owned()],
+        "a refused writer left nothing"
+    );
+
+    // A later build's image: its record carries bit 22. Its bytes are made
+    // here as that build would write them (the record's flags, its CRC-32C
+    // and the image's BLAKE3 trailer), never through this build's writer.
+    let later = Root::new();
+    let lseries = later.series();
+    let mut lg = generation(301, vec![entry("NSE-FNO-ZZNEW-A", Code::Match)]);
+    lg.entries[0].facts.flags = flags::LINEAGE_UNCHECKED;
+    let written = verdict::commit(&lseries, &lg).unwrap();
+    let mut bytes = fs::read(&written.path).unwrap();
+    let records_at = 512 + 8 * (16 + 7);
+    let with_22 = flags::LINEAGE_UNCHECKED | 1 << 22;
+    bytes[records_at + 80..records_at + 88].copy_from_slice(&with_22.to_le_bytes());
+    let crc = store::crc::crc32c(&bytes[records_at..records_at + 156]);
+    bytes[records_at + 156..records_at + 160].copy_from_slice(&crc.to_le_bytes());
+    let end = bytes.len() - 32;
+    let trailer = brutex_core::blake3::hash(&bytes[..end]);
+    bytes[end..].copy_from_slice(&trailer);
+    fs::write(&written.path, &bytes).unwrap();
+
+    let whole = verdict::check_trailer(&written.path).unwrap();
+    assert_eq!(whole.records, 1, "the later image reads whole");
+    let read = verdict::read_image(&written.path).unwrap();
+    assert_eq!(read.records[0].0.facts.flags, with_22);
+    let answer = Reader::new()
+        .lookup(
+            &lseries,
+            day(),
+            &Key::instrument("NSE-FNO-ZZNEW-A").unwrap(),
+        )
+        .unwrap()
+        .answer
+        .unwrap();
+    assert_eq!(answer.flags(), with_22, "the reader keeps bit 22");
+    assert_eq!(
+        flags::words(answer.flags()),
+        vec!["lineage_unchecked", "flag_22"]
+    );
+    // A partial run of this build carries that record whole, bit 22 and all.
+    let mut carry = generation(302, vec![entry("NSE-FNO-ZZNEW-B", Code::Match)]);
+    carry.carry = Carry::Others;
+    let carried = verdict::commit(&lseries, &carry).unwrap();
+    assert_eq!(carried.carried, 1);
+    let kept = Reader::new()
+        .lookup(
+            &lseries,
+            day(),
+            &Key::instrument("NSE-FNO-ZZNEW-A").unwrap(),
+        )
+        .unwrap()
+        .answer
+        .unwrap();
+    assert_eq!(kept.flags(), with_22, "a carry never drops a later bit");
+    assert_eq!(kept.header.generation, 2);
+
+    // Code 18 `owed`: severity 9, after `day_partial` and before
+    // `source_refused`; it sorts last by code and it colours the day.
+    let owed = Root::new();
+    let oseries = owed.series();
+    let o = verdict::commit(
+        &oseries,
+        &generation(
+            311,
+            vec![
+                entry("NSE-FNO-ZZOWED-A", Code::Owed),
+                entry("NSE-FNO-ZZOWED-B", Code::SourceRefused),
+                entry("NSE-FNO-ZZOWED-C", Code::Match),
+                entry("NSE-FNO-ZZOWED-D", Code::NotCompared),
+            ],
+        ),
+    )
+    .unwrap();
+    assert_eq!(o.worst, Code::Owed);
+    let image = verdict::read_image(&o.path).unwrap();
+    let codes: Vec<Code> = image.records.iter().map(|(r, _)| r.facts.code).collect();
+    assert_eq!(
+        codes,
+        vec![
+            Code::Match,
+            Code::SourceRefused,
+            Code::NotCompared,
+            Code::Owed
+        ]
+    );
+    assert_eq!(image.header.counts[18], 1);
+    assert_eq!(image.header.slice_of(Code::Owed), (3, 1));
+    let owed_day = Reader::new()
+        .year(&oseries, 2031)
+        .unwrap()
+        .unwrap()
+        .entry(day());
+    assert_eq!(owed_day.worst_code(), Some(Code::Owed));
+    assert_eq!(owed_day.mismatches, 0, "owed is never a store defect");
+    assert_eq!(Code::Owed.worse(Code::DayPartial), Code::DayPartial);
+    assert_eq!(Code::Owed.worse(Code::SourceRefused), Code::Owed);
+
+    // The other refusals of inputs version 1 cannot hold.
     let mut bad = generation(u64::from(u32::MAX) + 1, Vec::new());
     assert_eq!(
         verdict::commit(&series, &bad).unwrap_err().word(),
@@ -1137,12 +1413,6 @@ fn format_v1_holds_every_fact_it_names() {
     );
     bad.run = 5;
     bad.entries = vec![entry("NSE-FNO-ZZALL-B", Code::Match)];
-    bad.entries[0].facts.flags = 1 << 20;
-    match verdict::commit(&series, &bad) {
-        Err(VerdictError::FlagUnknown { bits }) => assert_eq!(bits, 1 << 20),
-        other => panic!("expected flag_unknown, got {other:?}"),
-    }
-    bad.entries[0].facts.flags = 0;
     bad.entries[0].details = vec![Detail {
         kind: 0,
         payload: Vec::new(),
@@ -1184,12 +1454,14 @@ fn format_v1_holds_every_fact_it_names() {
     );
 }
 
-/// The codes, their severities and the mismatch set of §6.4, pinned.
+/// The codes, their severities and the mismatch set of §6.4, pinned: codes 1
+/// to 18 (D-4844, D-4879), a total severity order with `owed` at 9.
 #[test]
 fn the_codes_and_their_severity_are_the_designs() {
+    assert_eq!(Code::ALL.len(), 18);
     let mut severities: Vec<u8> = Code::ALL.iter().map(|c| c.severity()).collect();
     severities.sort_unstable();
-    assert_eq!(severities, (1..=17).collect::<Vec<u8>>(), "a total order");
+    assert_eq!(severities, (1..=18).collect::<Vec<u8>>(), "a total order");
     let by_severity: Vec<u8> = {
         let mut all = Code::ALL.to_vec();
         all.sort_by_key(|c| c.severity());
@@ -1197,7 +1469,9 @@ fn the_codes_and_their_severity_are_the_designs() {
     };
     assert_eq!(
         by_severity,
-        vec![9, 2, 3, 4, 7, 8, 5, 16, 6, 12, 13, 14, 17, 15, 10, 11, 1]
+        vec![
+            9, 2, 3, 4, 7, 8, 5, 16, 18, 6, 12, 13, 14, 17, 15, 10, 11, 1
+        ]
     );
     let mismatches: Vec<u8> = Code::ALL
         .iter()
@@ -1205,14 +1479,17 @@ fn the_codes_and_their_severity_are_the_designs() {
         .map(|c| c.code())
         .collect();
     assert_eq!(mismatches, vec![2, 3, 4, 5, 7, 8, 9]);
-    for code in Code::ALL {
+    for (i, code) in Code::ALL.into_iter().enumerate() {
+        assert_eq!(usize::from(code.code()), i + 1, "ALL is in code order");
         assert_eq!(Code::from_code(code.code()), Some(code));
         assert_eq!(code.worse(Code::Match), code);
         assert_eq!(Code::StoreUnreadable.worse(code), Code::StoreUnreadable);
     }
     assert_eq!(Code::from_code(0), None, "0 is unset, never a written code");
-    assert_eq!(Code::from_code(18), None);
+    assert_eq!(Code::from_code(19), None);
     assert_eq!(Code::DayPartial.word(), "day_partial");
+    assert_eq!(Code::Owed.word(), "owed");
+    assert_eq!(Code::Owed.code(), 18);
 }
 
 /// The feed, segment, timeframe and unit bytes, pinned to their sources: a
@@ -1265,7 +1542,35 @@ fn the_series_bytes_are_pinned() {
     assert_eq!(
         series.image_path(day(), 7),
         root.0
-            .join("verify/zerodha/INDEX/1min/2031/2031-03-04.g000007.vdt")
+            .join("verify/zerodha/INDEX/1min/2031/2031-03-04.g0000000007.vdt")
+    );
+    // Ten digits, the width of u32::MAX: every generation has one name, and
+    // one day's names sort in generation order.
+    assert_eq!(
+        series.image_path(day(), u32::MAX).file_name().unwrap(),
+        "2031-03-04.g4294967295.vdt"
+    );
+    let mut names: Vec<String> = [1_000_000u32, 999_999, 7, u32::MAX, 10]
+        .into_iter()
+        .map(|g| {
+            series
+                .image_path(day(), g)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "2031-03-04.g0000000007.vdt",
+            "2031-03-04.g0000000010.vdt",
+            "2031-03-04.g0000999999.vdt",
+            "2031-03-04.g0001000000.vdt",
+            "2031-03-04.g4294967295.vdt",
+        ]
     );
     assert_eq!(
         series.year_index(2031),
@@ -1369,7 +1674,8 @@ fn the_bytes_sit_at_the_offsets_section_35_states() {
 }
 
 /// D-4854 — a partial day is never green: a key the run never reached reads
-/// the day block, whose worst is at least `day_partial`.
+/// `day_partial` from the day block's state, and the day's worst is at least
+/// `day_partial`.
 #[test]
 fn a_partial_day_is_never_green() {
     let root = Root::new();
@@ -1391,7 +1697,7 @@ fn a_partial_day_is_never_green() {
         .unwrap();
     assert_eq!(
         reached.code(),
-        Code::Match,
+        Some(Code::Match),
         "the reached key keeps its own verdict"
     );
     let unreached = reader
@@ -1403,51 +1709,90 @@ fn a_partial_day_is_never_green() {
         .unwrap()
         .answer
         .unwrap();
-    assert_eq!(unreached.found, Found::DayBlock);
-    assert_eq!(unreached.code(), Code::DayPartial);
+    assert_eq!(unreached.found, Found::NoRecord(NoRecord::DayPartial));
+    assert_eq!(unreached.code(), Some(Code::DayPartial));
     assert_eq!(unreached.day.not_reached, 9);
     let year = reader.year(&series, 2031).unwrap().unwrap();
     assert_eq!(year.entry(day()).worst_code(), Some(Code::DayPartial));
 }
 
-/// The scrub reads the trailer and every check; a flipped byte anywhere is
-/// refused by name, and a lookup that meets a flipped record refuses it.
+/// IA-VD-14 — `check_trailer` accepts a whole image and refuses one byte
+/// changed anywhere in it, header, day block, table, records, details or the
+/// trailer itself, `trailer_mismatch` by name. A lookup never reads the
+/// trailer (a changed trailer byte leaves every answer as it was), and a
+/// lookup that meets a changed record refuses it `record_corrupt`.
 #[test]
-fn a_flipped_byte_is_refused_by_the_scrub_and_the_lookup() {
+fn a_day_images_trailer_names_any_changed_byte() {
     let root = Root::new();
     let series = root.series();
-    let done = verdict::commit(&series, &generation(171, day_of(30))).unwrap();
+    let mut g = generation(171, day_of(3));
+    g.entries[1].details = vec![Detail {
+        kind: 4,
+        payload: b"ZZ invented detail".to_vec(),
+    }];
+    g.day_details = vec![Detail {
+        kind: 19,
+        payload: vec![0xC3; 24],
+    }];
+    let done = verdict::commit(&series, &g).unwrap();
     let clean = fs::read(&done.path).unwrap();
-    assert_eq!(verdict::scrub(&done.path).unwrap().records, 30);
-    let image = verdict::read_image(&done.path).unwrap();
-    let records_at = 512 + 8 * (usize::try_from(image.header.capacity).unwrap() + 7);
-    for at in [3usize, 300, 520, records_at + 160 * 4 + 90, clean.len() - 1] {
+    let checked = verdict::check_trailer(&done.path).unwrap();
+    assert_eq!(
+        (checked.generation, checked.records, checked.details),
+        (1, 3, 2)
+    );
+    for at in 0..clean.len() {
         let mut bytes = clean.clone();
-        bytes[at] ^= 0x10;
+        bytes[at] ^= 0x01;
         fs::write(&done.path, &bytes).unwrap();
-        let refused = verdict::scrub(&done.path).unwrap_err();
-        assert!(
-            ["image_corrupt", "record_corrupt"].contains(&refused.word()),
-            "byte {at}: {refused}"
-        );
+        match verdict::check_trailer(&done.path) {
+            Err(VerdictError::TrailerMismatch { path }) => assert_eq!(path, done.path),
+            other => panic!(
+                "byte {at} of {}: expected trailer_mismatch, got {other:?}",
+                clean.len()
+            ),
+        }
     }
+
+    fs::write(&done.path, &clean).unwrap();
+    let image = verdict::read_image(&done.path).unwrap();
+
+    // A lookup never reads the trailer.
     let mut bytes = clean.clone();
-    bytes[records_at + 160 * 4 + 90] ^= 0x10;
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x80;
     fs::write(&done.path, &bytes).unwrap();
-    let flipped = image.records[4].0.key.clone();
+    let key = image.records[1].0.key.clone();
     let mut reader = Reader::new();
-    match reader.lookup(&series, day(), &flipped) {
-        Err(VerdictError::RecordCorrupt { ordinal, .. }) => assert_eq!(ordinal, 4),
+    assert_eq!(
+        found(&reader.lookup(&series, day(), &key).unwrap().answer.unwrap()).key,
+        key,
+        "a changed trailer changes no answer"
+    );
+    assert_eq!(
+        verdict::check_trailer(&done.path).unwrap_err().word(),
+        "trailer_mismatch"
+    );
+
+    // A lookup that meets a changed record refuses it by name.
+    let records_at = 512 + 8 * (usize::try_from(image.header.capacity).unwrap() + 7);
+    let mut bytes = clean.clone();
+    bytes[records_at + 160 + 90] ^= 0x10;
+    fs::write(&done.path, &bytes).unwrap();
+    let mut reader = Reader::new();
+    match reader.lookup(&series, day(), &key) {
+        Err(VerdictError::RecordCorrupt { ordinal, .. }) => assert_eq!(ordinal, 1),
         other => panic!("expected record_corrupt, got {other:?}"),
     }
     fs::write(&done.path, &clean).unwrap();
     assert!(
         reader
-            .lookup(&series, day(), &flipped)
+            .lookup(&series, day(), &key)
             .unwrap()
             .answer
             .is_some()
     );
+    assert_eq!(verdict::check_trailer(&done.path).unwrap(), checked);
 }
 
 /// The handle cache holds at most 64 handles, and a lookup over a year of
@@ -1522,10 +1867,21 @@ fn section_35_states_the_format_this_module_writes() {
         "`hard_link`",
         "BLAKE3",
         "CRC-32C",
-        "`store::verdict::scrub`",
+        "`store::verdict::check_trailer`",
+        "`trailer_mismatch`",
+        "`owed`",
+        "`lineage_unchecked`",
+        "`source_crc_unrecorded`",
+        "`flag_<n>`",
+        "`flag_unknown`",
+        "`no_record`",
+        "`stale: unknown (month busy)`",
+        "10 digits",
+        "L-IA-33",
         "D-4808",
         "D-4844",
         "D-4865",
+        "D-4879",
     ] {
         assert!(text.contains(fact), "§35 does not state {fact}");
     }
@@ -1547,4 +1903,163 @@ fn every_key_a_store_path_can_name_fits_the_key_field() {
         "C".repeat(store::path::MAX_SEGMENT_LEN)
     );
     assert_eq!(Key::instrument(&widest).unwrap().text().len(), longest);
+}
+
+/// One IA-VD-16 case: the day's state, whether the source holds the day, and
+/// the no-record answer with its code, word and reason.
+type Case = (
+    DayState,
+    SourceHeld,
+    NoRecord,
+    Option<Code>,
+    &'static str,
+    Option<&'static str>,
+);
+
+/// IA-VD-16 — a key with no record answers by the day block's state, never
+/// with the day's worst code: on a complete day where one share is
+/// `value_mismatch`, a share absent from the source reads `no_record`; a
+/// partial day reads `day_partial`, a day the source lacks
+/// `source_lacks_day`, a day not imported `owed (not_imported)`, and a day
+/// imported with verification off `not_compared (verify_off)`. Each costs the
+/// same reads as any lookup.
+#[test]
+fn a_key_without_a_record_never_shows_another_keys_code() {
+    let absent = Key::instrument("NSE-CASH-ZZABSENT").unwrap();
+    let cases: [Case; 9] = [
+        (
+            DayState::Complete,
+            SourceHeld::Yes,
+            NoRecord::NotInDay,
+            None,
+            "no_record",
+            None,
+        ),
+        (
+            DayState::Complete,
+            SourceHeld::Unknown,
+            NoRecord::NotInDay,
+            None,
+            "no_record",
+            None,
+        ),
+        (
+            DayState::Stopped,
+            SourceHeld::Yes,
+            NoRecord::DayPartial,
+            Some(Code::DayPartial),
+            "day_partial",
+            None,
+        ),
+        (
+            DayState::SourceLost,
+            SourceHeld::Yes,
+            NoRecord::DayPartial,
+            Some(Code::DayPartial),
+            "day_partial",
+            None,
+        ),
+        (
+            DayState::DiskFull,
+            SourceHeld::Yes,
+            NoRecord::DayPartial,
+            Some(Code::DayPartial),
+            "day_partial",
+            None,
+        ),
+        (
+            DayState::Census,
+            SourceHeld::Yes,
+            NoRecord::DayPartial,
+            Some(Code::DayPartial),
+            "day_partial",
+            None,
+        ),
+        (
+            DayState::HeldBackCap,
+            SourceHeld::Yes,
+            NoRecord::DayPartial,
+            Some(Code::DayPartial),
+            "day_partial",
+            None,
+        ),
+        (
+            DayState::NotImported,
+            SourceHeld::Yes,
+            NoRecord::NotImported,
+            Some(Code::Owed),
+            "owed",
+            Some("not_imported"),
+        ),
+        (
+            DayState::VerifyOff,
+            SourceHeld::Yes,
+            NoRecord::VerifyOff,
+            Some(Code::NotCompared),
+            "not_compared",
+            Some("verify_off"),
+        ),
+    ];
+    for (state, held, want, code, word, reason) in cases {
+        let root = Root::new();
+        let series = Series {
+            segment: Segment::Cash,
+            ..root.series()
+        };
+        let mut g = generation(
+            181,
+            vec![
+                entry("NSE-CASH-ZZMISMATCH", Code::ValueMismatch),
+                entry("NSE-CASH-ZZFINE", Code::Match),
+            ],
+        );
+        g.day_block.state = state;
+        g.day_block.source_held = held;
+        let done = verdict::commit(&series, &g).unwrap();
+        assert_eq!(
+            done.worst,
+            Code::ValueMismatch,
+            "{state:?}: another key's mismatch is the day's worst"
+        );
+        let got = Reader::new().lookup(&series, day(), &absent).unwrap();
+        assert!(got.cost.reads <= 5 && got.cost.opens <= 2, "{:?}", got.cost);
+        let answer = got.answer.unwrap();
+        assert_eq!(answer.found, Found::NoRecord(want), "{state:?}, {held:?}");
+        assert_eq!(answer.code(), code, "{state:?}: never the day's worst code");
+        assert_ne!(answer.code(), Some(Code::ValueMismatch));
+        assert_eq!(want.word(), word);
+        assert_eq!(want.reason(), reason);
+        assert_eq!(NoRecord::of(&answer.day), want);
+    }
+    // A day the source lacks: `source_lacks_day`, whatever else the state
+    // says, unless the day closed partial.
+    for (state, want) in [
+        (DayState::Complete, NoRecord::SourceLacksDay),
+        (DayState::NotImported, NoRecord::SourceLacksDay),
+        (DayState::Stopped, NoRecord::DayPartial),
+    ] {
+        let block = DayBlock {
+            state,
+            source_held: SourceHeld::No,
+            ..DayBlock::of(Code::ValueMismatch)
+        };
+        assert_eq!(NoRecord::of(&block), want, "{state:?}");
+    }
+    let root = Root::new();
+    let series = root.series();
+    let mut g = generation(182, vec![entry("NSE-FNO-ZZHELD-A", Code::ValueMismatch)]);
+    g.day_block.source_held = SourceHeld::No;
+    g.day_block.state = DayState::NotImported;
+    verdict::commit(&series, &g).unwrap();
+    let answer = Reader::new()
+        .lookup(
+            &series,
+            day(),
+            &Key::instrument("NSE-FNO-ZZHELD-B").unwrap(),
+        )
+        .unwrap()
+        .answer
+        .unwrap();
+    assert_eq!(answer.code(), Some(Code::SourceLacksDay));
+    assert_eq!(NoRecord::SourceLacksDay.word(), "source_lacks_day");
 }
