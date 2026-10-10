@@ -327,6 +327,25 @@ pub(crate) fn open_classified(
     // stamps it into the header on create and verifies it on every reopen, so a
     // reader that folded the hash differently would be refused by the file
     // itself — which is the check working, not a bug to route around.
+    // A KEY THE CURRENT DECODER REFUSES IS REFUSED BY NAME on every reader
+    // (D-3331; WP-12c, DB-A18): the re-key recorded it `retired`, its files
+    // are kept, and no route serves its bars. One `stat` of the lineage
+    // ledger and one hash probe, for a GDFL option only.
+    if vendor == Vendor::Gdfl
+        && segment == "FNO"
+        && let Some(contract) = contract
+        && let Some(why) = change::retired_refusal(
+            store_root,
+            vendor,
+            &format!("{exchange}-{segment}-{symbol}-{contract}"),
+        )
+    {
+        note_refused(vendor, exchange, segment, symbol, timeframe, month, &why);
+        return Err(OpenRefusal {
+            kind: OpenRefusalKind::Invalid,
+            message: why,
+        });
+    }
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the id is a CROSS-CHECK the store verifies on reopen, never an \
@@ -932,6 +951,114 @@ fn window_bar(rules: &change::Rules, behind: Behind, bar: Bar, series: usize) ->
     }
 }
 
+/// A series the current decoder files under another key (D-3331; WP-12c,
+/// DB-A17): still served, and named with the key it continues as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupersededBy {
+    /// The census key asked for.
+    pub key: String,
+    /// The census key the decoder files it under.
+    pub by: String,
+    /// Why its expiry moved: `closed_day` or `vendor_redated`.
+    pub kind: &'static str,
+    /// `true` when the re-key recorded it (`superseded` in
+    /// `imports/gdfl.lineage`, the bars published under `by`); `false` when
+    /// the decoder disagrees with the stored key and the re-key that moves it
+    /// has not run (`cli gdfl-rekey --apply`, WP-80), so `by` holds no bar
+    /// of it yet.
+    pub recorded: bool,
+}
+
+/// A series some of whose bars the re-key copied in from a stored key the
+/// decoder files here (D-3331; WP-12c, DB-A17): the reverse of
+/// [`SupersededBy`], so the copy can be audited from the key it landed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Supersedes {
+    /// The census key asked for.
+    pub key: String,
+    /// The stored key the bars were copied from; still readable, and kept.
+    pub of: String,
+    /// Why its expiry moved: `closed_day` or `vendor_redated`.
+    pub kind: &'static str,
+    /// Bars copied, as the ledger line states them.
+    pub bars: u64,
+    /// BLAKE3 of those bars' records in write order, 64 hex digits.
+    pub blake3: String,
+}
+
+/// The sentence `/provenance.json` adds about a key the re-key superseded,
+/// copied into or retired (D-3331; WP-12c), or `None` for any other key:
+/// one `stat` of the lineage ledger and two hash probes.
+pub(crate) fn rekey_note(
+    store_root: &std::path::Path,
+    vendor: Vendor,
+    key: &str,
+) -> Option<String> {
+    change::rekey_note(store_root, vendor, key)
+}
+
+/// What the re-key says of one asked series: refused, superseded, or
+/// nothing. O(1): one ledger probe, and for a GDFL option the decoder's
+/// settlement of its stored expiry (bounded walks over compile-time tables).
+fn rekey_status(
+    lineage: &change::Lineage,
+    vendor: Vendor,
+    key: &SeriesKey,
+) -> Result<Option<SupersededBy>, String> {
+    let text = key.text();
+    match lineage.status_of(&text) {
+        Some(change::KeyStatus::Retired(why)) => return Err(why.clone()),
+        Some(change::KeyStatus::Superseded { by, kind }) => {
+            return Ok(Some(SupersededBy {
+                key: text,
+                by: by.clone(),
+                kind,
+                recorded: true,
+            }));
+        }
+        None => {}
+    }
+    if vendor != Vendor::Gdfl || key.exchange != "NSE" || key.segment != "FNO" {
+        return Ok(None);
+    }
+    let decoded = key.contract.and_then(|contract| {
+        let underlying = brutex_core::symbol::Symbol::new(&key.symbol).ok()?;
+        pull::gdfl_rekey::decoded_key(underlying, contract)
+            .map(|(to, kind)| (pull::gdfl_lineage::option_key(underlying, to), kind))
+    });
+    Ok(decoded.map(|(by, kind)| SupersededBy {
+        key: text,
+        by,
+        kind: kind.as_str(),
+        recorded: false,
+    }))
+}
+
+/// [`rekey_status`] of every asked series, the superseded ones, and the
+/// keys the re-key copied into each (one more probe per series); or the
+/// first retired one's refusal.
+fn rekey_statuses(
+    lineage: &change::Lineage,
+    query: &WindowQuery,
+) -> Result<(Vec<SupersededBy>, Vec<Supersedes>), String> {
+    let mut superseded = Vec::with_capacity(query.series.len());
+    let mut copied_in = Vec::new();
+    for key in &query.series {
+        if let Some(one) = rekey_status(lineage, query.vendor, key)? {
+            superseded.push(one);
+        }
+        let text = key.text();
+        copied_in.extend(lineage.predecessors_of(&text).iter().map(|one| Supersedes {
+            key: text.clone(),
+            of: one.of.clone(),
+            kind: one.kind,
+            bars: one.bars,
+            blake3: one.blake3.clone(),
+        }));
+    }
+    Ok((superseded, copied_in))
+}
+
 /// One series' total, as the answer names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesTotal {
@@ -990,6 +1117,12 @@ pub struct Window {
     pub scan_rows: u64,
     /// Days covered per held month, when asked for.
     pub coverage: Vec<MonthCoverage>,
+    /// The asked series the current decoder files under another key, each
+    /// with that key (D-3331; WP-12c).
+    pub superseded: Vec<SupersededBy>,
+    /// The stored keys whose bars the re-key copied into an asked series
+    /// (D-3331; WP-12c).
+    pub supersedes: Vec<Supersedes>,
 }
 
 /// The most missing months named in one answer; the count is always whole.
@@ -1162,6 +1295,9 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
     // THE LINEAGE LEDGER IS READ ONCE PER REQUEST, and its fault said once.
     let lineage = change::Lineage::read(store_root, query.vendor);
     out.faults.extend(lineage.fault.clone());
+    // A RETIRED SERIES IS REFUSED BY NAME, and a superseded one is served
+    // with the key it continues as (D-3331; WP-12c).
+    (out.superseded, out.supersedes) = rekey_statuses(&lineage, query)?;
     for key in &query.series {
         rules.push(change::Rules::of(
             store_root,
@@ -1862,6 +1998,21 @@ pub(crate) mod test_access {
     /// (`<store>/imports/gdfl.lineage`, D-3331).
     pub(crate) fn lineage_ledger_counts(text: &str) -> (usize, usize) {
         super::change::for_tests::ledger_counts(text)
+    }
+
+    /// What a ledger text's re-key records say of `key` (`superseded by
+    /// <key>`, `retired`, or nothing) and how many lineage events label it
+    /// (D-3331; WP-12c).
+    pub(crate) fn lineage_ledger_status(text: &str, key: &str) -> (String, usize) {
+        let (status, events) = super::change::for_tests::ledger_status(text, key);
+        let said = match status {
+            Some(super::change::KeyStatus::Superseded { by, kind }) => {
+                format!("superseded by {by} ({kind})")
+            }
+            Some(super::change::KeyStatus::Retired(why)) => format!("retired: {why}"),
+            None => String::new(),
+        };
+        (said, events)
     }
 }
 

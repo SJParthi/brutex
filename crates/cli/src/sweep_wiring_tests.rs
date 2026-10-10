@@ -153,6 +153,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "fold-audit"
                 | "gdfl-dayflags"
                 | "gdfl-import"
+                | "gdfl-rekey"
                 | "tix-rebuild"
                 | "research-plan"
                 | "policy-check"

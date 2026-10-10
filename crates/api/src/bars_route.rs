@@ -264,6 +264,12 @@ pub(super) async fn bars_json(
             .await;
     match answer {
         Ok(Ok((status, body))) => (status, json(), body),
+        // A KEY THE DECODER REFUSES IS GONE, as on the window (D-3331, WP-12c).
+        Ok(Err(why)) if pull::gdfl_lineage::is_contract_refused(&why) => (
+            axum::http::StatusCode::GONE,
+            json(),
+            format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+        ),
         Ok(Err(why)) => refuse(why),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
@@ -772,6 +778,15 @@ pub(super) async fn bars_window_json(
     };
     let (body, withheld, faulted) = match answered {
         Ok(Ok(rendered)) => rendered,
+        // A SERIES THE DECODER REFUSES IS GONE, not malformed: 410, with the
+        // refusal the re-key recorded (D-3331; WP-12c, DB-A18).
+        Ok(Err(why)) if pull::gdfl_lineage::is_contract_refused(&why) => {
+            return (
+                axum::http::StatusCode::GONE,
+                json(),
+                format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+            );
+        }
         Ok(Err(why)) => return refuse(why),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
@@ -986,8 +1001,39 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
             month.days_covered
         )
     }));
+    // THE KEY A SERIES CONTINUES AS (D-3331; WP-12c, DB-A17): `null` when no
+    // asked series is superseded, so every older answer reads the same.
+    let superseded = if window.superseded.is_empty() {
+        "null".to_owned()
+    } else {
+        list(&mut window.superseded.iter().map(|one| {
+            format!(
+                r#"{{"key":{},"by":{},"kind":{},"recorded":{}}}"#,
+                render::json_string(&one.key),
+                render::json_string(&one.by),
+                render::json_string(one.kind),
+                one.recorded
+            )
+        }))
+    };
+    // AND THE KEYS A SERIES' COPIED BARS CAME FROM, so the copy is audited
+    // from the key it landed in: `null` for every other series.
+    let copied_in = if window.supersedes.is_empty() {
+        "null".to_owned()
+    } else {
+        list(&mut window.supersedes.iter().map(|one| {
+            format!(
+                r#"{{"key":{},"of":{},"kind":{},"bars":{},"blake3":{}}}"#,
+                render::json_string(&one.key),
+                render::json_string(&one.of),
+                render::json_string(one.kind),
+                one.bars,
+                render::json_string(&one.blake3)
+            )
+        }))
+    };
     let body = format!(
-        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"at_index":{},"series_totals":{totals},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faults":{},"bars":{rows}}}"#,
+        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faults":{},"bars":{rows}}}"#,
         window.total,
         window.offset,
         window.months_read,
