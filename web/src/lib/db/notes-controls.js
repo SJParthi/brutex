@@ -72,23 +72,21 @@
  */
 
 
-/* THE WINDOW IS ALWAYS DRAWN, AND IT NEVER TOUCHES THE RUNGS ABOVE IT.
+/* THE DAY WINDOW NARROWS A CONTRACT TOO (DB-046, DB-G89; D-3337 item 5).
  *
- * An earlier draft hid this pair the moment an expiry was chosen. That was a
- * misreading of "the dates must not be applicable to a contract". The order
- * the owner set is feed, universe, instrument, segment, timeframe, expiry,
- * strike, moneyness, side, FROM DATE, TO DATE — the dates are in the F&O
- * list, so they are present for a contract too.
+ * The page once said the dates were "spot only — a contract's window is its
+ * expiry, so these are ignored once an expiry is chosen". The code and the
+ * server did the opposite, correctly: with FROM = TO = 2019-03-20 on NIFTY
+ * 2019-03-28 11,500 CE the grid asks `/bars.json?...&from=2019-03-20&to=
+ * 2019-03-20` and every row returned is on that IST day. The labels now say
+ * what happens: the window narrows a contract to the chosen days within its
+ * life.
  *
- * What must not happen is the window narrowing the CONTRACT RUNGS. It cannot:
- * this filters `barRows`, which is downstream of every offer.
- * `expiryOffered` folds `matchedPreContract`; `strikeOffered` and
- * `sideOffered` fold `expiryGated` — all upstream of the bars. So choosing a
- * fortnight can never make an expiry vanish from its own menu, which is the
- * failure that instruction was guarding against.
- *
- * A contract's extent is still its expiry. The window only says which of its
- * days to draw. */
+ * What it must not do is narrow the CONTRACT RUNGS, and it cannot: it filters
+ * the bars, which are downstream of every offer. `expiryOffered` folds
+ * `matchedPreContract`; the strike and side offers fold `expiryGated` — all
+ * upstream of the bars. So choosing a fortnight can never make an expiry
+ * vanish from its own menu. */
 export const dayWindowApplies = true;
 
 /**
@@ -214,41 +212,66 @@ export const LEGACY_BLIND = new Set(['n50', 'n100', 'n200', 'n500']);
 export const SEGMENT_KEYS = ['INDEX', 'CASH', 'FNO'];
 
 /**
- * /ingest's THREE SEGMENTS, ON THIS PAGE'S OWN ROWS.
+ * THE SEGMENTS, ON THIS PAGE'S OWN ROWS (D-3337 item 6; DB-050, DB-G67).
  *
- * The rung offered INDEX / CASH / FNO — the store's own second field — and
- * /ingest offers Spot / Expired futures / Expired options. Same question, two
- * vocabularies, so a reader moving between the pages had to translate.
+ * Re-derived from a field every row carries — its expiry — never relabelled
+ * from the store's INDEX / CASH / FNO:
  *
- * THE FILE ARGUED AGAINST THIS and the objection was real: "relabelling would
- * rename three sets into three other sets that do not have the same members".
- * It is answered rather than ignored — the sets are not relabelled, they are
- * RE-DERIVED from a field every row already carries. `expiry` is what splits
- * them:
+ *   Spot                 `expiry === null`: INDEX and CASH, neither settles.
+ *   Expired futures /    a contract whose expiry is before TODAY'S IST day
+ *   Expired options      and on or before the feed's archive end.
+ *   … settled after the  a contract that settled before today but after the
+ *   archive ended        archive's last day: its final sessions are not held.
+ *   Unexpired …          a contract expiring today or later: not settled.
  *
- *   Spot            a continuous series — `expiry === null`. INDEX and CASH
- *                   both land here, which is correct: neither settles.
- *   Expired futures a settled contract, `-FUT`.
- *   Expired options a settled contract, `-CE` or `-PE`.
+ * The last four rows are drawn only when the feed's store holds such a
+ * contract; Expired futures and Expired options are always drawn.
  *
- * So Spot is not "INDEX renamed" — it is every row with no expiry, whatever
- * the store keyed it under, and the membership is computed rather than
- * asserted. The operator's instruction, and the objection's terms are met.
- *
- * The notes are /ingest's own words, including the 503, because the reason an
- * expired contract is absent is the same reason on both pages.
+ * THE "503 — no transport in this build" CLAUSE IS GONE. It was false for a
+ * store holding about 1.55 lakh option instrument-months imported by
+ * `cli gdfl-import` (D-2804), and the server sentence it quoted ("expired F&O
+ * has no local-archive path and no HTTP transport in this build") is no
+ * longer anywhere in `crates/api` (checked 10 Oct 2026). What a feed holds and how it got there is counted on the row itself
+ * (`segmentRows` in `selection.svelte.js`); these notes are the definitions.
+ * Membership is computed by `segmentOf` in `selection-model.js`.
  */
 export const SEG_VIEW = [
-  { key: 'spot', name: 'Spot', note: 'continuous series — no expiry' },
+  { key: 'spot', name: 'Spot', note: 'continuous series — no expiry', always: true },
   {
     key: 'futures',
     name: 'Expired futures',
-    note: 'contracts that have already settled · 503 — no transport in this build'
+    note: 'futures that settled before today, with their final session inside the archive',
+    always: true
   },
   {
     key: 'options',
     name: 'Expired options',
-    note: 'contracts that have already settled · 503 — no transport in this build'
+    note: 'options that settled before today, with their final session inside the archive',
+    always: true
+  },
+  {
+    key: 'futures-cut',
+    name: 'Futures settled after the archive ended',
+    note: "settled before today but after the vendor archive's last day, so their last sessions are not held",
+    always: false
+  },
+  {
+    key: 'options-cut',
+    name: 'Options settled after the archive ended',
+    note: "settled before today but after the vendor archive's last day, so their last sessions are not held",
+    always: false
+  },
+  {
+    key: 'futures-live',
+    name: 'Unexpired futures',
+    note: 'expiring today or later — not settled',
+    always: false
+  },
+  {
+    key: 'options-live',
+    name: 'Unexpired options',
+    note: 'expiring today or later — not settled',
+    always: false
   }
 ];
 

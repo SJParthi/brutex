@@ -166,3 +166,67 @@ test('the key list is what encode actually emits, in that order', () => {
   const emitted = [...new URLSearchParams(url).keys()];
   assert.deepEqual(emitted, KEYS, 'a new field must be added to KEYS as well');
 });
+
+/* ── /db's selection in the address bar (WP-50; D-3337 item 4, DB-077) ── */
+
+import { encodeDb, decodeDb, dbHref, DB_KEYS } from '../src/lib/urlstate.js';
+
+test('THE REGRESSION: a /db option selection survives the address bar, field for field', () => {
+  const sel = {
+    feed: 'gdfl',
+    seg: 'options',
+    sym: 'NIFTY',
+    tf: '1s',
+    exp: '2019-03-28',
+    k: ['1160000', '1150000'],
+    side: 'CE',
+    from: '2019-03-15',
+    to: '2019-03-15',
+    tfrom: '10:00:00',
+    tto: '10:04:59',
+    sort: 'c',
+    dir: /** @type {'asc'} */ ('asc'),
+    page: 3,
+    view: 'census',
+    oow: true
+  };
+  const q = encodeDb(sel);
+  const { sel: back, refused } = decodeDb(q);
+  assert.deepEqual(refused, []);
+  assert.deepEqual(back, { ...sel, k: ['1150000', '1160000'] });
+});
+
+test('one /db selection is one address: strikes sorted and deduplicated, keys in D-3337 order', () => {
+  const a = encodeDb({ feed: 'gdfl', sym: 'NIFTY', k: ['1160000', '1150000', '1150000'] });
+  const b = encodeDb({ k: [1150000, 1160000], sym: 'NIFTY', feed: 'gdfl' });
+  assert.equal(a, b);
+  assert.equal(a, 'feed=gdfl&sym=NIFTY&k=1150000&k=1160000');
+  const order = [...new URLSearchParams(encodeDb({ oow: true, feed: 'z', tto: '10:00', seg: 'spot' })).keys()];
+  assert.deepEqual(order, ['feed', 'seg', 'tto', 'oow']);
+  assert.deepEqual(DB_KEYS, ['feed', 'seg', 'sym', 'key', 'tf', 'exp', 'k', 'side', 'from', 'to', 'tfrom', 'tto', 'sort', 'dir', 'page', 'view', 'oow']);
+});
+
+test('the opening values are not written: page 1, Bars, newest first, the window applied', () => {
+  assert.equal(encodeDb({ feed: 'zerodha', sym: 'NIFTY', sort: 'ts', dir: 'desc', page: 1, view: 'bars', oow: false }), 'feed=zerodha&sym=NIFTY');
+  assert.equal(encodeDb({}), '');
+  assert.equal(dbHref({}), '/db');
+  assert.equal(dbHref({ feed: 'zerodha', seg: 'spot', sym: 'NIFTY', tf: '1day' }), '/db?feed=zerodha&seg=spot&sym=NIFTY&tf=1day');
+});
+
+test('a malformed field is named, never silently dropped or guessed', () => {
+  const { sel, refused } = decodeDb('?k=12.5&from=2019-02-30&to=2019-13-01&side=xx&page=0&tfrom=25:00&dir=up&oow=yes&view=chart&sym=nifty');
+  assert.deepEqual(sel, { sym: 'NIFTY' });
+  assert.deepEqual(
+    refused.map((r) => r.key).sort(),
+    ['dir', 'from', 'k', 'oow', 'page', 'side', 'tfrom', 'to', 'view']
+  );
+  for (const r of refused) assert.ok(r.why.length > 0, r.key);
+});
+
+test('a link from another page carries an instrument key and a day window', () => {
+  const href = dbHref({ feed: 'gdfl', key: 'NSE-FNO-NIFTY-2019-03-28-1150000-CE', tf: '1s', from: '2019-03-01', to: '2019-03-31' });
+  const { sel } = decodeDb(href.slice('/db'.length));
+  assert.equal(sel.key, 'NSE-FNO-NIFTY-2019-03-28-1150000-CE');
+  assert.equal(sel.from, '2019-03-01');
+  assert.equal(sel.to, '2019-03-31');
+});

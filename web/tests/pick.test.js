@@ -93,3 +93,46 @@ test('it does not reorder the caller’s array', () => {
   pickDefaultFeed(held);
   assert.equal(held.map((f) => f.wire).join(','), before, 'the caller’s order survived');
 });
+
+// ONLY THE OPERATOR'S FEEDS (D-3338, DB-051). Dhan, Groww and TrueData are
+// `offered: false` on `/feeds.json`, `excluded_by: "operator"`. A feed so
+// excluded is never chosen for the reader, whatever its store holds.
+test('THE REGRESSION: an excluded feed is never the default, even holding the most bars', () => {
+  const held = [
+    { wire: 'dhan', ready: true, bars: 9_999_999_999, offered: false },
+    { wire: 'zerodha', ready: true, bars: 451_629_928, offered: true },
+    { wire: 'gdfl', ready: true, bars: 3_259_842_252, offered: true }
+  ];
+  assert.equal(pickDefaultFeed(held), 'gdfl');
+  assert.equal(pickDefaultFeed([{ wire: 'dhan', ready: true, bars: 5, offered: false }]), null);
+  // No `offered` field (an older API) hides nothing.
+  assert.equal(pickDefaultFeed([{ wire: 'a', bars: 2 }]), 'a');
+});
+
+// A FIRST VISIT SURVEYS ONLY THE OFFERED FEEDS (D-3338; the 9 Oct drill-down,
+// row 3: HEAD /store.json for dhan, groww and truedata on every open).
+import { createFeedStartup } from '../src/lib/feed-startup.js';
+
+test('the first-visit survey never asks for an excluded feed’s census', async () => {
+  const list = [
+    { wire: 'dhan', ready: false, offered: false },
+    { wire: 'gdfl', ready: true, offered: true },
+    { wire: 'zerodha', ready: true, offered: true }
+  ];
+  /** @type {string[]} */
+  const asked = [];
+  const feeds = { all: [], active: null, error: null };
+  const storage = { getItem: () => null, setItem: () => {} };
+  await createFeedStartup(feeds, async (/** @type {string} */ url) => {
+    if (url === '/feeds.json') return Response.json(list);
+    const wire = new URL(url, 'http://fixture').searchParams.get('feed');
+    asked.push(String(wire));
+    const bars = wire === 'gdfl' ? 9 : 3;
+    return new Response(null, { headers: {
+      'x-brutex-census-state': 'held', 'x-brutex-census-degraded': '',
+      'x-brutex-census-note': `${wire}: 1 month(s), ${bars} row(s), generation 1`
+    } });
+  }, () => storage).load();
+  assert.deepEqual(asked.sort(), ['gdfl', 'zerodha']);
+  assert.equal(feeds.active, 'gdfl');
+});

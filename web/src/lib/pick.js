@@ -20,12 +20,30 @@
 /**
  * The feed to open on, or `null` when there are none.
  *
- * @param {Array<{wire: string, ready?: boolean, bars?: number}>} held
+ * ONLY AN OFFERED FEED CAN BE THE DEFAULT (D-3338). The operator uses Zerodha
+ * and GDFL; `/feeds.json` marks every other feed `offered: false` with
+ * `excluded_by: "operator"`. A feed excluded that way is never chosen for the
+ * reader, whatever its store holds. A row with no `offered` field (an older
+ * API) is treated as offered, so nothing is hidden by a field's absence.
+ *
+ * @param {Array<{wire: string, ready?: boolean, bars?: number, offered?: boolean}>} held
  *        one entry per feed, carrying what the store actually holds for it.
  * @returns {string | null} the `wire` name, never a display name.
  */
 export function pickDefaultFeed(held) {
-  if (!Array.isArray(held) || held.length === 0) return null;
+  if (!Array.isArray(held)) return null;
+  const offered = held.filter((f) => f && f.offered !== false);
+  if (offered.length === 0) return null;
+  return pickAmong(offered);
+}
+
+/**
+ * The store decides among the offered feeds; the credential is the fallback.
+ *
+ * @param {Array<{wire: string, ready?: boolean, bars?: number}>} held
+ * @returns {string | null}
+ */
+function pickAmong(held) {
   const best =
     held.filter((f) => (f.bars ?? 0) > 0).sort((a, b) => (b.bars ?? 0) - (a.bars ?? 0))[0] ??
     held.find((f) => f.ready) ??

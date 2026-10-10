@@ -64,7 +64,17 @@
   import { createPageRequests } from '$lib/page-requests.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
+  import { dbHref } from '$lib/urlstate.js';
   import { monthVerdict, isWholeAudit, unreadablePeers, auditRung } from '$lib/gap-verdict.js';
+
+  /* A MONTH ROW OPENS THAT MONTH ON /db (D-3337 item 4): the same feed, the
+     series' own key and rung, and the month as the day window. */
+  /** @param {string} ym `YYYY-MM` */
+  const monthLink = (ym) => {
+    const [y, mo] = ym.split('-').map(Number);
+    const last = new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10);
+    return dbHref({ feed: feeds.active ?? '', key: symbol, tf: rung, from: `${ym}-01`, to: last });
+  };
 
   /** @typedef {{ day: number, from: number, to: number, minutes: number, reason: string }} Run */
   /**
@@ -510,7 +520,9 @@
         {#each b.month as m (m.month)}
           {@const v = monthVerdict(m)}
           <tr class={v.kind}>
-            <td class="mono">{m.month}</td>
+            <td class="mono">
+              <a href={monthLink(m.month)} title="Open this month of this series on /db">{m.month}</a>
+            </td>
             <td class="num mono">{fmt(m.held)}</td>
             <td class="num mono">{fmt(m.expected)}</td>
             <td class="num mono">{m.lost_minutes ? fmt(m.lost_minutes) : '—'}</td>

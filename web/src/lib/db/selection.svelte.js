@@ -24,7 +24,7 @@
  * so every `$effect` is still created — and still runs within a flush — in
  * exactly the order it did before the split.
  */
-import { feeds } from '../feeds.svelte.js';
+import { feeds, selectFeed } from '../feeds.svelte.js';
 /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
    `loadCatalogue(feeds.active)` on every feed change, so the universe rung
    costs this page NO request — it is a join against a list the layout has
@@ -33,11 +33,32 @@ import { feeds } from '../feeds.svelte.js';
    checkable. See `universeRefusal`. */
 import { catalogue } from '../index.svelte.js';
 import { UNIVERSES, EVERYTHING, tokensOf, LEGACY_BLIND, censusKeyOf, SEG_VIEW, VIEWS } from './notes-controls.js';
-import { fmt, txt, tfCmp } from './notes-labels.js';
+import { fmt, txt, tfCmp, TF_SECS } from './notes-labels.js';
 import { parseKey } from '../instrument.js';
-import { monthLabel, dayLabel } from '../dates.js';
+import { monthLabel, dayLabel, istDay, timeLabel } from '../dates.js';
 import { strikeText } from './decoration.js';
-import { spanFloor } from './bars-plan.js';
+import { replaceState } from '$app/navigation';
+import { page } from '$app/state';
+import { ask } from '../ask.js';
+import { createPageRequests } from '../page-requests.js';
+import { encodeDb, decodeDb } from '../urlstate.js';
+import {
+  segmentOf,
+  contractRungsOf,
+  foldInstruments,
+  heldSpan,
+  eraOf,
+  sessionGrid,
+  expiryTags,
+  calendarOf,
+  dayCode,
+  keepOffered,
+  linkOfKey,
+  rebound,
+  timeBound,
+  DEFAULT_INSTRUMENT,
+  DEFAULT_SEGMENT
+} from './selection-model.js';
 /**
  * THE DB VIEW — what the store actually holds, for ONE feed.
  *
@@ -124,22 +145,19 @@ export function selectionState(db) {
   let fromMonth = $state('');
   let toMonth = $state('');
 
-  /* ---- THE DAY WINDOW, AND IT BELONGS TO SPOT ONLY ---------------------
+  /* ---- THE DAY WINDOW, FOR SPOT AND FOR A CONTRACT ---------------------
    *
    * A spot series runs forever, so "show me this week" is a real question and
-   * a calendar is the only way to ask it. A CONTRACT is different: it is
-   * defined BY its expiry, and its bars run from listing to that expiry and
-   * stop. Narrowing a contract by a second date range asks a question the
-   * contract has already answered, and a reader who set a window on spot and
-   * then chose an expiry would be silently filtering a series whose extent was
-   * never theirs to choose.
-   *
-   * So the pair is applied and drawn only while no expiry is chosen. Not
-   * disabled — absent. A control that cannot change the answer is not a
-   * control, and the page's other rungs already follow that rule.
+   * a calendar is the only way to ask it. It is just as real for a contract:
+   * a 4.5-year NIFTY option stored from 2018 is not one question, and the
+   * server narrows a contract's bars to the chosen days exactly as it does a
+   * spot series (DB-046, DB-G89). The labels used to say "spot only"; the code
+   * never did.
    *
    * `YYYY-MM-DD`, the same shape `b.day` carries, so the compare is a string
-   * compare and never a Date. Empty means unbounded on that side.
+   * compare and never a Date. Empty means unbounded on that side. The fields
+   * open on the span the CENSUS says this selection holds (`heldDays`), and
+   * `daySeed` remembers that span so "narrowed" means "differs from it".
    */
   let fromDay = $state('');
   let toDay = $state('');
@@ -277,6 +295,58 @@ export function selectionState(db) {
    * reads back off a name — never a label, never lower case.
    */
   let side = $state('');
+
+  /**
+   * THE SEARCH TEXT, APART FROM THE PICK (D-3337 item 1, DB-001).
+   *
+   * `filter` above is the EXACT instrument key the Instrument rung picked —
+   * the store's own underlying spelling, matched by equality, never a prefix.
+   * (Its name is the legacy one; `instrument` is published as its alias.) The
+   * text a search box holds is a different thing and lives here, so typing
+   * `NIFT` can list NIFTY, NIFTYIT and NIFTY100 without the grid blending
+   * them: only a pick narrows the rows.
+   */
+  let query = $state('');
+
+  /**
+   * SHOW MONTHS OUTSIDE THE OPERATOR'S WINDOW (D-3338).
+   *
+   * Zerodha's descriptor carries the operator's window, 2018-01-01 to
+   * 2026-09-30; 115 indices hold 82,079 `1day` bars dated before it from an
+   * earlier run. Those months are hidden by default and shown on this toggle,
+   * labelled "outside your window". Nothing is deleted.
+   */
+  let oow = $state(false);
+
+  /**
+   * THE FULL SPAN THE DAY FIELDS WERE LAST SEEDED WITH. The window narrows
+   * exactly when `fromDay`/`toDay` differ from it (`dayNarrowing`).
+   */
+  let daySeed = $state({ from: '', to: '' });
+
+  /**
+   * TODAY'S IST DAY, which splits expired contracts from unexpired ones
+   * (D-3337 item 6). Read once when the page opens; a page left open across
+   * midnight keeps the day it opened on until it is reloaded.
+   */
+  const today = istDay(Date.now());
+
+  /**
+   * THE EXCHANGE CALENDAR OF RECORD for the active feed and rung (D-3336),
+   * read from `/calendar.json`: the closed days the date fields strike and the
+   * holidays an expiry shift is measured against. `null` until it answers;
+   * `calWhy` names a failure.
+   * @type {{from: number, days: string, fromDate: string, toDate: string} | null}
+   */
+  let calendar = $state.raw(null);
+  let calWhy = $state('');
+  let calFor = $state('');
+
+  /** Why the address bar could not be written, or `''` (CLAUSE: §4). */
+  let urlWhy = $state('');
+  /** What a link asked for that this page could not honour, named. */
+  /** @type {string[]} */
+  let linkNotes = $state([]);
 
 
   /* ======================================================================
@@ -516,8 +586,70 @@ export function selectionState(db) {
     return s;
   });
 
+  /** The `/feeds.json` row of the feed on screen, or `null`. */
+  const activeFeed = $derived(feeds.all.find((f) => f.wire === feeds.active) ?? null);
+  /** The feed's archive end (GDFL: 2026-09-24), or `null` (D-3338). */
+  const archiveTo = $derived(/** @type {any} */ (activeFeed)?.archive?.to ?? null);
+  /** The span this feed answers for: GDFL's archive, Zerodha's window. */
+  const era = $derived(eraOf(activeFeed, oow));
+
+  /**
+   * THE CENSUS SPLIT BY THE OPERATOR'S WINDOW (D-3338). A month outside a
+   * feed's `window` is held back unless `oow` is on, and COUNTED, so the
+   * toggle can say how many it shows. One pass per census — the window's
+   * month bounds are cut once, and the toggle only chooses which half to
+   * read, so pressing it does not walk the census again.
+   */
+  const windowSplit = $derived.by(() => {
+    const w = /** @type {any} */ (activeFeed)?.window;
+    /** @type {any[]} */
+    const out = [];
+    if (!w || typeof w.from !== 'string' || typeof w.to !== 'string') return { rows: db.deco, out };
+    const lo = w.from.slice(0, 7);
+    const hi = w.to.slice(0, 7);
+    /** @type {any[]} */
+    const rows = [];
+    for (const r of db.deco) (r.month < lo || r.month > hi ? out : rows).push(r);
+    return { rows, out };
+  });
+  const inWindow = $derived({ rows: oow ? db.deco : windowSplit.rows });
+  /** How many instrument-months the window holds back (0 with `oow` on). */
+  const oowHidden = $derived(oow ? 0 : windowSplit.out.length);
+  /** How many census months lie outside the window, held back or shown. */
+  const oowMonths = $derived(windowSplit.out.length);
+  /**
+   * How many of those belong to the selection on screen — this instrument,
+   * segment and rung — so the toggle says what it would add HERE (NIFTY 1day:
+   * 36 months, 2015-01 to 2017-12), beside the feed's whole count. Walks the
+   * out-of-window rows only.
+   */
+  const oowHere = $derived.by(() => {
+    if (!filter) return 0;
+    let n = 0;
+    for (const r of windowSplit.out) {
+      if (r.underlying !== filter || (timeframe && r.timeframe !== timeframe)) continue;
+      if (kind && segOf(r) !== kind) continue;
+      n += 1;
+    }
+    return n;
+  });
+
   const universed = $derived(
-    universeNames === null ? db.deco : db.deco.filter((/** @type {any} */ r) => universeNames.has(r.underlying))
+    universeNames === null
+      ? inWindow.rows
+      : inWindow.rows.filter((/** @type {any} */ r) => universeNames.has(r.underlying))
+  );
+
+  /**
+   * WHETHER THIS FEED HAS NO INSTRUMENT MASTER AT ALL (DB-041).
+   *
+   * GDFL publishes none; `/instruments.json?feed=gdfl` now lists its census
+   * (every stored spot series and option underlying) with `master: null` and
+   * membership from `core::universe`'s own lists. A row reading "in this
+   * master" was false for every one of them.
+   */
+  const noMaster = $derived(
+    catalogueIsThisFeed && masterRows().length > 0 && masterRows().every((r) => r?.master === null)
   );
 
   /**
@@ -533,11 +665,15 @@ export function selectionState(db) {
    * recomputes only when the store or the catalogue changes — never per
    * keystroke and never per scroll frame.
    */
+  /* HELD IS COUNTED BY UNDERLYING. A master row for an option-only
+     underlying is `NSE-FNO-ACC`, a key no census row carries (its rows are
+     `NSE-FNO-ACC-<expiry>-<strike>-CE`), so a key join counted every such
+     member "not held" over a store holding its contracts. */
   const universeCount = $derived.by(() => {
     const out = new Map();
     if (!catalogueIsThisFeed) return out;
     const stored = new Set();
-    for (const r of db.deco) stored.add(r.instrument);
+    for (const r of db.deco) stored.add(r.underlying);
     for (const u of UNIVERSES) {
       if (!u.token || !tokensHere.has(u.token)) continue;
       let members = 0;
@@ -545,7 +681,8 @@ export function selectionState(db) {
       for (const r of masterRows()) {
         if (!tokensOf(r).includes(u.token)) continue;
         members += 1;
-        if (stored.has(censusKeyOf(r))) held += 1;
+        const k = censusKeyOf(r);
+        if (stored.has(parseKey(k).underlying ?? k)) held += 1;
       }
       out.set(u.key, { members, held });
     }
@@ -567,41 +704,37 @@ export function selectionState(db) {
    * `null` means NOT MEASURED, which is not zero: without a catalogue for this
    * feed there is no list to be absent from.
    */
+  /* BY UNDERLYING, for the reason `universeCount` gives: a contract-month is
+     listed when its underlying is. Joined on the full key this counted every
+     GDFL option month "not listed" — 2,46,147 months across 1,34,519
+     "instruments", which was every contract in the store (DB-041). */
   const outsideMaster = $derived.by(() => {
     if (!catalogueIsThisFeed) return null;
     const listed = new Set();
-    for (const r of masterRows()) listed.add(censusKeyOf(r));
+    for (const r of masterRows()) {
+      const k = censusKeyOf(r);
+      listed.add(parseKey(k).underlying ?? k);
+    }
     const names = new Set();
     let months = 0;
     for (const r of db.deco) {
-      if (listed.has(r.instrument)) continue;
+      if (listed.has(r.underlying)) continue;
       months += 1;
-      names.add(r.instrument);
+      names.add(r.underlying);
     }
     return { months, instruments: names.size };
   });
 
   const typed = $derived(filter.trim().toUpperCase());
 
-  const instrumentRows = $derived.by(() => {
-    const by = new Map();
-    for (const it of universed) {
-      let a = by.get(it.underlying);
-      if (!a)
-        by.set(
-          it.underlying,
-          (a = { key: it.underlying, months: 0, bars: 0, short: 0, segs: new Set(), keys: new Set() })
-        );
-      a.months += 1;
-      a.bars += it.rows;
-      a.short += it.short;
-      // WHICH SEGMENTS THIS NAME HOLDS, so the Segment rung can offer what is
-      // there and refuse what is not BY NAME rather than by absence.
-      if (it.segRung) a.segs.add(it.segRung);
-      a.keys.add(it.instrument);
-    }
-    return [...by.values()].sort((a, b) => txt(a.key, b.key));
-  });
+  /**
+   * THE EXACT-INSTRUMENT INDEX (DB-001): every row of the universe, folded by
+   * underlying, once per census or universe change. A pick is then ONE Map
+   * probe and the rows it returns are that underlying's and no other's.
+   */
+  const instrumentIndex = $derived(foldInstruments(universed));
+
+  const instrumentRows = $derived([...instrumentIndex.values()].sort((a, b) => txt(a.key, b.key)));
 
   /**
    * O(1): the STORE'S OWN SPELLING of the instrument the text box currently
@@ -623,6 +756,22 @@ export function selectionState(db) {
   });
   const picked = $derived(instrumentKeys.get(typed) ?? '');
 
+  /**
+   * THE ROWS THE INSTRUMENT RUNG LEAVES — EXACTLY ONE UNDERLYING (DB-001,
+   * D-3337 item 1).
+   *
+   * This was `textMatched`, a PREFIX match: picking NIFTY on Zerodha brought
+   * about a hundred NIFTY* indices (page 2 of 1day showed NIFTY100's
+   * 28-30 Sep 2026 closes above NIFTY's own), GDFL LT listed LTM's months, and
+   * the NIFTY 2019-03-28 strike menu offered NIFTYIT's 15,400, 15,500 and
+   * 16,000. Now a picked key is matched by equality through the index above.
+   * A key the store does not hold (a master member never pulled) returns no
+   * row, which is the honest answer; nothing picked returns the universe.
+   */
+  const instrumentMatched = $derived(
+    picked ? (instrumentIndex.get(picked)?.rows ?? []) : filter ? [] : universed
+  );
+
   /* ---- facets ---------------------------------------------------------
      A FACET'S OWN SELECTION IS EXCLUDED FROM ITS OWN COUNT, and every other
      selection is applied. Otherwise a toggle promises a number and delivers a
@@ -636,7 +785,7 @@ export function selectionState(db) {
 
   const kinds = $derived.by(() => {
     const c = new Map();
-    for (const it of db.textMatched) c.set(it.kind, (c.get(it.kind) ?? 0) + 1);
+    for (const it of instrumentMatched) c.set(it.kind, (c.get(it.kind) ?? 0) + 1);
     // THE TIE-BREAK IS THREE-WAY, and `txt` is what makes it so. `a < b ? -1 :
     // 1` answers "greater" for two EQUAL keys, in both directions at once, and
     // a comparator that contradicts itself leaves the order of those elements
@@ -697,16 +846,24 @@ export function selectionState(db) {
       // this is a no-op for them and the reason it is written anyway is the
       // day the master carries a contract.
       const u = parseKey(k).underlying ?? k;
-      meta.set(u, { sym: r?.symbol ?? u, kind: r?.kind ? String(r.kind).toLowerCase() : '' });
+      meta.set(u, {
+        sym: r?.symbol ?? u,
+        kind: r?.kind ? String(r.kind).toLowerCase() : '',
+        master: r?.master ?? null
+      });
     }
-    /** @param {string} k @param {{months:number,bars:number,short:number}=} h */
+    /** @param {string} k @param {{months:number,bars:number,short:number,spotMonths:number,contractMonths:number}=} h */
     const decorate = (k, h) => ({
       key: k,
       sym: meta.get(k)?.sym ?? k,
       kind: meta.get(k)?.kind ?? '',
+      /* `null` when the feed has no master (GDFL) or the name is not in it. */
+      master: meta.get(k)?.master ?? null,
       months: h?.months ?? 0,
       bars: h?.bars ?? 0,
-      short: h?.short ?? 0
+      short: h?.short ?? 0,
+      spotMonths: h?.spotMonths ?? 0,
+      contractMonths: h?.contractMonths ?? 0
     });
     if (universeNames === null) return instrumentRows.map((r) => decorate(r.key, r));
     /* ALREADY UNDERLYINGS AND ALREADY UNIQUE -- `universeNames` is a Set of
@@ -716,6 +873,17 @@ export function selectionState(db) {
     for (const u of universeNames) out.push(decorate(u, held.get(u)));
     return out.sort((a, b) => txt(a.sym, b.sym) || txt(a.key, b.key));
   });
+
+  /**
+   * THE INSTRUMENT THE PAGE OPENS ON AND RESETS TO (D-3337 item 2): NIFTY when
+   * this feed offers it with rows, else the first offered name with rows,
+   * else the first offered. The same rule the seed below applies.
+   */
+  const defaultPick = $derived(
+    (instrumentOffered.find((/** @type {any} */ r) => r.key === DEFAULT_INSTRUMENT && r.months > 0) ??
+      instrumentOffered.find((/** @type {any} */ r) => r.months > 0) ??
+      instrumentOffered[0])?.key ?? ''
+  );
 
   /**
    * WHICH CONTRACT RUNGS THE CHOSEN SEGMENT ACTUALLY HAS.
@@ -737,41 +905,80 @@ export function selectionState(db) {
    * that does not exist for that thing — drawing it dead says "this could be
    * filled" about something that never could.
    */
-  const contractRungs = $derived(
-    kind === 'futures'
-      ? { expiry: true, strike: false, money: false, side: false }
-      : kind === 'options'
-        ? { expiry: true, strike: true, money: true, side: true }
-        : { expiry: false, strike: false, money: false, side: false }
-  );
+  const contractRungs = $derived(contractRungsOf(kind));
 
-  /** Which of the three a stored row belongs to, off its own name. */
-  /** @param {{expiry: string | null, instrument: string}} r */
+  /**
+   * Which segment a stored row belongs to, off its own name, today's IST day
+   * and the feed's archive end (D-3337 item 6, DB-G67): spot, an expired
+   * future or option, one that settled after the archive ended, or one that
+   * has not expired. See `segmentOf`.
+   *
+   * @param {{expiry: string | null, instrument: string}} r
+   */
   function segOf(r) {
-    if (r.expiry === null) return 'spot';
-    return /-(CE|PE)$/.test(r.instrument) ? 'options' : 'futures';
+    return segmentOf(r, today, archiveTo);
   }
 
-  /** /ingest's three, each with what this selection holds of it. */
+  /**
+   * How many instrument-months of each segment this FEED holds — what decides
+   * whether the cut and unexpired rows are drawn at all, and what the notes
+   * count. One pass per census.
+   */
+  const feedSegments = $derived.by(() => {
+    const n = new Map();
+    for (const r of inWindow.rows) {
+      const k = segOf(r);
+      n.set(k, (n.get(k) ?? 0) + 1);
+    }
+    return n;
+  });
+
+  /**
+   * HOW THIS FEED'S CONTRACTS GOT INTO THE STORE, in the descriptor's words
+   * (DB-050). A folder feed was imported from the vendor's archive files by
+   * `cli gdfl-import` (D-2804); a REST feed was pulled through its API.
+   */
+  const contractSource = $derived.by(() => {
+    const f = /** @type {any} */ (activeFeed);
+    if (!f) return '';
+    if (f.kind === 'folder') return `imported from ${f.display}'s archive files${f.wire === 'gdfl' ? ' by cli gdfl-import (D-2804)' : ''}`;
+    return `pulled through ${f.display}'s API`;
+  });
+
+  /**
+   * THE SEGMENT ROWS, each with what this instrument holds of it and what the
+   * feed holds overall (DB-050). The cut and unexpired rows are drawn only
+   * when the feed holds such a contract or one is selected.
+   */
   const segmentRows = $derived.by(() => {
     const n = new Map();
-    for (const r of db.textMatched) {
-      const s = segOf(r);
-      n.set(s, (n.get(s) ?? 0) + 1);
+    for (const r of instrumentMatched) {
+      const k = segOf(r);
+      n.set(k, (n.get(k) ?? 0) + 1);
     }
-    return SEG_VIEW.map((s) => {
+    const name = /** @type {any} */ (activeFeed)?.display ?? feedDisplay(feeds.active);
+    return SEG_VIEW.filter((s) => s.always || (feedSegments.get(s.key) ?? 0) > 0 || s.key === kind).map((s) => {
       const c = n.get(s.key) ?? 0;
+      const all = feedSegments.get(s.key) ?? 0;
+      const contract = s.key !== 'spot';
+      /* WHAT THE STORE HOLDS, never a build note. A contract segment the feed
+         holds none of says so and names what /feeds.json says about the
+         feed's expired F&O; one it holds counts them and names their source. */
+      const feedSays =
+        !contract
+          ? ''
+          : all > 0
+            ? ` ${name} holds ${fmt(all)} such instrument-month(s), ${contractSource}.`
+            : ` ${name} holds none${/** @type {any} */ (activeFeed)?.fno === 'none' ? ' — /feeds.json says it serves no expired F&O (fno: none)' : ''}.`;
       return {
         key: s.key,
         name: s.name,
-        /* THE DETAIL IS /ingest's NOTE, which is what that page puts here. The
-           held count is this page's own fact and rides the title beside it. */
-        detail: s.note,
-        title: c > 0 ? `${fmt(c)} instrument-month(s) held. ${s.note}` : `Nothing stored. ${s.note}`,
+        detail: c > 0 ? `${fmt(c)} held` : 'nothing stored',
+        title: `${c > 0 ? `${fmt(c)} instrument-month(s) held for this instrument.` : 'Nothing stored for this instrument.'} ${s.note}.${feedSays}`,
         /* NOT `disabled`. A segment with nothing stored is a legitimate thing to
            select — the answer is an empty table, which IS the answer to "do I
            hold any of these". Disabling it would refuse the question. */
-        why: c === 0 ? 'nothing stored under this segment for the current selection' : undefined
+        why: c === 0 ? 'nothing stored under this segment for this instrument' : undefined
       };
     });
   });
@@ -780,7 +987,7 @@ export function selectionState(db) {
   /* `segOf`, NOT `r.kind`. `kind` now holds one of /ingest's three — spot,
      futures, options — and those are derived from a row's expiry rather than
      read off the store's second field. See `SEG_VIEW`. */
-  const segmented = $derived(kind ? db.textMatched.filter((/** @type {any} */ r) => segOf(r) === kind) : db.textMatched);
+  const segmented = $derived(kind ? instrumentMatched.filter((/** @type {any} */ r) => segOf(r) === kind) : instrumentMatched);
 
   /* ======================================================================
      THE BAR-LENGTH RUNG — feed → universe → TIMEFRAME → months
@@ -819,8 +1026,11 @@ export function selectionState(db) {
    * filtering on a sentinel, so "every rung" costs no pass at all and cannot
    * accidentally drop a row whose rung string this page has never heard of.
    */
+  /* `segmented` WHEN NO RUNG IS CHOSEN, and it read `universed`: the moment
+     between a feed change and the rung's re-seed then counted every
+     instrument and every segment as "at this rung". */
   const timeframed = $derived(
-    timeframe ? segmented.filter((/** @type {any} */ r) => r.timeframe === timeframe) : universed
+    timeframe ? segmented.filter((/** @type {any} */ r) => r.timeframe === timeframe) : segmented
   );
 
   /**
@@ -1027,6 +1237,20 @@ export function selectionState(db) {
     return [...seen].sort();
   });
 
+  /**
+   * WEEKLY OR MONTHLY, THE WEEKDAY, AND ANY HOLIDAY SHIFT (DB-076; D-3337
+   * item 5, D-3331), for every expiry of the picked underlying. Measured from
+   * its stored expiries and the calendar of record — see `expiryTags`; no rule
+   * about which weekday an index expires on is written here.
+   */
+  const expiryTagMap = $derived.by(() => {
+    const own = picked ? instrumentIndex.get(picked)?.rows ?? [] : [];
+    const set = new Set();
+    for (const r of own) if (r.expiry !== null) set.add(r.expiry);
+    const cal = calendar;
+    return expiryTags(set, (iso) => dayCode(cal, iso));
+  });
+
   /** How many rows above this rung carry a contract at all — the gate's denominator. */
   const contractHere = $derived(
     matchedPreContract.reduce(
@@ -1094,7 +1318,11 @@ export function selectionState(db) {
     if (expiriesAll.length > 0) return null;
     if (db.deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without contracts`;
-    return `not one of the ${fmt(db.deco.length)} instrument-month(s) ${feedDisplay(feeds.active)} holds is named the way this repository names a contract. crates/core/src/instrument.rs ends a future “-<YYYY-MM-DD>-FUT” and an option “-<YYYY-MM-DD>-<strike in paisa>-CE|PE”, and nothing in this store ends either way: it holds indices and equities, whose names carry no expiry at all. /store.json sends no expiry field, so an expiry here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at. THIS RUNG IS NOT LIVE-ONLY AND NEVER WAS: an expired contract on disk would be listed here, because the list is folded off the stored names and nothing in it is compared to today. There is none because nothing in this build can fetch one — crates/api/src/server.rs answers POST /pull/fno with 503 and the reason “expired F&O has no local-archive path and no HTTP transport in this build”, and crates/core/src/vendor.rs declines every FUT/CE/PE master row as Skip::LiveContract. Nothing is being held back, because there is nothing to hold.`;
+    /* WHAT THE STORE HOLDS, AND WHAT THE FEED SAYS — never a build note. The
+       old sentence ended "nothing in this build can fetch one", which stopped
+       being true when expired options were imported (DB-G67). */
+    const fno = /** @type {any} */ (activeFeed)?.fno;
+    return `not one of the ${fmt(db.deco.length)} instrument-month(s) ${feedDisplay(feeds.active)} holds is a contract: no stored name ends “-<YYYY-MM-DD>-FUT” or “-<YYYY-MM-DD>-<strike in paisa>-CE|PE” (crates/core/src/instrument.rs). An expiry is read off a stored name, never guessed, and nothing in this list is compared to today, so an expired contract on disk would be listed here.${fno === 'none' ? ` /feeds.json says ${feedDisplay(feeds.active)} serves no expired F&O (fno: none).` : ''}`;
   });
 
   /* ---- THE SIDE — the finest rung on the page --------------------------
@@ -1112,6 +1340,27 @@ export function selectionState(db) {
     return [...s].sort(txt);
   });
 
+  /**
+   * THE ROWS THE SIDE RUNG COUNTS: everything above it, the strike and
+   * moneyness picks included, the side's own pick left out — the facet rule
+   * (DB-N09). Counted over `expiryGated` alone, the list read "Both 438 /
+   * CE 236 / PE 202" with strike 11,600 chosen, which were the whole expiry's
+   * counts; for that strike they are 8 / 6 / 2.
+   */
+  const sideBase = $derived.by(() => {
+    let out = expiryGated;
+    if (strikePick.size > 0) {
+      out = out.filter((/** @type {any} */ r) => r.strike !== null && strikePick.has(String(r.strike)));
+    }
+    if (mnyPick.size > 0) {
+      out = out.filter((/** @type {any} */ r) => {
+        const k = db.rungKeyOf(r);
+        return k !== null && mnyPick.has(k);
+      });
+    }
+    return out;
+  });
+
   /** Rows per side, with the gate above it applied — the facet rule, again. */
   /* THE SIDES THIS SELECTION REACHES, sorted — the cascade's ninth rung.
    *
@@ -1121,24 +1370,24 @@ export function selectionState(db) {
    * `expiryOffered` against `expiriesAll`, and for the same reason. */
   const sideOffered = $derived.by(() => {
     const seen = new Set();
-    for (const r of expiryGated) if (r.side !== null) seen.add(r.side);
+    for (const r of sideBase) if (r.side !== null) seen.add(r.side);
     return [...seen].sort();
   });
 
   /** How many rows the Both row returns — what clicking it actually gives. */
-  const mnyFilteredCount = $derived(expiryGated.length);
+  const mnyFilteredCount = $derived(sideBase.length);
 
   const sideCount = $derived.by(() => {
     const c = new Map();
-    for (const r of expiryGated) {
+    for (const r of sideBase) {
       if (r.side !== null) c.set(r.side, (c.get(r.side) ?? 0) + 1);
     }
     return c;
   });
 
-  /** How many rows the side rung can reach at all, under the gate. */
+  /** How many rows the side rung can reach at all, under the gate and the strike. */
   const sidedHere = $derived(
-    expiryGated.reduce(
+    sideBase.reduce(
       (/** @type {number} */ a, /** @type {any} */ r) => a + (r.side === null ? 0 : 1),
       0
     )
@@ -1179,7 +1428,7 @@ export function selectionState(db) {
     if (sideRefusal !== null || sidedHere > 0) return null;
     if (!expiry && expiryHeld > 0)
       return `the ${fmt(expiryHeld)} contract row(s) this selection reaches are held back until an expiry is chosen, so there is no option here to take a side of yet — choose an expiry beside this and it fills`;
-    return `this selection reaches no option: ${fmt(expiryGated.length)} row(s) are here and none of them carries a side`;
+    return `this selection reaches no option: ${fmt(sideBase.length)} row(s) are here and none of them carries a side`;
   });
 
   /**
@@ -1233,7 +1482,173 @@ export function selectionState(db) {
   let view = $state('bars');
   const viewNow = $derived(VIEWS.find((v) => v.key === view) ?? VIEWS[0]);
   let pageSize = $state(50);
-  let page = $state(1);
+  /**
+   * EACH VIEW KEEPS ITS OWN PAGE (DB-021). One shared `page` meant Coverage
+   * opened on its LAST page after a visit to page 900 of Bars. `page` below is
+   * published as the CURRENT view's entry, so every reader and writer of
+   * `db.page` is unchanged.
+   */
+  let pages = $state({ census: 1, bars: 1 });
+
+  /* ======================================================================
+     THE DAYS — held span, era, closed days (DB-044, DB-045, DB-N04)
+     ====================================================================== */
+
+  /**
+   * THE DAYS THIS SELECTION HOLDS, from the CENSUS spans of the rows it
+   * matches (`first_ts`/`last_ts`), never from the rows on screen (DB-045).
+   * Before a contract is chosen the expiry gate holds every contract row
+   * back, and the span is then the rows the rungs above leave.
+   */
+  const heldDays = $derived.by(() => {
+    const own = matched.length > 0 ? matched : expiryGated;
+    return heldSpan(own);
+  });
+
+  /**
+   * The bounds a day field may take: the held span where it is known, else
+   * this feed's era (GDFL's archive, Zerodha's window), else unbounded.
+   */
+  const dayBounds2 = $derived({
+    lo: heldDays.lo || era.from,
+    hi: heldDays.hi || era.to
+  });
+
+  /**
+   * WHETHER THE DAY WINDOW NARROWS ANYTHING: the fields differ from the full
+   * span they were seeded with. A window the reader typed (or a link carried)
+   * before any span was known narrows when it is set at all.
+   */
+  const dayNarrowing = $derived(
+    daySeed.from === '' && daySeed.to === ''
+      ? Boolean(fromDay || toDay)
+      : (fromDay !== '' && fromDay !== daySeed.from) || (toDay !== '' && toDay !== daySeed.to)
+  );
+
+  /** Whether a window is disjoint from what the selection holds. */
+  const dayDisjoint = $derived(
+    Boolean(heldDays.lo && heldDays.hi) &&
+      ((Boolean(toDay) && toDay < heldDays.lo) || (Boolean(fromDay) && fromDay > heldDays.hi))
+  );
+
+  /**
+   * A closed day by the calendar of record, for the day fields' grid: `true`
+   * closed, `false` a session, `null` the calendar does not reach.
+   * @param {string} iso
+   */
+  function dayClosed(iso) {
+    const c = dayCode(calendar, iso);
+    return c === null ? null : c === '.';
+  }
+
+  /**
+   * WHAT THE DATE FIELDS SAY ABOUT THEIR BOUNDS (DB-045, DB-046, DB-G89),
+   * built from the census span and the feed's era — and saying that the
+   * window narrows a contract too.
+   */
+  const dayReason = $derived.by(() => {
+    const held = heldDays.lo && heldDays.hi;
+    const span = held
+      ? `This selection holds ${dayLabel(heldDays.lo)} to ${dayLabel(heldDays.hi)} (the census's first and last bar); days outside it are struck through because there is no bar there to show.`
+      : era.from
+        ? `Nothing in this selection is counted yet, so the fields are bounded by ${era.label}, ${dayLabel(era.from)} to ${dayLabel(era.to)}.`
+        : 'Nothing in this selection is counted yet, so there is no held range to bound these fields with.';
+    const shut = calendar
+      ? ` Days the exchange calendar of record marks closed (weekends and holidays, /calendar.json) are struck too and can still be picked.`
+      : calWhy
+        ? ` Closed days are not marked: ${calWhy}.`
+        : '';
+    const contract = contractRungs.expiry
+      ? ' The window narrows a contract too: only its bars on the chosen days are shown, within its life.'
+      : '';
+    return `${span}${shut}${contract}`;
+  });
+
+  /**
+   * WHERE A CHOSEN CONTRACT'S STORED LIFE IS CUT, AND BY WHAT (DB-G67,
+   * DB-G68). The archive's first and last days are on GDFL's descriptor
+   * (`archive`, D-3338); a contract first stored on the first day may have
+   * been listed earlier, and one whose last stored bar comes before its
+   * expiry is short of its final sessions. Each case says which cause the
+   * page can name, and names none it cannot measure. `''` when nothing is
+   * cut or no contract is chosen.
+   */
+  const lifeNote = $derived.by(() => {
+    if (!expiry || matched.length === 0) return '';
+    const span = heldSpan(matched);
+    const a = /** @type {any} */ (activeFeed)?.archive;
+    /** @type {string[]} */
+    const out = [];
+    if (a?.from && span.lo === a.from) {
+      out.push(
+        `its first stored bar is on ${dayLabel(a.from)}, the vendor archive's first day, so its life may have begun before the archive`
+      );
+    }
+    if (span.hi && span.hi < expiry) {
+      if (a?.to && expiry > a.to) {
+        out.push(
+          `it expires ${dayLabel(expiry)}, after the vendor archive's last day (${dayLabel(a.to)}), so its final sessions are not in the archive`
+        );
+      } else {
+        out.push(
+          `its last stored bar is on ${dayLabel(span.hi)}, before its expiry on ${dayLabel(expiry)}: the store holds no later bar for it — it may not have traded after that day, or the census is behind (the census banner names a lag)`
+        );
+      }
+    }
+    return out.length ? `This contract's stored life is cut: ${out.join('; ')}.` : '';
+  });
+
+  /* ======================================================================
+     THE TIME PICKERS' SESSION GRID (DB-074)
+     ====================================================================== */
+
+  /** The rung's length in seconds, or `undefined` for a rung not on the ladder. */
+  const rungSecs = $derived(TF_SECS.get(timeframe));
+  /** Whether the bounds carry a second (`HH:MM:SS`) — the 1s rung. */
+  const secondRung = $derived(Number.isFinite(rungSecs) && /** @type {number} */ (rungSecs) < 60);
+
+  /**
+   * The minutes a bar of this rung opens on (09:15 to 15:29 on 1min and 1s,
+   * every five minutes on 5min), plus any minute outside the regular session
+   * the loaded rows actually hold — never only the minutes on screen.
+   */
+  const sessionRows = $derived.by(() => {
+    const held = new Set();
+    for (const b of db.barRows ?? []) {
+      const t = timeLabel(b.ts);
+      if (t !== '—') held.add(t);
+    }
+    return sessionGrid(rungSecs, held);
+  });
+
+  /**
+   * One end of the time window, set from a picked minute (and, on the 1s rung,
+   * a second): `HH:MM:SS` on 1s, `HH:MM` otherwise.
+   *
+   * @param {'from' | 'to'} end
+   * @param {string} minute `HH:MM`, or `''` to clear
+   * @param {string | null} [second]
+   */
+  function setTimeBound(end, minute, second = null) {
+    const v = minute ? timeBound(minute, rungSecs, end, second) : '';
+    if (end === 'from') fromTime = v;
+    else toTime = v;
+  }
+
+  /* ======================================================================
+     THE STRIKES THIS SELECTION REACHES (DB-G98) — for the strike rung's note
+     ====================================================================== */
+  const strikesHere = $derived.by(() => {
+    const seen = new Set();
+    for (const r of expiryGated) if (r.strike !== null) seen.add(r.strike);
+    const list = [...seen].sort((a, b) => a - b);
+    let step = null;
+    for (let i = 1; i < list.length; i += 1) {
+      const gap = list[i] - list[i - 1];
+      if (gap > 0 && (step === null || gap < step)) step = gap;
+    }
+    return { list, step };
+  });
   /* EVERY RUNG COUNTS, INCLUDING THE TWO SILENT ONES. `filtered` drives both
      "of N stored" on the first tile and whether "Reset all filters" is offered
      at all, so a universe or a month window left out here would leave a live
@@ -1246,34 +1661,33 @@ export function selectionState(db) {
      warns about, pointed the other way. A CHOSEN expiry IS resettable and is
      in the list; the gate is reported instead, on the rung's own clause, in
      `narrowing`, in `blocked` and in the empty-table panel. */
+  /**
+   * WHETHER ANYTHING DIFFERS FROM WHAT "Reset all filters" RESTORES (D-3337
+   * item 2): the default instrument, Spot, the finest held rung, the whole
+   * held span, no time bound, no contract pick, no universe, the window
+   * applied. Every rung is always SET now (one instrument, one segment, one
+   * rung), so "set" cannot be the test — only "differs from the reset" is.
+   * The day window compares against the span it was seeded with
+   * (`dayNarrowing`), which is also what the bars grid's manifest check asks.
+   */
   const filtered = $derived(
     Boolean(
-      typed ||
+      (filter && filter !== defaultPick) ||
+        (kind && kind !== DEFAULT_SEGMENT) ||
         month ||
-        kind ||
         holesOnly ||
         universe ||
-        timeframe ||
+        (timeframe && tfAll.length > 0 && timeframe !== tfAll[0][0]) ||
         fromMonth ||
         toMonth ||
         expiry ||
         side ||
         strikePick.size ||
         mnyPick.size ||
-        /* THE DAY WINDOW COUNTS AS A FILTER, and it was the only live one
-           missing from this list. `month`, `holesOnly`, `fromMonth` and
-           `toMonth` are all documented dead; `fromDay`/`toDay` are the two the
-           operator can actually move, and `barWindowed` really does narrow on
-           them. Left out, a reader who had cut the window to one week saw no
-           "filtered" state and no Reset button — the page said nothing was
-           narrowing while a week's worth of rows was all it would show.
-           Compared against the seeded span, not against empty: the fields open
-           populated at the store's own floor and ceiling, so "set" is not
-           "narrowed" — only a value that differs from the full span is.
-           `dayWindowNarrows` is that comparison, named once and shared with
-           the manifest-disagreement guard, which needs the identical question
-           answered the identical way. */
-        db.dayWindowNarrows
+        fromTime ||
+        toTime ||
+        oow ||
+        dayNarrowing
     )
   );
 
@@ -1340,12 +1754,16 @@ export function selectionState(db) {
             key: `${fromMonth || '*'} … ${toMonth || '*'}`
           }
         : null,
-      typed ? { k: 'text', text: `the text “${filter.trim()}”` } : null,
+      /* THE INSTRUMENT, BY ITS EXACT KEY (DB-001). It read "the text NIFTY",
+         which was what the old prefix filter did. */
+      filter ? { k: 'instrument', text: `instrument ${filter}`, key: filter } : null,
       /* "segment", matching the control's own label. The state is still called
          `kind` because that is the field `deco` parses out of the instrument
          string and renaming it would touch the sort, the facet counts and the
          drawer for no gain — only the word an operator reads changed. */
-      kind ? { k: 'segment', text: `segment ${kind}` } : null,
+      kind
+        ? { k: 'segment', text: `segment ${SEG_VIEW.find((v) => v.key === kind)?.name ?? kind}`, key: kind }
+        : null,
       month ? { k: 'month', text: `month ${monthLabel(month)}`, key: month } : null,
       /* THE EXPIRY IS NAMED WHETHER IT IS A CHOICE OR A GATE, and they are two
          different sentences because they are two different facts. A chosen
@@ -1371,22 +1789,38 @@ export function selectionState(db) {
          the label the panel shows, and the store's own key one hover away. A
          strike is named in rupees because that is what the panel shows; the
          paisa integer behind it is the key. */
+      /* EVERY STRIKE, NOT THE FIRST (DB-077). Strike is multi-select now, and
+         a chip naming one of two picks hides the other. */
       strikePick.size
         ? {
             k: 'strike',
-            text:
-              `strike ${strikeText(Number([...strikePick][0]))}`,
-            key: [...strikePick].join(' · ')
+            text: `${strikePick.size === 1 ? 'strike' : 'strikes'} ${[...strikePick]
+              .map(Number)
+              .sort((a, b) => a - b)
+              .map((p) => strikeText(p))
+              .join(', ')}`,
+            key: [...strikePick].map(Number).sort((a, b) => a - b).join(' · ')
           }
         : null,
-      mnyPick.size
-        ? {
-            k: 'moneyness',
-            text:
-              `moneyness ${[...mnyPick][0]}`
-          }
-        : null,
+      mnyPick.size ? { k: 'moneyness', text: `moneyness ${[...mnyPick].sort().join(', ')}` } : null,
       side ? { k: 'side', text: `option type ${side}`, key: side } : null,
+      /* THE DAY AND TIME WINDOWS ARE NARROWINGS TOO (DB-077), and an empty
+         grid under a one-week window used to be explained without them. */
+      dayNarrowing
+        ? {
+            k: 'days',
+            text: `days ${fromDay ? dayLabel(fromDay) : 'any'} → ${toDay ? dayLabel(toDay) : 'any'}`,
+            key: `${fromDay || '*'} … ${toDay || '*'}`
+          }
+        : null,
+      fromTime || toTime
+        ? {
+            k: 'times',
+            text: `time of day ${fromTime || 'any'} → ${toTime || 'any'} IST`,
+            key: `${fromTime || '*'} … ${toTime || '*'}`
+          }
+        : null,
+      oow ? { k: 'oow', text: 'months outside your window shown' } : null,
       holesOnly ? { k: 'holes', text: 'holes only' } : null
     ].filter((n) => n !== null)
   );
@@ -1463,35 +1897,14 @@ export function selectionState(db) {
 
   const stranded = $derived.by(() => {
     const out = [];
-    /* `filter && !picked`, AND THE OLD TEST COULD NOT FIRE AT ALL.
-       It read `picked && !instrumentKeys.has(picked)`. `instrumentKeys` maps
-       UPPER(key) -> key and `picked` is `instrumentKeys.get(typed) ?? ''`, so
-       `picked` is only ever truthy when it came OUT of that map — and for an
-       all-uppercase store key, which is every key this store produces,
-       `has(picked)` is then true and the guard is false. Meanwhile the exact
-       condition the branch exists for — `filter` naming an instrument the
-       coarser rungs no longer offer — is when the lookup MISSES, and `picked`
-       collapses to `''` and short-circuits it. Both arms wrong, in opposite
-       directions.
-
-       So the rung most likely to be stranded (see the Instrument gate above,
-       where a universe the store holds nothing of used to remove the control
-       outright) was the one rung that could never report it, and its Clear
-       button was unreachable.
-
-       `filter` is what the operator set and `picked` is what it resolved to;
-       set-but-unresolved is precisely stranded. `value` prints what he typed
-       rather than the empty string it resolved to. */
-    if (filter && !picked) {
+    /* AN INSTRUMENT THE RUNGS ABOVE NO LONGER OFFER — the universe moved,
+       or a link named one this feed's store does not list. Clearing re-seeds
+       the opening instrument. */
+    if (filter && db.deco.length > 0 && !instrumentOffered.some((/** @type {any} */ r) => r.key === filter)) {
       out.push({ rung: 'Instrument', value: filter, clear: () => (filter = '') });
     }
-    /* `SEG_VIEW`, NOT `kinds`. `kind` holds one of /ingest's three now — spot,
-       futures, options — and `kinds` holds the store's own second field, INDEX /
-       CASH / FNO. Comparing across the two vocabularies made this fire on every
-       load: "Segment is set to spot, which the rungs above it no longer offer",
-       over a rung that was offering exactly that. All three are always offered,
-       so the only way to strand this rung now is a value from neither
-       vocabulary. */
+    /* `SEG_VIEW`, NOT `kinds`: one vocabulary. Only a value from neither
+       vocabulary can strand this rung now. */
     if (kind && !SEG_VIEW.some((s) => s.key === kind)) {
       out.push({
         rung: 'Segment',
@@ -1515,6 +1928,35 @@ export function selectionState(db) {
     }
     if (side && !sideOffered.includes(side)) {
       out.push({ rung: 'Side', value: side, clear: () => (side = '') });
+    }
+    /* THE STRIKE IS NAMED TOO (DB-020). A strike left over from another
+       expiry or segment emptied the grid with no banner and no Clear. */
+    if (strikePick.size > 0) {
+      const here = new Set(strikesHere.list.map(String));
+      const gone = [...strikePick].filter((k) => !here.has(k));
+      if (gone.length > 0) {
+        out.push({
+          rung: gone.length === 1 ? 'Strike' : 'Strikes',
+          value: gone.map((k) => strikeText(Number(k))).join(', '),
+          clear: () => (strikePick = new Set([...strikePick].filter((k) => here.has(k))))
+        });
+      }
+    }
+    if (mnyPick.size > 0 && !contractRungs.money) {
+      out.push({ rung: 'Moneyness', value: [...mnyPick].join(', '), clear: () => (mnyPick = new Set()) });
+    }
+    /* A DAY WINDOW THAT CANNOT MEET THE SELECTION (row 132 of the 9 Oct
+       drill-down: an Oct 2024 window carried onto a 2019 contract). */
+    if (dayDisjoint) {
+      out.push({
+        rung: 'Days',
+        value: `${fromDay ? dayLabel(fromDay) : 'any'} → ${toDay ? dayLabel(toDay) : 'any'}`,
+        clear: () => {
+          fromDay = heldDays.lo;
+          toDay = heldDays.hi;
+          daySeed = { from: heldDays.lo, to: heldDays.hi };
+        }
+      });
     }
     return out;
   });
@@ -1558,6 +2000,18 @@ export function selectionState(db) {
     goTime = '';
     landedRk = '';
     db.jumpWhy = '';
+    /* THE OPERATOR'S DEFAULTS, NOT THE ALPHABET'S (D-3337 item 2). The empty
+       rungs re-seed: NIFTY where this feed holds it, Spot, the finest held
+       rung, the whole held span — and newest first on page one. Reset used to
+       land on 360ONE and keep a Date-ascending sort (drill-down row 39). */
+    query = '';
+    oow = false;
+    daySeed = { from: '', to: '' };
+    pages = { census: 1, bars: 1 };
+    if ('barSortKey' in db) {
+      db.barSortKey = 'ts';
+      db.barDesc = true;
+    }
     clearContract();
   }
 
@@ -1649,7 +2103,45 @@ export function selectionState(db) {
     view: { get: () => view, set: (v) => (view = v) },
     viewNow: { get: () => viewNow },
     pageSize: { get: () => pageSize, set: (v) => (pageSize = v) },
-    page: { get: () => page, set: (v) => (page = v) },
+    /* THE CURRENT VIEW'S PAGE (DB-021): every reader and writer of `db.page`
+       is unchanged, and each view keeps its own. */
+    page: { get: () => pages[/** @type {'census' | 'bars'} */ (view)] ?? 1, set: (v) => (pages[/** @type {'census' | 'bars'} */ (view)] = v) },
+    pages: { get: () => pages, set: (v) => (pages = v) },
+    instrument: { get: () => filter, set: (v) => (filter = v) },
+    query: { get: () => query, set: (v) => (query = v) },
+    oow: { get: () => oow, set: (v) => (oow = v) },
+    oowHidden: { get: () => oowHidden },
+    oowMonths: { get: () => oowMonths },
+    oowHere: { get: () => oowHere },
+    activeFeed: { get: () => activeFeed },
+    archiveTo: { get: () => archiveTo },
+    era: { get: () => era },
+    today: { get: () => today },
+    noMaster: { get: () => noMaster },
+    instrumentIndex: { get: () => instrumentIndex },
+    instrumentMatched: { get: () => instrumentMatched },
+    defaultPick: { get: () => defaultPick },
+    feedSegments: { get: () => feedSegments },
+    expiryTagMap: { get: () => expiryTagMap },
+    sideBase: { get: () => sideBase },
+    heldDays: { get: () => heldDays },
+    dayBounds2: { get: () => dayBounds2 },
+    daySeed: { get: () => daySeed, set: (v) => (daySeed = v) },
+    dayNarrowing: { get: () => dayNarrowing },
+    dayDisjoint: { get: () => dayDisjoint },
+    dayClosed: { get: () => dayClosed },
+    dayReason: { get: () => dayReason },
+    calendar: { get: () => calendar, set: (v) => (calendar = v) },
+    calWhy: { get: () => calWhy, set: (v) => (calWhy = v) },
+    calFor: { get: () => calFor, set: (v) => (calFor = v) },
+    rungSecs: { get: () => rungSecs },
+    secondRung: { get: () => secondRung },
+    sessionRows: { get: () => sessionRows },
+    setTimeBound: { get: () => setTimeBound },
+    strikesHere: { get: () => strikesHere },
+    lifeNote: { get: () => lifeNote },
+    urlWhy: { get: () => urlWhy, set: (v) => (urlWhy = v) },
+    linkNotes: { get: () => linkNotes, set: (v) => (linkNotes = v) },
     filtered: { get: () => filtered },
     feedName: { get: () => feedName },
     narrowing: { get: () => narrowing },
@@ -1660,198 +2152,516 @@ export function selectionState(db) {
   });
 }
 
+
 /**
- * THE SEEDS — the four effects that put a value on an empty rung once the store
- * has answered: the day window, the segment, the instrument and the timeframe.
+ * THE SEEDS — the effects that put a value on an empty rung once the store
+ * has answered (the instrument, the segment, the timeframe, the day window),
+ * the exchange calendar the date fields and the expiry tags read, and the
+ * reconciliation a change of feed, instrument or segment triggers.
  *
- * Creates the page's effects that stood at old lines 6613, 6664, 6671 and 6697; the shell calls it
- * in that position of the order.
+ * The first three seed effects keep the shape `if (db.<rung> === '' && …)`
+ * and read only `db`: `web/tests/database-page-fixture.js` cuts each one out
+ * of this file and runs it over plain inputs.
  *
  * @param {any} db the page's shared state object (see the shell)
  */
 export function selectionSeeds(db) {
-  /* A SELECTION THE CASCADE HAS SINCE ELIMINATED, NAMED RATHER THAN CLEARED.
-   *
-   * Every rung offers only what the rungs above it leave, so widening one above
-   * can strand a choice below: pick NIFTY, switch the universe to one NIFTY is
-   * not in, and the instrument stays selected while its own menu no longer
-   * lists it. The table empties — correctly — and NOTHING SAYS WHY. That is the
-   * one hole the cascade left, and an empty grid with no reason is the shape §4
-   * calls a silent failure.
-   *
-   * NAMED, NOT CLEARED. Dropping the selection silently is the other half of
-   * the same fault: the reader asked for something and the page decided on
-   * their behalf that they no longer want it, invisibly. This states the fact
-   * and offers the button. */
-  /**
-   * THE DAY WINDOW OPENS ON THE SPAN THE STORE ACTUALLY HOLDS.
-   *
-   * Both fields opened on `dd Mon yyyy` while /ingest's opened on real dates,
-   * and that was the visible half of "these are not the same control". The
-   * other half was a five-pixel height difference, fixed in `DayField`.
-   *
-   * IT IS /ingest's RULE, NOT ITS VALUE, AND THAT DISTINCTION IS FORCED HERE.
-   *
-   * On /ingest the window is the ASK and its bounds are the server picker's
-   * whole span, so it can open on 01 Jan 2015. Here the two fields are BOUNDED
-   * BY WHAT THE STORE HOLDS — `min={dayBounds[0]}` on the From field — because
-   * the calendar's job on this page is to strike the days with no bar behind
-   * them, which is how a reader sees where the store starts and stops.
-   *
-   * Seeding this to 01 Jan 2015 was tried and reverted: it puts a value in the
-   * field that the field's own `min` refuses, so it renders `aria-invalid` and
-   * the control contradicts itself on load. A window that opens refused is worse
-   * than one that opens narrow.
-   *
-   * So it opens on the whole span the store holds — `dayBounds[0]` to
-   * `dayBounds[1]`, both measured off the rows, never a date typed into this
-   * file. That is the same PRINCIPLE /ingest follows: mapped to what is really
-   * there.
-   *
-   * SEEDED ONCE, NOT PINNED. The guard is that both fields are empty, so this
-   * fires when the store first answers and never again — a window the reader
-   * narrowed is his, and `stranded` speaks up if a chosen day stops being held
-   * rather than this quietly moving him.
-   */
+  /** A feed change the link reader made itself, which is not pruned. */
+  let quietFeed = /** @type {string | null} */ (null);
+  /** A sort and a page a link carried, applied once the selection settles. */
+  /** @type {{sort: string, desc: boolean} | null} */
+  let linkSort = null;
+  /** @type {{view: string, page: number} | null} */
+  let linkPage = null;
+  /* ======================================================================
+     THE SELECTION FROM THE ADDRESS BAR (DB-077; D-3337 item 4)
+     ----------------------------------------------------------------------
+     Read ONCE, when the feed list has answered (a link's `feed` must be one
+     the server offers). Every rung the link names is set before the census
+     arrives, so the seeds fill only what it left empty. A value the page
+     cannot honour is NAMED in `linkNotes` — never dropped in silence — and a
+     rung the store turns out not to hold is named by `stranded` with its
+     Clear button, exactly as a rung the reader stranded would be.
+     ====================================================================== */
+  let linkRead = false;
   $effect(() => {
-    if (db.fromDay === '' && db.toDay === '' && db.spanCeil) {
-      db.fromDay = spanFloor;
-      db.toDay = db.spanCeil;
-    }
+    if (linkRead || feeds.all.length === 0) return;
+    linkRead = true;
+    untrack(() => {
+      const { sel, refused } = decodeDb(page.url.search);
+      /** @type {string[]} */
+      const notes = refused.map((r) => `${r.key}=${r.value} was not read: ${r.why}`);
+      if (sel.feed) {
+        const f = feeds.all.find((x) => x.wire === sel.feed);
+        if (!f) notes.push(`feed=${sel.feed} is not a feed this server lists`);
+        else if (/** @type {any} */ (f).offered === false) notes.push(`feed=${sel.feed} is excluded by the operator (D-3338) and is not offered`);
+        else if (feeds.active !== sel.feed) {
+          quietFeed = sel.feed;
+          selectFeed(sel.feed);
+        }
+      }
+      const link = sel.key ? linkOfKey(sel.key) : null;
+      if (sel.key && link === null) notes.push(`key=${sel.key} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`);
+      const sym = sel.sym ?? link?.sym;
+      if (sym) db.filter = sym;
+      const exp = sel.exp ?? link?.expiry;
+      const strikes = sel.k ?? (link?.strike ? [link.strike] : []);
+      const side = sel.side ?? link?.side;
+      if (sel.seg) db.kind = sel.seg;
+      else if (!link && exp) {
+        /* A contract named without a segment is read as one: an option when
+           a strike or side is named, else a future, filed by its expiry. */
+        const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
+        db.kind = segmentOf(
+          { expiry: exp, instrument: strikes.length || side ? 'contract-CE' : 'contract-FUT' },
+          db.today,
+          /** @type {any} */ (f)?.archive?.to ?? null
+        );
+      } else if (link) {
+        const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
+        db.kind =
+          link.contract === 'spot'
+            ? 'spot'
+            : segmentOf(
+                { expiry: link.expiry, instrument: /** @type {string} */ (sel.key) },
+                db.today,
+                /** @type {any} */ (f)?.archive?.to ?? null
+              );
+      }
+      if (sel.tf) db.timeframe = sel.tf;
+      if (exp) db.expiry = exp;
+      if (strikes.length) db.strikePick = new Set(strikes);
+      if (side) db.side = side;
+      if (sel.from || sel.to) {
+        db.fromDay = sel.from ?? '';
+        db.toDay = sel.to ?? '';
+        /* A LINKED WINDOW IS THE READER'S, not a seed: it stays when the span
+           arrives, and `dayNarrowing` reports it. */
+        db.daySeed = { from: '\u0000', to: '\u0000' };
+      }
+      if (sel.tfrom) db.fromTime = sel.tfrom;
+      if (sel.tto) db.toTime = sel.tto;
+      if (sel.oow) db.oow = true;
+      if (sel.view) db.view = sel.view;
+      if (sel.sort || sel.dir) linkSort = { sort: sel.sort ?? 'ts', desc: (sel.dir ?? 'desc') === 'desc' };
+      if (sel.page && sel.page > 1) linkPage = { view: sel.view ?? 'bars', page: sel.page };
+      db.linkNotes = notes;
+    });
   });
 
   /**
-   * EXACTLY ONE SEGMENT AND EXACTLY ONE INSTRUMENT, SEEDED.
+   * EXACTLY ONE SEGMENT, SEEDED — SPOT FIRST (D-3337 item 2).
    *
-   * The `All segments` and `All instruments` head rows are gone — every rung on
-   * this page is `single`, so "all of them" was never a member of the set being
-   * offered, only the way to leave the rung unanswered. With the rows gone the
-   * empty string is no longer a state the page can rest in, so each seeds itself
-   * the moment there is something to seed from.
-   *
-   * ONE INSTRUMENT IS NOT A NARROWING, IT IS A CORRECTION. The bars table has no
-   * instrument column — `b.instrument` appears only on a row's `title` — so a
-   * table blended across instruments printed OPEN, HIGH, LOW and CLOSE from
-   * different price scales with nothing on screen saying which row belonged to
-   * which name. Exactly one instrument is the only selection under which those
-   * columns mean anything, the same argument that took `All rungs` off Timeframe.
-   *
-   * PREFER SOMETHING HELD. Both seeds pick a member with rows behind it where
-   * one exists, because a page that opens on an empty table over a store that
-   * holds data has answered a question nobody asked. It falls back to the first
-   * offered member when the store holds none of them — which is honest: the
-   * table is empty because the store is.
+   * The operator's opening segment is Spot. It is chosen when the instrument
+   * holds spot rows; an instrument that holds none (an option-only
+   * underlying such as ACC on GDFL) opens on the first segment it does hold,
+   * so a pick never lands on an empty table over a store that has its rows.
+   * Waits for the decorated census and for the instrument, because a segment
+   * held by another instrument is not evidence the selected one has it.
    */
-  /* `deco.length > 0` IS THE GUARD, AND `segmentRows.length > 0` WAS NOT ONE.
-     `segmentRows` is `SEG_VIEW.map(...)` — always exactly three rows, whatever
-     the store holds — so that test is a constant, not a gate, and this effect
-     fired on the very first tick. At mount `feeds.active` is still null and
-     `rows` is `[]`, so all three rows carry a `why`, `held` is `undefined`,
-     and `kind` was set to `segmentRows[0].key`. Because the outer guard is
-     `kind === ''` it then never re-evaluated, and `forgetPreviousFeed`
-     deliberately preserves `kind`, so a later feed never re-opened it either.
-
-     Net: "PREFER SOMETHING HELD" — the rule the paragraph above states — was
-     dead for this rung. The choice was always made against an empty store and
-     always landed on the first row. It is masked today only because spot is
-     the one populated segment, so `segmentRows[0]` happens to be right; it
-     becomes visible the day the store holds a settled contract and no spot row
-     for the selection.
-
-     Waiting for the complete decorated census is what makes `why` mean
-     "read, and this segment is empty" rather than "still preparing". Raw rows
-     arrive before that asynchronous work finishes; they cannot seed a picker
-     whose held counts come from the prepared snapshot. The instrument must
-     also settle first: a segment held by another instrument is not evidence
-     that the selected one has it. */
   $effect(() => {
     if (db.kind === '' && db.deco.length > 0 && db.filter !== '' && db.segmentRows.length > 0) {
-      const held = db.segmentRows.find((/** @type {any} */ s) => s.why === undefined);
-      db.kind = (held ?? db.segmentRows[0]).key;
+      const held = db.segmentRows.filter((/** @type {any} */ s) => s.why === undefined);
+      db.kind = (held.find((/** @type {any} */ s) => s.key === 'spot') ?? held[0] ?? db.segmentRows[0]).key;
     }
   });
 
+  /**
+   * EXACTLY ONE INSTRUMENT, SEEDED — NIFTY FIRST (D-3337 item 2, operator
+   * answer 11). `'NIFTY'` here is `DEFAULT_INSTRUMENT` (selection-model.js),
+   * written out because this body runs in the seam fixture with `db` alone.
+   * Where this feed's store holds no NIFTY, the first offered name with rows
+   * is chosen, as before; the alphabet (360ONE) was never the operator's
+   * choice.
+   */
   $effect(() => {
     if (db.filter === '' && db.deco.length > 0 && db.instrumentOffered.length > 0) {
-      const held = db.instrumentOffered.find((/** @type {any} */ r) => r.months > 0);
+      const held =
+        db.instrumentOffered.find((/** @type {any} */ r) => r.key === 'NIFTY' && r.months > 0) ??
+        db.instrumentOffered.find((/** @type {any} */ r) => r.months > 0);
       db.filter = (held ?? db.instrumentOffered[0]).key;
     }
   });
 
   /**
-   * EXACTLY ONE RUNG, ALWAYS, SEEDED FROM THE STORE.
+   * EXACTLY ONE RUNG, ALWAYS, SEEDED FROM THE STORE — THE FINEST HELD.
    *
-   * `timeframe === ''` used to mean "every rung at once" and there is no such
-   * view any more — see the comment where the `All rungs` row used to be. So the
-   * empty string is no longer a state this page can rest in: the moment the
-   * store answers, the finest rung it holds is selected.
-   *
-   * FINEST, NOT FIRST BY NAME. `tfAll` is already sorted by `tfCmp`, which
-   * orders by BAR LENGTH and not by text — as text these read `15min`, `1day`,
-   * `1min`, which is an ordering by first character and not by anything a bar
-   * length has. So `tfAll[0]` is the finest rung stored, which is the one the
-   * engine sweeps and the one a reader opening this page is most likely to want.
-   *
-   * IT DOES NOT OVERRIDE A CHOICE. The guard is that `timeframe` is empty, so
-   * this fires once per store reading and never again — a rung the operator
-   * picked is his, and `stranded` is what speaks up if the store stops holding
-   * it rather than this quietly moving him.
+   * `tfAll` is sorted by bar LENGTH (`tfCmp`), so `tfAll[0]` is the finest
+   * rung the selection holds: 1s on GDFL, 1min on Zerodha. A rung the
+   * operator picked is never overridden here; a feed change that leaves it
+   * unheld clears it (`reconcile` below) and this re-seeds it.
    */
   $effect(() => {
     if (db.timeframe === '' && db.filter !== '' && db.kind !== '' && db.tfAll.length > 0) db.timeframe = db.tfAll[0][0];
   });
+
+  /**
+   * THE DAY WINDOW OPENS ON THE SPAN THE CENSUS SAYS THIS SELECTION HOLDS
+   * (DB-044, DB-045), and follows it while the reader has not narrowed it.
+   *
+   * It opened on 01 Jan 2015 (a hard-coded floor) and today, although GDFL
+   * starts 2018-09-03 and GDFL 360ONE starts 2023-01. Now it is the first and
+   * last bar of the rows the selection matches. When the selection changes —
+   * another instrument, an expiry — a window still equal to the old span (or
+   * empty) moves to the new one; a window the reader narrowed is his and
+   * stays, and `stranded` speaks up if it no longer meets the selection.
+   */
+  $effect(() => {
+    const lo = db.heldDays.lo;
+    const hi = db.heldDays.hi;
+    /* The fields are read too, so a Reset (or a Clear of both) re-seeds even
+       when the selection's span did not move. */
+    const from = db.fromDay;
+    const to = db.toDay;
+    const seed = db.daySeed;
+    if (!lo || !hi) return;
+    untrack(() => {
+      const blank = from === '' && to === '';
+      if (!blank && seed.from === lo && seed.to === hi) return;
+      const whole = blank || (from === seed.from && to === seed.to);
+      db.daySeed = { from: lo, to: hi };
+      if (whole) {
+        db.fromDay = lo;
+        db.toDay = hi;
+      }
+    });
+  });
+
+  /**
+   * THE CALENDAR OF RECORD FOR THIS FEED AND RUNG (D-3336), read once per
+   * (feed, rung) through one ticketed request: the closed days the date
+   * fields strike (DB-N04) and the holidays an expiry shift is measured
+   * against (DB-076). A refusal or failure is named in `calWhy`; the fields
+   * then strike only out-of-span days and say why closed days are not marked.
+   */
+  const calReads = createPageRequests();
+  $effect(() => {
+    const feed = feeds.active;
+    const rung = db.timeframe;
+    if (!feed || !rung) return;
+    const want = `${feed}|${rung}`;
+    if (untrack(() => db.calFor) === want) return;
+    db.calFor = want;
+    db.calendar = null;
+    db.calWhy = '';
+    calReads.cancel();
+    void calReads.run(async (ticket) => {
+      try {
+        const r = await ask(
+          `/calendar.json?feed=${encodeURIComponent(feed)}&rung=${encodeURIComponent(rung)}`,
+          { signal: ticket.signal }
+        );
+        const body = r.ok ? await r.json() : null;
+        if (!ticket.current()) return;
+        const cal = calendarOf(body);
+        db.calendar = cal;
+        db.calWhy = cal
+          ? ''
+          : r.ok
+            ? `/calendar.json answered with no day string${typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : ''}`
+            : `/calendar.json answered HTTP ${r.status}`;
+      } catch (why) {
+        if (ticket.current()) db.calWhy = `/calendar.json could not be read: ${String(/** @type {any} */ (why)?.message ?? why)}`;
+      }
+    });
+  });
+  $effect(() => () => calReads.dispose());
+
+  /* ======================================================================
+     WHAT A CHANGE DROPS (DB-019, DB-020; D-3337 item 3)
+     ----------------------------------------------------------------------
+     A FEED change re-seeds every rung the new census lacks: an instrument it
+     does not hold, a segment the instrument does not hold, a rung it does
+     not store (GDFL stores only 1s, Zerodha no 1s — every switch used to land
+     on an empty grid under "Timeframe is set to 1s …"), and every contract
+     pick it does not offer; a window wholly outside its span returns to it.
+     An INSTRUMENT change drops the contract picks the new underlying does
+     not offer (BANKNIFTY kept NIFTY's 02 Jan 2020 11,500 PE). A SEGMENT
+     change drops the picks the segment hides — Spot has no expiry, strike or
+     side, so leftovers emptied the grid with no control left to clear them.
+     Pages return to one on every change (`selectionPaging`).
+
+     Each change is noted as PENDING and applied by one effect once the
+     census and the coarser rungs it depends on have settled, in cascade
+     order: instrument, then segment, then the rest. Anything else that moves
+     a rung (a link, a reset) is not an operator change and is not pruned.
+     ====================================================================== */
+  /** @type {{feed: boolean, instrument: boolean, segment: boolean} | null} */
+  let pending = $state(null);
+  let lastFeed = /** @type {string | null} */ (null);
+  let lastInstrument = '';
+  let lastKind = '';
+
+  $effect(() => {
+    const f = feeds.active;
+    const ins = db.filter;
+    const k = db.kind;
+    untrack(() => {
+      const feedMoved = lastFeed !== null && f !== null && f !== lastFeed && f !== quietFeed;
+      const insMoved = lastInstrument !== '' && ins !== '' && ins !== lastInstrument;
+      const segMoved = lastKind !== '' && k !== '' && k !== lastKind;
+      if (feedMoved || insMoved || segMoved) {
+        pending = {
+          feed: Boolean(pending?.feed) || feedMoved,
+          instrument: Boolean(pending?.instrument) || insMoved,
+          segment: Boolean(pending?.segment) || segMoved
+        };
+      }
+      /* A SEGMENT'S HIDDEN RUNGS GO AT ONCE: Spot has no expiry, strike,
+         moneyness or side, and Futures no strike, moneyness or side. */
+      if (segMoved) {
+        const rungs = contractRungsOf(k);
+        if (!rungs.expiry) db.expiry = '';
+        if (!rungs.strike && db.strikePick.size) db.strikePick = new Set();
+        if (!rungs.money && db.mnyPick.size) db.mnyPick = new Set();
+        if (!rungs.side) db.side = '';
+      }
+      if (f !== null) lastFeed = f;
+      if (ins !== '') lastInstrument = ins;
+      if (k !== '') lastKind = k;
+      if (f === quietFeed) quietFeed = null;
+    });
+  });
+
+  $effect(() => {
+    const p = pending;
+    if (p === null || db.deco.length === 0) return;
+    /* Read the rungs this pass depends on, so it re-runs as the seeds settle. */
+    const ins = db.filter;
+    const k = db.kind;
+    const tf = db.timeframe;
+    const rows = db.segmentRows;
+    const tfs = db.tfAll;
+    untrack(() => {
+      if (p.feed) {
+        if (ins !== '' && !db.instrumentIndex.has(ins)) {
+          db.filter = '';
+          return;
+        }
+        if (ins === '') return;
+      }
+      if (p.feed || p.instrument) {
+        const here = rows.find((/** @type {any} */ s) => s.key === k);
+        if (k !== '' && (here === undefined || here.why !== undefined)) {
+          const held = rows.some((/** @type {any} */ s) => s.why === undefined);
+          if (held) {
+            db.kind = '';
+            return;
+          }
+        }
+        if (k === '') return;
+      }
+      if (p.feed) {
+        if (tf !== '' && !tfs.some((/** @type {any} */ [t]) => t === tf)) {
+          db.timeframe = '';
+          return;
+        }
+        if (tf === '') return;
+        /* A BOUND CARRIED ACROSS RUNGS IS RE-EXPRESSED AT THE NEW RESOLUTION:
+           a 1s `HH:MM:SS` bound on a minute rung would compare a `HH:MM`
+           label against seconds and drop the minute it names. */
+        const secs = TF_SECS.get(tf);
+        db.fromTime = rebound(db.fromTime, secs, 'from');
+        db.toTime = rebound(db.toTime, secs, 'to');
+        /* The window toggle is a feed's own (Zerodha's operator window); a
+           feed without one has nothing to show outside it. */
+        if (db.oow && !db.activeFeed?.window) db.oow = false;
+        if (db.dayDisjoint) {
+          db.fromDay = db.heldDays.lo;
+          db.toDay = db.heldDays.hi;
+          db.daySeed = { from: db.heldDays.lo, to: db.heldDays.hi };
+        }
+      }
+      /* THE NEW SELECTION'S OFFER AT THE KEPT EXPIRY: `expiryGated` is the
+         rows the rungs above leave held to the current expiry, so its strikes
+         and sides are what that expiry offers under the new underlying. */
+      const sides = new Set();
+      for (const r of db.expiryGated) if (r.side !== null) sides.add(r.side);
+      const kept = keepOffered(
+        { expiry: db.expiry, strikes: db.strikePick, side: db.side, money: db.mnyPick },
+        {
+          rungs: db.contractRungs,
+          expiries: db.expiryOffered,
+          strikes: db.strikesHere.list.map(String),
+          sides
+        }
+      );
+      if (kept.expiry !== db.expiry) db.expiry = kept.expiry;
+      if (kept.strikes.size !== db.strikePick.size) db.strikePick = kept.strikes;
+      if (kept.side !== db.side) db.side = kept.side;
+      if (kept.money.size !== db.mnyPick.size) db.mnyPick = kept.money;
+      pending = null;
+    });
+  });
+
+  /** Hand over the link's sort once, and forget it. */
+  function takeLinkSort() {
+    const s = linkSort;
+    linkSort = null;
+    return s;
+  }
+  /** Hand over the link's page once, and forget it. */
+  function takeLinkPage() {
+    const p = linkPage;
+    linkPage = null;
+    return p;
+  }
+  Object.defineProperties(db, {
+    linkPending: { get: () => ({ sort: linkSort, page: linkPage }) },
+    takeLinkSort: { get: () => takeLinkSort },
+    takeLinkPage: { get: () => takeLinkPage },
+    reconciling: { get: () => pending !== null }
+  });
 }
 
 /**
- * A NARROWING RETURNS THE READER TO PAGE ONE — the effect that watches every
- * rung and both grids' sorts and resets the page.
- *
- * Creates the page's effects that stood at old lines 7393; the shell calls it
- * in that position of the order.
+ * A NARROWING RETURNS THE READER TO PAGE ONE, AND THE ADDRESS BAR FOLLOWS THE
+ * SELECTION — the effect that watches every rung that changes which rows
+ * exist, the per-view sort resets, a linked page, and the URL mirror.
  *
  * @param {any} db the page's shared state object (see the shell)
  */
 export function selectionPaging(db) {
+  /* EVERY RUNG THAT CHANGES WHICH ROWS EXIST (DB-021). The timeframe, the
+     expiry, the side, the day and time windows, the feed and the window
+     toggle were missing, so a page number survived them and landed mid-list.
+     Each view keeps its own page; this returns BOTH to one, because both
+     views read the same selection. */
   $effect(() => {
-    /* THE TWO NEW RUNGS ARE IN HERE FOR THE SAME REASON THE OTHERS ARE. A
-       universe or a month window changes WHICH rows exist, not merely their
-       order, so an offset kept across the change lands the operator halfway
-       down a list they have never seen — and the row under the cursor is a
-       different row than the one they left. */
     void [
-      db.typed,
-      db.month,
+      feeds.active,
+      db.filter,
       db.kind,
-      db.holesOnly,
+      db.timeframe,
       db.universe,
+      db.month,
+      db.holesOnly,
       db.fromMonth,
       db.toMonth,
-      /* THE CONTRACT RUNG IS IN HERE FOR THE SAME REASON THE OTHERS ARE: a
-         strike or a rung changes WHICH rows exist, not merely their order. */
+      db.expiry,
+      db.side,
       db.strikePick,
       db.mnyPick,
-      db.sortKey,
-      db.desc,
-      /* THE BAR GRID'S OWN SORT IS IN HERE FOR THE SAME REASON THE CENSUS
-         GRID'S IS: a re-order changes which rows the FIRST page holds, and
-         a reader left on page 12 of a re-sorted run is standing somewhere
-         they never chose. */
-      db.barSortKey,
-      db.barDesc,
+      db.fromDay,
+      db.toDay,
+      db.fromTime,
+      db.toTime,
+      db.oow,
       /* AND THE READ BUDGET, because it changes which FILES were opened and
          therefore which bars exist at all. */
       db.readBudget
     ];
     untrack(() => {
       db.restartAtTop();
-      /* A NARROWING RETURNS THE READER TO PAGE ONE. Keeping the ordinal
-         across a change of WHICH ROWS EXIST is the same defect as keeping
-         the scroll offset, one altitude up: page 12 of the old run is a
-         different twelve rows in the new one, and very often none at all.
-         `pageNow` already clamps, so this is not a correctness fix - it is
-         the difference between landing at the top of the answer and landing
-         at the end of it. */
-      db.page = 1;
+      db.pages = { census: 1, bars: 1 };
     });
+  });
+
+  /* A SORT RETURNS ITS OWN VIEW TO PAGE ONE: page 12 of a re-sorted run is a
+     different twelve rows. The other view's page is not touched. */
+  $effect(() => {
+    void [db.sortKey, db.desc];
+    untrack(() => {
+      /* A LINK'S OWN SORT MUST NOT ERASE THE LINK'S OWN PAGE. */
+      if (db.linkPending.page) return;
+      db.restartAtTop();
+      db.pages.census = 1;
+    });
+  });
+  $effect(() => {
+    void [db.barSortKey, db.barDesc];
+    untrack(() => {
+      if (db.linkPending.page) return;
+      db.restartAtTop();
+      db.pages.bars = 1;
+    });
+  });
+
+  /** Whether every rung the page seeds has settled on the census. */
+  const settled = $derived(
+    db.deco.length > 0 &&
+      db.filter !== '' &&
+      db.kind !== '' &&
+      db.timeframe !== '' &&
+      !db.reconciling &&
+      (db.daySeed.from !== '' || db.matched.length === 0)
+  );
+
+  /* A LINKED SORT AND PAGE ARE APPLIED ONCE THE SELECTION HAS SETTLED, after
+     the resets above have run for the seeds, so the link's page is the page
+     shown rather than the first thing the seeds reset. */
+  $effect(() => {
+    if (!settled) return;
+    untrack(() => {
+      const s = db.takeLinkSort();
+      if (s) {
+        if (db.view === 'census') {
+          db.sortKey = s.sort;
+          db.desc = s.desc;
+        } else {
+          db.barSortKey = s.sort;
+          db.barDesc = s.desc;
+        }
+      }
+    });
+  });
+  $effect(() => {
+    if (!settled) return;
+    void [db.barSortKey, db.barDesc, db.sortKey, db.desc];
+    untrack(() => {
+      const p = db.takeLinkPage();
+      if (p) db.pages[p.view === 'census' ? 'census' : 'bars'] = p.page;
+    });
+  });
+
+  /**
+   * THE ADDRESS BAR, MIRRORED (DB-077). Written with SvelteKit's own
+   * `replaceState` once the selection has settled, and only when the
+   * encoded selection differs from the address — idempotent, so one
+   * selection is one URL and a reload, a bookmark or a shared link restores
+   * it. A failure is named in `urlWhy`, never swallowed.
+   */
+  const sortOpening = $derived(
+    db.view === 'census' ? db.sortKey === 'instrument' && !db.desc : db.barSortKey === 'ts' && db.barDesc
+  );
+  const encoded = $derived(
+    encodeDb({
+      feed: feeds.active ?? '',
+      seg: db.kind,
+      sym: db.filter,
+      tf: db.timeframe,
+      exp: db.expiry,
+      k: db.strikePick,
+      side: db.side,
+      from: db.dayNarrowing ? db.fromDay : '',
+      to: db.dayNarrowing ? db.toDay : '',
+      tfrom: db.fromTime,
+      tto: db.toTime,
+      /* A VIEW'S OWN OPENING SORT IS NOT WRITTEN: Bars opens newest first,
+         Coverage by instrument ascending. */
+      sort: sortOpening ? '' : db.view === 'census' ? db.sortKey : db.barSortKey,
+      dir: sortOpening ? undefined : (db.view === 'census' ? db.desc : db.barDesc) ? 'desc' : 'asc',
+      page: db.page,
+      view: db.view,
+      oow: db.oow
+    })
+  );
+  $effect(() => {
+    const q = encoded;
+    if (!settled || typeof location === 'undefined') return;
+    untrack(() => {
+      const now = location.search.replace(/^\?/, '');
+      if (now === q) return;
+      try {
+        replaceState(q ? `?${q}` : location.pathname, {});
+        db.urlWhy = '';
+      } catch (why) {
+        db.urlWhy = `the address bar could not be updated: ${String(/** @type {any} */ (why)?.message ?? why)}`;
+      }
+    });
+  });
+  Object.defineProperties(db, {
+    settled: { get: () => settled },
+    encoded: { get: () => encoded }
   });
 }
