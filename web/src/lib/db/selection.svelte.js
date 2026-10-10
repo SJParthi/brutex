@@ -40,6 +40,7 @@ import { strikeText } from './decoration.js';
 import { replaceState } from '$app/navigation';
 import { page } from '$app/state';
 import { ask } from '../ask.js';
+import { askCalendar } from '../calendar-owed.js';
 import { createPageRequests } from '../page-requests.js';
 import { encodeDb, decodeDb } from '../urlstate.js';
 import {
@@ -2347,19 +2348,24 @@ export function selectionSeeds(db) {
     calReads.cancel();
     void calReads.run(async (ticket) => {
       try {
-        const r = await ask(
+        // A CALENDAR STILL BUILDING (202, DB-N19) IS ASKED AGAIN at the
+        // server's hint, never read as a calendar with no day string.
+        const { response: r, body } = await askCalendar(
           `/calendar.json?feed=${encodeURIComponent(feed)}&rung=${encodeURIComponent(rung)}`,
-          { signal: ticket.signal }
+          ask,
+          ticket.signal
         );
-        const body = r.ok ? await r.json() : null;
         if (!ticket.current()) return;
         const cal = calendarOf(body);
+        const reason = typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : '';
         db.calendar = cal;
         db.calWhy = cal
           ? ''
-          : r.ok
-            ? `/calendar.json answered with no day string${typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : ''}`
-            : `/calendar.json answered HTTP ${r.status}`;
+          : body?.status === 'building'
+            ? `/calendar.json is still being built${reason}`
+            : r.ok
+              ? `/calendar.json answered with no day string${reason}`
+              : `/calendar.json answered HTTP ${r.status}`;
       } catch (why) {
         if (ticket.current()) db.calWhy = `/calendar.json could not be read: ${String(/** @type {any} */ (why)?.message ?? why)}`;
       }

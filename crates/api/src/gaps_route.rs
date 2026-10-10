@@ -98,7 +98,7 @@ pub(super) async fn gaps_json(
     };
     // A SERIES NAMED WITHOUT ITS EXCHANGE AND SEGMENT IS FOUND IN THE CENSUS,
     // or refused by name: see `inferred`.
-    let (mut asked, inferred) = match inferred(&site, asked).await {
+    let (asked, inferred) = match inferred(&site, asked).await {
         Ok(Ok(found)) => found,
         Ok(Err(why)) => return refuse(why),
         Err(why) => return calendar_admission_refused(&why),
@@ -151,20 +151,13 @@ pub(super) async fn gaps_json(
     } else if mode == Mode::Record {
         Denominator::record(&span)
     } else {
-        // OFF THE ASYNC WORKERS, AND ADMITTED: the peer vote derives one
-        // calendar per peer series on a miss. W1-api2-11, D-1443.
-        let peers_site = std::sync::Arc::clone(&site);
-        match crate::detail::run_calendar(move || {
-            let peers = peer_calendar(&peers_site, &asked);
-            (asked, peers)
-        })
-        .await
-        {
-            Ok((back, peers)) => {
-                asked = back;
-                Denominator::peers(peers)
-            }
-            Err(why) => return calendar_admission_refused(&why),
+        // THE PEER VOTE, KEPT OR BUILT OFF THE REQUEST PATH (DB-N19): see
+        // `voted`. A build is derived on the calendar pool behind its
+        // admission (W1-api2-11, D-1443) and waited for at most the served
+        // budget, past which the request is answered "building".
+        match voted(&site, &asked).await {
+            Ok(peers) => Denominator::peers(peers),
+            Err(answer) => return answer,
         }
     };
     let (months, denominator) =
@@ -714,50 +707,14 @@ fn gaps_body(
     )
 }
 
-/// A calendar for auditing one series, built from everything EXCEPT that
-/// series.
-///
-/// # Why the audited series may not vote
-///
-/// `calendar_of` reads a session's windows off contiguous runs of minute bars,
-/// so a series with a hole derives a calendar in which that hole is a window
-/// boundary. Auditing a series against its own derivation therefore answers
-/// "no losses" for every possible input — measured, in one test run: one minute
-/// deleted mid-session produced `expected 8,249, held 8,249, lost 0` with the
-/// missing minute reported as `outside-window`.
-///
-/// `agree` is a UNION — a day is a session if ANY reading saw one, and the
-/// session taken is the LONGEST any reading measured — so a peer's own hole
-/// cannot shorten the day for everybody, and one honest peer is enough to
-/// establish what the exchange did.
-///
-/// # When there are no peers
-///
-/// A store holding one feed's copy of one symbol has nothing independent to
-/// compare against. That returns `None`, `gaps::classify_against` falls back to
-/// the typed table, and `source` says `table` so the answer names what decided
-/// it. Substituting the series' own derivation there would be the §4 fallback
-/// that hides a failure: it would answer, confidently, zero.
-pub(super) struct PeerCalendar {
-    /// The agreed calendar, or `None` when nothing independent could vote.
-    pub(super) calendar: Option<pull::calendar::Calendar>,
-    /// The `feed:symbol` readings that voted, sorted, for the answer to name.
-    pub(super) from: Vec<String>,
-    /// Every feed whose census could not be read, in `Vendor::ALL` order.
-    ///
-    /// Such a census contributes no series, so without this list a damaged
-    /// counter fell back to the table with `voted_by: []` -- the same answer
-    /// as a store with no peers at all, which is the failure `CLAUDE.md` §4
-    /// bans. A peer that might have voted and could not be read is named.
-    ///
-    /// Then, as `feed:symbol` in the order they were walked, every peer series
-    /// with a bar file its census holds and its derivation could not open. Its
-    /// calendar lacks what that file would have proved, so it does not vote,
-    /// and `calendar_of::cached` does not keep it. D-0695.
-    pub(super) unreadable: Vec<String>,
-}
+// THE PEER VOTE'S TYPE LIVES BESIDE THE CACHE THAT KEEPS IT, so a vote can be
+// kept under the census stamps it was read under (WP-36, DB-N19). Its own doc
+// says why the audited series may not vote.
+pub(super) use crate::calendar_of::build::PeerCalendar;
 
-/// Build a [`PeerCalendar`] for the series `asked` addresses.
+/// Build a [`PeerCalendar`] for the series `asked` addresses, now, whatever
+/// is kept: the reading a vote build makes ([`lead_vote`]), for a test.
+#[cfg(test)]
 pub(super) fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
     peer_calendar_reading(site, asked, census_now_stamped)
 }
@@ -767,12 +724,27 @@ pub(super) fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
 /// Production passes [`census_now_stamped`] and nothing else, for the reason
 /// [`calendar_json_reading`](super::calendar_route::calendar_json_reading)
 /// gives: a test installs a newer manifest after the census is read and before
-/// a peer's calendar is kept. D-0695.
+/// a peer's calendar is kept. D-0695. Production reads it through
+/// [`peer_vote_reading`], which also says whether the vote may be kept.
+#[cfg(test)]
 pub(super) fn peer_calendar_reading(
     site: &Site,
     asked: &Addressed,
     census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
 ) -> PeerCalendar {
+    peer_vote_reading(site, asked, census).1
+}
+
+/// [`peer_calendar_reading`], and the stamps its vote may be kept under:
+/// `None` when the census it read is not one its stamps could have read
+/// (`read_as_stamped`, D-0695) or any feed or peer could not be read -- a vote
+/// that names an unreadable peer is answered and built again next time, never
+/// kept past the fault (DB-N19).
+fn peer_vote_reading(
+    site: &Site,
+    asked: &Addressed,
+    census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
+) -> (Option<CensusStamps>, PeerCalendar) {
     // A FRESH CENSUS, for the reason D-0318 records: a list captured before the
     // store had anything in it reports a complete store as short.
     //
@@ -795,18 +767,19 @@ pub(super) fn peer_calendar_reading(
         // SORTED SO THE ANSWER IS REPRODUCIBLE. A `HashMap`'s iteration order
         // varies per process and `from` ships the names that voted.
         keys.sort_unstable();
+        // A stored calendar from another venue cannot decide which minutes
+        // this requested exchange and segment owed (D-0660), and THE AUDITED
+        // SERIES DOES NOT VOTE ON ITSELF: that one comparison is the whole
+        // difference between a denominator and a tautology.
+        keys.retain(|(exchange, segment, symbol)| {
+            exchange.as_str() == asked.exchange
+                && segment.as_str() == asked.segment
+                && !(vendor_census.vendor == asked.vendor && symbol.as_str() == asked.symbol)
+        });
+        // HOW FAR A VOTE HAS GOT is what a "building" answer says (DB-N19).
+        crate::calendar_of::build::owe(keys.len());
         for key in keys {
             let (exchange, segment, symbol) = key;
-            // A stored calendar from another venue cannot decide which
-            // minutes this requested exchange and segment owed. D-0660.
-            if exchange.as_str() != asked.exchange || segment.as_str() != asked.segment {
-                continue;
-            }
-            // THE AUDITED SERIES DOES NOT VOTE ON ITSELF. This one comparison
-            // is the whole difference between a denominator and a tautology.
-            if vendor_census.vendor == asked.vendor && symbol.as_str() == asked.symbol {
-                continue;
-            }
             let months: Vec<store::path::YearMonth> =
                 by_series.get(&key).cloned().unwrap_or_default();
             let derived = crate::calendar_of::cached(
@@ -820,6 +793,7 @@ pub(super) fn peer_calendar_reading(
                 &months,
                 census_holds(Some((vendor_census, key))),
             );
+            crate::calendar_of::build::counted();
             // A PEER WHOSE HELD FILE DID NOT OPEN IS NAMED, NOT COUNTED AS A
             // PEER THAT TRADED NOTHING THERE. See `PeerCalendar::unreadable`.
             if !derived.unopened.is_empty() {
@@ -846,20 +820,249 @@ pub(super) fn peer_calendar_reading(
             }
         }
     }
+    let keep = (unreadable.is_empty() && super::census_cache::read_as_stamped(&stamps, &fresh))
+        .then_some(stamps);
     if readings.is_empty() {
-        return PeerCalendar {
-            calendar: None,
-            from: Vec::new(),
-            unreadable,
-        };
+        return (
+            keep,
+            PeerCalendar {
+                calendar: None,
+                from: Vec::new(),
+                unreadable,
+            },
+        );
     }
     let (agreed, _clashes) = crate::calendar_of::agree(&readings);
     let from: Vec<String> = readings.into_iter().map(|(name, _)| name).collect();
-    PeerCalendar {
-        calendar: Some(agreed),
-        from,
-        unreadable,
+    (
+        keep,
+        PeerCalendar {
+            calendar: Some(agreed),
+            from,
+            unreadable,
+        },
+    )
+}
+
+/// One `/gaps.json` answer: status, content type, body.
+type GapsAnswer = (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+);
+
+/// The peer vote's key: the parts of `asked` it reads.
+fn vote_key(asked: &Addressed) -> crate::calendar_of::build::VoteKey {
+    (
+        asked.vendor,
+        asked.exchange.clone(),
+        asked.segment.clone(),
+        asked.symbol.clone(),
+    )
+}
+
+/// The peers' vote for the series `asked` addresses (DB-N19).
+///
+/// Kept under the census stamps of every vendor's manifest -- the vote reads
+/// every feed's census -- and handed out while none has moved: one `stat` per
+/// vendor and one probe. Otherwise one build per series, led or joined, run
+/// on the calendar pool and waited for at most the served budget; past it the
+/// request is answered `202` `"building"` and the build goes on. Before this
+/// the first `calendar=peers` audit after a start derived every peer series'
+/// calendar on the request (17.9 s for Zerodha NIFTY on WP-36's shadow) and
+/// every later one walked, sorted and agreed them all again (0.26-0.40 s).
+///
+/// # Errors
+///
+/// The answer the request is given instead: `"building"`, a full build map,
+/// or the admission refusal the build met.
+async fn voted(site: &Loaded, asked: &Addressed) -> Result<PeerCalendar, GapsAnswer> {
+    use crate::calendar_of::build::Joined;
+    let builds = &site.calendars.builds;
+    let key = vote_key(asked);
+    let now = super::census_cache::manifest_stamps(&site.store_root);
+    if let Some(vote) = builds.votes.kept(&key, &now) {
+        return Ok((*vote).clone());
     }
+    let build = match builds
+        .votes
+        .join(&key, Some(&now), builds.census_at_start())
+    {
+        Joined::Parked(voted) => return vote_of(voted),
+        Joined::CensusAtStart(since) => {
+            return Err(vote_building(
+                asked, "census", "start-up", since, None, 0, 0,
+            ));
+        }
+        Joined::Full => return Err(votes_full()),
+        Joined::Follow(build) => build,
+        Joined::Lead(build) => {
+            lead_vote(site, asked, &build, now);
+            build
+        }
+    };
+    if let Some(voted) = build.wait(builds.budget()).await {
+        return vote_of(voted);
+    }
+    let progress = build.progress();
+    Err(vote_building(
+        asked,
+        if progress.reading_for.is_some() {
+            "deriving"
+        } else {
+            "queued"
+        },
+        progress.origin.word(),
+        progress.queued_for,
+        progress.reading_for,
+        progress.counted,
+        progress.owed,
+    ))
+}
+
+/// A finished vote build's answer as the route takes it.
+fn vote_of(voted: crate::calendar_of::build::Voted) -> Result<PeerCalendar, GapsAnswer> {
+    voted.map(|vote| (*vote).clone()).map_err(|(status, body)| {
+        (
+            axum::http::StatusCode::from_u16(status)
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            body,
+        )
+    })
+}
+
+/// Run the vote build a request for `asked` leads, keep its vote when it may
+/// be kept, and finish the build with it -- or with the admission refusal it
+/// met, so nobody waits on a build that will never answer. Spawned, so the
+/// build outlives a request that stopped waiting for it (DB-N19).
+fn lead_vote(
+    site: &Loaded,
+    asked: &Addressed,
+    build: &std::sync::Arc<crate::calendar_of::build::Build<crate::calendar_of::build::Voted>>,
+    now: CensusStamps,
+) {
+    let key = vote_key(asked);
+    let addressed = Addressed {
+        vendor: asked.vendor,
+        month: asked.month,
+        timeframe: asked.timeframe,
+        contract: asked.contract,
+        exchange: asked.exchange.clone(),
+        segment: asked.segment.clone(),
+        symbol: asked.symbol.clone(),
+    };
+    let (site, build) = (std::sync::Arc::clone(site), std::sync::Arc::clone(build));
+    drop(tokio::spawn(async move {
+        let reading = {
+            let (site, build, key) = (
+                std::sync::Arc::clone(&site),
+                std::sync::Arc::clone(&build),
+                key.clone(),
+            );
+            crate::detail::run_calendar(move || {
+                let _entered = build.enter(Some(now));
+                let (keep, vote) = peer_vote_reading(&site, &addressed, census_now_stamped);
+                let vote = std::sync::Arc::new(vote);
+                if let Some(stamps) = keep {
+                    let _kept_or_full =
+                        site.calendars
+                            .builds
+                            .votes
+                            .keep(key, stamps, std::sync::Arc::clone(&vote));
+                }
+                vote
+            })
+        };
+        let voted = reading.await.map_err(|why| {
+            let (status, _, body) = calendar_admission_refused(&why);
+            (status.as_u16(), body)
+        });
+        site.calendars
+            .builds
+            .votes
+            .flights
+            .finish(&key, &build, voted);
+    }));
+}
+
+/// The `202` a `calendar=peers` audit is answered while its vote is built:
+/// what the build is doing, how far it has got, and when to ask again. No
+/// minute is audited, so nothing here can be read as a verdict (DB-N19).
+fn vote_building(
+    asked: &Addressed,
+    phase: &str,
+    by: &str,
+    since: std::time::Duration,
+    reading: Option<std::time::Duration>,
+    counted: u64,
+    owed: u64,
+) -> GapsAnswer {
+    let millis =
+        |elapsed: std::time::Duration| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let retry = crate::calendar_of::build::RETRY_AFTER_MS;
+    let doing = match phase {
+        "census" => {
+            "the server is reading its census at start, which the vote is read from".to_owned()
+        }
+        "queued" => "it is queued".to_owned(),
+        // NO PEER SERIES OWED YET: the walk of every feed's census entries
+        // that finds them (about 0.3 s on the operator's store) is still
+        // going, so "0 of 0" would read as a vote with nothing to count.
+        _ if owed == 0 => "it is walking every feed's census for the peer series".to_owned(),
+        _ => format!("it has derived {counted} of the {owed} peer series it reads so far"),
+    };
+    (
+        axum::http::StatusCode::ACCEPTED,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "status": "building",
+            "calendar": "peers",
+            "feed": asked.vendor.as_str(),
+            "exchange": asked.exchange,
+            "segment": asked.segment,
+            "symbol": asked.symbol,
+            "phase": phase,
+            "by": by,
+            "since_ms": millis(since),
+            "reading_ms": reading.map(millis),
+            "series_counted": counted,
+            "series_owed": owed,
+            "retry_after_ms": retry,
+            "reason": format!(
+                "The peers' vote this audit counts against is being built off the request \
+                 path: {doing}. No minute is audited until it is whole; ask again in {retry} ms, \
+                 or ask for calendar=record, which needs no vote."
+            ),
+        })
+        .to_string(),
+    )
+}
+
+/// The `429` a `calendar=peers` audit is answered when every vote build the
+/// map holds is queued or running.
+fn votes_full() -> GapsAnswer {
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "error": format!(
+                "peer vote build not admitted: {} builds are queued or running, the most this \
+                 server holds at once; retry, or ask for calendar=record",
+                crate::calendar_of::build::MAX_BUILDS
+            )
+        })
+        .to_string(),
+    )
 }
 
 /// How many months one audit request will walk before it stops and says so.
@@ -2664,5 +2867,57 @@ mod tests {
             "{runs:?}"
         );
         assert!(runs.iter().any(|run| run["day"] == friday), "{runs:?}");
+    }
+
+    /// **A PEER VOTE STILL BUILDING SAYS WHAT IT IS DOING, NEVER "0 OF 0".**
+    /// DB-N19: a vote walks every feed's census entries before it knows how
+    /// many peer series it owes, and an FNO audit owes none at all.
+    #[test]
+    fn a_building_vote_says_what_it_is_doing_and_audits_nothing() {
+        let asked = Addressed::parse(
+            "feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract=2019-09-26-1300000-CE&timeframe=1s&month=2019-09",
+        )
+        .unwrap();
+        let body = |phase: &str, counted: u64, owed: u64| {
+            let (status, _, body) = vote_building(
+                &asked,
+                phase,
+                "request",
+                std::time::Duration::from_millis(40),
+                Some(std::time::Duration::from_millis(30)),
+                counted,
+                owed,
+            );
+            assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        };
+        let walking = body("deriving", 0, 0);
+        assert_eq!(walking["status"], "building");
+        assert_eq!(walking["calendar"], "peers");
+        assert_eq!(walking["symbol"], "NIFTY");
+        assert_eq!(walking["since_ms"], 40);
+        assert_eq!(walking["reading_ms"], 30);
+        let reason = walking["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("walking every feed's census for the peer series"),
+            "{reason}"
+        );
+        assert!(!reason.contains("0 of the 0"), "{reason}");
+        assert!(
+            walking.get("lost_minutes").is_none(),
+            "no minute is audited"
+        );
+        let deriving = body("deriving", 57, 343);
+        let reason = deriving["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("it has derived 57 of the 343 peer series"),
+            "{reason}"
+        );
+        assert_eq!(deriving["series_owed"], 343);
+        let queued = body("queued", 0, 0);
+        assert!(
+            queued["reason"].as_str().unwrap().contains("it is queued"),
+            "{queued}"
+        );
     }
 }
