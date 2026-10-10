@@ -65,8 +65,12 @@ export const CSV_COLS = [
   { label: 'month', v: (r) => r.month },
   { label: 'timeframe', v: (r) => r.timeframe },
   { label: 'rows', v: (r) => String(r.rows) },
-  { label: 'fullest_in_month', v: (r) => String(r.denom) },
-  { label: 'short_by', v: (r) => String(r.short) },
+  // THE COVERAGE VERDICT IS THE CALENDAR'S (WP-54, D-3336): what the
+  // calendar of record owes the row at its rung, what is missing, and the
+  // state the grid shows. The peer "fullest in month" is no longer a verdict.
+  { label: 'owed_by_calendar', v: (r) => (Number.isFinite(r.cover?.owed) ? String(r.cover.owed) : '') },
+  { label: 'missing_by_calendar', v: (r) => (Number.isFinite(r.cover?.missing) ? String(r.cover.missing) : '') },
+  { label: 'coverage_state', v: (r) => r.cover?.state ?? '' },
   { label: 'first_ts_micros', v: (r) => (r.firstAt === null ? '' : String(r.firstAt * 1000)) },
   { label: 'last_ts_micros', v: (r) => (r.lastAt === null ? '' : String(r.lastAt * 1000)) },
   { label: 'chg_bps', v: (r) => (r.chg === null ? '' : String(r.chg)) },

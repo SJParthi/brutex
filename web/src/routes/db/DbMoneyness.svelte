@@ -1,31 +1,55 @@
 <script module>
   /**
-   * /db — THE MONEYNESS RUNG
+   * /db — THE MONEYNESS RUNG, AND HOW AN OPTION BAR'S SPOT IS TAKEN
    *
-   * The Moneyness control on the contract strip, and the strike chain and ladder
-   * it and the Strike control are built from.
+   * The Moneyness control on the contract strip, the "Spot" control beside
+   * it (exact second, or the last spot at or before t), and the strike chain
+   * the Strike control is built from.
    *
-   * Every line below was MOVED out of `routes/db/+page.svelte` by WP-00 (the /db
-   * page split). The only edits to a moved line are the ones the move needs: a
-   * page-level name that now lives in another file is imported, or, for state,
-   * read as `db.<name>`; a plain module exports what it declares; and a callback
-   * over such a value marks its parameter `any`, the way the page already did
-   * elsewhere. Nothing was fixed in the move: every defect the audit found is
-   * still present byte for byte, and is fixed by the package that owns this file
-   * next.
+   * Moved out of `routes/db/+page.svelte` by WP-00; owned by WP-53, which
+   * fixed here:
    *
-   * Owner after WP-00: WP-53 (option cells: own-month pricing, point-in-time moneyness, refusal words).
+   * - DB-008: the strike chain is the SELECTION's — this underlying and this
+   *   expiry — never a fold of every strike the whole store holds (it read
+   *   "1,135 listed · 1 to 19,13,000" for one NIFTY expiry).
+   * - DB-075: the Moneyness control was drawn and dead, because a month has
+   *   no spot. A rung belongs to a BAR at its own instant (D-3329): the
+   *   control keeps the bars whose own rung, answered by `/chain.json` over
+   *   the strikes stored by then, is the one picked.
+   * - DB-068: an opt-in "last spot at or before t", always shown with its
+   *   age, never a later bar (D-3328; the operator's answer 4).
    */
-  import { rungOf, ladderPos, famOf } from '$lib/db/chain.js';
+  import { ladderPos, famOf } from '$lib/db/chain.js';
   import { txt, fmt } from '$lib/db/notes-labels.js';
   import { strikeText } from '$lib/db/decoration.js';
   import { feeds } from '$lib/feeds.svelte.js';
-  import { NO_SPOT } from '$lib/db/notes-options.js';
+  import { RUNG_PER_BAR, rungMatches } from '$lib/db/notes-options.js';
+  import { rungKey } from '$lib/moneyness.js';
+  import { dayLabel, secondLabel } from '$lib/dates.js';
   import Picker from '$lib/Picker.svelte';
 
+  /** The Spot control's two rows (D-3328). */
+  const ASOF_ROWS = [
+    {
+      key: 'exact',
+      name: 'Exact second',
+      detail: 'default',
+      title:
+        'The underlying’s close stamped at exactly the option bar’s own instant (D-2807). A second with no underlying bar is named “no spot”, never filled.'
+    },
+    {
+      key: 'prev',
+      name: 'Last at or before t',
+      detail: 'shows its age',
+      title:
+        'The underlying’s last bar at or before the option bar’s instant, inside the same IST session — never a later bar, never another month (D-3328). Every cell priced this way shows how many seconds old its spot is.'
+    }
+  ];
+
   /**
-   * THE STRIKE CHAIN AND THE MONEYNESS LADDER OVER IT — the strike and moneyness
-   * rungs' rows, counts, summaries and refusals.
+   * THE STRIKE CHAIN OF THIS SELECTION, AND THE MONEYNESS LADDER AT EACH
+   * BAR'S OWN INSTANT — the strike and moneyness rungs' rows, counts,
+   * summaries and refusals.
    *
    * Creates no effect, so where the shell calls it does not change behaviour.
    *
@@ -33,60 +57,34 @@
    */
   export function chainState(db) {
     /* ======================================================================
-       THE CONTRACT RUNG — THE STRIKE CHAIN, AND THE MONEYNESS LADDER OVER IT
+       THE CONTRACT RUNG — THE STRIKE CHAIN, AND THE MONEYNESS LADDER
        ----------------------------------------------------------------------
-       MONEYNESS IS A POSITION ON A LADDER, NOT ONE OF THREE WORDS. A strike is
-       in or out of the money BY A DISTANCE: for a call every strike below spot
-       is in the money and gets further in as you descend — ITM-1, ITM-2, ITM-3 …
-       — and every strike above it gets further out — OTM+1, OTM+2, OTM+3. ATM is
-       the single strike nearest spot. Collapsing that to three buckets throws
-       away the axis a reader trades on: one word cannot answer for a strike one
-       step in and a strike six steps in, which are different instruments.
+       MONEYNESS IS A POSITION ON A LADDER, NOT ONE OF THREE WORDS. For a call
+       every strike below spot is in the money and further in as you descend —
+       ITM-1, ITM-2 … — and every strike above it further out — OTM+1, OTM+2.
+       ATM is the single strike nearest spot. `ladderPos` reads the signed
+       offset back off the name, so `ITM-10` sorts deeper than `ITM-2`.
 
-       THE SIGN IS PART OF THE NAME, and it is what makes the order an order.
-       `ITM-10` is DEEPER than `ITM-2` because −10 < −2; compared as text `ITM-10`
-       lands before `ITM-2` and `ITM-100` lands between them. `ladderPos` reads
-       the offset back off the name as a signed NUMBER, so a two-, three- or
-       four-digit offset needs no new rule and no new branch.
-
-       NOTHING HERE CARRIES A DEPTH. There is no `CHAIN = 6`, no cap, no band and
-       no bound between the chain and the panel: the rungs are counted off the
-       strikes the STORE actually names, so a store holding one strike has one
-       rung and says so, and a store holding five hundred has five hundred. A
-       rung the current selection holds no bar for stays on the ladder and
-       reports `no bars`, which is a finding about the window rather than a
-       shorter ladder.
-
-       ONE RENDERER, TWO DATA SOURCES. Both panels are `$lib/Picker.svelte` — the
-       same control `/markets` and `/ingest` use and the same one this page
-       already uses for Segment and Instrument. Everything that differs between
-       strike and moneyness is DATA: what the rows are, what the counts are read
-       from, what the button says, what the refusal says. A second lookalike
-       control is how two panels start the same and end up two pixels and one
-       wording apart, and there is not one here.
+       A RUNG IS COUNTED AT AN INSTANT, ALONG THE STRIKES STORED BY THEN
+       (D-3329). The server answers it per bar (`/chain.json`); nothing here
+       counts one. The chain below is only the Strike control's list.
 
        THEY STAY TWO CONTROLS. A rung is a distance and a strike is an absolute
-       price, and a reader who wants `52,000` and a reader who wants `ITM-2` are
-       asking different questions — one of them survives a move in spot and the
-       other does not.
+       price: `52,000` and `ITM-2` are different questions, and only one of
+       them survives a move in spot.
        ====================================================================== */
 
     /**
-     * EVERY STRIKE THE STORE NAMES, ascending, with the sides it holds at it.
+     * EVERY STRIKE OF THIS SELECTION'S EXPIRY, ascending, with the sides it
+     * holds — the selection's underlying and expiry, from `expiryGated`
+     * (DB-008). With no expiry chosen the gate holds every contract row back,
+     * so the chain is empty and the Strike control says to choose one.
      *
-     * Built from `deco` — the WHOLE store for this feed — and not from the
-     * filtered view, for the same reason `monthFull` is: the chain is what exists
-     * on disk, and narrowing the table to one month must not quietly shorten the
-     * ladder the remaining rows are placed on. What the narrowing changes is the
-     * COUNT beside each rung, which is counted separately and against
-     * `matchedPreContract`.
-     *
-     * One pass over the rows, then O(1) per lookup. Recomputed when the store is
-     * re-read, never per keystroke and never per scroll frame.
+     * One pass over the gated rows, then O(1) per lookup.
      */
     const chainAll = $derived.by(() => {
       const by = new Map();
-      for (const r of db.deco) {
+      for (const r of db.expiryGated) {
         if (r.strike === null) continue;
         let e = by.get(r.strike);
         if (!e) by.set(r.strike, (e = { strike: r.strike, sides: new Set(), months: 0 }));
@@ -96,7 +94,7 @@
       return [...by.values()].sort((a, b) => a.strike - b.strike);
     });
 
-    /** Strike -> its position in the chain. The rung lookup is a probe, not a scan. */
+    /** Strike -> its position in the chain. */
     const chainAt = $derived.by(() => {
       const m = new Map();
       for (let i = 0; i < chainAll.length; i += 1) m.set(chainAll[i].strike, i);
@@ -104,14 +102,9 @@
     });
 
     /**
-     * THE CHAIN'S OWN GRID, in paisa — counted, never `sym === 'BANKNIFTY' ? 500
-     * : 50`. The smallest positive gap between two adjacent listed strikes is a
-     * fact about what is on disk; a table of step sizes per symbol would be this
-     * page asserting an exchange's contract specification, which
-     * `docs/00-charter.md` sources for nothing.
-     *
-     * `null` under two strikes: one strike has no gap, and a step invented for it
-     * would be a number nobody measured.
+     * THE CHAIN'S OWN GRID, in paisa — the smallest positive gap between two
+     * adjacent strikes of THIS expiry, counted, never a table of step sizes
+     * per symbol. `null` under two strikes.
      */
     const chainStep = $derived.by(() => {
       let step = null;
@@ -122,99 +115,19 @@
       return step;
     });
 
-    /**
-     * SPOT, IN PAISA — the price the ladder is drawn around.
-     *
-     * IT IS `null`, ON EVERY STORE THIS PAGE CAN READ, AND THAT IS A FINDING
-     * RATHER THAN A STUB. `/store.json` carries ten fields and none is a price:
-     * `chg_bps` is a RATIO — this month's first close over its last, in integer
-     * basis points — and a ratio has no scale, so no absolute price can be
-     * recovered from it. `/instruments.json`, the other endpoint this page holds,
-     * carries `symbol`, `key`, `kind`, `exchange`, `segment`, `universe`,
-     * `universes`, `bars` and `href`, and none of those is a price either.
-     * `/bars.json` does carry prices — and reading one would be a request per
-     * contract and about 81 bytes per bar (see the note panel's last line, where
-     * that number is measured) to recover a single figure, which is the exact
-     * trade D-0067 refused when it put the two closes in the census instead.
-     *
-     * A DERIVED AND NOT A LITERAL `null`, on purpose. The day a price reaches
-     * this page the anchor is a computation over the rows on hand, not an edit to
-     * a constant — and `moneyRefusal` beside it has to be able to say "not
-     * measured" rather than "impossible".
-     *
-     * @type {number | null}
-     */
-    const spotPaisa = $derived.by(() => {
-      /* Nothing to read it from. Every field of every endpoint this page calls
-         is enumerated above; when one of them becomes a price, it is read here
-         and the ladder below lights up with no other change to this file. */
-      return null;
+    /** Whether the feed's store holds any option at all: one pass per store read. */
+    const storeOptions = $derived.by(() => {
+      let n = 0;
+      for (const r of db.deco) if (r.strike !== null) n += 1;
+      return n;
     });
 
-    /**
-     * WHICH CHAIN ENTRY IS THE MONEY — the index of the strike nearest spot, or
-     * `null` when spot is not on hand.
-     *
-     * Nearest by absolute distance, and the FIRST of two equidistant strikes, so
-     * the answer is the same on every read of the same chain. A ladder whose
-     * centre moved between two paints would renumber every rung under the
-     * reader's selection.
-     */
-    const atmIndex = $derived.by(() => {
-      if (spotPaisa === null || chainAll.length === 0) return null;
-      let at = 0;
-      for (let i = 1; i < chainAll.length; i += 1) {
-        if (Math.abs(chainAll[i].strike - spotPaisa) < Math.abs(chainAll[at].strike - spotPaisa)) {
-          at = i;
-        }
-      }
-      return at;
-    });
-
-    /**
-     * EVERY RUNG THE CHAIN REACHES, in ladder order: deepest ITM … ITM-1, ATM,
-     * OTM+1 … deepest OTM.
-     *
-     * The union across the sides each strike actually holds, not one rung per
-     * strike. A strike is ITM for one side and OTM for the other, so on a chain
-     * that runs out of room at one end the union is the wider of the two sides —
-     * stating it as the union is true in both cases and "one per strike" is true
-     * only on a chain centred exactly on the money.
-     *
-     * Empty when there is no anchor, which is what disables the control. A rung
-     * NAMED without a money to measure from would be this page inventing a
-     * distance, and every name on the ladder would be wrong by however far the
-     * guess sat from spot.
-     */
-    const ladderRungs = $derived.by(() => {
-      if (atmIndex === null) return [];
-      const seen = new Set();
-      for (let i = 0; i < chainAll.length; i += 1) {
-        for (const side of chainAll[i].sides) seen.add(rungOf(i - atmIndex, side));
-      }
-      /* SORTED BY SIGNED POSITION, NEVER BY TEXT — see the block header. `txt` is
-         the tie-break only, and it can only fire between two names with the same
-         offset, which is `ATM` against itself and therefore never. */
-      return [...seen].sort((a, b) => ladderPos(a) - ladderPos(b) || txt(a, b));
-    });
-
-    /**
-     * The rung one stored row sits on, or `null` — no anchor, no contract, or a
-     * strike the chain does not list.
-     *
-     * @param {{ strike: number | null, side: 'CE' | 'PE' | null }} r
-     */
-    function rungKeyOf(r) {
-      if (atmIndex === null || r.strike === null || r.side === null) return null;
-      const i = chainAt.get(r.strike);
-      return i === undefined ? null : rungOf(i - atmIndex, r.side);
-    }
-
-    /* `expiryGated` AND NOT `matchedPreContract`, on both of these. The expiry
-       is the rung directly above the strike, so counting a strike over rows the
-       gate is holding back would print a bar count the click cannot produce —
-       the exact rule the facet block states. With no expiry chosen every strike
-       honestly reads `no bars`, because that is what selecting it returns. */
+    /*
+       THE COUNT, COUNTED — and the three states are not two. `—` when nothing
+       has been read, `no bars` when it has and this row is empty, a number
+       otherwise.
+       @param {number} n */
+    const barsDetail = (/** @type {number} */ n) => (db.deco.length === 0 ? '—' : n ? `${fmt(n)} bars` : 'no bars');
 
     /** Bars at each strike, over everything the rungs above this one reached. */
     const strikeBars = $derived.by(() => {
@@ -225,216 +138,175 @@
       return c;
     });
 
-    /** The same count one level up, per rung. Empty while there is no anchor. */
+    /** The strikes this selection reaches — the chain itself now (DB-008). */
+    const strikeOffered = $derived(new Set(chainAll.map((c) => c.strike)));
+
+    const strikeRows = $derived(
+      chainAll.map((c) => ({
+        key: String(c.strike),
+        name: strikeText(c.strike),
+        detail: barsDetail(strikeBars.get(c.strike) ?? 0)
+      }))
+    );
+
+    const strikeSummary = $derived(
+      chainAll.length === 0
+        ? 'No strike here'
+        : db.strikePick.size === 0
+          ? `Any strike · ${fmt(chainAll.length)} in this expiry`
+          : `${strikeText(Number([...db.strikePick][0]))} only`
+    );
+
+    /**
+     * WHY THE STRIKE PANEL CANNOT BE OPENED, or `null` when it can — a fact
+     * about the STORE (no option in it at all), never about the selection:
+     * an expiry not yet chosen is said on the control's own clause.
+     */
+    const strikeRefusal = $derived.by(() => {
+      if (storeOptions > 0) return null;
+      if (db.deco.length === 0)
+        return `nothing has been read for ${db.feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
+      return `not one of the ${fmt(db.deco.length)} instrument-month(s) ${db.feedDisplay(feeds.active)} holds is named the way this repository names an option. crates/core/src/instrument.rs ends one “-<strike in paisa>-CE” or “-<strike in paisa>-PE”, and nothing in this store ends either way. /store.json sends no strike field, so a strike here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at.`;
+    });
+
+    /* ======================================================================
+       THE MONEYNESS LADDER — PER BAR (D-3329, DB-075)
+       ====================================================================== */
+
+    /**
+     * THE CHAIN AT THE PAGE'S NEWEST INSTANT, as `/chain.json` counted it:
+     * the strikes stored by then, ATM and the local step. It is what the
+     * control lists; each bar's own rung is asked at its own instant. Of
+     * several groups (a page over two rungs), the one counted latest.
+     */
+    const ladder = $derived.by(() => {
+      /** @type {any} */
+      let best = null;
+      for (const l of db.ladders?.values?.() ?? []) if (!best || l.at > best.at) best = l;
+      return best;
+    });
+
+    /** Every rung the chain at that instant reaches, on both sides, in ladder order. */
+    const ladderRungs = $derived.by(() => {
+      const seen = new Set();
+      for (const s of ladder?.strikes ?? []) {
+        if (s.ce) seen.add(s.ce);
+        if (s.pe) seen.add(s.pe);
+      }
+      /* And every rung a bar on this page actually sits on, so a pick the
+         newest instant's chain does not reach is still offered and counted. */
+      for (const r of db.optionPage ?? []) {
+        const a = db.rungMap?.get(rungKey(r));
+        if (a?.rung) seen.add(a.rung);
+      }
+      return [...seen].sort((a, b) => ladderPos(a) - ladderPos(b) || txt(a, b));
+    });
+
+    /** Bars on THIS page at each rung, and at each family. */
     const mnyBars = $derived.by(() => {
       const c = new Map();
-      if (atmIndex === null) return c;
-      for (const r of db.expiryGated) {
-        const k = rungKeyOf(r);
-        if (k !== null) c.set(k, (c.get(k) ?? 0) + r.rows);
+      for (const r of db.optionPage ?? []) {
+        const k = db.rungMap?.get(rungKey(r))?.rung;
+        if (!k) continue;
+        c.set(k, (c.get(k) ?? 0) + 1);
+        const f = String(famOf(k));
+        if (f !== k) c.set(f, (c.get(f) ?? 0) + 1);
       }
       return c;
     });
 
-    /**
-     * THE COUNT, COUNTED — and the three states are not two.
-     *
-     * `—` when nothing has been read, because a store nobody read counted
-     * nothing. `no bars` when it HAS been read and this row is empty, because
-     * that is a finding about the window and not about the control. A number
-     * otherwise. `0 bars` would be the third spelling of the second state and
-     * reads as a measurement of the first.
-     *
-     * @param {number} n
-     */
-    const barsDetail = (n) => (db.deco.length === 0 ? '—' : n ? `${fmt(n)} bars` : 'no bars');
-
-    /** One row per strike the store names, ascending, priced in rupees. */
-    /* THE STRIKES THIS SELECTION ACTUALLY REACHES — the cascade's seventh rung.
-     *
-     * `chainAll` is the CHAIN: every strike the store lists, in ladder order,
-     * folded from `deco`. It has to stay that way — it is the coordinate frame
-     * `atmIndex` indexes into and `ladderRungs` measures distance along, and
-     * narrowing a frame renumbers every rung under a live moneyness pick.
-     *
-     * The OFFER is a different question: which of those strikes the rungs above
-     * leave. Two values, because they answer two things — the same split
-     * `expiryOffered` makes against `expiriesAll`, and for the same reason.
-     */
-    const strikeOffered = $derived.by(() => {
-      const seen = new Set();
-      for (const r of db.expiryGated) if (r.strike !== null) seen.add(r.strike);
-      return seen;
-    });
-
-    const strikeRows = $derived(
-      chainAll
-        .filter((c) => strikeOffered.has(c.strike))
-        .map((c) => ({
-          key: String(c.strike),
-          name: strikeText(c.strike),
-          detail: barsDetail(strikeBars.get(c.strike) ?? 0)
-        }))
-    );
+    /** `n on this page`, or `none on this page` — a count of what was read. */
+    const pageDetail = (/** @type {number} */ n) => (n ? `${fmt(n)} on this page` : 'none on this page');
 
     /**
-     * The ladder as rows, with the FAMILY rows interleaved so that "all of ITM"
-     * and "exactly ITM-2" are the same gesture.
-     *
-     * A FAMILY OF ONE IS ITS RUNG and is drawn once. Printing both would be the
-     * page repeating a control it already drew, one row apart — and ATM is always
-     * a family of one, by definition.
-     *
-     * The family key is prefixed `fam:` so it can never collide with a rung name:
-     * `ATM` is both a family and a rung, and one string standing for two rows is
-     * how a tick lands on the wrong one.
+     * The control's rows: ATM, then the two families (any depth), then every
+     * rung in ladder order. A family pick keeps a bar on ANY rung of it — the
+     * page's rungs change as it turns, so a family is a word, not a list.
      */
-    /* THE RUNGS THIS SELECTION REACHES. `ladderRungs` is the ladder — the frame —
-     * and this is which of its rungs the strike above actually leaves. */
-    const mnyOffered = $derived.by(() => {
-      const seen = new Set();
-      for (const r of db.expiryGated) {
-        if (db.strikePick.size > 0 && !(r.strike !== null && db.strikePick.has(String(r.strike)))) continue;
-        const k = rungKeyOf(r);
-        if (k !== null) seen.add(k);
-      }
-      return seen;
-    });
-
     const mnyRows = $derived.by(() => {
-      const out = [];
-      for (const f of ['ITM', 'ATM', 'OTM']) {
-        const run = ladderRungs.filter((m) => famOf(m) === f && mnyOffered.has(m));
-        if (run.length === 0) continue;
-        if (run.length > 1) {
-          out.push({
-            key: `fam:${f}`,
-            name: f,
-            detail: `${fmt(run.length)} rungs · ${barsDetail(
-              run.reduce((a, m) => a + (mnyBars.get(m) ?? 0), 0)
-            )}`
-          });
-        }
-        for (const m of run) out.push({ key: m, name: m, detail: barsDetail(mnyBars.get(m) ?? 0) });
+      const out = [
+        { key: 'ATM', name: 'ATM', detail: pageDetail(mnyBars.get('ATM') ?? 0), title: 'The stored strike nearest spot at the bar’s own instant.' },
+        { key: 'ITM', name: 'ITM · any depth', detail: pageDetail(mnyBars.get('ITM') ?? 0), title: 'Every in-the-money rung, ITM-1 and deeper.' },
+        { key: 'OTM', name: 'OTM · any depth', detail: pageDetail(mnyBars.get('OTM') ?? 0), title: 'Every out-of-the-money rung, OTM+1 and further.' }
+      ];
+      for (const m of ladderRungs) if (m !== 'ATM') out.push({ key: m, name: m, detail: pageDetail(mnyBars.get(m) ?? 0), title: '' });
+      for (const m of db.mnyPick) {
+        if (!out.some((r) => r.key === m)) out.push({ key: m, name: m, detail: pageDetail(0), title: '' });
       }
       return out;
     });
 
-    /**
-     * The selection as the PANEL sees it: the rungs, plus a family key for every
-     * run that is wholly taken.
-     *
-     * A ROW IS TICKED WHEN EVERY KEY UNDER IT IS, so half a family reads as
-     * unticked and ticking it takes the rest — never the other way round.
-     */
-    const mnySelected = $derived.by(() => {
-      const s = new Set(db.mnyPick);
-      for (const f of ['ITM', 'OTM']) {
-        const run = ladderRungs.filter((m) => famOf(m) === f);
-        if (run.length > 1 && run.every((m) => db.mnyPick.has(m))) s.add(`fam:${f}`);
-      }
-      return s;
-    });
+    const mnySelected = $derived(new Set(db.mnyPick));
 
-    /**
-     * A family tick, expanded into its whole run — in BOTH directions.
-     *
-     * The panel hands back a Set; the family keys in it are not selection, they
-     * are a gesture. Comparing what the run WAS against what the family key now
-     * says is what distinguishes "the reader ticked ITM" from "the reader ticked
-     * the last remaining ITM rung, which happens to complete the family", and the
-     * second must not then re-add rungs the first would have.
-     *
-     * @param {Set<string>} next
-     */
+    /** Single select: the pick, or nothing. @param {Set<string>} next */
     function onMnyPick(next) {
-      const out = new Set();
-      for (const k of next) if (!k.startsWith('fam:')) out.add(k);
-      for (const f of ['ITM', 'OTM']) {
-        const run = ladderRungs.filter((m) => famOf(m) === f);
-        if (run.length < 2) continue;
-        const was = run.every((m) => db.mnyPick.has(m));
-        const now = next.has(`fam:${f}`);
-        if (now && !was) for (const m of run) out.add(m);
-        else if (!now && was) for (const m of run) out.delete(m);
-      }
-      db.mnyPick = out;
+      const k = [...next].find((x) => !db.mnyPick.has(x)) ?? [...next][0];
+      db.mnyPick = k === undefined ? new Set() : new Set([k]);
     }
 
-    /* WHAT EACH BUTTON SAYS. The count is the reader's own selection against what
-       this chain supports — never a label and never a constant. An empty
-       selection says what it MEANS rather than what it holds: no join at all, the
-       same sentence the `Everything` universe row carries. */
-    /* SINGLE SELECT, SO THERE IS NO PLURAL ARM.
-     *
-     * `Picker` has carried a `single` prop all along — it emits `new Set([key])`
-     * and never grows — and these two call sites were the only ones on the page
-     * that had not switched it on. The instrument picker already had it. So the
-     * page offered single select on one control and multi on two, which is the
-     * inconsistency rather than a design.
-     *
-     * The `size > 1` arm is gone rather than left standing: a branch no input can
-     * reach is a branch no test can cover and a mutant that deletes it survives.
-     * The Set stays as the storage because that is what `Picker` emits; it now
-     * holds at most one key. */
-    const strikeSummary = $derived(
-      chainAll.length === 0
-        ? 'No strike stored'
-        : db.strikePick.size === 0
-          ? `Any strike · ${fmt(chainAll.length)} listed`
-          : `${strikeText(Number([...db.strikePick][0]))} only`
-    );
+    /**
+     * WHY THE MONEYNESS CONTROL CANNOT BE USED, or `null`. A rung is counted
+     * along ONE expiry's chain, so it needs an expiry; it needs no spot here,
+     * because every bar's own spot is the server's.
+     */
+    const moneyRefusal = $derived.by(() => {
+      if (strikeRefusal) return `there is no chain to place a rung on — ${strikeRefusal}`;
+      if (!db.expiry) return 'choose an expiry first: a rung is counted along one expiry’s chain, at each bar’s own instant';
+      if (db.view !== 'bars') return 'a rung belongs to a bar at its own instant, so it is read in the Bars view';
+      return null;
+    });
 
     const mnySummary = $derived(
-      ladderRungs.length === 0
-        ? 'No ladder'
-        : db.mnyPick.size === 0
-          ? `Any rung · ${fmt(ladderRungs.length)} on the ladder`
-          : `${[...db.mnyPick][0]} only`
+      moneyRefusal ? 'No rung here' : db.mnyPick.size === 0 ? 'Any rung' : `${[...db.mnyPick][0]} only`
     );
 
-    /**
-     * WHY THE STRIKE PANEL CANNOT BE OPENED, or `null` when it can.
-     *
-     * `CLAUDE.md` §4: degrade loudly and NAME THE REASON. "Not yet read" and "the
-     * store holds no option" are opposite instructions — one is a wait and the
-     * other is a fact about the pull — and one greyed control cannot say both.
-     */
-    const strikeRefusal = $derived.by(() => {
-      if (chainAll.length > 0) return null;
-      if (db.deco.length === 0)
-        return `nothing has been read for ${db.feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
-      return `not one of the ${fmt(db.deco.length)} instrument-month(s) ${db.feedDisplay(feeds.active)} holds is named the way this repository names an option. crates/core/src/instrument.rs ends one “-<strike in paisa>-CE” or “-<strike in paisa>-PE”, and nothing in this store ends either way: it holds indices, equities and futures, whose names carry no strike at all. /store.json sends no strike field, so a strike here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at.`;
+    /** What the clause under the control says: the pick against this page, or the ladder. */
+    const mnyNote = $derived.by(() => {
+      if (moneyRefusal) return moneyRefusal;
+      const page = db.optionPage ?? [];
+      if (db.mnyPick.size > 0) {
+        const pick = [...db.mnyPick][0];
+        let kept = 0;
+        let unread = 0;
+        let refused = 0;
+        for (const r of page) {
+          const a = db.rungMap?.get(rungKey(r));
+          if (!a) unread += 1;
+          else if (!a.rung) refused += 1;
+          else if (rungMatches(db.mnyPick, a.rung)) kept += 1;
+        }
+        return `${pick} keeps ${fmt(kept)} of this page’s ${fmt(page.length)} option bar(s), each at its own instant${refused ? `; ${fmt(refused)} have no rung (refused, see the tally)` : ''}${unread ? `; ${fmt(unread)} not read yet` : ''}. The pager counts every bar of the query: the server pages before the rung, so turn pages for more.`;
+      }
+      if (ladder && !ladder.why && ladder.atm !== null) {
+        return `rungs at each bar’s own instant · at ${dayLabel(ladder.at * 1000)} ${secondLabel(ladder.at * 1000)} IST: ${fmt(ladder.n ?? 0)} strike(s) stored by then, ATM ${strikeText(ladder.atm)}, step ${ladder.step === null ? '—' : strikeText(ladder.step)}`;
+      }
+      return `rungs at each bar’s own instant, over the strikes stored by then (/chain.json)`;
     });
 
-    const moneyRefusal = $derived.by(() => {
-      if (ladderRungs.length > 0) return null;
-      if (chainAll.length === 0)
-        return `there is no chain to place a rung on — ${strikeRefusal ?? 'no strike is stored'}. And there would be no ladder even with one, because ${NO_SPOT}`;
-      return `${fmt(chainAll.length)} strike(s) are stored and not one of them can be named ITM or OTM, because ${NO_SPOT} The ladder is derived from this chain and nothing else, so it fills itself in the day a spot price reaches this page — no list of rung names is written down anywhere to be edited.`;
-    });
+    /* THE SPOT RULE (D-3328). `exact` is the default; `prev` is opted in
+       here and changes every spot, rung and greek read on the page. */
+    let spotAsof = $state(/** @type {'exact'|'prev'} */ ('exact'));
 
     Object.defineProperties(db, {
       chainAll: { get: () => chainAll },
       chainAt: { get: () => chainAt },
       chainStep: { get: () => chainStep },
-      spotPaisa: { get: () => spotPaisa },
-      atmIndex: { get: () => atmIndex },
+      ladder: { get: () => ladder },
       ladderRungs: { get: () => ladderRungs },
-      rungKeyOf: { get: () => rungKeyOf },
       strikeBars: { get: () => strikeBars },
       mnyBars: { get: () => mnyBars },
       barsDetail: { get: () => barsDetail },
       strikeOffered: { get: () => strikeOffered },
       strikeRows: { get: () => strikeRows },
-      mnyOffered: { get: () => mnyOffered },
       mnyRows: { get: () => mnyRows },
       mnySelected: { get: () => mnySelected },
       onMnyPick: { get: () => onMnyPick },
       strikeSummary: { get: () => strikeSummary },
       mnySummary: { get: () => mnySummary },
+      mnyNote: { get: () => mnyNote },
       strikeRefusal: { get: () => strikeRefusal },
-      moneyRefusal: { get: () => moneyRefusal }
+      moneyRefusal: { get: () => moneyRefusal },
+      spotAsof: { get: () => spotAsof, set: (v) => (spotAsof = v === 'prev' ? 'prev' : 'exact') }
     });
   }
 </script>
@@ -445,14 +317,12 @@
 </script>
 
 <!-- MONEYNESS IS A SEPARATE CONTROL AND STAYS ONE. A strike is an
-     absolute price and a rung is a distance from spot; the same tick
-     means two different queries and neither is a view of the other. -->
+     absolute price and a rung is a distance from spot at one instant; the
+     same tick means two different queries and neither is a view of the
+     other. -->
 {#if db.contractRungs.money}
-  <div class="field mcell" class:off={Boolean(db.moneyRefusal)} title={db.moneyRefusal ?? undefined}>
-    <span class="lab"
-      title="A distance measured along that chain — the same 35,000 is ITM-2 for a call and OTM+2 for a put, which is why it is its own control."
-      >Moneyness</span
-    >
+  <div class="field mcell" class:off={Boolean(db.moneyRefusal)} title={db.moneyRefusal ?? RUNG_PER_BAR}>
+    <span class="lab" title={RUNG_PER_BAR}>Moneyness</span>
     <Picker
       single
       filter
@@ -463,19 +333,26 @@
       selected={db.mnySelected}
       onchange={db.onMnyPick}
     />
-    <!-- THE REFUSAL IS SAID ONCE. When there is no chain the ladder's
-         reason STARTS with the chain's, so the clause narrows to the part
-         that is still true after a chain arrives. -->
-    <span class="note" class:warn={Boolean(db.strikeRefusal || db.moneyRefusal)}>
-      {#if db.strikeRefusal}
-        No ladder — a rung is a distance measured along a chain, so there is nothing to place
-        one on. There would be none with a chain either: {NO_SPOT}
-      {:else if db.moneyRefusal}
-        The ladder is not drawn — {db.moneyRefusal}
+    <span class="note" class:warn={Boolean(db.moneyRefusal)} title={db.mnyNote}>{db.mnyNote}</span>
+  </div>
+  <!-- THE SPOT RULE (D-3328): exact by default, the last spot at or before
+       t opted in. It is a control because it changes every spot-derived
+       cell on the page, and its age is drawn on every cell it priced. -->
+  <div class="field mcell" title={ASOF_ROWS.find((r) => r.key === db.spotAsof)?.title}>
+    <span class="lab" title="Which underlying bar an option bar’s spot, rung and greeks are measured from (D-3328).">Spot</span>
+    <Picker
+      single
+      label="spot rules"
+      summary={ASOF_ROWS.find((r) => r.key === db.spotAsof)?.name ?? 'Exact second'}
+      rows={ASOF_ROWS}
+      selected={new Set([db.spotAsof])}
+      onchange={(/** @type {Set<string>} */ sel) => (db.spotAsof = [...sel][0] ?? 'exact')}
+    />
+    <span class="note" class:warn={db.spotAsof === 'prev'}>
+      {#if db.spotAsof === 'prev'}
+        last underlying bar at or before each option bar, same session, never later — every cell shows its age
       {:else}
-        {fmt(db.ladderRungs.length)} rung(s), {db.ladderRungs[0]} to {db.ladderRungs[
-          db.ladderRungs.length - 1
-        ]} — every position this chain reaches on both sides of the money
+        the underlying’s bar at the option bar’s own second, or “no spot” — nothing earlier is used
       {/if}
     </span>
   </div>

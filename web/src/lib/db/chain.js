@@ -4,16 +4,10 @@
  * How a chain offset becomes `ATM`, `ITM-k` or `OTM+k`, and how that name is
  * read back as a signed position.
  *
- * Every line below was MOVED out of `routes/db/+page.svelte` by WP-00 (the /db
- * page split). The only edits to a moved line are the ones the move needs: a
- * page-level name that now lives in another file is imported, or, for state,
- * read as `db.<name>`; a plain module exports what it declares; and a callback
- * over such a value marks its parameter `any`, the way the page already did
- * elsewhere. Nothing was fixed in the move: every defect the audit found is
- * still present byte for byte, and is fixed by the package that owns this file
- * next.
- *
- * Owner after WP-00: WP-53 (option cells: own-month pricing, point-in-time moneyness).
+ * Moved out of `routes/db/+page.svelte` by WP-00 and owned by WP-53. The
+ * names are the server's convention too: `/chain.json` (D-3329) names every
+ * rung it counts this way, and the Moneyness control reads them back here, so
+ * the list, the pick and the per-bar test are one string.
  *
  * A PLAIN MODULE, NOT A `.svelte.js` ONE: it holds constants and pure
  * functions only, so `node --test` can import it with no compiler. Imports

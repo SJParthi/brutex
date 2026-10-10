@@ -31,6 +31,7 @@
   import DbExtremes, { extremesState } from './DbExtremes.svelte';
   import DbDayFlags from './DbDayFlags.svelte';
   import DbOptionCells from './DbOptionCells.svelte';
+  import DbOptionNotes from './DbOptionNotes.svelte';
   import DbProvenance from './DbProvenance.svelte';
 
   /**
@@ -1011,11 +1012,18 @@
       };
     });
 
-    const barPage = $derived(
+    /** The page as the server (or the local sort) gives it. */
+    const barPageRead = $derived(
       barState.local
         ? barSorted.slice((pageNow - 1) * db.pageSize, pageNow * db.pageSize)
         : barSorted
     );
+    /* THE MONEYNESS PICK KEEPS THE BARS WHOSE OWN RUNG IT IS (WP-53; D-3329,
+       DB-075). A rung is the server's answer at each bar's own instant, so it
+       is applied to the page read, after the server paged: the pager still
+       counts the query's bars, and DbMoneyness says so. The option cells read
+       `barPageRead`, so a bar the pick sets aside is still asked about. */
+    const barPage = $derived(db.rungKeep ? barPageRead.filter(db.rungKeep) : barPageRead);
 
     /* ---------------------------------------------------------------------
        THE NEWEST STORED BAR OF THE SELECTION — one seek per selection, never
@@ -1173,7 +1181,10 @@
     }
     $effect(() => {
       const want = anchorRow;
-      const rows = barPage;
+      /* THE SERVER'S PAGE, which `want` indexes; the row drawn for it is
+         found in what the grid shows, which a Moneyness pick may have
+         narrowed (WP-53). */
+      const rows = barPageRead;
       const box = db.barBox;
       if (want < 0 || barState.loading || !box || rows.length === 0) return;
       const index = want - (pageNow - 1) * db.pageSize;
@@ -1182,9 +1193,11 @@
         const row = rows[index];
         if (!row) return;
         db.landedRk = row.rk;
+        const drawn = barPage.indexOf(row);
+        if (drawn < 0) return;
         /* AFTER THE ROWS ARE IN THE DOCUMENT: the next turn of the loop. */
         setTimeout(() => {
-          const tr = /** @type {HTMLElement | null} */ (box.querySelectorAll('tbody tr.brow')[index] ?? null);
+          const tr = /** @type {HTMLElement | null} */ (box.querySelectorAll('tbody tr.brow')[drawn] ?? null);
           if (!tr) return;
           box.scrollTop = Math.max(0, tr.offsetTop - HEAD - Math.max(0, (box.clientHeight - HEAD - tr.offsetHeight) / 2));
         }, 0);
@@ -1371,6 +1384,7 @@
       dayWindowNarrows: { get: () => dayWindowNarrows },
       barDisagree: { get: () => barDisagree },
       barPage: { get: () => barPage },
+      barPageRead: { get: () => barPageRead },
       barHoleMonths: { get: () => holeMonths },
       emptyNote: { get: () => emptyNote },
       newestClose: { get: () => newestClose },
@@ -1716,6 +1730,7 @@
 <DbChart {db} />
 <DbExtremes {db} />
 <DbDayFlags {db} />
+<DbOptionNotes {db} />
 <div class="tbl">
     <!-- THE FIT IS PUBLISHED ON THE ELEMENT, AND IT IS KEPT RATHER THAN
          SWEPT UP AFTERWARDS. `data-boxh` and `data-fit` went in as debug
@@ -1853,6 +1868,22 @@
                 {/each}
               </tr>
             {/each}
+          {:else if db.barPage.length === 0 && db.rungHidden?.hidden > 0}
+            <!-- THE MONEYNESS PICK SET ASIDE EVERY BAR OF THIS PAGE (WP-53,
+                 DB-075): the page is not empty, its bars sit on other rungs. -->
+            <tr class="bstate">
+              <td colspan={BAR_COLS.length}>
+                <div class="bnone">
+                  <h3>No bar of this page is {[...db.mnyPick][0]}</h3>
+                  <p>
+                    The server sent {fmt(db.rungHidden.of)} bar(s) for this page and none sits on {[...db.mnyPick][0]}
+                    at its own instant{#if db.rungHidden.unread > 0} — {fmt(db.rungHidden.unread)} rung(s) are still being
+                      read{/if}. The rung is applied to each page after the server pages it, so another page may hold
+                    some; or clear the Moneyness pick.
+                  </p>
+                </div>
+              </td>
+            </tr>
           {:else if db.barPage.length === 0}
             <tr class="bstate">
               <td colspan={BAR_COLS.length}>
@@ -1891,6 +1922,15 @@
                       {/if}
                       Widening the window brings the selection's other bars back.
                     </p>
+                    <!-- EACH ASKED DAY'S OWN REASON, FROM THE DAY BAND (DB-016,
+                         DB-025, WP-54): a refused import with its words, a
+                         closed day, a store gap, and the other feed's count.
+                         `null` while the band has not answered this window. -->
+                    {#if db.dayEmptyWhy}
+                      <p class="bwhy">{db.dayEmptyWhy}</p>
+                    {:else if db.dayBandLoading}
+                      <p class="bwhy">Reading why these days hold no bar from /dayflags.json…</p>
+                    {/if}
                   {:else}
                     <h3>No bar came back</h3>
                     <p>
@@ -3441,6 +3481,10 @@
   .bnone p.err {
     color: var(--down);
     font-family: var(--mono);
+  }
+  /* THE DAY BAND'S OWN REASON FOR AN EMPTY WINDOW (DB-016, WP-54). */
+  .bnone p.bwhy {
+    color: var(--ink-2);
   }
   .bnotes {
     flex: none;
