@@ -64,13 +64,13 @@ export const BAR_COLS = [
     key: 'tod',
     label: 'Time',
     w: 84,
-    why: 'the bar’s own opening minute, IST - to the SECOND on a 1s rung, where sixty bars share each minute; absent on a day rung, where every bar opens at the same one'
+    why: 'the bar’s own opening minute, IST - to the SECOND on a 1s rung, where sixty bars share each minute; absent on a day rung, where every bar opens at the same one. Sorting orders every bar of the query by its IST time of day, on the server (DB-006)'
   },
   {
     key: 'tf',
     label: 'TF',
     w: 68,
-    why: 'the bar length, sorted by DURATION and never by spelling'
+    why: 'the bar length; a page is read at one rung, so every row carries the same one'
   },
   { key: 'o', label: 'Open', w: 104, num: true, why: 'paisa integer, straight from the store' },
   { key: 'h', label: 'High', w: 104, num: true, why: 'paisa integer, straight from the store' },
@@ -81,7 +81,7 @@ export const BAR_COLS = [
     label: 'Volume',
     w: 116,
     num: true,
-    why: 'contracts or shares traded inside this bar'
+    why: 'SHARES traded inside this bar — for an option or a future, shares of the underlying (lots × lot size), not lots; no lot is shown, because no lot size is served for a contract (D-3343). An index has no traded volume and reads n/a (D-3322)'
   },
   { key: 'premkt', label: 'Pre-mkt %', w: 102, num: true, none: NO_PREMKT },
   {
@@ -89,21 +89,21 @@ export const BAR_COLS = [
     label: 'Change %',
     w: 102,
     num: true,
-    why: 'this bar’s close against the PREVIOUS BAR’s close in the same month file, in integer basis points'
+    why: 'this bar’s close against the PREVIOUS STORED BAR’s close of its series, wherever it lies — another month, another day, outside the date window — in integer basis points; refused by name where that bar is not the comparable one (D-3325)'
   },
   {
     key: 'oi',
     label: 'Open interest',
     w: 124,
     num: true,
-    why: 'the stored open interest. i64::MIN is the null sentinel and renders as unknown; a zero is a real zero'
+    why: 'the stored open interest, in SHARES of the underlying, not lots (D-3343). n/a on an index or a share, which has none (D-3322); i64::MIN is the null sentinel and renders as unknown; a zero is a real zero'
   },
   {
     key: 'oichg',
     label: 'OI chg %',
     w: 100,
     num: true,
-    why: 'this bar’s open interest against the previous bar’s, in integer basis points'
+    why: 'this bar’s open interest against the previous stored bar’s, in integer basis points'
   },
   {
     key: 'exp',
@@ -298,14 +298,41 @@ export const READ_BUDGETS = [1, 3, 6, 12, 24, 0];
 /** @param {number} n */
 export const budgetLabel = (n) => (n === 0 ? 'Every one' : `${fmt(n)} newest`);
 
-/** Why one bar's percentage is not a number. One code, one sentence. */
+/**
+ * Why one bar's percentage is not a number. One code, one sentence — EVERY
+ * code the server can send (D-3325; `web/tests/bar-why.test.js` reads them out
+ * of `bars.rs` and `bars_change.rs`). Each one is a fact about the bar, never a
+ * zero and never a blank.
+ */
 export const BAR_WHY = {
+  no_earlier_stored_bar:
+    'no earlier bar of this series is stored at all, so there is nothing to measure it against: this is the first stored bar of the series (for a GDFL contract, its first bar in an archive that starts on 3 Sep 2018). It is not a zero.',
+  earlier_month_not_read:
+    'the bar before this one is in an earlier month the request was told not to read (lookback off). It is not a zero.',
+  first_bar_in_window:
+    'the bar before this one lies outside the date or time window the request was told to stay inside (lookback off). It is not a zero.',
+  /* KEPT FOR AN ANSWER CACHED BEFORE D-3325: the server no longer sends it. */
   first_bar_in_file:
-    'this is the first bar of the earliest month this request read, so the close it would be measured against is in a month the request did not read. It is not a zero.',
-  previous_close_zero:
-    'the previous close is zero paisa, and a ratio against zero is not a number.',
+    'this was the first bar of the month the request read; the server no longer answers this way (D-3325), so this answer predates it — read again for the change against the previous stored bar.',
+  previous_close_zero: 'the previous close is zero paisa, and a ratio against zero is not a number.',
+  contract_adjusted:
+    'a corporate action re-based this contract at its ex-date, between the previous bar and this one (the import’s lineage ledger, D-3331), so the two prices are not on one basis.',
+  corporate_action_unverified:
+    'this is the first bar of a session on a series a corporate action can re-base — a share, or an option or future on one — and no adjustment is verified, so an overnight move is refused rather than shown as a possibly fake crash (D-0018, D-3325).',
+  previous_session_not_adjacent:
+    'the previous stored bar is from a session earlier than the one immediately before this bar’s, so sessions are missing between them and a change across the hole would not be a bar-to-bar move.',
+  halt_suspected:
+    'a suspected trading halt lies between the previous bar and this one (D-3320), so the move is not one of continuous trading.',
+  phase_boundary:
+    'the previous bar is in a different phase of the session — pre-open, continuous, closing auction — so the two prices are not comparable bar to bar (D-3320).',
+  previous_bar_not_adjacent:
+    'on this index rung the previous stored bar is not the previous bucket — minutes are missing between them — so the change would span a hole.',
+  vendor_oi_unadjusted:
+    'the vendor carried this contract’s open interest unscaled past its ex-date (D-3331), so it is not comparable with the bar before.',
+  not_a_derivative:
+    'not applicable: an index or a share has no open interest, on any feed (D-3322). A Zerodha month stores 0 here, which is not a measurement; it is not shown as one.',
   oi_null:
-    'open interest on this bar is the store’s null sentinel, i64::MIN - this feed stamps none for this segment. It is NOT zero; a zero here would be a real zero.',
+    'open interest on this bar is the store’s null sentinel, i64::MIN — this feed stamps none for this series. It is NOT zero; a zero here would be a real zero.',
   oi_null_before:
     'the previous bar carries no open interest, so there is nothing to measure this one against.',
   previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.',
