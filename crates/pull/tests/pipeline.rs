@@ -58,7 +58,7 @@ use pull::archive::{self, ArchiveError, MAX_FINDING_BYTES, MAX_MEMBERS};
 use pull::csv::{Columns, CsvError, decode};
 use pull::fetch::{
     self, BarRequest, BarSource, FakeSource, FetchError, MAX_ROWS, ParallelArrays, RawRow,
-    RawWindow,
+    RawWindow, RowCause,
 };
 use pull::fold::{Bucket, FoldError, fold};
 use pull::ingest::{Failure, Ingested, Plan};
@@ -901,10 +901,12 @@ fn every_timestamp_encoding_lands_the_same_instant() {
     );
 }
 
-/// A timestamp this build cannot hold refuses the whole window and names the
-/// row it came from.
+/// A timestamp this build cannot hold refuses ITS ROW, names the row it came
+/// from, and the rest of the window lands (D-3351, WP-13c; DB-N23). It
+/// refused the whole window, and one bad row in a 60-day Zerodha answer then
+/// lost all sixty days.
 #[test]
-fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
+fn a_timestamp_that_names_no_instant_refuses_its_row_and_the_window_lands() {
     let bad = RawRow {
         timestamp: i64::MIN,
         open: 1,
@@ -918,7 +920,7 @@ fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
         timestamp: 1_664_768_760,
         ..bad
     };
-    let refused = fetch::land(
+    let landed = fetch::land(
         &RawWindow {
             rows: vec![good, bad],
         },
@@ -926,21 +928,24 @@ fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Paisa,
     )
-    .expect_err("the second row names no instant");
+    .expect("one bad row never refuses the window");
+    assert_eq!(landed.bars.len(), 1, "the good row lands");
+    assert_eq!(landed.bars[0].ts_micros, good.timestamp * 1_000_000);
+    assert_eq!(landed.refused.rows(), 1, "and the bad one is refused");
+    let group = &landed.refused.groups[0];
     assert_eq!(
-        discriminant(&refused),
-        discriminant(&FetchError::TimestampRefused {
-            row: 0,
-            raw: 0,
-            why: SessionError::TimestampOutOfRange { secs: 0 },
-        }),
+        group.cause,
+        RowCause::Timestamp,
         "a timestamp this build cannot read is the vendor being wrong, not a \
-         bar this engine declined — got {refused}"
+         bar this engine declined"
     );
+    assert_eq!((group.first_row, group.first_raw), (1, i64::MIN));
     assert!(
-        refused.to_string().contains("row 1"),
-        "and the refusal names WHICH row — {refused}"
+        group.why.contains("row 1") && group.why.contains("before the Unix epoch"),
+        "and the refusal names WHICH row, in its own words — {}",
+        group.why
     );
+    assert_eq!(group.day, None, "a stamp before the epoch names no day");
 }
 
 // ===========================================================================
@@ -1178,10 +1183,11 @@ fn a_member_that_is_not_text_is_refused_as_a_ghost_the_filter_missed() {
     );
 }
 
-/// A price that leaves the paisa grid on conversion refuses the whole window,
-/// and each of the four fields refuses in its own name.
+/// A price that leaves the paisa grid on conversion refuses ITS ROW, and each of
+/// the four fields refuses in its own name; the rest of the window lands
+/// (D-3351, WP-13c; DB-N23).
 #[test]
-fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
+fn a_price_that_leaves_the_paisa_grid_refuses_its_row_and_names_its_field() {
     // Fits an i64, and does not fit one once multiplied by a hundred.
     let too_big = i64::MAX / 50;
     let base = RawRow {
@@ -1214,23 +1220,30 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
 
     let mut sentences = HashSet::with_capacity(rows.len());
     for row in rows {
-        let refused = fetch::land(
-            &RawWindow { rows: vec![row] },
+        // THE BAD ROW AND A GOOD ONE A MINUTE LATER: the good one lands.
+        let good = RawRow {
+            timestamp: base.timestamp + 60,
+            ..base
+        };
+        let landed = fetch::land(
+            &RawWindow {
+                rows: vec![row, good],
+            },
             &request(),
             TimestampEncoding::EpochSecondsUtc,
             PriceScale::Rupees,
         )
-        .expect_err("a rupee price this large has no paisa");
+        .expect("one bad price never refuses the window");
+        assert_eq!(landed.bars.len(), 1, "the good row lands");
+        assert_eq!(landed.bars[0].open, 100, "one rupee is a hundred paisa");
+        let group = &landed.refused.groups[0];
         assert_eq!(
-            discriminant(&refused),
-            discriminant(&FetchError::PriceRefused {
-                row: 0,
-                field: "",
-                raw: 0,
-            }),
-            "refused on the grid, not rounded onto it — got {refused}"
+            (group.cause, group.rows, group.first_row),
+            (RowCause::Price, 1, 0),
+            "refused on the grid, not rounded onto it — got {}",
+            group.why
         );
-        let text = refused.to_string();
+        let text = group.why.clone();
         assert!(
             sentences.insert(text.clone()),
             "each field must refuse in its OWN name, or an operator cannot see \

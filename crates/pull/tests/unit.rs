@@ -5662,7 +5662,7 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
 /// Rupees become paisa exactly, and a price that would overflow refuses.
 #[test]
 fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
-    use pull::fetch::{BarRequest, FetchError, RawRow, RawWindow, land_with_cash_schedule as land};
+    use pull::fetch::{BarRequest, RawRow, RawWindow, land_with_cash_schedule as land};
     use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
@@ -5715,17 +5715,26 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
             open_interest: None,
         }],
     };
-    let why = land(
+    // REFUSED BY ROW, NOT BY WINDOW (D-3351, WP-13c; DB-N23): the row is
+    // named with its field and value, and nothing of it is stored.
+    let landed = land(
         &huge,
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Rupees,
         Some(&schedule),
     )
-    .expect_err("i64::MAX rupees cannot become paisa");
+    .expect("one bad price never refuses the window");
     assert!(
-        matches!(why, FetchError::PriceRefused { field: "open", .. }),
-        "refused by field name, not silently wrapped — got {why:?}"
+        landed.bars.is_empty(),
+        "i64::MAX rupees cannot become paisa"
+    );
+    let group = landed.refused.groups.first().expect("the row is named");
+    assert_eq!(group.cause, pull::fetch::RowCause::Price);
+    assert!(
+        group.why.contains("row 0: open") && group.why.contains(&i64::MAX.to_string()),
+        "refused by field name, not silently wrapped — got {}",
+        group.why
     );
 }
 
@@ -7208,6 +7217,12 @@ fn a_call_and_its_put_are_never_one_instrument_for_either_vendor() {
 /// What must still hold: no chunk wider than the cap, the chunks tile the
 /// window with no gap and no overlap, and a rung with no published cap still
 /// falls back to one month per request.
+///
+/// **And, since D-3351, a chunk is whole months.** The cut at the cap alone
+/// split a month between two requests, and when the first answer did not land
+/// the second opened the month part-way, past what an append can ever fill
+/// (DB-N20: 35 Zerodha sessions in four months, on 210 instruments). Whole
+/// months up to the cap keep the day pass at 2 requests.
 #[test]
 fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     use pull::session::{Day, Window, split_window};
@@ -7221,28 +7236,38 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
             .collect()
     };
 
-    // A span that does NOT divide evenly, which is the common case: 65 days at
-    // a cap of 30 is 30 + 30 + 5. Day 1000 is 1972-09-27, so this window
-    // crosses two month ends — and no longer breaks at either.
+    // WHOLE MONTHS UP TO THE CAP (D-3351). Day 1000 is 1972-09-27, so this
+    // window holds the last four days of September (1000..=1003), October's
+    // 31 (1004..=1034) and November's 30 (1035..=1064). September's tail is a
+    // chunk of its own because adding October would pass 30 days; October is
+    // wider than the cap and is cut inside itself; November fits whole. A
+    // chunk never ends inside a month the cap could have finished, so a
+    // request that fails can never leave a month another request opened.
     let chunks = split_window(window(1_000, 1_064), Some(30)).expect("a positive cap");
     assert_eq!(
         spans(&chunks),
-        vec![(1_000, 1_029), (1_030, 1_059), (1_060, 1_064)],
-        "the vendor's cap is the only bound, and the month is the store's problem"
+        vec![
+            (1_000, 1_003),
+            (1_004, 1_033),
+            (1_034, 1_034),
+            (1_035, 1_064)
+        ],
+        "whole months, and a month wider than the cap cut inside itself"
     );
     for (from, to) in spans(&chunks) {
         assert!(to - from < 30, "chunk {from}..{to} is wider than the cap");
     }
 
-    // AN EXACT MULTIPLE leaves no remainder chunk.
+    // AN EXACT MONTH leaves no remainder chunk.
     let exact = split_window(window(1_035, 1_094), Some(30)).expect("a positive cap");
     assert_eq!(
         spans(&exact),
         vec![(1_035, 1_064), (1_065, 1_094)],
-        "60 days at a cap of 30 is two chunks and no tail"
+        "November whole, then December to the window's end"
     );
 
-    // A WINDOW INSIDE THE CAP is one chunk even when it crosses a month.
+    // A WINDOW INSIDE THE CAP is one chunk even when it crosses a month: no
+    // later request of the window exists to open October part-way.
     let crosses = split_window(window(1_000, 1_010), Some(30)).expect("a positive cap");
     assert_eq!(
         spans(&crosses),
@@ -7275,7 +7300,9 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     .expect("a forward window");
     for (vendor, cap, want) in [
         ("zerodha day", 2000_u32, 2_usize),
-        ("zerodha minute", 60, 41),
+        // 41 when chunks were cut at the cap alone; whole months cost 31 more
+        // (D-3351), because 60 days hold two whole months only with February.
+        ("zerodha minute", 60, 72),
     ] {
         let chunks = split_window(backfill, Some(cap)).expect("a positive cap");
         assert_eq!(

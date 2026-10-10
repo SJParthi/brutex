@@ -1355,23 +1355,49 @@ impl fmt::Display for Window {
     }
 }
 
-/// Split a window into consecutive legal chunks, each at most `cap_days` long
-/// — or, when the vendor published no cap, each inside one calendar month.
+/// Split a window into consecutive legal chunks, each at most `cap_days` long,
+/// that **never end inside a month unless the month itself is wider than the
+/// cap** — or, when the vendor published no cap, each inside one month.
 ///
-/// **A capped chunk may cross a month boundary, and that is the design.** This
-/// read *"each inside one calendar month"*, and the comments below said the
-/// month bound "binds at every rung". Neither has been true since the month
-/// clamp was removed for capped rungs (`ingest::months_in` now splits a landed
-/// batch into one file per month, `docs/04-invariants.md` RG-04 and MR-38):
-/// with `Some(cap)` the chunk ends at the earlier of the cap and the window's
-/// last day, and the month is not consulted. D-1370.
+/// # Whole months, up to the cap (D-3351, WP-13c; DB-N20)
+///
+/// A chunk starts where the last ended and takes whole months — the first one
+/// from the window's own first day — for as long as the next whole month still
+/// fits the cap. A month wider than the cap is split inside itself. When the
+/// rest of the window fits the cap it is one chunk, ending at the window's last
+/// day: no later chunk exists to open a month part-way.
+///
+/// **Why.** Chunks cut at the cap alone (D-1370) put one month's days in two
+/// requests. When the earlier request's answer did not land and the later one
+/// did, the month was opened part-way, and the append-only store then refused
+/// its first days for ever: Zerodha NIFTY 1min lacks 2020-12-01..15,
+/// 2021-12-01..10, 2022-12-01..05 and 2024-11-04..22, 35 sessions
+/// (`state/gdfl-board/zerodha-holes.md`), and so do 189 other Zerodha series
+/// of the 330 holding minute bars (WP-13c, measured 10 Oct 2026). A chunk of
+/// whole months cannot do that: a request that fails leaves its months as they
+/// were — absent, or held to a tail an append can still extend — and no other
+/// request writes into them.
+///
+/// **What it costs, measured by the tests below.** Zerodha's 2,000-day `day`
+/// rung still needs 2 requests over 2018-01..2026-09; its 60-day `minute` rung
+/// needs 96 there instead of 54, because two whole months fit 60 days only when
+/// one is February. A vendor whose cap is narrower than a month (Groww's 30-day
+/// minute cap and its 31-day months) still splits that month inside itself: the
+/// server's stop-at-the-first-failed-request keeps a failed FETCH from opening
+/// it part-way, and a failed LANDING of the earlier part (a store refusal) can
+/// still leave a front only a versioned repair fills (D-3350). No feed the
+/// operator pulls has such a cap: Zerodha's is 60 days at `minute`.
 ///
 /// ```
 /// # use pull::session::{Day, SessionError, Window, split_window};
 /// let window = Window::new(Day::new(2026, 7, 15)?, Day::new(2026, 8, 20)?)?;
-/// // Capped: the first chunk runs straight across July into August.
+/// // Capped: the first chunk ends with July, never inside August.
 /// let capped = split_window(window, Some(30))?;
-/// assert_eq!(capped[0].to().to_string(), "2026-08-13");
+/// assert_eq!(capped[0].to().to_string(), "2026-07-31");
+/// assert_eq!(capped[1].to().to_string(), "2026-08-20");
+/// // A cap of two months takes both whole.
+/// let wide = split_window(window, Some(60))?;
+/// assert_eq!(wide.len(), 1);
 /// // Uncapped: the month is the only bound left.
 /// let uncapped = split_window(window, None)?;
 /// assert_eq!(uncapped[0].to().to_string(), "2026-07-31");
@@ -1405,11 +1431,12 @@ impl fmt::Display for Window {
 ///
 /// # The split
 ///
-/// Chunks are **inclusive on both ends and non-overlapping**: a 30-day cap over
-/// days 0..=64 yields `0..=29`, `30..=59`, `60..=64`. Overlapping them would
-/// refetch a boundary day and make the run's cost depend on the chunking; a gap
-/// between them would lose one. The last chunk is short whenever the span does
-/// not divide evenly, which is the common case and not an edge case.
+/// Chunks are **inclusive on both ends and non-overlapping**, and each ends at
+/// a month end except the last (D-3351): a 30-day cap over 1972-09-27..
+/// 1972-11-30 yields `09-27..=09-30`, `10-01..=10-30`, `10-31..=10-31`,
+/// `11-01..=11-30` — October, wider than the cap, is the one month cut inside
+/// itself. Overlapping them would refetch a boundary day and make the run's
+/// cost depend on the chunking; a gap between them would lose one.
 ///
 /// Returns the window unchanged in a single-element vector when it already
 /// fits, so a caller has one code path rather than two.
@@ -1430,24 +1457,22 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
     let mut chunks = Vec::new();
     let mut start = first;
     while start <= last {
-        // THE MONTH BOUNDS ONLY AN UNCAPPED RUNG.
-        //
-        // This comment used to say "AND NEVER ACROSS A MONTH BOUNDARY" and that
-        // the chunk ends at the earlier of the cap, the last day and the month
-        // end. The code below has not done that since the clamp was removed for
-        // capped rungs: `fetch::land` / `ingest::one` no longer refuse a batch
-        // spanning two months, `ingest::months_in` writes one file per month
-        // out of it, and clamping cost 81 requests where a 2,000-day cap needs
-        // 2. So: with a published cap the chunk ends at the earlier of the cap
-        // and the operator's last day; with none it ends at the earlier of the
-        // month end and the last day. D-1370.
+        // A CHUNK ENDS AT A MONTH END, the window's last day, or — only for a
+        // month wider than the cap — at the cap (D-3351, superseding D-1370's
+        // cap-only cut). `ingest::months_in` still writes one file per month
+        // out of a chunk holding several, so whole months cost no extra
+        // request where they fit: Zerodha's day rung is 2 requests either way.
         //
         // `cap_days - 1` because both ends are INCLUDED: a 30-day chunk starting
         // at day 0 ends at day 29, not day 30. Off by one here would make every
         // chunk one day over the vendor's cap.
         let month_end = Day::from_days(start)?.end_of_month().days_from_epoch();
         let capped = match cap_days {
-            Some(cap) => start.saturating_add(cap - 1),
+            // WHOLE MONTHS WHILE THEY FIT (D-3351). The chunk never ends inside
+            // a month the cap could have finished, so no later request can
+            // open a month an earlier one was answering. A month wider than
+            // the cap is the one exception, cut inside itself at the cap.
+            Some(cap) => whole_months(month_end, start.saturating_add(cap - 1), last)?,
             // A VENDOR THAT PUBLISHES NO CAP IS STILL ASKED A MONTH AT A TIME.
             // There is no number to chunk by, and one unbounded request for a
             // seven-year window is the one shape that cannot be retried
@@ -1497,6 +1522,46 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
             ),
     );
     Ok(chunks)
+}
+
+/// The last day of a chunk whose first month ends at `month_end`: the
+/// window's `last` day when the rest of the window fits the cap, else that
+/// month end extended by every following whole month that still ends on or
+/// before `capped` (the cap's last day) — or `capped` itself when the first
+/// month is wider than the cap. D-3351.
+///
+/// **The rest of the window in one request when it fits.** No later request
+/// of this window exists to open a month part-way, so the last chunk may end
+/// inside a month: eleven days across a month end stay one request, as they
+/// were under D-1370, and only a window wider than the cap pays for whole
+/// months.
+///
+/// Bounded by the cap: at most `cap / 28` months are walked, one
+/// `end_of_month` each.
+///
+/// # Errors
+///
+/// A day the calendar cannot name.
+fn whole_months(month_end: u32, capped: u32, last: u32) -> Result<u32, SessionError> {
+    if last <= capped {
+        // THE REST OF THE WINDOW FITS: one request, and nothing after it.
+        return Ok(last);
+    }
+    if capped < month_end {
+        // THE MONTH IS WIDER THAN THE CAP: cut inside it, at the cap.
+        return Ok(capped);
+    }
+    let mut end = month_end;
+    while end < last {
+        let next = Day::from_days(end.saturating_add(1))?
+            .end_of_month()
+            .days_from_epoch();
+        if next > capped {
+            break;
+        }
+        end = next;
+    }
+    Ok(end)
 }
 
 #[cfg(test)]
@@ -1859,6 +1924,25 @@ mod month_boundary {
                         }),
                         "cap {cap:?}: chunk is wider than the vendor allows",
                     );
+                    // A CHUNK ENDS AT A MONTH END OR THE WINDOW'S LAST DAY, and
+                    // inside a month only when that month is wider than the cap
+                    // and the chunk lies wholly in it (D-3351).
+                    let month_days = c.to().end_of_month().days_from_epoch()
+                        - Day::new(c.to().year(), c.to().month(), 1)
+                            .expect("the first of the month")
+                            .days_from_epoch()
+                        + 1;
+                    let inside_a_wide_month = cap.is_some_and(|cap| {
+                        cap < month_days
+                            && (c.from().year(), c.from().month())
+                                == (c.to().year(), c.to().month())
+                    });
+                    assert!(
+                        c.to() == c.to().end_of_month() || c.to() == to || inside_a_wide_month,
+                        "cap {cap:?}: chunk {}..{} ends inside a month the cap could finish",
+                        c.from(),
+                        c.to()
+                    );
                     if cap.is_none() {
                         assert_eq!(
                             (c.from().year(), c.from().month()),
@@ -1890,6 +1974,10 @@ mod month_boundary {
     /// 2,460 days at Zerodha's documented caps. Asserted rather than described,
     /// because the whole point of the change is the request count and a
     /// sentence about it cannot fail.
+    ///
+    /// The minute count rose from 41 to 73 when chunks became whole months
+    /// (D-3351): 60 days hold two whole months only when one is February. The
+    /// day pass, the one the month clamp once cost forty times over, is still 2.
     #[test]
     fn the_documented_caps_turn_a_seven_year_window_into_a_handful_of_requests() {
         let window = Window::new(day(2019, 12, 2), day(2026, 8, 26)).expect("a real window");
@@ -1898,9 +1986,13 @@ mod month_boundary {
         let daily = split_window(window, Some(2000)).expect("splittable");
         assert_eq!(daily.len(), 2, "2,460 days at 2,000 per request");
 
-        // `minute` — 60 days per request.
+        // `minute` — 60 days per request, in whole months.
         let minute = split_window(window, Some(60)).expect("splittable");
-        assert_eq!(minute.len(), 41, "2,460 days at 60 per request");
+        assert_eq!(
+            minute.len(),
+            73,
+            "2,460 days at 60 per request, whole months"
+        );
 
         // AND WHAT THE MONTH CLAMP COST, kept as the comparison: one chunk per
         // month over the same window, at both rungs, is what this replaced.
@@ -1909,6 +2001,69 @@ mod month_boundary {
         assert!(
             by_month.len() / daily.len() >= 40,
             "the day pass issued at least forty times the requests it needed"
+        );
+    }
+
+    /// **NO REQUEST CAN OPEN A MONTH ANOTHER REQUEST IS ANSWERING (DB-N20,
+    /// D-3351).** The operator's Zerodha minute window, 2018-01-01..2026-09-30,
+    /// at the 60-day cap. Before, the request after 2020-10-17..2020-12-15
+    /// began on 2020-12-16, so when the first was refused the second opened
+    /// December at the 16th and its first eleven sessions could never be
+    /// appended. Now every Muhurat request ends at a month end and the next
+    /// begins on a first of the month: 2020-11, 2021-11, 2022-10, 2023-11 and
+    /// 2024-11 are each one request of their own month, and December begins its
+    /// own request.
+    #[test]
+    fn the_zerodha_minute_window_never_splits_a_month_between_two_requests() {
+        let window = Window::new(day(2018, 1, 1), day(2026, 9, 30)).expect("a real window");
+        let chunks = split_window(window, Some(60)).expect("splittable");
+        assert_eq!(chunks.len(), 96, "54 requests became 96");
+        for c in &chunks {
+            assert_eq!(c.from().day(), 1, "{c} begins inside a month");
+            assert_eq!(c.to(), c.to().end_of_month(), "{c} ends inside a month");
+        }
+        for (muhurat, from, to) in [
+            (day(2018, 11, 7), day(2018, 11, 1), day(2018, 11, 30)),
+            (day(2019, 10, 27), day(2019, 10, 1), day(2019, 10, 31)),
+            (day(2020, 11, 14), day(2020, 11, 1), day(2020, 11, 30)),
+            (day(2021, 11, 4), day(2021, 11, 1), day(2021, 11, 30)),
+            (day(2022, 10, 24), day(2022, 10, 1), day(2022, 10, 31)),
+            (day(2023, 11, 12), day(2023, 11, 1), day(2023, 11, 30)),
+            (day(2024, 11, 1), day(2024, 11, 1), day(2024, 11, 30)),
+        ] {
+            let holding = chunks
+                .iter()
+                .find(|c| c.from() <= muhurat && muhurat <= c.to())
+                .expect("a chunk holds the Muhurat");
+            assert_eq!((holding.from(), holding.to()), (from, to), "{muhurat}");
+        }
+        // The day rung is unchanged: two requests.
+        assert_eq!(
+            split_window(window, Some(2000)).expect("splittable").len(),
+            2
+        );
+    }
+
+    /// A month wider than the cap is the one month a chunk may end inside,
+    /// and the chunk then lies wholly in that month.
+    #[test]
+    fn a_month_wider_than_the_cap_is_cut_inside_itself_only() {
+        let window = Window::new(day(2026, 7, 20), day(2026, 9, 3)).expect("a real window");
+        let spans: Vec<(String, String)> = split_window(window, Some(30))
+            .expect("splittable")
+            .iter()
+            .map(|c| (c.from().to_string(), c.to().to_string()))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("2026-07-20", "2026-07-31"),
+                ("2026-08-01", "2026-08-30"),
+                // THE REST OF THE WINDOW FITS THE CAP, so it is one request:
+                // no later request exists to open September part-way.
+                ("2026-08-31", "2026-09-03"),
+            ]
+            .map(|(a, b)| (a.to_owned(), b.to_owned()))
         );
     }
 }

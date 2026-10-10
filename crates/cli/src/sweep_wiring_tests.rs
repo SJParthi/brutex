@@ -159,6 +159,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "results"
                 | "top"
                 | "verify"
+                // The Zerodha month-hole plan and versioned repair (D-3350,
+                // WP-13c): a store verb, never a sweep.
+                | "zerodha-repair"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

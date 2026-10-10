@@ -526,11 +526,15 @@ impl Series {
         held_months(&self.dir(root)?)
     }
 
-    /// The bar file of `month`.
+    /// The bar file of `month` every reader opens: the original, or the
+    /// repair revision a promotion made it (D-3350, WP-13c). The day memo is
+    /// keyed by this file's stamp, so a promotion is a new key and never a
+    /// stale hit on the original's unchanged stamp. `None` also where the
+    /// month's generation cannot be told; the read that follows names why.
     fn path(&self, root: &Path, month: YearMonth) -> Option<PathBuf> {
         StorePath::new(self.inst.parts(self.vendor, self.rung, month))
             .ok()
-            .map(|path| path.to_path_buf(root))
+            .and_then(|path| store::generation::served_bars_path(root, path).ok())
     }
 
     /// `month`'s file, opened for reading through the reader every bar route
