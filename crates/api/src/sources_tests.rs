@@ -1310,6 +1310,73 @@ async fn the_day_table_is_cached_until_a_month_file_changes() {
     assert_eq!(after["days"][1]["close"]["equal"], false);
 }
 
+/// A VERSIONED REPAIR IS A NEW CACHE KEY, NEVER A STALE HIT (D-3350, WP-13c).
+/// A repair publishes a new generation of the month and leaves the original
+/// file byte for byte as it was, so a memo keyed by the original's stamp would
+/// keep answering the bars from before the repair. Keyed by the generation
+/// every reader opens, the next answer reads the repaired month.
+#[tokio::test]
+async fn a_repaired_month_is_read_from_its_new_generation_not_the_cache() {
+    let fx = Fixture::nifty("day-repair");
+    let query = format!("{NIFTY}&from=2019-03-28&to=2019-03-29");
+    let (_, first) = fx.get("/sources/day.json", &query).await;
+    assert_eq!(first["days"][1]["zerodha_minutes_fold"]["minutes"], 1);
+    let (_, again) = fx.get("/sources/day.json", &query).await;
+    assert_eq!(again["summary"]["days_from_cache"], 2);
+
+    // A MINUTE ON B, BETWEEN HELD BARS: only a repair can add it.
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: YearMonth::new(day_b().year(), day_b().month()).expect("a month"),
+        file: FileKind::Bars,
+    })
+    .expect("fixture path");
+    let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+    let id = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+    let original = fs::read(path.to_path_buf(&fx.root)).expect("the original month");
+    let repaired = store::repair::repair_month(
+        &fx.root,
+        path,
+        id,
+        &[bar(
+            t(day_b(), 9, 16, 0),
+            (101_200, 101_300, 101_100, 101_250),
+            0,
+            OI_NULL,
+        )],
+        store::repair::Policy {
+            open_interest_applies: false,
+            basis_witness: false,
+        },
+    )
+    .expect("the repair");
+    assert!(
+        matches!(
+            repaired,
+            store::repair::MonthRepair::Repaired { added: 1, .. }
+        ),
+        "{repaired:?}"
+    );
+    assert_eq!(
+        fs::read(path.to_path_buf(&fx.root)).expect("the original month"),
+        original,
+        "the original's bytes, and so its stamp's size, are unchanged"
+    );
+
+    let (_, after) = fx.get("/sources/day.json", &query).await;
+    assert_eq!(
+        after["summary"]["days_from_cache"], 0,
+        "the month every reader opens changed"
+    );
+    assert_eq!(after["days"][1]["zerodha_minutes_fold"]["minutes"], 2);
+    assert_eq!(after["days"][1]["zerodha_minutes_fold"]["c"], 101_250);
+}
+
 /// Newest first and pages of 31 days: a quarter is three pages, page 1 the
 /// middle one, and a page past the end is the last.
 #[tokio::test]

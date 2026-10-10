@@ -553,7 +553,16 @@ impl SeriesPlan {
         let Ok(address) = StorePath::new(parts) else {
             return;
         };
-        let path = address.to_path_buf(root);
+        // THE FILE EVERY READER OPENS, which a repair makes a revision's
+        // (D-3350): the header and runs memos are keyed by it, so a promotion
+        // is a new key and never a stale hit on the original's stamp.
+        let path = match store::generation::served_bars_path(root, address) {
+            Ok(path) => path,
+            Err(why) => {
+                self.faults.push(format!("{month}: {why}"));
+                return;
+            }
+        };
         match header_of(root, parts, &path) {
             Ok(Some((held, stamp, file))) => self.slots.push(Slot {
                 month,

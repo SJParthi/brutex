@@ -52,6 +52,18 @@ enum Why {
     Unverified,
     /// Broker stamps out of order: nothing about the window is attested.
     Unordered,
+    /// Rows the vendor sent on this day were refused — by name, a row at a
+    /// time (D-3351), or by the store, which refused the day's month inside
+    /// its held range — and the day is short in the store by them (D-3335's
+    /// `refused_day`).
+    RefusedDay,
+    /// The store refused this day's rows because the month already holds
+    /// later days: a span before the month's first held bar that only a
+    /// versioned repair can fill (D-3335's `refused_front`, D-3350).
+    RefusedFront,
+    /// A versioned repair added this day's bars (D-3350): the line supersedes
+    /// the day's earlier `refused_*` line, last line of a key winning.
+    Repaired,
 }
 
 impl Why {
@@ -62,7 +74,69 @@ impl Why {
             Self::WithheldUnsized => "withheld_unmeasured_session",
             Self::Unverified => "calendar_unverified",
             Self::Unordered => "unordered_stamps",
+            Self::RefusedDay => "refused_day",
+            Self::RefusedFront => "refused_front",
+            Self::Repaired => "repaired",
         }
+    }
+}
+
+/// What a landing refused of an answer it was handed, for the ledger: the
+/// IST-local epoch second of every refused row, and the days the store
+/// refused before a month's first held bar. D-3351, WP-13c.
+///
+/// The ledger audits the VENDOR's rows, so a minute refused after the vendor
+/// sent it — a row named and refused, or a month the append-only store
+/// refused — read as held, and the 35 sessions the store refused on the
+/// operator's store had no line at all (DB-N22). Each source keeps its own
+/// list in time order; nothing here is sorted.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Refusals {
+    /// One time-ordered list per source: rows refused by name, rows of a
+    /// month the store refused.
+    pub(super) seconds: Vec<Vec<i64>>,
+    /// IST day numbers before a refused month's first held bar, in order.
+    pub(super) fronts: Vec<u32>,
+    /// IST day numbers a repair added bars on, in order (D-3350).
+    pub(super) repaired: Vec<u32>,
+}
+
+/// One pointer per time-ordered list of refused seconds, each advanced only
+/// forward, so a membership question asked in time order is O(1) amortised.
+struct Cursor<'a> {
+    lists: Vec<(&'a [i64], usize)>,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(lists: &'a [Vec<i64>]) -> Self {
+        Self {
+            lists: lists.iter().map(|list| (list.as_slice(), 0)).collect(),
+        }
+    }
+
+    /// Whether `second` is refused. Asked with `second` non-decreasing.
+    fn refused(&mut self, second: i64) -> bool {
+        let mut hit = false;
+        for (list, at) in &mut self.lists {
+            while list.get(*at).is_some_and(|&s| s < second) {
+                *at += 1;
+            }
+            hit |= list.get(*at) == Some(&second);
+        }
+        hit
+    }
+
+    /// Whether any refused second lies in `[from, to)`. Asked with `from`
+    /// non-decreasing; leaves every pointer at or past `from`.
+    fn any_in(&mut self, from: i64, to: i64) -> bool {
+        let mut hit = false;
+        for (list, at) in &mut self.lists {
+            while list.get(*at).is_some_and(|&s| s < from) {
+                *at += 1;
+            }
+            hit |= list.get(*at).is_some_and(|&s| s < to);
+        }
+        hit
     }
 }
 
@@ -139,11 +213,12 @@ pub(super) fn report(
     store_root: &Path,
     plan: Plan<'_>,
     done: &mut Ingested,
+    refusals: &Refusals,
 ) {
     let Some(venue) = audited_venue(plan) else {
         return;
     };
-    let audit = audit_venue(rows, plan, venue);
+    let audit = audit_refused(rows, plan, venue, refusals);
     for group in aggregate(&audit.findings, plan.vendor) {
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
@@ -275,7 +350,16 @@ fn special_windows(session: Session) -> Owed {
     (owed, count)
 }
 
+#[cfg(test)]
 fn audit_venue(rows: &[RawRow], plan: Plan<'_>, venue: Venue) -> Audit {
+    audit_refused(rows, plan, venue, &Refusals::default())
+}
+
+/// The audit of `rows` as the STORE holds them: a refused row's minute counts
+/// as missing, and a day short by refusals is `refused_day` (or
+/// `refused_front`) on the ledger, with no receipt finding of its own — the
+/// landing already named each refusal (D-3351).
+fn audit_refused(rows: &[RawRow], plan: Plan<'_>, venue: Venue, refusals: &Refusals) -> Audit {
     let mut audit = Audit::default();
     if rows
         .windows(2)
@@ -290,8 +374,16 @@ fn audit_venue(rows: &[RawRow], plan: Plan<'_>, venue: Venue) -> Audit {
         });
         return audit;
     }
+    let mut refused = Cursor::new(&refusals.seconds);
+    let mut days_refused = Cursor::new(&refusals.seconds);
+    let mut fronts = refusals.fronts.iter().copied().peekable();
+    let mut repaired = refusals.repaired.iter().copied().peekable();
     let mut stamps = rows
         .iter()
+        .map(|row| local_seconds(row.timestamp, plan.encoding))
+        // A REFUSED ROW IS NOT HELD (D-3351): its exact second is dropped
+        // before the floor, so a kept row in the same minute still holds it.
+        .filter(|&second| !refused.refused(i64::try_from(second).unwrap_or(i64::MAX)))
         // FLOORED TO ITS MINUTE (c4a-4, D-1493). Every comparison below is
         // in whole minutes: `next` steps by 60 from the open, and `missing`
         // counts `(to - from) / 60`. A stamp such as 09:15:59 compared raw
@@ -300,7 +392,7 @@ fn audit_venue(rows: &[RawRow], plan: Plan<'_>, venue: Venue) -> Audit {
         // missing minutes. `ingest::from_window` refuses an off-grid stamp
         // before calling here, so production input is already aligned; this
         // makes the count right without relying on that order of calls.
-        .map(|row| local_seconds(row.timestamp, plan.encoding).div_euclid(60) * 60)
+        .map(|second| second.div_euclid(60) * 60)
         .peekable();
     for number in
         plan.request.window.from().days_from_epoch()..=plan.request.window.to().days_from_epoch()
@@ -330,35 +422,22 @@ fn audit_venue(rows: &[RawRow], plan: Plan<'_>, venue: Venue) -> Audit {
                 continue;
             }
             DayPlan::Unsized => {
-                // THE DAY IS WITHHELD AND SAID SO, the rest of the answer is
-                // audited (D-3344). Its rows are counted for the ledger: the
-                // landing refuses them by the same calendar.
-                let mut held = 0_u32;
-                while let Some(&stamp) = stamps.peek() {
-                    if stamp >= base + 86_400 {
-                        break;
-                    }
-                    if stamp >= base {
-                        held = held.saturating_add(1);
-                    }
-                    stamps.next();
-                }
-                let mut line = DayGaps::new(day, Why::WithheldUnsized);
-                line.held = held;
-                audit.days.push(line);
-                audit.findings.push(Finding {
-                    why: Why::WithheldUnsized,
-                    day: Some(day),
-                    detail: "unsized session",
-                    minutes: 0,
-                    text: format!(
-                        "request minute coverage UNVERIFIED on {day}: a traded session whose length no record states; {held} minute row(s) withheld with the day, the rest of the window audited"
-                    ),
-                });
+                withheld_day(day, base, &mut stamps, &mut audit);
                 continue;
             }
         };
-        let mut line = DayGaps::new(day, Why::VendorEmpty);
+        let why = short_why(number, base, &mut fronts, &mut days_refused);
+        let findings = &mut audit.findings;
+        let mut sink = Vec::new();
+        // A REFUSED DAY'S RUNS ARE NOT RECEIPT FINDINGS: the landing named
+        // each refusal already, and a "coverage gap" sentence would blame the
+        // vendor for minutes it sent. They are counted into the ledger line.
+        let found = if why == Why::VendorEmpty {
+            findings
+        } else {
+            &mut sink
+        };
+        let mut line = DayGaps::new(day, why);
         for &(open, close) in windows.iter().take(count) {
             line.owed = line.owed.saturating_add(close.saturating_sub(open));
             let mut next = base + i128::from(open) * 60;
@@ -371,21 +450,81 @@ fn audit_venue(rows: &[RawRow], plan: Plan<'_>, venue: Venue) -> Audit {
                     break;
                 }
                 if stamp > next {
-                    missing(&mut audit.findings, &mut line, base, next, stamp);
+                    missing(found, &mut line, base, next, stamp);
                 }
                 next = stamp + 60;
                 stamps.next();
             }
             if next < close {
-                missing(&mut audit.findings, &mut line, base, next, close);
+                missing(found, &mut line, base, next, close);
             }
         }
         line.held = line.owed.saturating_sub(line.missing);
+        // A DAY A REPAIR FILLED IS SAID, short or not (D-3350), so its earlier
+        // `refused_*` line is superseded rather than left standing.
+        while repaired.next_if(|&day| day < number).is_some() {}
+        let filled = repaired.next_if_eq(&number).is_some();
         if line.missing > 0 {
+            audit.days.push(line);
+        } else if filled {
+            line.why = Why::Repaired;
             audit.days.push(line);
         }
     }
     audit
+}
+
+/// THE DAY IS WITHHELD AND SAID SO, the rest of the answer is audited
+/// (D-3344). Its rows are counted for the ledger: the landing refuses them by
+/// the same calendar.
+fn withheld_day(
+    day: Day,
+    base: i128,
+    stamps: &mut std::iter::Peekable<impl Iterator<Item = i128>>,
+    audit: &mut Audit,
+) {
+    let mut held = 0_u32;
+    while let Some(&stamp) = stamps.peek() {
+        if stamp >= base + 86_400 {
+            break;
+        }
+        if stamp >= base {
+            held = held.saturating_add(1);
+        }
+        stamps.next();
+    }
+    let mut line = DayGaps::new(day, Why::WithheldUnsized);
+    line.held = held;
+    audit.days.push(line);
+    audit.findings.push(Finding {
+        why: Why::WithheldUnsized,
+        day: Some(day),
+        detail: "unsized session",
+        minutes: 0,
+        text: format!(
+            "request minute coverage UNVERIFIED on {day}: a traded session whose length no record states; {held} minute row(s) withheld with the day, the rest of the window audited"
+        ),
+    });
+}
+
+/// WHY A DAY IS SHORT, decided before its runs are counted (D-3351): the
+/// store refused it before its month's first held bar, or rows of it were
+/// refused, or — the rest — the vendor sent no candle. Asked in day order.
+fn short_why(
+    number: u32,
+    base: i128,
+    fronts: &mut std::iter::Peekable<impl Iterator<Item = u32>>,
+    days_refused: &mut Cursor<'_>,
+) -> Why {
+    while fronts.next_if(|&front| front < number).is_some() {}
+    let base_second = i64::try_from(base).unwrap_or(i64::MAX);
+    if fronts.next_if_eq(&number).is_some() {
+        Why::RefusedFront
+    } else if days_refused.any_in(base_second, base_second.saturating_add(86_400)) {
+        Why::RefusedDay
+    } else {
+        Why::VendorEmpty
+    }
 }
 
 fn local_seconds(timestamp: i64, encoding: TimestampEncoding) -> i128 {
@@ -515,7 +654,12 @@ fn aggregate(findings: &[Finding], vendor: brutex_core::vendor::Vendor) -> Vec<G
                     vendor.as_str(),
                     open.first
                 ),
-                Why::WithheldUnsized | Why::Unverified | Why::Unordered => format!(
+                Why::WithheldUnsized
+                | Why::Unverified
+                | Why::Unordered
+                | Why::RefusedDay
+                | Why::RefusedFront
+                | Why::Repaired => format!(
                     "request minute coverage UNVERIFIED in {month}: {} finding(s) on {} day(s), {first_day}..{last_day}; the first: {}",
                     open.count, open.days, open.first
                 ),
@@ -696,6 +840,22 @@ pub(super) fn append_ledger(
     vendor: brutex_core::vendor::Vendor,
     lines: &[String],
 ) -> Result<(), String> {
+    append_named(store_root, vendor, "gaps", lines)
+}
+
+/// [`append_ledger`] for `<store>/audit/<vendor>.<name>`, under the same line
+/// rules: the gap ledger is `gaps`, the repair journal `repairs` (D-3350).
+///
+/// # Errors
+///
+/// The host's words for a directory, open, write or sync that failed, or the
+/// refusal of a line that would break the line rules.
+pub(super) fn append_named(
+    store_root: &Path,
+    vendor: brutex_core::vendor::Vendor,
+    name: &str,
+    lines: &[String],
+) -> Result<(), String> {
     if lines.is_empty() {
         return Ok(());
     }
@@ -711,7 +871,7 @@ pub(super) fn append_ledger(
     }
     let dir = store_root.join("audit");
     std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-    let path = dir.join(format!("{}.gaps", vendor.as_str()));
+    let path = dir.join(format!("{}.{name}", vendor.as_str()));
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

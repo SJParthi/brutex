@@ -130,6 +130,10 @@ use std::fs;
 /// next epoch, migration and recount. D-3316 (WP-10).
 #[path = "census_store.rs"]
 pub mod census_store;
+/// What a versioned repair of a series' months would do, read-only: the one
+/// answer `/pull/repair.json` and `cli zerodha-repair` give. D-3350, WP-13c.
+#[path = "repair_plan.rs"]
+pub mod repair_plan;
 #[path = "request_minutes.rs"]
 mod request_minutes;
 use std::io::{ErrorKind, Write as _};
@@ -494,9 +498,21 @@ pub fn from_dir(
 /// folder's.
 #[must_use]
 pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
-    let done = from_members_inner(members, store_root, plan);
+    from_members_mode(members, store_root, plan, Mode::Append).0
+}
+
+/// [`from_members`] in either mode, with what the landing refused after the
+/// vendor sent it — for the gap ledger, which audits the vendor's rows and
+/// must still count a refused minute as missing from the store (D-3351).
+fn from_members_mode(
+    members: &[Member],
+    store_root: &Path,
+    plan: Plan<'_>,
+    mode: Mode<'_>,
+) -> (Ingested, request_minutes::Refusals) {
+    let (done, refusals) = from_members_inner(members, store_root, plan, mode);
     note_run(&done, members, &plan);
-    done
+    (done, refusals)
 }
 
 /// One line per completed run, at **`Info`** — the line this module's header
@@ -836,12 +852,18 @@ fn note_not_derived(instrument: &str, rung: Timeframe, why: &str) {
               is one read-modify-write under one lock, and splitting it would \
               hand the lock across a function boundary the type does not track"
 )]
-fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
+fn from_members_inner(
+    members: &[Member],
+    store_root: &Path,
+    plan: Plan<'_>,
+    mode: Mode<'_>,
+) -> (Ingested, request_minutes::Refusals) {
     let Plan { vendor, .. } = plan;
     let mut done = Ingested {
         members: members.len(),
         ..Ingested::default()
     };
+    let mut refusals = request_minutes::Refusals::default();
 
     // THE CENSUS FIRST, BEFORE ANY BAR IS WRITTEN. A bar that cannot be
     // counted must not be stored: the store would then hold rows the census
@@ -857,7 +879,7 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
     // rather than eight hundred identical times, and before anything is
     // locked, read or written.
     if let Err(why) = plan.timeframe() {
-        return refused_whole(members, &census_path, why);
+        return (refused_whole(members, &census_path, why), refusals);
     }
 
     // WHICH CENSUS THIS RUN'S ROWS GO TO (D-3316): the vendor's single file
@@ -866,7 +888,7 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
     // reads, locks or rewrites another segment's census, let alone GDFL's.
     let target = match census_store::target_for_plan(store_root, vendor, plan.segment) {
         Ok(target) => target,
-        Err(why) => return refused_whole(members, &census_path, why),
+        Err(why) => return (refused_whole(members, &census_path, why), refusals),
     };
     let census_path = target.named();
 
@@ -884,16 +906,16 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
     // use of the thing it protects.
     let census_lock = match target.lock() {
         Ok(guard) => guard,
-        Err(why) => return refused_whole(members, &census_path, why),
+        Err(why) => return (refused_whole(members, &census_path, why), refusals),
     };
     if let Err(why) = target.still_where_located() {
-        return refused_whole(members, &census_path, why);
+        return (refused_whole(members, &census_path, why), refusals);
     }
 
     // Under the lock, so a partition's current epoch cannot move under it.
     let mut loaded = match target.load() {
         Ok(loaded) => loaded,
-        Err(why) => return refused_whole(members, &census_path, why),
+        Err(why) => return (refused_whole(members, &census_path, why), refusals),
     };
     // Set when a partition at its capacity is compacted mid-run (D-3316 item
     // 5): the appends below are then relative to an epoch not yet written,
@@ -930,8 +952,13 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
 
     for member in members {
         done.rows_read += member.rows.len();
-        match one(member, store_root, plan) {
-            Ok(landed) => {
+        match one(member, store_root, plan, mode) {
+            Ok(mut landed) => {
+                // WHAT THE LANDING REFUSED AFTER THE VENDOR SENT IT, for the
+                // gap ledger (D-3351): each source a list in time order.
+                refusals.seconds.append(&mut landed.refused_seconds);
+                refusals.fronts.append(&mut landed.fronts);
+                refusals.repaired.append(&mut landed.repaired_days);
                 // ONE EVENT PER MEMBER, WHICH IS THE GRANULARITY THAT WAS
                 // MISSING. Per-row would be millions on a one-minute backfill
                 // and would roll the run's own beginning out of an 8 MB x 8
@@ -1041,7 +1068,7 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
         ));
     }
 
-    done
+    (done, refusals)
 }
 
 /// A run refused before a single bar was written, named against the file the
@@ -1145,76 +1172,95 @@ pub fn from_window(
     store_root: &Path,
     plan: Plan<'_>,
 ) -> Ingested {
+    from_window_mode(raw, instrument, origin, store_root, plan, Mode::Append)
+}
+
+/// One window fetched from a broker, landed as a VERSIONED REPAIR of every
+/// month it touches that holds bars around a hole (D-3350, WP-13c; DB-N20,
+/// DB-N22).
+///
+/// The same door as [`from_window`] — the same row screening, session filter,
+/// fold, census, derived rungs and gap ledger — with one difference at the
+/// write: a month the append-only store refuses because the offered bars lie
+/// inside its held range, or a month already served from a revision, is
+/// published as a NEW generation holding every bar it held plus the offered
+/// ones ([`store::repair::repair_month`]) and promoted so every reader opens
+/// it. A held bar is never dropped and never changed: an offered bar that
+/// disagrees with one refuses that month by name. A month the append door
+/// takes (a new month, a tail) is appended as usual. Every repair is
+/// journaled in `<store>/audit/<vendor>.repairs` with `reason`.
+#[must_use]
+pub fn repair_window(
+    raw: &crate::fetch::RawWindow,
+    instrument: &str,
+    origin: &str,
+    store_root: &Path,
+    plan: Plan<'_>,
+    reason: &str,
+) -> Ingested {
+    from_window_mode(
+        raw,
+        instrument,
+        origin,
+        store_root,
+        plan,
+        Mode::Repair { reason },
+    )
+}
+
+/// Whether a landing appends, or repairs a month the append door refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode<'a> {
+    /// The append-only door, and nothing else.
+    Append,
+    /// A month the append door refuses is repaired to a new generation, for
+    /// this reason (D-3350).
+    Repair {
+        /// Why, journaled with every repair.
+        reason: &'a str,
+    },
+}
+
+fn from_window_mode(
+    raw: &crate::fetch::RawWindow,
+    instrument: &str,
+    origin: &str,
+    store_root: &Path,
+    plan: Plan<'_>,
+    mode: Mode<'_>,
+) -> Ingested {
     // This door receives vendor candles. Archive members bypass it and retain
     // all legitimate snapshots, including identical rows within one second.
-    let mut rows = Vec::with_capacity(raw.rows.len());
-    let mut seen = std::collections::HashMap::with_capacity(raw.rows.len());
-    let mut duplicates = 0;
-    for row in &raw.rows {
-        if !broker_stamp_on_grid(row.timestamp, plan.encoding, plan.request.granularity) {
-            note_not_filed(
-                instrument,
-                "broker timestamp",
-                "off-grid candle refused before fold or append",
-            );
-            return Ingested {
-                members: 1,
-                rows_read: raw.rows.len(),
-                failures: vec![on_stamp_day(
-                    Failure::new(
-                        instrument,
-                        format!(
-                            "off-grid broker candle at {} ({:?}) for {}; refused before fold or append",
-                            row.timestamp,
-                            plan.encoding,
-                            plan.request.granularity.label()
-                        ),
-                    ),
-                    row.timestamp,
-                    plan.encoding,
-                )],
-                ..Ingested::default()
-            };
-        }
-        if let Some(previous) = seen.insert(row.timestamp, *row) {
-            if previous != *row {
-                note_not_filed(
-                    instrument,
-                    "broker timestamp",
-                    "conflicting candles refused before append",
-                );
-                return Ingested {
-                    members: 1,
-                    rows_read: raw.rows.len(),
-                    failures: vec![on_stamp_day(
-                        Failure::new(
-                            instrument,
-                            format!(
-                                "conflicting vendor candles at {}; refused before append",
-                                row.timestamp
-                            ),
-                        ),
-                        row.timestamp,
-                        plan.encoding,
-                    )],
-                    ..Ingested::default()
-                };
-            }
-            duplicates += 1;
-        } else {
-            rows.push(*row);
-        }
-    }
+    //
+    // A CANDLE OFF THE GRID, OR TWO CANDLES AT ONE STAMP THAT DISAGREE, ARE
+    // REFUSED BY NAME AND THE REST OF THE ANSWER LANDS (D-3351, DB-N23). Each
+    // refused the whole answer, and a whole answer refused while the next one
+    // landed is how a month was opened part-way for ever (DB-N20).
+    let (rows, screened, duplicates) = screen_candles(raw, plan);
     let member = Member {
         path: std::path::PathBuf::from(origin),
         instrument: instrument.to_owned(),
         rows,
     };
-    let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
+    let (mut done, mut refusals) =
+        from_members_mode(std::slice::from_ref(&member), store_root, plan, mode);
+    done.rows_read += screened.rows();
+    done.failures
+        .extend(refused_row_failures(instrument, &screened, plan.encoding));
+    refusals.seconds.push(screened.local_seconds);
     // ONE EVENT AND ONE FAILURE PER (MONTH, REASON), AND ONE LEDGER LINE PER
     // DAY (D-3335, D-3341, WP-13b). It was one event and one failure per gap
-    // (OD-2, D-2371), and each failure one `pull.spot` line besides.
-    request_minutes::report(&member.rows, instrument, store_root, plan, &mut done);
+    // (OD-2, D-2371), and each failure one `pull.spot` line besides. A minute
+    // refused after the vendor sent it — a row named, or a month the store
+    // refused — is a minute the store lacks, and its day says why (D-3351).
+    request_minutes::report(
+        &member.rows,
+        instrument,
+        store_root,
+        plan,
+        &mut done,
+        &refusals,
+    );
     done.rows_read += duplicates;
     done.rows_folded += duplicates;
     if duplicates > 0 {
@@ -1228,6 +1274,120 @@ pub fn from_window(
         );
     }
     done
+}
+
+/// The broker's candles a landing may take: each on the requested grid, and
+/// one per stamp. A candle off the grid is refused; two candles at one stamp
+/// that disagree are BOTH refused — neither can be chosen without inventing
+/// which one the vendor meant; identical repeats are one candle. Answers the
+/// kept rows in the vendor's order, the refusals in the vendor's order, and
+/// how many identical repeats were folded (D-3351).
+///
+/// Two passes over the rows and one hash probe per row: O(rows).
+fn screen_candles(
+    raw: &crate::fetch::RawWindow,
+    plan: Plan<'_>,
+) -> (Vec<crate::fetch::RawRow>, crate::fetch::Refused, usize) {
+    /// What a stamp has been seen as.
+    #[derive(Clone, Copy)]
+    enum Seen {
+        /// One candle, or identical repeats of it, first at this row.
+        One(usize),
+        /// Candles that disagree: every row at this stamp is refused.
+        Conflicting,
+    }
+    let on_grid = |row: &crate::fetch::RawRow| {
+        broker_stamp_on_grid(row.timestamp, plan.encoding, plan.request.granularity)
+    };
+    let mut seen: std::collections::HashMap<i64, Seen> =
+        std::collections::HashMap::with_capacity(raw.rows.len());
+    for (i, row) in raw.rows.iter().enumerate() {
+        if !on_grid(row) {
+            continue;
+        }
+        match seen.get(&row.timestamp).copied() {
+            None => {
+                seen.insert(row.timestamp, Seen::One(i));
+            }
+            Some(Seen::One(first)) if raw.rows.get(first) != Some(row) => {
+                seen.insert(row.timestamp, Seen::Conflicting);
+            }
+            Some(_) => {}
+        }
+    }
+    let mut kept = Vec::with_capacity(raw.rows.len());
+    let mut refused = crate::fetch::Refused::default();
+    let mut duplicates = 0usize;
+    for (i, row) in raw.rows.iter().enumerate() {
+        let local = stamp_local_second(row.timestamp, plan.encoding);
+        if !on_grid(row) {
+            refused.note(crate::fetch::RowCause::OffGrid, (i, row.timestamp), local, || {
+                format!(
+                    "row {i}: off-grid broker candle at {} ({:?}) for {}; off-grid candle refused before fold or append, this row only",
+                    row.timestamp,
+                    plan.encoding,
+                    plan.request.granularity.label()
+                )
+            });
+            continue;
+        }
+        match seen.get(&row.timestamp).copied() {
+            Some(Seen::One(first)) if first == i => kept.push(*row),
+            Some(Seen::One(_)) => duplicates += 1,
+            _ => refused.note(
+                crate::fetch::RowCause::Conflicting,
+                (i, row.timestamp),
+                local,
+                || {
+                    format!(
+                        "row {i}: conflicting vendor candles at {}; conflicting candles refused before append, every candle at that stamp",
+                        row.timestamp
+                    )
+                },
+            ),
+        }
+    }
+    (kept, refused, duplicates)
+}
+
+/// The IST-local epoch second of a vendor stamp, in the arithmetic
+/// [`stamp_day`] uses: the space the gap ledger counts minutes in.
+fn stamp_local_second(timestamp: i64, encoding: TimestampEncoding) -> i64 {
+    let offset = i128::from(crate::session::IST_OFFSET_SECS) * 1_000;
+    let utc_millis = match encoding {
+        TimestampEncoding::EpochMillisUtc => i128::from(timestamp),
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
+            i128::from(timestamp) * 1_000
+        }
+        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+            i128::from(timestamp) * 1_000 - offset
+        }
+    };
+    i64::try_from((utc_millis + offset).div_euclid(1_000)).unwrap_or(i64::MAX)
+}
+
+/// One named failure per (cause, day) of refused rows, logged once each
+/// (D-3351): the first row in its own words, the count, and that it is those
+/// rows only.
+fn refused_row_failures(
+    instrument: &str,
+    refused: &crate::fetch::Refused,
+    encoding: TimestampEncoding,
+) -> Vec<Failure> {
+    refused
+        .groups
+        .iter()
+        .map(|group| {
+            let why = format!(
+                "{}; {} row(s) refused for {} on this day, those rows only: the rest of the answer lands (D-3351)",
+                group.why,
+                group.rows,
+                group.cause.code()
+            );
+            note_not_filed(instrument, group.cause.code(), &why);
+            on_stamp_day(Failure::new(instrument, why), group.first_raw, encoding)
+        })
+        .collect()
 }
 
 /// `failure`, about the IST day a vendor stamp falls on, when that day is one
@@ -1689,6 +1849,16 @@ struct Landed {
     /// declined. `Ingested::balances` reconciles against `census` alone and
     /// must never learn about this field.
     outside_session: u32,
+    /// What this member's landing refused after the vendor sent it, as
+    /// IST-local seconds, one time-ordered list per source: rows refused by
+    /// name, and rows of months the store refused (D-3351).
+    refused_seconds: Vec<Vec<i64>>,
+    /// IST day numbers the store refused before a month's first held bar, in
+    /// order: the ledger's `refused_front` days.
+    fronts: Vec<u32>,
+    /// IST day numbers a repair added bars on, in order: the ledger's
+    /// `repaired` days (D-3350).
+    repaired_days: Vec<u32>,
 }
 
 /// The month's two closes, when the batch just appended **is** the whole file.
@@ -1807,7 +1977,7 @@ fn nothing_landed(
     census: DropCensus,
     folded: usize,
     outside_session: u32,
-    failures: Vec<Failure>,
+    (failures, refused_seconds): (Vec<Failure>, Vec<Vec<i64>>),
 ) -> Landed {
     Landed {
         failures,
@@ -1819,6 +1989,9 @@ fn nothing_landed(
         derived: 0,
         derived_expected: 0,
         outside_session,
+        refused_seconds,
+        fronts: Vec::new(),
+        repaired_days: Vec::new(),
     }
 }
 
@@ -1848,18 +2021,9 @@ fn write_month(
     member: &Member,
     store_root: &Path,
     plan: Plan<'_>,
-    identity: &Identity,
-) -> Result<(Held, usize), Failure> {
-    let parts = PathParts {
-        vendor: plan.vendor,
-        exchange: identity.exchange.as_str(),
-        segment: identity.segment.as_str(),
-        symbol: identity.symbol.as_str(),
-        contract: plan.contract,
-        timeframe,
-        month,
-        file: FileKind::Bars,
-    };
+    (identity, mode): (&Identity, Mode<'_>),
+) -> Result<(Held, usize, Vec<i64>), Failure> {
+    let parts = month_parts(plan, identity, timeframe, month);
     let key = EntryKey {
         contract: plan.contract,
         exchange: identity.exchange,
@@ -1868,7 +2032,18 @@ fn write_month(
         timeframe,
         month,
     };
-    write_and_count(slice, store_root, identity.symbol_id, parts, key).map_err(|why| {
+    let written = match mode {
+        Mode::Append => write_and_count(slice, store_root, identity.symbol_id, parts, key)
+            .map(|(held, written)| (held, written, Vec::new())),
+        Mode::Repair { reason } => repair_or_append(
+            slice,
+            store_root,
+            identity.symbol_id,
+            (parts, key),
+            (repair_policy(plan), reason),
+        ),
+    };
+    written.map_err(|why| {
         Failure::new(
             member.instrument.clone(),
             format!(
@@ -1878,6 +2053,387 @@ fn write_month(
         )
         .in_month(month)
     })
+}
+
+/// The path parts of one month of this plan's instrument at `timeframe`.
+fn month_parts<'a>(
+    plan: Plan<'a>,
+    identity: &'a Identity,
+    timeframe: Timeframe,
+    month: store::path::YearMonth,
+) -> PathParts<'a> {
+    PathParts {
+        vendor: plan.vendor,
+        exchange: identity.exchange.as_str(),
+        segment: identity.segment.as_str(),
+        symbol: identity.symbol.as_str(),
+        contract: plan.contract,
+        timeframe,
+        month,
+        file: FileKind::Bars,
+    }
+}
+
+/// The days of the months a member's landing refused that the store does not
+/// hold, for the gap ledger (D-3351): a refused month is a month whose days
+/// the vendor sent and the store lacks, and a ledger that audits only the
+/// vendor's rows read them as held (DB-N22).
+#[derive(Debug, Default)]
+struct NotHeld {
+    /// IST-local seconds of the offered bars of those days, in time order.
+    seconds: Vec<i64>,
+    /// Those days that lie before their month's first held bar, in order.
+    fronts: Vec<u32>,
+    /// The IST days a repair added bars on, in order.
+    repaired: Vec<u32>,
+}
+
+impl NotHeld {
+    /// Count the IST days of `added_at`, the stamps a repair added.
+    fn repaired(&mut self, added_at: &[i64]) {
+        for &ts in added_at {
+            if let Ok(day) = u32::try_from(local_day(ts))
+                && self.repaired.last() != Some(&day)
+            {
+                self.repaired.push(day);
+            }
+        }
+    }
+
+    /// Count a refused month's days, log its refusal, and hand it back.
+    fn month(
+        &mut self,
+        refused: Failure,
+        slice: &[store::format::Bar],
+        (store_root, parts): (&Path, PathParts<'_>),
+        symbol_id: u32,
+    ) -> Failure {
+        note_not_filed(&refused.instrument, "bars", &refused.why);
+        not_held_days(
+            slice,
+            store_root,
+            symbol_id,
+            parts,
+            &mut self.seconds,
+            &mut self.fronts,
+        );
+        refused
+    }
+}
+
+/// The days of a refused month's `slice` the store does NOT hold a bar on,
+/// as IST-local seconds of their offered bars (appended to `seconds` in time
+/// order), and of those, the days before the month's first held bar (appended
+/// to `fronts`): the ledger's `refused_day` and `refused_front` (D-3351).
+///
+/// One lookup per day of the slice — at most 31 — through the month's own
+/// time index; a month that will not open holds nothing to ask, and every day
+/// of the slice is then not held.
+fn not_held_days(
+    slice: &[store::format::Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+    seconds: &mut Vec<i64>,
+    fronts: &mut Vec<u32>,
+) {
+    let file = StorePath::new(parts)
+        .ok()
+        .and_then(|path| BarFile::open_existing(store_root, path, symbol_id).ok());
+    let held = file.as_ref().map_or(0, |file| file.header().n_valid);
+    let first_day = file
+        .as_ref()
+        .filter(|_| held > 0)
+        .map(|file| local_day(file.header().first_ts_micros));
+    let mut at = 0usize;
+    while let Some(first) = slice.get(at) {
+        let day = local_day(first.ts_micros);
+        let mut end = at;
+        while slice
+            .get(end)
+            .is_some_and(|bar| local_day(bar.ts_micros) == day)
+        {
+            end += 1;
+        }
+        let day_start = (day * 86_400 - crate::session::IST_OFFSET_SECS) * 1_000_000;
+        let holds_day = file.as_ref().is_some_and(|file| {
+            file.first_at_or_after(day_start)
+                .ok()
+                .filter(|&index| index < held)
+                .and_then(|index| file.read_record(index).ok())
+                .is_some_and(|bar| bar.ts_micros < day_start + 86_400 * 1_000_000)
+        });
+        if !holds_day {
+            seconds.extend(
+                slice
+                    .get(at..end)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|bar| local_second_of(bar.ts_micros)),
+            );
+            if first_day.is_some_and(|first| day < first)
+                && let Ok(number) = u32::try_from(day)
+            {
+                fronts.push(number);
+            }
+        }
+        at = end;
+    }
+}
+
+/// The IST-local epoch second of a bar's stamp.
+const fn local_second_of(ts_micros: i64) -> i64 {
+    ts_micros.div_euclid(1_000_000) + crate::session::IST_OFFSET_SECS
+}
+
+/// The IST day number of a bar's stamp.
+const fn local_day(ts_micros: i64) -> i64 {
+    local_second_of(ts_micros).div_euclid(86_400)
+}
+
+/// How a repair compares an offered bar with a held one, from what the
+/// instrument IS (D-3350): open interest compared only where it is a
+/// measurement (D-3322), and a held bar required in the offered window where
+/// the feed adjusts its prices as of the pull date (D-3323). A feed whose
+/// basis for the segment nobody recorded is held to the witness too.
+fn repair_policy(plan: Plan<'_>) -> store::repair::Policy {
+    let segment = plan.request.listing.segment();
+    let mut adjusted = true;
+    for feed in crate::vendor::Feed::ALL {
+        if feed.store_vendor() == Some(plan.vendor)
+            && let Some(row) = feed.descriptor().basis.segment(segment)
+        {
+            adjusted = row.price.adjusted_as_of_pull_date();
+        }
+    }
+    store::repair::Policy {
+        open_interest_applies: crate::vendor::open_interest_applies(segment),
+        basis_witness: adjusted,
+    }
+}
+
+/// THE REPAIR DOOR (D-3350): the append door first, and a versioned repair of
+/// the month when the append door refuses it.
+///
+/// A new month, a tail and a batch already held go through
+/// [`write_and_count`] exactly as an ordinary pull. A batch the append-only
+/// month refuses — offered bars inside its held range at stamps it never held
+/// (the DB-N20 holes), or a month already served from a revision — is handed
+/// to [`store::repair::repair_month`], which publishes a new generation with
+/// every held bar and every offered one and promotes it. The census row is
+/// the served month's header. Each repair is journaled.
+fn repair_or_append(
+    bars: &[store::format::Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    (parts, key): (PathParts<'_>, EntryKey),
+    (policy, reason): (store::repair::Policy, &str),
+) -> Result<(Held, usize, Vec<i64>), String> {
+    let appended = match write_and_count(bars, store_root, symbol_id, parts, key) {
+        Ok((held, written)) => return Ok((held, written, Vec::new())),
+        Err(why) => why,
+    };
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    match store::repair::repair_month(store_root, path, symbol_id, bars, policy) {
+        Ok(store::repair::MonthRepair::NothingNew { .. }) => Ok((
+            held_of_served(store_root, path, symbol_id, key)?,
+            0,
+            Vec::new(),
+        )),
+        Ok(store::repair::MonthRepair::Repaired {
+            from,
+            to,
+            held,
+            added,
+            added_at,
+            header,
+            published,
+            skipped,
+            ..
+        }) => {
+            let journaled = journal_repair(
+                store_root,
+                &parts,
+                (from, to.ordinal(), held, added),
+                (&header, published, &skipped),
+                reason,
+            );
+            let held_now = held_of_served(store_root, path, symbol_id, key)?;
+            journaled.map(|()| {
+                (
+                    held_now,
+                    usize::try_from(added).unwrap_or(usize::MAX),
+                    added_at,
+                )
+            })
+        }
+        Err(why) => {
+            let refused = format!("{appended}; the versioned repair refused it too: {why}");
+            match journal_refusal(store_root, &parts, &why.to_string(), reason) {
+                Ok(()) => Err(refused),
+                Err(journal) => Err(format!(
+                    "{refused}; and the repair journal line was not written: {journal}"
+                )),
+            }
+        }
+    }
+}
+
+/// The census row of the month as every reader now opens it: its served
+/// generation's header and closes.
+fn held_of_served(
+    store_root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    key: EntryKey,
+) -> Result<Held, String> {
+    let file =
+        BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let header = file.header();
+    let closes = month_closes(&file, &header, &[])?;
+    Ok(Held::new(
+        Entry {
+            key,
+            rows: header.n_valid,
+            first_ts_micros: header.first_ts_micros,
+            last_ts_micros: header.last_ts_micros,
+        },
+        closes,
+    ))
+}
+
+/// The census key text a ledger line names a month by.
+fn ledger_key(parts: &PathParts<'_>) -> String {
+    match parts.contract {
+        Some(contract) => format!(
+            "{}-{}-{}-{contract}",
+            parts.exchange, parts.segment, parts.symbol
+        ),
+        None => format!("{}-{}-{}", parts.exchange, parts.segment, parts.symbol),
+    }
+}
+
+/// A reason as one ledger field: every byte outside `[A-Za-z0-9_.:/-]`
+/// becomes `_`, so the line keeps D-3317's one-space field rule. The whole
+/// reason is on the telemetry event beside it.
+fn ledger_field(text: &str) -> String {
+    let field: String = text
+        .chars()
+        .take(160)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if field.is_empty() {
+        "-".to_owned()
+    } else {
+        field
+    }
+}
+
+/// One `repair` line in `<store>/audit/<vendor>.repairs` and one `pull.repair`
+/// event (D-3350): the month, the generation it replaced and the one now
+/// served, the bars kept and added, the stamps it now spans, whether the
+/// revision was written now or found complete (a resumed crash), the ordinals
+/// stepped over, and why.
+fn journal_repair(
+    store_root: &Path,
+    parts: &PathParts<'_>,
+    (from, to, held, added): (u32, u32, u64, u64),
+    (header, published, skipped): (&Header, store::repair::Published, &[(u32, String)]),
+    reason: &str,
+) -> Result<(), String> {
+    let skipped_field = if skipped.is_empty() {
+        "-".to_owned()
+    } else {
+        skipped
+            .iter()
+            .map(|(ordinal, _)| ordinal.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let published_word = match published {
+        store::repair::Published::Created => "created",
+        store::repair::Published::Reused => "reused",
+    };
+    let line = format!(
+        "repair {} {} {} v=1 from_generation={from} to_generation={to} held={held} added={added} rows={} first={} last={} revision={published_word} skipped={skipped_field} reason={} run={}",
+        ledger_key(parts),
+        parts.timeframe.as_str(),
+        parts.month,
+        header.n_valid,
+        header.first_ts_micros,
+        header.last_ts_micros,
+        ledger_field(reason),
+        telemetry::global().map_or(0, telemetry::Sink::run)
+    );
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.repair", "month repaired to a new generation")
+            .with("instrument", telemetry::Value::Str(parts.symbol))
+            .with("feed", telemetry::Value::Str(parts.vendor.as_str()))
+            .with("month", telemetry::Value::Str(&parts.month.to_string()))
+            .with("rung", telemetry::Value::Str(parts.timeframe.as_str()))
+            .with("from_generation", telemetry::Value::Uint(u64::from(from)))
+            .with("to_generation", telemetry::Value::Uint(u64::from(to)))
+            .with("held", telemetry::Value::Uint(held))
+            .with("added", telemetry::Value::Uint(added))
+            .with("skipped", telemetry::Value::Str(&skipped_field))
+            .with("reason", telemetry::Value::Str(reason)),
+    );
+    request_minutes::append_named(store_root, parts.vendor, "repairs", &[line]).map_err(|why| {
+        note_not_filed(parts.symbol, "repair journal", &why);
+        format!(
+            "{}: repaired to generation {to} and served, but its journal line was not written: {why}",
+            parts.month
+        )
+    })
+}
+
+/// One `refused` line in the repair journal and one `pull.repair` error
+/// event: a month the repair door would not take, and why.
+fn journal_refusal(
+    store_root: &Path,
+    parts: &PathParts<'_>,
+    why: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.repair", "month repair refused")
+            .with("instrument", telemetry::Value::Str(parts.symbol))
+            .with("feed", telemetry::Value::Str(parts.vendor.as_str()))
+            .with("month", telemetry::Value::Str(&parts.month.to_string()))
+            .with("rung", telemetry::Value::Str(parts.timeframe.as_str()))
+            .with("why", telemetry::Value::Str(why))
+            .with("reason", telemetry::Value::Str(reason)),
+    );
+    let line = format!(
+        "refused {} {} {} v=1 why={} reason={} run={}",
+        ledger_key(parts),
+        parts.timeframe.as_str(),
+        parts.month,
+        ledger_field(why),
+        ledger_field(reason),
+        telemetry::global().map_or(0, telemetry::Sink::run)
+    );
+    request_minutes::append_named(store_root, parts.vendor, "repairs", &[line])
+}
+
+/// Every refusal a landing made before any file was opened: each day of
+/// unmeasured length (D-3344) and each (cause, day) of rows refused by name
+/// (D-3351). Carried on every return of [`one`], so an answer that stored
+/// nothing still says why.
+fn landing_failures(
+    instrument: &str,
+    landed: &fetch::Landed,
+    encoding: TimestampEncoding,
+) -> Vec<Failure> {
+    let mut failures = refused_day_failures(instrument, &landed.refused_days);
+    failures.extend(refused_row_failures(instrument, &landed.refused, encoding));
+    failures
 }
 
 /// One named failure per day [`fetch::land_rows`] refused, logged and returned
@@ -1909,7 +2465,12 @@ fn refused_day_failures(instrument: &str, days: &[fetch::RefusedDay]) -> Vec<Fai
         .collect()
 }
 
-fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, String> {
+fn one(
+    member: &Member,
+    store_root: &Path,
+    plan: Plan<'_>,
+    mode: Mode<'_>,
+) -> Result<Landed, String> {
     let Plan {
         request,
         encoding,
@@ -1930,10 +2491,8 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // EACH REFUSED DAY IS NAMED, AND THAT DAY IS ALL THAT IS LOST (D-3344).
     // Carried on every return below, so a window holding nothing but the
     // refused day still says why it stored nothing.
-    let mut failures = refused_day_failures(&member.instrument, &landed.refused_days);
-    if landed.bars.is_empty() {
-        return Ok(nothing_landed(landed.census, 0, outside_session, failures));
-    }
+    let mut failures = landing_failures(&member.instrument, &landed, encoding);
+    let mut refused_seconds = vec![std::mem::take(&mut landed.refused.local_seconds)];
 
     // THE FOLD. Without it a real run produced 354,675 rows and ZERO bars:
     // both archive vendors ship one-second snapshots with two to four rows per
@@ -1943,7 +2502,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // The bucket width comes from the TIMEFRAME the caller is filing under, so
     // a one-second feed, a one-minute feed and a daily feed all fold through
     // this same line. Nothing here knows which vendor it came from.
-    let folded = fold_in_place(&mut landed.bars, timeframe, member)?;
+    let folded = fold_landed(&mut landed.bars, timeframe, member)?;
 
     // The month comes from the FIRST surviving bar. A member whose bars cross a
     // month boundary would need two files, and that split is a decision about
@@ -1956,16 +2515,16 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // bucket is only ever re-stamping them. `rows_folded = 0` on a 1day rung
     // is the signature, and nothing wrote it down.
 
-    // `fold` returns at least one bar for an input that had at least one, and
-    // the empty input already returned above — but the type does not say so,
-    // and the arm that says "this cannot happen" is a `Landed` with nothing in
-    // it rather than a panic.
+    // NOTHING TO FILE — an answer of refused or dropped rows, or nothing at
+    // all — still carries why: every refused day and row is on `failures`.
+    // (`fold` returns at least one bar for an input that had at least one,
+    // so a folded batch never reaches this arm.)
     if landed.bars.is_empty() {
         return Ok(nothing_landed(
             landed.census,
             folded,
             outside_session,
-            failures,
+            (failures, refused_seconds),
         ));
     }
     // ONE RUN PER MONTH, RATHER THAN A REFUSAL IF THE BARS CROSS ONE.
@@ -1990,15 +2549,30 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let mut months_written = 0usize;
     // Bars of months whose write was refused: offered, never stored.
     let mut refused_bars = 0usize;
+    // The days of refused months the store does not hold, for the ledger.
+    let mut not_held = NotHeld::default();
     for (ym, slice) in &by_month {
         // ONE MONTH'S REFUSAL IS THAT MONTH'S (D-3345). See `write_month`.
-        let written = write_month(slice, *ym, timeframe, member, store_root, plan, &identity);
+        let written = write_month(
+            slice,
+            *ym,
+            timeframe,
+            member,
+            store_root,
+            plan,
+            (&identity, mode),
+        );
         let (pulled, wrote) = match written {
-            Ok(done) => done,
+            Ok((held, wrote, added_at)) => {
+                // THE DAYS A REPAIR FILLED, for the ledger (D-3350): their
+                // earlier `refused_*` lines are superseded by a `repaired` one.
+                not_held.repaired(&added_at);
+                (held, wrote)
+            }
             Err(refused) => {
-                note_not_filed(&member.instrument, "bars", &refused.why);
-                failures.push(refused);
                 refused_bars = refused_bars.saturating_add(slice.len());
+                let at = (store_root, month_parts(plan, &identity, timeframe, *ym));
+                failures.push(not_held.month(refused, slice, at, symbol_id));
                 continue;
             }
         };
@@ -2018,29 +2592,29 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         //
         // Per month, because `DeriveInto::month` names one file and the
         // derived rungs of January must not land in February's.
-        failures.extend(derive_all(
-            slice,
-            &member.instrument,
-            store_root,
-            symbol_id,
-            timeframe,
-            DeriveInto {
-                calendar: plan.calendar,
-                cash_schedule: plan.cash_schedule,
-                // THE CONTRACT THE BARS WERE FILED UNDER, which is what
-                // `derive_all` reads its option/future line off. Leaving this
-                // `None` would file an option's derived rungs in the
-                // underlying's own directory.
-                contract: plan.contract,
-                vendor,
-                exchange,
-                segment,
-                symbol,
-                month: *ym,
-            },
+        let into = DeriveInto {
+            calendar: plan.calendar,
+            cash_schedule: plan.cash_schedule,
+            // THE CONTRACT THE BARS WERE FILED UNDER, which is what
+            // `derive_all` reads its option/future line off. Leaving this
+            // `None` would file an option's derived rungs in the
+            // underlying's own directory.
+            contract: plan.contract,
+            vendor,
+            exchange,
+            segment,
+            symbol,
+            month: *ym,
+        };
+        failures.extend(derive_month(
+            mode,
+            (slice, &member.instrument),
+            (store_root, symbol_id, timeframe),
+            (into, plan),
             &mut entries,
         ));
     }
+    refused_seconds.push(not_held.seconds);
 
     // PER MONTH ON BOTH SIDES. `entries` now holds one bars entry per month
     // plus that month's derived rungs, so the subtrahend is the number of
@@ -2068,6 +2642,9 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         derived,
         derived_expected,
         outside_session,
+        refused_seconds,
+        fronts: not_held.fronts,
+        repaired_days: not_held.repaired,
     })
 }
 
@@ -2539,6 +3116,168 @@ fn derive_all(
     failures
 }
 
+/// The derived rungs of one landed month, by the landing's mode: appended
+/// ([`derive_all`]), or — for a repair — folded again from the month as now
+/// served and repaired the same way ([`derive_repair`], D-3350): a derived
+/// month held around the hole cannot be appended to either.
+fn derive_month(
+    mode: Mode<'_>,
+    (slice, instrument): (&[Bar], &str),
+    (store_root, symbol_id, timeframe): (&Path, u32, Timeframe),
+    (into, plan): (DeriveInto<'_>, Plan<'_>),
+    entries: &mut Vec<Held>,
+) -> Vec<Failure> {
+    match mode {
+        Mode::Append => derive_all(
+            slice, instrument, store_root, symbol_id, timeframe, into, entries,
+        ),
+        Mode::Repair { reason } => derive_repair(
+            instrument,
+            store_root,
+            symbol_id,
+            timeframe,
+            (into, repair_policy(plan), reason),
+            entries,
+        ),
+    }
+}
+
+/// [`derive_all`] for a REPAIR (D-3350): every derived rung is folded again
+/// from the source month AS IT IS NOW SERVED — the repaired generation — and
+/// each rung month goes through the same repair door as its source: appended
+/// where the append door takes it, repaired to a new generation where the
+/// month holds bars around the days the fold now fills. A held derived bar is
+/// never dropped or changed; one the fold would change refuses that rung by
+/// name, and the source month's repair stands.
+///
+/// Spot and futures only, minute source only, never GDFL — the rules
+/// [`derive_all`] states.
+fn derive_repair(
+    instrument: &str,
+    store_root: &Path,
+    symbol_id: u32,
+    source: Timeframe,
+    (into, policy, reason): (DeriveInto<'_>, store::repair::Policy, &str),
+    entries: &mut Vec<Held>,
+) -> Vec<Failure> {
+    let mut failures = Vec::new();
+    if !derives_for(into.vendor)
+        || into.contract.is_some_and(|c| c.is_option())
+        || source != Timeframe::MINUTE_1
+    {
+        return failures;
+    }
+    let source_parts = PathParts {
+        vendor: into.vendor,
+        exchange: into.exchange.as_str(),
+        segment: into.segment.as_str(),
+        symbol: into.symbol.as_str(),
+        contract: into.contract,
+        timeframe: source,
+        month: into.month,
+        file: FileKind::Bars,
+    };
+    let (minutes, venue) = match served_minutes(store_root, symbol_id, source_parts) {
+        Ok(read) => read,
+        Err(why) => {
+            for rung in derived_from(source) {
+                note_not_derived(instrument, rung, &why);
+            }
+            failures.push(Failure::new(instrument, why).in_month(into.month));
+            return failures;
+        }
+    };
+    let mut ledger: Vec<String> = Vec::with_capacity(derived_count(source));
+    for rung in derived_from(source) {
+        let parts = PathParts {
+            timeframe: rung,
+            ..source_parts
+        };
+        let key = EntryKey {
+            contract: into.contract,
+            exchange: into.exchange,
+            segment: into.segment,
+            symbol: into.symbol,
+            timeframe: rung,
+            month: into.month,
+        };
+        let Some(bucket) = crate::fold::Bucket::of_secs(rung.secs()) else {
+            continue;
+        };
+        let folded =
+            crate::fold::derive_minutes(&minutes, bucket, venue, into.cash_schedule, into.calendar);
+        let crate::fold::Derived {
+            bars,
+            tally,
+            diagnostics,
+        } = match folded {
+            Ok(folded) => folded,
+            Err(why) => {
+                let why = why.to_string();
+                note_not_derived(instrument, rung, &why);
+                failures.push(
+                    Failure::new(instrument, format!("{}: {why}", rung.as_str()))
+                        .in_month(into.month),
+                );
+                continue;
+            }
+        };
+        failures.extend(diagnostics.into_iter().map(|why| {
+            Failure::new(instrument, format!("{}: {why}", rung.as_str())).in_month(into.month)
+        }));
+        if bars.is_empty() {
+            continue;
+        }
+        match repair_or_append(&bars, store_root, symbol_id, (parts, key), (policy, reason)) {
+            Ok((held, _, _)) => {
+                entries.push(held);
+                ledger.push(request_minutes::derive_line(&parts, tally));
+            }
+            Err(why) => {
+                note_not_derived(instrument, rung, &why);
+                failures.push(
+                    Failure::new(instrument, format!("{}: {why}", rung.as_str()))
+                        .in_month(into.month),
+                );
+            }
+        }
+    }
+    failures.extend(request_minutes::record_derived(
+        store_root,
+        into.vendor,
+        instrument,
+        into.month,
+        &ledger,
+    ));
+    failures
+}
+
+/// Every bar of a source month as it is now served, and the venue its
+/// minutes are judged complete against.
+fn served_minutes(
+    store_root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+) -> Result<(Vec<Bar>, crate::vendor::Venue), String> {
+    let venue = Exchange::parse(parts.exchange)
+        .ok()
+        .zip(Segment::parse(parts.segment).ok())
+        .and_then(|(exchange, segment)| crate::vendor::Venue::for_segment(exchange, segment))
+        .ok_or_else(|| {
+            format!(
+                "no verified minute-completeness venue for {}/{}; derived rungs not repaired",
+                parts.exchange, parts.segment
+            )
+        })?;
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let file =
+        BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let minutes = (0..file.header().n_valid)
+        .map(|i| file.read_record(i).map_err(|why| why.to_string()))
+        .collect::<Result<Vec<Bar>, String>>()?;
+    Ok((minutes, venue))
+}
+
 /// Folds a member's bars to the rung being filed under, in place, and answers
 /// how many rows the fold absorbed.
 ///
@@ -2577,6 +3316,19 @@ fn derive_all(
 // Closing it means threading the source rung through `from_dir` and
 // `from_window`, which know it and `Plan` does not. Named here rather than
 // half-fixed. D-0354.
+/// [`fold_in_place`] for an answer that may have landed no bar at all — every
+/// row refused or dropped (D-3351) — which folds nothing.
+fn fold_landed(
+    bars: &mut Vec<store::format::Bar>,
+    timeframe: Timeframe,
+    member: &Member,
+) -> Result<usize, String> {
+    if bars.is_empty() {
+        return Ok(0);
+    }
+    fold_in_place(bars, timeframe, member)
+}
+
 fn fold_in_place(
     bars: &mut Vec<store::format::Bar>,
     timeframe: Timeframe,
@@ -3050,6 +3802,16 @@ fn write_and_count(
     key: EntryKey,
 ) -> Result<(Held, usize), String> {
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    // A MONTH SERVED FROM A REPAIR REVISION (D-3350). The writer door refuses
+    // it — an append to its original would never be served — so a batch it
+    // already holds, bar for bar, is answered as the append door answers one:
+    // nothing written. A batch holding anything new is refused by name; only
+    // a further repair can add to the month.
+    if let store::generation::Served::Revision(pointer) =
+        store::generation::served(store_root, path).map_err(|why| why.to_string())?
+    {
+        return already_served(bars, store_root, path, symbol_id, key, pointer);
+    }
     let mut file =
         BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
     // THE DISCRIMINANT IS KEPT, AND IT WAS THROWN AWAY. `Committed` and
@@ -3098,6 +3860,39 @@ fn write_and_count(
         // WRITTEN, NOT MERELY OFFERED, AND NOT THE WHOLE BATCH EITHER.
         written,
     ))
+}
+
+/// [`write_and_count`] for a month served from a repair revision: every
+/// offered bar must already be held there with the same values, and then the
+/// answer is the served month's census row with nothing written. One lookup
+/// per offered bar through the revision's own time index.
+fn already_served(
+    bars: &[store::format::Bar],
+    store_root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    key: EntryKey,
+    pointer: store::generation::Pointer,
+) -> Result<(Held, usize), String> {
+    let file =
+        BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let n_valid = file.header().n_valid;
+    for bar in bars {
+        let held = file
+            .first_at_or_after(bar.ts_micros)
+            .ok()
+            .filter(|&index| index < n_valid)
+            .and_then(|index| file.read_record(index).ok());
+        if held != Some(*bar) {
+            return Err(format!(
+                "the month is served from repair revision {} (D-3350) and does not hold the offered bar at {} as offered; an ordinary append cannot add to it, so nothing was written. Repair it: POST /pull/repair, or cli zerodha-repair",
+                pointer.revision.ordinal(),
+                bar.ts_micros
+            ));
+        }
+    }
+    drop(file);
+    Ok((held_of_served(store_root, path, symbol_id, key)?, 0))
 }
 
 /// Writes the overlay records beside the bars they belong to.
@@ -3987,7 +4782,7 @@ mod tests {
     fn a_member_is_landed_from_its_own_rows_without_a_copy() {
         let source = include_str!("ingest.rs");
         let start = source
-            .find(&format!("{}{}", "fn one(member: &", "Member,"))
+            .find(&format!("{}{}", "fn one(\n    member: &", "Member,"))
             .expect("ingest::one exists");
         let body = &source[start..];
         let body = &body[..body.find("\n}\n").expect("ingest::one ends")];

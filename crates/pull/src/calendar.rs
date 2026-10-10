@@ -82,6 +82,17 @@
 //! daily bar and not one minute bar. Zerodha's minute history does not reach
 //! them.
 //!
+//! **That last sentence is wrong, and is kept so the correction can be read
+//! beside it (D-3352, WP-13c).** It was measured on a store pulled before the
+//! answers that carried those days had landed. Kite returned sixty one-minute
+//! rows for NIFTY on each of the five days in the 6–7 Oct 2026 pulls
+//! (`audit/pull.journal` records 1421354, 1421380, 1421401, 1421480 and
+//! 1421519, each "60 minute row(s) refused";
+//! `state/gdfl-board/zerodha-holes.md` §2C). The store lacks them because the
+//! landing refused them (D-3344) and each month then held later days; their
+//! windows are recorded now (D-3319) and a versioned repair adds them
+//! (D-3350).
+//!
 //! They get their own answer, [`DayKind::OpenLengthUnmeasured`], because both
 //! neighbours are wrong: a full session would claim 375 owed bars each and
 //! report 1,875 losses that were never offered, and a closed day would deny a
@@ -265,7 +276,8 @@ pub enum DayKind {
     /// Every Diwali **Muhurat** session before 2025: 2020-11-14, 2021-11-04,
     /// 2022-10-24, 2023-11-12 and 2024-11-01. Each has a daily bar and zero
     /// minute bars, which is Zerodha's minute history not reaching them rather
-    /// than a hole in a day it served.
+    /// than a hole in a day it served. (Corrected by D-3352: Kite served sixty
+    /// minutes on each; the store refused them. See the module header.)
     ///
     /// **It is a third answer on purpose.** Calling them [`Self::Open`] with a
     /// full session would claim 375 owed bars and report 1,875 losses that were
