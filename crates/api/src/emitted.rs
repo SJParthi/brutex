@@ -222,9 +222,11 @@ struct Case {
 /// span whose daily rung was not read, driven over two daily bars on disk.
 /// 31 -> 33 at D-1765: `api.backtest limit ignored`, an unparseable `limit`,
 /// and `api.logs filter ignored`, a `level` or `run` that could not be read.
-/// 33 -> 34 at WP-36 (DB-N19): `api.calendar warmed`, the one line the served
+/// 33 -> 34 at D-3341: `api.audit whole note not appended`, a member
+/// failure whose whole reason could not be kept beside the journal.
+/// 34 -> 35 at WP-36 (DB-N19): `api.calendar warmed`, the one line the served
 /// process writes when its start-up census read and calendar builds end.
-const ROWS: usize = 34;
+const ROWS: usize = 35;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -532,6 +534,40 @@ fn cases() -> Vec<Case> {
                     && counts(record, "records", 5)
                     && counts(record, "take", 5)
             }),
+        });
+    }
+
+    {
+        // A DIRECTORY WHERE THE NOTES FILE HAS TO BE (D-3341, DB-G23). The
+        // member record still lands, cut, and the line names why its whole
+        // reason did not.
+        let root = fixture("emit-journal-whole-note");
+        std::fs::create_dir_all(root.join("audit").join("pull.notes"))
+            .expect("a directory in the notes file's place");
+        cases.push(Case {
+            site: "audit.rs api.audit whole note not appended",
+            target: "api.audit",
+            message: "whole note not appended",
+            level: telemetry::Level::Error,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    let why = "emit-site-probe: a reason longer than the sixty bytes a \
+                               member record's note field keeps, so its whole is kept apart";
+                    let day = pull::session::Day::new(2020, 11, 14).expect("a real day");
+                    let record = crate::audit::Record::member_failure(
+                        crate::audit::Scope::Spot,
+                        std::time::SystemTime::UNIX_EPOCH,
+                        "EMITWHOLE",
+                        pull::session::Window::new(day, day).expect("one day"),
+                        why,
+                    );
+                    crate::audit::Journal::at(&root)
+                        .append_member(&record, why)
+                        .expect("the record itself still lands");
+                })
+            },
+            mine: Box::new(|record| says(record, "instrument", "EMITWHOLE")),
         });
     }
 
@@ -1791,11 +1827,14 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 65 -> 66 at D-3313: the before-first-bar note, reached in server tests.
     //
-    // 66 -> 67 at WP-36 (DB-N19): `api.calendar warmed`, driven in the table
+    // 66 -> 67 at D-3341: `api.audit whole note not appended`, driven in the
+    // table above.
+    //
+    // 67 -> 68 at WP-36 (DB-N19): `api.calendar warmed`, driven in the table
     // above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 67,
+        lib_sites, 68,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

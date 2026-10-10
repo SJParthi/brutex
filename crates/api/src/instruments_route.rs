@@ -17,10 +17,14 @@
 //! move.
 
 use super::{
-    Loaded, MasterState, census_headers, census_is_unreadable, census_now, no_such_feed_json,
-    note_header, param, universe_label, universes_json,
+    Loaded, MasterState, Site, census_is_unreadable, no_such_feed_json, note_header, param,
+    universe_label, universes_json, vendor_census,
 };
-use crate::{census, ingest, render};
+use crate::{ingest, render};
+use brutex_core::instrument::{Exchange, InstrumentKey, Kind, Segment};
+use brutex_core::symbol::Symbol;
+use brutex_core::vendor::Vendor;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 /// The browser's copy of the bounded universe, for the type-ahead.
@@ -33,201 +37,106 @@ use std::fmt::Write as _;
 /// request. A request per character is ~800 requests to type one symbol and
 /// makes keystroke latency a function of the network.
 ///
-/// Hand-written JSON rather than a serialiser, because adding one would be a
-/// dependency for six fields whose shapes are all known here, and every value
-/// below is escaped through [`render::json_string`] rather than trusted.
-///
 /// # Two silent answers this route used to give, and what now separates them
 ///
-/// Both were `200` with no status anywhere on the wire, while `Read::notes` and
-/// [`Read::status`](super::Read::status) — which `/health` reads and answers
-/// `503` from — sat one field away and were discarded here.
+/// * **The counter would not load.** The page drew the same em dash a
+///   genuinely un-pulled instrument shows. It now answers `503` with the
+///   census headers [`super::store_route::census_headers_with`] writes.
+/// * **The selected feed's master would not decode.** The body was `[]`,
+///   indistinguishable from a feed that lists nothing. [`MASTER_STATE_HEADER`]
+///   says which. D-0124.
 ///
-/// * **The counter would not load.** `rows_for` answers `None` for an
-///   unreadable census, so `bars_of` summed to `0` for every row and the page
-///   drew the same em dash a genuinely un-pulled instrument shows. The universe
-///   was intact; the count was not a measurement.
-/// * **The selected feed's master would not decode.** No row then carries that
-///   feed's id, the filter admits nothing, and the body is `[]` — indistinguishable
-///   from a feed that lists nothing. [`Read::master`](super::Read::master) is
-///   the per-feed answer the whole-read boolean could not give.
+/// # What D-3327 changed (DB-041, DB-042, DB-066, DB-G80)
 ///
-/// Both now answer `503` and stamp the reason: [`UNIVERSE_STATUS_HEADER`],
-/// [`MASTER_STATE_HEADER`], [`MASTER_NOTE_HEADER`] and the three census headers
-/// [`census_headers`] writes. **The body shape does not move** — it is a JSON
-/// array in every state, exactly as it was. D-0124.
+/// * **Rows per rung.** `bars` counted one-minute spot bars only, so RELIANCE
+///   with 2,168 day bars and NIFTYFINSERVICE with 2,910 read `0` and sorted
+///   last. Each row now carries `rows_by_rung`, and `bars` is the row count of
+///   the finest rung the store holds for it, named by `bars_rung`.
+/// * **A feed with no master is listed from its census.** GDFL publishes no
+///   instrument master, so this answered `[]` and every universe tier was
+///   disabled. Its rows now come from the census: every stored spot series,
+///   and every option underlying with no spot series (`spot: false`), each
+///   with `master: null`, its membership from `core::universe`'s own lists,
+///   and never a claim to be "in this master". A mastered feed's rows say
+///   `master: "<feed>"`.
+/// * **Off the async workers, and once per census read.** The body is built
+///   on the store-read pool from the feed's facet index (one node per
+///   instrument, `facets.rs`), and kept per (feed census read, universe
+///   parse): an unchanged census answers the kept body. It walked every
+///   census entry on every request, and on a miss rebuilt the census inline
+///   on a Tokio worker for 360 to 400 ms.
 pub(super) async fn instruments_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
-    // THE LIST IS THE SELECTED FEED'S, NOT THE MERGE OF ALL OF THEM.
-    //
-    // This returned the merged universe whatever feed was chosen, so switching
-    // the picker changed nothing. That is wrong twice over: the two brokers do
-    // NOT list the same instruments — `GIFTNIFTY` is Dhan-only — so the page
-    // offered symbols the selected feed cannot be asked for, and `held` was
-    // computed feed-agnostically, so a row read HELD while the chosen feed held
-    // nothing for it.
-    //
-    // An instrument belongs to a feed's list when that feed's master gave it an
-    // id. `ids` is indexed by the vendor's own discriminant, so the test is one
-    // array index per row and not a lookup.
-    // REFUSED BY NAME, NEVER SUBSTITUTED — the same rule `masters_json` states
-    // twelve hundred lines below, and this route was the last of twelve
-    // `parse_vendor` call sites in this crate still breaking it.
-    //
-    // `ingest::parse_vendor` answers the EMPTY string with Dhan itself, so this
-    // `unwrap_or` was unreachable for an absent `?feed=` and caught exactly one
-    // input: a feed somebody NAMED and this build does not read. Everything
-    // downstream then became Dhan's answer under HTTP 200 — the row filter
-    // (`ids.get(feed as usize)`), the per-symbol bar counts, and the census and
-    // master headers. A wrong answer wearing the shape of a right one, which
-    // this file elsewhere calls the worst class of defect in the repository.
+    // REFUSED BY NAME, NEVER SUBSTITUTED. `ingest::parse_vendor` answers the
+    // EMPTY string with Dhan itself, so this caught exactly one input: a feed
+    // somebody NAMED and this build does not read.
     let asked_feed = param(uri.query().unwrap_or(""), "feed");
     let Some(feed) = ingest::parse_vendor(&asked_feed) else {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
-        );
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            headers,
+            json_headers(),
             no_such_feed_json(&asked_feed),
         );
     };
-    // SORTED, GROUPED, AND HELD-FIRST. `by_key` is a HashMap, so iterating it
-    // gave the browser TATACOMM, GMRAIRPORT, PINELABS — an order stable per
-    // process and meaningless to a human. Nothing was findable by scrolling and
-    // 35 indices were scattered through 750 equities.
-    //
-    // Three keys: instruments this store HOLDS come first because those are the
-    // ones that can be charted; indices before equities because they are the
-    // engine's own surface and there are 35 against 750; then alphabetical.
-    //
-    // O(n log n) once per request over a bounded ~800, replacing an unbounded
-    // amount of human scanning.
-    //
-    // ONE GUARD FOR THE WHOLE STATEMENT. The rows below BORROW from the parsed
-    // universe, so the read guard has to outlive them — a temporary taken
-    // inline is dropped at the semicolon with the borrows still live, which is
-    // the compiler catching the reload's one real hazard rather than a nuisance.
-    // NAMED `universe` AND NOT `held`, because `held` is REBOUND thirteen lines
-    // down and a shadow does not drop.
-    //
-    // This guard was called `held`; `let held = bars_by_symbol(..)` below then
-    // shadowed the name while the guard itself stayed alive to the end of the
-    // function -- correctly, since `listing` borrows through it. Two later
-    // statements read `site.universe()` again, and with the name taken there was
-    // no way to see that those were a SECOND `read()` on a lock this thread
-    // already held.
-    //
-    // That is a deadlock, not a slow path. `Site::reparse` takes `.write()` on
-    // the same lock and is reachable from `POST /masters/refresh`, and a writer
-    // waiting between the two acquisitions blocks the second one against a guard
-    // only this thread can release. The crate already states the rule twenty-odd
-    // lines from the writer: *"holding both across the same statement is the
-    // deadlock this shape invites."*
-    //
-    // The fix is to acquire once and reuse, which the borrow already required.
-    let universe = site.universe();
-    let mut listing: Vec<_> = universe
-        .read
-        .merged
-        .by_key
-        .iter()
-        .filter(|(_, entry)| {
-            crate::catalog::tracked(entry.universe)
-                && entry.ids.get(feed as usize).copied().flatten().is_some()
-        })
-        .collect();
-    // HOW MANY BARS, not whether any. "HELD" was store jargon that leaked onto
-    // the screen: it told an operator a boolean when the question they actually
-    // have is "how much of this do I have". A count answers both — zero IS the
-    // boolean, and 1,125 is what the boolean threw away.
-    // FRESH, so a row's bar count moves as a backfill lands. See `census_now`.
-    let (censuses, entries) = census_now(&site);
-    // ONE PASS OVER THE CENSUS, NOT ONE PER INSTRUMENT. See `bars_by_symbol`.
-    let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), entries.iter());
-    let bars_of = |key: &brutex_core::instrument::InstrumentKey| -> u64 {
-        held.get(&(key.exchange, key.segment, key.underlying))
-            .copied()
-            .unwrap_or(0)
-    };
-    listing.sort_unstable_by_key(|(key, _)| {
-        (
-            bars_of(key) == 0,
-            key.kind != brutex_core::instrument::Kind::Index,
-            key.underlying,
-        )
-    });
-
-    let mut out = String::from("[");
-    for (n, (key, entry)) in listing.into_iter().enumerate() {
-        let bars = bars_of(key);
-        // THE TRACKED UNIVERSE ONLY — the same predicate the page uses.
-        //
-        // This iterated the whole master and shipped 2,780 listings while the
-        // page beside it said 785. A type-ahead that suggests instruments the
-        // operator's own universe excludes is worse than none: it offers a
-        // symbol, the click lands on a page that does not list it, and nothing
-        // says why. The bound is ~800 by decision, and this is one of the
-        // places that must honour it rather than one of the places that
-        // quietly does not.
-        if n > 0 {
-            out.push(',');
+    match crate::detail::run_store_read(move || instruments_answer(&site, feed)).await {
+        Ok(answer) => answer,
+        Err(why) => {
+            let saturated = matches!(why, crate::detail::RunError::Saturated);
+            let mut headers = json_headers();
+            if saturated {
+                headers.insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("1"),
+                );
+            }
+            (
+                if saturated {
+                    axum::http::StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                },
+                headers,
+                format!(
+                    r#"{{"error":{}}}"#,
+                    render::json_string(&format!("instrument read unavailable: {why:?}"))
+                ),
+            )
         }
-        let canonical = key.to_string();
-        let _ = write!(
-            out,
-            // EXCHANGE AND SEGMENT TRAVEL WITH THE ROW, because the store is
-            // keyed on them: the path IS the index, so a chart request names
-            // every part rather than sending a synthetic id the server would
-            // have to resolve back into one.
-            // `universe` and `held` travel with the row so the browser can
-            // GROUP without asking again: F&O vs NIFTY Total Market vs index is
-            // the distinction the operator reads, and it is a bitset here.
-            //
-            // TWO UNIVERSE FIELDS, AND BOTH ARE LOAD-BEARING.
-            //   `universe`  — the frozen one. `index`, `fno`, `ntm`, those
-            //                 joined by `+`, or `other`, and never anything
-            //                 else. The pages in production split it on `+`;
-            //                 widening it would change a field they already
-            //                 read. See `universe_label`.
-            //   `universes` — the whole set, one token per bit, including the
-            //                 four NIFTY tiers D-0089 appended. A new reader
-            //                 uses this and needs no split; an old reader never
-            //                 sees it. See `universe_tokens`.
-            // The second is not a rename of the first and the first is not
-            // deprecated by the second: an instrument's membership is a set,
-            // and the string can only ever be a lossy view of it.
-            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"universes":{},"bars":{bars},"href":{}}}"#,
-            render::json_string(key.underlying.as_str()),
-            render::json_string(&canonical),
-            render::json_string(&format!("{:?}", key.kind)),
-            render::json_string(key.exchange.as_str()),
-            render::json_string(key.segment.as_str()),
-            render::json_string(&universe_label(entry.universe)),
-            universes_json(entry.universe),
-            render::json_string(&format!(
-                "/instruments?q={}",
-                render::query_value(&canonical)
-            )),
-        );
     }
-    out.push(']');
+}
 
-    // THE READ'S OWN VERDICT, ON THE WIRE. `read.status()` and `read.master`
-    // were computed at startup and consulted by `/health` and the HTML pages
-    // and by nothing on this route, which is the whole defect: the numbers
-    // below are only measurements when the master decoded and the counter
-    // loaded, and until now nothing said which of those held.
-    let census = censuses.iter().find(|c| c.vendor == feed);
-    // THE GUARD TAKEN AT THE TOP, not a second `read()` on a lock this thread
-    // already holds. Both of these read `site.universe()` before -- see the
-    // comment on that binding for why that deadlocks against `reparse`.
+fn json_headers() -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers
+}
+
+/// The whole `/instruments.json` answer for one feed, off the async workers.
+pub(super) fn instruments_answer(
+    site: &Site,
+    feed: Vendor,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let (_stamps, now) = vendor_census(site, feed);
+    let census = now.census();
+    // THE GUARD TAKEN ONCE, AND HELD ACROSS THE BUILD. The rows borrow from
+    // the parsed universe, and a second `read()` on this lock while a
+    // `Site::reparse` writer waits is a deadlock, not a slow path.
+    let universe = site.universe();
+    let body = site.census_wire.kept(
+        now.slot(),
+        feed,
+        "instruments.json",
+        universe.generation,
+        || Ok(instruments_body(site, feed, now.slot(), &universe.read)),
+    );
     let (master, master_note) = universe.read.master(feed);
-    let mut headers = census_headers(census);
+    let behind = super::store_route::behind(site, feed);
+    let mut headers = super::store_route::census_headers_with(census, Some(&behind));
     headers.insert(
         axum::http::HeaderName::from_static(UNIVERSE_STATUS_HEADER),
         note_header(universe.read.status()),
@@ -240,105 +149,213 @@ pub(super) async fn instruments_json(
         axum::http::HeaderName::from_static(MASTER_NOTE_HEADER),
         note_header(&master_note),
     );
-    // 503 FOR THE TWO STATES WHERE EVERY NUMBER BELOW IS ABSENT RATHER THAN
-    // MEASURED, and 200 for everything else — including a merge disagreement,
-    // which makes `status()` say `DEGRADED` while the list and the counts are
-    // both real. Refusing the type-ahead for a routine ISIN conflict would take
-    // the console down for a fact the header already carries.
-    let code = if census_is_unreadable(census) || master == MasterState::Unavailable {
+    // 503 FOR THE STATES WHERE EVERY NUMBER BELOW IS ABSENT RATHER THAN
+    // MEASURED: a counter that will not load, or a master that should be there
+    // and will not decode. A feed that publishes no master is not one of them:
+    // its rows are the census's (D-3327).
+    let code = if census_is_unreadable(census)
+        || (master == MasterState::Unavailable && feed.publishes_master())
+    {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     } else {
         axum::http::StatusCode::OK
     };
-    (code, headers, out)
+    match body {
+        Ok(body) => (code, headers, body.as_ref().clone()),
+        Err(why) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            headers,
+            format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+        ),
+    }
 }
 
-/// Bars held per symbol, folded out of the census in ONE pass.
-///
-/// # What this replaces, and what it cost
-///
-/// The closure this replaces scanned the whole entry vector for every symbol:
-///
-/// ```text
-/// entries.iter().filter(|(series, _)| series.symbol == sym)
-/// ```
-///
-/// and it was the `sort_unstable_by_key` key as well as the emitted field, so
-/// the scan ran once per *comparison* — about 22.6 scans per row at n=785, plus
-/// one per emitted row: ~18,565 full passes over the census for one request.
-/// The cost was the PRODUCT of the tracked universe and the census, on a
-/// response whose size never moves. Measured, in an optimised build with no
-/// disk I/O, at universe 785: 750 entries 15.5 ms, 9,000 entries 165.9 ms,
-/// 43,422 entries 819.2 ms — for 25 KB of JSON. `docs/06-limits.md` §34
-/// projects a 93,776-row census, and `/instruments.json` is on the load path of
-/// every page in the front end (`web/src/lib/index.svelte.js`).
-///
-/// Now: one pass over the entries, a hash probe per symbol, `CLAUDE.md` §3
-/// rule 4. The per-request cost is O(entries + universe) and no longer their
-/// product. `api::server::instrument_bar_counts_are_one_pass_over_the_census`
-/// holds the pass count at one for two universe sizes, so a future edit that
-/// reintroduces the inner scan fails by cost and not by taste.
-///
-/// THE NAME WAS WRONG AND THE TEST BENEATH IT WAS EMPTY, and the two failures
-/// were one. It read `api::unit::…`, and there is no `unit` module anywhere in
-/// this crate — the test is in `server.rs`'s own `mod tests` — while the test
-/// itself folded an entries vector of length ZERO and asserted `0 == 0`. Gate
-/// 12 was satisfied by both, because it resolves the crate and the final
-/// segment and asks whether a proof is NAMED; its own log says it cannot ask
-/// whether the claim is true. The module segment is `server` rather than
-/// `server::tests` for that resolver's sake: it matches on `crate::mod::fn` and
-/// a fourth segment makes it look for an `fn tests`, which is the form every
-/// other citation in this file already avoids.
-///
-/// The iterator is taken generically for that test: it counts what it yields.
-///
-/// # What one count is
-///
-/// The ONE-MINUTE SPOT bars of one listing: keyed by exchange, segment and
-/// symbol, with every contract series and every other rung left out. It was
-/// keyed by the symbol alone, so the NIFTY index row summed its 1-minute and
-/// 1-day bars and every stored NIFTY option, an index whose only data was
-/// options showed as held and charted nothing, and `NSE-CASH-X` and
-/// `BSE-CASH-X` showed one number (Z1-slice14-F1, D-1762).
-fn bars_by_symbol<'a>(
-    census: Option<&census::VendorCensus>,
-    entries: impl IntoIterator<Item = &'a (census::Series, store::path::YearMonth)>,
-) -> std::collections::HashMap<ListingKey, u64> {
-    // PRE-SIZED FROM THE ENTRIES, not from the census. Gate 11 rule 3 refuses a
-    // map that grows by rehashing, and this function exists to remove a cost —
-    // it replaced an O(entries x universe) nested scan, so a map that rehashes
-    // its way up hands part of that saving straight back. The ceiling is one
-    // symbol per entry: the loop below inserts at most once per entry and
-    // usually far fewer, since a symbol repeats across months. `size_hint().0`
-    // is a LOWER bound by contract, which is what a capacity wants — never an
-    // over-allocation on an iterator that cannot say how long it is.
-    let entries = entries.into_iter();
-    let mut held = std::collections::HashMap::with_capacity(entries.size_hint().0);
-    let Some(census) = census else {
-        // NOT AN EMPTY MAP OF ZEROES — an empty map, which every caller reads
-        // as "no count for this symbol". The distinction is the one D-0124
-        // makes on the wire: an unreadable census is not a store of zeroes.
-        return held;
-    };
-    for (series, month) in entries {
-        if series.contract.is_some() || series.timeframe != store::path::Timeframe::MINUTE_1 {
-            continue;
-        }
-        if let super::census_cache::RowsOf::Held(rows) = census.rows_of(&series.at(*month)) {
-            *held
-                .entry((series.exchange, series.segment, series.symbol))
-                .or_insert(0) += rows;
-        }
+/// What the census holds for one spot listing: rows per rung, and whether
+/// the feed holds options on it.
+#[derive(Debug, Default, Clone)]
+struct Held {
+    rows: BTreeMap<store::path::Timeframe, u64>,
+    options: bool,
+}
+
+impl Held {
+    /// The finest rung held and its rows: what `bars` reports.
+    fn bars(&self) -> (u64, Option<store::path::Timeframe>) {
+        self.rows
+            .iter()
+            .find(|(_, rows)| **rows > 0)
+            .map_or((0, None), |(rung, rows)| (*rows, Some(*rung)))
+    }
+}
+
+/// The census's spot series and option underlyings for one feed, read off its
+/// facet index: one node per instrument, never a walk of the census.
+fn held_by_listing(
+    site: &Site,
+    feed: Vendor,
+    slot: &std::sync::Arc<super::census_cache::Slot>,
+) -> BTreeMap<(Exchange, Segment, Symbol), Held> {
+    let mut held: BTreeMap<(Exchange, Segment, Symbol), Held> = BTreeMap::new();
+    for segment in [Segment::Index, Segment::Cash] {
+        super::facets::index(site, feed, segment, slot, |index| {
+            for ((exchange, symbol), under) in index.underlyings() {
+                held.entry((*exchange, segment, *symbol)).or_default().rows =
+                    under.agg.rows.clone();
+            }
+        });
+    }
+    let options: Vec<(Exchange, Symbol)> =
+        super::facets::index(site, feed, Segment::Fno, slot, |index| {
+            index.underlyings().map(|(id, _)| *id).collect()
+        });
+    for (exchange, symbol) in options {
+        let spot_segment = [Segment::Index, Segment::Cash]
+            .into_iter()
+            .find(|segment| held.contains_key(&(exchange, *segment, symbol)));
+        // AN UNDERLYING WITH OPTIONS AND NO SPOT SERIES is listed under FNO,
+        // so it is findable and says plainly that its spot is not stored.
+        held.entry((exchange, spot_segment.unwrap_or(Segment::Fno), symbol))
+            .or_default()
+            .options = true;
     }
     held
 }
 
-/// The part of an instrument key that names its spot series in the store.
-type ListingKey = (
-    brutex_core::instrument::Exchange,
-    brutex_core::instrument::Segment,
-    brutex_core::symbol::Symbol,
-);
+/// The `/instruments.json` body for one feed: its master's tracked rows, or,
+/// for a feed that publishes no master, the census's own listings.
+fn instruments_body(
+    site: &Site,
+    feed: Vendor,
+    slot: &std::sync::Arc<super::census_cache::Slot>,
+    read: &super::Read,
+) -> String {
+    let held = held_by_listing(site, feed, slot);
+    let mut rows: Vec<Row> = if feed.publishes_master() {
+        read.merged
+            .by_key
+            .iter()
+            .filter(|(_, entry)| {
+                crate::catalog::tracked(entry.universe)
+                    && entry.ids.get(feed as usize).copied().flatten().is_some()
+            })
+            .map(|(key, entry)| Row {
+                key: *key,
+                universe: entry.universe,
+                held: held
+                    .get(&(key.exchange, key.segment, key.underlying))
+                    .cloned()
+                    .unwrap_or_default(),
+                master: Some(feed),
+                spot: true,
+            })
+            .collect()
+    } else {
+        held.iter()
+            .map(|(&(exchange, segment, symbol), held)| {
+                let is_spot = segment != Segment::Fno;
+                let key = InstrumentKey {
+                    exchange,
+                    segment,
+                    underlying: symbol,
+                    kind: if segment == Segment::Index {
+                        Kind::Index
+                    } else {
+                        Kind::Equity
+                    },
+                };
+                Row {
+                    key,
+                    // MEMBERSHIP FROM THE SOURCED LISTS, never from the census:
+                    // being stored is not being a constituent (D-0089).
+                    universe: brutex_core::universe::of_instrument(&key),
+                    held: held.clone(),
+                    master: None,
+                    spot: is_spot,
+                }
+            })
+            .collect()
+    };
+    // HELD FIRST, INDICES BEFORE EQUITIES, THEN BY NAME: the rows that can be
+    // charted, the engine's own surface, then alphabetical.
+    rows.sort_unstable_by_key(|row| {
+        (
+            row.held.bars().0 == 0,
+            row.key.kind != Kind::Index,
+            row.key.underlying,
+            row.key.segment,
+        )
+    });
+    let mut out = String::from("[");
+    for (n, row) in rows.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        row.write(&mut out);
+    }
+    out.push(']');
+    out
+}
+
+/// One `/instruments.json` row.
+struct Row {
+    key: InstrumentKey,
+    universe: brutex_core::universe::Universe,
+    held: Held,
+    /// The feed whose master lists it, or `None` for a census-derived row.
+    master: Option<Vendor>,
+    /// Whether this is a spot listing; `false` for an option underlying the
+    /// feed holds no spot series of.
+    spot: bool,
+}
+
+impl Row {
+    fn write(&self, out: &mut String) {
+        let (bars, rung) = self.held.bars();
+        let canonical = self.key.to_string();
+        let _ = write!(
+            out,
+            // EXCHANGE AND SEGMENT TRAVEL WITH THE ROW, because the store is
+            // keyed on them. `universe` is the frozen legacy label and
+            // `universes` the whole set (D-0089): both load-bearing.
+            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"universes":{},"bars":{bars},"bars_rung":{},"rows_by_rung":{{"#,
+            render::json_string(self.key.underlying.as_str()),
+            render::json_string(&canonical),
+            if self.spot {
+                render::json_string(&format!("{:?}", self.key.kind))
+            } else {
+                "null".to_owned()
+            },
+            render::json_string(self.key.exchange.as_str()),
+            render::json_string(self.key.segment.as_str()),
+            render::json_string(&universe_label(self.universe)),
+            universes_json(self.universe),
+            rung.map_or_else(
+                || "null".to_owned(),
+                |rung| render::json_string(rung.as_str())
+            ),
+        );
+        for (n, (rung, rows)) in self.held.rows.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{}:{rows}", render::json_string(rung.as_str()));
+        }
+        let _ = write!(
+            out,
+            r#"}},"spot":{},"options":{},"master":{},"href":{}}}"#,
+            self.spot,
+            self.held.options,
+            self.master.map_or_else(
+                || "null".to_owned(),
+                |feed| render::json_string(feed.as_str())
+            ),
+            render::json_string(&format!(
+                "/instruments?q={}",
+                render::query_value(&canonical)
+            )),
+        );
+    }
+}
 
 /// What each spot target resolves to FOR ONE FEED — the counts, and every name
 /// that did not resolve.
@@ -424,248 +441,239 @@ mod tests {
         store_root,
     };
     use crate::server::{LEGACY_UNIVERSE_TOKENS, Site, UNIVERSE_TOKENS, universe_tokens};
-    use brutex_core::vendor::Vendor;
-    use std::path::PathBuf;
 
-    /// **The bar count per instrument is ONE pass over the census, whatever the
-    /// universe is.**
-    ///
-    /// `/instruments.json` folded the census inside a closure that was both the
-    /// sort key and the emitted field, so the scan ran once per comparison —
-    /// ~22.6 per row at n=785 — and the request cost the PRODUCT of the universe
-    /// and the census for a response whose size never moves. Measured in an
-    /// optimised build with no disk I/O: 750 entries 15.5 ms, 43,422 entries
-    /// 819.2 ms, response flat at ~25 KB.
-    ///
-    /// The assertion is the pass count and not a duration, because a timing
-    /// assertion on a shared machine is a flake. The iterator counts what it
-    /// yields, so a future edit that puts the scan back inside the per-symbol
-    /// path fails here by COST.
-    ///
-    /// The proof of the claim above is this test itself,
-    /// `api::server::instrument_bar_counts_are_one_pass_over_the_census`. Named
-    /// rather than left implicit because gate 12 reads a cost claim in any doc
-    /// block, including a test's own, and cannot tell that the assertion is six
-    /// lines below the sentence. The two DURATIONS quoted -- 15.5 ms and 819.2 ms
-    /// -- are measurements and are not asserted anywhere, which is what the
-    /// paragraph above says and why the pass count is the thing pinned.
-    ///
-    /// # What this asserted before, and why it asserted nothing
-    ///
-    /// `entries` was `Vec::new()`. The load-bearing line was
-    /// `assert_eq!(visits.get(), entries.len(), ...)` with BOTH SIDES ZERO —
-    /// `0 == 0`, under a message reading "one visit per entry, and the universe
-    /// is not a factor in it". Nothing about a per-symbol scan can fail against
-    /// an empty vector, so the O(entries x universe) regression the doc block
-    /// on `bars_by_symbol` cites this test against would have walked straight
-    /// through it. `CLAUDE.md` §4's "a test that asserts nothing" is the row it
-    /// was sitting on.
-    ///
-    /// It runs at TWO sizes now, and the sizes differ in the UNIVERSE — three
-    /// symbols and ten, over the same four months each — because the whole
-    /// claim is that the universe is not a factor. A reintroduced inner scan
-    /// yields `entries.len() * symbols` and misses at both.
-    #[test]
-    fn instrument_bar_counts_are_one_pass_over_the_census() {
-        // Two universes, four months each. The month count is held fixed so the
-        // only thing moving between the passes is the number of distinct
-        // symbols -- which is the factor the claim says is absent.
-        let small = ["NIFTY", "BANKNIFTY", "RELIANCE"];
-        let large = [
-            "NIFTY",
-            "BANKNIFTY",
-            "RELIANCE",
-            "TCS",
-            "INFY",
-            "HDFCBANK",
-            "ITC",
-            "SBIN",
-            "WIPRO",
-            "ONGC",
-        ];
-        for symbols in [small.as_slice(), large.as_slice()] {
-            let entries = one_pass_entries(symbols, 4);
-            assert_eq!(
-                entries.len(),
-                symbols.len().saturating_mul(4),
-                "the fixture must not be empty, which is the defect this replaces"
-            );
-            let census = one_pass_census(&entries);
-            let visits = std::cell::Cell::new(0_usize);
-            let counted = || {
-                entries.iter().inspect(|_| {
-                    visits.set(visits.get() + 1);
-                })
-            };
+    /// The rows [`census_on_disk`] records for a month at one rung.
+    const ROWS: u64 = 375;
 
-            // THE COST. One visit per entry, at both universe sizes. A scan
-            // reintroduced inside the per-symbol path reads
-            // `entries.len() * symbols` here -- 36 for the small pass and 400
-            // for the large one -- and fails by COST rather than by taste.
-            let held = bars_by_symbol(Some(&census), counted());
-            assert_eq!(
-                visits.get(),
-                entries.len(),
-                "one visit per entry, and the universe is not a factor in it"
-            );
-
-            // AND THE FOLD IS RIGHT, not merely cheap. A pass count on its own
-            // is satisfied by a function that walks the entries and counts
-            // nothing, so the map is checked too: one key per symbol, and each
-            // key carrying every month that symbol holds.
-            assert_eq!(
-                held.len(),
-                symbols.len(),
-                "one key per symbol, and no key for a symbol nobody holds"
-            );
-            for name in symbols {
-                let symbol = brutex_core::symbol::Symbol::new(name).expect("a symbol");
-                let key = (
-                    brutex_core::instrument::Exchange::Nse,
-                    brutex_core::instrument::Segment::Index,
-                    symbol,
-                );
-                assert_eq!(
-                    held.get(&key),
-                    Some(&(4 * ONE_PASS_ROWS)),
-                    "{name} holds four months of {ONE_PASS_ROWS} rows"
-                );
-            }
-
-            // NO CENSUS IS AN EMPTY MAP, not a map of zeroes: the caller reads a
-            // missing key as "no count", which is the distinction D-0124 put on
-            // the wire. It does not walk the entries at all -- which is the one
-            // assertion here that the old empty fixture could still make.
-            visits.set(0);
-            let none = bars_by_symbol(None, counted());
-            assert!(none.is_empty(), "an unreadable census counts nothing");
-            assert_eq!(visits.get(), 0, "and it does not even walk the entries");
-
-            // AN ABSENT MANIFEST OVER THE SAME ENTRIES. The entries are walked
-            // -- once each, still -- and every probe misses, so the map is
-            // empty rather than a row of zeroes. With the old fixture this arm
-            // never entered the loop body at all.
-            visits.set(0);
-            let absent = census::read_vendor(
-                &crate::scratch::path("bars-by-symbol"),
-                brutex_core::vendor::Vendor::Dhan,
-            );
-            let nothing = bars_by_symbol(Some(&absent), counted());
-            assert!(nothing.is_empty(), "an absent manifest holds nothing");
-            assert_eq!(
-                visits.get(),
-                entries.len(),
-                "and it is still one visit per entry when every probe misses"
-            );
-        }
-    }
-
-    /// One count is one listing's one-minute SPOT bars: an option on the same
-    /// symbol, the same symbol's daily rung, and the same symbol on another
-    /// exchange each stay out of it (Z1-slice14-F1, D-1762).
-    #[test]
-    fn an_instrument_counts_only_its_own_one_minute_spot_bars() {
-        use brutex_core::instrument::{Contract, Exchange, Segment};
-        let symbol = brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol");
-        let spot = census::Series {
-            contract: None,
-            exchange: Exchange::Nse,
-            segment: Segment::Index,
-            symbol,
-            timeframe: store::path::Timeframe::MINUTE_1,
-        };
-        let option = census::Series {
-            contract: Some(Contract::parse("2026-01-29-2500000-CE").expect("a contract")),
-            segment: Segment::Fno,
-            ..spot
-        };
-        let daily = census::Series {
-            timeframe: store::path::Timeframe::DAY_1,
-            ..spot
-        };
-        let bse = census::Series {
-            exchange: Exchange::Bse,
-            ..spot
-        };
-        let at = month_of(2026, 1);
-        let entries = [(spot, at), (option, at), (daily, at), (bse, at)];
-        let census = one_pass_census(&entries);
-        let held = bars_by_symbol(Some(&census), entries.iter());
-        assert_eq!(
-            held.get(&(Exchange::Nse, Segment::Index, symbol)),
-            Some(&ONE_PASS_ROWS)
-        );
-        assert_eq!(
-            held.get(&(Exchange::Bse, Segment::Index, symbol)),
-            Some(&ONE_PASS_ROWS)
-        );
-        assert_eq!(held.get(&(Exchange::Nse, Segment::Fno, symbol)), None);
-        assert_eq!(held.len(), 2, "{held:?}");
-    }
-
-    /// The rows every fixture month in [`one_pass_census`] is recorded with.
-    ///
-    /// A regular NSE session, so a wrong fold reads as a wrong number of
-    /// sessions rather than as an anonymous integer.
-    const ONE_PASS_ROWS: u64 = 375;
-
-    /// `symbols x months` index entries, oldest month first.
-    ///
-    /// Real [`census::Series`] values and real months: a fixture of the right
-    /// SHAPE is what the test this feeds did not have.
-    fn one_pass_entries(
-        symbols: &[&str],
-        months: u8,
-    ) -> Vec<(census::Series, store::path::YearMonth)> {
-        let mut out = Vec::with_capacity(symbols.len().saturating_mul(usize::from(months)));
-        for name in symbols {
-            for m in 1..=months {
-                out.push((
-                    census::Series {
-                        contract: None,
-                        exchange: brutex_core::instrument::Exchange::Nse,
-                        segment: brutex_core::instrument::Segment::Index,
-                        symbol: brutex_core::symbol::Symbol::new(name).expect("a symbol"),
-                        timeframe: store::path::Timeframe::MINUTE_1,
-                    },
-                    month_of(2026, m),
-                ));
-            }
-        }
-        out
-    }
-
-    /// A census holding [`ONE_PASS_ROWS`] for every entry it is handed.
-    ///
-    /// In memory, at a path nothing ever writes -- the same fixture discipline
-    /// `percentage_tests::census_of` states: every number the test reads came
-    /// out of the manifest, and a change that reached for a bar file would fail
-    /// rather than pass slowly.
-    fn one_pass_census(
-        entries: &[(census::Series, store::path::YearMonth)],
-    ) -> census::VendorCensus {
+    /// Writes `vendor`'s single-file census under `root`, holding each
+    /// `(segment, symbol, contract, rung, rows)` in January 2026.
+    fn census_on_disk(
+        root: &std::path::Path,
+        vendor: Vendor,
+        held: &[(Segment, &str, Option<&str>, store::path::Timeframe, u64)],
+    ) {
         let mut manifest =
-            pull::manifest::Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis census");
-        for &(series, at) in entries {
+            pull::manifest::Manifest::open(vendor, &[], &[]).expect("a genesis census");
+        for &(segment, symbol, contract, timeframe, rows) in held {
             manifest
                 .record_held(pull::manifest::Held::new(
                     pull::manifest::Entry {
-                        key: series.at(at),
-                        rows: ONE_PASS_ROWS,
-                        first_ts_micros: 1_751_350_800_000_000,
-                        last_ts_micros: 1_751_363_940_000_000,
+                        key: pull::manifest::EntryKey {
+                            contract: contract.map(|text| {
+                                brutex_core::instrument::Contract::parse(text).expect("a contract")
+                            }),
+                            exchange: Exchange::Nse,
+                            segment,
+                            symbol: Symbol::new(symbol).expect("a symbol"),
+                            timeframe,
+                            month: month_of(2026, 1),
+                        },
+                        rows,
+                        first_ts_micros: 1_767_239_100_000_000,
+                        last_ts_micros: 1_767_261_540_000_000,
                     },
                     pull::manifest::Closes::UNKNOWN,
                 ))
                 .expect("records");
         }
-        census::VendorCensus {
-            vendor: Vendor::Dhan,
-            path: PathBuf::from("/nonexistent/bars-by-symbol/dhan.man"),
-            state: census::Census::Held {
-                manifest: Box::new(manifest),
-            },
+        std::fs::write(
+            pull::manifest::manifest_path(root, vendor),
+            manifest.image(),
+        )
+        .expect("a census on disk");
+    }
+
+    /// The rows of an `/instruments.json` body, by symbol and segment.
+    fn rows_of(body: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str::<Vec<serde_json::Value>>(body).expect("a JSON array")
+    }
+
+    /// **EACH ROW COUNTS ROWS PER RUNG, AND `bars` IS ITS FINEST RUNG'S**
+    /// (DB-042, D-3327 item 4).
+    ///
+    /// `bars` counted one-minute spot bars only, so a share held at the day
+    /// rung alone read `0` and sorted last. RELIANCE here is held at `1day`
+    /// only and must read its day rows; NIFTY at two rungs reads its minute
+    /// rows; an option on NIFTY and NIFTY's BSE listing stay out of NSE
+    /// NIFTY's count.
+    #[test]
+    fn each_row_counts_rows_per_rung_and_bars_is_its_finest_rungs() {
+        let dir = agreeing("instruments-rungs");
+        let built = site("instruments-rungs", &dir);
+        census_on_disk(
+            &built.store_root,
+            Vendor::Dhan,
+            &[
+                (
+                    Segment::Index,
+                    "NIFTY",
+                    None,
+                    store::path::Timeframe::MINUTE_1,
+                    ROWS,
+                ),
+                (
+                    Segment::Index,
+                    "NIFTY",
+                    None,
+                    store::path::Timeframe::DAY_1,
+                    21,
+                ),
+                (
+                    Segment::Cash,
+                    "RELIANCE",
+                    None,
+                    store::path::Timeframe::DAY_1,
+                    2_168,
+                ),
+                (
+                    Segment::Fno,
+                    "NIFTY",
+                    Some("2026-01-29-2500000-CE"),
+                    store::path::Timeframe::MINUTE_1,
+                    9_999,
+                ),
+            ],
+        );
+        let (code, headers, body) = instruments_answer(&built, Vendor::Dhan);
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(headers["x-brutex-census-state"], "held");
+        let rows = rows_of(&body);
+        let nifty = rows
+            .iter()
+            .find(|row| row["symbol"] == "NIFTY")
+            .expect("NIFTY");
+        assert_eq!(nifty["bars"], ROWS);
+        assert_eq!(nifty["bars_rung"], "1min");
+        assert_eq!(nifty["rows_by_rung"]["1day"], 21);
+        assert_eq!(nifty["options"], true, "the feed holds options on it");
+        assert_eq!(nifty["master"], "dhan");
+        let reliance = rows
+            .iter()
+            .find(|row| row["symbol"] == "RELIANCE")
+            .expect("RELIANCE");
+        assert_eq!(reliance["bars"], 2_168, "a day-only share is not a zero");
+        assert_eq!(reliance["bars_rung"], "1day");
+        assert_eq!(reliance["options"], false);
+
+        // KEPT PER CENSUS READ: the same census answers the same body, and a
+        // census that moves answers the new count.
+        let (_, _, again) = instruments_answer(&built, Vendor::Dhan);
+        assert_eq!(again, body);
+        census_on_disk(
+            &built.store_root,
+            Vendor::Dhan,
+            &[(
+                Segment::Cash,
+                "RELIANCE",
+                None,
+                store::path::Timeframe::DAY_1,
+                2_169,
+            )],
+        );
+        let (_, _, moved) = instruments_answer(&built, Vendor::Dhan);
+        let reliance = rows_of(&moved)
+            .into_iter()
+            .find(|row| row["symbol"] == "RELIANCE")
+            .expect("RELIANCE");
+        assert_eq!(reliance["bars"], 2_169);
+    }
+
+    /// **A FEED WITH NO MASTER IS LISTED FROM ITS CENSUS, AND NEVER AS "IN
+    /// THIS MASTER"** (DB-041, D-3327 item 4).
+    ///
+    /// GDFL publishes no instrument master, so this route answered `[]` and
+    /// every universe tier on /db was disabled. Its rows now come from the
+    /// census: each spot series with its kind and its membership from the
+    /// sourced lists, each option underlying with no spot series under `FNO`
+    /// with `spot: false` and no kind, all of them `master: null`.
+    #[test]
+    fn a_feed_with_no_master_is_listed_from_its_census() {
+        let dir = agreeing("instruments-gdfl");
+        let built = site("instruments-gdfl", &dir);
+        census_on_disk(
+            &built.store_root,
+            Vendor::Gdfl,
+            &[
+                (
+                    Segment::Index,
+                    "NIFTY",
+                    None,
+                    store::path::Timeframe::SECOND_1,
+                    ROWS,
+                ),
+                (
+                    Segment::Cash,
+                    "RELIANCE",
+                    None,
+                    store::path::Timeframe::SECOND_1,
+                    ROWS,
+                ),
+                (
+                    Segment::Fno,
+                    "NIFTY",
+                    Some("2026-01-29-2500000-CE"),
+                    store::path::Timeframe::SECOND_1,
+                    ROWS,
+                ),
+                (
+                    Segment::Fno,
+                    "ALBK",
+                    Some("2026-01-29-1500-PE"),
+                    store::path::Timeframe::SECOND_1,
+                    ROWS,
+                ),
+            ],
+        );
+        let (code, headers, body) = instruments_answer(&built, Vendor::Gdfl);
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            headers[MASTER_STATE_HEADER], "not-mastered",
+            "GDFL publishes no master"
+        );
+        let rows = rows_of(&body);
+        assert_eq!(rows.len(), 3, "{body}");
+        for row in &rows {
+            assert_eq!(row["master"], serde_json::Value::Null, "{row}");
         }
+        let nifty = rows
+            .iter()
+            .find(|row| row["symbol"] == "NIFTY")
+            .expect("NIFTY");
+        assert_eq!(nifty["kind"], "Index");
+        assert_eq!(nifty["bars_rung"], "1s");
+        assert_eq!(nifty["options"], true);
+        assert!(
+            nifty["universes"]
+                .as_array()
+                .expect("a list")
+                .contains(&serde_json::json!("index")),
+            "{nifty}"
+        );
+        let reliance = rows
+            .iter()
+            .find(|row| row["symbol"] == "RELIANCE")
+            .expect("RELIANCE");
+        assert_eq!(reliance["kind"], "Equity");
+        assert!(
+            reliance["universes"]
+                .as_array()
+                .expect("a list")
+                .contains(&serde_json::json!("fno")),
+            "RELIANCE is an F&O underlying by the sourced list: {reliance}"
+        );
+        let albk = rows
+            .iter()
+            .find(|row| row["symbol"] == "ALBK")
+            .expect("ALBK");
+        assert_eq!(albk["spot"], false);
+        assert_eq!(
+            albk["kind"],
+            serde_json::Value::Null,
+            "no spot series, no kind"
+        );
+        assert_eq!(albk["segment"], "FNO");
+        assert_eq!(albk["bars"], 0);
+        assert_eq!(albk["options"], true);
     }
 
     /// **`/instruments.json` REFUSES A FEED IT DOES NOT READ, RATHER THAN
