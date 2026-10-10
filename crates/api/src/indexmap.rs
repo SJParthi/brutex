@@ -1247,7 +1247,12 @@ mod tests {
         // No stamp: walked every time, and the kept commit is left alone.
         let unstamped = keeper.symbols(&read(), None).expect("held");
         let unstamped_again = keeper.symbols(&read(), None).expect("held");
-        assert_eq!(*unstamped, *next);
+        // THE SAME SYMBOLS, IN WHATEVER ORDER: each read decodes into a new
+        // hash map, so two reads need not list them in one order, and this
+        // compares the set (`held` is already sorted above).
+        let mut unstamped_sorted = (*unstamped).clone();
+        unstamped_sorted.sort_unstable();
+        assert_eq!(unstamped_sorted, held);
         assert!(!Arc::ptr_eq(&unstamped, &unstamped_again), "never kept");
         assert!(!Arc::ptr_eq(&unstamped, &next));
         let kept = keeper.symbols(&read(), Some(later)).expect("held");

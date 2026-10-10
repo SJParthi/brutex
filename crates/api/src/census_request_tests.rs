@@ -61,6 +61,7 @@
     reason = "finite owned fixtures and exact response assertions"
 )]
 
+use super::census_cache::Cached;
 use super::*;
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
@@ -641,7 +642,7 @@ async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() 
         .census
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((newer_stamps, older_censuses, older_entries));
+        Some(Cached::planted(newer_stamps, older_censuses, older_entries));
     assert_eq!(
         fixture.locate("RELIANCE"),
         None,
@@ -827,13 +828,17 @@ fn a_poisoned_census_lock_is_read_through_and_still_refreshed() {
     assert_eq!(fixture.reads(), reads + 1);
 }
 
-/// THE KEY IS THE WHOLE SET, SO ANOTHER FEED'S REWRITE RE-READS THIS ONE.
+/// ANOTHER FEED'S REWRITE LEAVES THIS FEED'S MANIFEST UNREAD (D-3327 item 1;
+/// DB-059, DB-G06, DB-G79).
 ///
-/// The cost `docs/06-limits.md`'s D-0686 section states: the first request
-/// after ANY vendor's stamp moves pays a whole `read_all`, the unchanged
-/// manifests included. Pinned so a change to that cost is a visible one.
+/// This pinned the opposite until D-3327: the cache was one key over every
+/// vendor's stamp, so the first request after ANY vendor's commit re-read every
+/// manifest, the unchanged ones included, and a Zerodha commit every half
+/// second made GDFL's 268 MB manifest a read per request. Each vendor now has
+/// its own cell, keyed on its own stamp: Zerodha's rewrite is read once, and
+/// Dhan's unchanged manifest is not read at all.
 #[test]
-fn another_feeds_rewrite_rereads_every_manifest_once() {
+fn another_feeds_rewrite_leaves_this_feeds_manifest_unread() {
     let fixture = Fixture::new("census-request-other-feed");
     fixture.publish(&[(Segment::Cash, "ADANIENT")], 0);
     assert!(fixture.locate("ADANIENT").is_some());
@@ -841,14 +846,27 @@ fn another_feeds_rewrite_rereads_every_manifest_once() {
     assert!(fixture.locate("ADANIENT").is_some());
     assert_eq!(fixture.reads(), reads, "warm");
     fixture.publish_for(Vendor::Zerodha, &[(Segment::Index, "NIFTY")], 0);
+    let zerodha = manifest_path(&fixture.root, Vendor::Zerodha);
+    let zerodha_reads = census::manifest_reads::of(&zerodha);
     assert!(fixture.locate("NIFTY").is_some());
     assert_eq!(
         fixture.reads(),
-        reads + 1,
-        "Dhan's unchanged manifest re-read"
+        reads,
+        "Dhan's unchanged manifest is not read again"
+    );
+    assert_eq!(
+        census::manifest_reads::of(&zerodha),
+        zerodha_reads + 1,
+        "Zerodha's rewrite is read, once"
     );
     assert!(fixture.locate("NIFTY").is_some());
-    assert_eq!(fixture.reads(), reads + 1, "and once only");
+    assert!(fixture.locate("ADANIENT").is_some());
+    assert_eq!(fixture.reads(), reads, "and still not");
+    assert_eq!(
+        census::manifest_reads::of(&zerodha),
+        zerodha_reads + 1,
+        "once only"
+    );
 }
 
 /// COLD, WARM AND COLD AGAIN ANSWER THE SAME BYTES. `CLAUDE.md` §3 rule 5.
@@ -940,7 +958,7 @@ fn concurrent_installs_and_readers_never_see_a_torn_census() {
     assert!(looked.load(std::sync::atomic::Ordering::Relaxed) > 0);
     let (_, cached) = census_now(&fixture.site);
     let disk = census::held_entries(&census::read_all(&fixture.site.store_root));
-    assert_eq!(*cached, disk, "the cache converged on the disk");
+    assert_eq!(**cached, disk, "the cache converged on the disk");
     assert_eq!(cached.len(), 1);
 }
 
@@ -1984,11 +2002,13 @@ fn a_socket_is_bound_at_a_path_too_long_for_a_socket_address() {
 /// two a stamp decides (`EOPNOTSUPP` on this macOS host, which `std` calls
 /// `Unsupported`; the kind is not assumed here, only required to be neither).
 /// `read_vendor` must label it `Fault::Io` of that kind, and the cache must
-/// decline it: every request while the socket stays reads again, counted on
-/// Dhan's healthy manifest beside it, and nothing is cached. Once the socket
-/// is gone the next read is kept. A `read_vendor` that labelled every I/O
-/// error `Fault::Refused` had this socket kept, under a stamp that cannot say
-/// when the fault ends.
+/// decline it: while the socket stays, Groww's own cell keeps nothing and no
+/// all-vendor read is kept, so every request reads Groww again. Since D-3327
+/// the cache is per vendor, so Dhan's healthy manifest beside it is read once
+/// and kept in its own cell: a fault on one feed no longer makes every other
+/// feed's manifest a read per request. Once the socket is gone the next read
+/// is kept. A `read_vendor` that labelled every I/O error `Fault::Refused` had
+/// this socket kept, under a stamp that cannot say when the fault ends.
 ///
 /// The socket is bound through `SocketAt`, so a long `TMPDIR` still fits.
 #[cfg(unix)]
@@ -2022,12 +2042,29 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
     let faulted = ["unreadable", "held", "absent", "absent", "absent"];
     cold(&fixture);
     let base = fixture.reads();
+    let kept = |vendor| {
+        fixture
+            .site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|cached| cached.keeps_vendor(vendor))
+    };
     for request in 1..=3 {
         assert_eq!(fixture.states(), faulted, "request {request}: served");
         assert_eq!(
             fixture.reads(),
-            base + request,
-            "request {request}: read again, not kept"
+            base + 1,
+            "request {request}: Dhan's healthy manifest was read once and kept"
+        );
+        assert!(
+            !kept(Vendor::Groww),
+            "request {request}: Groww's cell keeps nothing"
+        );
+        assert!(
+            kept(Vendor::Dhan),
+            "request {request}: Dhan's cell keeps its read"
         );
     }
     assert!(
@@ -2036,8 +2073,10 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Cached::kept_stamps)
             .is_none(),
-        "nothing is cached while the socket stays"
+        "no all-vendor read is cached while the socket stays"
     );
 
     drop(socket);
@@ -2049,21 +2088,21 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
     assert_eq!(fixture.reads(), after, "and what it read is kept");
 }
 
-/// WHILE A FAULT THE CENSUS CACHE DECLINES LASTS, `/store.json` READS THE
-/// MANIFESTS AND ENCODES ITS BODY AGAIN ON EVERY REQUEST. D-0695.
+/// A FAULT ON ANOTHER FEED'S MANIFEST LEAVES THIS FEED'S `/store.json` BODY
+/// KEPT (D-3327 item 1; DB-G79).
 ///
-/// This pins a cost `docs/06-limits.md` states, not a behaviour anybody
-/// wants. `/store.json` keeps its encoded body in `store_wire::Cache`, keyed on
-/// the census it was built from. A read the census cache declines is a new
-/// census on every request, so that cache misses too. With a socket at
-/// Groww's manifest path, each of three `feed=dhan` requests reads Dhan's
-/// healthy manifest again and answers the same bytes from a new allocation.
-/// Once the socket is gone, the next request reads once, and the one after
-/// reads nothing and answers the same allocation. A cache that survived the
-/// declined read fails the first half, and must correct that section.
+/// This pinned a cost `docs/06-limits.md` stated, not a behaviour anybody
+/// wanted: `store_wire::Cache` kept the encoded body against the all-vendor
+/// census, and a read the census cache declined (a socket at Groww's manifest
+/// path) was a new census on every request, so `feed=dhan` read Dhan's healthy
+/// manifest and encoded its body again on every request. The body is now kept
+/// per (vendor, format) against that vendor's own cell, so Groww's fault does
+/// not reach it: the first request reads Dhan once and encodes, and every later
+/// one reads nothing and answers the same allocation, before and after the
+/// socket goes.
 #[cfg(unix)]
 #[test]
-fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() {
+fn a_fault_on_another_feeds_manifest_leaves_this_feeds_store_body_kept() {
     use axum::http::{HeaderMap, Method, StatusCode, Uri};
     let fixture = Fixture::new("cr-wire");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
@@ -2084,27 +2123,28 @@ fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() 
         let again = body();
         assert_eq!(
             fixture.reads(),
-            base + request,
-            "request {request}: read again"
+            base + 1,
+            "request {request}: not read again"
         );
         assert_eq!(again, first, "request {request}: the same answer");
-        assert_ne!(
+        assert_eq!(
             again.as_ptr(),
             first.as_ptr(),
-            "request {request}: encoded again"
+            "request {request}: the kept body, not encoded again"
         );
     }
 
     drop(socket);
     fs::remove_file(&groww).expect("take the socket away");
-    let kept = body();
-    let after = fixture.reads();
-    assert_eq!(after, base + 4, "its end is read");
-    let warm = body();
-    assert_eq!(fixture.reads(), after, "and kept");
+    let after = body();
     assert_eq!(
-        warm.as_ptr(),
-        kept.as_ptr(),
+        fixture.reads(),
+        base + 1,
+        "Groww's repair does not move Dhan's cell"
+    );
+    assert_eq!(
+        after.as_ptr(),
+        first.as_ptr(),
         "and its body is not encoded again"
     );
 }
@@ -2220,7 +2260,9 @@ fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
         fault,
     };
     let held = || Census::Held {
-        manifest: Box::new(Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest")),
+        manifest: census::Manifests::single(
+            Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest"),
+        ),
     };
     let io = |kind| unreadable(Fault::Io(kind));
     let not_a_directory = ManifestStamp::Faulted(ErrorKind::NotADirectory);
@@ -2326,7 +2368,9 @@ fn only_an_absence_its_stamp_contradicts_is_served_unreadable() {
         fault,
     };
     let held = || Census::Held {
-        manifest: Box::new(Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest")),
+        manifest: census::Manifests::single(
+            Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest"),
+        ),
     };
     // (the stamp, whether the root was a directory, what the read said,
     // served unreadable in its place)
@@ -2463,7 +2507,7 @@ fn kept_census(fixture: &Fixture) -> Option<CensusStamps> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        .map(|(at, _, _)| at.clone())
+        .and_then(Cached::kept_stamps)
 }
 
 /// Where the store root is when a miss that read an absence stamps again.
@@ -3896,6 +3940,8 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Cached::kept_stamps)
             .is_none(),
         "no whole read was kept, so only the per-row rule kept each calendar"
     );

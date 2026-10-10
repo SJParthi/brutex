@@ -164,6 +164,14 @@ fn w1_api5_1_a_body_reads_the_whole_census_and_the_bullet_says_so() {
     );
 }
 
+/// W1-api5-2, AS D-3327 LEFT IT. The bullet still names the cost it was
+/// written for: every census miss read every vendor's whole manifest and sorted
+/// every entry. D-3327 (WP-30) removed it: each vendor is read through its own
+/// cell on its own stamp, a moved manifest is extended by its appended entries
+/// (`census::read_vendor_after`), and the merged entry list is sorted only when
+/// a caller reads it. The source assertions below pin that shape; the bullet
+/// in `docs/06-limits.md` is not this package's to rewrite (WP-99 rewrites it
+/// under D-3327), so the words are still held to it until it is.
 #[test]
 fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_miss() {
     names(
@@ -181,13 +189,32 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
         miss.contains("let mut censuses = read(&site.store_root);"),
         "{miss}"
     );
-    assert!(miss.contains("census::held_entries(&censuses)"), "{miss}");
+    assert!(
+        miss.contains("HeldEntries::of(&censuses)")
+            && !miss.contains("census::held_entries(&censuses)"),
+        "the entries are no longer sorted on every miss: {miss}"
+    );
+    assert!(
+        item(CENSUS_CACHE, "pub(crate) fn census_now_stamped(")
+            .contains("vendor_slot(site, vendor, vendor_stamp(root, vendor), true)"),
+        "each vendor is read through its own cell"
+    );
+    assert!(
+        item(CENSUS_CACHE, "fn vendor_slot(")
+            .contains("census::read_vendor_after(root, vendor, previous)"),
+        "and a miss extends the vendor's previous read"
+    );
     assert!(
         item(CENSUS, "pub fn held_entries(").contains("sort_unstable"),
-        "the entries are sorted on every miss"
+        "the merged list is still a sort when a caller reads it"
     );
 }
 
+/// W1-api5-3, AS D-3327 LEFT IT. The bullet names the walk this route made on
+/// every request: the universe, every census entry, and a sort. D-3327 (WP-30)
+/// builds the body once per (feed census read, universe parse) on the
+/// store-read pool, from the facet index's one node per instrument, and keeps
+/// it. The bullet is WP-99's to rewrite; the words are held to it until then.
 #[test]
 fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
     names(
@@ -202,16 +229,21 @@ fn w1_api5_3_the_instrument_list_walks_the_universe_and_every_census_entry() {
     );
     let route = item(INSTRUMENTS_ROUTE, "pub(super) async fn instruments_json(");
     assert!(
-        route.contains(".by_key\n        .iter()\n        .filter("),
-        "{route}"
+        route.contains("crate::detail::run_store_read(move || instruments_answer(&site, feed))"),
+        "off the async workers: {route}"
     );
-    assert!(route.contains("bars_by_symbol(censuses.iter()"), "{route}");
-    assert!(route.contains("entries.iter()"), "{route}");
-    assert!(route.contains("listing.sort_unstable_by_key("), "{route}");
+    let answer = item(INSTRUMENTS_ROUTE, "pub(super) fn instruments_answer(");
     assert!(
-        item(INSTRUMENTS_ROUTE, "fn bars_by_symbol<'a>(")
-            .contains("for (series, month) in entries"),
-        "every entry is walked"
+        answer.contains("site.census_wire.kept(") && answer.contains("universe.generation"),
+        "kept per census read and universe parse: {answer}"
+    );
+    assert!(
+        item(INSTRUMENTS_ROUTE, "fn held_by_listing(").contains("super::facets::index("),
+        "counted from the facet index, not a walk of every entry"
+    );
+    assert!(
+        !INSTRUMENTS_ROUTE.contains("fn bars_by_symbol"),
+        "the per-request walk is gone"
     );
 }
 

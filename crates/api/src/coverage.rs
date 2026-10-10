@@ -94,6 +94,14 @@ pub enum Bucket {
     /// which are not shares, and `AGL`, whose row in the exchange's file has an
     /// empty ISIN cell (`docs/06-limits.md` §11).
     NoNseIsin,
+    /// **The bucket D-3327 added.** This feed's master carries NO ISIN column
+    /// at all (Zerodha, `docs/00-charter.md` §4d), so the name's NSE ISIN
+    /// cannot be compared with anything of the feed's, and the feed lists the
+    /// name by symbol on exactly one NSE cash row (`merge::Merged::
+    /// native_lookup`, the D-3314 probe). Not `lacks`: the feed has a row; the
+    /// row cannot be ISIN-checked here. D-3314's `zerodha_nse_checked` checks
+    /// it against NSE's own file before a pull.
+    Unverifiable,
 }
 
 impl Bucket {
@@ -105,6 +113,7 @@ impl Bucket {
             Self::Ambiguous => "ambiguous",
             Self::Malformed => "malformed",
             Self::NoNseIsin => "no_nse_isin",
+            Self::Unverifiable => "unverifiable",
         }
     }
 }
@@ -147,6 +156,11 @@ pub struct Covered {
     /// about NSE's constituent file and about no master: five F&O index
     /// underlyings and `AGL`. See `docs/06-limits.md` §11.
     pub no_nse_isin: usize,
+    /// Names a feed whose master carries no ISIN column lists by symbol on one
+    /// NSE cash row, which cannot be ISIN-checked here. See
+    /// [`Bucket::Unverifiable`]. Zero for every feed whose master has an ISIN
+    /// column.
+    pub unverifiable: usize,
     /// What the source states the set's size is, when a source states one.
     pub published: Option<usize>,
     /// Every name behind the four non-matched counts, with its reason.
@@ -177,6 +191,7 @@ impl Covered {
             .saturating_add(self.ambiguous)
             .saturating_add(self.malformed)
             .saturating_add(self.no_nse_isin)
+            .saturating_add(self.unverifiable)
     }
 }
 
@@ -242,11 +257,21 @@ impl Coverage {
                     // them is edited. `every_matched_row_contributes_exactly_one_id`
                     // is the assertion; this line is the reason it can never
                     // matter here.
-                    from_join(
+                    let joined = from_join(
                         join.tier(vendor, tier),
                         join.ids_for(vendor, target).unwrap_or_default(),
                         tier.published(),
-                    )
+                    );
+                    // A MASTER WITH NO ISIN COLUMN IS JOINED BY SYMBOL, and a
+                    // name it lists is `unverifiable`, never `lacks` (DB-043,
+                    // D-3327 item 4): the ISIN join above found nothing because
+                    // there is nothing of this feed's to compare, not because
+                    // the feed has no row.
+                    if vendor.master_columns().isin.is_empty() {
+                        by_symbol(joined, merged, vendor)
+                    } else {
+                        joined
+                    }
                 } else {
                     from_master(merged, vendor, target)
                 };
@@ -294,7 +319,7 @@ impl Coverage {
                 }
                 let mut line = format!(
                     "{} · {}: {} of {} reachable — {} lacks, {} ambiguous, {} malformed, \
-                     {} no NSE ISIN. \
+                     {} no NSE ISIN, {} unverifiable by ISIN. \
                      This is default identity coverage, not pull readiness. A run of \
                      target={} preflights the selected basket and refuses unresolved \
                      identities before vendor work; it does not silently skip them. \
@@ -308,6 +333,7 @@ impl Coverage {
                     covered.ambiguous,
                     covered.malformed,
                     covered.no_nse_isin,
+                    covered.unverifiable,
                     target.slug(),
                 );
                 let names: Vec<&str> = covered
@@ -413,9 +439,82 @@ fn from_join(join: &TierJoin, ids: &[VendorId], published: usize) -> Covered {
         ambiguous: join.ambiguous.len(),
         malformed: join.malformed.len(),
         no_nse_isin: join.no_nse_isin.len(),
+        unverifiable: 0,
         published: Some(published),
         unresolved,
     }
+}
+
+/// A join-backed answer for a feed whose master carries NO ISIN column,
+/// re-read by symbol: each name the ISIN join could only call `lacks` is
+/// asked of the feed's own listings under its NSE cash key, one probe each
+/// (`merge::Merged::native_lookup`, the probe D-3314's `zerodha_nse_checked`
+/// policy takes as its second condition).
+///
+/// * one row, its token shared with no other key: [`Bucket::Unverifiable`];
+/// * rows that do not agree on one token: [`Bucket::Ambiguous`];
+/// * no row under the symbol either: still [`Bucket::Lacks`], now saying the
+///   symbol was asked as well.
+///
+/// `matched` does not move: it is the id list an ISIN-policy pull would send,
+/// and nothing here is an ISIN match. The counts are re-read off the rows so
+/// the partition still sums to `published`.
+fn by_symbol(mut covered: Covered, merged: &Merged, vendor: Vendor) -> Covered {
+    use crate::merge::NativeLookup;
+    for row in &mut covered.unresolved {
+        if row.bucket != Bucket::Lacks {
+            continue;
+        }
+        let key = brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            &row.symbol,
+        );
+        let found = key.map_or(NativeLookup::Absent, |key| {
+            merged.native_lookup(vendor, key)
+        });
+        let (bucket, why) = match found {
+            NativeLookup::Unique(id) => (
+                Bucket::Unverifiable,
+                format!(
+                    "{}'s master has no ISIN column, so NSE's ISIN for this name cannot be \
+                     compared; it lists the symbol on one NSE cash row ({}), which is a \
+                     symbol match and not an ISIN one. D-3314's zerodha_nse_checked \
+                     policy checks it against NSE's own file before a pull",
+                    vendor.as_str(),
+                    id.as_str()
+                ),
+            ),
+            NativeLookup::Contested => (
+                Bucket::Ambiguous,
+                format!(
+                    "{}'s master has no ISIN column, and its NSE cash rows for this symbol \
+                     do not agree on one token, so no id is chosen",
+                    vendor.as_str()
+                ),
+            ),
+            NativeLookup::Absent => (
+                Bucket::Lacks,
+                format!(
+                    "{}'s master has no ISIN column, and it lists no NSE cash row under this \
+                     symbol either",
+                    vendor.as_str()
+                ),
+            ),
+        };
+        row.bucket = bucket;
+        row.why = why;
+    }
+    let count = |bucket: Bucket| {
+        covered
+            .unresolved
+            .iter()
+            .filter(|row| row.bucket == bucket)
+            .count()
+    };
+    covered.lacks = count(Bucket::Lacks);
+    covered.ambiguous = count(Bucket::Ambiguous);
+    covered.unverifiable = count(Bucket::Unverifiable);
+    covered
 }
 
 /// One master-counted target's answer, folded off the merged universe.
@@ -452,6 +551,7 @@ fn from_master(merged: &Merged, vendor: Vendor, target: SpotTarget) -> Covered {
         // defines this target, so no published name was ever looked up in the
         // exchange's ISIN column.
         no_nse_isin: 0,
+        unverifiable: 0,
         // NO DENOMINATOR, AND THAT IS THE FACT. NSE publishes no file naming
         // this set, so there is no published count to be short of and a number
         // here would be invention — `CLAUDE.md` §3 rule 1.
@@ -530,12 +630,14 @@ fn target_json(covered: Option<&Covered>, target: SpotTarget) -> String {
     }
     match covered {
         // EVERY COUNT NULL, AND THE WORD THAT EXPLAINS ALL OF THEM.
-        None => out.push_str(r#""ambiguous":null,"malformed":null,"no_nse_isin":null"#),
+        None => out.push_str(
+            r#""ambiguous":null,"malformed":null,"no_nse_isin":null,"unverifiable":null"#,
+        ),
         Some(c) => {
             let _ = write!(
                 out,
-                r#""ambiguous":{},"malformed":{},"no_nse_isin":{}"#,
-                c.ambiguous, c.malformed, c.no_nse_isin
+                r#""ambiguous":{},"malformed":{},"no_nse_isin":{},"unverifiable":{}"#,
+                c.ambiguous, c.malformed, c.no_nse_isin, c.unverifiable
             );
         }
     }
@@ -687,6 +789,78 @@ mod tests {
         let join = Join::build(&merged);
         let coverage = Coverage::build(&merged, &join);
         (merged, coverage)
+    }
+
+    /// **A MASTER WITH NO ISIN COLUMN IS JOINED BY SYMBOL: A SHARE IT LISTS IS
+    /// `unverifiable`, NEVER `lacks`** (DB-043, D-3327 item 4, D-3314).
+    ///
+    /// Zerodha's master carries no ISIN column, so the ISIN join could only
+    /// call every published name `lacks`: `/universes.json?feed=zerodha` said
+    /// "208 vendor lacks" over 208 stored F&O shares. Here Zerodha lists
+    /// RELIANCE on one NSE cash row (unverifiable: a symbol match, not an ISIN
+    /// one), TCS on two rows that do not agree on a token (ambiguous), and no
+    /// INFY at all (still lacks, saying the symbol was asked too). The tokens
+    /// are invented. Nothing moves into `matched`, and the five buckets still
+    /// sum to the published list.
+    #[test]
+    fn a_master_with_no_isin_column_calls_a_listed_share_unverifiable_not_lacking() {
+        let zerodha = |symbol: &str, id: &str| Listing {
+            vendor_id: brutex_core::vendor::VendorId::new(id).expect("a legal id"),
+            key: key(symbol, Kind::Equity),
+            isin: None,
+            unsuffixed: None,
+        };
+        let merged = merge(&[
+            source(
+                Vendor::Groww,
+                vec![equity("RELIANCE", RELIANCE, "NSE-RELIANCE")],
+            ),
+            source(
+                Vendor::Zerodha,
+                vec![
+                    zerodha("RELIANCE", "900001"),
+                    zerodha("TCS", "900002"),
+                    zerodha("TCS", "900003"),
+                ],
+            ),
+        ]);
+        let coverage = Coverage::build(&merged, &Join::build(&merged));
+        let n50 = coverage
+            .of(Vendor::Zerodha, SpotTarget::Nifty50)
+            .expect("Zerodha publishes a master and it was read");
+        let bucket = |symbol: &str| {
+            n50.unresolved
+                .iter()
+                .find(|row| row.symbol.as_str() == symbol)
+                .map(|row| (row.bucket, row.why.clone()))
+        };
+        let (reliance, why) = bucket("RELIANCE").expect("RELIANCE is named");
+        assert_eq!(reliance, Bucket::Unverifiable, "{why}");
+        assert!(
+            why.contains("900001") && why.contains("no ISIN column"),
+            "{why}"
+        );
+        assert_eq!(bucket("TCS").map(|(b, _)| b), Some(Bucket::Ambiguous));
+        let (infy, why) = bucket("INFY").expect("INFY is named");
+        assert_eq!(infy, Bucket::Lacks);
+        assert!(why.contains("no NSE cash row under this symbol"), "{why}");
+        assert_eq!(n50.unverifiable, 1);
+        assert_eq!(n50.matched, 0, "a symbol match is not an ISIN match");
+        assert_eq!(
+            n50.accounted(),
+            SpotTarget::Nifty50.tier().expect("a tier").published()
+        );
+        let json = coverage.json(Vendor::Zerodha);
+        assert!(json.contains(r#""bucket":"unverifiable""#), "{json}");
+        assert!(json.contains(r#""unverifiable":1"#), "{json}");
+
+        // A FEED WITH AN ISIN COLUMN IS UNCHANGED: Groww's RELIANCE matches by
+        // ISIN, and nothing of Groww's is ever unverifiable.
+        let groww = coverage
+            .of(Vendor::Groww, SpotTarget::Nifty50)
+            .expect("Groww publishes a master");
+        assert_eq!(groww.matched, 1);
+        assert_eq!(groww.unverifiable, 0);
     }
 
     #[test]
@@ -926,7 +1100,7 @@ mod tests {
             "the wire says it, once, for the whole feed: {json}"
         );
         assert!(
-            json.contains(r#""counted_from":"no master","published":null,"matched":null,"lacks":null,"ambiguous":null,"malformed":null,"no_nse_isin":null,"unresolved":[]"#),
+            json.contains(r#""counted_from":"no master","published":null,"matched":null,"lacks":null,"ambiguous":null,"malformed":null,"no_nse_isin":null,"unverifiable":null,"unresolved":[]"#),
             "and every count is null rather than zero: {json}"
         );
         assert!(
