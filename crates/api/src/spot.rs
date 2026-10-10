@@ -1,12 +1,12 @@
 //! `GET /spot.json` — the underlying's stored close at an option bar's own
-//! instant, so `/db` can name moneyness, intrinsic and extrinsic (D-2807).
+//! instant, so `/db` can name moneyness, intrinsic and extrinsic (D-2807,
+//! D-3328).
 //!
 //! # What it answers, and what it never answers
 //!
 //! For each asked instant `t` (UTC seconds, an option bar's own stamp) it reads
 //! the UNDERLYING's bar file on the same feed, at the same rung, in the same
-//! month file, and returns that bar's close only when a bar is stamped at
-//! exactly `t`. The underlying's segment and store key come from the sourced
+//! month file. The underlying's segment and store key come from the sourced
 //! alias table, `brutex_core::alias::option_underlying` (D-3332): an index
 //! option (`NIFTY`, `FINNIFTY`, `NIFTYIT`, `NIFTYFPI`, ...) reads
 //! `NSE/INDEX/<store key>` -- `NIFTYFINSERVICE` for FINNIFTY -- and every other
@@ -16,36 +16,52 @@
 //! `brutex_core::universe::FNO_INDEX_UNDERLYINGS`, so NIFTYIT and NIFTYFPI were
 //! read as shares and FINNIFTY under a key no feed files (DB-G25, DB-G54).
 //!
-//! **Never a nearest or an earlier bar.** A missing spot bar is answered by
-//! name (`no_spot_bar`, `no_spot_file`, `spot_unreadable`,
-//! `spot_order_broken`), never by the previous close: a stale spot would put
-//! the option on the wrong rung while looking exactly like a measurement.
-//! `CLAUDE.md` §4. **No look-ahead:** the close returned is the close of the
-//! bar that opens at `t`, which is complete at the same instant the option
-//! bar at `t` is; no later bar's value is returned. The bisection below may
-//! READ later records to LOCATE `t`, and returns none of their values.
+//! **Two ways to take a spot, and the default is the strict one** (D-3328):
+//!
+//! * `asof=exact` (the default, D-2807): the close of the bar stamped at
+//!   exactly `t`, or a named absence (`no_spot_bar`, `no_spot_file`,
+//!   `spot_unreadable`, `spot_order_broken`).
+//! * `asof=prev` (opted in): the close of the underlying's LAST bar at or
+//!   before `t` within `t`'s own IST session (its IST trade day), with the
+//!   stamp it came from (`spot_t`) and its age (`spot_age_s`, `t - spot_t`).
+//!   No such bar in that session answers `no_spot_in_session`, and an
+//!   instant off the rung's grid -- no option bar's own stamp at that rung --
+//!   answers `t_off_grid`, because the bar before it may close after it. A
+//!   daily rung holds one bar per session, closing at the session's close, so
+//!   there `prev` answers exactly what `exact` does.
+//!
+//! Every instant carries `spot_t` and `spot_age_s` (0 for an exact hit, `null`
+//! with no close), and the body says which rule answered (`asof`), so an
+//! earlier close can never pass for one stamped at `t`.
+//!
+//! **Never a later bar, never another month.** No look-ahead (`CLAUDE.md` §3
+//! rule 7): the close returned is that of a bar that opens at or before `t`,
+//! complete no later than the option bar at `t` is. The lookup may READ the
+//! record after `t` to LOCATE `t`, and returns none of its values. An instant
+//! whose IST month is not the asked `month` is a wrong question, answered
+//! `t_outside_month` before any record is read: until D-3328 it was answered
+//! `no_spot_bar`, as if the file were held and empty at `t` (DB-039).
 //!
 //! # Cost, stated rather than claimed
 //!
 //! The file is opened once per request. Each instant is one
-//! [`store::file::BarFile::first_at_or_after`] bisection — at most
-//! `ceil(log2(n_valid + 1))` record reads, proven by the store's own test
-//! `first_at_or_after_never_probes_more_than_the_bisection_height` — plus at
-//! most two record reads to confirm the hit or bracket the miss.
-//! That is `O(log n_valid)` per instant, NOT `O(1)`: the store is addressed by
-//! row index and a month file is sparse in time, so no row offset can be
-//! computed from a timestamp alone. `n_valid` is bounded by the month's
-//! geometry (`docs/06-limits.md`, D-2807), so the bound is a constant per rung:
-//! fourteen probes at the one-minute month ceiling, twenty at the one-second.
-//! Instants per request are capped at [`MAX_SPOT_TIMES`]. The wall-clock
-//! time is UNVERIFIED by any gate: no bench row times this lookup, and the
-//! one measurement taken was ad hoc (`docs/06-limits.md`, D-2807).
+//! [`store::file::BarFile::first_at_or_after`] lookup -- O(1) through the
+//! month's `.tix` time index when it has one (D-2329), and otherwise a
+//! bisection of at most `ceil(log2(n_valid + 1))` record reads, which the
+//! store names per handle (`BarFile::time_lookup`) -- plus at most two record
+//! reads to confirm the hit or bracket the miss. `asof=prev` reads nothing
+//! more: the bar before `t` is the record the bracket already read.
+//! Instants per request are capped at [`MAX_SPOT_TIMES`]. The work runs on
+//! the blocking pool behind `crate::detail::run_store_read`'s admission
+//! (DB-066, DB-G80): a full pool is a named `429` with `Retry-After`, never a
+//! stalled async worker. The wall-clock time is measured by WP-32's report
+//! and gate 8 (`benches/ratio/spot.rs`); no figure is restated here.
 
 use super::{Loaded, ingest, param, render, timeframe_param};
 use crate::bars::OpenRefusalKind;
 use std::fmt::Write as _;
 use store::file::BarFile;
-use store::path::{PathParts, Timeframe, YearMonth};
+use store::path::{IST_OFFSET_SECS, PathParts, Timeframe, YearMonth};
 
 /// The most instants one request may ask for.
 ///
@@ -54,6 +70,12 @@ use store::path::{PathParts, Timeframe, YearMonth};
 /// room for the other fields. `/db` asks for its page in chunks of at most
 /// this many.
 pub const MAX_SPOT_TIMES: usize = 400;
+
+/// Microseconds in a second.
+const MICROS: i64 = 1_000_000;
+
+/// Seconds in a day.
+const SECONDS_PER_DAY: i64 = 86_400;
 
 /// The store segment an option underlying's own price series lives under.
 ///
@@ -79,14 +101,73 @@ pub fn underlying_key(symbol: &str) -> &str {
     brutex_core::alias::option_underlying(symbol).key
 }
 
+/// Which bar an instant's spot is taken from. D-3328.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsOf {
+    /// Only the bar stamped exactly at `t` (D-2807). The default.
+    Exact,
+    /// The underlying's last bar at or before `t` within `t`'s IST session,
+    /// opted in, always shown with its stamp and age (D-3328). Never a later
+    /// bar, never another session or month.
+    Prev,
+}
+
+impl AsOf {
+    /// The `asof` field of `query`: absent or `exact` is [`Self::Exact`],
+    /// `prev` is [`Self::Prev`].
+    ///
+    /// # Errors
+    ///
+    /// Any other word, by name. Not read as the default: a misspelt opt-in
+    /// silently answered exact would hide every earlier close it asked for.
+    pub fn parse(query: &str) -> Result<Self, String> {
+        match param(query, "asof").as_str() {
+            "" | "exact" => Ok(Self::Exact),
+            "prev" => Ok(Self::Prev),
+            other => Err(format!(
+                "{other:?} is not an asof: exact (the default, the bar stamped at t, \
+                 D-2807) or prev (the last bar at or before t in its IST session, D-3328)"
+            )),
+        }
+    }
+
+    /// The wire word.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Prev => "prev",
+        }
+    }
+}
+
 /// One instant's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
-    /// The underlying's close, in paisa, of the bar stamped exactly at `t`.
-    At(i64),
-    /// The file is held and has no bar at `t`: the records either side
-    /// bracket it, which is what makes the absence a fact and not a guess.
+    /// The underlying's close, in paisa, of the bar stamped `ts_micros`:
+    /// `t` itself, or under [`AsOf::Prev`] the last bar of `t`'s IST
+    /// session at or before it.
+    At {
+        /// The close, paisa.
+        close: i64,
+        /// The stamp of the bar it came from, microseconds.
+        ts_micros: i64,
+    },
+    /// The file is held and has no bar at `t`, which lies inside its month:
+    /// the records either side bracket it, which is what makes the absence a
+    /// fact and not a guess.
     NoBar,
+    /// Under [`AsOf::Prev`]: the file is held, and no bar of `t`'s IST
+    /// session lies at or before `t` (the session had not printed yet, or
+    /// the bar before `t` belongs to an earlier day).
+    NoBarInSession,
+    /// `t`'s IST month is not the month asked: a wrong question, answered
+    /// before any record is read (D-3328, DB-039).
+    OutsideMonth,
+    /// Under [`AsOf::Prev`], `t` is not a stamp the rung's grid holds, so it
+    /// is no option bar's own stamp at that rung, and the bar before it may
+    /// close after it: refused rather than answered with a later close.
+    OffGrid,
     /// The underlying's month file is not held.
     NoFile,
     /// A record needed to answer would not read; the reason is in `faults`.
@@ -98,11 +179,20 @@ pub enum Spot {
 }
 
 impl Spot {
-    /// The close, in paisa, when one was found at exactly `t`.
+    /// The close, in paisa, when one was found.
     #[must_use]
     pub const fn close(&self) -> Option<i64> {
         match self {
-            Self::At(close) => Some(*close),
+            Self::At { close, .. } => Some(*close),
+            _ => None,
+        }
+    }
+
+    /// The stamp, microseconds, of the bar the close came from.
+    #[must_use]
+    pub const fn stamp_micros(&self) -> Option<i64> {
+        match self {
+            Self::At { ts_micros, .. } => Some(*ts_micros),
             _ => None,
         }
     }
@@ -111,8 +201,11 @@ impl Spot {
     #[must_use]
     pub const fn why(&self) -> Option<&'static str> {
         match self {
-            Self::At(_) => None,
+            Self::At { .. } => None,
             Self::NoBar => Some("no_spot_bar"),
+            Self::NoBarInSession => Some("no_spot_in_session"),
+            Self::OutsideMonth => Some("t_outside_month"),
+            Self::OffGrid => Some("t_off_grid"),
             Self::NoFile => Some("no_spot_file"),
             Self::Unreadable => Some("spot_unreadable"),
             Self::OrderBroken => Some("spot_order_broken"),
@@ -120,37 +213,137 @@ impl Spot {
     }
 }
 
-/// The underlying's close at exactly `ts_micros`, read from `file`.
+/// Whether the instant `ts_micros` lies in `month`'s IST span,
+/// `[00:00 IST on the 1st, 00:00 IST on the next 1st)` -- the span the store
+/// files a bar of that month in (`store::file`'s admission).
+#[must_use]
+pub const fn in_month(month: YearMonth, ts_micros: i64) -> bool {
+    let (from, until) = month.ist_bounds_micros();
+    ts_micros >= from && ts_micros < until
+}
+
+/// The IST day number (days since 1970-01-01 IST) of an instant.
+#[must_use]
+pub const fn ist_day(ts_micros: i64) -> i64 {
+    (ts_micros.div_euclid(MICROS) + IST_OFFSET_SECS).div_euclid(SECONDS_PER_DAY)
+}
+
+/// The IST month an instant lies in, or `None` for an instant no calendar
+/// here can place.
+#[must_use]
+pub fn month_of(ts_micros: i64) -> Option<YearMonth> {
+    pull::session::IstMoment::from_epoch_secs(ts_micros.div_euclid(MICROS))
+        .ok()
+        .and_then(|at| at.day().year_month().ok())
+}
+
+/// Whether `ts_micros` is a stamp a rung of `timeframe_secs` holds: the
+/// store's own admission grid (`store::file`, D-0915) -- an intraday rung's
+/// bars open on the 09:15 IST-anchored grid of its width; a daily rung
+/// admits any whole second.
+#[must_use]
+pub fn on_grid(timeframe_secs: u32, ts_micros: i64) -> bool {
+    if timeframe_secs >= 86_400 || timeframe_secs == 0 {
+        return ts_micros.rem_euclid(MICROS) == 0;
+    }
+    let anchor =
+        (IST_OFFSET_SECS - i64::from(Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT) * 60) * MICROS;
+    ts_micros
+        .saturating_add(anchor)
+        .rem_euclid(i64::from(timeframe_secs) * MICROS)
+        == 0
+}
+
+/// The underlying's close at exactly `ts_micros` (D-2807), read from
+/// `file`, whose path names `month`.
 ///
 /// # Errors
 ///
 /// The store's refusal for a record the answer needed and could not read.
-pub fn close_at(file: &BarFile, ts_micros: i64) -> Result<Spot, store::file::StoreError> {
+pub fn close_at(
+    file: &BarFile,
+    month: YearMonth,
+    ts_micros: i64,
+) -> Result<Spot, store::file::StoreError> {
+    spot_at(file, month, ts_micros, AsOf::Exact)
+}
+
+/// One instant's spot under `asof`, read from `file`, whose path names
+/// `month`. See the module header.
+///
+/// An instant outside `month` is [`Spot::OutsideMonth`] and reads nothing,
+/// so [`Spot::NoBar`] and [`Spot::NoBarInSession`] are only ever answered for
+/// an instant inside the file's own span (DB-039).
+///
+/// # Errors
+///
+/// The store's refusal for a record the answer needed and could not read.
+pub fn spot_at(
+    file: &BarFile,
+    month: YearMonth,
+    ts_micros: i64,
+    asof: AsOf,
+) -> Result<Spot, store::file::StoreError> {
+    if !in_month(month, ts_micros) {
+        return Ok(Spot::OutsideMonth);
+    }
+    // NO LATER CLOSE THROUGH AN OFF-GRID QUESTION: the bar before an
+    // off-grid `t` can be the bar that CONTAINS `t`, which closes after it.
+    // On the grid, a bar stamped before `t` has closed by `t`, and one
+    // stamped at `t` closes with the option bar at `t` (D-3328).
+    let width = file.header().timeframe_secs;
+    if asof == AsOf::Prev && !on_grid(width, ts_micros) {
+        return Ok(Spot::OffGrid);
+    }
+    // A DAILY RUNG HOLDS ONE BAR PER SESSION, closing at the session's
+    // close: a bar of `t`'s session stamped before `t` is that same close,
+    // not an earlier price, so `prev` answers only what `exact` does.
+    let asof = if width >= 86_400 { AsOf::Exact } else { asof };
     let at = file.first_at_or_after(ts_micros)?;
     let next = if at < file.header().n_valid {
         let bar = file.read_record(at)?;
         if bar.ts_micros == ts_micros {
-            return Ok(Spot::At(bar.close));
+            return Ok(Spot::At {
+                close: bar.close,
+                ts_micros,
+            });
         }
         Some(bar.ts_micros)
     } else {
         None
     };
     let previous = match at.checked_sub(1) {
-        Some(index) => Some(file.read_record(index)?.ts_micros),
+        Some(index) => Some(file.read_record(index)?),
         None => None,
     };
-    Ok(verdict(previous, next, ts_micros))
+    let answered = verdict(previous.as_ref().map(|bar| bar.ts_micros), next, ts_micros);
+    if answered != Spot::NoBar {
+        return Ok(answered);
+    }
+    Ok(match (asof, previous) {
+        (AsOf::Exact, _) => Spot::NoBar,
+        // THE BRACKET ABOVE PROVED `previous < t < next` over strictly
+        // increasing stamps, so `previous` IS the last bar before `t`. It is
+        // taken only from `t`'s own IST day: a bar of an earlier session is
+        // yesterday's close, which this route never offers as today's.
+        (AsOf::Prev, Some(bar)) if ist_day(bar.ts_micros) == ist_day(ts_micros) => Spot::At {
+            close: bar.close,
+            ts_micros: bar.ts_micros,
+        },
+        (AsOf::Prev, _) => Spot::NoBarInSession,
+    })
 }
 
 /// What a miss at `ts_micros` means, from the stamps either side of where the
-/// bisection landed.
+/// lookup landed.
 ///
 /// THE ABSENCE IS BRACKETED, NOT ASSUMED: `previous < ts < next`, either side
 /// allowed to be the file's edge. A real bar is stamped after 1970, so a zero
 /// stamp is the zero-filled extent `store::file` documents, where the
-/// bisection's premise (strictly increasing stamps) does not hold — and then
-/// neither a hit nor an absence is stated.
+/// lookup's premise (strictly increasing stamps) does not hold — and then
+/// neither a hit nor an absence is stated. The caller has already placed
+/// `ts_micros` inside the file's month ([`spot_at`]), so a file edge here is
+/// the month's own edge and not a different file's question.
 #[must_use]
 pub fn verdict(previous: Option<i64>, next: Option<i64>, ts_micros: i64) -> Spot {
     let before = previous.is_none_or(|ts| ts > 0 && ts < ts_micros);
@@ -162,10 +355,67 @@ pub fn verdict(previous: Option<i64>, next: Option<i64>, ts_micros: i64) -> Spot
     }
 }
 
+/// The three JSON fields every instant carries for its spot: the close
+/// under the key `close_key`, `spot_t` and `spot_age_s`, for the instant
+/// `ts_micros` and the spot read there (its close and its bar's stamp), or
+/// three `null`s when none was read.
+#[must_use]
+pub fn spot_fields(close_key: &str, read: Option<(i64, i64)>, ts_micros: i64) -> String {
+    match read {
+        Some((close, stamp)) => format!(
+            r#""{close_key}":{close},"spot_t":{},"spot_age_s":{}"#,
+            stamp.div_euclid(MICROS),
+            (ts_micros - stamp).div_euclid(MICROS)
+        ),
+        None => format!(r#""{close_key}":null,"spot_t":null,"spot_age_s":null"#),
+    }
+}
+
+impl Spot {
+    /// The close and its bar's stamp, when a close was found.
+    #[must_use]
+    pub const fn read(&self) -> Option<(i64, i64)> {
+        match self {
+            Self::At { close, ts_micros } => Some((*close, *ts_micros)),
+            _ => None,
+        }
+    }
+}
+
+/// Reads the comma-separated UTC seconds of `t`, at most `cap` of them, as
+/// microseconds.
+///
+/// # Errors
+///
+/// An absent `t`, a word that is not a second, or more than `cap`, by name.
+pub fn times_param(query: &str, field: &str, cap: usize) -> Result<Vec<i64>, String> {
+    let raw = param(query, field);
+    if raw.is_empty() {
+        return Err(format!(
+            "{field} is required: one or more UTC seconds, comma separated"
+        ));
+    }
+    let mut times = Vec::new();
+    for word in raw.split(',') {
+        if times.len() == cap {
+            return Err(format!(
+                "more than {cap} instants in {field}; ask in chunks"
+            ));
+        }
+        let micros = word
+            .parse::<i64>()
+            .ok()
+            .and_then(|secs| secs.checked_mul(MICROS))
+            .ok_or_else(|| format!("{word:?} in {field} is not a UTC second"))?;
+        times.push(micros);
+    }
+    Ok(times)
+}
+
 /// Everything `/spot.json` reads off the query string. Every field refuses
-/// rather than defaults: the rung in particular has NO default here, because
-/// a spot read at a rung the option was not read at is a different instant's
-/// close.
+/// rather than defaults, but `asof`, whose default is D-2807's exact rule:
+/// the rung in particular has NO default here, because a spot read at a rung
+/// the option was not read at is a different instant's close.
 #[derive(Debug)]
 pub struct SpotAsk {
     vendor: brutex_core::vendor::Vendor,
@@ -173,6 +423,7 @@ pub struct SpotAsk {
     symbol: String,
     timeframe: Timeframe,
     month: YearMonth,
+    asof: AsOf,
     times: Vec<i64>,
 }
 
@@ -200,35 +451,16 @@ impl SpotAsk {
             );
         }
         let timeframe = timeframe_param(query)?;
-        let raw = param(query, "month");
-        let month = raw
-            .split_once('-')
-            .and_then(|(y, m)| YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
-            .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for \"month\""))?;
-        let raw = param(query, "t");
-        if raw.is_empty() {
-            return Err("t is required: one or more UTC seconds, comma separated".into());
-        }
-        let mut times = Vec::new();
-        for word in raw.split(',') {
-            if times.len() == MAX_SPOT_TIMES {
-                return Err(format!(
-                    "more than {MAX_SPOT_TIMES} instants in t; ask in chunks"
-                ));
-            }
-            let micros = word
-                .parse::<i64>()
-                .ok()
-                .and_then(|secs| secs.checked_mul(1_000_000))
-                .ok_or_else(|| format!("{word:?} in t is not a UTC second"))?;
-            times.push(micros);
-        }
+        let month = month_param(query)?;
+        let asof = AsOf::parse(query)?;
+        let times = times_param(query, "t", MAX_SPOT_TIMES)?;
         Ok(Self {
             vendor,
             exchange,
             symbol,
             timeframe,
             month,
+            asof,
             times,
         })
     }
@@ -254,18 +486,28 @@ impl SpotAsk {
                 file: store::path::FileKind::Bars,
             },
         );
+        // A WRONG MONTH IS A WRONG QUESTION WHETHER OR NOT THE FILE IS HELD.
+        let outside_or = |absent: Spot| {
+            self.times
+                .iter()
+                .map(|&ts| {
+                    if in_month(self.month, ts) {
+                        absent.clone()
+                    } else {
+                        Spot::OutsideMonth
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
         let file = match opened {
             Ok(file) => file,
             Err(refusal) => {
                 return match refusal.kind {
                     OpenRefusalKind::Invalid => Err(refusal.message),
-                    OpenRefusalKind::Absent => {
-                        Ok((vec![Spot::NoFile; self.times.len()], Vec::new()))
+                    OpenRefusalKind::Absent => Ok((outside_or(Spot::NoFile), Vec::new())),
+                    OpenRefusalKind::Unreadable => {
+                        Ok((outside_or(Spot::Unreadable), vec![refusal.message]))
                     }
-                    OpenRefusalKind::Unreadable => Ok((
-                        vec![Spot::Unreadable; self.times.len()],
-                        vec![refusal.message],
-                    )),
                 };
             }
         };
@@ -274,11 +516,11 @@ impl SpotAsk {
             .times
             .iter()
             .map(|&ts| {
-                close_at(&file, ts).unwrap_or_else(|why| {
+                spot_at(&file, self.month, ts, self.asof).unwrap_or_else(|why| {
                     faults.push(format!(
                         "{} t={}: {why}",
                         file.path().display(),
-                        ts / 1_000_000
+                        ts.div_euclid(MICROS)
                     ));
                     Spot::Unreadable
                 })
@@ -290,33 +532,32 @@ impl SpotAsk {
     /// The response body for `spots` and `faults`.
     #[must_use]
     pub fn render(&self, spots: &[Spot], faults: &[String]) -> String {
-        let mut rows = String::with_capacity(spots.len() * 48 + 2);
+        let mut rows = String::with_capacity(spots.len() * 80 + 2);
         rows.push('[');
-        for (n, (ts, spot)) in self.times.iter().zip(spots).enumerate() {
+        for (n, (&ts, spot)) in self.times.iter().zip(spots).enumerate() {
             if n > 0 {
                 rows.push(',');
             }
-            let close = spot
-                .close()
-                .map_or_else(|| "null".to_owned(), |paisa| paisa.to_string());
             let why = spot
                 .why()
                 .map_or_else(|| "null".to_owned(), render::json_string);
             let _ = write!(
                 rows,
-                r#"{{"t":{},"close":{close},"why":{why}}}"#,
-                ts / 1_000_000
+                r#"{{"t":{},{},"why":{why}}}"#,
+                ts.div_euclid(MICROS),
+                spot_fields("close", spot.read(), ts),
             );
         }
         rows.push(']');
         format!(
-            r#"{{"exchange":{},"segment":{},"symbol":{},"key":{},"timeframe":{},"month":{},"faults":{},"spots":{rows}}}"#,
+            r#"{{"exchange":{},"segment":{},"symbol":{},"key":{},"timeframe":{},"month":{},"asof":{},"faults":{},"spots":{rows}}}"#,
             render::json_string(&self.exchange),
             render::json_string(underlying_segment(&self.symbol)),
             render::json_string(&self.symbol),
             render::json_string(underlying_key(&self.symbol)),
             render::json_string(self.timeframe.as_str()),
             render::json_string(&self.month.to_string()),
+            render::json_string(self.asof.as_str()),
             if faults.is_empty() {
                 "null".to_owned()
             } else {
@@ -326,47 +567,94 @@ impl SpotAsk {
     }
 }
 
-/// `GET /spot.json?feed&exchange&symbol&timeframe&month&t=<s>,<s>…`
+/// The `month` field, `YYYY-MM`.
 ///
-/// 400 for a malformed question, 206 when any record would not read (the
-/// answers are real and the set is not whole, as `/bars.json` says it), 200
-/// otherwise — including when every answer is a named absence.
-pub async fn spot_json(
-    axum::extract::State(site): axum::extract::State<Loaded>,
-    uri: axum::http::Uri,
-) -> (
-    axum::http::StatusCode,
-    [(axum::http::HeaderName, &'static str); 1],
-    String,
-) {
-    let json = [(
+/// # Errors
+///
+/// Anything else, by name.
+pub fn month_param(query: &str) -> Result<YearMonth, String> {
+    let raw = param(query, "month");
+    raw.split_once('-')
+        .and_then(|(y, m)| YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
+        .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for \"month\""))
+}
+
+/// What the three option analytics routes answer: status, headers, body.
+pub type Answered = (axum::http::StatusCode, axum::http::HeaderMap, String);
+
+/// The JSON content type, as a header map.
+#[must_use]
+pub fn json_headers() -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
         axum::http::header::CONTENT_TYPE,
-        "application/json; charset=utf-8",
-    )];
-    let asked = match SpotAsk::parse(uri.query().unwrap_or("")) {
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers
+}
+
+/// `400` with the reason in an `error` key.
+#[must_use]
+pub fn bad_request(why: &str) -> Answered {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        json_headers(),
+        format!(r#"{{"error":{}}}"#, render::json_string(why)),
+    )
+}
+
+/// What a route answers when its store read was not admitted to the
+/// blocking pool: `429` with `Retry-After: 1` when every slot is taken, `503`
+/// when the task could not be joined, the reason named either way (DB-066).
+#[must_use]
+pub fn not_admitted(what: &str, why: &crate::detail::RunError) -> Answered {
+    let (status, body) =
+        crate::detail::admission_refused(what, crate::detail::MAX_STORE_READ_CONCURRENT, why);
+    let mut headers = json_headers();
+    if matches!(why, crate::detail::RunError::Saturated) {
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+    }
+    (status, headers, body)
+}
+
+/// The handler's body, off the async workers.
+#[must_use]
+pub fn respond(store_root: &std::path::Path, query: &str) -> Answered {
+    let asked = match SpotAsk::parse(query) {
         Ok(asked) => asked,
-        Err(why) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                json,
-                format!(r#"{{"error":{}}}"#, render::json_string(&why)),
-            );
-        }
+        Err(why) => return bad_request(&why),
     };
-    let (spots, faults) = match asked.answer(&site.store_root) {
+    let (spots, faults) = match asked.answer(store_root) {
         Ok(answered) => answered,
-        Err(why) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                json,
-                format!(r#"{{"error":{}}}"#, render::json_string(&why)),
-            );
-        }
+        Err(why) => return bad_request(&why),
     };
     let status = if faults.is_empty() {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::PARTIAL_CONTENT
     };
-    (status, json, asked.render(&spots, &faults))
+    (status, json_headers(), asked.render(&spots, &faults))
+}
+
+/// `GET /spot.json?feed&exchange&symbol&timeframe&month&t=<s>,<s>…[&asof=prev]`
+///
+/// 400 for a malformed question, 206 when any record would not read (the
+/// answers are real and the set is not whole, as `/bars.json` says it), 200
+/// otherwise — including when every answer is a named absence. 429 with
+/// `Retry-After` when the store-read pool is full (DB-066, DB-G80).
+pub async fn spot_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> Answered {
+    let query = uri.query().unwrap_or("").to_owned();
+    let root = site.store_root.clone();
+    // OFF THE ASYNC WORKERS (DB-066, DB-G80): opening a month file, its
+    // lock and up to 400 lookups are blocking file reads.
+    match crate::detail::run_store_read(move || respond(&root, &query)).await {
+        Ok(answered) => answered,
+        Err(why) => not_admitted("a spot read", &why),
+    }
 }
