@@ -6,11 +6,13 @@
 //! Timed on a held key and on an absent one, over manifests of 1,000, 10,000
 //! and 100,000 entries built in memory, so no disk is in the figure.
 //!
-//! WP-30 owns this file from here and adds its per-vendor cache rows to it.
+//! WP-30's per-vendor cache row is the last: a census miss reads the entries
+//! appended since the last read, so its cost is flat in what the census holds
+//! ([`tails_are_flat`], D-3327).
 
 use std::hint::black_box;
 
-use api::census::{Census, Series, VendorCensus};
+use api::census::{Census, Manifests, Series, VendorCensus};
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -60,7 +62,7 @@ fn census_of(n: usize) -> VendorCensus {
         vendor: Vendor::Gdfl,
         path: std::path::PathBuf::from("/nonexistent/bench/gdfl.man"),
         state: Census::Held {
-            manifest: Box::new(manifest),
+            manifest: Manifests::single(manifest),
         },
     }
 }
@@ -98,5 +100,116 @@ pub(crate) fn probes_are_flat() -> bool {
             RATIO_CEILING_PERMILLE,
         );
     }
+    // THE PER-VENDOR CACHE'S ROW, on this file's call from `main` (WP-30).
+    ok &= tails_are_flat();
+    ok
+}
+
+/// Entries appended between the whole read and every timed tail read.
+const APPENDED: usize = 256;
+
+/// One census on disk of `n` entries with [`APPENDED`] more appended in place
+/// after it was read whole: the file, the whole read, and the store root.
+///
+/// The append is the writer's own: each entry at its offset, then the header
+/// slot that counts it, into the same file (`pull::manifest::Append`).
+fn on_disk(n: usize) -> (std::path::PathBuf, VendorCensus) {
+    use std::os::unix::fs::FileExt as _;
+    let root = std::env::temp_dir().join(format!(
+        "brutex-bench-census-tail-{}-{n}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    if std::fs::create_dir_all(root.join("manifest")).is_err() {
+        refuse("a scratch store root");
+    }
+    let Ok(mut manifest) = Manifest::open(Vendor::Gdfl, &[], &[]) else {
+        refuse("a genesis census");
+    };
+    let entry = |i: usize| Entry {
+        key: key(i),
+        rows: 375,
+        first_ts_micros: 1_788_926_700_000_000,
+        last_ts_micros: 1_788_949_140_000_000,
+    };
+    for i in 0..n {
+        if manifest.record(entry(i)).is_err() {
+            refuse("a census entry");
+        }
+    }
+    let path = pull::manifest::manifest_path(&root, Vendor::Gdfl);
+    if std::fs::write(&path, manifest.image()).is_err() {
+        refuse("a census on disk");
+    }
+    let whole = api::census::read_vendor(&root, Vendor::Gdfl);
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) else {
+        refuse("the census opened for appending");
+    };
+    for i in n..n + APPENDED {
+        let Ok(append) = manifest.record(entry(i)) else {
+            refuse("an appended entry");
+        };
+        if file.write_all_at(&append.bytes, append.offset).is_err()
+            || file
+                .write_all_at(&append.commit.bytes, append.commit.offset)
+                .is_err()
+        {
+            refuse("an append written in place");
+        }
+    }
+    (root, whole)
+}
+
+/// A census miss costs the entries appended since the last read, whatever
+/// the census holds (D-3327 item 1; DB-059, DB-G06, DB-G79).
+///
+/// Over single-file censuses of 1,000, 10,000 and 100,000 entries on disk,
+/// each read whole once and then appended [`APPENDED`] entries in place, the
+/// timed call is `read_vendor_after` from the whole read: one header region,
+/// the first and last entries already read, and the appended entries
+/// decoded. A whole read of the same file is printed beside it, unasserted,
+/// so the difference the tail makes is on the record. Every read must reach
+/// the census a whole read gives: the counters are checked before timing.
+fn tails_are_flat() -> bool {
+    let built: Vec<(std::path::PathBuf, VendorCensus)> =
+        SIZES.iter().map(|&n| on_disk(n)).collect();
+    let mut tails = Vec::with_capacity(built.len());
+    for (&n, (root, whole)) in SIZES.iter().zip(&built) {
+        let extended = api::census::read_vendor_after(root, Vendor::Gdfl, Some(whole));
+        let again = api::census::read_vendor(root, Vendor::Gdfl);
+        let counters = |census: &VendorCensus| census.counters();
+        if counters(&extended) != counters(&again)
+            || extended.generation() != again.generation()
+            || extended.counters().map(|(_, _, entries)| entries)
+                != u64::try_from(n + APPENDED).ok()
+        {
+            refuse("the tail read did not reach the census a whole read gives");
+        }
+        tails.push(cost_ps(200, || {
+            api::census::read_vendor_after(root, Vendor::Gdfl, Some(black_box(whole)))
+        }));
+        let whole_ps = cost_ps(5, || {
+            api::census::read_vendor(black_box(root), Vendor::Gdfl)
+        });
+        println!("  census whole read at {n:>7} entries (unasserted) {whole_ps:>10} ps");
+    }
+    for (root, _) in &built {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (tails.first(), tails.get(1), tails.get(2)) else {
+        refuse("three sizes measured");
+    };
+    let mut ok = ratio(
+        &format!("census tail of {APPENDED} {}->{}", SIZES[0], SIZES[1]),
+        base,
+        mid,
+        RATIO_CEILING_PERMILLE,
+    );
+    ok &= ratio(
+        &format!("census tail of {APPENDED} {}->{}", SIZES[0], SIZES[2]),
+        base,
+        big,
+        RATIO_CEILING_PERMILLE,
+    );
     ok
 }

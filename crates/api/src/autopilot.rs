@@ -2512,10 +2512,10 @@ pub fn month_after(month: YearMonth) -> Option<YearMonth> {
 pub(crate) fn manifest_of(
     censuses: &[VendorCensus],
     vendor: brutex_core::vendor::Vendor,
-) -> Option<&Manifest> {
+) -> Option<&crate::census::Manifests> {
     censuses.iter().find(|c| c.vendor == vendor).and_then(|c| {
         match c.state {
-            Census::Held { ref manifest } => Some(&**manifest),
+            Census::Held { ref manifest } => Some(manifest),
             // AN UNREADABLE CENSUS IS NOT AN EMPTY ONE. Reporting `None` here
             // would make every key look missing and re-fetch a store that is
             // already full. The caller checks the state itself and refuses.
@@ -2523,8 +2523,6 @@ pub(crate) fn manifest_of(
         }
     })
 }
-
-use pull::manifest::Manifest;
 
 /// The first month at or after `hint` that this feed still owes work for.
 ///
@@ -6603,7 +6601,7 @@ mod tests {
         census_of(
             vendor,
             Census::Held {
-                manifest: Box::new(manifest),
+                manifest: crate::census::Manifests::single(manifest),
             },
         )
     }

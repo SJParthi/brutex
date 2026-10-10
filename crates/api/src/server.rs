@@ -1660,7 +1660,7 @@ use census_cache::{
     manifest_stamps, read_as_stamped, refuse_contradicted_absences, stamp_could_read,
 };
 pub use census_cache::{CensusCache, CensusNow, CensusStamps};
-pub(crate) use census_cache::{census_now, census_now_stamped, vendor_census};
+pub(crate) use census_cache::{Slot as CensusSlot, census_now, census_now_stamped, vendor_census};
 use feeds_route::feeds_json;
 use gaps_route::gaps_json;
 #[cfg(test)]
@@ -1669,8 +1669,11 @@ pub use instruments_route::{MASTER_NOTE_HEADER, MASTER_STATE_HEADER, UNIVERSE_ST
 use instruments_route::{instruments_json, universe_reach_json};
 pub(crate) use month_change::{Unknown, basis_points};
 use month_change::{month_before, month_change};
+pub(crate) use store_route::behind as census_behind;
+#[cfg(test)]
+use store_route::census_headers;
 pub use store_route::{CENSUS_DEGRADED_HEADER, CENSUS_NOTE_HEADER, CENSUS_STATE_HEADER};
-use store_route::{census_etag, census_headers, census_is_unreadable, held_row, store_json};
+use store_route::{census_etag, census_is_unreadable, held_row, store_json};
 #[cfg(test)]
 use store_route::{store_body, store_response};
 
@@ -17272,7 +17275,7 @@ mod tests {
             vendor,
             path: PathBuf::from("/nonexistent/ladder-gate/census.man"),
             state: census::Census::Held {
-                manifest: Box::new(manifest),
+                manifest: crate::census::Manifests::single(manifest),
             },
         }
     }
@@ -19113,21 +19116,22 @@ mod tests {
         // WARM: the census and the calendar both cached at the current stamp.
         let warm = super::ingestion_observations(&landed, &site).expect("NIFTY is observed");
         assert!(warm.sessions() > 0);
-        let base = census::manifest_reads::of(&manifest);
+        let base = census::manifest_reads::any_of(&manifest);
         let mut dated = std::collections::HashMap::new();
         let done = super::land_spot(&landed, &key, &site, &mut dated).await;
         assert_eq!(done.members, 5, "every body landed: {done:?}");
         assert_eq!(done.bars_committed, 4 * 375, "{:?}", done.failures);
         assert_eq!(
-            census::manifest_reads::of(&manifest) - base,
+            census::manifest_reads::any_of(&manifest) - base,
             0,
             "landing five bodies of one instrument read the manifest per body"
         );
         // AND THE NEXT INSTRUMENT'S OBSERVATION STILL SEES THE NEW STORE: the
-        // stamp moved, so it reads once, and once only.
+        // stamp moved, so it reads once, and once only -- whole, or since
+        // D-3327 by the census's appended tail.
         let after = super::ingestion_observations(&landed, &site).expect("NIFTY is observed");
         assert!(after.sessions() >= warm.sessions());
-        assert_eq!(census::manifest_reads::of(&manifest) - base, 1);
+        assert_eq!(census::manifest_reads::any_of(&manifest) - base, 1);
     }
 
     pub(super) async fn cash_month_replay_fixture(
@@ -28670,7 +28674,7 @@ mod tests {
             state,
         };
         let loaded = census(census::Census::Held {
-            manifest: Box::new(manifest),
+            manifest: crate::census::Manifests::single(manifest),
         });
         let months = crate::ladder::months_of(span((2015, 1, 1), (2023, 6, 23)));
 
@@ -29816,7 +29820,7 @@ mod percentage_tests {
             vendor: Vendor::Groww,
             path: PathBuf::from("/nonexistent/percentage-tests/groww.man"),
             state: census::Census::Held {
-                manifest: Box::new(manifest),
+                manifest: crate::census::Manifests::single(manifest),
             },
         }
     }
