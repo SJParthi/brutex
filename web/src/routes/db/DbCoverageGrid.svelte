@@ -2,38 +2,90 @@
   /**
    * /db — THE COVERAGE GRID
    *
-   * One row per stored instrument-month, windowed; the drill-through drawer; and
-   * the % change notes panel (`notesPanel`, rendered by the shell above the view
-   * split).
+   * One row per stored instrument-month — and one per month a series does not
+   * hold, between its first and its last — windowed; the drill-through drawer;
+   * and the % change notes panel (`notesPanel`, rendered by the shell above
+   * the view split).
    *
-   * Every line below was MOVED out of `routes/db/+page.svelte` by WP-00 (the /db
-   * page split). The only edits to a moved line are the ones the move needs: a
-   * page-level name that now lives in another file is imported, or, for state,
-   * read as `db.<name>`; a plain module exports what it declares; and a callback
-   * over such a value marks its parameter `any`, the way the page already did
-   * elsewhere. Nothing was fixed in the move: every defect the audit found is
-   * still present byte for byte, and is fixed by the package that owns this file
-   * next.
+   * # Judged against the calendar of record (WP-54, D-3336)
    *
-   * Owner after WP-00: WP-54 (coverage, coverage calendar and day flags).
+   * Every row used to be measured against the fullest stored series at the
+   * same month and rung (DB-014, DB-G34, DB-G63). Each is now measured by
+   * `$lib/completeness.js` `judgeRow` against the bars `/calendar.json` says
+   * the month owes at the row's rung: sessions times what each owes, a
+   * special session by its windows, a halted minute neither owed nor missing,
+   * a CAS-eligible share's auction day at 360 (D-3320); a one-second share or
+   * an option is trade-driven and owes no count. A hole every series shares
+   * is a "store-wide hole", never "full" (DB-012); a month a series does not
+   * hold is drawn as an absent row (DB-012, DB-053); a derived rung behind or
+   * short of its 1min source says so (DB-013, DB-G35); a month outside the
+   * operator's window is shaded (DB-052).
+   *
+   * Owner: WP-54 (coverage, coverage calendar and day flags).
    */
-  import { isSole, rollUpMonths } from '$lib/completeness.js';
-  import { fullestKey, OVER, heldWindow, dayText, pctText } from '$lib/db/decoration.js';
-  import { txt, fmt, tfCmp, barsPerSession } from '$lib/db/notes-labels.js';
-  import { bytesText, BYTES_PER_BAR, COLS, SOLE_WHY, whyText } from '$lib/db/notes-coverage.js';
+  import {
+    denomKey,
+    judgeRow,
+    rollUpMonths,
+    absentMonths,
+    segmentOfKey,
+    istDayOf,
+    isTradeDriven,
+    peersAtMost
+  } from '$lib/completeness.js';
+  import { calendarUrl, readLedger, ledgerSpan, ledgerDay, monthSpan, epochDayOfIso, isoOfEpochDay } from '$lib/calendar-owed.js';
+  import { OVER, heldWindow, pctText, contractLife } from '$lib/db/decoration.js';
+  import { txt, fmt, tfCmp, TF_SECS } from '$lib/db/notes-labels.js';
+  import { bytesText, BYTES_PER_BAR, COLS, whyText, noteText, STATE_WORD } from '$lib/db/notes-coverage.js';
   import { untrack } from 'svelte';
   import { ROW, HEAD } from '$lib/db/bars-plan.js';
   import { dayLabel, monthLabel } from '$lib/dates.js';
-  import { dirOf, bpsText } from '$lib/bps.js';
+  import { dirOf, bpsText, basisPoints } from '$lib/bps.js';
+  import { feeds } from '$lib/feeds.svelte.js';
+  import { ask } from '$lib/ask.js';
+  import { createPageRequests } from '$lib/page-requests.js';
+  import { dayflagsUrl } from '$lib/db/dayflags.js';
   import DbCalendar from './DbCalendar.svelte';
   /** @typedef {import('$lib/store.svelte.js').StoreRow} StoreRow */
   /** @typedef {import('$lib/db/decoration.js').DecoRow} DecoRow */
+  /** @typedef {import('$lib/completeness.js').Cover} Cover */
+
+  /** The rungs Zerodha folds from its 1min bars when `/feeds.json` names none. */
+  const DERIVED_FALLBACK = ['2min', '3min', '5min', '10min', '15min', '30min', '60min'];
 
   /**
-   * THE COVERAGE GRID — its sort, its windowed rows, the drawer, the month cards
-   * and the counted totals, and the % change notes panel.
+   * One absent month of a series, shaped like a decorated row so the grid,
+   * the sort and the drawer read it as one: zero bars, no stamps, no change,
+   * and `absent: true`.
    *
-   * Creates no effect, so where the shell calls it does not change behaviour.
+   * @param {any} like a stored row of the same series
+   * @param {string} month
+   */
+  function absentRow(like, month) {
+    return {
+      ...like,
+      month,
+      rows: 0,
+      first_ts: null,
+      last_ts: null,
+      firstAt: null,
+      lastAt: null,
+      chg: null,
+      chgWhy: 'absent',
+      prevChg: null,
+      prevChgWhy: 'absent',
+      chg_bps: null,
+      chg_why: 'absent',
+      prev_chg_bps: null,
+      prev_chg_why: 'absent',
+      key: `${like.instrument}\u0000${month}\u0000${like.timeframe}`,
+      absent: true
+    };
+  }
+
+  /**
+   * THE COVERAGE GRID — its calendar ledgers, its judged rows, its sort, its
+   * windowed rows, the drawer, the counted totals, and the % change notes.
    *
    * @param {any} db the page's shared state object (see the shell)
    */
@@ -42,96 +94,278 @@
     let desc = $state(false);
 
     /* ======================================================================
-       THE TRADING CALENDAR, DERIVED FROM THE STORE ITSELF
+       THE CALENDAR OF RECORD, ONE LEDGER PER (FEED, RUNG, SERIES)
+       ----------------------------------------------------------------------
+       `/calendar.json?feed&rung[&symbol&segment]` answers the dense day
+       string and the bars each kind of day owes at that rung (D-3336); asked
+       for one series, it also carries that series' own held days. A ledger
+       is read once per URL and kept until the census is read again; a
+       refusal is kept with its reason and named on every row it judges.
        ====================================================================== */
+    /** @type {Map<string, { ledger: any, why: string }>} */
+    let ledgers = $state.raw(new Map());
+    let ledgersFor = $state(0);
+    const ledgerReads = createPageRequests();
+
+    /** The rungs this feed folds from its 1min bars (D-3000). */
+    const derivedRungs = $derived(
+      new Set(/** @type {any} */ (db.activeFeed)?.derived_rungs ?? (feeds.active === 'zerodha' ? DERIVED_FALLBACK : []))
+    );
 
     /**
-     * How many bars a full month holds is not a constant and cannot be
-     * calculated: it is 375 x the number of sessions NSE actually held, and
-     * that depends on weekends, gazetted holidays, muhurat sessions and the
-     * occasional unscheduled close. This repository does not invent an exchange
-     * fact (`CLAUDE.md` section 3 rule 1), so the session count is OBSERVED:
-     * for each month, the fullest instrument in the store is the month.
-     *
-     * O(n) once over the rows, then O(1) per lookup — a Map probe, not a scan,
-     * so the 93,776-row census projected in `docs/06-limits.md` section 34
-     * costs one pass and not one pass per row.
-     *
-     * IT IS BUILT FROM THE WHOLE STORE, NEVER FROM THE FILTERED VIEW. The
-     * denominator is a fact about what NSE traded; narrowing the table to one
-     * kind must not quietly lower the bar the remaining rows are judged against.
+     * THE ONE SERIES THE SELECTION IS ABOUT, when it is one: spot (an index
+     * or a share), not a contract — `/calendar.json` reads a series by
+     * exchange, segment and symbol and holds no contract's days. `null` when
+     * the matched rows span series, and the exchange's calendar judges them.
      */
-    const monthFull = $derived.by(() => {
-      // KEYED ON (MONTH, RUNG), NOT ON MONTH.
-      //
-      // "The fullest instrument in this month" is only a denominator among rows
-      // of the SAME bar length. Keyed on the month alone, one 1min row (~8,250
-      // bars) beside a 1day row (19) judges every daily row ~8,231 short — 0.23%
-      // complete for a month that is actually full. Correct today only because
-      // the store happens to hold one rung; that is not a property to rely on.
-      return db.prepared.input === db.rows ? db.prepared.body?.observed.fullest ?? new Map() : new Map();
+    const oneSeries = $derived.by(() => {
+      /** @type {{ symbol: string, segment: string } | null} */
+      let one = null;
+      for (const r of db.matched) {
+        const seg = segmentOfKey(r.instrument);
+        if (seg === 'FNO') return null;
+        const symbol = r.underlying ?? '';
+        if (one === null) one = { symbol, segment: seg };
+        else if (one.symbol !== symbol || one.segment !== seg) return null;
+      }
+      return one;
     });
 
     /**
-     * HOW MANY ROWS STAND BEHIND EACH DENOMINATOR — the fact that decides
-     * whether "0 short" is a measurement or a tautology.
+     * The EXCHANGE ledger URL a row is judged with: what each day owes at
+     * its rung, over the feed's whole span (D-3336).
      *
-     * `monthFull` is "the fullest instrument in this (month, rung)". Where that
-     * group holds ONE row, the row IS the denominator: it is short of itself by
-     * zero, whatever it holds. The store holding `NSE-INDEX-NIFTY 2026-08 1min =
-     * 1 bar` and nothing else for that month reported, on the one page built to
-     * find holes: `Complete 1 of 1`, `Bars missing 0`, `Coverage 100.00%`, a
-     * green `full` chip and a filled meter — over a single bar. The same
-     * arithmetic reports a whole store of one bar as complete.
-     *
-     * A month held at a rung by one instrument is therefore UNVERIFIED, not full:
-     * nothing in the store contradicts it and nothing corroborates it either, and
-     * `CLAUDE.md` §3 rule 6 says which of those two to print. The same-month
-     * many-instruments case was fixed by the D-0089-era rewrite; this is the
-     * few-rows case it left behind.
+     * @param {{ instrument: string, timeframe: string, underlying?: string }} r
      */
-    const monthSupport = $derived(db.prepared.input === db.rows ? db.prepared.body?.observed.support ?? new Map() : new Map());
-
-    /**
-     * Whether this row is its own denominator — one row at this (month, rung),
-     * so `short === 0` says nothing about the month.
-     *
-     * @param {StoreRow} r
-     */
-    const soleDenom = (r) => isSole(monthSupport, r);
-
-    /**
-     * Bars this instrument-month is short of the fullest one in the same month.
-     *
-     * # What this used to be, and why it was worse than useless
-     *
-     * `ceil(rows / 375) * 375 - rows`. That is `(-rows) mod 375`, so it is in
-     * [0, 374] for EVERY row, whatever the month really held. It answered "is
-     * this row a whole multiple of 375", never "does this row hold the month" —
-     * and then the answer was labelled green "full" and counted in "Complete".
-     *
-     * Measured on the live store, both directions of the error:
-     *
-     * - `NSE-CASH-SHRIPISTON 2020-07` holds 147 bars against a 8,625-bar month.
-     *   It is short 8,478 — 22.6 whole trading days. The old expression said
-     *   228, understating the hole by 37x, and the row rendered as a minor gap.
-     * - `NSE-INDEX-NIFTY 2020-03` holds 7,774 bars and IS the fullest instrument
-     *   in its month — March 2020 held 20.73 sessions, because 2020-03-20 was a
-     *   short day. It is complete. The old expression said it was short 101,
-     *   inventing a hole in the one row that defines the month.
-     *
-     * A monitoring page whose entire stated job is "where are the holes"
-     * reporting no hole — or a fictional one — is the fallback that hides a
-     * failure `CLAUDE.md` section 4 bans, on the one surface built to prevent it.
-     *
-     * DO NOT "SIMPLIFY" THIS BACK INTO ARITHMETIC ON `rows` ALONE. There is no
-     * expression over a single row that can know how many sessions a month had.
-     *
-     * @param {StoreRow} r
-     */
-    function shortBy(r) {
-      return Math.max(0, (monthFull.get(fullestKey(r)) ?? r.rows) - r.rows);
+    function ledgerUrlOf(r) {
+      return calendarUrl(feeds.active ?? '', r.timeframe, null);
     }
+
+    /**
+     * The row's OWN series ledger URL, whose held digits count the days it
+     * holds, or `null` when the selection is not that one series. Its span is
+     * the series' own, so it never decides what is owed: a series that stops
+     * short would otherwise read full.
+     *
+     * @param {{ instrument: string, timeframe: string, underlying?: string }} r
+     */
+    function heldUrlOf(r) {
+      const series = oneSeries;
+      const own = series !== null && series.symbol === (r.underlying ?? '') && series.segment === segmentOfKey(r.instrument);
+      return own ? calendarUrl(feeds.active ?? '', r.timeframe, series) : null;
+    }
+
+    /** Every ledger the coverage view needs now: each matched rung, and 1min for a derived rung's source. */
+    const wanted = $derived.by(() => {
+      if (db.view !== 'census' || !feeds.active) return [];
+      const urls = new Set();
+      for (const r of db.matched) {
+        for (const at of derivedRungs.has(r.timeframe) ? [r, { ...r, timeframe: '1min' }] : [r]) {
+          urls.add(ledgerUrlOf(at));
+          const own = heldUrlOf(at);
+          if (own) urls.add(own);
+        }
+      }
+      return [...urls];
+    });
+
+    /* A CENSUS READ IS A NEW STORE: the held days may have moved, so every
+       ledger is read again. */
+    $effect(() => {
+      void db.fetchedAt;
+      void feeds.active;
+      untrack(() => {
+        ledgerReads.cancel();
+        ledgers = new Map();
+        ledgersFor += 1;
+      });
+    });
+    $effect(() => {
+      const need = wanted;
+      void ledgersFor;
+      const missing = need.filter((url) => !untrack(() => ledgers).has(url));
+      if (missing.length === 0) return;
+      void ledgerReads.run(async (ticket) => {
+        for (const url of missing) {
+          if (!ticket.current()) return;
+          const read = await readLedger(url, ask, ticket.signal);
+          if (!ticket.current()) return;
+          ledgers = new Map(ledgers).set(url, read);
+        }
+      });
+    });
+    $effect(() => () => ledgerReads.dispose());
+
+    /* ======================================================================
+       EVERY SERIES' SPAN, FROM THE WHOLE CENSUS
+       ----------------------------------------------------------------------
+       First and last month and day of each (instrument, rung) the store
+       holds, and the months it holds. Built once per census read, O(rows):
+       a series' first month is measured from its first bar, and the months
+       between its two ends it does not hold are drawn absent.
+       ====================================================================== */
+    const seriesIndex = $derived.by(() => {
+      /** @type {Map<string, { first: string, last: string, firstDay: number | null, lastDay: number | null, months: Set<string>, like: any }>} */
+      const by = new Map();
+      if (db.view !== 'census') return by;
+      for (const r of db.deco) {
+        const key = `${r.instrument}\u0000${r.timeframe}`;
+        let s = by.get(key);
+        if (!s) {
+          s = { first: r.month, last: r.month, firstDay: null, lastDay: null, months: new Set(), like: r };
+          by.set(key, s);
+        }
+        s.months.add(r.month);
+        if (r.month < s.first) s.first = r.month;
+        if (r.month > s.last) s.last = r.month;
+        if (r.firstAt !== null) {
+          const d = istDayOf(r.firstAt);
+          if (s.firstDay === null || d < s.firstDay) s.firstDay = d;
+        }
+        if (r.lastAt !== null) {
+          const d = istDayOf(r.lastAt);
+          if (s.lastDay === null || d > s.lastDay) s.lastDay = d;
+        }
+      }
+      return by;
+    });
+
+    /**
+     * HOW FAR THE STORE REACHES AT EACH RUNG: the last day any series holds
+     * a bar at it (GDFL's archive ends 2026-09-24). A month is owed only to
+     * there, and a series short of it in that month owes the rest.
+     */
+    const reach = $derived.by(() => {
+      /** @type {Map<string, number>} */
+      const by = new Map();
+      for (const s of seriesIndex.values()) {
+        if (s.lastDay === null) continue;
+        const tf = s.like.timeframe;
+        if (!by.has(tf) || /** @type {number} */ (by.get(tf)) < s.lastDay) by.set(tf, s.lastDay);
+      }
+      return by;
+    });
+
+    /** Every census row by its key, for a derived rung's 1min source: a probe, not a scan. */
+    const byKey = $derived.by(() => {
+      /** @type {Map<string, DecoRow>} */
+      const m = new Map();
+      if (db.view !== 'census') return m;
+      for (const it of db.deco) m.set(it.key, it);
+      return m;
+    });
+
+    const observed = $derived(db.prepared.input === db.rows ? db.prepared.body?.observed ?? null : null);
+
+    /**
+     * THE BAR COUNTS OF EVERY CALENDAR-OWED SERIES AT EACH (MONTH, RUNG),
+     * sorted, so "how many series hold no more than this row" is one binary
+     * search (`peersAtMost`): the corroboration that names a store-wide hole
+     * (DB-012). Trade-driven series are left out: they owe no count. Built
+     * once per census read, O(rows log rows).
+     */
+    const peerRows = $derived.by(() => {
+      /** @type {Map<string, number[]>} */
+      const by = new Map();
+      if (db.view !== 'census') return by;
+      for (const r of db.deco) {
+        if (isTradeDriven(r.timeframe, segmentOfKey(r.instrument), r.strike)) continue;
+        const k = denomKey(r.month, r.timeframe);
+        let a = by.get(k);
+        if (!a) by.set(k, (a = []));
+        a.push(r.rows);
+      }
+      for (const a of by.values()) a.sort((x, y) => x - y);
+      return by;
+    });
+
+    /**
+     * Judge one row against its ledger.
+     *
+     * @param {any} r a decorated row or an absent one
+     * @returns {Cover}
+     */
+    function coverOf(r) {
+      const read = ledgers.get(ledgerUrlOf(r));
+      const ownUrl = heldUrlOf(r);
+      const own = ownUrl ? ledgers.get(ownUrl)?.ledger ?? null : null;
+      const s = seriesIndex.get(`${r.instrument}\u0000${r.timeframe}`);
+      const at = denomKey(r.month, r.timeframe);
+      const derived = derivedRungs.has(r.timeframe);
+      /** @type {any} */
+      let source = null;
+      if (derived) {
+        const one = byKey.get(`${r.instrument}\u0000${r.month}\u00001min`);
+        if (one) source = { rows: one.rows, lastAt: one.lastAt, cover: coverOf(one) };
+      }
+      const secs = TF_SECS.get(r.timeframe);
+      return judgeRow(r, {
+        ledger: read?.ledger ?? null,
+        ledgerWhy: read ? read.why : 'reading the calendar of record…',
+        held: own,
+        storeLastDay: reach.get(r.timeframe) ?? null,
+        seriesFirstDay: s?.firstDay ?? null,
+        seriesLastDay: s?.lastDay ?? null,
+        fullest: observed?.fullest.get(at) ?? null,
+        support: observed?.support.get(at) ?? 0,
+        peers: peerRows.has(at) ? peersAtMost(/** @type {number[]} */ (peerRows.get(at)), r.rows) : null,
+        window: /** @type {any} */ (db.activeFeed)?.window ?? null,
+        archive: /** @type {any} */ (db.activeFeed)?.archive ?? null,
+        derived,
+        source,
+        rungMs: secs === undefined ? 0 : secs * 1000
+      });
+    }
+
+    /**
+     * The months one series does not hold between its two ends, as absent
+     * rows — and, for a derived rung, the months its 1min source holds that
+     * it does not ("derivation pending", DB-013). Months outside the
+     * operator's window are left out unless the window toggle shows them.
+     *
+     * @param {string} instrument
+     * @param {string} timeframe
+     */
+    function absentOf(instrument, timeframe) {
+      const s = seriesIndex.get(`${instrument}\u0000${timeframe}`);
+      if (!s) return [];
+      let first = s.first;
+      let last = s.last;
+      if (derivedRungs.has(timeframe)) {
+        const one = seriesIndex.get(`${instrument}\u00001min`);
+        if (one) {
+          if (one.first < first) first = one.first;
+          if (one.last > last) last = one.last;
+        }
+      }
+      const win = /** @type {any} */ (db.activeFeed)?.window ?? null;
+      return absentMonths(first, last, s.months)
+        .filter((m) => db.oow || !win || (m >= win.from.slice(0, 7) && m <= win.to.slice(0, 7)))
+        .map((m) => absentRow(s.like, m));
+    }
+
+    /**
+     * THE ROWS THE GRID JUDGES: the matched rows, and every absent month of
+     * each series among them. Absent months are drawn only when no single
+     * month is chosen, since a chosen month is already a narrowing.
+     */
+    const judged = $derived.by(() => {
+      if (db.view !== 'census') return [];
+      /** @type {any[]} */
+      const out = [];
+      const seen = new Set();
+      for (const r of db.matched) {
+        out.push({ ...r, cover: coverOf(r) });
+        seen.add(`${r.instrument}\u0000${r.timeframe}`);
+      }
+      if (!db.month) {
+        for (const key of seen) {
+          const [instrument, timeframe] = key.split('\u0000');
+          for (const a of absentOf(instrument, timeframe)) out.push({ ...a, cover: coverOf(a) });
+        }
+      }
+      return out;
+    });
 
     const storeBars = $derived(db.deco.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.rows, 0));
     const kindCount = $derived.by(() => {
@@ -156,12 +390,7 @@
 
     /**
      * Every reason code present, counted in both columns, most common first.
-     *
-     * ENUMERATED, NEVER LISTED BY HAND. The version of this panel that named
-     * `base_not_positive` and `overflow` and then said "neither appears in this
-     * dataset" was rendered over a dataset containing a `base_not_positive` row.
-     * A panel about honesty cannot afford a sentence that is not counted, so the
-     * sentence became a count.
+     * Enumerated, never listed by hand.
      */
     const reasonRoll = $derived.by(() => {
       const codes = new Set([...whyCount.chg.keys(), ...whyCount.prev.keys()]);
@@ -177,107 +406,88 @@
     const NOTES = $derived([
       {
         k: 'What the two columns are.',
-        v: `% change is the month's OWN first close to its OWN last close. Prev % change is the previous calendar month's same statistic for the same instrument — not the previous bar, because a row here is an instrument-month. Both arrive as integer basis points and the decimal point is inserted for display: 125 on the wire is +1.25% on screen. CLAUDE.md §7 bans the float for money and a ratio derived from money gets the same treatment, so no percentage on this page has ever been a float, at either end.`
+        v: `% in month is the month's OWN first close to its OWN last close (D-0069): it leaves out the move from the previous month's last close to this month's first. Prev month % is the previous calendar month's same statistic for the same instrument. The change against the previous month's close is in the row drawer, read from the two months' last bars. Both arrive as integer basis points and the decimal point is inserted for display: 125 on the wire is +1.25% on screen. CLAUDE.md §7 bans the float for money and a ratio derived from money gets the same treatment.`
       },
       {
-        k: 'No corporate-action threshold is sourced. That is why most cells are a dash.',
-        v: `${fmt(refusedForSplits)} of ${fmt(db.deco.length)} rows are refused for this reason, and it is the only one of the five that is PERMANENT — no pull fixes it. docs/00-charter.md names no verified split-and-bonus feed, and docs/05-decisions.md D-0018 both requires a suspected corporate action to be refused loudly and rejects back-adjusting from an unverified source. An unadjusted 1:5 split is a fake 80% overnight crash that no stored price can be told apart from a real move. So every instrument that can be re-based — cash equities, and the F&O contracts NSE adjusts alongside them — is marked rather than numbered, in BOTH columns, whether or not its neighbour is held. Indices never split, and the ${fmt(kindCount.get('INDEX') ?? 0)} INDEX row(s) are the only ones eligible for a number at all.`
+        k: 'No corporate-action threshold is sourced. That is why most share cells are a dash.',
+        v: `${fmt(refusedForSplits)} of ${fmt(db.deco.length)} rows are refused for this reason, and it is the only refusal no pull fixes. docs/00-charter.md names no verified split-and-bonus feed, and docs/05-decisions.md D-0018 both requires a suspected corporate action to be refused loudly and rejects back-adjusting from an unverified source. So every instrument that can be re-based — a cash share, and an option on a share — is marked rather than numbered. An index, and an option on an index, can never be re-based and both carry a number (D-3325, DB-G66); ${fmt(kindCount.get('INDEX') ?? 0)} INDEX row(s) are in this census.`
       },
       {
         k: 'A month-level field can flag a month. It cannot name the day.',
-        v: `D-0018's stated detector is an unexplained OVERNIGHT gap, which is a bar-to-bar test over a month's ~8,250 bars — O(bars) work that cannot live in a census row (D-0067). Even with a threshold in hand, this column could only ever say "a corporate action may fall in this month", never "split on 2024-06-14". Anything stronger would have to be measured somewhere else and is not being claimed here.`
+        v: `D-0018's stated detector is an unexplained OVERNIGHT gap, which is a bar-to-bar test over a month's bars — O(bars) work that cannot live in a census row (D-0067). Even with a threshold in hand, this column could only ever say "a corporate action may fall in this month", never "split on 2024-06-14".`
       },
       {
         k: 'Every reason on this dataset, counted.',
         v:
           reasonRoll.length === 0
             ? 'Nothing is refused: every row in this dataset carries a number in both columns.'
-            : `${reasonRoll.map((r) => `${r.code}: ${fmt(r.chg)} in % change, ${fmt(r.prev)} in prev`).join(' · ')}. Counted from the rows themselves rather than listed here, so this line cannot claim a code is absent while the table below shows one.`
+            : `${reasonRoll.map((r) => `${r.code}: ${fmt(r.chg)} in % in month, ${fmt(r.prev)} in prev`).join(' · ')}. Counted from the rows themselves rather than listed here.`
       },
       {
         k: 'What it cost to make this affordable.',
-        v: `Reading the two closes from /bars.json instead would be ${fmt(db.deco.length)} request(s) and about ${bytesText(storeBars * BYTES_PER_BAR)} moved — measured at ${BYTES_PER_BAR.toFixed(1)} bytes per bar, from 668,251 bytes for 8,250 bars — to extract ${bytesText(db.deco.length * 16)} of signal. D-0067 put the two closes in the census entry instead, so a row and its neighbour are two hash probes and no file is opened. This page pays one request for the whole table, as it always did.`
+        v: `Reading the two closes from /bars.json instead would be ${fmt(db.deco.length)} request(s) and about ${bytesText(storeBars * BYTES_PER_BAR)} moved to extract ${bytesText(db.deco.length * 16)} of signal. D-0067 put the two closes in the census entry instead.`
       }
     ]);
 
     let noteOpen = $state(false);
 
+    /**
+     * A row's value for the sort: the coverage verdict's numbers, never the
+     * peer comparison's.
+     *
+     * @param {any} r
+     * @param {string} k
+     */
+    function sortValue(r, k) {
+      const c = r.cover;
+      if (k === 'days') return c.heldSessions ?? -1;
+      if (k === 'short') return c.missing ?? -1;
+      if (k === 'pct') return c.ratio ?? -1;
+      return 0;
+    }
+
+    /* THE GRID'S ROWS. On the bar view nobody draws them, but the Coverage
+       tab's count and the pager read their length: the matched rows stand
+       in there, so the census is not judged for a grid that is not shown. */
     const sorted = $derived.by(() => {
+      if (db.view !== 'census') return db.matched;
       const k = sortKey;
       const dir = desc ? -1 : 1;
-      return [...db.matched].sort((a, b) => {
+      return [...judged].sort((a, b) => {
         let d = 0;
-        // `days` IS ITS OWN FIELD. Both keys used to sort on `a.rows`, so clicking
-        // the Sessions header ordered the table by Bars — two different numbers,
-        // and a column that sorts by a neighbour is worse than one that does not
-        // sort at all, because the arrow says it worked.
         if (k === 'rows') d = a.rows - b.rows;
-        // `?? 0` IS THE COERCION JAVASCRIPT ALREADY PERFORMS, WRITTEN DOWN.
-        // `days` is `null` for every rung `barsPerSession` has no session size
-        // for — 2min, 3min, 5min and the rest of the ladder — and `null - null`
-        // is 0 while `5 - null` is 5, because `-` sends `null` to 0 before it
-        // subtracts. Spelling it out changes no order and no output; it only
-        // stops the expression from reading as though a null could not arrive.
-        //
-        // IT IS DELIBERATELY NOT THE `?? -1` RULE `pct` USES TWO LINES DOWN.
-        // Sorting an unknown session count below every known one would be a
-        // different table from the one this page renders today, and changing
-        // which rows an operator sees first is not a typing change.
-        else if (k === 'days') d = (a.days ?? 0) - (b.days ?? 0);
-        else if (k === 'short') d = a.short - b.short;
-        // AN UNKNOWN SORTS AS AN UNKNOWN. `a.pct` is null for a row that is its
-        // own denominator, and `null - null` is 0 while `0.9 - null` is 0.9 —
-        // a comparator that treats "not measured" as zero orders the table by a
-        // number nobody computed. Below every real ratio, and stable among
-        // themselves.
-        else if (k === 'pct') d = (a.pct ?? -1) - (b.pct ?? -1);
+        // AN UNKNOWN SORTS AS AN UNKNOWN: a trade-driven row owes no count and
+        // an unmeasured one has none, so they sit below every real number.
+        else if (k === 'days' || k === 'short' || k === 'pct') d = sortValue(a, k) - sortValue(b, k);
         else if (k === 'month') d = txt(a.month, b.month);
-        // BY LENGTH, NOT BY SPELLING. `txt` stood here, which ordered the rungs
-        // `15min`, `1day`, `1min`, `30min` — by first character, which is the
-        // same defect as a month column ordered by `Apr`. `tfCmp` is the ladder
-        // the new Timeframe control is drawn from, so the column and the control
-        // cannot disagree about what "next rung" means.
         else if (k === 'timeframe') d = tfCmp(a.timeframe, b.timeframe);
         else if (k === 'chg' || k === 'prevChg') {
-          // AN UNKNOWN SORTS LAST IN BOTH DIRECTIONS, and the `return` rather
-          // than a `d` is what makes that true: folding it into `dir * d` would
-          // put every dash at the TOP on one click and the bottom on the next,
-          // so "biggest fall first" would open on a screen of dashes. A dash is
-          // not a very small number; it is not a number, and it has no place on
-          // either end of an ordering of numbers.
           if (a[k] === null && b[k] === null) d = 0;
           else if (a[k] === null) return 1;
           else if (b[k] === null) return -1;
           else d = a[k] - b[k];
         } else d = txt(a.instrument, b.instrument);
         if (d !== 0) return dir * d;
-        // Deterministic tie-break, NOT inverted with the direction: two runs of
-        // the same sort produce byte-identical order, so equal values never
-        // jitter when the direction is flipped and flipped back.
         return txt(a.instrument, b.instrument) || txt(a.month, b.month);
       });
     });
 
     /**
-     * A click on a column heading: same column flips the direction, a new column
-     * opens on the end that column is interesting at.
+     * A click on a column heading: same column flips the direction, a new
+     * column opens on the end that column is interesting at.
      *
-     * @param {string} key a `COLS[].key` — the field name `sorted` switches on
+     * @param {string} key a `COLS[].key`
      */
     function head(key) {
       if (sortKey === key) desc = !desc;
       else {
         sortKey = key;
-        // Open a numeric column on its interesting end: most bars first, biggest
-        // hole first, biggest gain first — but completeness ascending, because
-        // the WORST row is the one being looked for.
         desc = key === 'rows' || key === 'days' || key === 'short' || key === 'chg' || key === 'prevChg';
       }
     }
 
     /**
-     * The `aria-sort` value for one heading — the direction stated to a screen
-     * reader, from the same two variables the arrow is drawn from.
+     * The `aria-sort` value for one heading.
      *
      * @param {string} key a `COLS[].key`
      */
@@ -287,150 +497,52 @@
     const censusPage = $derived(sorted.slice((db.pageNow - 1) * db.pageSize, db.pageNow * db.pageSize));
 
     /* ======================================================================
-       THE SUMMARY, over the MATCHED set — the question actually on screen
+       THE SUMMARY, over the judged set — the question actually on screen
        ====================================================================== */
+    const stored = $derived(judged.filter((/** @type {any} */ r) => !r.absent));
+    /** Bars the selection holds — every matched row, whichever view is shown (the Bars tab's count). */
     const total = $derived(db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.rows, 0));
-    /**
-     * COMPLETE MEANS COMPARED. A row that is the only one stored at its (month,
-     * rung) is not counted here in either direction: it is not complete and it is
-     * not short, because nothing in the store can tell which. See `SOLE_WHY`.
-     */
-    const full = $derived(db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.short === 0 && !r.sole ? 1 : 0), 0));
-    const unverified = $derived(db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.sole ? 1 : 0), 0));
-    const gaps = $derived(db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.short, 0));
-    /** The rows a denominator other than themselves stands behind. */
-    const comparable = $derived(db.matched.filter((/** @type {any} */ r) => !r.sole));
-    /** Bars in those rows — the numerator Coverage is entitled to use. */
-    const judgedBars = $derived(comparable.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + r.rows, 0));
-
-    /**
-     * Session-equivalents across the selection, each row converted AT ITS OWN
-     * RUNG before summing.
-     *
-     * A single `total / 375` cannot be right for a store holding two rungs: 403
-     * daily bars are 403 sessions, not 1.07. Rows at a rung with no recorded
-     * session size contribute nothing rather than a guess, which is why this can
-     * read lower than the bar count implies — and why the label beside it says
-     * "session-equivalents" rather than "sessions".
-     */
-    const sessionEquivalents = $derived(
-      db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => {
-        const per = barsPerSession(r.timeframe);
-        return per === null ? a : a + r.rows / per;
-      }, 0)
+    /** Rows the calendar judged complete. */
+    const full = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.state === 'full' ? 1 : 0), 0));
+    /** Rows no calendar could judge: their reason is on each. */
+    const unverified = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'none' ? 1 : 0), 0));
+    /** Trade-driven rows: owed no count (D-3336 §2). */
+    const tradeRows = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'trade' ? 1 : 0), 0));
+    /** Bars the calendar owes the judged rows and the store does not hold. */
+    const gaps = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.missing ?? 0), 0));
+    /** Bars owed to the calendar-judged rows. */
+    const owed = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'calendar' ? r.cover.owed ?? 0 : 0), 0));
+    /** Bars those rows hold, each capped at what it owes. */
+    const judgedBars = $derived(
+      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.basis === 'calendar' && r.cover.owed !== null ? Math.min(r.rows, r.cover.owed) : 0), 0)
     );
-
-    /** Whole sessions missing, each row at its own rung. Same rule as above. */
-    const gapSessions = $derived(
-      db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => {
-        const per = barsPerSession(r.timeframe);
-        return per === null ? a : a + r.short / per;
-      }, 0)
-    );
-
-    /**
-     * How many matched rows sit at a rung with a recorded session size — the
-     * denominator BEHIND the two session figures above, counted rather than
-     * assumed.
-     *
-     * Both of those sums skip a row whose rung `barsPerSession` has no number
-     * for. When every row on screen is at such a rung the sums are `0`, and `0`
-     * is a measurement: it says the selection holds no sessions, when the truth
-     * is that nobody can convert the bars it does hold. Counting the convertible
-     * rows lets the sub-lines print a dash and name that, which is the same rule
-     * `dayText` already enforces one row at a time.
-     */
-    const ranged = $derived(
-      db.matched.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (barsPerSession(r.timeframe) === null ? 0 : 1), 0)
-    );
-
-    /* WHAT THE COMPARABLE SET WOULD HOLD IF FULL.
-       `total + gaps` counted the self-denominated rows into the numerator AND
-       gave them a shortfall of zero, so a store holding one bar reported
-       100.00% coverage with a full meter. Those rows are now outside both
-       halves, and the tile says how many. */
-    const owed = $derived(judgedBars + gaps);
-
-    /**
-     * Bars held over bars owed — or `null`, which is a THIRD answer and not a
-     * bad hundred percent.
-     *
-     * `owed > 0 ? total / owed : 1` said 100.00% over a selection holding no
-     * bars at all, and the meter beside it filled to the end. Every filter that
-     * matches nothing reaches that branch, so the one tile an operator uses to
-     * judge the store reported perfect coverage of nothing, in the confident
-     * shape of a measurement. 0/0 is not one; it is undefined, `pctText` draws
-     * the dash, and the tile names which absence it is.
-     */
+    /** Bars held over bars owed, or `null` where nothing is owed. */
     const coverage = $derived(owed > 0 ? judgedBars / owed : null);
+    /** Months a calendar-owed series does not hold between its two ends (`months_missing`): holes. */
+    const absentCount = $derived(
+      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.absent && r.cover.basis !== 'trade' ? 1 : 0), 0)
+    );
+    /** Months a trade-driven series does not hold between its two ends: nothing traded, not holes. */
+    const noTradeMonths = $derived(
+      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.absent && r.cover.basis === 'trade' ? 1 : 0), 0)
+    );
+    /** Rows short by a hole every stored series shares. */
+    const storeWideRows = $derived(judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.notes.includes('store_wide') ? 1 : 0), 0));
+    /** Derived rows behind or short of their 1min source. */
+    const derivedLagging = $derived(
+      judged.reduce((/** @type {any} */ a, /** @type {any} */ r) => a + (r.cover.notes.includes('derived_behind') || r.cover.notes.includes('derived_partial') ? 1 : 0), 0)
+    );
     const monthsIn = $derived.by(() => {
       const s = new Set();
       for (const r of db.matched) s.add(r.month);
       return [...s].sort();
     });
 
-    /* ---- the month roll-up ---------------------------------------------
-       WHICH MONTHS ARE COMPLETE, WHICH HAVE HOLES, HOW BIG. A hole is almost
-       never one instrument — it is a session the pull did not finish — so the
-       month is the altitude the answer actually lives at. Each card is also the
-       filter for that month, because seeing a hole and then having to type its
-       name is a page that shows a problem and hides the way in. */
-    /**
-     * THE DENOMINATOR IS SUMMED PER ROW, NOT SNAPSHOT FROM THE FIRST ONE.
-     *
-     * `fullest` was read once, inside `if (!m)` — from whichever row of that
-     * month `/store.json` happened to send first — and then multiplied by the
-     * row count. `monthFull` is keyed on (month, RUNG) and says why three lines
-     * into its own comment; this took a (month, rung) figure and applied it to
-     * every rung in the month. Measured on 2021-08 holding NIFTY@1day=23,
-     * NIFTY@1min=8,625 and BANKNIFTY@1min=8,625 — a month that is genuinely
-     * complete at both rungs — the card read `25,033.33%` with a meter 250 times
-     * its own width and the title "every one of the 3 instruments holds all 23
-     * bars" if the daily row arrived first, and `66.75%` tagged SHORT if the
-     * minute row did. One headline number with two values, decided by row order.
-     *
-     * `owed` is the sum of each row's OWN (month, rung) denominator, so every row
-     * is judged at its own rung and the ratio is the same whatever order the wire
-     * used. `fullest` survives only as a display figure and only where the month
-     * holds one rung — `sessions` already worked this way.
-     */
-    const monthCards = $derived.by(() =>
-      rollUpMonths(db.windowed)
-        .map((m) => {
-          // ONE CALL, ONE VALUE — the hoist `deco` already makes for the same
-          // reason. `barsPerSession` was called TWICE below, once to test for
-          // `null` and once to divide by, so the test narrowed nothing that
-          // could be checked and the second call was free to be a different
-          // answer than the one that was tested. It is pure and it is not,
-          // today; a guard that only happens to hold is not a guard.
-          //
-          // `m.tf` is the rung this month is stored at, or `false` once two
-          // rungs disagree — see `rollUpMonths`. A month with no single rung has
-          // no session size either, and asking for one is the question that
-          // returns `null` here.
-          const per = m.tf ? barsPerSession(m.tf) : null;
-          return {
-            ...m,
-            // THE FULLEST ROW, AND ONLY WHERE ONE RUNG MAKES THAT A SINGLE
-            // NUMBER. `null` draws a dash and the title says the month holds
-            // two rungs.
-            fullest: m.tf ? (m.n > 0 ? m.owed / m.n : 0) : null,
-            // NULL RATHER THAN A NUMBER when the rung is unknown or mixed; the
-            // renderer draws a dash. `dayText` owns that rule for every caller.
-            sessions: per !== null && m.n > 0 ? m.owed / m.n / per : null
-          };
-        })
-        .sort((a, b) => txt(b.month, a.month))
-    ); /* newest first: that is where a pull lands */
+    /* ---- the month roll-up (calendar-judged; absent months included) ---- */
+    const monthCards = $derived(rollUpMonths(judged).sort((a, b) => txt(b.month, a.month)));
+    const holeMonths = $derived(monthCards.filter((m) => m.state === 'near' || m.state === 'gap' || m.state === 'absent').length);
+    const unprovenMonths = $derived(monthCards.filter((m) => m.state === 'unmeasured').length);
 
-    /* A HOLE IS A HOLE, AND AN UNKNOWN IS NOT ONE. `state !== 'full'` counted the
-       months that hold too little AND the months nothing can be said about into
-       one figure labelled "with holes". They are different answers and the strip
-       now prints both. */
-    const holeMonths = $derived(
-      monthCards.filter((m) => m.state === 'near' || m.state === 'gap').length
-    );
-    const unprovenMonths = $derived(monthCards.filter((m) => m.state === 'sole').length);
     /** @type {HTMLElement | null} */
     let scroller = $state(null);
     let scrollTop = $state(0);
@@ -438,23 +550,8 @@
 
     const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - OVER));
     const count = $derived(Math.ceil(viewportH / ROW) + OVER * 2);
-    /* WINDOWED INSIDE THE PAGE, NOT INSTEAD OF IT. The pager decides WHICH
-       rows are reachable; the window decides which of those are in the DOM.
-       Dropping the window when the pager landed would have put 1,000 rows of
-       nine cells into the document on the largest page size, which is the
-       layout cost the window exists to refuse. */
     const slice = $derived(censusPage.slice(first, first + count));
 
-    /* THE SEAM APPEARS ONLY ONCE THERE IS SOMETHING BEHIND IT. A permanent rule
-       down the pinned column is a border pretending to be a shadow; the hairline
-       is drawn when — and only when — columns are actually sliding under it.
-
-       IT IS A `class:` DIRECTIVE AND NOT `classList.toggle`, WHICH IS NOT A
-       STYLE CHOICE. Svelte prunes CSS whose selectors it cannot see used in the
-       template, so a class added only from JavaScript compiles to a rule that is
-       deleted — the class lands on the node and nothing happens. Measured: the
-       element carried `xscrolled` while the `::after` stayed at opacity 0.
-       A boolean that flips at most twice per gesture costs nothing anyway. */
     let xscrolled = $state(false);
     function onScroll() {
       if (!scroller) return;
@@ -463,32 +560,18 @@
       if (x !== xscrolled) xscrolled = x;
     }
 
-    /* ======================================================================
-       KEYBOARD — the table is navigable without a mouse
-       ----------------------------------------------------------------------
-       A virtualised list cannot give every row a tab stop: 20,516 tab stops is
-       not navigation. The scroll box is the single stop and carries the cursor,
-       which is the `aria-activedescendant` pattern — the focused row is always
-       scrolled into view, so the id it names is always in the DOM.
-       ====================================================================== */
+    /* ---- KEYBOARD: one tab stop, `aria-activedescendant` names the row ---- */
     let cursor = $state(-1);
     /** @type {string | null} */
-    let openKey = $state(null); /* the row whose detail drawer is open */
+    let openKey = $state(null);
     /** @type {HTMLElement | null} */
     let drawerEl = $state(null);
 
-    /**
-     * Put the keyboard cursor on row `next` of the current page, clamped, and
-     * scroll it into view.
-     *
-     * @param {number} next a row index into `censusPage`, in or out of range
-     */
+    /** @param {number} next */
     function moveTo(next) {
       const n = censusPage.length;
       if (n === 0) return;
       cursor = Math.max(0, Math.min(n - 1, next));
-      // Written straight to the DOM, never back into `scrollTop` state, so the
-      // cursor moving and the list scrolling cannot feed each other.
       const el = scroller;
       if (!el) return;
       const top = HEAD + cursor * ROW;
@@ -496,27 +579,12 @@
       else if (top + ROW > el.scrollTop + viewportH) el.scrollTop = top + ROW - viewportH;
     }
 
-    /**
-     * Move the cursor by `d` rows. From no cursor at all it enters the list at
-     * the end the movement came from — down enters at the top, up at the bottom.
-     *
-     * @param {number} d rows to move, signed
-     */
+    /** @param {number} d */
     function step(d) {
       moveTo(cursor < 0 ? (d > 0 ? 0 : censusPage.length - 1) : cursor + d);
     }
 
-    /**
-     * Open the drawer on one census row.
-     *
-     * `undefined` IS A REAL ARGUMENT AND IT OPENS NOTHING. The Enter/Space path
-     * passes `censusPage[cursor]`, and an index into a windowed page can be past
-     * its end for the instant between a filter narrowing the list and the cursor
-     * being reset — which is exactly why the guard is here rather than at the
-     * one call site that can produce it.
-     *
-     * @param {DecoRow | undefined} it
-     */
+    /** @param {any} it */
     function openRow(it) {
       if (it) openKey = it.key;
     }
@@ -560,66 +628,294 @@
       e.preventDefault();
     }
 
-    /* ---- what the drawer shows -----------------------------------------
-       EVERY MONTH THIS INSTRUMENT HOLDS, which is the drill-through the study
-       asked for at the altitude this data actually supports. Built once as a
-       Map, so opening a row is a probe and not a scan of 20,516 rows. */
+    /* ---- what the drawer shows -------------------------------------------
+       EVERY MONTH OF THE OPENED SERIES at the opened rung, stored or absent,
+       judged; built as a Map so opening a row is a probe. */
     const byInstrument = $derived.by(() => {
-      /* SAME REASON AS THE PREFIX INDEX ABOVE: an unannotated `new Map()` is
-         `Map<any, any>`, and every month the drawer renders off `openMonths`
-         would then be a shape nothing checks — on the one panel that reads nine
-         fields off each row. */
       /** @type {Map<string, DecoRow[]>} */
       const by = new Map();
+      if (db.view !== 'census') return by;
       for (const it of db.deco) {
         let a = by.get(it.instrument);
         if (!a) by.set(it.instrument, (a = []));
         a.push(it);
       }
-      for (const a of by.values()) a.sort((x, y) => txt(y.month, x.month));
       return by;
     });
 
-    /* AND A SECOND MAP, BECAUSE THE LINE BELOW WAS THE SCAN THE COMMENT ABOVE
-       SAYS THERE ISN'T. `byInstrument` genuinely made the MONTH list a probe;
-       resolving the opened ROW was still `deco.find(...)` — O(n) over the whole
-       census, which `docs/06-limits.md` §34 projects at 93,776 rows — re-run on
-       every `deco` change as well as on every open. One line under an invariant
-       it did not hold, which is the shape §3 rule 4 exists to catch.
-
-       Built in the same pass as `byInstrument` would have coupled two lookups
-       with different keys; a second Map over the same array is one more pass at
-       build time and turns the open into a probe for real. */
-    const byKey = $derived.by(() => {
-      /** @type {Map<string, DecoRow>} */
+    const judgedByKey = $derived.by(() => {
+      /** @type {Map<string, any>} */
       const m = new Map();
-      for (const it of db.deco) m.set(it.key, it);
+      for (const it of judged) m.set(it.key, it);
       return m;
     });
 
-    const openRowData = $derived(openKey ? (byKey.get(openKey) ?? null) : null);
-    const openMonths = $derived(openRowData ? (byInstrument.get(openRowData.instrument) ?? []) : []);
+    const openRowData = $derived.by(() => {
+      if (!openKey) return null;
+      const hit = judgedByKey.get(openKey);
+      if (hit) return hit;
+      const row = byKey.get(openKey);
+      return row ? { ...row, cover: coverOf(row) } : null;
+    });
+    const openMonths = $derived.by(() => {
+      const o = openRowData;
+      if (!o) return [];
+      const rows = (byInstrument.get(o.instrument) ?? []).filter((r) => r.timeframe === o.timeframe);
+      return [...rows, ...absentOf(o.instrument, o.timeframe)]
+        .map((r) => judgedByKey.get(r.key) ?? { ...r, cover: coverOf(r) })
+        .sort((x, y) => txt(y.month, x.month));
+    });
     const openTotals = $derived.by(() => {
       let bars = 0;
       let missing = 0;
       let complete = 0;
       let unproven = 0;
+      let absent = 0;
+      let sessions = 0;
+      let held = 0;
+      let exact = true;
       for (const m of openMonths) {
+        const c = m.cover;
         bars += m.rows;
-        missing += m.short;
-        if (m.sole) unproven += 1;
-        else if (m.short === 0) complete += 1;
+        missing += c.missing ?? 0;
+        if (m.absent) absent += 1;
+        if (c.basis === 'none') unproven += 1;
+        else if (c.state === 'full') complete += 1;
+        sessions += c.sessions ?? 0;
+        held += c.heldSessions ?? 0;
+        if (!c.heldExact) exact = false;
       }
-      return { bars, missing, complete, unproven, n: openMonths.length };
+      return { bars, missing, complete, unproven, absent, sessions, held, exact, n: openMonths.length };
     });
+
+    /* ---- the opened month against the previous month's close (DB-081) ----
+       Two reads: the last bar of the month before and of this month. Only an
+       index or an option on one: a share can be re-based (D-0018). */
+    let vsPrev = $state.raw(/** @type {{ key: string, bps: number | null, why: string, base: number | null, last: number | null, note?: string } | null} */ (null));
+    const vsReads = createPageRequests();
+    $effect(() => {
+      const o = openRowData;
+      const feed = feeds.active;
+      if (!o || !feed || o.absent) {
+        vsPrev = null;
+        return;
+      }
+      if (untrack(() => vsPrev)?.key === o.key) return;
+      const seg = segmentOfKey(o.instrument);
+      const exch = String(o.instrument).split('-')[0];
+      // AN OPTION ON AN INDEX is one whose underlying the census holds as an
+      // INDEX series: read from the store, never from a list of names here.
+      const indexy = seg === 'INDEX' || (seg === 'FNO' && untrack(() => byInstrument).has(`${exch}-INDEX-${o.underlying}`));
+      if (!indexy) {
+        vsPrev = {
+          key: o.key,
+          bps: null,
+          base: null,
+          last: null,
+          why:
+            seg === 'FNO'
+              ? `no INDEX series named ${o.underlying} is stored, so this option's underlying may be a share, which can be re-based: no change across months is shown (D-0018)`
+              : 'a share can be re-based (split, bonus, consolidation): no change across months is shown (D-0018)'
+        };
+        return;
+      }
+      vsReads.cancel();
+      void vsReads.run(async (ticket) => {
+        const y = Number(o.month.slice(0, 4));
+        const m = Number(o.month.slice(5, 7));
+        const prev = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+        const parts = String(o.instrument).split('-');
+        const contract = o.expiry ? String(o.instrument).slice(`${parts[0]}-${parts[1]}-${o.underlying}-`.length) : '';
+        /** @param {string} month */
+        const lastClose = async (month) => {
+          const q = new URLSearchParams({ feed, exchange: parts[0], segment: parts[1], symbol: o.underlying ?? '', timeframe: o.timeframe, from: month, to: month, dir: 'desc', limit: '1' });
+          if (contract) q.set('contract', contract);
+          const r = await ask(`/bars/window.json?${q}`, { cache: 'no-store', signal: ticket.signal });
+          if (!r.ok) return null;
+          const b = await r.json();
+          const bar = Array.isArray(b?.bars) ? b.bars[0] : null;
+          return Number.isSafeInteger(bar?.c) ? bar.c : null;
+        };
+        try {
+          const prevRow = byKey.get(`${o.instrument}\u0000${prev}\u0000${o.timeframe}`);
+          if (!prevRow) {
+            if (ticket.current()) vsPrev = { key: o.key, bps: null, base: null, last: null, why: `${monthLabel(prev)} is not held at this rung, so there is no previous close to measure from` };
+            return;
+          }
+          // A MONTH'S LAST BAR IS ITS CLOSE ONLY IF ITS LAST SESSION IS HELD:
+          // in a month with a hole at its end (Zerodha 2024-11 stops on the
+          // 8th) the last stored bar is not the month's close, and the change
+          // is refused by name rather than measured to the wrong day.
+          //
+          // A TRADE-DRIVEN SERIES IS NOT CUT SHORT BY A QUIET LAST SESSION: an
+          // option's last bar is its last trade, which is its close whether it
+          // printed on the month's last session or a week before; the days of
+          // both last trades are named beside the figure instead. A contract's
+          // month ends at its expiry, never after it.
+          const ledger = untrack(() => ledgers).get(ledgerUrlOf(o))?.ledger ?? null;
+          const tradeDriven = o.cover?.basis === 'trade';
+          const expiryDay = o.expiry ? epochDayOfIso(o.expiry) : null;
+          /** @param {string} month @param {number | null} lastAt */
+          const cutShort = (month, lastAt) => {
+            if (!ledger || lastAt === null || tradeDriven) return null;
+            const { first, last: monthLast } = monthSpan(month);
+            const last = expiryDay !== null ? Math.min(monthLast, expiryDay) : monthLast;
+            for (let d = last; d >= first; d -= 1) {
+              const day = ledgerDay(ledger, d);
+              if (day && 'RXPHU'.includes(day.code)) return istDayOf(lastAt) < d ? isoOfEpochDay(d) : null;
+            }
+            return null;
+          };
+          for (const [month, lastAt] of /** @type {[string, number | null][]} */ ([[prev, prevRow.lastAt], [o.month, o.lastAt]])) {
+            const owed = cutShort(month, lastAt);
+            if (owed !== null) {
+              if (ticket.current()) {
+                vsPrev = {
+                  key: o.key,
+                  bps: null,
+                  base: null,
+                  last: null,
+                  why: `${monthLabel(month)}'s last session, ${dayLabel(owed)}, is not held at this rung (its last bar is on ${dayLabel(lastAt)}), so its last bar is not its close`
+                };
+              }
+              return;
+            }
+          }
+          const base = await lastClose(prev);
+          const last = await lastClose(o.month);
+          if (!ticket.current()) return;
+          const bps = base !== null && last !== null && base > 0 ? basisPoints(base, last) : null;
+          vsPrev = {
+            key: o.key,
+            bps: typeof bps === 'number' ? bps : null,
+            base,
+            last,
+            why: bps === null ? 'a last bar could not be read' : '',
+            note:
+              tradeDriven && prevRow.lastAt !== null && o.lastAt !== null
+                ? `last trades ${dayLabel(prevRow.lastAt)} and ${dayLabel(o.lastAt)}`
+                : ''
+          };
+        } catch (why) {
+          if (ticket.current()) vsPrev = { key: o.key, bps: null, base: null, last: null, why: `the last bars could not be read (${String(/** @type {any} */ (why)?.message ?? why)})` };
+        }
+      });
+    });
+    $effect(() => () => vsReads.dispose());
+
+    /* ---- a contract's life, and where the store cuts it (DB-G67/G68/G72) ---- */
+    let importedTo = $state(/** @type {string | null} */ (null));
+    const importReads = createPageRequests();
+    $effect(() => {
+      const o = openRowData;
+      if (!o?.expiry || feeds.active !== 'gdfl' || untrack(() => importedTo) !== null) return;
+      void importReads.run(async (ticket) => {
+        try {
+          const r = await ask('/imports.json?feed=gdfl&kind=options&from=2018-09-03&to=2018-09-03', { cache: 'no-store', signal: ticket.signal });
+          if (!r.ok || !ticket.current()) return;
+          const b = await r.json();
+          const k = (b?.kinds ?? []).find((/** @type {any} */ x) => x?.kind === 'options');
+          if (ticket.current()) importedTo = typeof k?.last_day === 'string' ? k.last_day : '';
+        } catch {
+          if (ticket.current()) importedTo = '';
+        }
+      });
+    });
+    $effect(() => () => importReads.dispose());
+
+    /* ---- the import's lineage records for the opened contract (DB-G72) ----
+       One `/dayflags.json` day read per opened GDFL contract: its `lineage`
+       names the key a contract continues as after a bonus or split renamed
+       it (D-3331), or says the ledger is not written yet. Kept per key. */
+    let lineage = $state.raw(/** @type {{ key: string, read: { present: boolean, records?: any[], why?: string | null } | null } | null} */ (null));
+    const lineageReads = createPageRequests();
+    $effect(() => {
+      const o = openRowData;
+      const feed = feeds.active;
+      if (!o?.expiry || feed !== 'gdfl' || o.absent) return;
+      if (untrack(() => lineage)?.key === o.instrument) return;
+      const s = untrack(() => seriesIndex).get(`${o.instrument}\u0000${o.timeframe}`);
+      const on = s?.lastDay ?? null;
+      if (on === null) return;
+      lineage = { key: o.instrument, read: null };
+      lineageReads.cancel();
+      void lineageReads.run(async (ticket) => {
+        try {
+          const day = isoOfEpochDay(on);
+          const r = await ask(dayflagsUrl('gdfl', o.instrument, day, day), { cache: 'no-store', signal: ticket.signal });
+          if (!r.ok || !ticket.current()) return;
+          const b = await r.json();
+          const l = b?.lineage;
+          if (ticket.current() && l && typeof l === 'object') {
+            lineage = { key: o.instrument, read: { present: l.present === true, records: Array.isArray(l.records) ? l.records : [], why: l.why ?? null } };
+          }
+        } catch {
+          /* A FAILED READ LEAVES THE LINEAGE UNREAD (`null`): the life marks
+             then say nothing about a rename, rather than "never renamed". */
+        }
+      });
+    });
+    $effect(() => () => lineageReads.dispose());
+
+    const openLife = $derived.by(() => {
+      const o = openRowData;
+      if (!o) return [];
+      const s = seriesIndex.get(`${o.instrument}\u0000${o.timeframe}`);
+      if (!s || s.firstDay === null || s.lastDay === null) return [];
+      // A SPOT SERIES HAS NO LIFE TO CUT: the archive's first day is a fact
+      // about the feed, said once on /feeds.json, not about NIFTY.
+      if (!o.expiry) return [];
+      const read = ledgers.get(ledgerUrlOf(o));
+      const expiryDay = o.expiry ? epochDayOfIso(o.expiry) : null;
+      const sessionsAfter =
+        read?.ledger && expiryDay !== null && s.lastDay < expiryDay
+          ? ledgerSpan(read.ledger, s.lastDay + 1, expiryDay).sessions
+          : expiryDay !== null && s.lastDay >= expiryDay
+            ? 0
+            : null;
+      return contractLife(
+        { firstDay: isoOfEpochDay(s.firstDay), lastDay: isoOfEpochDay(s.lastDay), expiry: o.expiry ?? null },
+        {
+          archive: /** @type {any} */ (db.activeFeed)?.archive ?? null,
+          importedTo: importedTo || null,
+          today: db.today ?? '',
+          sessionsAfter,
+          lineage: lineage !== null && lineage.key === o.instrument ? lineage.read : null
+        }
+      );
+    });
+
+    /**
+     * Show the opened month's days on the bar grid: the day window set to the
+     * month, and the day band beside it names each day.
+     *
+     * @param {any} m
+     */
+    function showDays(m) {
+      const y = Number(m.month.slice(0, 4));
+      const mo = Number(m.month.slice(5, 7));
+      const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+      db.fromDay = `${m.month}-01`;
+      db.toDay = `${m.month}-${String(lastDay).padStart(2, '0')}`;
+      db.view = 'bars';
+      openKey = null;
+    }
 
     Object.defineProperties(db, {
       sortKey: { get: () => sortKey, set: (v) => (sortKey = v) },
       desc: { get: () => desc, set: (v) => (desc = v) },
-      monthFull: { get: () => monthFull },
-      monthSupport: { get: () => monthSupport },
-      soleDenom: { get: () => soleDenom },
-      shortBy: { get: () => shortBy },
+      covLedgers: { get: () => ledgers },
+      covOneSeries: { get: () => oneSeries },
+      covJudged: { get: () => judged },
+      covTradeRows: { get: () => tradeRows },
+      covAbsent: { get: () => absentCount },
+      covNoTrade: { get: () => noTradeMonths },
+      covStored: { get: () => stored.length },
+      covStoreWide: { get: () => storeWideRows },
+      covDerivedLagging: { get: () => derivedLagging },
+      covVsPrev: { get: () => vsPrev },
+      covLife: { get: () => openLife },
+      covShowDays: { get: () => showDays },
       storeBars: { get: () => storeBars },
       kindCount: { get: () => kindCount },
       whyCount: { get: () => whyCount },
@@ -636,11 +932,7 @@
       full: { get: () => full },
       unverified: { get: () => unverified },
       gaps: { get: () => gaps },
-      comparable: { get: () => comparable },
       judgedBars: { get: () => judgedBars },
-      sessionEquivalents: { get: () => sessionEquivalents },
-      gapSessions: { get: () => gapSessions },
-      ranged: { get: () => ranged },
       owed: { get: () => owed },
       coverage: { get: () => coverage },
       monthsIn: { get: () => monthsIn },
@@ -669,6 +961,38 @@
       openTotals: { get: () => openTotals }
     });
   }
+
+  /**
+   * The words for one row's sessions cell: `5 / 19` (held / owed), or the
+   * trade-driven span, or a dash with its reason.
+   *
+   * @param {Cover} c
+   */
+  export function sessionsText(c) {
+    if (c.sessions === null) return '—';
+    if (c.heldSessions === null) return `— / ${fmt(c.sessions)}`;
+    const held = c.heldExact || Number.isInteger(c.heldSessions) ? fmt(c.heldSessions) : c.heldSessions.toFixed(2);
+    return `${held} / ${fmt(c.sessions)}`;
+  }
+
+  /**
+   * The full sentence behind one row's verdict, for its title.
+   *
+   * @param {any} it a judged row
+   */
+  export function coverTitle(it) {
+    const c = /** @type {Cover} */ (it.cover);
+    const head =
+      c.basis === 'none'
+        ? `Not measured: ${c.why}.`
+        : c.basis === 'trade'
+          ? `Trade-driven: ${fmt(it.rows)} bar(s) over ${c.sessions === null ? 'an unknown number of' : fmt(c.sessions)} session(s) in its span${c.heldExact ? `, ${fmt(c.heldSessions ?? 0)} of them held` : ''}.`
+          : it.absent
+            ? `Absent: the store holds no file for this month; the calendar owes ${fmt(c.owed ?? 0)} bar(s) over ${fmt(c.sessions ?? 0)} session(s).`
+            : `${fmt(it.rows)} of ${fmt(c.owed ?? 0)} bar(s) the calendar owes over ${fmt(c.sessions ?? 0)} session(s)${c.owedAlt !== null ? ` (${fmt(c.owedAlt)} were the share not auction-eligible)` : ''}${c.missing ? `; ${fmt(c.missing)} missing` : ''}${c.extra ? `; ${fmt(c.extra)} beyond what is owed` : ''}.`;
+    return [head, ...c.notes.map(noteText)].join(' ');
+  }
+
 
   /**
    * WHAT MOVED BETWEEN TWO READS — the per-tile and per-row flash, and the reset
@@ -982,21 +1306,44 @@
   let { db } = $props();
 </script>
 
-<!-- THE COVERAGE CALENDAR'S PLACE, HELD BY WP-00. It renders nothing until
-     WP-54 fills DbCalendar.svelte; mounted now so that package edits only the
-     calendar and never this grid. -->
+<!-- THE COVERAGE CALENDAR (WP-54): the selection's days, both feeds, above
+     the grid of its months. -->
 <DbCalendar {db} />
+
+<!-- ==================================================================
+     WHAT THE GRID BELOW SAYS, COUNTED — against the calendar of record.
+     ================================================================== -->
+<section class="covsum" aria-label="Coverage of the rows below, against the calendar of record">
+  <span class="cs"><b>{fmt(db.covStored)}</b> month(s) stored</span>
+  <span class="cs" class:risk={db.covAbsent > 0} title="Months a series does not hold between its first and last stored month (months_missing), drawn as absent rows below."
+    ><b>{fmt(db.covAbsent)}</b> absent</span
+  >
+  {#if db.covNoTrade > 0}
+    <span class="cs dim" title={noteText('no_trade_month')}><b>{fmt(db.covNoTrade)}</b> month(s) with no trade</span>
+  {/if}
+  <span class="cs"><b>{fmt(db.full)}</b> full</span>
+  <span class="cs" class:risk={db.gaps > 0}><b>{fmt(db.gaps)}</b> bar(s) missing</span>
+  <span class="cs" title="Bars held over bars the calendar of record owes these rows at their rungs (D-3336) — never against the fullest stored series."
+    >coverage <b>{pctText(db.coverage)}</b> of {fmt(db.owed)} owed</span
+  >
+  {#if db.covStoreWide > 0}
+    <span class="cs risk" title={noteText('store_wide')}><b>{fmt(db.covStoreWide)}</b> in a store-wide hole</span>
+  {/if}
+  {#if db.covDerivedLagging > 0}
+    <span class="cs risk" title={noteText('derived_behind')}><b>{fmt(db.covDerivedLagging)}</b> derived month(s) behind or short of 1min</span>
+  {/if}
+  {#if db.covTradeRows > 0}
+    <span class="cs" title={noteText('trade_driven')}><b>{fmt(db.covTradeRows)}</b> trade-driven (no fixed count)</span>
+  {/if}
+  {#if db.unverified > 0}
+    <span class="cs dim" title="Rows no calendar could judge; each names why on hover."><b>{fmt(db.unverified)}</b> not measured</span>
+  {/if}
+</section>
+
 <!-- ==================================================================
      THE CENSUS TABLE. Windowed: only the visible slice exists in the DOM.
      ================================================================== -->
 <div class="tbl rise">
-  <!-- The scroll region is FOCUSABLE ON PURPOSE and carries the row
-       cursor. A keyboard operator has no other way to reach 20,516 rows —
-       giving each row a tab stop is not navigation — so the box is the
-       single stop and `aria-activedescendant` names the row inside it.
-       Only Firefox focuses an overflow container by itself, so without the
-       explicit stop PageDown does nothing in Chrome and WCAG 2.1.1 is
-       unmet on the page's only content. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div
     class="tbl-scroll"
@@ -1009,14 +1356,10 @@
     role="grid"
     aria-rowcount={db.censusPage.length}
     aria-activedescendant={db.cursor >= 0 ? `dbrow-${db.cursor}` : undefined}
-    aria-label="Stored instrument-months, {fmt(db.censusPage.length)} row(s) on page {fmt(
+    aria-label="Stored and absent instrument-months, {fmt(db.censusPage.length)} row(s) on page {fmt(
       db.pageNow
     )} of {fmt(db.pageCount)}. Arrow keys move, Enter opens."
   >
-    <!-- `presentation` because this div exists for `min-width` and for the
-         spacer's positioning context, and for nothing an assistive reader
-         needs. Left with an implicit role it would sit between `grid` and
-         its `row`s and break the ownership chain. -->
     <div class="tbl-inner" role="presentation">
       <div class="thead" role="row">
         {#each COLS as c, ci (ci)}
@@ -1044,13 +1387,6 @@
       {#if db.sorted.length === 0}
         <div class="tnone">
           <h3>No row matches</h3>
-          <!-- THE NARROWINGS ARE LISTED FROM `narrowing`, THE SAME DERIVED
-               THE TILES CONSULT. This used to be a hand-glued chain of
-               `{#if}`s inserting its own commas, so the panel that explains
-               an empty table and the strip that reports it were two
-               independent spellings of one fact and could drift apart on
-               any edit. The emphasis and the raw-key tooltip both survive;
-               only the glue is gone. -->
           <p>
             {db.feedName} holds {fmt(db.deco.length)} instrument-months, and none of them match
             {#each db.narrowing as n, i (n.k)}{i > 0 ? ', ' : ''}<b
@@ -1058,11 +1394,6 @@
                 >{n.text}</b
               >{/each}.
           </p>
-          <!-- THE GATE IS NOT A FILTER AND THE BUTTON BELOW WILL NOT OPEN
-               IT, so it is said here in full rather than left to be
-               discovered by pressing the button and watching nothing
-               change. `CLAUDE.md` §4: degrade loudly and name the reason —
-               and name the way out, which is a control, not this button. -->
           {#if db.expiryHeld > 0}
             <p class="tgate">
               {fmt(db.expiryHeld)} of them are futures or options and are being <b>held back</b>,
@@ -1081,16 +1412,11 @@
           <button class="btn" onclick={db.reset}>Clear the filters</button>
         </div>
       {:else}
-        <!-- The spacer is the FULL height of THE PAGE, so the scrollbar
-             tells the truth about 1,000 rows while 30 of them exist. Rows
-             are absolutely positioned at their own offset — no accumulated
-             rounding down a long list. It was the full height of the whole
-             sorted set before the pager landed; leaving it there would have
-             drawn a scrollbar for 20,516 rows over a page holding 50. -->
         <div class="tspace" role="rowgroup" style="height:{db.censusPage.length * ROW}px">
           {#key db.stamp}
             {#each db.slice as it, i (it.key)}
               {@const n = db.first + i}
+              {@const c = it.cover}
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <!-- svelte-ignore a11y_interactive_supports_focus -->
               <div
@@ -1099,7 +1425,8 @@
                 class:row-in={db.entering}
                 class:cur={db.cursor === n}
                 class:open={db.openKey === it.key}
-                data-state={it.state}
+                class:oow={c.notes.includes('outside_window')}
+                data-state={it.absent && c.basis === 'trade' ? 'notrade' : c.state}
                 id="dbrow-{n}"
                 role="row"
                 aria-rowindex={n + 1}
@@ -1110,20 +1437,14 @@
                 }}
                 style="top:{n * ROW}px; animation-delay:{Math.min(i * 8, 180)}ms"
               >
-                <!-- THE STORE'S OWN KEY IS ONE HOVER AWAY. This cell had
-                     no title at all, so the 137px the column clips were
-                     simply gone -- not moved, not abbreviated, gone. -->
                 <span class="cell inst" role="gridcell" title={it.instrument}>
                   <span class="pip" aria-hidden="true"></span>
                   <span class="ihead">{it.head}</span><span class="isym">{it.sym}</span>
+                  {#if it.absent}<span class="tag absent" class:notrade={c.basis === 'trade'} title={noteText(c.basis === 'trade' ? 'no_trade_month' : 'absent_month')}
+                      >{c.basis === 'trade' ? 'no trade' : 'absent'}</span
+                    >{/if}
+                  {#if c.notes.includes('outside_window')}<span class="tag oowtag" title={noteText('outside_window')}>outside your window</span>{/if}
                 </span>
-                <!-- THE RAW KEY LEADS THE TOOLTIP AND THE DAY WINDOW
-                     FOLLOWS IT. `2020-03` is the store's own spelling and
-                     has to stay one hover away and copyable; the window
-                     after it is the fact `first_ts` / `last_ts` have been
-                     on the wire for and no page has read — it tells a month
-                     held from the 2nd to the 31st from one held on the 2nd
-                     alone, which no bar count can. -->
                 <span
                   class="cell mono"
                   role="gridcell"
@@ -1132,55 +1453,48 @@
                     : `${monthLabel(it.month)} — the store's own key for it is ${it.month}`}
                   >{monthLabel(it.month)}</span
                 >
-                <span class="cell tf" role="gridcell">{it.timeframe}</span>
+                <span class="cell tf" role="gridcell"
+                  >{it.timeframe}{#if c.notes.includes('derived')}<span
+                      class="tag drv"
+                      class:lag={c.notes.includes('derived_behind') || c.notes.includes('derived_partial')}
+                      title={c.notes.filter((/** @type {string} */ x) => x.startsWith('derived')).map(noteText).join(' ')}
+                      >{c.notes.includes('derived_behind') ? 'behind' : c.notes.includes('derived_partial') ? 'partial' : 'derived'}</span
+                    >{/if}</span
+                >
                 <span
                   class="cell num"
                   role="gridcell"
                   class:flash-up={db.moved.get(it.key) === 'up'}
-                  class:flash-down={db.moved.get(it.key) === 'down'}>{fmt(it.rows)}</span
+                  class:flash-down={db.moved.get(it.key) === 'down'}>{it.absent ? '—' : fmt(it.rows)}</span
                 >
-                <span class="cell num dimnum" role="gridcell">{dayText(it.days)}</span>
-                <span class="cell num short" role="gridcell">
-                  <!-- A TAUTOLOGY IS NOT A VERDICT. `short === 0` against a
-                       denominator that is this row itself printed the green
-                       word `full` over a month holding one bar. -->
-                  {#if it.sole}
-                    <span class="unproven" title={SOLE_WHY}>unverified</span>
-                  {:else if it.short === 0}
-                    <span class="okword">full</span>
+                <span class="cell num dimnum" role="gridcell" title={coverTitle(it)}>{sessionsText(c)}</span>
+                <span class="cell num short" role="gridcell" title={coverTitle(it)}>
+                  {#if c.basis === 'trade'}
+                    <span class="unproven">trade-driven</span>
+                  {:else if c.basis === 'none'}
+                    <span class="unproven">not measured</span>
+                  {:else if c.state === 'unmeasured'}
+                    <!-- EVERY SESSION OF THE SPAN IS OF UNRECORDED LENGTH (a
+                         month outside the calendar of record): nothing is owed,
+                         so "−0" would be a measurement nobody took. -->
+                    <span class="unproven">unmeasured</span>
+                  {:else if c.state === 'full'}
+                    <span class="okword">full</span>{#if c.notes.includes('cas')}<span class="tag info">CAS</span>{/if}
+                  {:else if c.state === 'over'}
+                    <span class="okword">+{fmt(c.extra)}</span>
                   {:else}
-                    <span class="missnum">−{fmt(it.short)}</span>
-                    <!-- THE NULL TEST IS WRITTEN OUT, NOT RELIED ON.
-                         `lost` is `null` for a rung with no recorded
-                         session size, and `null >= 1` is false — so the
-                         days-lost chip was already suppressed for those
-                         rows and still is. Stating the absence is what
-                         lets `Math.floor` below be read as taking a
-                         number, which is the only thing it can take. -->
-                    {#if it.lost !== null && it.lost >= 1}
-                      <span class="lost">{Math.floor(it.lost)}d</span>
-                    {/if}
+                    <span class="missnum">−{fmt(c.missing ?? 0)}</span>
+                    {#if c.notes.includes('store_wide')}<span class="tag wide">store-wide</span>{/if}
                   {/if}
                 </span>
-                <span class="cell comp" role="gridcell">
-                  <!-- NO METER FOR A RATIO THAT DOES NOT EXIST — the rule
-                       the Coverage tile already keeps. An empty track reads
-                       as 0% and a full one as complete; both are claims. -->
-                  {#if it.pct !== null}
+                <span class="cell comp" role="gridcell" title={coverTitle(it)}>
+                  {#if c.ratio !== null}
                     <span class="meter" aria-hidden="true"
-                      ><span class="fill" style="width:{it.pct * 100}%"></span></span
+                      ><span class="fill" style="width:{c.ratio * 100}%"></span></span
                     >
                   {/if}
-                  <span class="cpct" title={it.pct === null ? SOLE_WHY : undefined}
-                    >{pctText(it.pct)}</span
-                  >
+                  <span class="cpct">{c.basis === 'trade' ? STATE_WORD.trade : pctText(c.ratio)}</span>
                 </span>
-                <!-- THE TWO PERCENTAGES. A number carries its sign, two
-                     decimals and its direction's colour; an unknown is a
-                     dash that NAMES ITSELF on hover and never a 0.00%.
-                     `title` for the pointer, `aria-label` for everything
-                     else — the reason has to reach both or the loud
-                     degradation is only loud to one of them. -->
                 <span class="cell num pc" role="gridcell" data-dir={dirOf(it.chg)}>
                   {#if it.chg === null}
                     <span class="unk" title={whyText(it.chgWhy)} aria-label={whyText(it.chgWhy)}
@@ -1210,125 +1524,122 @@
   </div>
 
   {#if db.openRowData}
-    <!-- ==============================================================
-         THE DRILL-THROUGH, at the altitude the data supports. Not a
-         chart — this store serves no price to this page — but every
-         month this instrument holds, which is the question a row raises.
-         ============================================================== -->
-    <!-- A `div`, NOT an `aside`. `role="dialog"` on a complementary
-         landmark is the a11y contradiction `svelte-check` names: this is a
-         transient overlay the operator dismisses, not a standing region of
-         the page. `aria-modal="false"` because it traps nothing — the
-         table behind it stays readable and reachable. -->
+    {@const o = db.openRowData}
+    {@const oc = o.cover}
     <div
       class="drawer panel-in"
       bind:this={db.drawerEl}
       role="dialog"
       aria-modal="false"
-      aria-label="{db.openRowData.instrument} — every stored month"
+      aria-label="{o.instrument} — every month at {o.timeframe}"
     >
       <div class="dhead">
         <div class="dtitle">
-          <span class="ihead">{db.openRowData.head}</span><span class="isym"
-            >{db.openRowData.sym}</span
-          >
+          <span class="ihead">{o.head}</span><span class="isym">{o.sym}</span>
+          <span class="dtf">{o.timeframe}</span>
         </div>
         <button class="link dclose" onclick={() => (db.openKey = null)}>close ·<kbd class="kbd">Esc</kbd></button>
       </div>
 
       <div class="dstats">
         <div class="dstat">
-          <span class="k">Months held</span><span class="v">{fmt(db.openTotals.n)}</span>
+          <span class="k">Months</span><span class="v">{fmt(db.openTotals.n - db.openTotals.absent)}{#if db.openTotals.absent > 0}<span class="risk"
+                >&nbsp;+{fmt(db.openTotals.absent)} {oc.basis === 'trade' ? 'with no trade' : 'absent'}</span
+              >{/if}</span>
         </div>
         <div class="dstat">
-          <span class="k">Complete</span><span class="v"
-            >{fmt(db.openTotals.complete)}{#if db.openTotals.unproven > 0}<span
-                class="unproven"
-                title={SOLE_WHY}>&nbsp;+{fmt(db.openTotals.unproven)} unverified</span
+          <span class="k">Full</span><span class="v"
+            >{fmt(db.openTotals.complete)}{#if db.openTotals.unproven > 0}<span class="unproven"
+                >&nbsp;+{fmt(db.openTotals.unproven)} unmeasured</span
               >{/if}</span
           >
         </div>
         <div class="dstat">
-          <span class="k">Bars</span><span class="v">{fmt(db.openTotals.bars)}</span>
+          <span class="k">Sessions</span><span
+            class="v"
+            title={oc.basis === 'trade'
+              ? 'trade-driven: sessions in the months shown; a contract holds a bar only where a trade printed, so days held are in the coverage calendar above'
+              : db.openTotals.exact
+                ? 'held days counted from the series\' own calendar'
+                : 'bars over the average session'}
+            >{oc.basis === 'trade' ? '—' : db.openTotals.exact ? fmt(db.openTotals.held) : db.openTotals.held.toFixed(1)} / {fmt(db.openTotals.sessions)}</span
+          >
         </div>
         <div class="dstat">
-          <span class="k">Short by</span
-          ><span class="v" class:risk={db.openTotals.missing > 0}>{fmt(db.openTotals.missing)}</span>
+          <span class="k">Missing</span><span class="v" class:risk={db.openTotals.missing > 0}>{fmt(db.openTotals.missing)}</span>
         </div>
       </div>
 
-      <!-- WHICH DAYS THE OPENED MONTH ACTUALLY COVERS. This is the one
-           place `/store.json`'s `first_ts` / `last_ts` are shown at full
-           size, and this drawer is the right place for them: the owner
-           named ONE instrument, and the per-instrument detail this page
-           already has is the surface that answers about it. A second OHLC
-           table would be `/markets` written twice, and `/store.json` serves
-           no price to build one from.
+      <div class="dverdict" data-state={oc.state}>
+        <p><b>{monthLabel(o.month)}</b> — {coverTitle(o)}</p>
+        {#if db.covVsPrev && db.covVsPrev.key === o.key}
+          <p class="dvs">
+            <span class="k">% in month</span>
+            {o.chg === null ? '—' : bpsText(o.chg)}
+            <span class="k">vs previous month close</span>
+            {#if db.covVsPrev.bps !== null}
+              <b data-dir={dirOf(db.covVsPrev.bps)}>{bpsText(db.covVsPrev.bps)}</b>
+              <span class="n">(last bar of {monthLabel(o.month)} against the last bar of the month before, at {o.timeframe}{db.covVsPrev.note ? `; ${db.covVsPrev.note}` : ''})</span>
+            {:else}
+              — <span class="n">{db.covVsPrev.why}</span>
+            {/if}
+          </p>
+        {/if}
+        {#each db.covLife as l (l.code)}
+          <p class="dlife" data-code={l.code}>{l.text}.</p>
+        {/each}
+        <button class="link" onclick={() => db.covShowDays(o)}>Show this month's days on the bar grid, with the day band →</button>
+      </div>
 
-           DEGRADES LOUDLY. A row without stamps says so and names the
-           payload as the reason; it does not print the month's first and
-           last calendar day, which are very often not trading days. -->
       <p class="dspan">
         <span class="k">Days held</span>
-        {#if heldWindow(db.openRowData)}
+        {#if heldWindow(o)}
           <span class="v" title="first_ts → last_ts from /store.json, microseconds, rendered IST"
-            >{heldWindow(db.openRowData)}</span
-          >
-          <span class="n"
-            >in <span
-              title={`${monthLabel(db.openRowData.month)} — the store's own key for it is ${db.openRowData.month}`}
-              >{monthLabel(db.openRowData.month)}</span
-            ></span
+            >{heldWindow(o)}</span
           >
         {:else}
           <span class="v">—</span>
-          <span class="n"
-            >/store.json carried no first/last stamp for this row, so the days it covers are
-            unknown — not the whole month, and not one day</span
-          >
+          <span class="n">{o.absent ? 'no file for this month' : '/store.json carried no first/last stamp for this row'}</span>
         {/if}
       </p>
 
       <div class="dlist">
         {#each db.openMonths as m (m.key)}
-          <div class="drow" data-state={m.state} class:this={m.key === db.openKey}>
-            <span
-              class="dm"
-              title={heldWindow(m)
-                ? `${monthLabel(m.month)} · held ${heldWindow(m)} — the store's own key for it is ${m.month}`
-                : `${monthLabel(m.month)} — the store's own key for it is ${m.month}`}
-              >{monthLabel(m.month)}</span
-            >
-            {#if m.pct !== null}
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="drow"
+            data-state={m.absent && m.cover.basis === 'trade' ? 'notrade' : m.cover.state}
+            class:this={m.key === db.openKey}
+            class:oow={m.cover.notes.includes('outside_window')}
+            title={coverTitle(m)}
+            onclick={() => (db.openKey = m.key)}
+          >
+            <span class="dm">{monthLabel(m.month)}</span>
+            {#if m.cover.ratio !== null}
               <span class="meter" aria-hidden="true"
-                ><span class="fill" style="width:{m.pct * 100}%"></span></span
+                ><span class="fill" style="width:{m.cover.ratio * 100}%"></span></span
+              >
+            {:else}
+              <span class="dword"
+                >{m.absent && m.cover.basis === 'trade'
+                  ? 'no trade'
+                  : (STATE_WORD[/** @type {keyof typeof STATE_WORD} */ (m.cover.state)] ?? m.cover.state)}</span
               >
             {/if}
-            <span class="dpct" title={m.pct === null ? SOLE_WHY : undefined}
-              >{pctText(m.pct)}</span
-            >
-            <span class="dshort" title={m.sole ? SOLE_WHY : undefined}
-              >{#if m.sole}unverified{:else if m.short === 0}full{:else}−{fmt(m.short)}{/if}</span
+            <span class="dpct">{sessionsText(m.cover)}</span>
+            <span class="dshort"
+              >{#if m.absent}{m.cover.basis === 'trade' ? 'no trade' : 'absent'}{:else if m.cover.basis !== 'calendar' || m.cover.state === 'unmeasured'}—{:else if m.cover.state === 'full'}full{:else}−{fmt(m.cover.missing ?? 0)}{/if}</span
             >
           </div>
         {/each}
       </div>
 
       <p class="dfoot">
-        Each month is measured against the fullest instrument stored for that month —
-        <span
-          title={`${monthLabel(db.openRowData.month)} — the store's own key for it is ${db.openRowData.month}`}
-          >{monthLabel(db.openRowData.month)}</span
-        >
-        {#if db.openRowData.sole}
-          held {fmt(db.openRowData.denom)} bars at its fullest — and this row IS that fullest, and
-          the only one stored at this rung for that month. The denominator is this row, so no
-          share of the month can be stated for it. {SOLE_WHY}
-        {:else}
-          held {fmt(db.openRowData.denom)} bars at its fullest, so this row's {fmt(
-            db.openRowData.rows
-          )} is {pctText(db.openRowData.pct)} of the month.
-        {/if}
+        Each month is measured against the bars the calendar of record owes it at {o.timeframe}
+        (/calendar.json, D-3336): the sessions pull::calendar sources, each at its own length — a
+        special session by its windows, a suspected halt's minutes neither owed nor missing, a
+        CAS-eligible share's auction day at 360. Never against the fullest stored series.
       </p>
     </div>
   {/if}
@@ -1830,8 +2141,11 @@
   .thead,
   .trow {
     display: grid;
+    /* WP-54: the rung cell carries a derived/behind tag, the sessions cell
+       reads "held / owed" and the missing cell a store-wide tag, so those
+       three are wider than the bare numbers they used to hold. */
     grid-template-columns:
-      minmax(224px, 2.2fr) 92px 48px 104px 86px 128px
+      minmax(224px, 2.2fr) 92px 96px 104px 92px 184px
       minmax(150px, 1fr) 116px 116px;
     align-items: center;
   }
@@ -2111,14 +2425,6 @@
   .missnum {
     color: var(--warn);
   }
-  .lost {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: var(--warn-soft);
-    color: var(--warn);
-  }
   .comp {
     display: flex;
     align-items: center;
@@ -2391,5 +2697,139 @@
     to {
       opacity: 1;
     }
+  }
+  /* ---- THE CALENDAR VERDICT (WP-54, D-3336) ---------------------------
+     The coverage strip above the grid, the absent and out-of-window rows,
+     and the small tags a verdict carries. Severity stays amber; an absent
+     month is a hole and wears the strong amber; a row outside the operator's
+     window is shaded, never hidden once shown (D-3338). */
+  .covsum {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s2) var(--s5);
+    padding: var(--s3) var(--s5);
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel);
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+  .covsum b {
+    color: var(--ink);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .covsum .risk b {
+    color: var(--warn);
+  }
+  .covsum .dim {
+    color: var(--faint);
+  }
+  .tag {
+    margin-left: var(--s2);
+    padding: 0 4px;
+    border-radius: 3px;
+    font-family: var(--sans);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: 0.03em;
+    background: var(--well);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .tag.absent,
+  .tag.wide,
+  .tag.drv.lag {
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+  .tag.info {
+    background: var(--info-soft);
+    color: var(--info);
+  }
+  /* A TRADE-DRIVEN MONTH WITH NO TRADE is not a hole: quiet, never amber. */
+  .tag.absent.notrade {
+    background: var(--well);
+    color: var(--faint);
+  }
+  .trow[data-state='notrade'] .cell,
+  .drow[data-state='notrade'] {
+    color: var(--faint);
+  }
+  .tag.oowtag {
+    background: var(--n5);
+    color: var(--faint);
+  }
+  .trow.oow,
+  .drow.oow {
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 6px,
+      color-mix(in srgb, var(--n7) 22%, transparent) 6px 7px
+    );
+  }
+  .trow[data-state='absent'] .cell.inst,
+  .trow[data-state='absent'] .cell {
+    color: var(--warn);
+  }
+  [data-state='absent'] .pip {
+    border-color: var(--warn);
+    border-style: dashed;
+    background: transparent;
+  }
+  [data-state='trade'] .pip,
+  [data-state='unmeasured'] .pip {
+    border-color: var(--n7);
+    background: transparent;
+  }
+  [data-state='absent'] .cpct,
+  [data-state='absent'] .dshort {
+    color: var(--warn);
+  }
+  .dtf {
+    margin-left: var(--s3);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .dverdict {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    padding: var(--s3) var(--s5);
+    border-bottom: 1px solid var(--line);
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+    color: var(--dim);
+  }
+  .dverdict b {
+    color: var(--ink);
+  }
+  .dvs .k {
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0 var(--s2);
+  }
+  .dvs [data-dir='up'] {
+    color: var(--up);
+  }
+  .dvs [data-dir='down'] {
+    color: var(--down);
+  }
+  .dvs .n {
+    color: var(--faint);
+  }
+  .dlife {
+    padding-left: var(--s3);
+    border-left: 3px solid var(--warn);
+  }
+  .dword {
+    font-size: var(--fs-micro);
+    color: var(--faint);
   }
 </style>

@@ -40,6 +40,7 @@ export const DB_PAGE_FILES = [
   '../src/lib/db/notes-options.js',
   '../src/lib/db/decoration.js',
   '../src/lib/db/notes-coverage.js',
+  '../src/lib/db/dayflags.js',
   '../src/lib/db/notes-labels.js'
 ];
 

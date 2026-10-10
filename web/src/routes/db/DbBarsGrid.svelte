@@ -1891,6 +1891,15 @@
                       {/if}
                       Widening the window brings the selection's other bars back.
                     </p>
+                    <!-- EACH ASKED DAY'S OWN REASON, FROM THE DAY BAND (DB-016,
+                         DB-025, WP-54): a refused import with its words, a
+                         closed day, a store gap, and the other feed's count.
+                         `null` while the band has not answered this window. -->
+                    {#if db.dayEmptyWhy}
+                      <p class="bwhy">{db.dayEmptyWhy}</p>
+                    {:else if db.dayBandLoading}
+                      <p class="bwhy">Reading why these days hold no bar from /dayflags.json…</p>
+                    {/if}
                   {:else}
                     <h3>No bar came back</h3>
                     <p>
@@ -3441,6 +3450,10 @@
   .bnone p.err {
     color: var(--down);
     font-family: var(--mono);
+  }
+  /* THE DAY BAND'S OWN REASON FOR AN EMPTY WINDOW (DB-016, WP-54). */
+  .bnone p.bwhy {
+    color: var(--ink-2);
   }
   .bnotes {
     flex: none;

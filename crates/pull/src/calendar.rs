@@ -1264,6 +1264,44 @@ pub fn phase_at(
     }
 }
 
+/// The phase of one SECOND of one IST day for one segment: [`phase_at`] of
+/// its minute, refined on a halt day by the segment's own [`HaltSeconds`]
+/// (DB-B43, D-3320).
+///
+/// A halt does not begin on a minute. On 2020-03-13 the index changes last
+/// at 09:21:09 and is halted from 09:21:10, so at minute resolution the 50
+/// flat seconds 09:21:10–09:21:59 were served as `continuous`, and 10:21:00
+/// as well although the index resumes at 10:21:01 (the 2020-03-23 halt the
+/// same way: 52 seconds). A second inside the segment's `from..resume` is
+/// [`Phase::Halted`], or [`Phase::ReopeningAuction`] where its minute is the
+/// auction's; a second outside it keeps its minute's phase. One-second
+/// series only: a minute bar is labelled by [`phase_at`], whose whole halted
+/// minutes `each_halt_names_its_seconds_and_whole_minutes` binds to these
+/// seconds. O(1): one walk of the three-entry [`HALTS`].
+#[must_use]
+pub fn phase_at_second(
+    venue: crate::vendor::Venue,
+    epoch_day: i64,
+    second: u32,
+    cas: CasEligibility,
+) -> Phase {
+    let Ok(minute) = u16::try_from(second / 60) else {
+        return Phase::Unverified;
+    };
+    let by_minute = phase_at(venue, epoch_day, minute, cas);
+    let Some(halt) = halt_on(epoch_day) else {
+        return by_minute;
+    };
+    let seconds = halt.seconds(venue);
+    if !(seconds.from..seconds.resume).contains(&second) {
+        return by_minute;
+    }
+    match by_minute {
+        Phase::Continuous | Phase::Halted => Phase::Halted,
+        other => other,
+    }
+}
+
 /// Whether `minute` is in the charter's 09:00–09:14 opening auction before a
 /// session that opens at `open`: cash and index only, and only before 09:15.
 fn pre_opens(venue: crate::vendor::Venue, open: u16, minute: u16) -> bool {
@@ -3522,6 +3560,94 @@ mod record_tests {
         assert_ne!(march_13.cash, march_13.derivatives);
         assert_ne!(march_13.index, march_13.derivatives);
         assert_ne!(march_13.cash, march_13.index);
+    }
+
+    /// **A HALT IS LABELLED TO THE SECOND ON A ONE-SECOND SERIES** (DB-B43).
+    /// The index is halted from 09:21:10 on 2020-03-13 and 09:58:09 on
+    /// 2020-03-23, and resumes at 10:21:01 and 10:57:01; a minute grid called
+    /// the rest of the halt-start minute and the resume second `continuous`.
+    #[test]
+    fn a_halt_is_labelled_to_the_second() {
+        let second = |h: u32, m: u32, s: u32| h * 3_600 + m * 60 + s;
+        let unknown = CasEligibility::Unknown;
+        let (march_13, march_23) = (at(2020, 3, 13), at(2020, 3, 23));
+        let idx = Venue::NseIndex;
+        // The second before the halt is still continuous; the next is halted.
+        assert_eq!(
+            phase_at_second(idx, march_13, second(9, 21, 9), unknown),
+            Phase::Continuous
+        );
+        assert_eq!(
+            phase_at_second(idx, march_13, second(9, 21, 10), unknown),
+            Phase::Halted
+        );
+        assert_eq!(
+            phase_at_second(idx, march_13, second(9, 21, 59), unknown),
+            Phase::Halted
+        );
+        // The minute grid alone called 09:21:10-09:21:59 continuous.
+        assert_eq!(
+            phase_at(idx, march_13, 9 * 60 + 21, unknown),
+            Phase::Continuous
+        );
+        // The reopening auction keeps its own phase; the resume second is the index's.
+        assert_eq!(
+            phase_at_second(idx, march_13, second(10, 10, 0), unknown),
+            Phase::ReopeningAuction
+        );
+        assert_eq!(
+            phase_at_second(idx, march_13, second(10, 21, 0), unknown),
+            Phase::Halted
+        );
+        assert_eq!(
+            phase_at_second(idx, march_13, second(10, 21, 1), unknown),
+            Phase::Continuous
+        );
+        // 2020-03-23: halted from 09:58:09, back at 10:57:01.
+        assert_eq!(
+            phase_at_second(idx, march_23, second(9, 58, 8), unknown),
+            Phase::Continuous
+        );
+        assert_eq!(
+            phase_at_second(idx, march_23, second(9, 58, 9), unknown),
+            Phase::Halted
+        );
+        assert_eq!(
+            phase_at_second(idx, march_23, second(10, 57, 0), unknown),
+            Phase::Halted
+        );
+        assert_eq!(
+            phase_at_second(idx, march_23, second(10, 57, 1), unknown),
+            Phase::Continuous
+        );
+        // Each segment's own seconds: index options trade until 09:21:44.
+        let fno = Venue::NseDerivatives;
+        assert_eq!(
+            phase_at_second(fno, march_13, second(9, 21, 44), unknown),
+            Phase::Continuous
+        );
+        assert_eq!(
+            phase_at_second(fno, march_13, second(9, 21, 45), unknown),
+            Phase::Halted
+        );
+        assert_eq!(
+            phase_at_second(Venue::NseCash, march_13, second(9, 21, 9), unknown),
+            Phase::Halted
+        );
+        // A day with no halt is its minute's phase, second for second.
+        let ordinary = at(2024, 1, 2);
+        assert_eq!(
+            phase_at_second(idx, ordinary, second(9, 21, 30), unknown),
+            Phase::Continuous
+        );
+        assert_eq!(
+            phase_at_second(idx, ordinary, second(9, 5, 0), unknown),
+            Phase::PreOpen
+        );
+        assert_eq!(
+            phase_at_second(idx, ordinary, 86_400 * 2, unknown),
+            Phase::Unverified
+        );
     }
 
     /// **A REGULAR DAY'S PHASES, BEFORE AND AFTER 2026-08-03.** DB-034,

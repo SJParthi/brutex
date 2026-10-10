@@ -1298,6 +1298,42 @@ fn an_index_change_is_refused_across_holes_halts_and_phases() {
     assert_eq!(window.bars[3].phase, Some("reopening_auction"));
 }
 
+/// **A ONE-SECOND BAR'S PHASE IS ITS SECOND'S, NOT ITS MINUTE'S** (DB-B43,
+/// WP-54). The index is halted from 09:21:10 on 2020-03-13 and resumes at
+/// 10:21:01 (`pull::calendar::HALTS`): the 50 flat seconds after 09:21:09 and
+/// the second 10:21:00 were served as `continuous` at minute resolution.
+#[test]
+fn a_one_second_bar_is_labelled_by_its_own_second_in_a_halt() {
+    let store = Store::new("index-halt-1s");
+    let stamps = [
+        ist(2020, 3, 13, 9, 21, 9),
+        ist(2020, 3, 13, 9, 21, 10),
+        ist(2020, 3, 13, 9, 21, 59),
+        ist(2020, 3, 13, 10, 10, 0),
+        ist(2020, 3, 13, 10, 21, 0),
+        ist(2020, 3, 13, 10, 21, 1),
+    ];
+    let window = series_of(
+        &store,
+        Vendor::Gdfl,
+        "NSE-INDEX-NIFTY",
+        Timeframe::SECOND_1,
+        &stamps,
+        0,
+    );
+    assert_eq!(
+        window.bars.iter().map(|row| row.phase).collect::<Vec<_>>(),
+        vec![
+            Some("continuous"),
+            Some("halted"),
+            Some("halted"),
+            Some("reopening_auction"),
+            Some("halted"),
+            Some("continuous"),
+        ]
+    );
+}
+
 /// **ACROSS TWO ADJACENT SESSIONS, AN INDEX'S MINUTE IS MEASURED ONLY FROM
 /// THE LAST BUCKET OF ONE TO THE FIRST BUCKET OF THE NEXT.** D-3325 rule 7: a
 /// session whose minute file stops early, or a session whose first minutes

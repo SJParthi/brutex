@@ -85,6 +85,7 @@
   import { searchState } from './DbSearch.svelte';
   import { chainState } from './DbMoneyness.svelte';
   import { optionCellsState } from './DbOptionCells.svelte';
+  import { dayFlagsState } from './DbDayFlags.svelte';
 
   /* ONE OBJECT CARRIES THE PAGE'S STATE, AND THE ORDER BELOW IS THE POINT.
      Each call declares its runes and publishes them onto `db` as getters
@@ -113,6 +114,9 @@
   selectionPaging(db);
   coverageStamp(db);
   barsMove(db);
+  // THE DAY BAND (WP-54): read by the band, the bar grid's empty state and
+  // the day fields, so it lives here rather than in any one of them.
+  dayFlagsState(db);
 </script>
 
 <svelte:head><title>Database · brutex</title></svelte:head>
