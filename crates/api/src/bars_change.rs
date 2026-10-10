@@ -256,9 +256,15 @@ impl Rules {
     }
 
     /// The phase of instant `ts` on IST day `day`, for this series' venue.
+    ///
+    /// A rung finer than a minute is labelled to the SECOND
+    /// (`calendar::phase_at_second`, DB-B43): a halt begins mid-minute
+    /// (09:21:10 for the index on 2020-03-13) and its flat seconds are
+    /// halted, never `continuous`.
     fn phase_at(&self, day: i64, ts: i64) -> Option<Phase> {
         let venue = self.venue?;
-        let minute = u16::try_from((ts - day_start(day)).div_euclid(60 * MICROS)).ok()?;
+        let since = ts - day_start(day);
+        let minute = u16::try_from(since.div_euclid(60 * MICROS)).ok()?;
         // ELIGIBILITY IS READ ONLY WHERE THE PHASE DEPENDS ON IT: a share,
         // from the closing auction's first minute on.
         let cas = if venue == Venue::NseCash && minute >= calendar::CAS_CONTINUOUS_CLOSE {
@@ -266,6 +272,10 @@ impl Rules {
         } else {
             CasEligibility::Unknown
         };
+        if self.rung_micros < 60 * MICROS {
+            let second = u32::try_from(since.div_euclid(MICROS)).ok()?;
+            return Some(calendar::phase_at_second(venue, day, second, cas));
+        }
         Some(calendar::phase_at(venue, day, minute, cas))
     }
 

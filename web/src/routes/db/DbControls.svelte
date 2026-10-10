@@ -439,6 +439,7 @@
         min={db.dayBounds2.lo}
         max={db.toDay || db.dayBounds2.hi}
         closed={db.dayClosed}
+        flagged={db.dayFlagged}
         onchange={(/** @type {string} */ d) => (db.fromDay = d)}
         boundsReason={`${db.dayReason} Only bars on or after this day.`}
       />
@@ -448,6 +449,7 @@
         min={db.fromDay || db.dayBounds2.lo}
         max={db.dayBounds2.hi}
         closed={db.dayClosed}
+        flagged={db.dayFlagged}
         onchange={(/** @type {string} */ d) => (db.toDay = d)}
         boundsReason={`${db.dayReason} Only bars on or before this day.`}
       />
