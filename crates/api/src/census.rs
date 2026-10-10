@@ -37,12 +37,18 @@
 //! has been ingested" and "the counter says zero" are different claims.
 //! A file that exists and will not load is a third thing again, and is loud.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
-use pull::manifest::{ENTRY_STRIDE, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest, manifest_path};
+use pull::manifest::{
+    Closes, ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, Held, Layout, MAX_ENTRIES, Manifest,
+    ManifestError, ManifestHeader, SEGMENTS, epoch_path, manifest_path, parse_epoch_name,
+    segment_dir, vendor_dir,
+};
 use pull::session::Day;
 use store::path::{Timeframe, YearMonth};
 
@@ -117,9 +123,529 @@ pub enum Census {
     },
     /// A census that loaded.
     Held {
-        /// The counters, and the index a probe goes through.
-        manifest: Box<Manifest>,
+        /// The counters, and the index a probe goes through: the single file,
+        /// or every segment's current epoch once the vendor is migrated to
+        /// version 4 (D-3316, D-3327). See [`Manifests`].
+        manifest: Manifests,
     },
+}
+
+/// The entries of headroom below which a census is `capped`. D-3327 item 2.
+///
+/// A census this close to its capacity refuses the next options day of the
+/// GDFL import (4,000 to 9,000 files a day, DB-G60), so it is named before it
+/// refuses rather than after: 16,384 is the figure D-3327 fixes.
+pub const CAPPED_HEADROOM: u64 = 16_384;
+
+/// The fewest appended entries a part keeps as a tail before it is read
+/// whole again. See [`Part`].
+const TAIL_FLOOR: u64 = 65_536;
+
+/// A tail may grow to the base's entries divided by this before the part is
+/// read whole again, whichever of this and [`TAIL_FLOOR`] is larger.
+const TAIL_DIVISOR: u64 = 8;
+
+/// The appended entries a tail's fresh level may hold before they are
+/// settled into its shared level. See [`Tail`].
+const FRESH_LIMIT: usize = 4_096;
+
+/// A file's device and inode: an appended file keeps them, a file installed
+/// by rename does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileId {
+    #[cfg(unix)]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "`None` off Unix, where no inode can be read; one signature for both"
+    )]
+    fn of(meta: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn of(_meta: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
+
+/// What was appended to a part's file after its [`Part::base`] was loaded,
+/// decoded from the appended bytes alone.
+///
+/// # Why a tail and not a reload (DB-059, DB-G06, DB-G79)
+///
+/// A manifest is append-only: entries below its `n_valid` never change, and a
+/// commit adds entries past it and then publishes a header. Re-reading the
+/// whole file after each commit cost the operator's API 0.5 to 0.8 s per miss
+/// on a 268 MB `gdfl.man`. A tail decodes only the entries between the
+/// loaded `n_valid` and the file's new one, with every check
+/// `pull::manifest::Manifest::load` makes on them: each entry's checksum and
+/// its own fields, a row count or a last stamp that would go backwards for
+/// its key, a row of another segment in a partition, and finally the header's
+/// own `n_keys` and `total_rows` against the counts the tail recomputes. Any
+/// disagreement, any slot that does not decode, a file replaced by rename
+/// (another inode), a first or last entry already read that the file no
+/// longer holds, or a generation that is not the base's lineage, and the
+/// part is read whole instead, exactly as before: the tail is a shortcut that
+/// must reach the same census, never a second opinion.
+///
+/// # Two levels, so an extend copies only what is new
+///
+/// A part handed to a request is shared, so an extend builds a new tail
+/// beside the old one rather than changing it. Copying one tail of up to a
+/// quarter of a million entries on every commit would make each commit cost
+/// the tail, not what it appended. So the tail is two levels: `fresh`, at
+/// most [`FRESH_LIMIT`] entries, which an extend copies, and `settled`,
+/// behind an [`Arc`] every later part shares unchanged. When `fresh` reaches
+/// [`FRESH_LIMIT`] it is settled: one copy of `settled` once per
+/// [`FRESH_LIMIT`] appended entries. A probe is one lookup per level.
+#[derive(Debug, Clone)]
+struct Tail {
+    /// The header the file published after the tail, checked against it.
+    header: ManifestHeader,
+    /// The appends settled so far, shared by every part extended from them.
+    settled: Arc<Level>,
+    /// The appends since the last settle.
+    fresh: Level,
+}
+
+/// One level of a [`Tail`].
+#[derive(Debug, Clone, Default)]
+struct Level {
+    /// The newest appended row of each key the level touched.
+    held: HashMap<EntryKey, Held>,
+    /// Every appended entry in order: the generation that published it, and
+    /// its key. What a `since=<generation>` delta reads (D-3327 item 3).
+    changes: Vec<(u64, EntryKey)>,
+}
+
+impl Tail {
+    /// The newest appended row of `key`: the fresh level's, else the settled
+    /// one's. Two probes.
+    fn held(&self, key: &EntryKey) -> Option<&Held> {
+        self.fresh
+            .held
+            .get(key)
+            .or_else(|| self.settled.held.get(key))
+    }
+
+    /// Every key the tail touched, each once.
+    fn keys(&self) -> impl Iterator<Item = &EntryKey> {
+        let settled = &self.settled;
+        settled.held.keys().chain(
+            self.fresh
+                .held
+                .keys()
+                .filter(move |key| !settled.held.contains_key(key)),
+        )
+    }
+
+    /// Entries appended, both levels together.
+    fn entries(&self) -> usize {
+        self.settled
+            .changes
+            .len()
+            .saturating_add(self.fresh.changes.len())
+    }
+
+    /// Settles the fresh level into a new shared one once it reaches
+    /// [`FRESH_LIMIT`]: one copy of the settled level, amortised over the
+    /// entries appended since the last.
+    fn settle(&mut self) {
+        if self.fresh.changes.len() < FRESH_LIMIT {
+            return;
+        }
+        let mut level = (*self.settled).clone();
+        level.held.extend(self.fresh.held.drain());
+        level.changes.append(&mut self.fresh.changes);
+        self.settled = Arc::new(level);
+    }
+}
+
+/// The keys appended after a generation, oldest first, each as often as it
+/// was appended: what [`Part::changed_since`] answers.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Since<'a> {
+    settled: &'a [(u64, EntryKey)],
+    fresh: &'a [(u64, EntryKey)],
+}
+
+impl<'a> Since<'a> {
+    /// Each appended entry: the generation that published it, and its key.
+    pub fn iter(&self) -> impl Iterator<Item = &'a (u64, EntryKey)> + 'a {
+        self.settled.iter().chain(self.fresh)
+    }
+
+    /// How many entries were appended.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.settled.len().saturating_add(self.fresh.len())
+    }
+
+    /// Whether nothing was appended.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.settled.is_empty() && self.fresh.is_empty()
+    }
+}
+
+/// One manifest file of a vendor's census: the single file of versions 1 to
+/// 3, or one segment's current epoch at version 4 (D-3316).
+///
+/// Cheap to clone: the decoded census is shared behind an [`Arc`], and so is
+/// the tail, so a census handed to a request is a few reference counts and
+/// never a copy of a two-million-entry index.
+#[derive(Debug, Clone)]
+pub struct Part {
+    /// `None` for a single file; the partition's segment at version 4.
+    segment: Option<Segment>,
+    /// The epoch file, at version 4, or `None` for a partition with no epoch
+    /// yet (and for a single file).
+    epoch: Option<u32>,
+    /// The file it was read from: the single file, the epoch, or the segment
+    /// directory of a partition with no epoch.
+    path: PathBuf,
+    /// The census as one whole read of the file loaded it.
+    base: Arc<Manifest>,
+    /// Entries appended since, when the file was extended rather than re-read.
+    tail: Option<Arc<Tail>>,
+    /// The file's identity when it was read, which a tail must match.
+    file: Option<FileId>,
+    /// The bytes of the first entry this part has read, which the file must
+    /// still hold before a tail is read: a file rewritten in place under the
+    /// same inode is read whole.
+    first_entry: Option<Arc<[u8]>>,
+    /// The bytes of the last entry this part has read, which the file must
+    /// still hold at that ordinal before a tail is read past it, for the same
+    /// reason.
+    last_entry: Option<Arc<[u8]>>,
+}
+
+impl Part {
+    /// A part over one manifest that is not on disk: what a test or a bench
+    /// builds in memory.
+    #[must_use]
+    pub fn in_memory(manifest: Manifest) -> Self {
+        Self {
+            segment: manifest.segment(),
+            epoch: None,
+            path: PathBuf::new(),
+            base: Arc::new(manifest),
+            tail: None,
+            file: None,
+            first_entry: None,
+            last_entry: None,
+        }
+    }
+
+    /// The header the file published: the tail's when there is one, so every
+    /// counter below is the file's newest, checked.
+    #[must_use]
+    pub fn header(&self) -> ManifestHeader {
+        self.tail
+            .as_ref()
+            .map_or_else(|| self.base.header(), |tail| tail.header)
+    }
+
+    /// The segment this part is the partition of; `None` for a single file.
+    #[must_use]
+    pub const fn segment(&self) -> Option<Segment> {
+        self.segment
+    }
+
+    /// The epoch file this part was read from, at version 4.
+    #[must_use]
+    pub const fn epoch(&self) -> Option<u32> {
+        self.epoch
+    }
+
+    /// Where this part was read from.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The newest row of one key. One probe per tail level and, when the
+    /// tail has none, one of the base: expected O(1).
+    #[must_use]
+    pub fn held(&self, key: &EntryKey) -> Option<Held> {
+        if let Some(tail) = &self.tail
+            && let Some(held) = tail.held(key)
+        {
+            return Some(*held);
+        }
+        self.base.held(key)
+    }
+
+    /// Every key this part holds, each once: the base's, then the keys only
+    /// the tail holds. O(1) to call, O(keys) to walk, and unordered.
+    pub fn held_keys(&self) -> impl Iterator<Item = &EntryKey> {
+        let base = &self.base;
+        self.base.held_keys().chain(
+            self.tail
+                .iter()
+                .flat_map(|tail| tail.keys())
+                .filter(move |key| base.held(key).is_none()),
+        )
+    }
+
+    /// The keys appended after `generation`, oldest first, each as often as
+    /// it was appended; `None` when this part cannot say (D-3327 item 3).
+    ///
+    /// The tail records each appended entry's generation in order, so the
+    /// answer is a binary search per level and two slices: O(log tail +
+    /// answer). A generation before the base was loaded is not held any more,
+    /// and neither is one past the newest.
+    #[must_use]
+    pub fn changed_since(&self, generation: u64) -> Option<Since<'_>> {
+        let base = self.base.header().generation;
+        let newest = self.header().generation;
+        if generation < base || generation > newest {
+            return None;
+        }
+        let Some(tail) = &self.tail else {
+            return Some(Since::default());
+        };
+        let after =
+            |changes: &[(u64, EntryKey)]| changes.partition_point(|(at, _)| *at <= generation);
+        Some(Since {
+            settled: tail
+                .settled
+                .changes
+                .get(after(&tail.settled.changes)..)
+                .unwrap_or_default(),
+            fresh: tail
+                .fresh
+                .changes
+                .get(after(&tail.fresh.changes)..)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// The oldest generation [`Self::changed_since`] still answers for.
+    #[must_use]
+    pub fn since_floor(&self) -> u64 {
+        self.base.header().generation
+    }
+
+    /// Whether `self` and `other` stand on the SAME whole read of one file:
+    /// one extends the other by appended entries alone, so what one held
+    /// below its tail the other holds too. A pointer comparison.
+    ///
+    /// What a derived index moved forward by [`Self::changed_since`] must
+    /// check first: a generation alone does not name a file, and a migrated
+    /// partition continues the single file's generation (D-3316), so the
+    /// same number can stand for a census read from another file.
+    #[must_use]
+    pub fn extends_same_read(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.base, &other.base)
+    }
+
+    /// Whether `self` and `other` are the same read: one file, one whole
+    /// read, one tail. Pointer comparisons; what a re-read that found nothing
+    /// appended hands back ([`read_vendor_after`] returns the previous part).
+    #[must_use]
+    pub fn same_read(&self, other: &Self) -> bool {
+        self.segment == other.segment
+            && self.epoch == other.epoch
+            && self.path == other.path
+            && Arc::ptr_eq(&self.base, &other.base)
+            && match (&self.tail, &other.tail) {
+                (None, None) => true,
+                (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    }
+
+    /// The newest row of every key, as [`Manifest::newest`] gives the base's,
+    /// with the tail's rows in place of the ones they superseded.
+    #[must_use]
+    pub fn newest(&self) -> Vec<Entry> {
+        let Some(tail) = &self.tail else {
+            return self.base.newest();
+        };
+        let mut out: Vec<Entry> = self
+            .base
+            .newest()
+            .into_iter()
+            .map(|entry| tail.held(&entry.key).map_or(entry, |held| held.entry))
+            .collect();
+        let mut fresh: Vec<Entry> = tail
+            .keys()
+            .filter(|key| self.base.held(key).is_none())
+            .filter_map(|key| tail.held(key).map(|held| held.entry))
+            .collect();
+        fresh.sort_unstable_by_key(|entry| entry.key);
+        out.extend(fresh);
+        out
+    }
+}
+
+/// One vendor's census: one [`Part`] for a single file, or one per segment
+/// once the vendor is migrated to version 4 (D-3316 item 7, D-3327).
+///
+/// # Read through the same questions a single manifest answers
+///
+/// Every caller asked a [`Manifest`] for a probe, its keys, its counters or
+/// what it stepped over, and asks this the same questions by the same names.
+/// A probe goes to the part of the key's own segment, so a migrated vendor's
+/// probe is still one hash lookup; the keys are every part's; the counters are
+/// summed. **A vendor is read in one shape at a time**: a migrated vendor is
+/// read from `manifest/v4/<vendor>/` only, never beside its single file.
+#[derive(Debug, Clone)]
+pub struct Manifests {
+    parts: Vec<Part>,
+    partitioned: bool,
+}
+
+impl Manifests {
+    /// A census of one in-memory manifest, as a single file is read.
+    #[must_use]
+    pub fn single(manifest: Manifest) -> Self {
+        Self {
+            parts: vec![Part::in_memory(manifest)],
+            partitioned: false,
+        }
+    }
+
+    /// A census of in-memory partitions, as a migrated vendor is read: one
+    /// manifest per segment, each a version-4 partition.
+    #[must_use]
+    pub fn partitions(manifests: Vec<Manifest>) -> Self {
+        Self {
+            parts: manifests.into_iter().map(Part::in_memory).collect(),
+            partitioned: true,
+        }
+    }
+
+    /// Every part, in [`SEGMENTS`] order for a partitioned census.
+    #[must_use]
+    pub fn parts(&self) -> &[Part] {
+        &self.parts
+    }
+
+    /// Whether every part of `self` is the same read as `other`'s
+    /// ([`Part::same_read`]), in the same shape.
+    #[must_use]
+    pub fn same_read(&self, other: &Self) -> bool {
+        self.partitioned == other.partitioned
+            && self.parts.len() == other.parts.len()
+            && self
+                .parts
+                .iter()
+                .zip(&other.parts)
+                .all(|(mine, theirs)| mine.same_read(theirs))
+    }
+
+    /// Whether this census was read from version-4 partitions.
+    #[must_use]
+    pub const fn is_partitioned(&self) -> bool {
+        self.partitioned
+    }
+
+    /// The part that holds `segment`'s keys: the single file, or that
+    /// segment's partition. One comparison per part, at most three.
+    #[must_use]
+    pub fn part_of(&self, segment: Segment) -> Option<&Part> {
+        if self.partitioned {
+            self.parts.iter().find(|part| part.segment == Some(segment))
+        } else {
+            self.parts.first()
+        }
+    }
+
+    /// The newest row of one key, closes and all. One probe.
+    #[must_use]
+    pub fn held(&self, key: &EntryKey) -> Option<Held> {
+        self.part_of(key.segment)?.held(key)
+    }
+
+    /// The newest entry of one key. One probe.
+    #[must_use]
+    pub fn entry(&self, key: &EntryKey) -> Option<Entry> {
+        self.held(key).map(|held| held.entry)
+    }
+
+    /// The month's closes, when the census holds the month. One probe.
+    #[must_use]
+    pub fn closes(&self, key: &EntryKey) -> Option<Closes> {
+        self.held(key).map(|held| held.closes)
+    }
+
+    /// Every key held, each once, in no stated order: a caller that renders
+    /// them sorts them, as [`held_entries`] does.
+    pub fn held_keys(&self) -> impl Iterator<Item = &EntryKey> {
+        self.parts.iter().flat_map(Part::held_keys)
+    }
+
+    /// The newest row of every key: each part's, in part order.
+    #[must_use]
+    pub fn newest(&self) -> Vec<Entry> {
+        self.parts.iter().flat_map(Part::newest).collect()
+    }
+
+    /// Distinct keys held, summed over the parts. One field read per part.
+    #[must_use]
+    pub fn keys(&self) -> u64 {
+        self.sum(|header| header.n_keys)
+    }
+
+    /// Rows held, summed over the parts. One field read per part.
+    #[must_use]
+    pub fn total_rows(&self) -> u64 {
+        self.sum(|header| header.total_rows)
+    }
+
+    /// Entries committed, summed over the parts. One field read per part.
+    #[must_use]
+    pub fn entries(&self) -> u64 {
+        self.sum(|header| header.n_valid)
+    }
+
+    /// Which commit this census is.
+    ///
+    /// A single file's own generation. For a partitioned census, the SUM of
+    /// its parts' generations: each part's only rises (an append adds one, a
+    /// compaction adds its key count, D-3316), so the sum rises whenever any
+    /// part moves and never goes back. It is a commit counter for the vendor,
+    /// not a count of anything; [`Part::header`] has each part's own.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.sum(|header| header.generation)
+    }
+
+    /// What loading stepped over, from the first part that stepped over
+    /// anything. See [`Manifest::degraded_reason`].
+    #[must_use]
+    pub fn degraded_reason(&self) -> Option<ManifestError> {
+        self.parts
+            .iter()
+            .find_map(|part| part.base.degraded_reason())
+    }
+
+    /// The part with the least headroom, and that headroom: the one that
+    /// refuses an append first.
+    #[must_use]
+    pub fn tightest(&self) -> Option<(&Part, u64)> {
+        self.parts
+            .iter()
+            .map(|part| (part, part.header().headroom()))
+            .min_by_key(|(_, headroom)| *headroom)
+    }
+
+    fn sum(&self, field: impl Fn(&ManifestHeader) -> u64) -> u64 {
+        self.parts.iter().fold(0u64, |total, part| {
+            total.saturating_add(field(&part.header()))
+        })
+    }
 }
 
 /// Where an unreadable census's refusal came from.
@@ -209,12 +735,83 @@ impl VendorCensus {
         }
     }
 
-    /// Which commit this census is, if it loaded.
+    /// Which commit this census is, if it loaded. See
+    /// [`Manifests::generation`] for what it is for a migrated vendor.
     #[must_use]
     pub fn generation(&self) -> Option<u64> {
         match self.state {
-            Census::Held { ref manifest } => Some(manifest.header().generation),
+            Census::Held { ref manifest } => Some(manifest.generation()),
             Census::Absent | Census::Unreadable { .. } => None,
+        }
+    }
+
+    /// Whether `self` is the census `other` already is: the same vendor and
+    /// path, both absent or both the same loaded read ([`Manifests::same_read`]).
+    /// An unreadable census is never the same: its refusal is read again.
+    ///
+    /// What `server::census_cache` asks before it makes a new slot, so a
+    /// stamp that moved with nothing appended keeps every answer kept against
+    /// the old one (D-3327 item 1).
+    #[must_use]
+    pub fn same_read(&self, other: &Self) -> bool {
+        self.vendor == other.vendor
+            && self.path == other.path
+            && match (&self.state, &other.state) {
+                (Census::Absent, Census::Absent) => true,
+                (Census::Held { manifest: mine }, Census::Held { manifest: theirs }) => {
+                    mine.same_read(theirs)
+                }
+                _ => false,
+            }
+    }
+
+    /// How full the census is, if it loaded: the part that refuses an append
+    /// first, its capacity and its headroom. D-3327 item 2, DB-G07, DB-G08.
+    ///
+    /// The capacity is the file's OWN: a version-4 header carries it, and a
+    /// single file is bound by [`MAX_ENTRIES`], the only bound such a file was
+    /// ever written under. Field reads, at most three.
+    #[must_use]
+    pub fn room(&self) -> Option<Room> {
+        let Census::Held { ref manifest } = self.state else {
+            return None;
+        };
+        let (part, headroom) = manifest.tightest()?;
+        let header = part.header();
+        Some(Room {
+            segment: part.segment(),
+            epoch: part.epoch(),
+            capacity: header.limit(),
+            committed: header.n_valid,
+            headroom,
+        })
+    }
+
+    /// The one word `x-brutex-census-state` carries for this census, given
+    /// how many census-refused days the import journal still names
+    /// (D-3327 item 2).
+    ///
+    /// `unreadable` and `absent` first, as before. A loaded census is
+    /// `behind` while the journal names census-refused days not yet
+    /// recounted, because those days' bars are on disk and not in this
+    /// census; otherwise `capped` when the tightest part has less than
+    /// [`CAPPED_HEADROOM`] entries left; otherwise `held`. A census both
+    /// behind and capped says `behind`, and its headers carry the headroom as
+    /// well, so neither fact is lost.
+    #[must_use]
+    pub fn state_word(&self, behind_days: u64) -> &'static str {
+        match self.state {
+            Census::Absent => "absent",
+            Census::Unreadable { .. } => "unreadable",
+            Census::Held { .. } if behind_days > 0 => "behind",
+            Census::Held { .. }
+                if self
+                    .room()
+                    .is_some_and(|room| room.headroom < CAPPED_HEADROOM) =>
+            {
+                "capped"
+            }
+            Census::Held { .. } => "held",
         }
     }
 
@@ -266,7 +863,7 @@ impl VendorCensus {
                         self.vendor.as_str(),
                         manifest.keys(),
                         manifest.total_rows(),
-                        manifest.header().generation
+                        manifest.generation()
                     )
                 },
                 |why| {
@@ -274,7 +871,7 @@ impl VendorCensus {
                         "{} DEGRADED CENSUS · recovered generation {} after stepping \
                          over: {why}",
                         self.vendor.as_str(),
-                        manifest.header().generation
+                        manifest.generation()
                     )
                 },
             ),
@@ -294,6 +891,42 @@ impl VendorCensus {
     }
 }
 
+/// How full one census is: [`VendorCensus::room`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Room {
+    /// The tightest part's segment, or `None` for a single file.
+    pub segment: Option<Segment>,
+    /// Its epoch, at version 4.
+    pub epoch: Option<u32>,
+    /// The entries it may hold, from its own header.
+    pub capacity: u64,
+    /// The entries it has committed.
+    pub committed: u64,
+    /// `capacity − committed`.
+    pub headroom: u64,
+}
+
+impl Room {
+    /// Why a census is `capped`, in a sentence, or `None` when it is not.
+    #[must_use]
+    pub fn capped_reason(&self) -> Option<String> {
+        (self.headroom < CAPPED_HEADROOM).then(|| {
+            format!(
+                "capped: {} of {} entries free in {} (below {CAPPED_HEADROOM}); \
+                 an append past the capacity is refused while its bars still \
+                 land, so months written after it are not counted until the \
+                 census is migrated or compacted (D-3316, D-3327)",
+                self.headroom,
+                self.capacity,
+                self.segment.map_or_else(
+                    || "the single file".to_owned(),
+                    |segment| format!("the {} partition", segment.as_str())
+                ),
+            )
+        })
+    }
+}
+
 /// One vendor's manifest, read off disk.
 ///
 /// Never fails: every outcome is a state the page renders, because a `/store`
@@ -301,32 +934,55 @@ impl VendorCensus {
 /// on a fresh install.
 #[must_use]
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
-    let path = manifest_path(root, vendor);
-    let state = match sized(&path) {
-        Err(e) => Census::of_io_error(&e),
-        Ok(Err(reason)) => Census::Unreadable {
-            reason,
-            fault: Fault::Refused,
-        },
-        Ok(Ok(bytes)) => {
-            // A file shorter than the header region is not sliced past its end;
-            // it is handed over as it is, and the manifest decoder refuses it
-            // by name. Splitting with a checked split rather than a range keeps
-            // `clippy::indexing_slicing` satisfied without a branch that says
-            // "this cannot happen".
-            let (header, entries) = bytes
-                .split_at_checked(HEADER_LEN_USIZE)
-                .unwrap_or((bytes.as_slice(), &[]));
-            match Manifest::open(vendor, header, entries) {
-                Ok(manifest) => Census::Held {
-                    manifest: Box::new(manifest),
-                },
-                Err(why) => Census::Unreadable {
-                    reason: why.to_string(),
-                    fault: Fault::Refused,
-                },
-            }
+    read_vendor_after(root, vendor, None)
+}
+
+/// [`read_vendor`], extending `previous` by what was appended since it was
+/// read wherever that reaches the same census, and reading whole otherwise.
+///
+/// # Which file is the census (D-3316 item 7)
+///
+/// A vendor with a `manifest/v4/<vendor>/` directory is MIGRATED: its census
+/// is every segment's current epoch, read from there only, each bounded by the
+/// capacity its own header declares (DB-G08). Otherwise its census is the
+/// single file `manifest/<vendor>.man`, read exactly as before version 4
+/// existed. A migrated vendor's single file is never read beside it.
+///
+/// # What `previous` buys (DB-059, DB-G06, DB-G79)
+///
+/// A part of `previous` read from the same file (the same inode, and for a
+/// partition the same epoch) is extended by the entries appended since, with
+/// every check a whole read makes on them (see `Tail`); a part whose file did
+/// not change is reused as it is, so an unchanged partition costs nothing.
+/// Anything else is read whole. The answer is the census a whole read gives:
+/// `census::a_tail_reaches_the_census_a_whole_read_gives` holds it.
+#[must_use]
+pub fn read_vendor_after(
+    root: &Path,
+    vendor: Vendor,
+    previous: Option<&VendorCensus>,
+) -> VendorCensus {
+    let previous = previous.and_then(|census| match census.state {
+        Census::Held { ref manifest } => Some(manifest),
+        Census::Absent | Census::Unreadable { .. } => None,
+    });
+    let (path, state) = match locate(root, vendor) {
+        Located::Single(path) => {
+            let state = read_single(
+                &path,
+                vendor,
+                previous
+                    .filter(|held| !held.is_partitioned())
+                    .and_then(|held| held.parts().first()),
+            );
+            (path, state)
         }
+        Located::Partitioned(dir) => {
+            let state =
+                read_partitioned(root, vendor, previous.filter(|held| held.is_partitioned()));
+            (dir, state)
+        }
+        Located::Refused(dir, state) => (dir, state),
     };
     // THE COUNTER'S OWN STATE, NAMED — held, absent, or unreadable.
     //
@@ -388,6 +1044,512 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     }
 }
 
+/// Where one vendor's census is, as [`read_vendor_after`] finds it.
+enum Located {
+    /// The single file, versions 1 to 3.
+    Single(PathBuf),
+    /// `manifest/v4/<vendor>/`, one directory of epochs per segment.
+    Partitioned(PathBuf),
+    /// Neither can be told: refused at that path, never guessed.
+    Refused(PathBuf, Census),
+}
+
+/// Whether `vendor` is migrated, by the one rule D-3316 item 7 states: a
+/// `manifest/v4/<vendor>/` directory.
+///
+/// The same answers `pull::ingest::census_store::locate` gives, with the file
+/// system's error kind kept rather than folded into a sentence, so a census
+/// refused here is stamped as the fault it is (D-0695). One `lstat`.
+fn locate(root: &Path, vendor: Vendor) -> Located {
+    let dir = vendor_dir(root, vendor);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(found) if found.is_dir() => Located::Partitioned(dir),
+        Ok(_) => {
+            let reason = format!(
+                "{} is not a directory, and it is where {}'s version-4 census lives \
+                 once migrated; refused rather than guess which census is {}'s (D-3316)",
+                dir.display(),
+                vendor.as_str(),
+                vendor.as_str()
+            );
+            Located::Refused(
+                dir,
+                Census::Unreadable {
+                    reason,
+                    fault: Fault::Refused,
+                },
+            )
+        }
+        Err(absent)
+            if matches!(
+                absent.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::NotADirectory
+                    | std::io::ErrorKind::InvalidFilename
+            ) =>
+        {
+            Located::Single(manifest_path(root, vendor))
+        }
+        Err(why) => {
+            let reason = format!(
+                "{} could not be measured: {why}; refused rather than guess whether {} \
+                 was migrated (D-3316)",
+                dir.display(),
+                vendor.as_str()
+            );
+            Located::Refused(
+                dir,
+                Census::Unreadable {
+                    reason,
+                    fault: Fault::Io(why.kind()),
+                },
+            )
+        }
+    }
+}
+
+/// The single file at `path`: extended from `previous` where that reaches the
+/// same census, read whole otherwise.
+fn read_single(path: &Path, vendor: Vendor, previous: Option<&Part>) -> Census {
+    if let Some(part) = previous.and_then(|previous| extend(path, vendor, previous)) {
+        return Census::Held {
+            manifest: Manifests {
+                parts: vec![part],
+                partitioned: false,
+            },
+        };
+    }
+    match sized_with_id(path) {
+        Err(e) => Census::of_io_error(&e),
+        Ok(Err(reason)) => Census::Unreadable {
+            reason,
+            fault: Fault::Refused,
+        },
+        Ok(Ok((bytes, file))) => {
+            // A file shorter than the header region is not sliced past its end;
+            // it is handed over as it is, and the manifest decoder refuses it
+            // by name. Splitting with a checked split rather than a range keeps
+            // `clippy::indexing_slicing` satisfied without a branch that says
+            // "this cannot happen".
+            let (header, entries) = bytes
+                .split_at_checked(HEADER_LEN_USIZE)
+                .unwrap_or((bytes.as_slice(), &[]));
+            match Manifest::open(vendor, header, entries) {
+                // AN EPOCH AT THE SINGLE FILE'S NAME is one segment's census
+                // where every segment's is read: refused, never served as all
+                // of the vendor's census (D-3316), as the writer refuses it.
+                Ok(manifest) if manifest.segment().is_some() => Census::Unreadable {
+                    reason: format!(
+                        "it holds a version-4 epoch of the {} partition, not a \
+                         single-file census; refused rather than read as all of {}'s \
+                         census (D-3316)",
+                        manifest.segment().map_or("", Segment::as_str),
+                        vendor.as_str()
+                    ),
+                    fault: Fault::Refused,
+                },
+                Ok(manifest) => Census::Held {
+                    manifest: Manifests {
+                        parts: vec![Part {
+                            segment: None,
+                            epoch: None,
+                            path: path.to_path_buf(),
+                            first_entry: entry_of(&manifest, &bytes, Some(0)),
+                            last_entry: entry_of(&manifest, &bytes, None),
+                            base: Arc::new(manifest),
+                            tail: None,
+                            file,
+                        }],
+                        partitioned: false,
+                    },
+                },
+                Err(why) => Census::Unreadable {
+                    reason: why.to_string(),
+                    fault: Fault::Refused,
+                },
+            }
+        }
+    }
+}
+
+/// A migrated vendor's census: every segment's current epoch, in
+/// [`SEGMENTS`] order. A segment with no epoch yet is an empty partition at
+/// its floor, as the writer starts it. Any segment that cannot be read makes
+/// the whole census unreadable, naming that file: a census missing one
+/// segment would read as a store without it.
+fn read_partitioned(root: &Path, vendor: Vendor, previous: Option<&Manifests>) -> Census {
+    let mut parts = Vec::with_capacity(SEGMENTS.len());
+    for segment in SEGMENTS {
+        let before = previous.and_then(|held| held.part_of(segment));
+        let dir = segment_dir(root, vendor, segment);
+        let epoch = match current_epoch(&dir) {
+            Ok(epoch) => epoch,
+            Err(why) => {
+                return Census::Unreadable {
+                    reason: format!("{} could not be listed: {why}", dir.display()),
+                    fault: Fault::Io(why.kind()),
+                };
+            }
+        };
+        let Some(epoch) = epoch else {
+            let base = before.filter(|part| part.epoch.is_none()).map_or_else(
+                || Arc::new(Manifest::partition_absent(vendor, segment)),
+                |part| Arc::clone(&part.base),
+            );
+            parts.push(Part {
+                segment: Some(segment),
+                epoch: None,
+                path: dir,
+                base,
+                tail: None,
+                file: None,
+                first_entry: None,
+                last_entry: None,
+            });
+            continue;
+        };
+        let path = epoch_path(root, vendor, segment, epoch);
+        if let Some(part) = before
+            .filter(|part| part.epoch == Some(epoch))
+            .and_then(|part| extend(&path, vendor, part))
+        {
+            parts.push(part);
+            continue;
+        }
+        let named = |why: &dyn std::fmt::Display| format!("{}: {why}", path.display());
+        match sized_epoch(&path) {
+            // AN EPOCH THAT WAS LISTED EXISTS. One that vanished, or that will
+            // not open, is refused with its own kind, never read as absent:
+            // epochs are never deleted (D-3316 item 2).
+            Err(why) => {
+                return Census::Unreadable {
+                    reason: named(&why),
+                    fault: Fault::Io(why.kind()),
+                };
+            }
+            Ok(Err(why)) => {
+                return Census::Unreadable {
+                    reason: named(&why),
+                    fault: Fault::Refused,
+                };
+            }
+            Ok(Ok((bytes, file))) => match Manifest::open_partition(vendor, segment, &bytes) {
+                Ok(manifest) => parts.push(Part {
+                    segment: Some(segment),
+                    epoch: Some(epoch),
+                    path,
+                    first_entry: entry_of(&manifest, &bytes, Some(0)),
+                    last_entry: entry_of(&manifest, &bytes, None),
+                    base: Arc::new(manifest),
+                    tail: None,
+                    file,
+                }),
+                Err(why) => {
+                    return Census::Unreadable {
+                        reason: named(&why),
+                        fault: Fault::Refused,
+                    };
+                }
+            },
+        }
+    }
+    Census::Held {
+        manifest: Manifests {
+            parts,
+            partitioned: true,
+        },
+    }
+}
+
+/// The current epoch in a segment directory: the highest-numbered
+/// `<epoch>.man`, or `None` when it holds none or does not exist. D-3316
+/// item 2. A `.man.tmp` is never an answer. O(entries of the directory).
+///
+/// # Errors
+///
+/// A directory that exists and cannot be listed.
+pub(crate) fn current_epoch(dir: &Path) -> std::io::Result<Option<u32>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(absent)
+            if matches!(
+                absent.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(why) => return Err(why),
+    };
+    let mut newest: Option<u32> = None;
+    for entry in entries {
+        if let Some(epoch) = entry?.file_name().to_str().and_then(parse_epoch_name) {
+            newest = Some(newest.map_or(epoch, |seen| seen.max(epoch)));
+        }
+    }
+    Ok(newest)
+}
+
+/// One epoch's bytes, bounded by the capacity ITS OWN HEADER declares
+/// (D-3316 item 3, DB-G08), and the file's identity.
+///
+/// The header region is read first, through the same non-blocking open
+/// [`sized`] uses; the largest capacity any partition slot in it declares is
+/// the bound (the largest, so the generation a load falls back to is
+/// admitted too); a file longer than that bound is refused unread, and the
+/// read is capped one byte past it. A region with no partition slot is
+/// bounded by [`MAX_ENTRIES`] and refused by name when it is decoded.
+fn sized_epoch(path: &Path) -> Sized {
+    use std::io::Read as _;
+    let file = open_without_waiting(path)?;
+    let meta = file.metadata()?;
+    if meta.is_dir() {
+        return Err(std::io::ErrorKind::IsADirectory.into());
+    }
+    if !meta.is_file() {
+        return Ok(Err(format!(
+            "not a regular file (a {}); an epoch is one, and this reader neither waits on a FIFO nor reads a device",
+            kind_of(meta.file_type())
+        )));
+    }
+    let mut bytes = Vec::with_capacity(HEADER_LEN_USIZE);
+    let _ = (&file).take(HEADER_LEN).read_to_end(&mut bytes)?;
+    let capacity = declared_capacity(&bytes).unwrap_or(MAX_ENTRIES);
+    let cap = HEADER_LEN.saturating_add(capacity.saturating_mul(ENTRY_STRIDE));
+    if meta.len() > cap {
+        return Ok(Err(format!(
+            "{} bytes; its header declares {capacity} entries, which is {cap} bytes, \
+             and this reader refuses more",
+            meta.len()
+        )));
+    }
+    let read_so_far = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let _ = (&file)
+        .take(cap.saturating_add(1).saturating_sub(read_so_far))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > cap {
+        return Ok(Err(format!(
+            "grew past {cap} bytes while it was read; this reader refuses more"
+        )));
+    }
+    #[cfg(test)]
+    manifest_reads::note(path);
+    Ok(Ok((bytes, FileId::of(&meta))))
+}
+
+/// What [`sized_epoch`] and [`sized_with_id`] answer: the file system's
+/// refusal (`Err`), this reader's refusal in words (`Ok(Err)`), or the bytes
+/// and the identity of the file they came from.
+type Sized = std::io::Result<Result<(Vec<u8>, Option<FileId>), String>>;
+
+/// Bytes between header slots.
+const SLOT_SPACING: usize = 16_384;
+
+/// The bytes of one entry `manifest` counts, out of the whole file it was
+/// loaded from: entry `ordinal`, or the last one for `None`; `None` for a
+/// census of no entries.
+fn entry_of(manifest: &Manifest, file: &[u8], ordinal: Option<u64>) -> Option<Arc<[u8]>> {
+    let header = manifest.header();
+    let stride = Layout::for_version(header.format_version)
+        .ok()?
+        .entry_stride();
+    let last = header.n_valid.checked_sub(1)?;
+    let at = ordinal.unwrap_or(last).min(last);
+    let at = usize::try_from(HEADER_LEN.checked_add(at.checked_mul(stride)?)?).ok()?;
+    let end = at.checked_add(usize::try_from(stride).ok()?)?;
+    file.get(at..end).map(Arc::from)
+}
+
+/// The largest capacity any decodable version-4 slot in `region` declares.
+fn declared_capacity(region: &[u8]) -> Option<u64> {
+    region
+        .chunks(SLOT_SPACING)
+        .take(2)
+        .filter_map(|slot| ManifestHeader::decode(slot).ok())
+        .filter(|header| header.segment.is_some())
+        .map(|header| header.capacity)
+        .max()
+}
+
+/// The newest header in a whole header region, when every slot in it is
+/// either never written (all zero) or a header in its own position; `None`
+/// otherwise, which sends the caller to a whole read, where a damaged slot is
+/// stepped over and SAID (D-0036). A tail never decides that on its own.
+fn newest_slot(region: &[u8]) -> Option<ManifestHeader> {
+    let mut newest: Option<ManifestHeader> = None;
+    for (index, slot) in (0u64..).zip(region.chunks(SLOT_SPACING).take(2)) {
+        if slot.get(..64)?.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        let header = ManifestHeader::decode(slot).ok()?;
+        if header.generation % 2 != index {
+            return None;
+        }
+        if newest.is_none_or(|seen| header.generation > seen.generation) {
+            newest = Some(header);
+        }
+    }
+    newest
+}
+
+/// `previous` extended by the entries appended to its file since, or `None`
+/// when that cannot be shown to reach the census a whole read gives. See
+/// [`Tail`] for every check, and why a refusal here is never an answer.
+///
+/// Reads one header region (32 KiB), the first and last entries already read
+/// (128 bytes each) and the appended entries, positionally: O(appended
+/// entries), whatever the file holds, plus one copy of at most
+/// [`FRESH_LIMIT`] tail entries (and, once per [`FRESH_LIMIT`] appended
+/// entries, of the settled level; see [`Tail`]). A file unchanged since
+/// `previous` costs the header region and the two entries, and hands
+/// `previous` back.
+#[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every check a whole read makes on the appended entries, in the order a reader \
+              must make them, kept in one place so none is skipped by a caller"
+)]
+fn extend(path: &Path, vendor: Vendor, previous: &Part) -> Option<Part> {
+    use std::os::unix::fs::FileExt as _;
+    let id = previous.file?;
+    if previous.base.degraded_reason().is_some() {
+        return None;
+    }
+    let file = open_without_waiting(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || FileId::of(&meta)? != id {
+        return None;
+    }
+    let before = previous.header();
+    let layout = Layout::for_version(before.format_version).ok()?;
+    let mut region = vec![0u8; HEADER_LEN_USIZE];
+    file.read_exact_at(&mut region, 0).ok()?;
+    let newest = newest_slot(&region)?;
+    if newest.vendor != vendor
+        || newest.segment != before.segment
+        || newest.format_version != before.format_version
+        || newest.entry_stride != before.entry_stride
+        || newest.limit() != before.limit()
+    {
+        return None;
+    }
+    // ONE LINEAGE: every entry adds one to both the generation and `n_valid`
+    // (`ManifestHeader::advance`), so their difference is fixed for a file
+    // that was only appended to. Anything else was rewritten, and is read
+    // whole.
+    if newest.n_valid < before.n_valid
+        || newest.n_valid > newest.limit()
+        || newest.generation.checked_sub(newest.n_valid)?
+            != before.generation.checked_sub(before.n_valid)?
+    {
+        return None;
+    }
+    let stride = layout.entry_stride();
+    let start = HEADER_LEN.checked_add(before.n_valid.checked_mul(stride)?)?;
+    let end = HEADER_LEN.checked_add(newest.n_valid.checked_mul(stride)?)?;
+    if meta.len() < end {
+        return None;
+    }
+    // THE FIRST AND THE LAST ENTRY ALREADY READ ARE READ AGAIN, and must be
+    // the same bytes: an append never rewrites them. A file rewritten in place
+    // under the same inode, even to the same header (a fixture writing a
+    // whole image over the file does exactly that), is read whole. Checked
+    // before an unchanged header is trusted, so that header is never the only
+    // evidence the census did not move.
+    let same_at = |kept: &[u8], at: u64| -> bool {
+        let mut again = vec![0u8; kept.len()];
+        file.read_exact_at(&mut again, at).is_ok() && again.as_slice() == kept
+    };
+    match (
+        previous.first_entry.as_deref(),
+        previous.last_entry.as_deref(),
+    ) {
+        (Some(first), Some(last)) => {
+            if !same_at(first, HEADER_LEN) || !same_at(last, start.checked_sub(stride)?) {
+                return None;
+            }
+        }
+        (None, None) if before.n_valid == 0 => {}
+        _ => return None,
+    }
+    if newest == before {
+        return Some(previous.clone());
+    }
+    let adding = newest.n_valid - before.n_valid;
+    let tailed = previous
+        .tail
+        .as_ref()
+        .map_or(0, |tail| u64::try_from(tail.entries()).unwrap_or(u64::MAX));
+    if tailed.saturating_add(adding) > TAIL_FLOOR.max(previous.base.entries() / TAIL_DIVISOR) {
+        return None;
+    }
+    let mut bytes = vec![0u8; usize::try_from(end - start).ok()?];
+    file.read_exact_at(&mut bytes, start).ok()?;
+    // THE FRESH LEVEL IS COPIED, THE SETTLED ONE SHARED: see `Tail`.
+    let mut tail = previous.tail.as_deref().cloned().unwrap_or_else(|| Tail {
+        header: before,
+        settled: Arc::default(),
+        fresh: Level::default(),
+    });
+    tail.fresh.changes.reserve(usize::try_from(adding).ok()?);
+    let lineage = newest.generation - newest.n_valid;
+    let (mut keys, mut rows) = (before.n_keys, before.total_rows);
+    let width = layout.entry_stride_len();
+    for (ordinal, chunk) in (before.n_valid..newest.n_valid).zip(bytes.chunks_exact(width)) {
+        let held = layout.decode_entry(chunk).ok()?;
+        let key = held.entry.key;
+        if newest.segment.is_some_and(|segment| key.segment != segment) {
+            return None;
+        }
+        match tail
+            .held(&key)
+            .copied()
+            .or_else(|| previous.base.held(&key))
+        {
+            None => {
+                keys = keys.checked_add(1)?;
+                rows = rows.checked_add(held.entry.rows)?;
+            }
+            Some(was) => {
+                if held.entry.rows < was.entry.rows
+                    || held.entry.last_ts_micros < was.entry.last_ts_micros
+                {
+                    return None;
+                }
+                rows = rows.checked_add(held.entry.rows - was.entry.rows)?;
+            }
+        }
+        let _superseded = tail.fresh.held.insert(key, held);
+        tail.fresh
+            .changes
+            .push((lineage.checked_add(ordinal)?.checked_add(1)?, key));
+    }
+    if keys != newest.n_keys || rows != newest.total_rows {
+        return None;
+    }
+    tail.header = newest;
+    tail.settle();
+    #[cfg(test)]
+    manifest_reads::note_tail(path, adding);
+    let first_entry = previous
+        .first_entry
+        .clone()
+        .or_else(|| bytes.chunks_exact(width).next().map(Arc::from));
+    let last_entry = bytes.rchunks_exact(width).next().map(Arc::from);
+    Some(Part {
+        tail: Some(Arc::new(tail)),
+        first_entry,
+        last_entry,
+        ..previous.clone()
+    })
+}
+
+/// No positional read off Unix: every census is read whole.
+#[cfg(not(unix))]
+fn extend(_path: &Path, _vendor: Vendor, _previous: &Part) -> Option<Part> {
+    None
+}
+
 /// The bytes at `path`, if this reader may hold them.
 ///
 /// Three outcomes, and they are deliberately three: `Err` is the file system
@@ -416,7 +1578,14 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
 /// bound, so a file that grows under the read is refused rather than held.
 /// R9-api-cx-1, D-0954. O(1) calls; the read is O(manifest bytes), bounded;
 /// `api::census::a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`.
+#[cfg(test)]
 fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
+    sized_with_id(path).map(|read| read.map(|(bytes, _file)| bytes))
+}
+
+/// [`sized`], and the identity of the file the bytes came from, taken from
+/// the same descriptor, which a later tail must match (see [`Part`]).
+fn sized_with_id(path: &Path) -> Sized {
     use std::io::Read as _;
     let file = open_without_waiting(path)?;
     let meta = file.metadata()?;
@@ -452,7 +1621,7 @@ fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
     // tests run concurrently and each owns its own scratch root. D-0686.
     #[cfg(test)]
     manifest_reads::note(path);
-    Ok(Ok(bytes))
+    Ok(Ok((bytes, FileId::of(&meta))))
 }
 
 /// `O_NONBLOCK`, from each platform's own `fcntl.h`, the values
@@ -509,31 +1678,53 @@ pub(crate) fn kind_of(kind: std::fs::FileType) -> &'static str {
 /// different directory that later appeared at the same spelling.
 #[must_use]
 pub fn read_all(root: &Path) -> Vec<VendorCensus> {
-    match std::fs::metadata(root) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            return unreadable_root(
-                root,
-                &format!(
-                    "configured store root {} is not a directory",
-                    root.display()
-                ),
-            );
-        }
-        Err(error) => {
-            return unreadable_root(
-                root,
-                &format!(
-                    "configured store root {} is unavailable: {error}",
-                    root.display()
-                ),
-            );
-        }
+    read_all_through(root, |vendor| read_vendor(root, vendor))
+}
+
+/// [`read_all`], each vendor read through `read`: the store root is admitted
+/// once, exactly as [`read_all`] admits it, and each vendor's census then
+/// comes from `read`, which `crate::server::census_cache` points at its
+/// per-vendor cache (D-3327 item 1).
+#[must_use]
+pub fn read_all_through(
+    root: &Path,
+    mut read: impl FnMut(Vendor) -> VendorCensus,
+) -> Vec<VendorCensus> {
+    if let Some(refused) = root_refusal(root) {
+        return unreadable_root(root, &refused);
     }
-    Vendor::ALL
-        .into_iter()
-        .map(|v| read_vendor(root, v))
-        .collect()
+    Vendor::ALL.into_iter().map(&mut read).collect()
+}
+
+/// Why the configured root cannot hold a census, or `None` when it is a
+/// directory: the admission [`read_all`] makes before any manifest is read.
+#[must_use]
+pub fn root_refusal(root: &Path) -> Option<String> {
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => None,
+        Ok(_) => Some(format!(
+            "configured store root {} is not a directory",
+            root.display()
+        )),
+        Err(error) => Some(format!(
+            "configured store root {} is unavailable: {error}",
+            root.display()
+        )),
+    }
+}
+
+/// [`unreadable_root`]'s row for one vendor: what a vendor read through
+/// [`read_all_through`] is when the root itself is refused.
+#[must_use]
+pub fn unreadable_root_row(root: &Path, vendor: Vendor, reason: &str) -> VendorCensus {
+    VendorCensus {
+        vendor,
+        path: manifest_path(root, vendor),
+        state: Census::Unreadable {
+            reason: reason.to_owned(),
+            fault: Fault::Root,
+        },
+    }
 }
 
 /// One root-level refusal projected across the fixed vendor set.
@@ -547,14 +1738,7 @@ pub fn read_all(root: &Path) -> Vec<VendorCensus> {
 fn unreadable_root(root: &Path, reason: &str) -> Vec<VendorCensus> {
     Vendor::ALL
         .into_iter()
-        .map(|vendor| VendorCensus {
-            vendor,
-            path: manifest_path(root, vendor),
-            state: Census::Unreadable {
-                reason: reason.to_owned(),
-                fault: Fault::Root,
-            },
-        })
+        .map(|vendor| unreadable_root_row(root, vendor, reason))
         .collect()
 }
 
@@ -1917,4 +3101,47 @@ pub(crate) mod manifest_reads {
             .filter(|read| read.as_path() == path)
             .count()
     }
+
+    /// Every read of `path` this process made, whole or by its tail: what a
+    /// caller counting "read once" counts since a census can be extended
+    /// rather than read whole (D-3327).
+    #[must_use]
+    pub(crate) fn any_of(path: &Path) -> usize {
+        of(path).saturating_add(tails_of(path).len())
+    }
+
+    /// Every tail read: the path, and the entries it decoded.
+    static TAILS: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Record one tail read of `path` that decoded `entries` appended entries.
+    pub(crate) fn note_tail(path: &Path, entries: u64) {
+        TAILS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((path.to_path_buf(), entries));
+    }
+
+    /// The entries every tail read of `path` decoded, in order.
+    #[must_use]
+    pub(crate) fn tails_of(path: &Path) -> Vec<u64> {
+        TAILS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(read, _)| read.as_path() == path)
+            .map(|(_, entries)| *entries)
+            .collect()
+    }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+#[path = "census_tail_tests.rs"]
+mod tail_tests;
