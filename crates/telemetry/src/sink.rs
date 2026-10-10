@@ -6524,4 +6524,140 @@ mod tests {
             super::Rationed::Write { held_before: 1 }
         );
     }
+
+    /// **A RUN IS READ FROM EVERY FORM A LINE CARRIES IT IN**, written or
+    /// seeded from the ring: a top-level run, a numeric field (unsigned or
+    /// signed), a field of canonical digits; never a negative, a padded or a
+    /// zero one.
+    #[test]
+    fn a_run_is_read_from_every_form_a_line_carries_it_in() {
+        let dir = scratch("audit-run-forms");
+        {
+            let ring_only = Sink::open(&Config::new(&dir).with_audit(false)).expect("opens");
+            let _ = ring_only.emit_for_run(9, &Event::error("x", "seeded top-level"));
+            let _ = ring_only.emit(&Event::error("x", "seeded field").with("run", 11_u64));
+            let _ = ring_only.emit(&Event::error("x", "seeded text").with("run", "13"));
+        }
+        let sink = Sink::open(&Config::new(&dir)).expect("opens with a stream");
+        assert_eq!(sink.audit_health().expect("a stream").seeded, 3);
+        let _ = sink.emit(&Event::error("x", "signed").with("run", 5_i64));
+        let _ = sink.emit(&Event::error("x", "text").with("run", "7"));
+        let _ = sink.emit(&Event::error("x", "negative").with("run", -3_i64));
+        let _ = sink.emit(&Event::error("x", "padded").with("run", "007"));
+        let _ = sink.emit(&Event::error("x", "a flag").with("run", true));
+        for (run, message) in [
+            ("9", "seeded top-level"),
+            ("11", "seeded field"),
+            ("13", "seeded text"),
+            ("5", "signed"),
+            ("7", "text"),
+        ] {
+            let found = probed(&dir, "run", run);
+            assert_eq!(found.len(), 1, "run {run}");
+            assert_eq!(found[0].message, message);
+        }
+        assert!(probed(&dir, "run", "-3").is_empty());
+        assert!(probed(&dir, "run", "007").is_empty());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A COVERAGE FILE IS READ LINE BY LINE AND A DIMENSION IT LACKS IS
+    /// ADDED FROM WHERE THE STREAM STANDS**: a line this build cannot read is
+    /// skipped, the first naming of a dimension wins, a generation whose file
+    /// is not a file covers nothing it can vouch for, and a coverage file that
+    /// cannot be read or written is named in the stream's health.
+    #[test]
+    fn a_coverage_file_is_read_line_by_line_and_extended_where_it_stands() {
+        assert_eq!(
+            super::dims_of("day 0\nnonsense\nrun x\nrun 5\nrun 6\ncode 007\n"),
+            vec![("day".to_owned(), 0), ("run".to_owned(), 5)]
+        );
+        // A FILE NAMING SOME DIMENSIONS: the rest are added from the offset
+        // the stream stands at when the next build opens it.
+        let dir = scratch("audit-dims-partial");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&Event::error("x", "refused"));
+        }
+        let dims = super::audit_generation_path(&dir, 0).join(super::AUDIT_DIMS_FILE);
+        std::fs::write(&dims, "day 0\n").expect("a partial coverage file");
+        let at = std::fs::metadata(audit_current_path(&dir))
+            .expect("a stream")
+            .len();
+        {
+            let _sink = Sink::open(&Config::new(&dir)).expect("reopens");
+        }
+        assert_eq!(super::audit_coverage(&dir, 0, "day"), Some(0));
+        assert_eq!(super::audit_coverage(&dir, 0, "target"), Some(at));
+        assert_eq!(super::audit_coverage(&dir, 0, "run"), Some(at));
+        // A COVERAGE FILE THAT IS NOT A FILE vouches for nothing, and the
+        // writer names it.
+        std::fs::remove_file(&dims).expect("unlink");
+        std::fs::create_dir_all(&dims).expect("a directory in its place");
+        assert_eq!(super::audit_coverage(&dir, 0, "day"), None);
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens anyway");
+            let health = sink.audit_health().expect("a stream");
+            assert!(
+                health
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|why| why.contains("cannot read the index coverage")),
+                "{health:?}"
+            );
+        }
+        // A GENERATION THAT CANNOT BE WRITTEN: the coverage is not recorded,
+        // and the stream says so.
+        let blocked = scratch("audit-dims-blocked");
+        let generation = super::audit_generation_path(&blocked, 0);
+        std::fs::create_dir_all(&generation).expect("mkdir");
+        let read_only = |mode: u32| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(mode))
+                .expect("chmod");
+        };
+        read_only(0o555);
+        let said = Sink::open(&Config::new(&blocked))
+            .expect("opens anyway")
+            .audit_health()
+            .expect("a stream")
+            .last_error;
+        read_only(0o755);
+        assert!(
+            said.as_deref()
+                .is_some_and(|why| why.contains("cannot record the index coverage")),
+            "{said:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&blocked);
+    }
+
+    /// **A POINTER THAT IS NOT ONE IS COUNTED AND ITS PLACE PASSED OVER**: a
+    /// posting with a foreign record in it pages past it, and says how many.
+    #[test]
+    fn a_pointer_that_is_not_one_is_counted_and_passed_over() {
+        use std::io::Write as _;
+        let dir = scratch("audit-malformed-pointer");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let _ = sink.emit(&Event::error("x", "first").with("instrument", "VBL"));
+        let path = audit_posting_path(&dir, 0, "instrument", "VBL").expect("a posting");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("the posting")
+            .write_all(&[7u8; AUDIT_POINTER_BYTES])
+            .expect("a foreign record");
+        let _ = sink.emit(&Event::error("x", "second").with("instrument", "VBL"));
+        let page =
+            super::audit_postings_before(&dir, "instrument", "VBL", 10, None).expect("a probe");
+        assert_eq!(page.total, 3);
+        assert_eq!(page.malformed, 1);
+        assert_eq!(page.pointers.len(), 2);
+        assert_eq!(page.pointers[0].0.index, 2, "the second line's place");
+        assert_eq!(
+            page.pointers[1].0.index, 0,
+            "the foreign record's place passed over"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
 }
