@@ -606,7 +606,8 @@ fn days_between(first: Day, last: Day) -> Vec<Day> {
 struct LineageIndex {
     /// Each key's records, as the answer carries them.
     by_key: HashMap<String, Vec<Value>>,
-    /// Lines that are neither `alias`, `lineage` nor `stitched` records.
+    /// Lines that are none of `alias`, `lineage`, `stitched` and the
+    /// re-key's `superseded` and `retired` records.
     unreadable: usize,
 }
 
@@ -623,7 +624,9 @@ type LineageMemo = HashMap<PathBuf, (FileStamp, Arc<LineageIndex>)>;
 /// One ledger text, indexed by the census key each record is about. A
 /// `lineage` record is filed under both keys (the old key `continues_as` the
 /// new one, the new key is `renamed_from` the old), a `stitched` record under
-/// its key. `alias` records are the decoder's (D-3331 item 1), not a key's.
+/// its key, a re-key `superseded` record under both (`superseded_by`,
+/// `supersedes`) and a `retired` record under its key (D-3331; WP-12c).
+/// `alias` records are the decoder's (D-3331 item 1), not a key's.
 fn index_lineage(text: &str) -> LineageIndex {
     let mut index = LineageIndex::default();
     let key = pull::gdfl_lineage::option_key;
@@ -655,6 +658,37 @@ fn index_lineage(text: &str) -> LineageIndex {
                 .push(json!({
                     "kind": "stitched", "ex": record.ex_date.to_string(),
                     "before": other(record.before), "after": other(record.after),
+                }));
+        } else if let Some(record) = pull::gdfl_lineage::SupersededRecord::parse(line) {
+            // THE RE-KEY'S RECORDS ARE READ, never "unreadable" (D-3331;
+            // WP-12c, DB-A17): the stated key is `superseded_by` the key the
+            // decoder files it under, which `supersedes` it with a copy of its
+            // bars, the count and BLAKE3 as the ledger states them.
+            let (old, new) = (
+                key(record.underlying, record.old),
+                key(record.underlying, record.new),
+            );
+            let (why, digest) = (record.kind.as_str(), record.digest_hex());
+            index.by_key.entry(old.clone()).or_default().push(json!({
+                "kind": "superseded_by", "key": new, "why": why,
+                "months": record.months, "bars": record.bars, "blake3": digest,
+            }));
+            index.by_key.entry(new).or_default().push(json!({
+                "kind": "supersedes", "key": old, "why": why,
+                "months": record.months, "bars": record.bars, "blake3": digest,
+            }));
+        } else if let Some(record) = pull::gdfl_lineage::RetiredRecord::parse(line) {
+            // AND A KEY THE DECODER REFUSES ON EVERY DAY (DB-A18), with the
+            // sentence every reader refuses it by.
+            index
+                .by_key
+                .entry(key(record.underlying, record.key))
+                .or_default()
+                .push(json!({
+                    "kind": "retired", "why": record.why.as_str(),
+                    "day": record.day.to_string(), "median": record.median,
+                    "days": record.days, "bars": record.bars,
+                    "refusal": record.refusal(),
                 }));
         } else {
             index.unreadable = index.unreadable.saturating_add(1);
@@ -4751,6 +4785,67 @@ mod tests {
             Value::Null,
             "only GDFL keeps a lineage ledger"
         );
+    }
+
+    /// **THE RE-KEY'S RECORDS ARE READ AND NAMED ON EACH KEY** (D-3331;
+    /// WP-12c, DB-A17, DB-A18): the stated key is `superseded_by` the
+    /// decoded one, the decoded key `supersedes` it, and a retired key says
+    /// so with its refusal -- never counted as unreadable ledger lines.
+    #[test]
+    fn the_rekeys_records_are_read_and_named_on_each_key() {
+        let root = root_of("lineage-rekey");
+        let stated = "NSE-FNO-ZZIDX-2023-06-29-1000000-PE";
+        let settled = "NSE-FNO-ZZIDX-2023-06-28-1000000-PE";
+        let refused = "NSE-FNO-ZZIDX-2020-06-25-191250000-CE";
+        let parse = |key: &str| pull::gdfl_lineage::parse_option_key(key).expect("an option key");
+        let (under, old) = parse(stated);
+        let moved = pull::gdfl_lineage::SupersededRecord {
+            underlying: under,
+            old,
+            new: parse(settled).1,
+            kind: pull::expiry_alias::AliasKind::VendorRedated,
+            months: 2,
+            bars: 3,
+            digest: [7; 32],
+        };
+        let retired = pull::gdfl_lineage::RetiredRecord {
+            underlying: under,
+            key: parse(refused).1,
+            why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+            day: day("2019-05-30"),
+            median: Some(1_170_000),
+            days: 1,
+            bars: 5,
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n{}\n", moved.line(), retired.line()),
+        );
+        let lineage_of = |key: &str, from: &str| {
+            answer(
+                &root,
+                &ask(&format!("feed=gdfl&instrument={key}&from={from}")),
+            )["lineage"]
+                .clone()
+        };
+        let old_side = lineage_of(stated, "2020-06-15");
+        assert_eq!(old_side["unreadable_lines"], 0, "{old_side:#}");
+        let record = &old_side["records"][0];
+        assert_eq!(record["kind"], "superseded_by");
+        assert_eq!(record["key"], settled);
+        assert_eq!(record["why"], "vendor_redated");
+        assert_eq!(
+            (record["months"].clone(), record["bars"].clone()),
+            (json!(2), json!(3))
+        );
+        assert_eq!(record["blake3"], moved.digest_hex());
+        let new_side = lineage_of(settled, "2020-06-15");
+        assert_eq!(new_side["records"][0]["kind"], "supersedes");
+        assert_eq!(new_side["records"][0]["key"], stated);
+        let gone = lineage_of(refused, "2019-05-30");
+        assert_eq!(gone["records"][0]["kind"], "retired");
+        assert_eq!(gone["records"][0]["why"], "strike_implausible");
+        assert_eq!(gone["records"][0]["refusal"], retired.refusal());
     }
 
     /// **A ZERODHA SHARE'S ZERO-VOLUME MINUTES ARE HELD, NOT TRADED** (DB-B16).
