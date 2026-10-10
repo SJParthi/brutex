@@ -66,7 +66,30 @@ pub(crate) struct Asked {
     pub(crate) newest_first: bool,
     /// The page, from 0.
     pub(crate) page: usize,
+    /// One run, when named (WP-33c; DB-A41): the journal's own run id on a
+    /// day's closing line, or a `cli` attempt the importer's lines were logged
+    /// under, or the importer run that attempt opened.
+    pub(crate) run: Option<u64>,
+    /// One stage, when named (DB-A47): the row's settled stage.
+    pub(crate) stage: Option<String>,
+    /// One refusal reason code, when named (DB-A47): the journal's `reason=`,
+    /// the importer's logged `code`, or the reason the census's own wording
+    /// names (see [`reason_of`]).
+    pub(crate) reason: Option<String>,
+    /// Text a logged refusal's `why` holds, when named (DB-A47): the search
+    /// for a reason no code names, on rows written before codes existed.
+    pub(crate) why: Option<String>,
 }
+
+/// Every parameter `/imports.json` reads. Any other is refused by name
+/// (WP-33c, DB-A45): a filter this route does not apply must never come back
+/// as an answer that looks filtered.
+pub(crate) const PARAMS: [&str; 11] = [
+    "feed", "from", "to", "kind", "outcome", "order", "page", "run", "stage", "reason", "why",
+];
+
+/// The longest `reason` or `why` a request may name.
+pub(crate) const MAX_TEXT_ASKED: usize = 120;
 
 /// Reads a query string, or names the parameter it cannot read.
 ///
@@ -78,6 +101,14 @@ pub(crate) struct Asked {
 ///
 /// The parameter and why, as one sentence for a 400.
 pub(crate) fn asked(query: &str) -> Result<Asked, String> {
+    let unknown = crate::logs::unknown_params(query, &PARAMS);
+    if !unknown.is_empty() {
+        return Err(format!(
+            "/imports.json does not read {}: refused rather than answered unfiltered. It reads {}",
+            unknown.join(", "),
+            PARAMS.join(", ")
+        ));
+    }
     let feed = param(query, "feed");
     let gdfl = brutex_core::vendor::Vendor::Gdfl.as_str();
     if feed.is_empty() {
@@ -141,6 +172,7 @@ pub(crate) fn asked(query: &str) -> Result<Asked, String> {
             .filter(|page| page.to_string() == page_word)
             .ok_or_else(|| format!("page={page_word:?} is not a whole number"))?
     };
+    let (run, stage, reason, why) = narrowing(query)?;
     Ok(Asked {
         from,
         to,
@@ -148,7 +180,65 @@ pub(crate) fn asked(query: &str) -> Result<Asked, String> {
         outcome,
         newest_first,
         page,
+        run,
+        stage,
+        reason,
+        why,
     })
+}
+
+/// The run, stage, reason and logged words a query narrows the rows by
+/// (WP-33c; DB-A41, DB-A47), each read or refused by name.
+///
+/// # Errors
+///
+/// The parameter and why, as one sentence for a 400.
+#[expect(
+    clippy::type_complexity,
+    reason = "four independent narrowings, each optional, read in one pass"
+)]
+fn narrowing(
+    query: &str,
+) -> Result<(Option<u64>, Option<String>, Option<String>, Option<String>), String> {
+    let run_word = param(query, "run");
+    let run = if run_word.is_empty() {
+        None
+    } else {
+        Some(
+            run_word
+                .parse::<u64>()
+                .ok()
+                .filter(|run| *run != 0 && run.to_string() == run_word)
+                .ok_or_else(|| {
+                    format!("run={run_word:?} is not a run id (a whole number above 0)")
+                })?,
+        )
+    };
+    let stage_word = param(query, "stage");
+    let stage = if stage_word.is_empty() {
+        None
+    } else if Stage::ALL.iter().any(|stage| stage.as_str() == stage_word) {
+        Some(stage_word)
+    } else {
+        return Err(format!(
+            "stage={stage_word:?} is not one of {}",
+            Stage::ALL.map(Stage::as_str).join(", ")
+        ));
+    };
+    let text = |name: &str| -> Result<Option<String>, String> {
+        let word = param(query, name);
+        if word.is_empty() {
+            return Ok(None);
+        }
+        if word.len() > MAX_TEXT_ASKED {
+            return Err(format!(
+                "{name}= is {} bytes; at most {MAX_TEXT_ASKED} are read",
+                word.len()
+            ));
+        }
+        Ok(Some(word))
+    };
+    Ok((run, stage, text("reason")?, text("why")?))
 }
 
 /// `GET /imports.json`.
@@ -214,6 +304,10 @@ impl Asked {
             outcome: None,
             newest_first: true,
             page: 0,
+            run: None,
+            stage: None,
+            reason: None,
+            why: None,
         }
     }
 }
@@ -223,46 +317,135 @@ impl Asked {
 /// days the census refused, where each kind stands, the newest runs, and the
 /// newest day that is not done with its stage and reason. Never an error: a
 /// journal that cannot be read is a `{"error": ...}` the console prints.
+///
+/// # Cost (WP-33c; DB-A32)
+///
+/// It was four whole-journal [`answer`] walks per request, each rendering 200
+/// rows (and probing the `cli` audit stream for each failed one): p50 8.6 ms
+/// on the operator's journal, paid on every `/audit.json?feed=gdfl` poll. Now
+/// it is ONE walk of the journal's days ([`summary_of`]), rendering one row,
+/// and its answer is kept against the journal's parse and the importer log's
+/// evidence it was computed from: while neither moves (every poll between
+/// imports) a request is two tail reads that find nothing new, a lock and a
+/// clone of the kept answer. Either moving recomputes it once.
 pub(crate) fn summary(root: &std::path::Path) -> Value {
-    let whole = match answer(root, &Asked::whole()) {
-        Ok(whole) => whole,
+    type Kept = (
+        std::sync::Arc<Parsed>,
+        std::sync::Arc<ImportRefusals>,
+        Value,
+    );
+    static KEPT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Kept>>,
+    > = std::sync::OnceLock::new();
+    let snapshot = match crate::server::import_journal::snapshot(root) {
+        Ok(snapshot) => snapshot,
         Err(why) => return json!({ "error": why, "route": "/imports.json?feed=gdfl" }),
     };
+    let evidence = crate::logs::import_refusals(root);
+    let kept = KEPT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    // THE SAME PARSE AND THE SAME EVIDENCE, BY POINTER. Both tails mutate
+    // through `Arc::make_mut`, and the strong `Arc`s kept here make any change
+    // a copy at a new address, so pointer equality is content equality.
+    if let Some((parsed, refusals, value)) = kept
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&snapshot.path)
+        && std::sync::Arc::ptr_eq(parsed, &snapshot.parsed)
+        && std::sync::Arc::ptr_eq(refusals, &evidence)
+        && snapshot.present
+    {
+        return with_read_now(value.clone(), &snapshot);
+    }
+    let value = summary_of(root, &snapshot, &evidence);
+    let _replaced = kept
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            snapshot.path.clone(),
+            (
+                std::sync::Arc::clone(&snapshot.parsed),
+                std::sync::Arc::clone(&evidence),
+                value.clone(),
+            ),
+        );
+    with_read_now(value, &snapshot)
+}
+
+/// `value` with `journal.read_now` set to what THIS call's read of the
+/// journal read: a kept summary must not repeat the bytes the call that
+/// computed it read.
+fn with_read_now(mut value: Value, snapshot: &Snapshot) -> Value {
+    if let Some(journal) = value.get_mut("journal").and_then(Value::as_object_mut) {
+        let _replaced = journal.insert("read_now".to_owned(), Value::from(snapshot.read_now));
+    }
+    value
+}
+
+/// [`summary`]'s answer from one walk of every day the journal and the log
+/// name: the counts, the census days, the newest row of each not-done outcome
+/// and whether any not-done row is unsettled. One row is rendered: the newest
+/// not done, by its deciding line.
+pub(crate) fn summary_of(
+    root: &std::path::Path,
+    snapshot: &Snapshot,
+    evidence: &ImportRefusals,
+) -> Value {
+    let parsed: &Parsed = &snapshot.parsed;
+    let whole = Asked::whole();
+    let range = parsed.span();
+    let walked = walk(parsed, range, &whole, evidence);
     // THE NEWEST DAY THAT IS NOT DONE: the newest `incomplete`, `refused` or
     // `open` row, by its deciding line, so a run stopped at the census names
-    // that day and why (DB-G07: "the last importer refusal").
+    // that day and why (DB-G07: "the last importer refusal"). Per outcome its
+    // newest row by day (the last in the walk's day order), then the one of
+    // those with the latest line.
     let newest = [
         DayOutcome::Incomplete,
         DayOutcome::Refused,
         DayOutcome::Open,
     ]
     .into_iter()
-    .filter_map(|outcome| {
-        let asked = Asked {
-            outcome: Some(outcome),
-            ..Asked::whole()
-        };
-        answer(root, &asked).ok()?.get("rows")?.get(0).cloned()
-    })
-    .max_by_key(|row| row.get("line").and_then(Value::as_u64).unwrap_or(0));
-    let take = |key: &str| whole.get(key).cloned().unwrap_or(Value::Null);
-    let asked = take("asked");
-    let runs = take("runs");
-    let census_then_done = take("census_refused_then_done");
+    .filter_map(|outcome| walked.rows.iter().rev().find(|row| row.outcome == outcome))
+    .max_by_key(|row| row.line)
+    .map(|row| row_json(root, row, evidence));
+    let unsettled = walked.rows.iter().any(|row| {
+        !row.outcome.is_done()
+            && stage_of(row, evidence.of(row.kind.as_str(), &row.day.to_string())).is_none()
+    });
+    let mut notes = notes_of(snapshot, &[]);
+    if unsettled {
+        notes.push(UNSETTLED.to_owned());
+    }
+    let runs = runs_json(parsed);
     json!({
         "route": "/imports.json?feed=gdfl",
-        "journal": take("journal"),
-        "span": { "from": asked.get("from"), "to": asked.get("to") },
-        "counts": take("counts"),
-        "census_refused": take("census_refused"),
-        "census_refused_then_done": census_then_done.get("count"),
-        "kinds": take("kinds"),
-        "runs": runs.as_array().map(|runs| runs.iter().take(20).cloned().collect::<Vec<_>>()),
-        "runs_total": runs.as_array().map_or(0, Vec::len),
+        "journal": journal_json(snapshot),
+        "span": {
+            "from": range.map(|(from, _)| from.to_string()),
+            "to": range.map(|(_, to)| to.to_string()),
+        },
+        "counts": DayOutcome::ALL
+            .iter()
+            .zip(walked.counts)
+            .map(|(outcome, n)| (outcome.as_str().to_owned(), Value::from(n)))
+            .collect::<serde_json::Map<String, Value>>(),
+        "census_refused": {
+            "count": walked.census_refused.len(),
+            "days": walked.census_refused,
+        },
+        "census_refused_then_done": walked.census_then_done.len(),
+        "kinds": kinds_json(parsed, evidence),
+        "runs": runs.iter().take(20).cloned().collect::<Vec<_>>(),
+        "runs_total": runs.len(),
         "newest_not_done": newest,
-        "notes": take("notes"),
+        "notes": notes,
     })
 }
+
+/// The note a not-done row with no settled stage owes its reader.
+const UNSETTLED: &str = "A row with stage null and stage_from null was closed by a line written \
+     before D-3317, which records no stage, and the importer's log holds no refusal that \
+     settles it: unrecorded, not guessed.";
 
 /// How a row's stage was settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,21 +517,74 @@ fn count(value: Option<u64>) -> Value {
     value.map_or(Value::Null, Value::from)
 }
 
+/// A row's refusal reason code, and where it was read (DB-A47):
+///
+/// * `journal` -- the closing line's own `reason=` (D-3317 builds);
+/// * `log code` -- the importer's logged `code`, when the log also settled
+///   the row's stage (D-3317 builds log `code` on every refusal);
+/// * `census wording` -- a row written before codes existed whose logged
+///   census refusal is in the census's own words for a full census
+///   (`pull::manifest::ManifestError::TooManyEntries`'s `Display`, in each
+///   form it has had: [`CENSUS_FULL_WORDS`]): the importer codes that refusal
+///   `too_many_entries` (`gdfl_import::census_code`). Read from the
+///   producer's own wording, never from a guess at a sentence's meaning: the
+///   census's other `n_valid is` refusal (`CounterExceedsRegion`, "the region
+///   holds") matches none of them and keeps `reason: null`.
+///
+/// `None` when nothing settles it: unrecorded, not guessed.
+pub(crate) fn reason_of(
+    row: &DayRow,
+    logged: &[telemetry::Record],
+    stage: Option<&(String, StageFrom)>,
+) -> Option<(String, &'static str)> {
+    if let Some(reason) = row.reason.clone() {
+        return Some((reason, "journal"));
+    }
+    let field = |record: &telemetry::Record, key: &str| {
+        record
+            .field(key)
+            .and_then(telemetry::OwnedValue::as_str)
+            .map(str::to_owned)
+    };
+    if stage.is_some_and(|(_, from)| *from == StageFrom::Log)
+        && let Some(code) = logged.iter().find_map(|record| field(record, "code"))
+    {
+        return Some((code, "log code"));
+    }
+    let census = Stage::Census.as_str();
+    logged
+        .iter()
+        .any(|record| {
+            field(record, "about").as_deref() == Some(census)
+                && field(record, "why").is_some_and(|why| {
+                    why.starts_with("n_valid is ")
+                        && CENSUS_FULL_WORDS.iter().any(|words| why.contains(words))
+                })
+        })
+        .then(|| (CENSUS_FULL_CODE.to_owned(), "census wording"))
+}
+
+/// The census's own words for a full census, after `n_valid is <n>`, in
+/// every form `pull::manifest::ManifestError::TooManyEntries` has written:
+/// before WP-10 (`0a189286`) "; this build holds at most <limit>", since then
+/// "; this census holds at most <limit>" for a census already past its limit
+/// and " of a capacity of <limit> (...)" for a batch that does not fit. The
+/// operator's `cli` log holds 210 census refusals, all in the first form
+/// (counted 10 Oct 2026).
+const CENSUS_FULL_WORDS: [&str; 3] = [
+    "; this build holds at most ",
+    "; this census holds at most ",
+    " of a capacity of ",
+];
+
+/// The code the importer gives that refusal (`gdfl_import::census_code`).
+const CENSUS_FULL_CODE: &str = "too_many_entries";
+
 /// One row as the wire carries it.
 fn row_json(root: &std::path::Path, row: &DayRow, evidence: &ImportRefusals) -> Value {
     let (logged, source) = logged_for(root, row, evidence);
     let stage = stage_of(row, &logged);
-    let reason = row.reason.clone().or_else(|| {
-        // A REASON CODE ONLY WHEN THE IMPORTER WROTE ONE (D-3317 builds log
-        // `code`); a sentence is never turned into a code here.
-        stage.as_ref().filter(|(_, from)| *from == StageFrom::Log)?;
-        logged.iter().find_map(|record| {
-            record
-                .field("code")
-                .and_then(telemetry::OwnedValue::as_str)
-                .map(str::to_owned)
-        })
-    });
+    let reason = reason_of(row, &logged, stage.as_ref());
     let field = |record: &telemetry::Record, key: &str| -> Value {
         record
             .field(key)
@@ -379,7 +615,8 @@ fn row_json(root: &std::path::Path, row: &DayRow, evidence: &ImportRefusals) -> 
             StageFrom::Journal => "journal",
             StageFrom::Log => "log",
         }),
-        "reason": reason,
+        "reason": reason.as_ref().map(|(reason, _)| reason.clone()),
+        "reason_from": reason.as_ref().map(|(_, from)| *from),
         "files": count(row.stats.files),
         "seconds": count(row.stats.seconds),
         "failures": count(row.stats.failures),
@@ -390,6 +627,7 @@ fn row_json(root: &std::path::Path, row: &DayRow, evidence: &ImportRefusals) -> 
         "months": count(row.stats.months),
         "definition": count(row.stats.definition),
         "run": count(row.stats.run),
+        "cli_attempts": evidence.attempts_of(row.kind.as_str(), &row.day.to_string()),
         "recounted": row.recounted,
         "restated": row.restated(),
         "line": (row.line > 0).then_some(row.line),
@@ -404,10 +642,44 @@ fn row_json(root: &std::path::Path, row: &DayRow, evidence: &ImportRefusals) -> 
     })
 }
 
-/// Whether a row is one the request asked for.
-fn wanted(row: &DayRow, asked: &Asked) -> bool {
+/// Whether a row is one the request asked for: its kind and outcome, and
+/// (WP-33c) its run, stage, reason and logged words. The stage, reason and
+/// words are read from the journal and the `cli` ring's evidence, with no I/O;
+/// `run_attempt` is the `cli` attempt that opened the asked importer run, when
+/// the ring names one.
+fn wanted(
+    row: &DayRow,
+    asked: &Asked,
+    logged: &[telemetry::Record],
+    evidence: &ImportRefusals,
+    run_attempt: Option<u64>,
+) -> bool {
+    let kind_day = || (row.kind.as_str(), row.day.to_string());
     asked.kind.is_none_or(|kind| kind == row.kind)
         && asked.outcome.is_none_or(|outcome| outcome == row.outcome)
+        && asked.run.is_none_or(|run| {
+            let (kind, day) = kind_day();
+            let attempts = evidence.attempts_of(kind, &day);
+            row.stats.run == Some(run)
+                || attempts.contains(&run)
+                || run_attempt.is_some_and(|attempt| attempts.contains(&attempt))
+        })
+        && asked
+            .stage
+            .as_deref()
+            .is_none_or(|want| stage_of(row, logged).is_some_and(|(stage, _)| stage == want))
+        && asked.reason.as_deref().is_none_or(|want| {
+            let stage = stage_of(row, logged);
+            reason_of(row, logged, stage.as_ref()).is_some_and(|(reason, _)| reason == want)
+        })
+        && asked.why.as_deref().is_none_or(|want| {
+            logged.iter().any(|record| {
+                record
+                    .field("why")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .is_some_and(|why| why.contains(want))
+            })
+        })
 }
 
 /// A day with a logged refusal and no journal line: the shape of every day a
@@ -464,6 +736,9 @@ fn walk<'p>(
     let Some((from, to)) = range.filter(|(from, to)| from <= to) else {
         return out;
     };
+    let run_attempt = asked
+        .run
+        .and_then(|run| evidence.attempt_of_importer_run(run));
     for row in merged(parsed, from, to, evidence) {
         if asked.kind.is_some_and(|kind| kind != row.kind) {
             continue;
@@ -484,7 +759,7 @@ fn walk<'p>(
         } else if row.census_closes > 0 || (row.recounted && row.previous.is_some()) {
             out.census_then_done.push(name);
         }
-        if wanted(&row, asked) {
+        if wanted(&row, asked, logged, evidence, run_attempt) {
             out.rows.push(row);
         }
     }
@@ -574,6 +849,43 @@ fn kinds_json(parsed: &Parsed, evidence: &ImportRefusals) -> Vec<Value> {
         .collect()
 }
 
+/// What the journal and the `cli` ring say about one run id (DB-A41): the
+/// journal's `run` lines of that id, the `cli` attempt of that id (or the one
+/// that opened that importer run), with its start, its finish or that none was
+/// logged, and the importer runs it opened.
+fn run_json(parsed: &Parsed, evidence: &ImportRefusals, run: u64) -> Value {
+    let lines: Vec<Value> = runs_json(parsed)
+        .into_iter()
+        .filter(|line| line.get("id").and_then(Value::as_u64) == Some(run))
+        .collect();
+    let attempt_id = evidence
+        .attempt(run)
+        .map(|_| run)
+        .or_else(|| evidence.attempt_of_importer_run(run));
+    let attempt = attempt_id.and_then(|id| evidence.attempt(id).map(|attempt| (id, attempt)));
+    json!({
+        "id": run,
+        "journal_lines": lines,
+        "attempt": attempt.map(|(id, attempt)| json!({
+            "id": id,
+            "command": attempt.command,
+            "started_ms": attempt.started_ms,
+            "finished_ms": attempt.finished_ms,
+            "phase": attempt.phase,
+            "finished": if attempt.finished_ms.is_some() {
+                "command finished is logged"
+            } else {
+                "no command finished is logged: the attempt was stopped, or is still running"
+            },
+            "importer_runs": attempt.importer_runs,
+            "importer_lines": attempt.lines,
+            "from": "the cli ring: every line between this attempt's command started and its \
+                     command finished is its own, because one cli process at a time writes \
+                     logs/cli",
+        })),
+    })
+}
+
 /// Every `run` line, newest first, its fields decoded.
 fn runs_json(parsed: &Parsed) -> Vec<Value> {
     parsed
@@ -646,12 +958,7 @@ fn notes_of(snapshot: &Snapshot, rows: &[Value]) -> Vec<String> {
             && row.get("outcome").and_then(Value::as_str) != Some(DayOutcome::Done.as_str())
     });
     if unsettled {
-        notes.push(
-            "A row with stage null and stage_from null was closed by a line written before \
-             D-3317, which records no stage, and the importer's log holds no refusal that \
-             settles it: unrecorded, not guessed."
-                .to_owned(),
-        );
+        notes.push(UNSETTLED.to_owned());
     }
     notes
 }
@@ -698,7 +1005,12 @@ pub(crate) fn body(
             "kind": asked.kind.map(ImportKind::as_str),
             "outcome": asked.outcome.map(DayOutcome::as_str),
             "order": if asked.newest_first { "desc" } else { "asc" },
+            "run": asked.run,
+            "stage": asked.stage,
+            "reason": asked.reason,
+            "why": asked.why,
         },
+        "run": asked.run.map(|run| run_json(parsed, evidence, run)),
         "page": page,
         "pages": pages,
         "page_rows": PAGE_ROWS,
@@ -826,7 +1138,12 @@ begin options 2020-09-16 *
         assert_eq!(rows[0]["outcome"], "incomplete");
         assert_eq!(rows[0]["stage"], "census");
         assert_eq!(rows[0]["stage_from"], "log");
-        assert_eq!(rows[0]["reason"], Value::Null, "no code is invented");
+        // THE CENSUS'S OWN WORDS NAME ITS CODE (WP-33c, DB-A47): a line
+        // written before codes existed, whose logged refusal opens
+        // `n_valid is`, is the census's full refusal, which the importer codes
+        // `too_many_entries`; read from that wording and said so.
+        assert_eq!(rows[0]["reason"], "too_many_entries");
+        assert_eq!(rows[0]["reason_from"], "census wording");
         assert_eq!(rows[0]["late"], 2);
         assert_eq!(rows[0]["max_back_s"], 3);
         assert_eq!(rows[0]["logged"][0]["about"], "census");
@@ -915,6 +1232,8 @@ begin options 2020-09-16 *
         assert_eq!(rows[0]["line"], Value::Null);
         assert_eq!(rows[0]["stage"], "calendar");
         assert_eq!(rows[0]["stage_from"], "log");
+        assert_eq!(rows[0]["reason"], Value::Null, "no code is invented");
+        assert_eq!(rows[0]["reason_from"], Value::Null);
         assert_eq!(rows[0]["failures"], 1, "one refusal, logged twice");
         assert_eq!(rows[0]["logged"].as_array().unwrap().len(), 2);
         assert_eq!(rows[1]["day"], "2022-03-04");
@@ -983,6 +1302,192 @@ begin options 2020-09-16 *
         assert_eq!(got["counts"]["refused"], 1);
         assert_eq!(got["span"]["from"], "2018-11-06");
         assert_eq!(got["journal"]["lines"], 15);
+    }
+
+    /// Appends lines to the `cli` ring of `root`.
+    fn cli_append(root: &std::path::Path, text: &str) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("logs").join("cli").join("events.ndjson"))
+            .expect("the cli log");
+        file.write_all(text.as_bytes()).expect("append");
+    }
+
+    /// One `cli.lifecycle` line of attempt `run`. Invented.
+    fn lifecycle(seq: u32, run: u64, message: &str) -> String {
+        format!(
+            "{{\"seq\":{seq},\"run\":{run},\"ts\":\"2026-10-06T08:57:38.499Z\",\"ms\":{},\
+             \"level\":\"info\",\"target\":\"cli.lifecycle\",\"msg\":\"{message}\",\
+             \"fields\":{{\"command\":\"gdfl-import\",\"phase\":\"completed\"}}}}\n",
+            1_791_270_000_000_u64 + u64::from(seq)
+        )
+    }
+
+    /// **A RUN FINDS ITS DAYS, ITS REFUSALS, ITS START AND ITS END**
+    /// (WP-33c, DB-A41): the journal's own `run=` on a closing line, and a
+    /// `cli` attempt whose importer lines carry no run of their own but are
+    /// filed under it by position, the `cli` half having one writer. An
+    /// attempt with no `command finished` says so; a run nobody logged finds
+    /// nothing; a run that is not a number is refused by name.
+    #[test]
+    fn a_run_finds_its_days_its_refusals_its_start_and_its_end() {
+        let root = store("run");
+        cli_append(&root, &lifecycle(20, 4025, "command started"));
+        cli_append(
+            &root,
+            "{\"seq\":21,\"ts\":\"2026-10-06T08:57:38.502Z\",\"ms\":1791270000021,\
+             \"level\":\"info\",\"target\":\"gdfl.import\",\"msg\":\"run started\",\
+             \"fields\":{\"kind\":\"options\",\"run\":1791270000}}\n",
+        );
+        cli_append(
+            &root,
+            "{\"seq\":22,\"ts\":\"2026-10-06T08:57:39.000Z\",\"ms\":1791270000022,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"options\",\"day\":\"2020-01-01\",\"about\":\"census\",\
+             \"why\":\"n_valid is 9; this build holds at most 8\"}}\n",
+        );
+        let by_journal = answer(&root, &ask("feed=gdfl&run=7")).expect("reads");
+        let days: Vec<&str> = by_journal["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["day"].as_str().unwrap())
+            .collect();
+        assert_eq!(days, ["2022-03-07"], "{by_journal:#}");
+        assert_eq!(by_journal["asked"]["run"], 7);
+
+        let by_attempt = answer(&root, &ask("feed=gdfl&run=4025")).expect("reads");
+        let rows = by_attempt["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{by_attempt:#}");
+        assert_eq!(rows[0]["day"], "2020-01-01");
+        assert_eq!(rows[0]["cli_attempts"], json!([4025]));
+        assert_eq!(rows[0]["logged"].as_array().unwrap().len(), 2);
+        let attempt = &by_attempt["run"]["attempt"];
+        assert_eq!(attempt["id"], 4025);
+        assert_eq!(attempt["importer_runs"], json!([1_791_270_000_u64]));
+        assert_eq!(attempt["finished_ms"], Value::Null);
+        assert!(
+            attempt["finished"]
+                .as_str()
+                .unwrap()
+                .contains("no command finished is logged")
+        );
+        // THE IMPORTER'S OWN RUN ID FINDS THE SAME DAYS, THROUGH ITS ATTEMPT.
+        let by_importer = answer(&root, &ask("feed=gdfl&run=1791270000")).expect("reads");
+        assert_eq!(by_importer["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(by_importer["run"]["attempt"]["id"], 4025);
+        // AND ITS END, ONCE LOGGED.
+        cli_append(&root, &lifecycle(23, 4025, "command finished"));
+        let ended = answer(&root, &ask("feed=gdfl&run=4025")).expect("reads");
+        assert_eq!(ended["run"]["attempt"]["phase"], "completed");
+        assert!(ended["run"]["attempt"]["finished_ms"].is_u64());
+        let none = answer(&root, &ask("feed=gdfl&run=999")).expect("reads");
+        assert_eq!(none["rows"], json!([]));
+        assert_eq!(none["run"]["attempt"], Value::Null);
+        assert!(asked("feed=gdfl&run=04").is_err_and(|why| why.contains("run=")));
+        assert!(asked("feed=gdfl&run=0").is_err_and(|why| why.contains("run=")));
+    }
+
+    /// **EVERY DAY REFUSED FOR ONE REASON IS ONE QUERY** (WP-33c, DB-A47): by
+    /// stage, by reason code (the journal's, or the census's own words for a
+    /// full census on a line written before codes), and by the words the
+    /// refusal logged; the census's OTHER `n_valid` refusal is no full census
+    /// and names no code.
+    #[test]
+    fn every_day_refused_for_one_reason_is_one_query() {
+        let root = store("reasons");
+        cli_append(
+            &root,
+            "{\"seq\":30,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171079000,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"options\",\"day\":\"2018-11-06\",\"about\":\"census\",\
+             \"why\":\"n_valid is 9; the region holds 8\"}}\n",
+        );
+        let days = |query: &str| -> Vec<String> {
+            let got = answer(&root, &ask(query)).expect("reads");
+            got["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["day"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            days("feed=gdfl&order=asc&stage=census"),
+            ["2018-11-06", "2019-11-14", "2020-01-01"]
+        );
+        assert_eq!(
+            days("feed=gdfl&order=asc&reason=too_many_entries"),
+            ["2019-11-14", "2020-01-01"],
+            "the region refusal of 2018-11-06 is not a full census"
+        );
+        assert_eq!(days("feed=gdfl&reason=price_refused"), ["2022-03-07"]);
+        assert_eq!(days("feed=gdfl&why=LTP"), ["2018-11-06"]);
+        assert_eq!(
+            days("feed=gdfl&order=asc&why=n_valid"),
+            ["2018-11-06", "2019-11-14", "2020-01-01"]
+        );
+        let region = answer(&root, &ask("feed=gdfl&from=2018-11-06&to=2018-11-06")).unwrap();
+        assert_eq!(region["rows"][0]["stage"], "census");
+        assert_eq!(region["rows"][0]["reason"], Value::Null);
+        assert!(asked("feed=gdfl&stage=censuss").is_err_and(|why| why.contains("census")));
+        assert!(
+            asked(&format!("feed=gdfl&why={}", "x".repeat(MAX_TEXT_ASKED + 1)))
+                .is_err_and(|why| why.contains("at most"))
+        );
+    }
+
+    /// **A PARAMETER THIS ROUTE DOES NOT READ IS REFUSED BY NAME** (WP-33c,
+    /// DB-A45): `reason`'s old misspelling and any other name are never
+    /// answered as if they had filtered.
+    #[test]
+    fn a_parameter_this_route_does_not_read_is_refused_by_name() {
+        let why = asked("feed=gdfl&bogus=1&reasn=census").expect_err("unknown names");
+        assert!(why.contains("bogus") && why.contains("reasn"), "{why}");
+        assert!(
+            why.contains("refused rather than answered unfiltered"),
+            "{why}"
+        );
+        assert!(asked("feed=gdfl&run=7&stage=census&reason=x&why=y&order=asc").is_ok());
+    }
+
+    /// **THE AUDIT SUMMARY IS KEPT WHILE NOTHING MOVES, AND MOVES WITH THE
+    /// JOURNAL** (WP-33c, DB-A32): two calls over an unchanged journal and log
+    /// answer the same value (the second from what was kept); a closing line
+    /// appended changes it; and it is the same answer one walk gives.
+    #[test]
+    fn the_summary_is_kept_while_nothing_moves_and_moves_with_the_journal() {
+        use std::io::Write as _;
+        let root = store("summary-kept");
+        let mut first = summary(&root);
+        let mut again = summary(&root);
+        assert_eq!(
+            again["journal"]["read_now"], 0,
+            "this call read nothing new"
+        );
+        first["journal"]["read_now"] = Value::Null;
+        again["journal"]["read_now"] = Value::Null;
+        assert_eq!(first, again);
+        let snapshot = crate::server::import_journal::snapshot(&root).unwrap();
+        let evidence = crate::logs::import_refusals(&root);
+        let mut walked = summary_of(&root, &snapshot, &evidence);
+        walked["journal"]["read_now"] = Value::Null;
+        assert_eq!(first, walked);
+        assert_eq!(first["newest_not_done"]["day"], "2020-09-16");
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(pull::gdfl_import::journal_path(&root))
+            .unwrap();
+        journal
+            .write_all(
+                b"done options 2020-09-16 * definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+            )
+            .unwrap();
+        let moved = summary(&root);
+        assert_ne!(first, moved);
+        assert_eq!(moved["counts"]["open"], 0);
+        assert_eq!(moved["newest_not_done"]["day"], "2022-03-07");
     }
 
     /// An absent journal answers, says so, and lists no row.

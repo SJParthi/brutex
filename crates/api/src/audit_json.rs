@@ -54,14 +54,18 @@
 //! entry region — the same pass `/store.json` already makes. Nothing here walks
 //! a directory.
 //!
-//! **One cost does grow with the journal, once** (WP-33a, D-3341 item 4).
-//! Scoping the runs by feed needs each run record's vendor, and the journal
-//! keeps no index of its runs, so [`Attribution`] decodes every record the
-//! first time and only the appended ones after that: measured on a shadow of
-//! the operator's store, 9 Oct 2026, 4,217,027 records (1,079,558,912 bytes)
-//! took 1.33 s on the first request; 200 later requests took p50 0.75 ms and
-//! p99 0.84 ms for `feed=zerodha`. The GDFL answer adds the import journal's
-//! summary (`crate::server::imports::summary`): p50 8.6 ms, p99 9.3 ms.
+//! **The journal's runs come from its index** (WP-33c; DB-A32). Scoping the
+//! runs by feed needs each run record's vendor. Until WP-33c the journal kept
+//! no index of its runs, so [`Attribution`] decoded every record the first
+//! time a process asked: 4,217,027 records (1,079,558,912 bytes) took 1.33 s
+//! on a shadow of the operator's store, 9 Oct 2026, under a mutex. Now the
+//! journal's own append keeps `pull.journal.idx` (`audit::Journal::read_index`)
+//! and the first request reads O(runs) entries and the records past its cover;
+//! a journal the index does not cover yet is walked once, outside any lock,
+//! and `journal.feed_scope.index` says so and why. The GDFL answer adds the
+//! import journal's summary (`crate::server::imports::summary`), computed in
+//! one walk of the journal's days and kept until the journal or the importer's
+//! log moves, so an unchanged journal costs a lookup.
 
 use crate::server::{Loaded, Site, journal_trouble, param, window_text};
 use crate::{audit, ingest, render};
@@ -338,6 +342,9 @@ fn journal_block(site: &Site, feed: Vendor, page: usize, out: &mut String) {
         }
         Err(ref why) => (0, 0, 0, 0, 0, Some(why.clone())),
     };
+    let index = scoped
+        .as_ref()
+        .map_or_else(|_| "null".to_owned(), Attribution::index_json);
     // `held - 1` and not `held`, so 200 records is one page and not two.
     // Saturating, so an empty scope is page 0 of 1 rather than an underflow.
     let last_page = usize::try_from(held.saturating_sub(1) / per_page).unwrap_or(0);
@@ -349,7 +356,7 @@ fn journal_block(site: &Site, feed: Vendor, page: usize, out: &mut String) {
 
     let _ = write!(
         out,
-        r#","journal":{{"path":{},"present":{},"records":{total},"bytes":{},"trouble":{},"page":{page},"pages":{},"page_rows":{per_page},"feed_scope":{{"feed":{},"records":{held},"runs":{runs_held},"unattributed_records":{unattributed},"unattributed_runs":{unattributed_runs},"undecodable":{faults},"error":{},"holds":{}}}}}"#,
+        r#","journal":{{"path":{},"present":{},"records":{total},"bytes":{},"trouble":{},"page":{page},"pages":{},"page_rows":{per_page},"feed_scope":{{"feed":{},"records":{held},"runs":{runs_held},"unattributed_records":{unattributed},"unattributed_runs":{unattributed_runs},"undecodable":{faults},"error":{},"holds":{},"index":{index}}}}}"#,
         render::json_string(&journal.path.display().to_string()),
         !matches!(log, audit::Log::Absent),
         match log {
@@ -449,17 +456,18 @@ pub(crate) fn vendor_of_source(source: &str) -> Option<Vendor> {
 ///
 /// # Cost, stated
 ///
-/// The journal holds no index of its runs: on the operator's store, 9 Oct
-/// 2026, 12 run records among 4,217,027 (1,079,558,912 bytes), the rest
-/// member failures. So the first request reads the whole file once, in 4 MiB
-/// reads, decoding each 256-byte record; after that a request decodes only
-/// the records appended since (one `metadata` call when there are none). A
-/// file that shrank or was replaced is read again. Paging is then arithmetic
-/// over the run boundaries: O(runs), plus one bounded `Journal::page` read per
-/// run a page spans.
+/// On the operator's store, 9 Oct 2026, 12 run records among 4,217,027
+/// (1,079,558,912 bytes), the rest member failures. The first request reads
+/// the runs from the journal's index (O(runs), WP-33c) and decodes only the
+/// records past the index's cover; without a usable index it reads the whole
+/// file once, in 4 MiB reads, decoding each 256-byte record. After that a
+/// request decodes only the records appended since (one `metadata` call when
+/// there are none). A file that shrank or was replaced is read again. Paging is
+/// then arithmetic over the run boundaries: O(runs), plus one bounded
+/// `Journal::page` read per run a page spans.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Attribution {
-    /// Records decoded.
+    /// Records attributed: through the index, then decoded.
     scanned: u64,
     /// The file's identity when scanned.
     identity: Option<(u64, u64)>,
@@ -467,6 +475,11 @@ pub(crate) struct Attribution {
     runs: Vec<(u64, Option<Vendor>)>,
     /// Records that would not decode, kept in the run before them.
     faults: u64,
+    /// The records the journal's index covered when this was first read
+    /// through it (WP-33c), or `None` when it was walked.
+    index_covered: Option<u64>,
+    /// Why the index could not be used, when the journal was walked.
+    walk_why: Option<String>,
 }
 
 impl Attribution {
@@ -603,8 +616,18 @@ fn attributions()
     HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// The journal's run attribution through its first `total` records, read
-/// through the tail. See [`Attribution`] for the cost.
+/// The journal's run attribution through its first `total` records.
+///
+/// # Cost (WP-33c; DB-A32)
+///
+/// A process's first request reads the journal's INDEX
+/// ([`audit::Journal::read_index`]): O(runs), 12 on the operator's store,
+/// whatever the journal's length, then decodes only the records past its
+/// cover (none after an append). Later requests decode only the records
+/// appended since. A journal with no usable index is walked once per process,
+/// and `feed_scope.index` says so and why. No lock is held across a read: the
+/// cache is consulted under its lock, released, the records read, and the
+/// result published only when no other request got further first.
 ///
 /// # Errors
 ///
@@ -614,18 +637,58 @@ fn attribution(journal: &audit::Journal, total: u64) -> Result<Attribution, Stri
     let identity = std::fs::metadata(&journal.path)
         .ok()
         .map(|meta| (meta.dev(), meta.ino()));
+    let cached = attributions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&journal.path)
+        .filter(|held| held.identity == identity && held.scanned <= total)
+        .cloned();
+    let mut work = match cached {
+        Some(work) => work,
+        None => match journal.read_index(total) {
+            Ok(indexed) => Attribution {
+                scanned: indexed.covered,
+                identity,
+                runs: indexed.runs,
+                faults: indexed.faults,
+                index_covered: Some(indexed.covered),
+                walk_why: None,
+            },
+            Err(why) => Attribution {
+                identity,
+                walk_why: Some(why),
+                ..Attribution::default()
+            },
+        },
+    };
+    work.advance(&journal.path, total)?;
     let mut held = attributions()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let entry = held.entry(journal.path.clone()).or_default();
-    if entry.identity != identity || total < entry.scanned {
-        *entry = Attribution {
-            identity,
-            ..Attribution::default()
-        };
+    let newer = held
+        .get(&journal.path)
+        .is_none_or(|kept| kept.identity != work.identity || kept.scanned < work.scanned);
+    if newer {
+        let _replaced = held.insert(journal.path.clone(), work.clone());
     }
-    entry.advance(&journal.path, total)?;
-    Ok(entry.clone())
+    Ok(work)
+}
+
+impl Attribution {
+    /// How the records were attributed, as `feed_scope.index` carries it.
+    fn index_json(&self) -> String {
+        match (self.index_covered, self.walk_why.as_deref()) {
+            (Some(covered), _) => format!(
+                r#"{{"read_by":"index","covered":{covered},"decoded_past_cover":{}}}"#,
+                self.scanned.saturating_sub(covered)
+            ),
+            (None, why) => format!(
+                r#"{{"read_by":"walk","why":{},"walked":{}}}"#,
+                why.map_or_else(|| "null".to_owned(), render::json_string),
+                self.scanned
+            ),
+        }
+    }
 }
 
 /// One journal entry, as the console reads it.
@@ -1607,6 +1670,52 @@ mod tests {
         let grown = attribution(&journal, journal.look().records()).expect("attributed");
         assert_eq!(grown.scanned, total + 1);
         assert_eq!(grown.held(Vendor::Groww, total + 1), (4, 2));
+    }
+
+    /// **THE RUNS COME FROM THE JOURNAL'S INDEX, NOT A WALK** (WP-33c,
+    /// DB-A32): the appends kept the index, so the attribution reads its runs
+    /// and decodes no record (`decoded_past_cover: 0`) and the answer says so;
+    /// a journal with no index is walked once, outside any lock, and the
+    /// answer names the walk and why; both attribute alike.
+    #[test]
+    fn the_runs_come_from_the_journals_index_and_a_walk_says_why() {
+        let held_site = site("index-runs");
+        let journal = held_site.journal();
+        pulled(&journal, "https://api.kite.trade/a", 2);
+        pulled(&journal, "https://api.groww.in/b", 1);
+        let total = journal.look().records();
+        let indexed = attribution(&journal, total).expect("attributed");
+        assert_eq!(indexed.index_covered, Some(total));
+        assert_eq!(indexed.scanned, total);
+        assert_eq!(indexed.held(Vendor::Zerodha, total), (3, 1));
+        let json = body(&held_site, Vendor::Zerodha, 0, moment(), Ok(day()));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let index = &parsed["journal"]["feed_scope"]["index"];
+        assert_eq!(index["read_by"], "index", "{json}");
+        assert_eq!(index["decoded_past_cover"], 0);
+
+        let walked_site = site("index-runs-walked");
+        let walked_journal = walked_site.journal();
+        pulled(&walked_journal, "https://api.kite.trade/a", 2);
+        pulled(&walked_journal, "https://api.groww.in/b", 1);
+        std::fs::remove_dir_all(walked_journal.index_dir()).expect("an index to remove");
+        let walked = attribution(&walked_journal, total).expect("attributed");
+        assert_eq!(walked.index_covered, None);
+        assert!(
+            walked
+                .walk_why
+                .as_deref()
+                .is_some_and(|why| why.contains("no index"))
+        );
+        assert_eq!(
+            walked.held(Vendor::Zerodha, total),
+            indexed.held(Vendor::Zerodha, total)
+        );
+        assert_eq!(walked.runs, indexed.runs);
+        let json = body(&walked_site, Vendor::Zerodha, 0, moment(), Ok(day()));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["journal"]["feed_scope"]["index"]["read_by"], "walk");
+        assert_eq!(parsed["journal"]["feed_scope"]["index"]["walked"], total);
     }
 
     /// The vendor a source names: an endpoint of an HTTP feed, or a

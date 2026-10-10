@@ -2099,11 +2099,47 @@ jobs:
           # non-blocking `flock` on it, so two sinks cannot write one event
           # stream. It writes no byte, reads none, and names no path outside
           # the sink's own directory. D-1458.
-          declared='sink.rs:std::fs::OpenOptions::new:3
-          sink.rs:std::fs::create_dir_all:1
-          sink.rs:std::fs::metadata:1
+          #
+          # THE DURABLE AUDIT STREAM (D-3341 item 3, WP-33a, bdbef5a0) AND ITS
+          # INDEX COVERAGE (WP-33c) ADDED SITES, AND THIS LIST WAS NOT MOVED
+          # WITH THEM: gate 21 refused feat/db-fix from bdbef5a0 on. Every site
+          # below names a path built from the sink's own directory and the
+          # constants AUDIT_BASENAME, AUDIT_INDEX_DIR and AUDIT_DIMS_FILE; none
+          # reaches a bar, a manifest or anything outside that directory, and
+          # clause A still holds the crate to no dependency at all. Counted
+          # from `source_scan paths-prod` on WP-33c's tree, 10 Oct 2026:
+          #
+          #   OpenOptions::new x6  the ring's append target (FileTarget::open,
+          #                        reopen after a roll); the events.lock hold;
+          #                        an audit posting file; the next audit file
+          #                        after a roll; the generation's `dims`
+          #                        coverage file (WP-33c)
+          #   create_dir_all   x4  the sink's directory; `audit.idx/` before
+          #                        the serial; a posting's dimension directory;
+          #                        a generation directory for `dims` (WP-33c)
+          #   fs::metadata     x2  stat by PATH for the resume point, and a
+          #                        posting file's length in a probe
+          #   fs::read         x1  the audit serial (eight bytes)
+          #   read_to_string   x2  a generation's `dims`, read by a probe and by
+          #                        the writer before it adds a line (WP-33c)
+          #   remove_dir_all   x1  the index generation of the audit file a roll
+          #                        deletes, so the index never outlives it
+          #   remove_file      x1  dropping the oldest rolled file
+          #   fs::rename       x2  rolling within its own directory; the staged
+          #                        audit serial put in place
+          #   fs::write        x1  the staged audit serial
+          #   File::open       x1  the ring's own files, read once to seed a new
+          #                        audit stream
+          declared='sink.rs:std::fs::File::open:1
+          sink.rs:std::fs::OpenOptions::new:6
+          sink.rs:std::fs::create_dir_all:4
+          sink.rs:std::fs::metadata:2
+          sink.rs:std::fs::read:1
+          sink.rs:std::fs::read_to_string:2
+          sink.rs:std::fs::remove_dir_all:1
           sink.rs:std::fs::remove_file:1
-          sink.rs:std::fs::rename:1
+          sink.rs:std::fs::rename:2
+          sink.rs:std::fs::write:1
           tail.rs:std::fs::File::open:2'
 
           # D-2312: clauses A and B are `gates_runtime gate21`.

@@ -139,13 +139,16 @@ pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
 pub use crate::record::Record;
 pub use crate::sink::{
-    AUDIT_BASENAME, AUDIT_DIMENSIONS, AUDIT_INDEX_DIR, AUDIT_KEEP_FILES, AUDIT_LIFECYCLE_WORDS,
+    AUDIT_ACCESS_SEGMENT, AUDIT_BASENAME, AUDIT_DIMENSIONS, AUDIT_DIMS_FILE,
+    AUDIT_FIRST_DIMENSIONS, AUDIT_INDEX_DIR, AUDIT_KEEP_FILES, AUDIT_LIFECYCLE_WORDS,
     AUDIT_MAX_FILE_BYTES, AUDIT_MAX_POSTING_NAME, AUDIT_POINTER_BYTES, AuditHealth, AuditLine,
-    AuditPointer, BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted,
-    FileTarget, Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Postings, Sink, Target,
-    audit_current_path, audit_generation_path, audit_path_for, audit_posting_path, audit_postings,
-    audit_read, audit_rolled_path, audit_serial, audit_serial_path, current_path,
-    dir_beneath_store, is_audited, paths_newest_first, rotated_path,
+    AuditPointer, BASENAME, Config, DEFAULT_FLOOD_LINES, DEFAULT_KEEP_FILES,
+    DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FLOOD_MESSAGE, FLOOD_WINDOW_MS, FileTarget, Health,
+    MAX_TARGET_LEVELS, MIN_FILE_BYTES, PostingAt, Postings, PostingsPage, Sink, Target,
+    audit_coverage, audit_current_path, audit_generation_path, audit_path_for, audit_posting_path,
+    audit_postings, audit_postings_before, audit_read, audit_rolled_path, audit_serial,
+    audit_serial_path, audit_state, current_path, dir_beneath_store, is_audited,
+    paths_newest_first, rotated_path,
 };
 pub use crate::tail::{
     DEFAULT_MAX_SCAN_BYTES, MAX_LIMIT, MAX_LINE_BYTES, Query, READ_BLOCK, Tail, tail,

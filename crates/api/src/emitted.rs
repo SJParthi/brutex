@@ -226,7 +226,10 @@ struct Case {
 /// failure whose whole reason could not be kept beside the journal.
 /// 34 -> 35 at WP-36 (DB-N19): `api.calendar warmed`, the one line the served
 /// process writes when its start-up census read and calendar builds end.
-const ROWS: usize = 35;
+/// 35 -> 37 at WP-33c: `api.audit journal index build finished`, the pull
+/// journal's index built by the first append to a journal with none, and
+/// `api.access read refused`, a refused `/db` read's access record.
+const ROWS: usize = 37;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -1222,6 +1225,56 @@ fn cases() -> Vec<Case> {
         }),
     });
 
+    // crates/api/src/audit.rs — the pull journal's index, built from scratch
+    // by the first append to a journal that has none (WP-33c; DB-A32).
+    {
+        let root = fixture("emit-journal-index");
+        cases.push(Case {
+            site: "audit.rs api.audit journal index build finished",
+            target: "api.audit",
+            message: "journal index build finished",
+            level: telemetry::Level::Info,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    crate::audit::Journal::at(&root)
+                        .append(&crate::audit::Record::refused(
+                            crate::audit::Scope::Spot,
+                            crate::audit::Outcome::Failed,
+                            std::time::SystemTime::UNIX_EPOCH,
+                            "emit-site-probe source",
+                            "emit-site-probe",
+                        ))
+                        .expect("the record lands, and the index is built behind it");
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "path", "emit-journal-index") && counts(record, "runs", 1)
+            }),
+        });
+    }
+
+    // crates/api/src/logs.rs — a refused `/db` read's access record, which the
+    // durable audit stream keeps (WP-33c; DB-A42).
+    cases.push(Case {
+        site: "logs.rs api.access read refused",
+        target: "api.access",
+        message: "read refused",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            crate::logs::note_access(
+                "/bars.json",
+                (404, 7),
+                &[("feed", "emit-site-probe-access".to_owned())],
+                true,
+                1,
+            );
+        }),
+        mine: Box::new(|record| {
+            says(record, "feed", "emit-site-probe-access") && counts(record, "status", 404)
+        }),
+    });
+
     cases
 }
 
@@ -1832,9 +1885,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 67 -> 68 at WP-36 (DB-N19): `api.calendar warmed`, driven in the table
     // above.
+    //
+    // 68 -> 70 at WP-33c: `audit::note_index` and `logs::note_access`, both
+    // driven in the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 68,
+        lib_sites, 70,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
