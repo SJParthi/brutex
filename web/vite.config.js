@@ -286,7 +286,16 @@ const ROUTES = [
 	// EACH OPTION BAR'S RUNG at its own instant, over the strikes stored by
 	// then (`web/src/lib/moneyness.js` readRungs; `crates/api/src/chain.rs`,
 	// D-3329). WP-53.
-	'/chain.json'
+	'/chain.json',
+	// WHERE A BAR CAME FROM (WP-55, D-3334): the Source lines under /db's
+	// grid and their drawer read `/provenance.json` per month file and per
+	// bar, and `/sources/day.json` for a share's closing-auction record and
+	// last print (D-3320). The day route is listed EXACTLY and never as
+	// `/sources`: that path is where the All sources page goes (D-3339,
+	// WP-58), and a prefix claiming it would hand that page to Rust in
+	// development only — the `/audit` trap the notes above record.
+	'/provenance.json',
+	'/sources/day.json'
 ];
 
 export default {
