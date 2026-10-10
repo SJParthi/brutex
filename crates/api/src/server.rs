@@ -3487,7 +3487,7 @@ async fn broker_answer(
     // this line is the receipt; everything inside it is the pull.
     // FRESH, NOT `site.censuses`: see `broker_run`. One manifest read against a
     // call that is about to open sockets is free in the only units that matter.
-    let run = broker_run(&asked, site, &census::read_all(&site.store_root)).await;
+    let mut run = broker_run(&asked, site, &census::read_all(&site.store_root)).await;
 
     // A refusal, recorded and rendered, with the reason it carries.
     let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
@@ -3658,6 +3658,7 @@ async fn broker_answer(
         journal,
         facts,
         run.took,
+        Some(&mut run.ledger),
     )
 }
 
@@ -3746,6 +3747,253 @@ pub(crate) struct BrokerRun {
     /// One line per instrument whose leading empty chunks were shown to
     /// precede its first bar. Not failures, and on the receipt. D-3313.
     pub before_first_bar: Vec<String>,
+    /// The days each instrument was asked for, once the run has begun. A
+    /// refusal of a whole instrument is about this window, and is filed under
+    /// its one month only when the window lies inside one. D-3341, DB-G45.
+    pub window: Option<pull::session::Window>,
+    /// What this run put in the pull journal while it ran: its opening record
+    /// and every member failure, as each member landed. D-3341, DB-055.
+    pub ledger: RunLedger,
+}
+
+/// What a broker run has put in the pull journal while it was still running.
+///
+/// # Why the journal is written during the run (D-3341, DB-055, DB-G46)
+///
+/// A run's record and its member failures were appended by the CALLER after
+/// the run returned. The operator's swept 1min stock pass started at 19:31 IST
+/// and `pull.journal` was last written at 19:00: for the hours that pass ran,
+/// nothing durable named one refusal, `/audit.json` could not see the run,
+/// and the rolling log that did name them wrapped in 6 to 10 minutes. The
+/// autopilot's runs wrote no member failure at all.
+///
+/// Now [`broker_run_by`] opens the run with an [`audit::Outcome::Opened`]
+/// record before its first instrument and appends every failure when the
+/// instrument it belongs to has landed, through [`audit::Journal::append_failure`],
+/// which keeps each failure's whole reason and keeps it filed under this run
+/// even when another run appends in between. The caller still writes the
+/// closing record; the failures are not written a second time.
+///
+/// # A journal that refuses the opening record
+///
+/// Then nothing is appended during the run: a failure appended behind another
+/// run's record would be filed under that run. The caller appends the
+/// failures after its closing record instead, as before D-3341
+/// ([`RunLedger::rest`]), and the receipt says the opening record was refused.
+#[derive(Debug, Default)]
+pub(crate) struct RunLedger {
+    /// The run's place in the journal, when its opening record landed.
+    thread: Option<audit::Thread>,
+    /// Why the opening record did not land, in its own words.
+    pub opened_refused: Option<String>,
+    /// How many of the run's failures are on disk, in order: every failure
+    /// before this index reached the journal, and none after it has.
+    flushed: usize,
+    /// How many member-failure records reached the journal.
+    pub written: usize,
+    /// Why the failure at `flushed` did not reach the journal, while one is
+    /// still waiting; `None` once every failure offered so far landed.
+    pub refused: Option<String>,
+    /// The days the run asked for, the window a failure about no day or month
+    /// is filed under.
+    window: Option<pull::session::Window>,
+}
+
+impl RunLedger {
+    /// Opens `asked`'s run over `of` instruments in `journal`.
+    ///
+    /// The source is the feed's own endpoint, carried through the cash-identity
+    /// policy exactly as the closing record's is ([`spot_audit_origin`]), so
+    /// `/audit.json` names this run's vendor from its first record.
+    fn open(journal: &audit::Journal, asked: &ingest::SpotRequest, of: usize) -> Self {
+        let head = audit::Record::opened(
+            audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            &spot_audit_origin(asked.cash_identity, &planned_origin(asked)),
+            asked.window,
+            of,
+        );
+        let mut ledger = Self {
+            window: Some(asked.window),
+            ..Self::default()
+        };
+        match journal.open_run(&head) {
+            Ok(thread) => ledger.thread = Some(thread),
+            Err(why) => ledger.opened_refused = Some(why),
+        }
+        ledger
+    }
+
+    /// Appends every failure of `failures` not yet on disk, each as its own
+    /// member-failure record filed under its own day or month, behind the
+    /// run's opening record. Nothing when the run was never opened in the
+    /// journal ([`Self::rest`] writes those after the closing record).
+    ///
+    /// # A refused append is retried, not skipped
+    ///
+    /// The journal's lock is taken without waiting, so a second writer in the
+    /// middle of its own append refuses this one. The failure is then left
+    /// where it is and offered again with the next instrument's, so one busy
+    /// moment does not lose a reason; the first refusal still waiting is on
+    /// the receipt ([`Self::fact`]).
+    ///
+    /// # Cost
+    ///
+    /// One locked append per new failure — bounded by the failures, which are
+    /// bounded by the members and, since D-3341's aggregation, by one per
+    /// (instrument, month, reason). Never by rows.
+    fn flush(&mut self, journal: &audit::Journal, failures: &[pull::ingest::Failure]) {
+        let Some(window) = self.window else {
+            return;
+        };
+        let Some(mut thread) = self.thread.take() else {
+            return;
+        };
+        self.write(
+            failures,
+            window,
+            std::time::SystemTime::now(),
+            |record, whole| journal.append_failure(&mut thread, record, whole),
+        );
+        self.thread = Some(thread);
+    }
+
+    /// Whether the run was opened in the journal, so its failures are written
+    /// there as they land rather than by the caller.
+    #[must_use]
+    pub(crate) const fn opened(&self) -> bool {
+        self.thread.is_some()
+    }
+
+    /// Appends, after the caller's closing record, the failures the run did not
+    /// write itself: all of them when its opening record was refused, and
+    /// otherwise only those whose append was refused during the run, offered
+    /// once more behind a restatement of the opening record
+    /// ([`audit::Journal::append_failure`]) so they stay filed under this run.
+    /// What landed and the refusal still waiting are counted on `self`.
+    pub(crate) fn rest(
+        &mut self,
+        journal: &audit::Journal,
+        now: std::time::SystemTime,
+        failures: &[pull::ingest::Failure],
+    ) {
+        if self.opened() {
+            self.flush(journal, failures);
+            return;
+        }
+        let Some(window) = self.window else {
+            return;
+        };
+        self.write(failures, window, now, |record, whole| {
+            journal.append_member(record, whole)
+        });
+    }
+
+    /// Offers `failures[self.flushed..]` to `append` in order, stopping at the
+    /// first refusal so the rest stay in order and are offered again.
+    fn write(
+        &mut self,
+        failures: &[pull::ingest::Failure],
+        window: pull::session::Window,
+        at: std::time::SystemTime,
+        mut append: impl FnMut(&audit::Record, &str) -> Result<(), String>,
+    ) {
+        while let Some(failure) = failures.get(self.flushed) {
+            let record = audit::Record::member_failure(
+                audit::Scope::Spot,
+                at,
+                &failure.instrument,
+                failure_window(failure, window),
+                &failure.why,
+            );
+            if let Err(why) = append(&record, &failure.why) {
+                self.refused = Some(why);
+                return;
+            }
+            self.written = self.written.saturating_add(1);
+            self.flushed = self.flushed.saturating_add(1);
+        }
+        self.refused = None;
+    }
+
+    /// The receipt's line for the failures this run recorded, out of `total`.
+    fn fact(&self, total: usize) -> (&'static str, String) {
+        let how = if self.opened() {
+            "each appended as its member landed, behind this run's opening record"
+        } else {
+            "each on its own record after this run's"
+        };
+        let opened = self.opened_refused.as_deref().map_or_else(String::new, |why| {
+            format!(" The run's opening record was refused, so none was written during the run: {why}")
+        });
+        (
+            "Failures recorded",
+            match self.refused.as_deref() {
+                Some(why) if self.written < total => format!(
+                    "{} of {total} — the rest are NOT on disk: {why}.{opened}",
+                    self.written
+                ),
+                _ => format!("{} of {total} — {how}.{opened}", self.written),
+            },
+        )
+    }
+}
+
+/// The endpoint a run of `asked` fetches from, before it has fetched anything:
+/// the feed descriptor's base URL and path template, which is what the closing
+/// record's `origin` is built from (`HttpSource::endpoint`). Empty for a feed
+/// with no HTTP transport, which never reaches a broker run.
+fn planned_origin(asked: &ingest::SpotRequest) -> String {
+    match asked.feed.descriptor().transport {
+        pull::vendor::Transport::Http(ref spec) => format!(
+            "{}{}",
+            spec.base_url,
+            spec.path_template_for(asked.granularity)
+        ),
+        pull::vendor::Transport::LocalArchive(_) => String::new(),
+    }
+}
+
+/// The days a failure is about, as its journal record files it: its own day,
+/// else its own month inside the window asked, else the whole window.
+/// D-3341, DB-G45.
+fn failure_window(
+    failure: &pull::ingest::Failure,
+    window: pull::session::Window,
+) -> pull::session::Window {
+    if let Some(day) = failure.day
+        && let Ok(one) = pull::session::Window::new(day, day)
+    {
+        return one;
+    }
+    failure
+        .month
+        .and_then(|month| {
+            let first = Day::new(month.year(), month.month(), 1).ok()?;
+            let from = if first > window.from() {
+                first
+            } else {
+                window.from()
+            };
+            let last = first.end_of_month();
+            let to = if last < window.to() {
+                last
+            } else {
+                window.to()
+            };
+            pull::session::Window::new(from, to)
+                .or_else(|_| pull::session::Window::new(first, last))
+                .ok()
+        })
+        .unwrap_or(window)
+}
+
+/// The one month a window lies inside, or `None` when it spans several.
+fn only_month(window: pull::session::Window) -> Option<store::path::YearMonth> {
+    match (window.from().year_month(), window.to().year_month()) {
+        (Ok(from), Ok(to)) if from == to => Some(from),
+        _ => None,
+    }
 }
 
 /// The receipt line for one instrument's span before its first bar, written to
@@ -3806,9 +4054,11 @@ impl BrokerRun {
         self.total.failures.push(pull::ingest::Failure {
             instrument: instrument.to_owned(),
             why: why.clone(),
-            // Carried by pull where it is known (DB-G45, D-3341); WP-34 fills
-            // these from the broker's own window.
-            month: None,
+            // A REFUSAL OF THE WHOLE INSTRUMENT IS ABOUT THE WHOLE WINDOW, so it
+            // names a month only when the window lies inside one — the
+            // autopilot's month unit — and never the window's first month for
+            // an 8.75-year pass (DB-G45, D-3341). No day: nothing here names one.
+            month: self.window.and_then(only_month),
             day: None,
         });
         self.refused.push(why);
@@ -4119,27 +4369,39 @@ fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
 /// knows the feed, rung and month the operator asked for is this one, so the
 /// event is emitted here. (This once said `pull` had no telemetry dependency;
 /// Z1-slice14-F4, D-1762.)
-fn note_member_failure(
-    failure: &pull::ingest::Failure,
-    month: &str,
-    asked: &ingest::SpotRequest,
-    site: &Site,
-) {
-    let noted = telemetry::emit(
-        &telemetry::Event::error("pull.spot", "member did not land")
-            .with("instrument", telemetry::Value::Str(&failure.instrument))
-            .with("month", telemetry::Value::Str(month))
-            .with("feed", telemetry::Value::Str(asked.feed.wire()))
-            .with("rung", telemetry::Value::Str(asked.granularity.dir()))
-            .with("why", telemetry::Value::Str(&failure.why)),
-    );
+///
+/// # Filed under the failure's OWN month and day (D-3341, DB-G45)
+///
+/// All 48,396 of these lines in a stock pass said `month=2018-01`, the first
+/// month of an 8.75-year window, because this took the window's first month
+/// from its caller: a gap on 2019-12-02, a Muhurat refusal for 2020-11-14 and
+/// a derived-rung failure for 2026-09 were all filed under 2018-01, and so was
+/// every entry of the autopilot's ring. The failure carries its own month and
+/// day where it names them (`pull::ingest::Failure`); `month` is written only
+/// for a failure about ONE month, so the audit stream indexes it there and
+/// nowhere else, and `window` always says what was asked.
+fn note_member_failure(failure: &pull::ingest::Failure, asked: &ingest::SpotRequest, site: &Site) {
+    let about = crate::autopilot::About::of(failure.month, failure.day, asked.window);
+    let mut event = telemetry::Event::error("pull.spot", "member did not land")
+        .with("instrument", telemetry::Value::Str(&failure.instrument))
+        .with("window", telemetry::Value::Str(&about.window))
+        .with("feed", telemetry::Value::Str(asked.feed.wire()))
+        .with("rung", telemetry::Value::Str(asked.granularity.dir()))
+        .with("why", telemetry::Value::Str(&failure.why));
+    if let Some(month) = about.one_month() {
+        event = event.with("month", telemetry::Value::Str(month));
+    }
+    if let Some(day) = about.day.as_deref() {
+        event = event.with("day", telemetry::Value::Str(day));
+    }
+    let noted = telemetry::emit(&event);
     debug_assert!(
         noted.is_written() || telemetry::global().is_none(),
         "a member that reached the vendor and did not land is the failure this \
          event exists to name"
     );
     site.autopilot
-        .fail(&failure.instrument, month, &failure.why);
+        .fail(&failure.instrument, &about, &failure.why);
 }
 
 /// What the pull order has to say about this request, or [`None`] to proceed.
@@ -4639,7 +4901,6 @@ async fn land_broker_member(
     instrument: &brutex_core::instrument::InstrumentKey,
     site: &Site,
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
-    month: &str,
     asked: &ingest::SpotRequest,
 ) -> pull::ingest::Ingested {
     let mut landed_one = land_spot(landed, instrument, site, dated).await;
@@ -4652,7 +4913,7 @@ async fn land_broker_member(
     // it is a different one from a refusal — the socket worked and the store did
     // not. Both belong on the page; only naming the first would hide the disk.
     for failure in &landed_one.failures {
-        note_member_failure(failure, month, asked, site);
+        note_member_failure(failure, asked, site);
     }
     landed_one
 }
@@ -4712,7 +4973,8 @@ async fn land_spot(
                     failures: vec![pull::ingest::Failure {
                         instrument: instrument.underlying.to_string(),
                         why,
-                        month: None,
+                        // THE BODY'S OWN MONTH, when it lies inside one (D-3341).
+                        month: bodies.first().and_then(|(window, _)| only_month(*window)),
                         day: None,
                     }],
                     ..pull::ingest::Ingested::default()
@@ -4854,10 +5116,11 @@ fn zerodha_isin_cross_check(
     Ok(())
 }
 
-pub(crate) async fn broker_run(
+pub(crate) async fn broker_run_by(
     asked: &ingest::SpotRequest,
     site: &Site,
     censuses: &[census::VendorCensus],
+    driver: crate::autopilot::Driver,
 ) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
@@ -4929,8 +5192,13 @@ pub(crate) async fn broker_run(
     }
 
     let claimed_run = note_run_started(asked, targets.len());
+    // THE RUN IS ON THE JOURNAL BEFORE ITS FIRST INSTRUMENT, and each failure
+    // follows as its member lands (`RunLedger`, D-3341, DB-055, DB-G46).
+    let journal = site.journal();
     let mut out = BrokerRun {
         attempted: targets.len(),
+        window: Some(asked.window),
+        ledger: RunLedger::open(&journal, asked, targets.len()),
         ..BrokerRun::default()
     };
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
@@ -4938,12 +5206,12 @@ pub(crate) async fn broker_run(
     // pause that happened before it began does not.
     let epoch = site.autopilot.epoch();
 
-    // The month these bars are for, named once rather than per instrument.
-    let month = asked
-        .window
-        .from()
-        .year_month()
-        .map_or_else(|_| String::new(), |m| m.to_string());
+    // WHAT EACH INSTRUMENT IS FETCHED FOR: the window, and its month only when
+    // it lies inside one. This was the window's FIRST month, named once, and
+    // it labelled every instrument's cell and every failure of an 8.75-year
+    // pass `2018-01` (D-3341, DB-G19, DB-G45).
+    let span = crate::autopilot::months_of_window(asked.window);
+    let whole = crate::autopilot::About::of(only_month(asked.window), None, asked.window);
 
     // THE RUN-LEVEL VIEW NO INSTRUMENT HAS. Each one meets the vendor alone and
     // pays the whole 5xx ladder to learn what the previous one already found
@@ -4975,16 +5243,15 @@ pub(crate) async fn broker_run(
         // hang — D-0057's `now` object. One uncontended lock per instrument,
         // against an instrument that costs a network round trip, so it is free
         // in the only units that matter.
+        //
         site.autopilot.publish(|status| {
-            status.now = Some(crate::autopilot::InFlight {
-                instrument: instrument.underlying.to_string(),
-                month: month.clone(),
-                timeframe: asked.granularity.to_string(),
-                feed: asked.feed.display().to_owned(),
-                index: index.saturating_add(1),
-                of: targets.len(),
-                since: std::time::Instant::now(),
-            });
+            status.now = Some(in_flight(
+                asked,
+                instrument,
+                &span,
+                (driver, started),
+                (index.saturating_add(1), targets.len()),
+            ));
         });
         // THE NEXT LANES, FETCHED TOGETHER when nothing fetched is waiting.
         // Landing stays one instrument at a time and in target order below,
@@ -5021,14 +5288,14 @@ pub(crate) async fn broker_run(
                 // surfaces, each doing what its format can actually do.
                 note_instrument_refusal(
                     &instrument.underlying.to_string(),
-                    &month,
+                    &whole,
                     asked.feed.wire(),
                     index.saturating_add(1),
                     targets.len(),
                     &why,
                 );
                 site.autopilot
-                    .fail(&instrument.underlying.to_string(), &month, &why);
+                    .fail(&instrument.underlying.to_string(), &whole, &why);
                 out.record_refusal(instrument.underlying.as_str(), why);
                 marked.credential_dead
             }
@@ -5044,11 +5311,14 @@ pub(crate) async fn broker_run(
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
                 let landed_one =
-                    land_broker_member(&landed, instrument, site, &mut dated, &month, asked).await;
+                    land_broker_member(&landed, instrument, site, &mut dated, asked).await;
                 out.absorb_member(&landed, landed_one);
                 rejected
             }
         };
+        // THIS INSTRUMENT'S FAILURES REACH THE JOURNAL NOW, not when the run
+        // ends (D-3341, DB-055): `/audit.json` sees a run in flight.
+        out.ledger.flush(&journal, &out.total.failures);
         // `CLAUDE.md` §8: A REJECTED TOKEN IS RE-READ ONCE, HERE. See
         // `credential_halts`, which says what this loop used to do instead.
         //
@@ -5076,9 +5346,46 @@ pub(crate) async fn broker_run(
     // process lived.
     site.autopilot.publish(|status| status.now = None);
     out.record_stop();
+    out.ledger.flush(&journal, &out.total.failures);
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     note_run_finished(&out, out.total.balances(), claimed_run);
     out
+}
+
+/// The cell a broker run publishes for `instrument`, `place` = (index, of).
+///
+/// THE FEED BY ITS WIRE KEY, THE WINDOW AND WHO STARTED IT (D-3341, DB-G19,
+/// DB-G20): a page matches a row on the feed's key, and the display name it
+/// carried matched nothing; `month` is the window's span, never its first
+/// month. `run` is who started the run and when, for its measured pace.
+fn in_flight(
+    asked: &ingest::SpotRequest,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    span: &str,
+    run: (crate::autopilot::Driver, std::time::Instant),
+    place: (usize, usize),
+) -> crate::autopilot::InFlight {
+    crate::autopilot::InFlight {
+        instrument: instrument.underlying.to_string(),
+        month: span.to_owned(),
+        timeframe: asked.granularity.to_string(),
+        feed: asked.feed.wire().to_owned(),
+        window: Some(asked.window),
+        driver: run.0,
+        run_since: run.1,
+        index: place.0,
+        of: place.1,
+        since: std::time::Instant::now(),
+    }
+}
+
+/// [`broker_run_by`] for a pull an operator asked for on `/pull/spot`.
+pub(crate) async fn broker_run(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    censuses: &[census::VendorCensus],
+) -> BrokerRun {
+    broker_run_by(asked, site, censuses, crate::autopilot::Driver::Hand).await
 }
 
 /// `CLAUDE.md` §8 for one spot instrument: re-read once after a rejection, and
@@ -5173,7 +5480,13 @@ pub(crate) async fn recovery_spot(
 ) -> Result<BrokerRun, String> {
     let _seat = seat;
     let now = std::time::SystemTime::now();
-    let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
+    let mut run = broker_run_by(
+        asked,
+        site,
+        &census::read_all(&site.store_root),
+        crate::autopilot::Driver::Recovery,
+    )
+    .await;
     let journal = site.journal();
     let origin = spot_audit_origin(asked.cash_identity, &run.origin);
     let record = if let Some(blocked) = &run.blocked {
@@ -5196,14 +5509,13 @@ pub(crate) async fn recovery_spot(
         )
     };
     journal.append(&record)?;
-    for failure in &run.total.failures {
-        journal.append(&audit::Record::member_failure(
-            audit::Scope::Spot,
-            now,
-            &failure.instrument,
-            asked.window,
-            &failure.why,
-        ))?;
+    // THE FAILURES ARE ALREADY ON THE JOURNAL, appended as each member landed
+    // behind the run's opening record (D-3341); `rest` writes them here only
+    // when that record was refused. A failure that did not land is still a
+    // failed audit append, and refuses the unit as it always did.
+    run.ledger.rest(&journal, now, &run.total.failures);
+    if let Some(why) = run.ledger.refused.clone() {
+        return Err(why);
     }
     Ok(run)
 }
@@ -7335,21 +7647,25 @@ struct Markers<'a> {
 /// `clippy::too_many_lines`. Nothing about it changed.
 fn note_instrument_refusal(
     instrument: &str,
-    month: &str,
+    about: &crate::autopilot::About,
     feed: &str,
     index: usize,
     of: usize,
     why: &str,
 ) {
-    let emitted = telemetry::emit(
-        &telemetry::Event::error("pull.spot", "instrument refused")
-            .with("instrument", telemetry::Value::Str(instrument))
-            .with("month", telemetry::Value::Str(month))
-            .with("feed", telemetry::Value::Str(feed))
-            .with("index", telemetry::Value::Uint(index as u64))
-            .with("of", telemetry::Value::Uint(of as u64))
-            .with("why", telemetry::Value::Str(why)),
-    );
+    // `month` ONLY FOR A WINDOW INSIDE ONE MONTH: a refusal of the whole
+    // instrument is about its whole window, which `window` names (D-3341).
+    let mut event = telemetry::Event::error("pull.spot", "instrument refused")
+        .with("instrument", telemetry::Value::Str(instrument))
+        .with("window", telemetry::Value::Str(&about.window))
+        .with("feed", telemetry::Value::Str(feed))
+        .with("index", telemetry::Value::Uint(index as u64))
+        .with("of", telemetry::Value::Uint(of as u64))
+        .with("why", telemetry::Value::Str(why));
+    if let Some(month) = about.one_month() {
+        event = event.with("month", telemetry::Value::Str(month));
+    }
+    let emitted = telemetry::emit(&event);
     debug_assert!(
         emitted.is_written() || telemetry::global().is_none(),
         "a refusal that cannot be logged is the defect this event exists to remove"
@@ -7888,6 +8204,16 @@ async fn broker_window(
 ///
 /// `source` is what the run is filed under in the journal: a folder path on one
 /// side, the broker's URL on the other.
+///
+/// `ledger` is a broker run's own (D-3341): its failures are already in the
+/// journal, appended as each member landed, so only the closing record is
+/// written here and the receipt says how many of them landed. `None` for an
+/// archive run, which writes the record and then its failures, as before.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the receipt's eight inputs are each a separate fact of one run; \
+              bundling them into a struct would only rename the list"
+)]
 fn landed_answer(
     done: &pull::ingest::Ingested,
     window: pull::session::Window,
@@ -7896,6 +8222,7 @@ fn landed_answer(
     journal: &audit::Journal,
     mut facts: Vec<(&'static str, String)>,
     took: u64,
+    ledger: Option<&mut RunLedger>,
 ) -> (axum::http::StatusCode, String) {
     facts.push(("Members read", done.members.to_string()));
     facts.push(("Rows read", done.rows_read.to_string()));
@@ -7961,14 +8288,23 @@ fn landed_answer(
     }
     let record = audit::Record::of_run(audit::Scope::Spot, now, took, source, window, done);
     let verdict = record.outcome.label();
-    facts.extend(recorded_with_failures(
-        journal,
-        &record,
-        audit::Scope::Spot,
-        now,
-        window,
-        &done.failures,
-    ));
+    match ledger {
+        Some(ledger) => {
+            facts.push(recorded_fact(journal, &record));
+            ledger.rest(journal, now, &done.failures);
+            if !done.failures.is_empty() {
+                facts.push(ledger.fact(done.failures.len()));
+            }
+        }
+        None => facts.extend(recorded_with_failures(
+            journal,
+            &record,
+            audit::Scope::Spot,
+            now,
+            window,
+            &done.failures,
+        )),
+    }
     let reason = if !done.failures.is_empty() {
         "PARTIAL OR FAILED: one or more requested members or coverage checks failed. \
          Successful writes remain on disk; they do not certify the full request. \
@@ -8018,7 +8354,7 @@ fn local_answer(
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
 
     match outcome {
-        Ok(done) => landed_answer(&done, window, now, folder, journal, facts, took),
+        Ok(done) => landed_answer(&done, window, now, folder, journal, facts, took, None),
         Err(why) => {
             facts.push(("Refused", why.clone()));
             facts.push(("Took", render_elapsed(took)));
@@ -8124,9 +8460,16 @@ fn recorded_with_failures(
     let mut written = 0usize;
     let mut first_refusal = None;
     for failure in failures {
-        let detail =
-            audit::Record::member_failure(scope, now, &failure.instrument, window, &failure.why);
-        match journal.append(&detail) {
+        // FILED UNDER ITS OWN DAY OR MONTH, WITH ITS WHOLE REASON (D-3341,
+        // DB-G23, DB-G45): the same two rules a broker run's failures follow.
+        let detail = audit::Record::member_failure(
+            scope,
+            now,
+            &failure.instrument,
+            failure_window(failure, window),
+            &failure.why,
+        );
+        match journal.append_member(&detail, &failure.why) {
             Ok(()) => written = written.saturating_add(1),
             Err(why) => {
                 if first_refusal.is_none() {
@@ -12653,10 +12996,18 @@ fn audit_row(entry: audit::Entry) -> render::AuditRow {
             drops: record.drops,
             failures: record.failures,
             took_micros: record.elapsed_micros,
-            note: if record.note_was_cut() {
-                format!("{}… (cut from {} bytes)", record.note, record.note_bytes)
-            } else {
-                record.note.clone()
+            // THE WHOLE REASON WHEN THE RECORD KEPT ONE (D-3341, DB-G23), and
+            // the cut one with why when it cannot be read.
+            note: match (entry.whole_note, record.note_was_cut()) {
+                (Some(Ok(whole)), _) => whole,
+                (Some(Err(why)), _) => format!(
+                    "{}… (cut from {} bytes; the whole note could not be read: {why})",
+                    record.note, record.note_bytes
+                ),
+                (None, true) => {
+                    format!("{}… (cut from {} bytes)", record.note, record.note_bytes)
+                }
+                (None, false) => record.note.clone(),
             },
         },
     }
@@ -17864,6 +18215,7 @@ mod tests {
             &journal,
             Vec::new(),
             1,
+            None,
         );
         assert!(page.contains("<th>Members read</th><td>1</td>"));
         assert!(page.contains("<th>Failure diagnostics</th><td>2</td>"));
@@ -17937,6 +18289,7 @@ mod tests {
             &journal,
             Vec::new(),
             1,
+            None,
         );
         assert!(page.contains("PARTIAL OR FAILED"), "{page}");
         assert!(!page.contains("badge good"), "{page}");
@@ -29213,6 +29566,236 @@ mod tests {
         }
     }
 
+    /// **A BROKER RUN IS ON THE JOURNAL BEFORE ITS FIRST INSTRUMENT, AND EACH
+    /// FAILURE FOLLOWS AS ITS MEMBER LANDS** (D-3341, DB-055, DB-G46).
+    ///
+    /// The operator's 1min stock pass started at 19:31 IST and `pull.journal`
+    /// was last written at 19:00: a run wrote its record and failures only
+    /// after its last instrument, so `/audit.json` could not see a run in
+    /// flight and the rolling log that named its refusals wrapped in minutes.
+    ///
+    /// Read here AFTER `broker_run` returns and BEFORE any caller writes the
+    /// closing record: the opening record, filed under the feed's own
+    /// endpoint, and NIFTY's refusal behind it, already on disk. The caller's
+    /// closing step then writes nothing a second time.
+    #[tokio::test]
+    async fn a_broker_run_journals_its_opening_and_each_failure_before_it_returns() {
+        let dir = masters(
+            "ledger-refused",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let site = Site::serving(&dir, &store_root("ledger-refused"));
+        let censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
+        // A rung this feed does not serve: refused inside the loop, by name,
+        // without a socket (see the test above).
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+
+        let mut out = broker_run(&asked, &site, &censuses).await;
+        assert_eq!(out.refused.len(), 1, "the premise: one refusal: {out:?}");
+
+        let journal = site.journal();
+        let records = journal.look().records();
+        let page = journal.page(records, 0, 10).expect("a page");
+        let rows: Vec<audit::Record> = page
+            .iter()
+            .rev()
+            .map(|entry| entry.decoded.clone().expect("decodes"))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the opening record and one failure: {rows:?}"
+        );
+        let opened = rows.first().expect("a row");
+        assert_eq!(
+            (opened.kind, opened.outcome),
+            (audit::Kind::Run, audit::Outcome::Opened),
+            "{opened:?}"
+        );
+        assert_eq!(
+            crate::audit_json::vendor_of_source(&opened.source),
+            Some(Vendor::Dhan),
+            "the opening record names the feed its failures are filed under: {opened:?}"
+        );
+        let failed = rows.get(1).expect("a row");
+        assert_eq!(failed.kind, audit::Kind::MemberFailure, "{failed:?}");
+        assert_eq!(failed.source, "NIFTY", "{failed:?}");
+        assert_eq!(
+            (failed.from_days, failed.to_days),
+            (
+                day(2026, 8, 3).days_from_epoch(),
+                day(2026, 8, 5).days_from_epoch()
+            ),
+            "a refusal of the whole instrument is about the whole window: {failed:?}"
+        );
+        let why = out
+            .total
+            .failures
+            .first()
+            .map(|f| f.why.clone())
+            .expect("a failure");
+        assert!(
+            failed.note_was_cut(),
+            "the premise: the reason is longer than the note"
+        );
+        assert_eq!(
+            page.first().and_then(|entry| entry.whole_note.clone()),
+            Some(Ok(why)),
+            "and the journal keeps the whole reason"
+        );
+        assert!(out.ledger.opened(), "{:?}", out.ledger);
+        assert_eq!((out.ledger.written, &out.ledger.refused), (1, &None));
+
+        // THE CLOSING STEP WRITES NOTHING TWICE.
+        out.ledger
+            .rest(&journal, std::time::SystemTime::now(), &out.total.failures);
+        assert_eq!(
+            journal.look().records(),
+            records,
+            "no failure was written twice"
+        );
+        assert_eq!(
+            out.ledger.fact(out.total.failures.len()).1,
+            "1 of 1 — each appended as its member landed, behind this run's opening record."
+        );
+    }
+
+    /// **A FAILURE IS FILED UNDER ITS OWN DAY, ELSE ITS OWN MONTH, ELSE THE
+    /// WINDOW** (D-3341, DB-G45), in the instrument-agnostic path every feed
+    /// and instrument shares: NIFTY's Muhurat day, BANKNIFTY's month, a
+    /// stock's whole-window refusal.
+    #[test]
+    fn a_failure_is_journaled_under_its_own_day_or_month_inside_the_window() {
+        let window = pull::session::Window::new(day(2018, 1, 1), day(2026, 9, 30))
+            .expect("an ordered window");
+        let days = |w: pull::session::Window| (w.from(), w.to());
+
+        let muhurat = pull::ingest::Failure::new("NIFTY", "UNVERIFIED on 2020-11-14")
+            .in_month(month_of(2020, 11))
+            .on_day(day(2020, 11, 14));
+        assert_eq!(
+            days(failure_window(&muhurat, window)),
+            (day(2020, 11, 14), day(2020, 11, 14))
+        );
+
+        let month =
+            pull::ingest::Failure::new("BANKNIFTY", "rung not derived").in_month(month_of(2026, 9));
+        assert_eq!(
+            days(failure_window(&month, window)),
+            (day(2026, 9, 1), day(2026, 9, 30))
+        );
+
+        // A MONTH THE WINDOW CUTS is cut to the window.
+        let short = pull::session::Window::new(day(2026, 9, 10), day(2026, 9, 20))
+            .expect("an ordered window");
+        assert_eq!(
+            days(failure_window(&month, short)),
+            (day(2026, 9, 10), day(2026, 9, 20))
+        );
+
+        let whole = pull::ingest::Failure::new("CHOLAFIN", "CHOLAFIN: refused with status 500");
+        assert_eq!(days(failure_window(&whole, window)), days(window));
+    }
+
+    /// A refusal of a whole instrument names a month only when the window lies
+    /// inside one (the autopilot's unit), never the first month of an
+    /// 8.75-year pass (D-3341, DB-G45).
+    #[test]
+    fn a_whole_instrument_refusal_names_a_month_only_for_a_one_month_window() {
+        let long = pull::session::Window::new(day(2018, 1, 1), day(2026, 9, 30))
+            .expect("an ordered window");
+        let mut run = BrokerRun {
+            window: Some(long),
+            ..BrokerRun::default()
+        };
+        run.record_refusal("CHOLAFIN", "CHOLAFIN: refused".to_owned());
+        let refused = run.total.failures.first().expect("a failure");
+        assert_eq!((refused.month, refused.day), (None, None), "{refused:?}");
+
+        let unit = pull::session::Window::new(day(2026, 9, 1), day(2026, 9, 30))
+            .expect("an ordered window");
+        let mut run = BrokerRun {
+            window: Some(unit),
+            ..BrokerRun::default()
+        };
+        run.record_refusal("NIFTY", "NIFTY: refused".to_owned());
+        assert_eq!(
+            run.total.failures.first().and_then(|f| f.month),
+            Some(month_of(2026, 9))
+        );
+    }
+
+    /// **A FAILURE WHOSE APPEND IS REFUSED IS OFFERED AGAIN, NOT SKIPPED**, and
+    /// the receipt says the rest are not on disk only while one is still
+    /// waiting (D-3341, DB-G46).
+    ///
+    /// The journal's lock is taken without waiting, so a second writer in the
+    /// middle of its append refuses this one. Held here, then released.
+    #[test]
+    fn a_refused_failure_append_is_retried_with_the_next_member() {
+        let root = store_root("ledger-retry");
+        let journal = audit::Journal::at(&root);
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        let mut ledger = RunLedger::open(&journal, &asked, 2);
+        assert!(ledger.opened(), "{ledger:?}");
+        let failures = vec![
+            pull::ingest::Failure::new("NIFTY", "NIFTY: refused"),
+            pull::ingest::Failure::new("BANKNIFTY", "BANKNIFTY: refused"),
+        ];
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&journal.path)
+            .expect("the journal exists");
+        held.try_lock().expect("this test holds the append lock");
+        ledger.flush(&journal, &failures[..1]);
+        assert_eq!(ledger.written, 0);
+        assert!(ledger.refused.is_some(), "{ledger:?}");
+        assert!(
+            ledger
+                .fact(1)
+                .1
+                .starts_with("0 of 1 — the rest are NOT on disk: "),
+            "{}",
+            ledger.fact(1).1
+        );
+        held.unlock().expect("released");
+
+        ledger.flush(&journal, &failures);
+        assert_eq!((ledger.written, &ledger.refused), (2, &None), "{ledger:?}");
+        let records = journal.look().records();
+        let sources: Vec<String> = journal
+            .page(records, 0, 10)
+            .expect("a page")
+            .into_iter()
+            .rev()
+            .map(|entry| entry.decoded.expect("decodes").source)
+            .collect();
+        assert_eq!(
+            sources.len(),
+            3,
+            "the head, then both failures in order: {sources:?}"
+        );
+        assert_eq!(
+            sources.get(1..),
+            Some(&["NIFTY".to_owned(), "BANKNIFTY".to_owned()][..])
+        );
+    }
+
     /// **THE RUN'S OWN EVENTS REACH THE FILE, AND SO DOES EVERY REQUEST'S.**
     ///
     /// Four production `telemetry::emit` sites live behind functions this
@@ -29329,14 +29912,12 @@ mod tests {
         // it is the one site in this file whose `debug_assert` already demands
         // `is_written` — which, with no sink installed, was vacuous.
         let from = crate::emitted::mark();
+        // FILED UNDER ITS OWN DAY AND MONTH (D-3341, DB-G45): the failure
+        // names 2026-08-04, and the line says so rather than the window's
+        // first month.
         note_member_failure(
-            &pull::ingest::Failure {
-                instrument: "EMITMEMBER".to_owned(),
-                why: "the store refused the month".to_owned(),
-                month: None,
-                day: None,
-            },
-            "2026-08",
+            &pull::ingest::Failure::new("EMITMEMBER", "the store refused the month")
+                .on_day(day(2026, 8, 4)),
             &asked,
             &site,
         );
@@ -29352,6 +29933,8 @@ mod tests {
         );
         assert!(
             crate::emitted::says(mine, "month", "2026-08")
+                && crate::emitted::says(mine, "day", "2026-08-04")
+                && crate::emitted::says(mine, "window", "2026-08-03..=2026-08-05")
                 && crate::emitted::says(mine, "why", "the store refused the month"),
             "{mine:?}"
         );
