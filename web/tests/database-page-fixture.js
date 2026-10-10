@@ -32,6 +32,7 @@ export const DB_PAGE_FILES = [
   '../src/lib/db/selection-model.js',
   '../src/lib/db/notes-controls.js',
   '../src/lib/db/search.js',
+  '../src/lib/db/contract-parse.js',
   '../src/lib/db/bars-plan.js',
   '../src/lib/db/notes-bars.js',
   '../src/lib/db/export.js',

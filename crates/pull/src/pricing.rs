@@ -533,6 +533,27 @@ impl std::fmt::Display for PricingError {
 
 impl std::error::Error for PricingError {}
 
+impl PricingError {
+    /// The premium and the discounted intrinsic it did not exceed, when the
+    /// model refused the quote as at or below that floor (`greeks`'
+    /// `PriceBelowIntrinsic`), both in paisa; `None` for every other refusal.
+    ///
+    /// Under this module's zero carry ([`contract_from`], D-2830) that floor
+    /// is the ZERO-CARRY bound, a limit of the model's inputs rather than a
+    /// verdict on the print, so `/greeks.json` names it apart from an
+    /// unsolved volatility (D-3330, DB-G64). A caller outside this crate
+    /// cannot name `greeks`' error type, which is why this is asked here.
+    #[must_use]
+    pub const fn below_discounted_intrinsic(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Model(GreeksError::PriceBelowIntrinsic { price, intrinsic }) => {
+                Some((*price, *intrinsic))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl From<GreeksError> for PricingError {
     fn from(why: GreeksError) -> Self {
         Self::Model(why)
@@ -1859,6 +1880,15 @@ mod tests {
             why.to_string().contains("discounted intrinsic value"),
             "{why}"
         );
+        // THE FLOOR IS ASKABLE FROM OUTSIDE THE CRATE (D-3330): the premium
+        // and the zero-carry discounted intrinsic it did not exceed.
+        let (price, floor) = why
+            .below_discounted_intrinsic()
+            .expect("the below-intrinsic refusal names its floor");
+        assert!(
+            price.to_bits() == 100_f64.to_bits() && floor > price,
+            "{price} {floor}"
+        );
 
         let above = BarQuote {
             // A call worth more than the underlying itself.
@@ -1868,6 +1898,7 @@ mod tests {
         let why = bar_greeks(above, test_rate(), YearBasis::Calendar365)
             .expect_err("a close above the maximum");
         assert!(matches!(why, PricingError::Model(_)), "{why:?}");
+        assert_eq!(why.below_discounted_intrinsic(), None, "{why:?}");
 
         for (field, broken) in [
             (

@@ -621,7 +621,9 @@ fn words_array<'a>(words: impl Iterator<Item = &'a str>) -> String {
 /// and only for a feed `pull::ingest::derives_for` admits (never GDFL, D-2802).
 /// `the_derived_rungs_are_the_ingest_rule` holds the count against
 /// `pull::ingest::derived_count`, so the two cannot drift silently.
-fn rungs_of(feed: pull::vendor::Feed) -> (Vec<&'static str>, Vec<store::path::Timeframe>) {
+pub(super) fn rungs_of(
+    feed: pull::vendor::Feed,
+) -> (Vec<&'static str>, Vec<store::path::Timeframe>) {
     let served: Vec<&'static str> = pull::vendor::Granularity::ALL
         .into_iter()
         .filter(|rung| feed.serves(*rung))
@@ -675,7 +677,7 @@ fn auction_json(note: Option<pull::vendor::AuctionNote>) -> String {
 }
 
 /// The wire word for a price basis (D-3323).
-const fn price_word(price: pull::vendor::PriceBasis) -> &'static str {
+pub(super) const fn price_word(price: pull::vendor::PriceBasis) -> &'static str {
     match price {
         pull::vendor::PriceBasis::Raw => "raw",
         pull::vendor::PriceBasis::AsPublished => "as_published",
@@ -684,7 +686,7 @@ const fn price_word(price: pull::vendor::PriceBasis) -> &'static str {
 }
 
 /// The wire word for a volume basis (D-3323).
-const fn volume_word(volume: pull::vendor::VolumeBasis) -> &'static str {
+pub(super) const fn volume_word(volume: pull::vendor::VolumeBasis) -> &'static str {
     match volume {
         pull::vendor::VolumeBasis::Raw => "raw",
         pull::vendor::VolumeBasis::VendorOwn => "vendor_own",
