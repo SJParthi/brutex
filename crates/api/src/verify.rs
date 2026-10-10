@@ -34,17 +34,23 @@
 //! offsets, none of which grows with the size of the file. Before that,
 //! `Manifest::newest` walks the census's whole append log once to find the
 //! newest write of each key: O(log length). So one scrub is O(log length +
-//! E_v) with E_v file opens, and it runs on the request's own task, blocking
-//! that runtime worker for the whole walk (`docs/06-limits.md`, W1-api5-7 and
-//! D-1501). This said "O(1) per entry" and named no log walk until D-1501
-//! (W1-api6-0).
+//! E_v) with E_v file opens. It ran on the request's own task, blocking that
+//! runtime worker for the whole walk (`docs/06-limits.md`, W1-api5-7 and
+//! D-1501), the DB-066 stall class the other store routes were moved off:
+//! 246,147 file opens for GDFL on the operator's store, each on a Tokio
+//! worker. Since WP-33c (DB-A35) `/verify.json` runs it through
+//! [`vendor_off_worker`]: on the blocking pool, at most
+//! [`MAX_SCRUBS_CONCURRENT`] at once, and a request past that is a named 429,
+//! never a queue. This said "O(1) per entry" and named no log walk until
+//! D-1501 (W1-api6-0).
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
 //! `CLAUDE.md` §3 rule 6: a structural argument is not a
 //! measurement, however sound it is.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use brutex_core::vendor::Vendor;
 use pull::scrub::{self, Tally};
@@ -262,10 +268,129 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     report
 }
 
+/// How many whole-vendor scrubs run at once (WP-33c, DB-A35): one. A scrub
+/// opens one bar file per held month (246,147 for GDFL on the operator's
+/// store), so two at once only halve each other's speed and hold two blocking
+/// threads; a second request while one runs is refused by name.
+pub const MAX_SCRUBS_CONCURRENT: usize = 1;
+
+/// Scrubs running now.
+static SCRUBS: AtomicUsize = AtomicUsize::new(0);
+
+/// A held scrub seat of a counter, given back however the scrub ends.
+struct Seat(&'static AtomicUsize);
+
+impl Seat {
+    /// A seat of `seats`, or `None` when [`MAX_SCRUBS_CONCURRENT`] are taken.
+    /// One compare-and-swap loop over one counter: O(1).
+    fn take(seats: &'static AtomicUsize) -> Option<Self> {
+        seats
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held < MAX_SCRUBS_CONCURRENT).then(|| held.saturating_add(1))
+            })
+            .ok()
+            .map(|_| Self(seats))
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        let _released = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                Some(held.saturating_sub(1))
+            });
+    }
+}
+
+/// [`vendor`], off the async workers (WP-33c, DB-A35): on Tokio's blocking
+/// pool, behind its own seat, so a scrub never holds a runtime worker and
+/// never takes a slot the `/db` reads share. A seat that is taken answers 429
+/// naming the bound; a task that cannot be joined, 503. Both bodies are JSON
+/// `{"error": ...}`, as every other admission refusal is
+/// (`crate::detail::admission_refused`).
+///
+/// # Errors
+///
+/// The status and body to answer instead of a report.
+pub(crate) async fn vendor_off_worker(
+    root: PathBuf,
+    census: VendorCensus,
+) -> Result<Report, (axum::http::StatusCode, String)> {
+    scrub_seated(&SCRUBS, root, census).await
+}
+
+/// [`vendor_off_worker`] over the seats `seats` counts: the process's
+/// [`SCRUBS`], or a test's own, so a test holding a seat never refuses
+/// another test's scrub.
+async fn scrub_seated(
+    seats: &'static AtomicUsize,
+    root: PathBuf,
+    census: VendorCensus,
+) -> Result<Report, (axum::http::StatusCode, String)> {
+    let Some(seat) = Seat::take(seats) else {
+        return Err(crate::detail::admission_refused(
+            "vendor scrub",
+            MAX_SCRUBS_CONCURRENT,
+            &crate::detail::RunError::Saturated,
+        ));
+    };
+    tokio::task::spawn_blocking(move || {
+        let _seat = seat;
+        vendor(&root, &census)
+    })
+    .await
+    .map_err(|why| {
+        crate::detail::admission_refused(
+            "vendor scrub",
+            MAX_SCRUBS_CONCURRENT,
+            &crate::detail::RunError::Join(why.to_string()),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pull::scrub::Finding;
+
+    /// **THE SCRUB RUNS OFF THE WORKERS, ONE AT A TIME** (WP-33c, DB-A35): a
+    /// seat held is a named 429 for the next scrub, given back when the scrub
+    /// ends, and a scrub over a counter that could not be read answers its
+    /// refusal from the blocking pool exactly as the inline call did.
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "a test that cannot panic cannot fail, and these lints exist to keep panics \
+                  out of the crate rather than out of its tests"
+    )]
+    async fn a_scrub_runs_off_the_workers_and_one_at_a_time() {
+        static OWN: AtomicUsize = AtomicUsize::new(0);
+        let unread = VendorCensus {
+            vendor: Vendor::Zerodha,
+            path: PathBuf::from("/nowhere/manifest"),
+            state: Census::Unreadable {
+                reason: "a fixture counter".to_owned(),
+                fault: crate::census::Fault::Refused,
+            },
+        };
+        let held = Seat::take(&OWN).expect("a free seat");
+        let refused = scrub_seated(&OWN, PathBuf::from("/nowhere"), unread.clone())
+            .await
+            .expect_err("the only seat is held");
+        assert_eq!(refused.0, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(refused.1.contains("vendor scrub"), "{}", refused.1);
+        drop(held);
+        let report = scrub_seated(&OWN, PathBuf::from("/nowhere"), unread)
+            .await
+            .expect("the seat is free again");
+        assert!(
+            report
+                .refused
+                .is_some_and(|why| why.contains("could not be read"))
+        );
+        assert_eq!(OWN.load(Ordering::Acquire), 0, "the seat is given back");
+    }
 
     /// Nothing checked is never "verified".
     ///

@@ -169,13 +169,55 @@ const MAX_SAFE_RUN_ID: u64 = 9_007_199_254_740_991;
 /// clamp is a setting that silently did something other than what it said.
 pub const MIN_FILE_BYTES: u64 = 1024;
 
+/// How many lines one `(target, message)` pair may write at `warn` in one
+/// [`FLOOD_WINDOW_MS`] window before the rest of that window's lines are held
+/// back and counted (DB-A43).
+///
+/// # Why a ration, and why at `warn` only
+///
+/// The 64 MiB ring is the only place a `warn` line lives, and one pair can
+/// spend it in seconds: measured on the operator's store, 9 Oct 2026, one
+/// wall-second held 29,415 `api.bars read refused` lines (one per refused
+/// month of a `/db` burst) and the rolled file `events.3` covered 155 ms. Every
+/// other line of that hour was evicted by one repeated sentence.
+///
+/// So a pair past this many lines in one window writes nothing more in that
+/// window: each held line is counted in [`Health::rationed`], and the pair's
+/// next line after the window writes ONE `held back by the flood ration` line
+/// first, naming the message and how many were held. Nothing is silent; the
+/// count is exact. A pair that floods and then falls silent leaves its last
+/// window's count in [`Health::rationed`] only, because the summary rides on
+/// the pair's next line. Said rather than hidden (`CLAUDE.md` §3 rule 6).
+///
+/// `error` is never rationed (a refusal names itself at that level), and an
+/// audited line ([`is_audited`]) is never rationed either: the durable stream
+/// must not lose what it exists to keep. `info` and below are not rationed:
+/// they are a run's structural progress, which pages fold line by line.
+///
+/// 256 is above every ration a caller already applies (`api.request`'s
+/// 200 failed-request lines a minute), so no caller's own bound is cut.
+pub const DEFAULT_FLOOD_LINES: u32 = 256;
+
+/// The flood ration's window, in milliseconds of the sink's own clamped clock.
+pub const FLOOD_WINDOW_MS: i64 = 1_000;
+
+/// The message of the one line that says a pair was held back.
+pub const FLOOD_MESSAGE: &str = "held back by the flood ration";
+
+/// The most pairs the ration follows at once. A pair past it is written
+/// unrationed rather than held: the table is bounded so a lookup is a
+/// constant, and an unfollowed pair loses nothing.
+const FLOOD_PAIRS: usize = 128;
+
 /// What happened to one event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emitted {
     /// The bytes reached the file.
     Written,
-    /// Quieter than the sink's floor. Not a failure: nothing was meant to
-    /// happen, and nothing did.
+    /// Quieter than the sink's floor, or a `warn` line its pair's flood
+    /// ration held back (counted in [`Health::rationed`] and said by the
+    /// pair's next line; [`DEFAULT_FLOOD_LINES`]). Not a failure: the bound
+    /// working, and nothing was lost without a count.
     Filtered,
     /// It could not be written, and the reason is in [`Sink::health`].
     Dropped,
@@ -295,6 +337,10 @@ pub struct Config {
     /// `audit.idx` index (D-3341 item 3). On by default; a sink around a
     /// [`Target`] this crate did not open never keeps one.
     pub audit: bool,
+    /// How many `warn` lines one `(target, message)` pair may write per
+    /// [`FLOOD_WINDOW_MS`]; zero turns the ration off. [`DEFAULT_FLOOD_LINES`]
+    /// by default (DB-A43).
+    pub flood_lines: u32,
 }
 
 impl Config {
@@ -308,6 +354,7 @@ impl Config {
             min_level: Level::Info,
             target_levels: Vec::new(),
             audit: true,
+            flood_lines: DEFAULT_FLOOD_LINES,
         }
     }
 
@@ -315,6 +362,15 @@ impl Config {
     #[must_use]
     pub const fn with_audit(mut self, audit: bool) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// The same configuration with a different flood ration: `lines` per
+    /// `(target, message)` pair at `warn` per [`FLOOD_WINDOW_MS`], or none at
+    /// all for zero.
+    #[must_use]
+    pub const fn with_flood_lines(mut self, lines: u32) -> Self {
+        self.flood_lines = lines;
         self
     }
 
@@ -558,6 +614,12 @@ pub struct Health {
     /// and an open that resumes a floor ahead of the clock names it in
     /// [`Self::last_error`]. audit-20261003 hunt-costs-4, D-1538.
     pub clock_held: u64,
+    /// `warn` lines the flood ration held back ([`DEFAULT_FLOOD_LINES`],
+    /// DB-A43). Each is also counted on the `held back by the flood ration`
+    /// line its pair writes next; this is the running total, including a last
+    /// window no later line has reported yet. Not a failure, so not loud: the
+    /// ration is the bound working.
+    pub rationed: u64,
 }
 
 impl Health {
@@ -610,6 +672,82 @@ struct Inner {
     /// Behind the same lock as the ring, so an audited line lands in both
     /// files in one order and under one writer.
     audit: Option<Audit>,
+    /// The flood ration's pairs (DB-A43). Behind the ring's lock, so a pair's
+    /// count and the lines it admits are one order.
+    flood: Flood,
+}
+
+/// One `(target, message)` pair's place in the flood ration.
+#[derive(Debug, Clone, Copy)]
+struct Pair {
+    /// The `ms` its window opened at.
+    start: i64,
+    /// Lines written in that window.
+    written: u32,
+    /// Lines held back in that window, not yet reported by a line.
+    held: u64,
+}
+
+/// What the flood ration decided for one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rationed {
+    /// Write it, first saying how many lines of its pair the last window held
+    /// back (zero: nothing to say).
+    Write { held_before: u64 },
+    /// Hold it back: its pair has written its ration this window.
+    Hold,
+}
+
+/// The pairs the flood ration follows, keyed by a hash of the pair so a
+/// lookup allocates nothing. Two pairs whose hashes collide share a ration:
+/// the worst that does is hold a line one window early, and it is counted.
+#[derive(Debug, Default)]
+struct Flood {
+    pairs: std::collections::HashMap<u64, Pair>,
+}
+
+impl Flood {
+    /// The decision for one `warn` line of `target` and `message` at `at`,
+    /// with `limit` lines a window. O(1): one hash of the pair and one probe;
+    /// at most once per [`FLOOD_PAIRS`] new pairs, one pass that drops the
+    /// pairs with nothing to report.
+    fn admit(&mut self, limit: u32, target: &str, message: &str, at: i64) -> Rationed {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        target.hash(&mut hasher);
+        message.hash(&mut hasher);
+        let key = hasher.finish();
+        if !self.pairs.contains_key(&key) && self.pairs.len() >= FLOOD_PAIRS {
+            self.pairs
+                .retain(|_, pair| pair.held > 0 || at < pair.start.saturating_add(FLOOD_WINDOW_MS));
+            if self.pairs.len() >= FLOOD_PAIRS {
+                // A PAIR PAST THE TABLE IS WRITTEN, never held: an unfollowed
+                // pair loses nothing.
+                return Rationed::Write { held_before: 0 };
+            }
+        }
+        let pair = self.pairs.entry(key).or_insert(Pair {
+            start: at,
+            written: 0,
+            held: 0,
+        });
+        let mut held_before = 0;
+        if at >= pair.start.saturating_add(FLOOD_WINDOW_MS) {
+            held_before = pair.held;
+            *pair = Pair {
+                start: at,
+                written: 0,
+                held: 0,
+            };
+        }
+        if pair.written < limit {
+            pair.written = pair.written.saturating_add(1);
+            Rationed::Write { held_before }
+        } else {
+            pair.held = pair.held.saturating_add(1);
+            Rationed::Hold
+        }
+    }
 }
 
 impl Inner {
@@ -748,6 +886,10 @@ pub struct Sink {
     last_error: Mutex<Option<String>>,
     /// See [`Health::clock_held`].
     clock_held: AtomicU64,
+    /// See [`Config::flood_lines`]. Read-only after construction.
+    flood_lines: u32,
+    /// See [`Health::rationed`].
+    rationed: AtomicU64,
     /// The exclusive lock on `<dir>/events.lock`, held for the life of the
     /// sink and released by the kernel when the file closes. `None` for a sink
     /// around a target this crate did not open. See [`Sink::open`].
@@ -904,6 +1046,7 @@ impl Sink {
                 buf: Vec::with_capacity(512),
                 torn: false,
                 audit: None,
+                flood: Flood::default(),
             }),
             written: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -912,6 +1055,8 @@ impl Sink {
             reported: AtomicBool::new(false),
             last_error: Mutex::new(None),
             clock_held: AtomicU64::new(0),
+            flood_lines: config.flood_lines,
+            rationed: AtomicU64::new(0),
             held_lock: None,
         }
     }
@@ -1235,6 +1380,24 @@ impl Sink {
         if held {
             self.clock_held.fetch_add(1, Ordering::Relaxed);
         }
+        // THE FLOOD RATION (DB-A43): a `warn` pair past its lines this window
+        // is held back and counted; never an `error`, never an audited line.
+        // One level test for every other event. See `DEFAULT_FLOOD_LINES`.
+        let audited = is_audited(event.level(), event.target(), event.message());
+        let mut held_before = 0u64;
+        if self.flood_lines > 0 && event.level() == Level::Warn && !audited {
+            match inner
+                .flood
+                .admit(self.flood_lines, event.target(), event.message(), at)
+            {
+                Rationed::Hold => {
+                    drop(guard);
+                    self.rationed.fetch_add(1, Ordering::Relaxed);
+                    return Emitted::Filtered;
+                }
+                Rationed::Write { held_before: n } => held_before = n,
+            }
+        }
         inner.seq = inner.seq.saturating_add(1);
         inner.buf.clear();
         // A FRAGMENT THE LAST FAILURE COULD NOT CLOSE IS CLOSED FIRST. See
@@ -1243,6 +1406,17 @@ impl Sink {
         if led {
             inner.buf.push(b'\n');
         }
+        // WHAT THE LAST WINDOW HELD BACK IS SAID BEFORE THIS LINE, as a line of
+        // its own in the same write: its pair, its count and the window.
+        if held_before > 0 {
+            let said = Event::warn(event.target(), FLOOD_MESSAGE)
+                .with("message", event.message())
+                .with("held", held_before)
+                .with("window_ms", FLOOD_WINDOW_MS);
+            line(&mut inner.buf, inner.seq, at, run, &said);
+            inner.seq = inner.seq.saturating_add(1);
+        }
+        let own_from = inner.buf.len();
         line(&mut inner.buf, inner.seq, at, run, event);
         let span = u64::try_from(inner.buf.len()).unwrap_or(u64::MAX);
         // CARRIED OUT OF THE CRITICAL SECTION, NOT REPORTED INSIDE IT.
@@ -1281,9 +1455,9 @@ impl Sink {
         // stream's. Only an audited event reaches this; any other pays one
         // `Option` test and nothing else. D-3341 item 3.
         let audit_failure = match inner.audit {
-            Some(ref mut audit) if is_audited(event.level(), event.target(), event.message()) => {
-                let own = inner.buf.get(usize::from(led)..).unwrap_or(&[]);
-                audit.append(own, inner.seq, event.level(), &EventKeys(event))
+            Some(ref mut audit) if audited => {
+                let own = inner.buf.get(own_from..).unwrap_or(&[]);
+                audit.append(own, inner.seq, event.level(), &EventKeys(event, run))
             }
             _ => None,
         };
@@ -1298,7 +1472,8 @@ impl Sink {
                 if let Some(why) = audit_failure {
                     self.report(&why);
                 }
-                self.written.fetch_add(1, Ordering::Relaxed);
+                self.written
+                    .fetch_add(1 + u64::from(held_before > 0), Ordering::Relaxed);
                 Emitted::Written
             }
             Err(e) => {
@@ -1406,6 +1581,7 @@ impl Sink {
             current_bytes: bytes,
             next_seq,
             clock_held: self.clock_held.load(Ordering::Relaxed),
+            rationed: self.rationed.load(Ordering::Relaxed),
         }
     }
 
@@ -1766,7 +1942,10 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
 // Beside the stream, `audit.idx/<dimension>/<value>.idx` holds one fixed
 // 32-byte [`AuditPointer`] per audited event that carries that value: the
 // event's `day`, its `month` (or its day's), its `feed` (or `vendor`), its
-// `instrument` (or `symbol`), its `contract`, and its `target`. A reader
+// `instrument` (or `symbol`), its `contract`, its `target`, its `run` (its
+// top-level run, or a numeric `run` field) and its `code` (or `reason`): the
+// last two added by WP-33c so a run and a refusal reason are each one probe
+// (DB-A41, DB-A47). A reader
 // asking "what was refused for NIFTY on 2022-03-07" opens ONE file named by the
 // question and reads the pointers at its end; nothing is scanned and nothing is
 // planned. `CLAUDE.md` §4: the path is the index.
@@ -1780,7 +1959,7 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
 // An event that is not audited pays one `Option` test and, when the sink keeps
 // a stream, [`is_audited`]: one level comparison and at most one pass over its
 // message, which `crate::event` bounds. An audited event pays one more
-// `write` of its line and at most six index appends of 32 bytes, each through
+// `write` of its line and at most eight index appends of 32 bytes, each through
 // a posting file kept open between events ([`AUDIT_HANDLES`] of them; a miss
 // is one `open`, and at most one `create_dir_all`). None of that grows with the
 // stream, the index or the number of earlier events. Once per
@@ -1798,6 +1977,18 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
 // the ring's audited lines, oldest first: the refusals still on disk are kept
 // before the ring rolls them away. Once, at open, bounded by the ring's own
 // ceiling, and counted in [`AuditHealth::seeded`].
+//
+// # Retention, named (WP-33c, DB-A43)
+//
+// The stream holds at most [`AUDIT_MAX_FILE_BYTES`] x [`AUDIT_KEEP_FILES`] =
+// 1 GiB while rotation works, and loses no audited line inside that bound: a
+// line leaves only when its whole file rolls past the kept set, with its index
+// generation. What it takes is bounded by what is audited: refusals at
+// `error`, run lifecycles, and access records their writer rations (the api's
+// `/db` reads: one sampled line and one count per route a minute, plus each
+// refused read under the failed-request ration). At ~600 bytes a line that is
+// some 1.8 million lines; how many days that is depends on how many refusals
+// the operator's runs produce, so no day count is claimed here.
 
 /// The audit stream's file stem: `audit.ndjson`, rolled to `audit.<n>.ndjson`.
 pub const AUDIT_BASENAME: &str = "audit";
@@ -1821,8 +2012,41 @@ const AUDIT_POINTER_BYTES_U64: u64 = 32;
 
 /// The dimensions the index keeps posting files for, in the order an event's
 /// pointers are appended.
-pub const AUDIT_DIMENSIONS: [&str; 6] =
+///
+/// `run` and `code` were added by WP-33c (DB-A41, DB-A47): `run` is the
+/// line's own run (its top-level `run`, else a numeric `run` field, which is
+/// how the GDFL importer names its run on `run started` and `run finished`),
+/// and `code` is a refusal's `code` field (else its `reason`), so every day
+/// refused for one reason is one posting. A generation written before a
+/// dimension existed does not index its earlier lines by it; [`audit_coverage`]
+/// says from which offset each generation does.
+pub const AUDIT_DIMENSIONS: [&str; 8] = [
+    "day",
+    "month",
+    "feed",
+    "instrument",
+    "contract",
+    "target",
+    "run",
+    "code",
+];
+
+/// The dimensions the first index build (D-3341 item 3) kept, from the start
+/// of every generation it wrote. A generation with no [`AUDIT_DIMS_FILE`] was
+/// written by that build: these six cover it whole, the rest not at all.
+pub const AUDIT_FIRST_DIMENSIONS: [&str; 6] =
     ["day", "month", "feed", "instrument", "contract", "target"];
+
+/// The file in each index generation naming, per dimension, the byte offset of
+/// the generation's audit file from which its lines are indexed by it:
+/// `<dimension> <offset>` per line. Written when a generation is opened by a
+/// build that indexes a dimension the file does not name yet.
+pub const AUDIT_DIMS_FILE: &str = "dims";
+
+/// A target whose last segment is this is an access record its writer already
+/// rations (the api's sampled `/db` reads, DB-A42), audited at `info` or
+/// above.
+pub const AUDIT_ACCESS_SEGMENT: &str = "access";
 
 /// The words that mark a run's lifecycle in an event's message ("run started",
 /// "command finished", "census refused; run stopped").
@@ -1919,13 +2143,15 @@ fn hex_digit(nibble: u8) -> char {
 }
 
 /// Whether an event belongs in the audit stream: every event at `error`, and
-/// every event at `info` or above whose target ends in `lifecycle` or whose
-/// message holds one of [`AUDIT_LIFECYCLE_WORDS`] as a word.
+/// every event at `info` or above whose target ends in `lifecycle` or
+/// [`AUDIT_ACCESS_SEGMENT`], or whose message holds one of
+/// [`AUDIT_LIFECYCLE_WORDS`] as a word.
 ///
 /// `warn` is not a refusal here: the ring's flood was `warn` (an expected
 /// absence logged once per month asked, DB-023), and a stream that took it
-/// would roll as fast as the ring does. O(message length), which
-/// `crate::event` bounds.
+/// would roll as fast as the ring does. An access record is taken because its
+/// writer bounds it before it is emitted (DB-A42); this crate cannot, as it
+/// knows no route. O(message length), which `crate::event` bounds.
 #[must_use]
 pub fn is_audited(level: Level, target: &str, message: &str) -> bool {
     if level.at_least(Level::Error) {
@@ -1934,7 +2160,9 @@ pub fn is_audited(level: Level, target: &str, message: &str) -> bool {
     if !level.at_least(Level::Info) {
         return false;
     }
-    target.rsplit('.').next() == Some("lifecycle")
+    let last = target.rsplit('.').next();
+    last == Some("lifecycle")
+        || last == Some(AUDIT_ACCESS_SEGMENT)
         || message
             .split(|c: char| !c.is_ascii_alphabetic())
             .any(|word| AUDIT_LIFECYCLE_WORDS.contains(&word))
@@ -2049,10 +2277,14 @@ trait Keyed {
     fn target(&self) -> &str;
     /// The text of the field named `key`, when it is text.
     fn text(&self, key: &str) -> Option<&str>;
+    /// The run the line belongs to: its top-level `run` when it has one, else
+    /// a `run` field holding a whole number (the GDFL importer's `run started`
+    /// and `run finished` name their run that way). `None` for neither.
+    fn run(&self) -> Option<u64>;
 }
 
-/// An event being written, as [`Keyed`].
-struct EventKeys<'e, 'a>(&'e Event<'a>);
+/// An event being written, and the run it is stamped with, as [`Keyed`].
+struct EventKeys<'e, 'a>(&'e Event<'a>, u64);
 
 impl Keyed for EventKeys<'_, '_> {
     fn target(&self) -> &str {
@@ -2066,6 +2298,23 @@ impl Keyed for EventKeys<'_, '_> {
             .find(|(name, _)| *name == key)
             .and_then(|&(_, value)| value.as_str())
     }
+
+    fn run(&self) -> Option<u64> {
+        if self.1 != 0 {
+            return Some(self.1);
+        }
+        self.0
+            .fields()
+            .iter()
+            .find(|(name, _)| *name == "run")
+            .and_then(|&(_, value)| match value {
+                crate::value::Value::Uint(n) => Some(n),
+                crate::value::Value::Int(n) => u64::try_from(n).ok(),
+                crate::value::Value::Str(text) => whole_number(text),
+                _ => None,
+            })
+            .filter(|run| *run != 0)
+    }
 }
 
 impl Keyed for Record {
@@ -2076,6 +2325,24 @@ impl Keyed for Record {
     fn text(&self, key: &str) -> Option<&str> {
         self.field(key).and_then(crate::value::OwnedValue::as_str)
     }
+
+    fn run(&self) -> Option<u64> {
+        if self.run != 0 {
+            return Some(self.run);
+        }
+        self.field("run")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(whole_number))
+            })
+            .filter(|run| *run != 0)
+    }
+}
+
+/// `text` as a canonical whole number: digits only, no sign, no leading zero.
+fn whole_number(text: &str) -> Option<u64> {
+    text.parse::<u64>().ok().filter(|n| n.to_string() == text)
 }
 
 /// Whether `text` is a day as this workspace writes one: `YYYY-MM-DD`.
@@ -2092,20 +2359,87 @@ fn is_day_text(text: &str) -> bool {
 }
 
 /// The posting values one event carries, one per [`AUDIT_DIMENSIONS`] entry.
-fn postings_of(keys: &impl Keyed) -> [Option<&str>; 6] {
+fn postings_of(keys: &impl Keyed) -> [Option<std::borrow::Cow<'_, str>>; 8] {
+    use std::borrow::Cow;
     let day = keys.text("day").filter(|text| is_day_text(text));
     let month = keys
         .text("month")
         .filter(|text| text.len() == 7 && is_day_text(&format!("{text}-01")))
         .or_else(|| day.and_then(|day| day.get(..7)));
     [
-        day,
-        month,
-        keys.text("feed").or_else(|| keys.text("vendor")),
-        keys.text("instrument").or_else(|| keys.text("symbol")),
-        keys.text("contract"),
-        Some(keys.target()),
+        day.map(Cow::Borrowed),
+        month.map(Cow::Borrowed),
+        keys.text("feed")
+            .or_else(|| keys.text("vendor"))
+            .map(Cow::Borrowed),
+        keys.text("instrument")
+            .or_else(|| keys.text("symbol"))
+            .map(Cow::Borrowed),
+        keys.text("contract").map(Cow::Borrowed),
+        Some(Cow::Borrowed(keys.target())),
+        keys.run().map(|run| Cow::Owned(run.to_string())),
+        keys.text("code")
+            .or_else(|| keys.text("reason"))
+            .map(Cow::Borrowed),
     ]
+}
+
+/// Whether the audit stream in `dir` exists, and its serial when it does:
+/// `Ok(None)` when neither its file nor its serial is there, which is a
+/// stream that was never written, NOT one that holds nothing (DB-A46). A
+/// reader says "no audit stream" for the first and "0 lines" only for the
+/// second.
+///
+/// # Errors
+///
+/// As [`audit_serial`].
+pub fn audit_state(dir: &Path) -> Result<Option<u64>, String> {
+    if !audit_current_path(dir).exists() && !audit_serial_path(dir).exists() {
+        return Ok(None);
+    }
+    audit_serial(dir).map(Some)
+}
+
+/// From which byte offset of the audit file of `serial` its lines are indexed
+/// by `dimension`: `Some(0)` for the whole generation, `Some(n)` for the lines
+/// from `n` on, `None` when none of them are (a generation written before the
+/// dimension existed, or whose [`AUDIT_DIMS_FILE`] is unreadable).
+///
+/// A generation with no file was written by the first index build, which kept
+/// [`AUDIT_FIRST_DIMENSIONS`] from its start and no other. One read of a file
+/// of a few hundred bytes.
+#[must_use]
+pub fn audit_coverage(dir: &Path, serial: u64, dimension: &str) -> Option<u64> {
+    let path = audit_generation_path(dir, serial).join(AUDIT_DIMS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => dims_of(&text)
+            .into_iter()
+            .find(|(name, _)| name == dimension)
+            .map(|(_, from)| from),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            AUDIT_FIRST_DIMENSIONS.contains(&dimension).then_some(0)
+        }
+        Err(_) => None,
+    }
+}
+
+/// The `<dimension> <offset>` lines of a [`AUDIT_DIMS_FILE`], the first
+/// naming of each dimension winning. A line this build cannot read is
+/// skipped: it names nothing this reader could rely on.
+fn dims_of(text: &str) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = Vec::new();
+    for line in text.lines() {
+        let Some((name, from)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(from) = whole_number(from) else {
+            continue;
+        };
+        if !out.iter().any(|(held, _)| held == name) {
+            out.push((name.to_owned(), from));
+        }
+    }
+    out
 }
 
 /// The serial of the audit file being appended to, `0` before the stream has
@@ -2215,12 +2549,85 @@ pub fn audit_postings(
     value: &str,
     take: usize,
 ) -> Result<Postings, String> {
+    let page = audit_postings_before(dir, dimension, value, take, None)?;
+    Ok(Postings {
+        pointers: page
+            .pointers
+            .into_iter()
+            .map(|(_, pointer)| pointer)
+            .collect(),
+        total: page.total,
+        malformed: page.malformed,
+    })
+}
+
+/// Where one pointer sits in the index: the generation (the serial of the
+/// audit file it points into) and its number in that generation's posting
+/// file. A posting file is appended to and never rewritten while its
+/// generation is kept, so a place is stable: the cursor a keyed `/logs.json`
+/// page hands back (DB-A44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PostingAt {
+    /// The generation.
+    pub serial: u64,
+    /// The pointer's number in that generation's posting file, from 0.
+    pub index: u64,
+}
+
+/// One page of a posting, read backwards from a place.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PostingsPage {
+    /// Up to the number asked for, strictly older than the place asked from,
+    /// newest first, each with its own place.
+    pub pointers: Vec<(PostingAt, AuditPointer)>,
+    /// How many whole records the posting holds across the kept generations.
+    pub total: u64,
+    /// Records among those read that would not decode, skipped (their places
+    /// are passed over, never re-read).
+    pub malformed: u64,
+    /// Kept generations whose lines this dimension does not index from their
+    /// start, with the offset it does index them from (`None`: not at all).
+    /// A posting that misses a line there misses it because the line predates
+    /// the dimension, not because nothing carried the value. Probed only for a
+    /// dimension outside [`AUDIT_FIRST_DIMENSIONS`].
+    pub uncovered: Vec<(u64, Option<u64>)>,
+}
+
+/// The newest `take` pointers `dimension = value` holds strictly older than
+/// `before` (from the newest when `None`), newest first, each with its place.
+///
+/// Per generation, newest first: one `metadata` call and one read of at most
+/// the pointers still wanted, at a computed offset in the posting file,
+/// whatever its length. At most [`AUDIT_KEEP_FILES`] + 2 generations. For a
+/// dimension a generation may not cover, one more small read per generation
+/// ([`audit_coverage`]). O(generations + take), never a walk of a posting.
+///
+/// # Errors
+///
+/// The serial or a posting file that is there and cannot be read, or a
+/// dimension or value the index cannot name.
+pub fn audit_postings_before(
+    dir: &Path,
+    dimension: &str,
+    value: &str,
+    take: usize,
+    before: Option<PostingAt>,
+) -> Result<PostingsPage, String> {
     let current = audit_serial(dir)?;
-    let mut out = Postings::default();
+    let mut out = PostingsPage::default();
     let oldest = current.saturating_sub(u64::from(AUDIT_KEEP_FILES));
-    for serial in (oldest..=current.saturating_add(1)).rev() {
+    let newest = current.saturating_add(1);
+    let check_coverage = !AUDIT_FIRST_DIMENSIONS.contains(&dimension);
+    for serial in (oldest..=newest).rev() {
         let path = audit_posting_path(dir, serial, dimension, value)
             .ok_or_else(|| format!("the audit index keeps no posting for {dimension}={value:?}"))?;
+        if check_coverage && audit_path_for(dir, current, serial).is_some_and(|file| file.exists())
+        {
+            let from = audit_coverage(dir, serial, dimension);
+            if from != Some(0) {
+                out.uncovered.push((serial, from));
+            }
+        }
         let len = match std::fs::metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(format!("{}: {e}", path.display())),
@@ -2228,20 +2635,32 @@ pub fn audit_postings(
         };
         let total = len / AUDIT_POINTER_BYTES_U64;
         out.total = out.total.saturating_add(total);
+        // THE PLACE ASKED FROM BOUNDS THIS GENERATION: newer generations are
+        // passed over whole, the place's own one is read below its index.
+        let end = match before {
+            Some(at) if serial > at.serial => continue,
+            Some(at) if serial == at.serial => total.min(at.index),
+            _ => total,
+        };
         let left = take.saturating_sub(out.pointers.len());
-        let wanted = total.min(u64::try_from(left).unwrap_or(u64::MAX));
+        let wanted = end.min(u64::try_from(left).unwrap_or(u64::MAX));
         if wanted == 0 {
             continue;
         }
-        let from = total
-            .saturating_sub(wanted)
-            .saturating_mul(AUDIT_POINTER_BYTES_U64);
-        let bytes =
-            crate::tail::read_at(&path, from, wanted.saturating_mul(AUDIT_POINTER_BYTES_U64))
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-        for chunk in bytes.chunks_exact(AUDIT_POINTER_BYTES).rev() {
+        let first = end.saturating_sub(wanted);
+        let bytes = crate::tail::read_at(
+            &path,
+            first.saturating_mul(AUDIT_POINTER_BYTES_U64),
+            wanted.saturating_mul(AUDIT_POINTER_BYTES_U64),
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        for (n, chunk) in bytes.chunks_exact(AUDIT_POINTER_BYTES).enumerate().rev() {
+            let at = PostingAt {
+                serial,
+                index: first.saturating_add(u64::try_from(n).unwrap_or(u64::MAX)),
+            };
             match AuditPointer::decode(chunk) {
-                Some(pointer) => out.pointers.push(pointer),
+                Some(pointer) => out.pointers.push((at, pointer)),
                 None => out.malformed = out.malformed.saturating_add(1),
             }
         }
@@ -2310,10 +2729,65 @@ impl Audit {
         let (len, torn) = terminate_torn_tail(&mut target, &current, found);
         audit.file = Some(target.file);
         audit.bytes = len;
+        // WHAT THIS BUILD INDEXES IS WRITTEN DOWN BEFORE ITS FIRST LINE, so a
+        // reader can tell a posting that missed a line from a generation that
+        // predates the dimension (WP-33c). Before the seed, so seeded lines
+        // are covered.
+        let marked = audit.mark_coverage();
         if fresh {
             audit.seed(ring_keep);
         }
-        (audit, torn)
+        (audit, torn.or(marked.err()))
+    }
+
+    /// Writes this build's coverage into the current generation's
+    /// [`AUDIT_DIMS_FILE`]: every dimension it does not name yet, from the
+    /// offset the stream stands at. A generation that has lines and no file was
+    /// written by the first index build, so the dimensions it kept are written
+    /// as covered from 0 and the others from here. One read and at most one
+    /// append, at open and at each roll.
+    fn mark_coverage(&mut self) -> Result<(), String> {
+        let generation = audit_generation_path(&self.dir, self.serial);
+        let path = generation.join(AUDIT_DIMS_FILE);
+        let held = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(dims_of(&text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                let why = format!("{}: cannot read the index coverage — {e}", path.display());
+                self.health.last_error = Some(why.clone());
+                return Err(why);
+            }
+        };
+        let older = self.bytes > 0 || generation.exists();
+        let mut text = String::new();
+        for dimension in AUDIT_DIMENSIONS {
+            let from = match held {
+                Some(ref held) if held.iter().any(|(name, _)| name == dimension) => continue,
+                Some(_) => self.bytes,
+                None if older && !AUDIT_FIRST_DIMENSIONS.contains(&dimension) => self.bytes,
+                None => 0,
+            };
+            text.push_str(dimension);
+            text.push(' ');
+            text.push_str(&from.to_string());
+            text.push('\n');
+        }
+        if text.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&generation)
+            .and_then(|()| {
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path)?
+                    .write_all(text.as_bytes())
+            })
+            .map_err(|e| {
+                let why = format!("{}: cannot record the index coverage — {e}", path.display());
+                self.health.last_error = Some(why.clone());
+                why
+            })
     }
 
     /// The stream with no file, and the reason, recorded.
@@ -2397,7 +2871,7 @@ impl Audit {
             let Some(value) = value else {
                 continue;
             };
-            let Some(path) = audit_posting_path(&self.dir, self.serial, dimension, value) else {
+            let Some(path) = audit_posting_path(&self.dir, self.serial, dimension, &value) else {
                 self.health.unindexed = self.health.unindexed.saturating_add(1);
                 continue;
             };
@@ -2486,6 +2960,11 @@ impl Audit {
         );
         self.bytes = 0;
         self.health.rotations = self.health.rotations.saturating_add(1);
+        // A NEW GENERATION IS COVERED BY EVERY DIMENSION FROM ITS FIRST LINE.
+        // A coverage file that cannot be written does not stop the roll: the
+        // reader then treats the generation as the first build's and says the
+        // newer dimensions do not cover it, which is the safe reading.
+        let _named_in_last_error = self.mark_coverage();
         Ok(())
     }
 
@@ -2888,6 +3367,7 @@ mod tests {
             buf: Vec::new(),
             torn: false,
             audit: None,
+            flood: super::Flood::default(),
         };
 
         assert_eq!(
@@ -3962,8 +4442,12 @@ mod tests {
             current_bytes: 100,
             next_seq: 11,
             clock_held: 0,
+            rationed: 9,
         };
-        assert!(!quiet.is_loud(), "nothing wrong is not loud");
+        assert!(
+            !quiet.is_loud(),
+            "nothing wrong is not loud, and a ration working is nothing wrong"
+        );
 
         let dropped_only = Health {
             dropped: 1,
@@ -5725,5 +6209,319 @@ mod tests {
             "newest first"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // WP-33c: RUN AND CODE IN THE INDEX, COVERAGE, ABSENCE, PLACES, ACCESS
+    // RECORDS AND THE FLOOD RATION
+    // -----------------------------------------------------------------------
+
+    /// **A RUN AND A REFUSAL REASON ARE EACH ONE PROBE** (DB-A41, DB-A47):
+    /// the top-level run of a stamped line, the numeric `run` field the GDFL
+    /// importer writes on `run started`, and a refusal's `code` (else its
+    /// `reason`) each land in their own posting; a line with none of them is
+    /// in neither, and a run of zero is no run.
+    #[test]
+    fn a_run_and_a_refusal_code_are_each_one_probe() {
+        let dir = scratch("audit-run-code");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert!(
+            sink.emit_for_run(4025, &Event::info("cli.lifecycle", "command started"))
+                .is_written()
+        );
+        assert!(
+            sink.emit(&Event::info("gdfl.import", "run started").with("run", 1_791_000_000_u64))
+                .is_written()
+        );
+        assert!(
+            sink.emit(
+                &Event::error("gdfl.import", "refused")
+                    .with("day", "2020-01-01")
+                    .with("code", "census_full")
+            )
+            .is_written()
+        );
+        assert!(
+            sink.emit(&Event::error("pull.spot", "refused").with("reason", "ZZ_REASON"))
+                .is_written()
+        );
+        assert!(
+            sink.emit(&Event::error("x", "refused").with("run", 0_u64))
+                .is_written()
+        );
+        assert_eq!(probed(&dir, "run", "4025").len(), 1);
+        let importer = probed(&dir, "run", "1791000000");
+        assert_eq!(importer.len(), 1);
+        assert_eq!(importer[0].message, "run started");
+        let census = probed(&dir, "code", "census_full");
+        assert_eq!(census.len(), 1);
+        assert_eq!(census[0].target, "gdfl.import");
+        assert_eq!(probed(&dir, "code", "ZZ_REASON").len(), 1);
+        assert!(probed(&dir, "run", "0").is_empty(), "zero is no run");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A GENERATION SAYS FROM WHERE EACH DIMENSION COVERS IT** (WP-33c): a
+    /// new stream is covered by every dimension from 0; a generation the first
+    /// index build wrote (lines, no `dims` file) is covered by its six from 0
+    /// and by `run` and `code` only from the offset the newer build opened it
+    /// at; a posting probe names that generation as uncovered, so a miss there
+    /// is never read as "nothing carried the value".
+    #[test]
+    fn a_generation_names_the_offset_each_dimension_covers_it_from() {
+        let dir = scratch("audit-coverage");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&Event::error("x", "refused").with("code", "A"));
+        }
+        for dimension in super::AUDIT_DIMENSIONS {
+            assert_eq!(
+                super::audit_coverage(&dir, 0, dimension),
+                Some(0),
+                "{dimension}"
+            );
+        }
+        assert!(
+            super::audit_postings_before(&dir, "code", "A", 10, None)
+                .expect("a probe")
+                .uncovered
+                .is_empty()
+        );
+
+        // THE FIRST BUILD'S GENERATION: lines and postings, no `dims` file.
+        let old = scratch("audit-coverage-old");
+        {
+            let sink = Sink::open(&Config::new(&old)).expect("opens");
+            let _ = sink.emit(&Event::error("x", "refused").with("code", "B"));
+        }
+        std::fs::remove_file(super::audit_generation_path(&old, 0).join(super::AUDIT_DIMS_FILE))
+            .expect("the newer build wrote one");
+        assert_eq!(super::audit_coverage(&old, 0, "day"), Some(0));
+        assert_eq!(super::audit_coverage(&old, 0, "run"), None);
+        let before = std::fs::metadata(audit_current_path(&old))
+            .expect("a stream")
+            .len();
+        {
+            let sink = Sink::open(&Config::new(&old)).expect("reopens");
+            let _ = sink.emit(&Event::error("x", "refused").with("code", "B"));
+        }
+        assert_eq!(super::audit_coverage(&old, 0, "day"), Some(0));
+        assert_eq!(super::audit_coverage(&old, 0, "code"), Some(before));
+        let page = super::audit_postings_before(&old, "code", "B", 10, None).expect("a probe");
+        assert_eq!(
+            page.pointers.len(),
+            2,
+            "the old build's line was posted by this one too"
+        );
+        assert_eq!(page.uncovered, vec![(0, Some(before))]);
+        assert!(
+            super::audit_postings_before(&old, "day", "2022-01-01", 10, None)
+                .expect("a probe")
+                .uncovered
+                .is_empty(),
+            "the first six cover every generation whole"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&old);
+    }
+
+    /// **A STREAM THAT WAS NEVER WRITTEN IS NOT A STREAM HOLDING NOTHING**
+    /// (DB-A46): `audit_state` answers `None` for a directory with no audit
+    /// file and no serial, and the serial for one that has a stream.
+    #[test]
+    fn an_absent_stream_is_named_apart_from_an_empty_one() {
+        let dir = scratch("audit-state");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        assert_eq!(super::audit_state(&dir), Ok(None));
+        assert_eq!(
+            audit_serial(&dir),
+            Ok(0),
+            "the serial alone cannot tell them apart"
+        );
+        {
+            let _sink = Sink::open(&Config::new(&dir)).expect("opens");
+        }
+        assert_eq!(super::audit_state(&dir), Ok(Some(0)));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PLACE IN A POSTING IS A STABLE CURSOR** (DB-A44): reading on from
+    /// the last place a page returned gives the next older pointers, never one
+    /// twice and never one skipped, across a roll, and lines appended after the
+    /// first page do not move what the next page holds.
+    #[test]
+    fn a_posting_is_paged_from_a_place_without_a_line_twice_or_skipped() {
+        let dir = scratch("audit-places");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 600;
+        for i in 0..12u32 {
+            let _ = sink.emit(
+                &Event::error("x", "refused")
+                    .with("instrument", "VBL")
+                    .with("i", i),
+            );
+        }
+        assert!(sink.audit_health().expect("a stream").rotations >= 2);
+        let first = super::audit_postings_before(&dir, "instrument", "VBL", 5, None).expect("p1");
+        assert_eq!(first.pointers.len(), 5);
+        assert_eq!(first.total, 12);
+        // A LINE APPENDED NOW IS NEWER THAN EVERY PLACE ALREADY HANDED OUT.
+        let _ = sink.emit(
+            &Event::error("x", "refused")
+                .with("instrument", "VBL")
+                .with("i", 99),
+        );
+        let mut seen: Vec<u64> = Vec::new();
+        let serial = audit_serial(&dir).expect("serial");
+        let mut page = first;
+        loop {
+            for (_, pointer) in &page.pointers {
+                let AuditLine::Found(record) = audit_read(&dir, serial, pointer) else {
+                    panic!("{pointer:?}");
+                };
+                seen.push(
+                    record
+                        .field("i")
+                        .and_then(crate::value::OwnedValue::as_u64)
+                        .unwrap(),
+                );
+            }
+            let Some(&(last, _)) = page.pointers.last() else {
+                break;
+            };
+            page = super::audit_postings_before(&dir, "instrument", "VBL", 5, Some(last))
+                .expect("the next page");
+        }
+        assert_eq!(
+            seen,
+            (0..12).rev().collect::<Vec<u64>>(),
+            "newest first, each once"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN ACCESS RECORD IS AUDITED AT INFO, AND NOTHING ELSE NEW IS**
+    /// (DB-A42): a target whose last segment is `access` is the api's rationed
+    /// `/db` read record; `accesses` and a `warn` are not.
+    #[test]
+    fn an_access_record_is_audited_at_info() {
+        assert!(is_audited(Level::Info, "api.access", "read served"));
+        assert!(is_audited(Level::Info, "access", "read served"));
+        assert!(!is_audited(Level::Debug, "api.access", "read served"));
+        assert!(!is_audited(Level::Info, "api.accesses", "read served"));
+        assert!(!is_audited(Level::Info, "api.access.detail", "read served"));
+    }
+
+    /// **A WARN FLOOD IS HELD TO ITS RATION, COUNTED, AND SAID** (DB-A43):
+    /// one pair past its lines in a window writes nothing more in it; the held
+    /// lines are counted in `rationed`; the pair's next line after the window
+    /// is led by ONE line naming the message and the count. Another pair, an
+    /// error and an audited warn are never held.
+    #[test]
+    fn a_warn_flood_is_held_to_its_ration_counted_and_said() {
+        let dir = scratch("flood");
+        let sink = Sink::open(&Config::new(&dir).with_flood_lines(3)).expect("opens");
+        for _ in 0..10 {
+            let _ = sink.emit(&Event::warn("api.bars", "read refused").with("month", "1999-02"));
+        }
+        assert!(
+            sink.emit(&Event::warn("api.other", "read refused"))
+                .is_written()
+        );
+        for _ in 0..5 {
+            assert!(
+                sink.emit(&Event::error("api.bars", "read refused"))
+                    .is_written()
+            );
+        }
+        for _ in 0..5 {
+            assert!(sink.emit(&Event::warn("autopilot", "paused")).is_written());
+        }
+        let health = sink.health();
+        assert_eq!(health.rationed, 7, "{health:?}");
+        let held: Vec<Record> = lines_of(&current_path(&dir))
+            .into_iter()
+            .filter(|r| r.target == "api.bars" && r.level == Level::Warn)
+            .collect();
+        assert_eq!(held.len(), 3, "the ration, and no more");
+        // THE NEXT WINDOW SAYS WHAT THE LAST ONE HELD, then writes the line.
+        {
+            let mut guard = sink.inner.lock().unwrap();
+            guard.last_at = guard.last_at.saturating_add(super::FLOOD_WINDOW_MS);
+        }
+        assert!(
+            sink.emit(&Event::warn("api.bars", "read refused").with("month", "1999-03"))
+                .is_written()
+        );
+        let lines = lines_of(&current_path(&dir));
+        let last_two = &lines[lines.len() - 2..];
+        assert_eq!(last_two[0].message, super::FLOOD_MESSAGE);
+        assert_eq!(
+            last_two[0]
+                .field("held")
+                .and_then(crate::value::OwnedValue::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            last_two[0]
+                .field("message")
+                .and_then(crate::value::OwnedValue::as_str),
+            Some("read refused")
+        );
+        assert_eq!(
+            last_two[1]
+                .field("month")
+                .and_then(crate::value::OwnedValue::as_str),
+            Some("1999-03")
+        );
+        assert_eq!(last_two[1].seq, last_two[0].seq + 1);
+        assert_eq!(sink.health().written, lines.len() as u64);
+        // OFF IS OFF.
+        let open = scratch("flood-off");
+        let unrationed = Sink::open(&Config::new(&open).with_flood_lines(0)).expect("opens");
+        for _ in 0..10 {
+            assert!(
+                unrationed
+                    .emit(&Event::warn("api.bars", "read refused"))
+                    .is_written()
+            );
+        }
+        assert_eq!(unrationed.health().rationed, 0);
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&open);
+    }
+
+    /// **THE RATION'S TABLE IS BOUNDED, AND A PAIR PAST IT IS WRITTEN, NOT
+    /// HELD**: `FLOOD_PAIRS` pairs in one window fill it; the next new pair is
+    /// written unrationed rather than held.
+    #[test]
+    fn a_pair_past_the_rations_table_is_written_not_held() {
+        let mut flood = super::Flood::default();
+        let names: Vec<String> = (0..super::FLOOD_PAIRS).map(|n| format!("t{n}")).collect();
+        for name in &names {
+            assert_eq!(
+                flood.admit(1, name, "m", 0),
+                super::Rationed::Write { held_before: 0 }
+            );
+            assert_eq!(flood.admit(1, name, "m", 0), super::Rationed::Hold);
+        }
+        for _ in 0..3 {
+            assert_eq!(
+                flood.admit(1, "past", "m", 0),
+                super::Rationed::Write { held_before: 0 },
+                "unfollowed, never held"
+            );
+        }
+        // A LATER WINDOW REPORTS WHAT EACH FOLLOWED PAIR HELD.
+        assert_eq!(
+            flood.admit(1, "t0", "m", super::FLOOD_WINDOW_MS),
+            super::Rationed::Write { held_before: 1 }
+        );
     }
 }

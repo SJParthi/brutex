@@ -1899,7 +1899,12 @@ async fn verify_json(
         );
     };
 
-    let report = crate::verify::vendor(&site.store_root, census);
+    // OFF THE ASYNC WORKERS, ONE SCRUB AT A TIME (WP-33c, DB-A35).
+    let report =
+        match crate::verify::vendor_off_worker(site.store_root.clone(), census.clone()).await {
+            Ok(report) => report,
+            Err((status, body)) => return (status, headers, body),
+        };
     // A DISAGREEMENT IS NOT A SERVER FAULT, so it is 200 with the finding in
     // the body: the request was answered correctly and the ANSWER is bad news.
     // A refusal — a counter that could not be read at all — is 503, because
@@ -17340,6 +17345,10 @@ async fn run_in_over(
                 say!("  masters: {}", dir.display());
                 say!("  store:   {}", store_root.display());
                 announce_log(logging.as_ref(), &level_note);
+                // THE PULL JOURNAL'S INDEX, BUILT ONCE IN THE BACKGROUND when
+                // it is absent or behind (WP-33c; DB-A32, DB-A34): the readers
+                // then cost O(runs), and until it lands they walk and say so.
+                let _index_build_detached = crate::audit::ensure_index(&store_root);
                 // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart

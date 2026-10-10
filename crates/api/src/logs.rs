@@ -122,6 +122,45 @@ struct Asked {
     /// audit index (D-3341 item 3). Empty for a request that names none, which
     /// is answered by the ring alone, exactly as before.
     keys: Keys,
+    /// `ring=1`: a keyed answer also reads the newest [`SCAN_BYTES`] of each
+    /// ring, for lines no audit stream holds (WP-33c, DB-A44). Off by default:
+    /// those rows cannot be paged and move as the ring moves, so they are
+    /// asked for, never mixed in.
+    ring: bool,
+    /// `before=<cursor>`: the next page of a keyed answer, from the `next` a
+    /// previous page handed back (WP-33c, DB-A44).
+    before: Option<String>,
+}
+
+/// Every parameter `/logs.json` and `/logs` read. Any other is named under
+/// `ignored` and logged once, never dropped in silence (WP-33c, DB-A45).
+pub(crate) const PARAMS: [&str; 12] = [
+    "limit",
+    "level",
+    "target",
+    "run",
+    "feed",
+    "instrument",
+    "day",
+    "contract",
+    "code",
+    "ring",
+    "before",
+    "durable",
+];
+
+/// The names `query` carries that `known` does not hold, in the order sent,
+/// each once. A name is the text before its `=`, as [`crate::server::param`]
+/// matches it. O(query length).
+pub(crate) fn unknown_params(query: &str, known: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let name = pair.split_once('=').map_or(pair, |(name, _)| name);
+        if !known.contains(&name) && !out.iter().any(|held| held == name) {
+            out.push(name.to_owned());
+        }
+    }
+    out
 }
 
 /// Reads the query string into a bounded [`telemetry::Query`].
@@ -167,7 +206,46 @@ fn asked(raw: &str) -> Asked {
     if run == 0 && !run_word.is_empty() && run_word != "0" {
         ignored.push(("run", run_word));
     }
-    let keys = keys_of(raw, &mut ignored);
+    let mut keys = keys_of(raw, &mut ignored);
+    let flag = |name: &'static str, ignored: &mut Vec<(&'static str, String)>| {
+        let word = crate::server::param(raw, name);
+        match word.as_str() {
+            "" | "0" => false,
+            "1" => true,
+            _ => {
+                ignored.push((name, word));
+                false
+            }
+        }
+    };
+    let ring = flag("ring", &mut ignored);
+    // `durable=1` ASKS THE INDEX FOR A RUN OR A TARGET ALONE. `run=` without
+    // it stays the ring's filter it always was, because a page polls it for a
+    // live sweep and the durable stream does not hold progress lines.
+    if flag("durable", &mut ignored) {
+        if run != 0 {
+            keys.run = Some(run);
+        } else if !target.is_empty() {
+            keys.target = Some(target.clone());
+        } else {
+            ignored.push((
+                "durable",
+                "1 with no run, target or key to probe the index by".to_owned(),
+            ));
+        }
+    }
+    let before_word = crate::server::param(raw, "before");
+    let before = if before_word.is_empty() {
+        None
+    } else if keys.is_empty() {
+        ignored.push(("before", before_word));
+        None
+    } else {
+        Some(before_word)
+    };
+    for name in unknown_params(raw, &PARAMS) {
+        ignored.push(("unknown parameter", name));
+    }
     for (param, word) in &ignored {
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::warn("api.logs", "filter ignored")
@@ -199,6 +277,8 @@ fn asked(raw: &str) -> Asked {
         run,
         ignored,
         keys,
+        ring,
+        before,
     }
 }
 
@@ -239,6 +319,16 @@ fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
             keys.contract = Some(contract);
         } else {
             ignored.push(("contract", contract));
+        }
+    }
+    // A REFUSAL'S CODE (WP-33c, DB-A47): the `code` (or `reason`) a refusal
+    // logged, one posting of the index.
+    let code = crate::server::param(raw, "code");
+    if !code.is_empty() {
+        if code.len() <= MAX_CONTRACT_ASKED && !code.contains(['/', '\\']) {
+            keys.code = Some(code);
+        } else {
+            ignored.push(("code", code));
         }
     }
     keys
@@ -638,7 +728,7 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"clock_held":{},"loud":{},"last_error":{}}}"#,
+        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"clock_held":{},"rationed":{},"loud":{},"last_error":{}}}"#,
         h.written,
         h.dropped,
         h.rotations,
@@ -646,6 +736,7 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
         h.current_bytes,
         h.next_seq,
         h.clock_held,
+        h.rationed,
         banner_is_loud(h),
         h.last_error
             .as_deref()
@@ -747,14 +838,40 @@ pub async fn logs_page(
 /// `the_page_shows_the_cli_half_and_not_only_the_servers` is named for the page
 /// and drove `json_over`, which never had the defect. That is how this survived
 /// being written down twice; the test drives [`page_over`] now.
+///
+/// **A KEYED PAGE READS THE INDEX, AS `/logs.json` DOES** (WP-33c, DB-A45):
+/// `/logs?feed=gdfl&day=2022-03-07` was byte-identical to `/logs`, because
+/// this walked the ring with the keys dropped. It now answers through
+/// [`keyed_walk`], the same rows `/logs.json` gives for the same query, with
+/// a link to the next page when there is one.
 fn page_over(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
-    let tail = both_halves(dir, cli_dir, &asked.query);
-    page_of(&tail, asked, health, (dir, cli_dir))
+    if asked.keys.is_empty() {
+        let tail = both_halves(dir, cli_dir, &asked.query);
+        return page_of(&tail, asked, health, (dir, cli_dir));
+    }
+    let (tail, _keyed, next) = keyed_walk(dir, cli_dir, asked);
+    let mut page = page_of(&tail, asked, health, (dir, cli_dir));
+    match next {
+        Some(cursor) => {
+            let _ = write!(
+                page,
+                "<p class=\"lead\">Read from the durable audit index, newest first. \
+                 <a href=\"/logs{}&amp;before={}\">Older matches</a></p>",
+                json_query(asked),
+                render::query_value(&cursor),
+            );
+        }
+        None => page.push_str(
+            "<p class=\"lead\">Read from the durable audit index: every match it holds is \
+             above.</p>",
+        ),
+    }
+    page
 }
 
 /// [`page_over`] over a walk a caller already has — split for [`json_of`]'s
@@ -1135,6 +1252,29 @@ fn json_query(asked: &Asked) -> String {
     if asked.run != 0 {
         let _ = write!(q, "&run={}", asked.run);
     }
+    // THE KEYS RIDE ALONG (WP-33c, DB-A45), so the JSON link and the next
+    // page reproduce the page's own question.
+    let keys = &asked.keys;
+    for (name, value) in [
+        ("feed", keys.feed.clone()),
+        (
+            "instrument",
+            keys.instrument.as_ref().map(|i| i.asked.clone()),
+        ),
+        ("day", keys.day.map(|d| d.to_string())),
+        ("contract", keys.contract.clone()),
+        ("code", keys.code.clone()),
+    ] {
+        if let Some(value) = value {
+            let _ = write!(q, "&{name}={}", render::query_value(&value));
+        }
+    }
+    if keys.run.is_some() || keys.target.is_some() {
+        q.push_str("&durable=1");
+    }
+    if asked.ring {
+        q.push_str("&ring=1");
+    }
     q
 }
 
@@ -1186,6 +1326,11 @@ fn page_shell(asked: &Asked, body: &str) -> String {
          <label>Level<select name=\"level\"><option value=\"\">every level</option>{levels}</select></label>\
          <label>Target<input type=\"text\" name=\"target\" value=\"{target}\" placeholder=\"pull, pull.member, api.serve\"></label>\
          <label>Run<input type=\"text\" name=\"run\" value=\"{run}\" placeholder=\"every run\"></label>\
+         <label>Feed<input type=\"text\" name=\"feed\" value=\"{feed}\" placeholder=\"gdfl, zerodha\"></label>\
+         <label>Instrument<input type=\"text\" name=\"instrument\" value=\"{instrument}\" placeholder=\"NSE-INDEX-NIFTY\"></label>\
+         <label>Day<input type=\"text\" name=\"day\" value=\"{day}\" placeholder=\"YYYY-MM-DD\"></label>\
+         <label>Contract<input type=\"text\" name=\"contract\" value=\"{contract}\"></label>\
+         <label>Code<input type=\"text\" name=\"code\" value=\"{code}\" placeholder=\"too_many_entries\"></label>\
          <label>Limit<input type=\"number\" name=\"limit\" min=\"1\" max=\"{max}\" value=\"{limit}\"></label>\
          <button type=\"submit\">Show</button>\
          <a href=\"/logs.json{q}\">as JSON</a>\
@@ -1201,6 +1346,20 @@ fn page_shell(asked: &Asked, body: &str) -> String {
         max = PAGE_LIMIT,
         q = json_query(asked),
         body = body,
+        feed = render::escape(asked.keys.feed.as_deref().unwrap_or("")),
+        instrument = render::escape(
+            asked
+                .keys
+                .instrument
+                .as_ref()
+                .map_or("", |instrument| instrument.asked.as_str())
+        ),
+        day = asked
+            .keys
+            .day
+            .map_or_else(String::new, |day| day.to_string()),
+        contract = render::escape(asked.keys.contract.as_deref().unwrap_or("")),
+        code = render::escape(asked.keys.code.as_deref().unwrap_or("")),
     )
 }
 
@@ -1237,22 +1396,21 @@ pub async fn note_request(
     let from_another_site = cross_site(request.headers());
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
+    // A `/db` READ KEEPS ITS SELECTION (WP-33c, DB-A42): the names it read
+    // by, never the whole query, and only on a read route.
+    let selection = is_db_read(&path).then(|| selection_of(request.uri().query().unwrap_or("")));
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let status = response.status();
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
 
-    let level = if status.is_server_error() {
-        telemetry::Level::Error
-    } else if status.is_client_error() {
-        telemetry::Level::Warn
-    } else {
-        telemetry::Level::Debug
-    };
+    let level = request_level(status);
     // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
-    // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
+    // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`]. A
+    // refused `/db` read's access record is under the same ration.
+    let mut admitted = true;
     if level != telemetry::Level::Debug {
-        let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
         let admit = FAILED_LINES
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1276,18 +1434,311 @@ pub async fn note_request(
                 .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
             );
         }
-        if !admit.write {
+        admitted = admit.write;
+    }
+    if let Some(ref selection) = selection
+        && !status.is_server_error()
+    {
+        note_access(&path, (status.as_u16(), micros), selection, admitted, now);
+        // A REFUSED READ'S LINE IS ITS ACCESS RECORD, which the audit stream
+        // keeps; a served one also leaves the `debug` request line below.
+        if status.is_client_error() {
             return response;
         }
     }
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::new(level, "api.request", "served")
-            .with("method", telemetry::Value::Str(&method))
-            .with("path", telemetry::Value::Str(&path))
-            .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
-            .with("micros", telemetry::Value::Uint(micros)),
-    );
+    if !admitted {
+        return response;
+    }
+    // A SERVER ERROR'S DURABLE COPY HAS ITS OWN RATION (WP-33c, DB-A52): the
+    // first [`AUDITED_ERRORS_PER_WINDOW`] a window are written at `error`,
+    // which the audit stream keeps; past it the line is still written, at
+    // `warn`, to the ring alone, saying so, and the next window's first says
+    // how many were kept out. A flood of 500s can no longer roll the stream.
+    let mut kept_out = None;
+    let mut durable = None;
+    let level = if level == telemetry::Level::Error {
+        let admit = AUDITED_ERRORS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(now);
+        kept_out = admit.summary;
+        durable = Some(admit.write);
+        if admit.write {
+            telemetry::Level::Error
+        } else {
+            telemetry::Level::Warn
+        }
+    } else {
+        level
+    };
+    let mut event = telemetry::Event::new(level, "api.request", "served")
+        .with("method", telemetry::Value::Str(&method))
+        .with("path", telemetry::Value::Str(&path))
+        .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
+        .with("micros", telemetry::Value::Uint(micros));
+    if let Some(durable) = durable {
+        event = event.with("durable", telemetry::Value::Bool(durable));
+    }
+    if let Some(kept_out) = kept_out {
+        event = event.with("kept_out_of_audit_before", telemetry::Value::Uint(kept_out));
+    }
+    let _dropped_when_filtered = telemetry::emit(&event);
     response
+}
+
+/// The level a request's line is written at: `error` for a server error,
+/// `warn` for a client error, `debug` otherwise.
+///
+/// 501 IS A PLACEHOLDER, NOT A FAILURE (WP-33c, DB-A52): a route this build
+/// registers and has not built answers it by design, and one bench put 201 of
+/// them into the durable audit stream at `error`. It is a `warn` in the ring,
+/// rationed as every failed request is, and the audit stream never takes it.
+fn request_level(status: axum::http::StatusCode) -> telemetry::Level {
+    if status.is_server_error() && status != axum::http::StatusCode::NOT_IMPLEMENTED {
+        telemetry::Level::Error
+    } else if status.is_client_error() || status.is_server_error() {
+        telemetry::Level::Warn
+    } else {
+        telemetry::Level::Debug
+    }
+}
+
+/// How many server-error request lines one window writes at `error`, where
+/// the durable audit stream keeps them (WP-33c, DB-A52). Past it a window's
+/// lines go to the ring at `warn`, each marked `durable: false`, and the next
+/// window's first line carries the count kept out.
+pub const AUDITED_ERRORS_PER_WINDOW: u64 = 20;
+
+/// The durable copy's ration, one window for every origin.
+static AUDITED_ERRORS: std::sync::Mutex<Ration> =
+    std::sync::Mutex::new(Ration::new(AUDITED_ERRORS_PER_WINDOW));
+
+// ---------------------------------------------------------------------------
+// /db READS, COUNTED AND SAMPLED (WP-33c, DB-A42)
+// ---------------------------------------------------------------------------
+//
+// # What was missing
+//
+// A served read was a `debug` line, dropped at the `info` floor, and every
+// `/db` data route is exempt from the invocation audit (D-0568, which this
+// does not change: that journal records sweep results and controls). A
+// refused read was a `warn` in the ring only. So "what did the operator read,
+// and what was refused" had no durable answer at all.
+//
+// # The rule (stated, because it bounds the durable stream)
+//
+// * EVERY read of a [`DB_READS`] route is COUNTED, per route, per
+//   [`ACCESS_WINDOW_MS`] window, served and refused apart, with its slowest
+//   time.
+// * The FIRST SERVED read of a route in a window is written whole, at `info`:
+//   `api.access read served`, with its route, status, time and the selection
+//   it named ([`ACCESS_KEYS`]: feed, instrument, symbol, day, month and the
+//   rest of a `/db` selection, never the whole query).
+// * EVERY REFUSED read is written, at `warn` (`api.access read refused`),
+//   under the failed-request ration every 4xx already had: 200 a minute from
+//   this console, 50 from another site, the rest counted and said.
+// * When a route's window closes, its next read first writes
+//   `api.access reads counted`: how many were served and refused in the
+//   window that closed, and the slowest.
+//
+// A target ending in `access` is audited (`telemetry::is_audited`), so all
+// three reach the durable stream and its index (feed, instrument, day, month):
+// `/logs.json?instrument=NIFTY` finds the operator's own NIFTY reads. Bound:
+// at most two lines per route a minute plus the rationed refusals, about
+// 1.6 MB a day for every route read continuously; a route nobody reads writes
+// nothing. A window's count rides on the route's next read, so the last
+// window before silence is counted in memory and said when the route is next
+// read: an honest limit, named.
+
+/// The routes a `/db` page reads its data from: each read is counted and
+/// sampled into the durable stream (WP-33c, DB-A42).
+pub const DB_READS: [&str; 16] = [
+    "/bars.json",
+    "/bars/window.json",
+    "/spot.json",
+    "/greeks.json",
+    "/chain.json",
+    "/calendar.json",
+    "/gaps.json",
+    "/instruments.json",
+    "/store.json",
+    "/dayflags.json",
+    "/imports.json",
+    "/provenance.json",
+    "/sources.json",
+    "/sources/bars.json",
+    "/sources/day.json",
+    "/census/facets.json",
+];
+
+/// The query names an access record keeps: the selection, never anything
+/// else a query may carry. At most [`telemetry::MAX_FIELDS`] less the four an
+/// access record always carries are kept, in this order.
+pub const ACCESS_KEYS: [&str; 12] = [
+    "feed",
+    "instrument",
+    "symbol",
+    "segment",
+    "contract",
+    "expiry",
+    "strike",
+    "right",
+    "timeframe",
+    "month",
+    "day",
+    "from",
+];
+
+/// An access record's window.
+pub const ACCESS_WINDOW_MS: u64 = 60_000;
+
+/// Whether `path` is a `/db` read route.
+fn is_db_read(path: &str) -> bool {
+    DB_READS.contains(&path)
+}
+
+/// The selection a read named, from its query: each of [`ACCESS_KEYS`] it
+/// carries, decoded, in that order.
+fn selection_of(query: &str) -> Vec<(&'static str, String)> {
+    ACCESS_KEYS
+        .iter()
+        .filter_map(|name| {
+            let value = crate::server::param(query, name);
+            (!value.is_empty()).then_some((*name, value))
+        })
+        .take(telemetry::MAX_FIELDS.saturating_sub(4))
+        .collect()
+}
+
+/// One route's access window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccessWindow {
+    /// When it opened, ms.
+    opened_ms: u64,
+    /// Reads served in it.
+    served: u64,
+    /// Reads refused in it.
+    refused: u64,
+    /// The slowest read in it, microseconds.
+    slowest: u64,
+    /// Whether its served read was written.
+    sampled: bool,
+}
+
+/// What one read writes, decided by [`AccessWindows::account`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccessPlan {
+    /// The window that just closed, to be said first, when it held more than
+    /// the line it wrote.
+    pub(crate) closed: Option<AccessWindow>,
+    /// Whether this read is written whole.
+    pub(crate) sample: bool,
+}
+
+/// Every route's access window. O(1) a read: one probe of a table of at most
+/// [`DB_READS`] routes.
+#[derive(Debug, Default)]
+pub(crate) struct AccessWindows {
+    routes: std::collections::HashMap<&'static str, AccessWindow>,
+}
+
+impl AccessWindows {
+    /// Accounts one read of `route`, `refused` or served, taking `micros`, at
+    /// `now_ms`.
+    pub(crate) fn account(
+        &mut self,
+        route: &'static str,
+        refused: bool,
+        micros: u64,
+        now_ms: u64,
+    ) -> AccessPlan {
+        let window = self.routes.entry(route).or_insert(AccessWindow {
+            opened_ms: now_ms,
+            ..AccessWindow::default()
+        });
+        let mut plan = AccessPlan::default();
+        if now_ms.saturating_sub(window.opened_ms) >= ACCESS_WINDOW_MS || now_ms < window.opened_ms
+        {
+            let reads = window.served.saturating_add(window.refused);
+            if reads > u64::from(window.sampled) {
+                plan.closed = Some(*window);
+            }
+            *window = AccessWindow {
+                opened_ms: now_ms,
+                ..AccessWindow::default()
+            };
+        }
+        if refused {
+            window.refused = window.refused.saturating_add(1);
+        } else {
+            window.served = window.served.saturating_add(1);
+            if !window.sampled {
+                window.sampled = true;
+                plan.sample = true;
+            }
+        }
+        window.slowest = window.slowest.max(micros);
+        plan
+    }
+}
+
+/// The access windows of this process.
+static ACCESS: std::sync::Mutex<Option<AccessWindows>> = std::sync::Mutex::new(None);
+
+/// Counts one `/db` read and writes what [`AccessWindows::account`] says to:
+/// the closed window's count, this read whole (a sampled served read, or a
+/// refused one the failed-request ration admits), or nothing.
+pub(crate) fn note_access(
+    path: &str,
+    (status, micros): (u16, u64),
+    selection: &[(&'static str, String)],
+    refusal_admitted: bool,
+    now_ms: u64,
+) {
+    let Some(route) = DB_READS.iter().copied().find(|route| *route == path) else {
+        return;
+    };
+    let refused = status >= 400;
+    let plan = ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(AccessWindows::default)
+        .account(route, refused, micros, now_ms);
+    let mut lines: Vec<telemetry::Event<'_>> = Vec::with_capacity(2);
+    if let Some(closed) = plan.closed {
+        lines.push(
+            telemetry::Event::info("api.access", "reads counted")
+                .with("route", telemetry::Value::Str(route))
+                .with("served", telemetry::Value::Uint(closed.served))
+                .with("refused", telemetry::Value::Uint(closed.refused))
+                .with("slowest_micros", telemetry::Value::Uint(closed.slowest))
+                .with("window_ms", telemetry::Value::Uint(ACCESS_WINDOW_MS)),
+        );
+    }
+    // A REFUSAL IS WRITTEN WHEN THE RATION EVERY FAILED REQUEST HAS ADMITS IT
+    // (`note_request` asked it, and said any count it held back).
+    let write = if refused {
+        refusal_admitted
+    } else {
+        plan.sample
+    };
+    if write {
+        let mut line = if refused {
+            telemetry::Event::warn("api.access", "read refused")
+        } else {
+            telemetry::Event::info("api.access", "read served")
+        }
+        .with("route", telemetry::Value::Str(route))
+        .with("status", telemetry::Value::Uint(u64::from(status)))
+        .with("micros", telemetry::Value::Uint(micros));
+        for (name, value) in selection {
+            line = line.with(name, telemetry::Value::Str(value));
+        }
+        lines.push(line);
+    }
+    for line in &lines {
+        let _dropped_when_filtered = telemetry::emit(line);
+    }
 }
 
 /// How many `api.request` lines at `Warn` or `Error` one window may write.
@@ -1455,11 +1906,18 @@ impl Ration {
 // answered from the durable audit stream each sink keeps
 // (`telemetry::audit_postings`): ONE posting file per key, named by the key, in
 // each half (the server's directory and `cli`'s), and one positional read per
-// line it points at. Nothing is scanned to find them. The newest
-// [`SCAN_BYTES`] of each ring are then read as well, for events written before
-// that half kept a stream (the stream starts the first time a build with it
-// opens the sink, seeded from what the ring still held), and a line found in
-// both is shown once.
+// line it points at. Nothing is scanned to find them.
+//
+// Since WP-33c (DB-A44) that is the WHOLE answer by default, one page at a
+// time: the postings are merged newest first from a cursor (`before=`, the
+// `next` the previous page handed back), so every match can be reached, none
+// twice, and a page does not move when unrelated lines arrive. The ring is
+// read only when `ring=1` asks for it, on a first page, for lines no stream
+// holds (`warn` and `info` detail, and lines older than the stream): those
+// rows are labelled `source: ring`, are never paged, and move as the ring
+// rolls, which is why they are asked for and never mixed in. Before WP-33c
+// every keyed request read the newest 4 MiB of both rings (5,352,506 bytes on
+// the operator's store, p50 22-28 ms), and its count moved with the ring.
 //
 // # What "bears on" means
 //
@@ -1480,10 +1938,11 @@ impl Ration {
 //
 // # Cost
 //
-// Per half: at most one `metadata` call and one read per probed posting
-// (two for a day: the day and its month), then one positional read per pointer
-// read, at most [`MAX_KEYED_READS`] across the request, and the ring's
-// [`SCAN_BYTES`]. None of it grows with the stream, the index or the store.
+// Per half: at most one `metadata` call per kept generation and one read per
+// probed posting (two for a day: the day and its month), then one positional
+// read per pointer read, at most [`MAX_KEYED_READS`] across the request; and
+// the ring's [`SCAN_BYTES`] only when `ring=1` asked for it. None of it grows
+// with the stream, the index or the store.
 
 /// The longest `contract` a keyed request reads: a store contract segment
 /// (`brutex_core::instrument::CONTRACT_CAPACITY`) or a vendor ticker, which
@@ -1505,6 +1964,13 @@ pub(crate) struct Keys {
     pub(crate) day: Option<pull::session::Day>,
     /// The contract, as the store names its segment, or a vendor ticker.
     pub(crate) contract: Option<String>,
+    /// A refusal's code (WP-33c, DB-A47).
+    pub(crate) code: Option<String>,
+    /// A run, probed in the index's `run` posting: set by `durable=1`.
+    pub(crate) run: Option<u64>,
+    /// A target, probed in the index's `target` posting: set by `durable=1`
+    /// with no run.
+    pub(crate) target: Option<String>,
 }
 
 impl Keys {
@@ -1514,6 +1980,9 @@ impl Keys {
             && self.instrument.is_none()
             && self.day.is_none()
             && self.contract.is_none()
+            && self.code.is_none()
+            && self.run.is_none()
+            && self.target.is_none()
     }
 }
 
@@ -1693,7 +2162,47 @@ pub(crate) fn bears(record: &telemetry::Record, keys: &Keys) -> Option<Scope> {
             return None;
         }
     }
+    if let Some(ref code) = keys.code {
+        let named = text_of(record, "code")
+            .or_else(|| text_of(record, "reason"))
+            .is_some_and(|held| held == code);
+        if !named {
+            return None;
+        }
+    }
+    if let Some(run) = keys.run
+        && run_of(record) != Some(run)
+    {
+        return None;
+    }
+    if let Some(ref target) = keys.target
+        && !target_admits(&record.target, target)
+    {
+        return None;
+    }
     Some(scope)
+}
+
+/// The run a line belongs to: its top-level `run`, else a numeric `run`
+/// field (the GDFL importer's `run started` and `run finished`), as the
+/// index files it (`telemetry` `Keyed::run`).
+fn run_of(record: &telemetry::Record) -> Option<u64> {
+    if record.run != 0 {
+        return Some(record.run);
+    }
+    record
+        .field("run")
+        .and_then(telemetry::OwnedValue::as_u64)
+        .filter(|run| *run != 0)
+}
+
+/// Whether a line's target is `asked` or beneath it (`pull` covers
+/// `pull.http`, never `pullover`).
+fn target_admits(target: &str, asked: &str) -> bool {
+    target == asked
+        || target
+            .strip_prefix(asked)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// How `record` bears on one instrument.
@@ -1756,100 +2265,408 @@ fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
         if gdfl {
             out.push(("target", pull::gdfl_import::TARGET.to_owned()));
         }
+    } else if let Some(ref code) = keys.code {
+        out.push(("code", code.clone()));
+    } else if let Some(run) = keys.run {
+        out.push(("run", run.to_string()));
     } else if let Some(ref feed) = keys.feed {
         out.push(("feed", feed.clone()));
         if gdfl {
             out.push(("target", pull::gdfl_import::TARGET.to_owned()));
         }
+    } else if let Some(ref target) = keys.target {
+        out.push(("target", target.clone()));
     }
     out
 }
 
-/// What one half's probe found.
+/// One posting of one half, read newest first from a place (WP-33c, DB-A44).
+struct Stream<'d> {
+    half: &'static str,
+    dir: &'d std::path::Path,
+    /// The half's current serial, as the pointers were read.
+    serial: u64,
+    dimension: &'static str,
+    value: String,
+    /// The pointers fetched, newest first, strictly older than the cursor.
+    page: telemetry::PostingsPage,
+    /// The fetched pointer the stream stands at.
+    next: usize,
+    /// The place of the last pointer this page consumed.
+    last: Option<telemetry::PostingAt>,
+    /// The place this page started from.
+    from: Slot,
+    /// Whether the posting may hold pointers older than those fetched.
+    more: bool,
+    /// The stream's next line, read and not yet consumed.
+    head: Option<(telemetry::AuditPointer, telemetry::Record)>,
+    /// Pointers this page consumed.
+    read: usize,
+}
+
+/// Where one stream of a keyed answer stands, as a cursor names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// Not started: from the newest pointer.
+    Newest,
+    /// After this place: the next page reads strictly older pointers.
+    At(telemetry::PostingAt),
+    /// Every pointer read.
+    Done,
+}
+
+impl Slot {
+    /// The cursor's text for one stream: `*`, `<serial>.<index>` or `-`.
+    fn text(self) -> String {
+        match self {
+            Self::Newest => "*".to_owned(),
+            Self::At(at) => format!("{}.{}", at.serial, at.index),
+            Self::Done => "-".to_owned(),
+        }
+    }
+
+    /// One stream's cursor text, or `None` when it is not one.
+    fn read(text: &str) -> Option<Self> {
+        match text {
+            "*" => Some(Self::Newest),
+            "-" => Some(Self::Done),
+            _ => {
+                let (serial, index) = text.split_once('.')?;
+                let number =
+                    |part: &str| part.parse::<u64>().ok().filter(|n| n.to_string() == part);
+                Some(Self::At(telemetry::PostingAt {
+                    serial: number(serial)?,
+                    index: number(index)?,
+                }))
+            }
+        }
+    }
+}
+
+/// The cursor a keyed answer hands back: one [`Slot`] per (half, posting),
+/// joined by `~`, in the order the halves and the probes are named. `None`
+/// when every stream is done: there is no next page.
+fn cursor_text(slots: &[Slot]) -> Option<String> {
+    slots.iter().any(|slot| *slot != Slot::Done).then(|| {
+        slots
+            .iter()
+            .map(|slot| slot.text())
+            .collect::<Vec<_>>()
+            .join("~")
+    })
+}
+
+impl Stream<'_> {
+    /// Reads the stream's next line into its head, consuming pointers whose
+    /// line has rolled off or will not read (each counted). One positional
+    /// read per pointer, each against `budget`.
+    fn fill(&mut self, budget: &mut usize, rolled_off: &mut u64, errors: &mut Vec<String>) {
+        while self.head.is_none() && *budget > 0 {
+            let Some(&(at, pointer)) = self.page.pointers.get(self.next) else {
+                return;
+            };
+            *budget = budget.saturating_sub(1);
+            match telemetry::audit_read(self.dir, self.serial, &pointer) {
+                telemetry::AuditLine::Found(record) => self.head = Some((pointer, record)),
+                telemetry::AuditLine::RolledOff => {
+                    *rolled_off = rolled_off.saturating_add(1);
+                    self.consume(at);
+                }
+                telemetry::AuditLine::Unreadable(why) => {
+                    errors.push(why);
+                    self.consume(at);
+                }
+            }
+        }
+    }
+
+    /// Steps past the pointer at `at`.
+    fn consume(&mut self, at: telemetry::PostingAt) {
+        self.next = self.next.saturating_add(1);
+        self.last = Some(at);
+        self.read = self.read.saturating_add(1);
+        self.head = None;
+    }
+
+    /// The place of the head, when there is one.
+    fn head_at(&self) -> Option<telemetry::PostingAt> {
+        self.head
+            .as_ref()
+            .and_then(|_| self.page.pointers.get(self.next).map(|(at, _)| *at))
+    }
+
+    /// Where the stream stands for the next page.
+    fn slot(&self) -> Slot {
+        if self.head.is_none() && self.next >= self.page.pointers.len() && !self.more {
+            return Slot::Done;
+        }
+        self.last.map_or(self.from, Slot::At)
+    }
+}
+
+/// What a keyed answer's index half found: its rows, in order, and how it
+/// read them.
 #[derive(Debug, Default)]
-struct Probed {
-    /// `(half, dimension, value, total pointers, pointers read)`, per posting.
-    postings: Vec<(&'static str, &'static str, String, u64, usize)>,
-    /// Lines found and matched, each with its half and scope.
-    found: Vec<(&'static str, Scope, telemetry::Record)>,
-    /// Pointers whose line has rolled out of the kept stream.
-    rolled_off: u64,
+struct Indexed {
+    /// `(half, scope, record)`, newest first.
+    rows: Vec<(&'static str, Scope, telemetry::Record)>,
+    /// The postings JSON, one object per (half, posting).
+    postings: Vec<String>,
+    /// The cursor for the next page, or `None` when every stream is done.
+    next: Option<String>,
     /// Pointers left unread at [`MAX_KEYED_READS`].
     capped: bool,
+    /// Pointers whose line has rolled out of the kept stream.
+    rolled_off: u64,
+    /// Lines read.
+    reads: usize,
+    /// A cursor that does not fit this request, named.
+    cursor_refused: Option<String>,
     /// Failures, in their own words.
     errors: Vec<String>,
 }
 
-/// Probes one half's audit index for `keys`, reading at most `budget` lines.
-fn probe_half(
-    half: &'static str,
-    dir: &std::path::Path,
-    keys: &Keys,
-    asked: &Asked,
-    budget: &mut usize,
-    out: &mut Probed,
-) {
-    let serial = match telemetry::audit_serial(dir) {
-        Ok(serial) => serial,
-        Err(why) => {
-            out.errors.push(why);
-            return;
-        }
+/// The index half of a keyed answer: every (half, posting) stream merged
+/// newest first, read from the cursor, a line in two postings of one half
+/// shown once, until `limit` lines bear on the keys or [`MAX_KEYED_READS`]
+/// lines were read (WP-33c, DB-A44).
+///
+/// # Cost
+///
+/// Per stream: [`telemetry::audit_postings_before`] (O(generations) `metadata`
+/// calls and one read of at most [`MAX_KEYED_READS`] pointers at a computed
+/// offset), then one positional read per line, at most [`MAX_KEYED_READS`]
+/// across the request. No ring is read and nothing grows with the stream:
+/// the same request costs the same at any size, and a page past the first
+/// starts where the last one stopped, so every match can be reached and none
+/// is shown twice. Lines appended later are newer than every place already
+/// handed out, so they never shift a later page.
+fn index_rows(halves: &[(&'static str, &std::path::Path)], asked: &Asked) -> Indexed {
+    let mut out = Indexed::default();
+    let probes = probes(&asked.keys);
+    let wanted = halves.len().saturating_mul(probes.len());
+    let Some(slots) = cursor_slots(asked.before.as_deref(), wanted, &mut out) else {
+        return out;
     };
-    let mut seen = std::collections::HashSet::new();
-    for (dimension, value) in probes(keys) {
-        let postings = match telemetry::audit_postings(dir, dimension, &value, *budget) {
-            Ok(postings) => postings,
-            Err(why) => {
-                out.errors.push(why);
-                continue;
-            }
-        };
-        let mut read = 0usize;
-        for pointer in &postings.pointers {
-            if *budget == 0 {
-                out.capped = true;
-                break;
-            }
-            if !seen.insert((pointer.serial, pointer.offset)) {
-                continue;
-            }
-            *budget = budget.saturating_sub(1);
-            read = read.saturating_add(1);
-            match telemetry::audit_read(dir, serial, pointer) {
-                telemetry::AuditLine::Found(record) => {
-                    if let Some(scope) = bears(&record, keys)
-                        && admitted(&record, asked)
-                    {
-                        out.found.push((half, scope, record));
-                    }
-                }
-                telemetry::AuditLine::RolledOff => {
-                    out.rolled_off = out.rolled_off.saturating_add(1);
-                }
-                telemetry::AuditLine::Unreadable(why) => out.errors.push(why),
-            }
-        }
-        // MORE POINTERS THAN WERE FETCHED: the posting holds older lines the
-        // budget did not reach, and the answer says so.
-        if postings.total > u64::try_from(postings.pointers.len()).unwrap_or(u64::MAX) {
-            out.capped = true;
-        }
-        out.postings
-            .push((half, dimension, value, postings.total, read));
-    }
+    let mut opened = open_streams(halves, &probes, &slots, &mut out);
+    let budget = merge_streams(&mut opened.streams, asked, &mut out);
+    out.reads = MAX_KEYED_READS.saturating_sub(budget);
+    let cursor: Vec<Slot> = opened
+        .slot_of
+        .iter()
+        .enumerate()
+        .map(|(index, held)| match *held {
+            Some(at) => opened.streams.get(at).map_or(Slot::Done, Stream::slot),
+            None => opened.fixed.get(index).copied().unwrap_or(Slot::Done),
+        })
+        .collect();
+    out.next = cursor_text(&cursor);
+    out.postings.extend(opened.streams.iter().map(posting_json));
+    out
 }
 
-/// Whether a record passes the request's level, target and run filters.
+/// The cursor a request carried, as one [`Slot`] per (half, posting), or
+/// every stream from its newest when it carried none. A cursor that is not
+/// one of this request's is refused by name in `out` and `None` answered: no
+/// page is read, never page one passed off as the next.
+fn cursor_slots(before: Option<&str>, wanted: usize, out: &mut Indexed) -> Option<Vec<Slot>> {
+    let Some(text) = before else {
+        return Some(vec![Slot::Newest; wanted]);
+    };
+    let read: Option<Vec<Slot>> = text.split('~').map(Slot::read).collect();
+    let fits = read.filter(|slots| slots.len() == wanted);
+    if fits.is_none() {
+        out.cursor_refused = Some(format!(
+            "before={text:?} is not a cursor of this request: it names {} place(s) and this \
+             request reads {wanted} posting(s); no page was read",
+            text.split('~').count()
+        ));
+    }
+    fits
+}
+
+/// The streams of one keyed request, and where each cursor slot stands.
+struct Opened<'d> {
+    streams: Vec<Stream<'d>>,
+    /// Per cursor slot, the stream reading it, or `None` for a slot no stream
+    /// reads (a half with no stream, a posting done, a read that failed).
+    slot_of: Vec<Option<usize>>,
+    /// Per cursor slot, what it stays when no stream reads it.
+    fixed: Vec<Slot>,
+}
+
+/// Opens one stream per (half, posting) the cursor has not finished: one
+/// [`telemetry::audit_postings_before`] each. A half with no audit stream is
+/// named in `out` (DB-A46), never read as one holding nothing.
+fn open_streams<'d>(
+    halves: &[(&'static str, &'d std::path::Path)],
+    probes: &[(&'static str, String)],
+    slots: &[Slot],
+    out: &mut Indexed,
+) -> Opened<'d> {
+    let mut opened = Opened {
+        streams: Vec::new(),
+        slot_of: Vec::new(),
+        fixed: Vec::new(),
+    };
+    for (h, &(half, dir)) in halves.iter().enumerate() {
+        let state = telemetry::audit_state(dir);
+        for (p, (dimension, value)) in probes.iter().enumerate() {
+            let from = slots
+                .get(h.saturating_mul(probes.len()).saturating_add(p))
+                .copied()
+                .unwrap_or(Slot::Done);
+            let serial = match state {
+                // NO STREAM IS NOT AN EMPTY STREAM (DB-A46): said by name,
+                // never `total: 0`.
+                Ok(None) => {
+                    out.postings.push(format!(
+                        r#"{{"half":{},"dimension":{},"value":{},"state":"no audit stream","total":null,"read":0}}"#,
+                        render::json_string(half),
+                        render::json_string(dimension),
+                        render::json_string(value),
+                    ));
+                    opened.slot_of.push(None);
+                    opened.fixed.push(Slot::Done);
+                    continue;
+                }
+                Err(ref why) => {
+                    out.errors.push(why.clone());
+                    opened.slot_of.push(None);
+                    opened.fixed.push(from);
+                    continue;
+                }
+                Ok(Some(serial)) => serial,
+            };
+            let before = match from {
+                Slot::At(at) => Some(at),
+                Slot::Newest => None,
+                Slot::Done => {
+                    opened.slot_of.push(None);
+                    opened.fixed.push(Slot::Done);
+                    continue;
+                }
+            };
+            match telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before) {
+                Ok(page) => {
+                    let more = page.pointers.len() >= MAX_KEYED_READS;
+                    opened.slot_of.push(Some(opened.streams.len()));
+                    opened.fixed.push(from);
+                    opened.streams.push(Stream {
+                        half,
+                        dir,
+                        serial,
+                        dimension,
+                        value: value.clone(),
+                        page,
+                        next: 0,
+                        last: None,
+                        from,
+                        more,
+                        head: None,
+                        read: 0,
+                    });
+                }
+                Err(why) => {
+                    out.errors.push(why);
+                    opened.slot_of.push(None);
+                    opened.fixed.push(from);
+                }
+            }
+        }
+    }
+    opened
+}
+
+/// Merges the streams newest first into `out.rows` until `asked.limit` rows
+/// bear on the keys or the read budget is spent; answers the budget left.
+fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -> usize {
+    let mut budget = MAX_KEYED_READS;
+    while out.rows.len() < asked.limit {
+        for stream in streams.iter_mut() {
+            stream.fill(&mut budget, &mut out.rolled_off, &mut out.errors);
+        }
+        // A STREAM WITH POINTERS LEFT AND NO HEAD READ could hold the newest
+        // line: with the budget spent, the page stops rather than guess.
+        if streams
+            .iter()
+            .any(|s| s.head.is_none() && s.next < s.page.pointers.len())
+        {
+            out.capped = true;
+            break;
+        }
+        let best = streams
+            .iter()
+            .enumerate()
+            .filter_map(|(at, stream)| {
+                stream.head.as_ref().map(|(_, record)| {
+                    let half_rank = usize::from(stream.half != "served");
+                    (at, (record.at_unix_millis, half_rank, record.seq))
+                })
+            })
+            .max_by_key(|(_, key)| *key)
+            .map(|(at, _)| at);
+        let Some(chosen) = best.and_then(|best| streams.get_mut(best)) else {
+            break;
+        };
+        let half = chosen.half;
+        let (Some(at), Some((pointer, record))) = (chosen.head_at(), chosen.head.take()) else {
+            break;
+        };
+        chosen.consume(at);
+        // THE SAME LINE IN ANOTHER POSTING OF THIS HALF is the same line: it
+        // stands at every such stream's head now, and is consumed there too.
+        for other in streams.iter_mut() {
+            if other.half == half
+                && other.head.as_ref().is_some_and(|(held, _)| {
+                    held.serial == pointer.serial && held.offset == pointer.offset
+                })
+                && let Some(at) = other.head_at()
+            {
+                other.consume(at);
+            }
+        }
+        if let Some(scope) = bears(&record, &asked.keys)
+            && admitted(&record, asked)
+        {
+            out.rows.push((half, scope, record));
+        }
+    }
+    budget
+}
+
+/// One stream's posting, as `index.postings` carries it.
+fn posting_json(stream: &Stream<'_>) -> String {
+    let uncovered: Vec<String> = stream
+        .page
+        .uncovered
+        .iter()
+        .map(|(serial, from)| {
+            format!(
+                r#"{{"serial":{serial},"indexed_from_offset":{}}}"#,
+                from.map_or_else(|| "null".to_owned(), |from| from.to_string())
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"half":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}]}}"#,
+        render::json_string(stream.half),
+        render::json_string(stream.dimension),
+        render::json_string(&stream.value),
+        stream.page.total,
+        stream.read,
+        stream.page.malformed,
+        uncovered.join(","),
+    )
+}
+
+/// Whether a record passes the request's level, target and run filters. A
+/// keyed request's run is the line's own run as the index files it: its
+/// top-level `run`, else its numeric `run` field (WP-33c, DB-A41).
 fn admitted(record: &telemetry::Record, asked: &Asked) -> bool {
     asked.level.is_none_or(|level| record.level.at_least(level))
-        && (asked.target.is_empty()
-            || record.target == asked.target
-            || record
-                .target
-                .strip_prefix(asked.target.as_str())
-                .is_some_and(|rest| rest.starts_with('.')))
-        && (asked.run == 0 || record.run == asked.run)
+        && (asked.target.is_empty() || target_admits(&record.target, &asked.target))
+        && (asked.run == 0 || run_of(record) == Some(asked.run))
 }
 
 /// What a bounded scan of one ring found.
@@ -1923,74 +2740,24 @@ fn ring_scan(
     out
 }
 
-/// `/logs.json` for a request that names a key: the audit index of both halves,
-/// then the newest of each ring, merged newest first, each record carrying its
-/// half, its source and how it bears on the keys. See the section header.
+/// `/logs.json` for a request that names a key: the durable audit index of
+/// both halves, newest first, one page from the cursor ([`index_rows`]); and,
+/// only when `ring=1` asked for it on a first page, the newest [`SCAN_BYTES`]
+/// of each ring for lines no stream holds (WP-33c, DB-A44). Each record
+/// carries its half, its source and how it bears on the keys.
 fn keyed_json(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
-    let halves: Vec<(&'static str, &std::path::Path)> = std::iter::once(("served", dir))
-        .chain(cli_dir.map(|cli| ("cli", cli)))
-        .collect();
-    let mut budget = MAX_KEYED_READS;
-    let mut probed = Probed::default();
-    for &(half, at) in &halves {
-        probe_half(half, at, &asked.keys, asked, &mut budget, &mut probed);
-    }
-    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = probed
-        .found
-        .into_iter()
-        .map(|(half, scope, record)| (half, "audit", scope, record))
-        .collect();
-    let mut seen: std::collections::HashSet<(&'static str, u64)> =
-        rows.iter().map(|row| (row.0, row.3.seq)).collect();
-    let mut ring = (0u64, 0u64, false, Vec::new());
-    for &(half, at) in &halves {
-        let scanned = ring_scan(at, SCAN_BYTES, |record| {
-            bears(record, &asked.keys).filter(|_| admitted(record, asked))
-        });
-        ring.0 = ring.0.saturating_add(scanned.bytes_read);
-        ring.1 = ring.1.saturating_add(scanned.files_read);
-        ring.2 |= scanned.hit_cap;
-        ring.3.extend(scanned.errors);
-        for (scope, record) in scanned.found {
-            if seen.insert((half, record.seq)) {
-                rows.push((half, "ring", scope, record));
-            }
-        }
-    }
-    rows.sort_by(|left, right| {
-        right
-            .3
-            .at_unix_millis
-            .cmp(&left.3.at_unix_millis)
-            .then_with(|| right.3.seq.cmp(&left.3.seq))
-    });
-    let matched = rows.len();
-    rows.truncate(asked.limit);
-
-    let tail = telemetry::Tail {
-        records: rows.iter().map(|row| row.3.clone()).collect(),
-        bytes_read: ring.0,
-        files_read: u32::try_from(ring.1).unwrap_or(u32::MAX),
-        malformed: 0,
-        hit_scan_cap: ring.2,
-        reached_oldest: !ring.2,
-        partial_tail: false,
-        errors: probed.errors.into_iter().chain(ring.3).collect(),
-        missing: None,
-    };
+    let (tail, keyed, _next) = keyed_walk(dir, cli_dir, asked);
     let body = json_of(&tail, asked, health, (dir, cli_dir));
     let mut out = body.strip_suffix('}').unwrap_or(&body).to_owned();
-    keyed_tail(&mut out, &asked.keys, matched, &rows, &probed.postings);
+    out.push_str(&keyed);
     let _ = write!(
         out,
-        r#","max_reads":{MAX_KEYED_READS},"capped":{},"rolled_off":{}}},"audit_stream":{}}}}}"#,
-        probed.capped,
-        probed.rolled_off,
+        r#","audit_stream":{}}}"#,
         audit_json_of(
             telemetry::global()
                 .and_then(telemetry::Sink::audit_health)
@@ -2000,32 +2767,107 @@ fn keyed_json(
     out
 }
 
-/// The `keyed` object a keyed answer ends with, up to its index's counts:
-/// the keys, how many lines matched, and each row's half, source and scope,
-/// in the order the records are.
-fn keyed_tail(
+/// A keyed answer's records as a [`telemetry::Tail`] and its `keyed` object,
+/// shared by `/logs.json` and the `/logs` page.
+fn keyed_walk(
+    dir: &std::path::Path,
+    cli_dir: Option<&std::path::Path>,
+    asked: &Asked,
+) -> (telemetry::Tail, String, Option<String>) {
+    let halves: Vec<(&'static str, &std::path::Path)> = std::iter::once(("served", dir))
+        .chain(cli_dir.map(|cli| ("cli", cli)))
+        .collect();
+    let indexed = index_rows(&halves, asked);
+    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = indexed
+        .rows
+        .iter()
+        .map(|(half, scope, record)| (*half, "audit", *scope, record.clone()))
+        .collect();
+    // THE RING, ONLY WHEN ASKED, ONLY ON A FIRST PAGE: its rows move as the
+    // ring moves and cannot be paged, so they are never mixed in unasked.
+    let scan_ring = asked.ring && asked.before.is_none();
+    let mut ring = (0u64, 0u64, false, Vec::new());
+    if scan_ring {
+        let mut seen: std::collections::HashSet<(&'static str, u64)> =
+            rows.iter().map(|row| (row.0, row.3.seq)).collect();
+        let mut found = Vec::new();
+        for &(half, at) in &halves {
+            let scanned = ring_scan(at, SCAN_BYTES, |record| {
+                bears(record, &asked.keys).filter(|_| admitted(record, asked))
+            });
+            ring.0 = ring.0.saturating_add(scanned.bytes_read);
+            ring.1 = ring.1.saturating_add(scanned.files_read);
+            ring.2 |= scanned.hit_cap;
+            ring.3.extend(scanned.errors);
+            for (scope, record) in scanned.found {
+                if seen.insert((half, record.seq)) {
+                    found.push((half, "ring", scope, record));
+                }
+            }
+        }
+        // AT MOST `limit` RING ROWS, beside at most `limit` index rows: the
+        // index rows of this page are never cut for a ring row, so the
+        // cursor never skips one.
+        found.sort_by(|left, right| {
+            right
+                .3
+                .at_unix_millis
+                .cmp(&left.3.at_unix_millis)
+                .then_with(|| right.3.seq.cmp(&left.3.seq))
+        });
+        found.truncate(asked.limit);
+        rows.extend(found);
+        rows.sort_by(|left, right| {
+            right
+                .3
+                .at_unix_millis
+                .cmp(&left.3.at_unix_millis)
+                .then_with(|| right.3.seq.cmp(&left.3.seq))
+        });
+    }
+    let tail = telemetry::Tail {
+        records: rows.iter().map(|row| row.3.clone()).collect(),
+        bytes_read: ring.0,
+        files_read: u32::try_from(ring.1).unwrap_or(u32::MAX),
+        malformed: 0,
+        hit_scan_cap: ring.2,
+        reached_oldest: indexed.next.is_none(),
+        partial_tail: false,
+        errors: indexed.errors.iter().cloned().chain(ring.3).collect(),
+        missing: None,
+    };
+    let mut keyed = String::new();
+    keyed_object(&mut keyed, asked, &rows, &indexed, scan_ring);
+    (tail, keyed, indexed.next)
+}
+
+/// The `keyed` object a keyed answer carries: the keys, the rows' half, source
+/// and scope in the records' order, the index's postings and counts, the
+/// cursor for the next page, and what the ring read when it was asked for.
+fn keyed_object(
     out: &mut String,
-    keys: &Keys,
-    matched: usize,
+    asked: &Asked,
     rows: &[(&'static str, &'static str, Scope, telemetry::Record)],
-    postings: &[(&'static str, &'static str, String, u64, usize)],
+    indexed: &Indexed,
+    scan_ring: bool,
 ) {
+    let keys = &asked.keys;
+    let text = |value: Option<&str>| value.map_or_else(|| "null".to_owned(), render::json_string);
     let _ = write!(
         out,
-        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"matched":{matched},"rows":["#,
-        keys.feed
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), render::json_string),
-        keys.instrument
-            .as_ref()
-            .map_or_else(|| "null".to_owned(), |i| render::json_string(&i.asked)),
+        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"code":{},"run":{},"target":{},"matched":{},"rows":["#,
+        text(keys.feed.as_deref()),
+        text(keys.instrument.as_ref().map(|i| i.asked.as_str())),
         keys.day.map_or_else(
             || "null".to_owned(),
             |d| render::json_string(&d.to_string())
         ),
-        keys.contract
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), render::json_string),
+        text(keys.contract.as_deref()),
+        text(keys.code.as_deref()),
+        keys.run
+            .map_or_else(|| "null".to_owned(), |run| format!("\"{run}\"")),
+        text(keys.target.as_deref()),
+        rows.len(),
     );
     for (n, (half, source, scope, record)) in rows.iter().enumerate() {
         if n > 0 {
@@ -2040,20 +2882,31 @@ fn keyed_tail(
             render::json_string(scope.as_str()),
         );
     }
-    out.push_str(r#"],"index":{"postings":["#);
-    for (n, (half, dimension, value, total, read)) in postings.iter().enumerate() {
-        if n > 0 {
-            out.push(',');
-        }
-        let _ = write!(
-            out,
-            r#"{{"half":{},"dimension":{},"value":{},"total":{total},"read":{read}}}"#,
-            render::json_string(half),
-            render::json_string(dimension),
-            render::json_string(value),
-        );
-    }
-    out.push(']');
+    let _ = write!(
+        out,
+        r#"],"index":{{"postings":[{}],"max_reads":{MAX_KEYED_READS},"reads":{},"capped":{},"rolled_off":{}}},"next":{},"more":{},"cursor_refused":{},"ring":{{"asked":{},"scanned":{scan_ring},"paged":false,"note":{}}}}}"#,
+        indexed.postings.join(","),
+        indexed.reads,
+        indexed.capped,
+        indexed.rolled_off,
+        indexed
+            .next
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        indexed.next.is_some(),
+        indexed
+            .cursor_refused
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        asked.ring,
+        render::json_string(if scan_ring {
+            "the newest bytes of each ring were read too, for lines no audit stream holds: those \
+             rows are this page's alone and move as the ring rolls"
+        } else {
+            "the audit index alone: every audited line, paged by `next`. Add ring=1 to a first \
+             page for the newest unaudited lines of each ring (warn and info detail)"
+        }),
+    );
 }
 
 /// The served sink's audit stream, as JSON; `null` when it keeps none.
@@ -2114,6 +2967,46 @@ pub(crate) struct ImportRefusals {
     pub(crate) malformed: u64,
     /// Files that could not be read, in their own words.
     pub(crate) errors: Vec<String>,
+    /// The `cli` attempts each `(day, kind)`'s importer lines were logged
+    /// under, in log order, each once (WP-33c; DB-A41). See [`Attempt`].
+    attempts_of: std::collections::BTreeMap<(String, String), Vec<u64>>,
+    /// Every `cli` attempt whose `command started` the ring holds.
+    attempts: std::collections::BTreeMap<u64, Attempt>,
+    /// The attempt the fold is inside: the run of the last `command started`
+    /// whose `command finished` it has not read yet.
+    current: Option<u64>,
+}
+
+/// One `cli` command, as its two lifecycle lines in the `cli` ring name it,
+/// and the GDFL importer lines logged between them (WP-33c; DB-A41).
+///
+/// # Why an importer line can be filed under its attempt
+///
+/// `cli` stamps only its `command started` / `command finished` pair with the
+/// attempt id (`cli::run_with_sink`: "Lifecycle IDs affect these two events
+/// only"), so every importer line carries `run: 0`, and `/logs.json?run=4025`
+/// found one line of a run that logged thousands. But the `cli` half has ONE
+/// writer at a time: its sink holds `logs/cli/events.lock` for the life of the
+/// process (`telemetry::Sink::open`, D-1458), and one process runs one
+/// command. So every line between an attempt's `command started` and its
+/// `command finished` (or the next `command started`, for an attempt that was
+/// killed) is that attempt's, by position. That is read here; nothing is
+/// guessed from time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Attempt {
+    /// The command word.
+    pub(crate) command: String,
+    /// `command started`'s stamp, ms.
+    pub(crate) started_ms: i64,
+    /// `command finished`'s stamp, ms: `None` for an attempt the ring holds no
+    /// finish of (killed, or still running).
+    pub(crate) finished_ms: Option<i64>,
+    /// `command finished`'s `phase`.
+    pub(crate) phase: Option<String>,
+    /// The importer runs this attempt opened (`run started`'s `run` field).
+    pub(crate) importer_runs: Vec<u64>,
+    /// Importer lines logged under it.
+    pub(crate) lines: u64,
 }
 
 impl ImportRefusals {
@@ -2165,18 +3058,102 @@ impl ImportRefusals {
         self.imported.get(kind)?.back().copied()
     }
 
-    /// Folds one line in, when it is a GDFL importer event at `error`, or one
-    /// of its `day imported` events.
+    /// The `cli` attempts a kind's day was logged under, oldest first.
+    pub(crate) fn attempts_of(&self, kind: &str, day: &str) -> &[u64] {
+        self.attempts_of
+            .get(&(day.to_owned(), kind.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// One `cli` attempt, by its id.
+    pub(crate) fn attempt(&self, id: u64) -> Option<&Attempt> {
+        self.attempts.get(&id)
+    }
+
+    /// The `cli` attempt that opened importer run `run`, when the ring names
+    /// one. O(attempts).
+    pub(crate) fn attempt_of_importer_run(&self, run: u64) -> Option<u64> {
+        self.attempts
+            .iter()
+            .find(|(_, attempt)| attempt.importer_runs.contains(&run))
+            .map(|(id, _)| *id)
+    }
+
+    /// A `cli.lifecycle` line: an attempt opens or closes.
+    fn lifecycle(&mut self, record: &telemetry::Record) {
+        match record.message.as_str() {
+            "command started" if record.run != 0 => {
+                self.current = Some(record.run);
+                let _replaced = self.attempts.insert(
+                    record.run,
+                    Attempt {
+                        command: text_of(record, "command").unwrap_or("").to_owned(),
+                        started_ms: record.at_unix_millis,
+                        ..Attempt::default()
+                    },
+                );
+            }
+            "command finished" if self.current == Some(record.run) => {
+                if let Some(attempt) = self.attempts.get_mut(&record.run) {
+                    attempt.finished_ms = Some(record.at_unix_millis);
+                    attempt.phase = text_of(record, "phase").map(str::to_owned);
+                }
+                self.current = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Files an importer line under the attempt the fold is inside.
+    fn file_under_attempt(&mut self, record: &telemetry::Record) {
+        let Some(id) = self.current else {
+            return;
+        };
+        if let Some(attempt) = self.attempts.get_mut(&id) {
+            attempt.lines = attempt.lines.saturating_add(1);
+            if record.message == "run started"
+                && let Some(run) = record.field("run").and_then(telemetry::OwnedValue::as_u64)
+                && !attempt.importer_runs.contains(&run)
+            {
+                attempt.importer_runs.push(run);
+            }
+        }
+        if let (Some(kind), Some(day)) = (text_of(record, "kind"), text_of(record, "day")) {
+            let filed = self
+                .attempts_of
+                .entry((day.to_owned(), kind.to_owned()))
+                .or_default();
+            if !filed.contains(&id) {
+                filed.push(id);
+            }
+        }
+    }
+
+    /// Folds one line in, when it is a GDFL importer event at `error`, one of
+    /// its `day imported` events, or a `cli` lifecycle line (WP-33c), and
+    /// files every importer line under its `cli` attempt.
     fn fold(&mut self, line: &[u8]) {
-        // CHEAP FIRST: a line that cannot be the importer's is not decoded.
+        // CHEAP FIRST: a line that cannot be the importer's or a lifecycle
+        // line is not decoded.
         let wanted = br#""target":"gdfl.import""#;
-        if !line.windows(wanted.len()).any(|window| window == wanted) {
+        let lifecycle = br#""target":"cli.lifecycle""#;
+        let importer = line.windows(wanted.len()).any(|window| window == wanted);
+        if !importer
+            && !line
+                .windows(lifecycle.len())
+                .any(|window| window == lifecycle)
+        {
             return;
         }
         let Ok(record) = telemetry::Record::decode(line) else {
             self.malformed = self.malformed.saturating_add(1);
             return;
         };
+        if !importer {
+            self.lifecycle(&record);
+            return;
+        }
+        self.file_under_attempt(&record);
         if record.level == telemetry::Level::Info && record.message == "day imported" {
             if let Some(kind) = text_of(&record, "kind") {
                 let stamps = self.imported.entry(kind.to_owned()).or_default();
@@ -3142,6 +4119,7 @@ mod tests {
             current_bytes: 4_096,
             next_seq: 1_201,
             clock_held: 0,
+            rationed: 0,
         }
     }
 
@@ -4029,10 +5007,28 @@ mod tests {
                 .expect("opens");
             let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
         }
-        let got = keyed(&dir, "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07");
+        // THE INDEX ALONE BY DEFAULT (WP-33c, DB-A44): the half keeps no
+        // stream, said by name, and nothing is read from the ring unasked.
+        let index_only = keyed(&dir, "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07");
+        assert_eq!(index_only["records"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            index_only["keyed"]["index"]["postings"][0]["state"],
+            "no audit stream"
+        );
+        assert_eq!(
+            index_only["keyed"]["index"]["postings"][0]["total"],
+            serde_json::Value::Null,
+            "an absent stream is never `total: 0` (DB-A46)"
+        );
+        assert_eq!(index_only["keyed"]["ring"]["scanned"], false);
+        assert_eq!(index_only["bytes_read"], 0, "no ring byte was read");
+        let got = keyed(
+            &dir,
+            "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07&ring=1",
+        );
         assert_eq!(got["records"].as_array().unwrap().len(), 1, "{got:#}");
         assert_eq!(got["keyed"]["rows"][0]["source"], "ring");
-        assert_eq!(got["keyed"]["index"]["postings"][0]["total"], 0);
+        assert_eq!(got["keyed"]["ring"]["scanned"], true);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -4158,6 +5154,234 @@ mod tests {
         assert_eq!(named, ["feed", "instrument", "day"]);
         assert_eq!(read.keys.contract.as_deref(), Some("2019-03-28-1150000-CE"));
         assert!(asked("").keys.is_empty());
+    }
+
+    /// **A KEYED ANSWER PAGES THROUGH EVERY MATCH FROM ITS CURSOR, NONE TWICE
+    /// AND NONE SKIPPED, AND A LINE WRITTEN BETWEEN PAGES DOES NOT MOVE THEM**
+    /// (WP-33c, DB-A44): seven refusals of one day, three a page; a line in two
+    /// postings of one half (a day's and its month's) is one row; the last
+    /// page hands back no cursor; no ring byte is read.
+    #[test]
+    fn a_keyed_answer_pages_every_match_from_its_cursor() {
+        let (dir, sink) = sink_in("keyed-pages");
+        for n in 0..7u32 {
+            let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07").with("n", n));
+        }
+        let page = |query: &str| keyed(&dir, query);
+        let first = page("day=2022-03-07&limit=3");
+        let mut seen: Vec<u64> = first["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["fields"]["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seen, [6, 5, 4], "{first:#}");
+        assert_eq!(first["keyed"]["more"], true);
+        assert_eq!(first["bytes_read"], 0, "no ring byte is read unasked");
+        // A LINE WRITTEN NOW IS NEWER THAN EVERY PLACE HANDED OUT.
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07").with("n", 99_u32));
+        let mut cursor = first["keyed"]["next"].as_str().unwrap().to_owned();
+        loop {
+            let next = page(&format!("day=2022-03-07&limit=3&before={cursor}"));
+            seen.extend(
+                next["records"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["fields"]["n"].as_u64().unwrap()),
+            );
+            let Some(more) = next["keyed"]["next"].as_str() else {
+                assert_eq!(next["keyed"]["more"], false);
+                assert_eq!(next["reached_oldest"], true);
+                break;
+            };
+            cursor = more.to_owned();
+        }
+        assert_eq!(
+            seen,
+            [6, 5, 4, 3, 2, 1, 0],
+            "every match, once, newest first"
+        );
+        // A CURSOR OF ANOTHER QUESTION IS REFUSED BY NAME, NEVER READ AS PAGE 1.
+        let wrong = page("day=2022-03-07&limit=3&before=1.2~3.4~5.6");
+        assert_eq!(wrong["records"], serde_json::json!([]));
+        assert!(
+            wrong["keyed"]["cursor_refused"]
+                .as_str()
+                .unwrap()
+                .contains("not a cursor of this request")
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A REFUSAL CODE AND A RUN ARE KEYS OF THE INDEX** (WP-33c; DB-A41,
+    /// DB-A47): `code=` finds every refusal that logged it; `run=` with
+    /// `durable=1` finds a run's lines in the index, its top-level run or the
+    /// numeric `run` field the importer writes; `run=` alone stays the ring's
+    /// filter a page polls.
+    #[test]
+    fn a_refusal_code_and_a_run_are_keys_of_the_index() {
+        let (dir, sink) = sink_in("keyed-code-run");
+        let _ = sink.emit(
+            &index_refusal("NIFTY 50.NSE_IDX.csv", "2020-01-01").with("code", "too_many_entries"),
+        );
+        let _ = sink.emit(
+            &index_refusal("NIFTY 50.NSE_IDX.csv", "2020-01-02").with("code", "price_refused"),
+        );
+        let _ = sink.emit(
+            &telemetry::Event::info("gdfl.import", "run started").with("run", 1_791_270_000_u64),
+        );
+        let _ = sink.emit_for_run(
+            4025,
+            &telemetry::Event::info("cli.lifecycle", "command started"),
+        );
+        let coded = keyed(&dir, "code=too_many_entries");
+        assert_eq!(coded["records"].as_array().unwrap().len(), 1, "{coded:#}");
+        assert_eq!(coded["records"][0]["fields"]["day"], "2020-01-01");
+        assert_eq!(coded["keyed"]["code"], "too_many_entries");
+        let importer = keyed(&dir, "run=1791270000&durable=1");
+        assert_eq!(
+            importer["records"].as_array().unwrap().len(),
+            1,
+            "{importer:#}"
+        );
+        assert_eq!(importer["records"][0]["message"], "run started");
+        let attempt = keyed(&dir, "run=4025&durable=1");
+        assert_eq!(attempt["records"][0]["message"], "command started");
+        assert!(
+            asked("run=4025").keys.is_empty(),
+            "run alone is the ring's filter"
+        );
+        let lone = asked("durable=1");
+        assert!(lone.keys.is_empty());
+        assert!(lone.ignored.iter().any(|(param, _)| *param == "durable"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PARAMETER NO FILTER READS IS NAMED, NEVER DROPPED** (WP-33c,
+    /// DB-A45): `reason=`, `why=` and any other name come back under
+    /// `ignored`, and a cursor with no key to page is named too.
+    #[test]
+    fn a_parameter_no_filter_reads_is_named_never_dropped() {
+        let read = asked("reason=census&why=x&bogus=1&before=1.2");
+        let named: Vec<(&str, &str)> = read
+            .ignored
+            .iter()
+            .map(|(param, word)| (*param, word.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("before", "1.2"),
+                ("unknown parameter", "reason"),
+                ("unknown parameter", "why"),
+                ("unknown parameter", "bogus"),
+            ]
+        );
+        assert_eq!(unknown_params("limit=1&&level=x&x=1&x=2", &PARAMS), ["x"]);
+        assert!(asked("feed=gdfl&ring=1&limit=5").ignored.is_empty());
+        assert!(
+            asked("ring=yes")
+                .ignored
+                .iter()
+                .any(|(param, word)| *param == "ring" && word == "yes")
+        );
+    }
+
+    /// **THE PAGE ANSWERS A KEYED QUESTION AS THE JSON DOES** (WP-33c,
+    /// DB-A45): `/logs?feed=gdfl&day=...` is no longer `/logs` with its keys
+    /// dropped: it shows the day's refusal, the form keeps the keys, and the
+    /// JSON link carries them.
+    #[test]
+    fn the_page_answers_a_keyed_question_as_the_json_does() {
+        let (dir, sink) = sink_in("keyed-page");
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
+        let _ = sink.emit(&telemetry::Event::error("pull.spot", "member did not land"));
+        let plain = page_over(&dir, None, &asked(""), None);
+        let keyed_page = page_over(&dir, None, &asked("feed=gdfl&day=2022-03-07"), None);
+        assert_ne!(plain, keyed_page);
+        assert!(keyed_page.contains("NIFTY 50.NSE_IDX.csv"), "{keyed_page}");
+        assert!(!keyed_page.contains("member did not land"), "{keyed_page}");
+        assert!(
+            keyed_page.contains("value=\"2022-03-07\""),
+            "the form keeps the day"
+        );
+        assert!(
+            keyed_page.contains("/logs.json?limit=50&amp;feed=gdfl&amp;day=2022-03-07")
+                || keyed_page.contains("/logs.json?limit=50&feed=gdfl&day=2022-03-07"),
+            "the JSON link carries the keys: {keyed_page}"
+        );
+        assert!(keyed_page.contains("durable audit index"), "{keyed_page}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **EVERY /db READ IS COUNTED, THE FIRST OF A WINDOW SAMPLED, AND A
+    /// WINDOW'S COUNT SAID WHEN IT CLOSES** (WP-33c, DB-A42); a lone sampled
+    /// read is no news; the selection kept is the selection's names only.
+    #[test]
+    fn every_db_read_is_counted_and_the_first_of_a_window_sampled() {
+        let mut windows = AccessWindows::default();
+        let first = windows.account("/bars.json", false, 10, 1_000);
+        assert_eq!(
+            first,
+            AccessPlan {
+                closed: None,
+                sample: true
+            }
+        );
+        assert!(!windows.account("/bars.json", false, 30, 2_000).sample);
+        assert!(!windows.account("/bars.json", true, 5, 3_000).sample);
+        assert!(
+            windows.account("/spot.json", false, 1, 3_000).sample,
+            "per route"
+        );
+        let next = windows.account("/bars.json", false, 7, 1_000 + ACCESS_WINDOW_MS);
+        assert!(next.sample, "a new window samples again");
+        let closed = next.closed.expect("the closed window is said");
+        assert_eq!((closed.served, closed.refused, closed.slowest), (2, 1, 30));
+        let lone = windows.account("/spot.json", false, 1, 3_000 + ACCESS_WINDOW_MS);
+        assert_eq!(lone.closed, None, "one sampled read is no news");
+        assert_eq!(
+            selection_of("feed=gdfl&instrument=NSE-INDEX-NIFTY&month=2019-03&token=secret&q=x%20y"),
+            [
+                ("feed", "gdfl".to_owned()),
+                ("instrument", "NSE-INDEX-NIFTY".to_owned()),
+                ("month", "2019-03".to_owned()),
+            ]
+        );
+        assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
+    }
+
+    /// **A 501 IS A PLACEHOLDER, NOT A FAILURE THE AUDIT STREAM KEEPS**
+    /// (WP-33c, DB-A52), and a server error's durable copy has its own ration.
+    #[test]
+    fn a_501_is_a_warn_and_a_server_errors_durable_copy_is_rationed() {
+        use axum::http::StatusCode;
+        assert_eq!(
+            request_level(StatusCode::NOT_IMPLEMENTED),
+            telemetry::Level::Warn
+        );
+        assert_eq!(
+            request_level(StatusCode::INTERNAL_SERVER_ERROR),
+            telemetry::Level::Error
+        );
+        assert_eq!(
+            request_level(StatusCode::SERVICE_UNAVAILABLE),
+            telemetry::Level::Error
+        );
+        assert_eq!(request_level(StatusCode::NOT_FOUND), telemetry::Level::Warn);
+        assert_eq!(request_level(StatusCode::OK), telemetry::Level::Debug);
+        assert!(!telemetry::is_audited(
+            request_level(StatusCode::NOT_IMPLEMENTED),
+            "api.request",
+            "served"
+        ));
+        let mut ration = Ration::new(AUDITED_ERRORS_PER_WINDOW);
+        let admitted = (0..AUDITED_ERRORS_PER_WINDOW + 5)
+            .filter(|_| ration.admit(1_000).write)
+            .count();
+        assert_eq!(admitted as u64, AUDITED_ERRORS_PER_WINDOW);
+        assert_eq!(ration.admit(1_000 + FAILED_LINE_WINDOW_MS).summary, Some(5));
     }
 
     /// **THE IMPORT'S PACE IS THE MEDIAN GAP BETWEEN ITS NEWEST DAYS**, over

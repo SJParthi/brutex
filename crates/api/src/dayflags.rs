@@ -59,11 +59,15 @@
 //!   [`LOOKBACK_MONTHS`] month opens back; where none is found, at most
 //!   [`FRONT_PROBE_MONTHS`] `metadata` calls each way to find the series'
 //!   first month, and one open;
-//! - the pull journal, for a Zerodha spot page only: a tail, like the
-//!   ledgers, then O(refusals of the symbol) a day. **The first read in a
-//!   process walks the whole journal**, which keeps no index by instrument
-//!   (4,217,027 records, 1 GiB, on the operator's store); the answer that
-//!   pays for it says so in `notes`, with the time it took.
+//! - the pull journal, for a Zerodha spot page only: through the journal's
+//!   own index (WP-33c; `crate::audit::Journal::read_index`), O(runs) for the
+//!   run spans and O(refusals of the symbol) for the records it names, then
+//!   O(refusals of the symbol) a day. A journal the index does not cover yet
+//!   (one written before this build, until its first append or the startup
+//!   build indexes it) is walked once per process, outside any lock, and the
+//!   answer that pays for it says so in `notes` and `sources.pull_journal.via`,
+//!   with the time it took and why (4,217,027 records, 1 GiB, on the
+//!   operator's store).
 //!
 //! Measured p50/p99 are in the commit that built this route and go to
 //! `docs/06-limits.md` with WP-99; none is claimed here.
@@ -504,7 +508,7 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     // gap line as its peer's and does not pay the journal's first walk (see
     // `read_pull_journal`), which is the one cost here that is not per day.
     let zerodha_spot = asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno;
-    let pull = zerodha_spot.then(|| read_pull_journal(root));
+    let pull = zerodha_spot.then(|| read_pull_journal(root, inst.symbol.as_str()));
     let pull_ok = pull.as_ref().and_then(|p| p.as_ref().ok());
     // WHERE THE SERIES STARTS decides whether a day can be a refused front
     // (D-3315). A `1day` bar before the page, which `day_bars` already found,
@@ -619,9 +623,9 @@ fn journal_rows(
             from: Some(first),
             to: Some(last),
             kind: Some(kind),
-            outcome: None,
             newest_first: false,
             page,
+            ..super::imports::Asked::whole()
         };
         let body = super::imports::answer(root, &asked)?;
         if page == 0 {
@@ -1566,13 +1570,12 @@ fn derive_json(
 // A record is attributed to the run before it, as `/audit.json` attributes it
 // (`audit_json::vendor_of_source`), and only Zerodha's are kept.
 
-/// The note prefixes of a Zerodha member whose WHOLE window was refused before
-/// append (`pull::ingest`): nothing of the window landed. Matched on the
-/// prefix, because the journal cuts a note at 60 bytes and keeps its start.
-const WHOLE_WINDOW_NOTES: [&str; 2] = [
-    "conflicting vendor candles at ",
-    "off-grid broker candle at ",
-];
+// The note prefixes of a Zerodha member whose WHOLE window was refused before
+// append (`pull::ingest`): nothing of the window landed. Matched on the
+// prefix, because the journal cuts a note at 60 bytes and keeps its start.
+// Kept in `audit` since WP-33c, so the journal's index files the same records
+// this reader keeps.
+use crate::audit::WHOLE_WINDOW_NOTES;
 
 /// The most refusals one record names; the rest are counted.
 const MAX_PULL_NAMED: usize = 4;
@@ -1681,6 +1684,21 @@ struct PullRead {
     /// long journal is the one non-constant cost of this route, so it is said.
     read_micros: u64,
     parsed: Arc<PullRefusals>,
+    /// How the refusals were found.
+    via: Via,
+}
+
+/// How one pull-journal read found its refusals (WP-33c).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Via {
+    /// No journal.
+    Absent,
+    /// Through the journal's index, which covered this many records and held
+    /// this many runs; only the asked instrument's refusals were read.
+    Index { covered: u64, runs: u64 },
+    /// By a walk of the journal, every instrument's refusals, because the
+    /// index could not be used, for this reason.
+    Walk { why: String },
 }
 
 /// The pull journals read so far.
@@ -1766,28 +1784,33 @@ fn pull_refusal(number: u64, record: &crate::audit::Record) -> Option<PullRefusa
     })
 }
 
-/// The pull journal at `root`, read through its tail: one `metadata` call, and
-/// the records appended since the last read, in 4 MiB reads. A file that shrank
-/// or was replaced is read again from its start.
+/// The pull journal at `root`, for `symbol`'s refusals: through the journal's
+/// index when it covers the journal ([`crate::audit::Journal::read_index`]),
+/// else by a walk that says why.
 ///
-/// # Cost, stated
+/// # Cost, stated (WP-33c; DB-A34)
 ///
-/// The journal keeps no index by instrument, so the FIRST read in a process
-/// walks every record: 4,217,027 of them (1,079,558,912 bytes) on the
-/// operator's store on 9 Oct 2026. A record is decoded only when its kind byte
-/// says run, or says member failure and its note bytes hold a refusal; the
-/// rest are skipped on two byte compares and a search of 68 bytes. After that
-/// a read costs the records appended since. `api::audit_json::Attribution`
-/// already reads this file the same way for `/audit.json`.
+/// Through the index: one read each of `ident`, `cover` and `runs` (O(runs)),
+/// one read of `symbol`'s `refusals` file and one positional read per record
+/// it names (O(refusals of the symbol): 20 for NIFTY on the operator's store),
+/// and a decode of the records past the cover (none after an append). No lock
+/// is held and nothing grows with the journal.
+///
+/// Without an index (a journal the first append under this build has not yet
+/// indexed, or an index of another file), the walk of every record the first
+/// time a process asks: 4,217,027 records (1,079,558,912 bytes) on the
+/// operator's store on 9 Oct 2026. It is read OUTSIDE the tail cache's lock,
+/// so one first walk never stalls every other page's read; the answer names
+/// the walk, its time and why the index could not be used.
 ///
 /// # Errors
 ///
 /// A file that is there and cannot be measured or read, in its own words.
-fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
-    use std::io::{Read as _, Seek as _};
+fn read_pull_journal(root: &Path, symbol: &str) -> Result<PullRead, String> {
     use std::os::unix::fs::MetadataExt as _;
     let started = std::time::Instant::now();
-    let path = crate::audit::journal_path(root);
+    let journal = crate::audit::Journal::at(root);
+    let path = journal.path.clone();
     let meta = match std::fs::metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(PullRead {
@@ -1799,30 +1822,153 @@ fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
                 read_now: 0,
                 read_micros: 0,
                 parsed: Arc::new(PullRefusals::default()),
+                via: Via::Absent,
             });
         }
         Err(e) => return Err(format!("{}: {e}", path.display())),
         Ok(meta) => meta,
     };
-    let identity = Some((meta.dev(), meta.ino()));
     let len = meta.len();
     let stride = crate::audit::RECORD_LEN_U64;
     let whole = len - len % stride;
-    let mut held = pull_tails().lock().unwrap_or_else(PoisonError::into_inner);
+    let (parsed, read_now, via) = match journal.read_index(whole / stride) {
+        Ok(indexed) => {
+            let (parsed, read_now) = pull_indexed(&journal, &indexed, symbol, whole / stride)?;
+            let via = Via::Index {
+                covered: indexed.covered,
+                runs: crate::audit::as_u64(indexed.runs.len()),
+            };
+            (parsed, read_now, via)
+        }
+        Err(why) => {
+            let (parsed, read_now) = pull_walked(&path, Some((meta.dev(), meta.ino())), whole)?;
+            (parsed, read_now, Via::Walk { why })
+        }
+    };
+    Ok(PullRead {
+        path,
+        present: true,
+        bytes: len,
+        records: whole / stride,
+        torn: len.saturating_sub(whole),
+        read_now,
+        read_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        parsed,
+        via,
+    })
+}
+
+/// `symbol`'s Zerodha refusals through the index: the records its `refusals`
+/// file names, each filed under the run before it, then the records past the
+/// cover, decoded in order from the vendor of the last run the index holds.
+/// Answers the refusals and how many records were read.
+fn pull_indexed(
+    journal: &crate::audit::Journal,
+    indexed: &crate::audit::Indexed,
+    symbol: &str,
+    total: u64,
+) -> Result<(Arc<PullRefusals>, u64), String> {
+    let mut parsed = PullRefusals::default();
+    let ordinals = journal.refusal_ordinals(symbol, indexed.covered)?;
+    let mut read_now = crate::audit::as_u64(ordinals.len());
+    for (ordinal, decoded) in journal.records_at(&ordinals)? {
+        let number = ordinal.saturating_add(1);
+        let record = match decoded {
+            Err(why) => {
+                parsed.faults.note(number, "", &format!("{why:?}"));
+                continue;
+            }
+            Ok(record) => record,
+        };
+        // AN ENTRY THAT NAMES ANOTHER RECORD is a fault of the index, named,
+        // never read as the symbol's.
+        if record.kind != crate::audit::Kind::MemberFailure || record.source != symbol {
+            parsed.faults.note(
+                number,
+                &record.source,
+                "the journal's index names this record under another source or kind",
+            );
+            continue;
+        }
+        if indexed.vendor_before(ordinal) != Some(Vendor::Zerodha) {
+            parsed.other_vendor = parsed.other_vendor.saturating_add(1);
+            continue;
+        }
+        if let Some(refusal) = pull_refusal(number, &record) {
+            parsed
+                .by_symbol
+                .entry(record.source.clone())
+                .or_default()
+                .push(refusal);
+        }
+    }
+    // THE RECORDS PAST THE COVER, which no append has indexed yet: read in
+    // order, from the vendor of the last run the index holds.
+    if total > indexed.covered {
+        let mut vendor = indexed.vendor_before(indexed.covered);
+        let tail: Vec<u64> = (indexed.covered..total).collect();
+        read_now = read_now.saturating_add(crate::audit::as_u64(tail.len()));
+        let mut rest = PullRefusals::default();
+        for (ordinal, decoded) in journal.records_at(&tail)? {
+            let image = match decoded {
+                Ok(ref record) => record.image(),
+                Err(ref why) => {
+                    rest.faults
+                        .note(ordinal.saturating_add(1), "", &format!("{why:?}"));
+                    continue;
+                }
+            };
+            pull_record(&mut rest, &mut vendor, ordinal.saturating_add(1), &image);
+        }
+        if let Some(found) = rest.by_symbol.remove(symbol) {
+            parsed
+                .by_symbol
+                .entry(symbol.to_owned())
+                .or_default()
+                .extend(found);
+        }
+        parsed.faults.count = parsed.faults.count.saturating_add(rest.faults.count);
+        parsed.faults.named.extend(rest.faults.named);
+        parsed.other_vendor = parsed.other_vendor.saturating_add(rest.other_vendor);
+    }
+    Ok((Arc::new(parsed), read_now))
+}
+
+/// Every symbol's Zerodha refusals by a walk of the journal through its tail
+/// cache: the records appended since the last walk, or all of them the first
+/// time. The walk runs OUTSIDE the cache's lock (DB-A34): the cache is read,
+/// the lock released, the records read, and the result published only if no
+/// other walk got further first. Two first walks at once each pay the walk;
+/// neither waits on the other.
+fn pull_walked(
+    path: &Path,
+    identity: Option<(u64, u64)>,
+    whole: u64,
+) -> Result<(Arc<PullRefusals>, u64), String> {
+    use std::io::{Read as _, Seek as _};
+    let stride = crate::audit::RECORD_LEN_U64;
     let fresh = || PullTail {
         identity,
         upto: 0,
         vendor: None,
         parsed: Arc::new(PullRefusals::default()),
     };
-    let tail = held.entry(path.clone()).or_insert_with(fresh);
+    let mut tail = {
+        let held = pull_tails().lock().unwrap_or_else(PoisonError::into_inner);
+        held.get(path).map_or_else(fresh, |held| PullTail {
+            identity: held.identity,
+            upto: held.upto,
+            vendor: held.vendor,
+            parsed: Arc::clone(&held.parsed),
+        })
+    };
     if tail.identity != identity || whole < tail.upto {
-        *tail = fresh();
+        tail = fresh();
     }
     let mut read_now = 0u64;
     if whole > tail.upto {
         let fail = |e: std::io::Error| format!("{}: {e}", path.display());
-        let mut file = std::fs::File::open(&path).map_err(fail)?;
+        let mut file = std::fs::File::open(path).map_err(fail)?;
         file.seek(std::io::SeekFrom::Start(tail.upto))
             .map_err(fail)?;
         let parsed = Arc::make_mut(&mut tail.parsed);
@@ -1854,16 +2000,15 @@ fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
             }
         }
     }
-    Ok(PullRead {
-        path: path.clone(),
-        present: true,
-        bytes: len,
-        records: tail.upto / stride,
-        torn: len.saturating_sub(whole),
-        read_now,
-        read_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        parsed: Arc::clone(&tail.parsed),
-    })
+    let parsed = Arc::clone(&tail.parsed);
+    let mut held = pull_tails().lock().unwrap_or_else(PoisonError::into_inner);
+    let publish = held
+        .get(path)
+        .is_none_or(|kept| kept.identity != tail.identity || kept.upto < tail.upto);
+    if publish {
+        held.insert(path.to_path_buf(), tail);
+    }
+    Ok((parsed, read_now))
 }
 
 /// Folds one 256-byte record into `parsed`: a run sets the vendor its member
@@ -1952,14 +2097,18 @@ fn pull_notes(pull: Option<&Result<PullRead, String>>) -> Vec<String> {
              the series' first 1day bar is not judged a refused front by it.",
             read.path.display()
         )],
-        // THE FIRST READ IN A PROCESS WALKS THE WHOLE JOURNAL: said, with its
-        // measured time, whenever this answer was the one that paid for it.
+        // A WALK IS SAID, with its measured time and why the index could not
+        // be used, whenever this answer was the one that paid for it.
         Some(Ok(read)) if read.read_now > FIRST_WALK_RECORDS => vec![format!(
-            "This answer read {} pull-journal record(s) in {} ms: the journal keeps no index by \
-             instrument, so a process's first read walks it once; later reads cost the records \
-             appended since.",
+            "This answer read {} pull-journal record(s) in {} ms by a walk of the journal, \
+             because its index could not be used ({}); a process walks it once, and later \
+             reads cost the records appended since.",
             read.read_now,
-            read.read_micros / 1_000
+            read.read_micros / 1_000,
+            match read.via {
+                Via::Walk { ref why } => why.as_str(),
+                Via::Index { .. } | Via::Absent => "the index covers only part of it",
+            }
         )],
         Some(Ok(_)) | None => Vec::new(),
     }
@@ -3259,6 +3408,20 @@ fn sources_json(
             "torn_bytes": read.torn,
             "read_now": read.read_now,
             "read_ms": read.read_micros / 1_000,
+            "via": match read.via {
+                Via::Absent => json!({ "kind": "absent" }),
+                Via::Index { covered, runs } => json!({
+                    "kind": "index",
+                    "covered": covered,
+                    "runs": runs,
+                    "refusals_of": "the asked instrument only",
+                }),
+                Via::Walk { ref why } => json!({
+                    "kind": "walk",
+                    "why": why,
+                    "refusals_of": "every instrument",
+                }),
+            },
             "zerodha_refusals": read.parsed.by_symbol.values().map(Vec::len).sum::<usize>(),
             "other_vendor_members": read.parsed.other_vendor,
             "faults": read.parsed.faults.json(),
@@ -4688,8 +4851,10 @@ mod tests {
             &root,
             &ask("feed=zerodha&instrument=NSE-INDEX-ZZOIL&from=2020-01-13"),
         );
-        assert_eq!(got["sources"]["pull_journal"]["zerodha_refusals"], 3);
+        // THROUGH THE INDEX (WP-33c): the asked instrument's refusals only.
+        assert_eq!(got["sources"]["pull_journal"]["zerodha_refusals"], 2);
         assert_eq!(got["sources"]["pull_journal"]["other_vendor_members"], 1);
+        assert_eq!(got["sources"]["pull_journal"]["via"]["kind"], "index");
         let front = record(&got, "2020-01-13");
         assert_eq!(front["refused_front"], true, "{front:#}");
         assert_eq!(front["pull"]["count"], 1);
@@ -4772,10 +4937,12 @@ mod tests {
         assert_eq!(record(&gdfl, "2020-01-13")["refused_front"], Value::Null);
     }
 
-    /// **THE PULL JOURNAL IS READ BY ITS TAIL**: a second read reads nothing
-    /// new, an append reads only its records, and a torn record is not read.
+    /// **A JOURNAL WITH NO INDEX IS WALKED, BY ITS TAIL, AND SAYS SO**: the
+    /// shape of the operator's journal before WP-33c's first append. A second
+    /// read reads nothing new, an append reads only its records, a torn record
+    /// is not read, and the answer names the walk and why.
     #[test]
-    fn the_pull_journal_is_read_by_its_tail() {
+    fn a_journal_with_no_index_is_walked_by_its_tail_and_says_so() {
         let root = root_of("pull-tail");
         pull_run(
             &root,
@@ -4787,16 +4954,106 @@ mod tests {
                 "conflicting vendor candles at 1578853800; refused before append",
             )],
         );
-        let first = read_pull_journal(&root).unwrap();
+        let journal = crate::audit::Journal::at(&root);
+        std::fs::remove_dir_all(journal.index_dir()).expect("the append built an index");
+        let first = read_pull_journal(&root, "ZZOIL").unwrap();
         assert!(first.present);
         assert_eq!((first.records, first.read_now), (2, 2));
-        let again = read_pull_journal(&root).unwrap();
+        assert!(
+            matches!(first.via, Via::Walk { ref why } if why.contains("no index")),
+            "{:?}",
+            first.via
+        );
+        let again = read_pull_journal(&root, "ZZOIL").unwrap();
         assert_eq!(again.read_now, 0);
-        pull_run(&root, "zerodha_nse_checked fixture", &[]);
-        append(&crate::audit::journal_path(&root), "torn");
-        let tail = read_pull_journal(&root).unwrap();
+        // A TORN TAIL AFTER A RECORD WRITTEN WITH NO INDEX: still walked.
+        let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_791_266_622);
+        let image = crate::audit::Record::refused(
+            crate::audit::Scope::Spot,
+            crate::audit::Outcome::Failed,
+            at,
+            "zerodha_nse_checked fixture",
+            "fixture run",
+        )
+        .image();
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&image);
+        bytes.extend_from_slice(b"torn");
+        std::fs::write(&journal.path, bytes).unwrap();
+        let tail = read_pull_journal(&root, "ZZOIL").unwrap();
         assert_eq!((tail.records, tail.read_now, tail.torn), (3, 1, 4));
         assert_eq!(tail.parsed.by_symbol["ZZOIL"].len(), 1);
+    }
+
+    /// **THROUGH THE INDEX THE READER READS THE ASKED SYMBOL'S RECORDS AND
+    /// NOTHING ELSE** (WP-33c, DB-A34): the journal's own appends keep the
+    /// index, so a read touches O(runs) entries and the one symbol's refusal
+    /// records, files each under the run before it, never reads another
+    /// symbol's, and decodes a record past the index's cover in order.
+    #[test]
+    fn through_the_index_only_the_asked_symbols_records_are_read() {
+        let root = root_of("pull-index");
+        let whole = "conflicting vendor candles at 1578853800; refused before append";
+        pull_run(
+            &root,
+            "Reference indices",
+            &[("ZZOIL", "2018-01-01", "2026-09-30", whole)],
+        );
+        pull_run(
+            &root,
+            "zerodha_nse_checked fixture",
+            &[
+                ("ZZOIL", "2018-01-01", "2026-09-30", whole),
+                ("ZZOTHER", "2018-01-01", "2026-09-30", whole),
+                (
+                    "ZZOIL",
+                    "2018-01-01",
+                    "2026-09-30",
+                    "request minute coverage UNVERIFIED",
+                ),
+            ],
+        );
+        let read = read_pull_journal(&root, "ZZOIL").unwrap();
+        assert_eq!(read.records, 6);
+        assert_eq!(
+            read.via,
+            Via::Index {
+                covered: 6,
+                runs: 2
+            }
+        );
+        assert_eq!(read.read_now, 2, "the two ZZOIL refusals, and nothing else");
+        assert_eq!(read.parsed.by_symbol["ZZOIL"].len(), 1, "Zerodha's only");
+        assert_eq!(read.parsed.other_vendor, 1, "the reference run's member");
+        assert!(!read.parsed.by_symbol.contains_key("ZZOTHER"));
+        // A RECORD PAST THE COVER (written by a build with no index) is read
+        // in order, under the run before it.
+        let journal = crate::audit::Journal::at(&root);
+        let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_791_266_622);
+        let late = crate::audit::Record::member_failure(
+            crate::audit::Scope::Spot,
+            at,
+            "ZZOIL",
+            pull::session::Window::new(day("2018-01-01"), day("2026-09-30")).unwrap(),
+            whole,
+        );
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&late.image());
+        std::fs::write(&journal.path, bytes).unwrap();
+        let read = read_pull_journal(&root, "ZZOIL").unwrap();
+        assert_eq!(read.records, 7);
+        assert_eq!(
+            read.via,
+            Via::Index {
+                covered: 6,
+                runs: 2
+            }
+        );
+        assert_eq!(
+            read.read_now, 3,
+            "the two indexed, and the one past the cover"
+        );
+        assert_eq!(read.parsed.by_symbol["ZZOIL"].len(), 2);
     }
 
     /// **THE ROUTE, OVER THE REAL ROUTER STATE**: 200 with one record a day,
