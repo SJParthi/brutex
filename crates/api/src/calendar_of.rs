@@ -152,6 +152,9 @@ pub struct Cache {
     answers: std::sync::Mutex<
         std::collections::HashMap<AnswerKey, (std::time::SystemTime, std::sync::Arc<KeptAnswer>)>,
     >,
+    /// Answers built off the request path, and the kept answers a request
+    /// may be handed without reading the census: see [`build`]. DB-N19.
+    pub builds: build::Builds,
 }
 
 /// One month file of one series at one rung: vendor, exchange, segment,
@@ -257,11 +260,21 @@ impl Cache {
     ///
     /// The caller keeps only answers whose key the census bounds: the
     /// exchange, or a symbol the census holds. D-0695, D-3336.
-    pub fn keep_answer(&self, key: AnswerKey, stamp: std::time::SystemTime, kept: KeptAnswer) {
+    ///
+    /// Hands back the kept answer, so the caller can confirm it under the
+    /// stamps it was read under ([`build::Builds::confirm`]).
+    pub fn keep_answer(
+        &self,
+        key: AnswerKey,
+        stamp: std::time::SystemTime,
+        kept: KeptAnswer,
+    ) -> std::sync::Arc<KeptAnswer> {
+        let kept = std::sync::Arc::new(kept);
         self.answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, (stamp, std::sync::Arc::new(kept)));
+            .insert(key, (stamp, std::sync::Arc::clone(&kept)));
+        kept
     }
 
     /// The month count remembered for `key` under `entry`.
@@ -309,6 +322,9 @@ impl Cache {
     /// Forget every kept `/calendar.json` answer and every month count, as a
     /// server that has answered nothing yet: for a test that wants a cold
     /// request.
+    ///
+    /// The confirmed answers go too: a request that found one would be
+    /// answered without reading anything, which is not a cold request.
     #[cfg(test)]
     pub(crate) fn forget_answers(&self) {
         self.answers
@@ -319,6 +335,7 @@ impl Cache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.builds.forget_confirmed();
     }
 
     /// How many month counts are remembered: for a test to know a count was
@@ -2425,6 +2442,9 @@ fn count_days(file: &store::file::BarFile, month: YearMonth) -> Result<MonthDays
 
 #[path = "calendar_record.rs"]
 pub mod record;
+
+#[path = "calendar_build.rs"]
+pub mod build;
 
 /// [`cached`], with the derivation passed in.
 ///

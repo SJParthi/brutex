@@ -483,24 +483,39 @@ fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
         let rest = &source[at..];
         rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
     };
+    // SINCE WP-36 (DB-N19) the handler hands out a confirmed answer itself
+    // and leads a build through `lead`, which runs the reading in the pool;
+    // the handler never reads the census or builds inline.
     let calendar = body_of("async fn calendar_json(");
     assert!(
-        calendar.contains("crate::detail::run_calendar(move ||")
-            && calendar.contains("calendar_json_reading(&site, &uri, census_now_stamped)"),
-        "/calendar.json derives inside the admitted blocking pool:\n{calendar}"
+        calendar.contains("lead(&site, uri, &asked, &build, now)")
+            && !calendar.contains("calendar_json_reading(")
+            && !calendar.contains("census_now_stamped"),
+        "/calendar.json builds only through `lead`:\n{calendar}"
     );
+    let lead = body_of("fn lead(");
+    assert!(
+        lead.contains("crate::detail::run_calendar(move ||")
+            && lead.contains("calendar_json_reading(&site, &uri, census_now_stamped)"),
+        "a build is read inside the admitted blocking pool:\n{lead}"
+    );
+    // SINCE WP-36 (DB-N19) the peer vote is kept, or built by `lead_vote`
+    // inside the pool; `gaps_json` asks `voted` and never derives inline.
     let gaps = body_of("async fn gaps_json(");
-    let call = gaps
-        .find("peer_calendar(&peers_site, &asked)")
-        .expect("the peer vote, when asked for, is derived");
-    let admitted = gaps
+    assert!(
+        gaps.contains("voted(&site, &asked).await")
+            && !gaps.contains("peer_calendar(")
+            && !gaps.contains("peer_vote_reading("),
+        "/gaps.json derives no vote inline:\n{gaps}"
+    );
+    let vote = body_of("fn lead_vote(");
+    let admitted = vote
         .find("crate::detail::run_calendar(move ||")
         .expect("inside the calendar pool");
+    let call = vote
+        .find("peer_vote_reading(&site, &addressed, census_now_stamped)")
+        .expect("the peer vote, when asked for, is derived");
     assert!(admitted < call, "the peer vote is derived inside the pool");
-    assert!(
-        !gaps.contains("peer_calendar(&site, &asked)"),
-        "and never inline on the worker"
-    );
 }
 
 /// **A REFUSED ADMISSION IS ANSWERED, NAMED AND RETRYABLE.** Saturation is
@@ -584,5 +599,325 @@ fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
     assert!(
         !map.contains("Published::read") && !map.contains("masters_dir()"),
         "and never inline in the handler"
+    );
+}
+
+// ══ WP-36: the cold start (DB-N19) ══════════════════════════════════════════
+
+impl Fixture {
+    /// Bound every request's wait, as the served process does.
+    fn served(&self, wait: std::time::Duration) {
+        self.site.calendars.builds.bound_waits(wait);
+    }
+
+    /// Hold the census cache's lock on another thread until the returned
+    /// sender is dropped or sent to: anything that reads the census blocks
+    /// meanwhile, and anything that does not, does not.
+    fn census_held(&self) -> std::sync::mpsc::Sender<()> {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (taken, held) = std::sync::mpsc::channel::<()>();
+        let site = Loaded::clone(&self.site);
+        std::thread::spawn(move || {
+            let _guard = site
+                .census
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            taken.send(()).expect("the test waits for the lock");
+            let _ = released.recv();
+        });
+        held.recv().expect("the census lock is taken");
+        release
+    }
+
+    /// `/calendar.json` with `query`, asked again while it is `"building"`,
+    /// until it is answered in full: the answer, which must be a `200`.
+    #[expect(clippy::panic, reason = "a build that never finishes fails the test")]
+    async fn settled(&self, query: &str) -> Value {
+        for _ in 0..1_000 {
+            let (status, answer) = self.get(query).await;
+            if status == axum::http::StatusCode::OK {
+                return answer;
+            }
+            assert_eq!(
+                status,
+                axum::http::StatusCode::ACCEPTED,
+                "{query}: {answer}"
+            );
+            assert_eq!(answer["status"], "building", "{query}: {answer}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{query}: still building after 1,000 asks");
+    }
+
+    /// GDFL one-second bars of NIFTY and BANKNIFTY on two days of March 2022.
+    fn gdfl_seconds(&self) {
+        for symbol in ["NIFTY", "BANKNIFTY"] {
+            let stamps: Vec<i64> = [epoch(2022, 3, 4), epoch(2022, 3, 8)]
+                .iter()
+                .flat_map(|day| (0..30).map(move |second| at(*day, second)))
+                .collect();
+            self.series(
+                Vendor::Gdfl,
+                Segment::Index,
+                symbol,
+                Timeframe::SECOND_1,
+                &stamps,
+            );
+        }
+    }
+}
+
+/// **A KEPT ANSWER IS HANDED OUT WITHOUT READING THE CENSUS, AND ONLY WHILE
+/// THE ASKED FEED'S STAMP STANDS STILL.** DB-N19.
+///
+/// After one request, the census cache's lock is held by another thread: a
+/// request that read the census would block. The next request is answered at
+/// once, the same bytes. Another feed's landing does not move this feed's
+/// answer either. This feed's landing does, and its next request reads again.
+#[tokio::test]
+async fn a_confirmed_answer_reads_no_census_and_moves_with_its_feeds_stamp() {
+    let fixture = Fixture::new("calendar-route-confirmed");
+    fixture.gdfl_seconds();
+    let (status, first) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{first}");
+    assert_eq!(fixture.site.calendars.builds.confirmed_answers(), 1);
+
+    let release = fixture.census_held();
+    let started = std::time::Instant::now();
+    let (status, again) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(again, first, "the confirmed answer, byte for byte");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "answered while the census lock was held: no census was read"
+    );
+    drop(release);
+
+    // ANOTHER FEED'S LANDING moves only that feed's manifest.
+    fixture.daily(
+        Vendor::Zerodha,
+        Segment::Index,
+        "NIFTY",
+        &[epoch(2025, 5, 2)],
+    );
+    let release = fixture.census_held();
+    let (status, still) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    drop(release);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(still, first, "another feed's landing does not move it");
+
+    // THIS FEED'S LANDING moves it: the next request reads and sees the day.
+    fixture.series(
+        Vendor::Gdfl,
+        Segment::Index,
+        "NIFTY",
+        Timeframe::SECOND_1,
+        &[at(epoch(2022, 4, 4), 0)],
+    );
+    let (status, landed) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{landed}");
+    assert_eq!(landed["toDate"], "2022-04-04", "{landed}");
+}
+
+/// **PAST THE BUDGET A REQUEST IS ANSWERED "BUILDING", AT ONCE, AND THE BUILD
+/// GOES ON; THE NEXT REQUEST IS ANSWERED IN FULL.** DB-N19: the first
+/// `/calendar.json?feed=gdfl&symbol=NIFTY` after a start took 6.55 s.
+///
+/// The census lock is held, so the build a request leads cannot finish. The
+/// request is answered `202` inside a bound far below a build, says what it
+/// is waiting for and when to ask again, and claims no day. Once the lock is
+/// let go the build finishes, and the next request is answered in full.
+#[tokio::test]
+async fn past_the_budget_a_request_is_answered_building_and_the_next_in_full() {
+    let fixture = Fixture::new("calendar-route-building");
+    fixture.gdfl_seconds();
+    fixture.served(std::time::Duration::from_millis(20));
+    let release = fixture.census_held();
+    let started = std::time::Instant::now();
+    let (status, building) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    let took = started.elapsed();
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{building}");
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "answered within its budget, not after the build: {took:?}"
+    );
+    assert_eq!(building["status"], "building");
+    assert_eq!(building["feed"], "gdfl");
+    assert_eq!(building["symbol"], "NIFTY");
+    assert_eq!(building["rung"], Value::Null, "the feed's default");
+    assert_eq!(building["by"], "request");
+    assert_eq!(building["retry_after_ms"], 250);
+    assert!(building.get("days").is_none(), "no day is claimed");
+    assert!(
+        building["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("ask again")),
+        "{building}"
+    );
+
+    // A SECOND REQUEST joins the same build: one build, not two.
+    let (status, joined) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{joined}");
+    assert_eq!(fixture.site.calendars.builds.in_flight(), 1);
+
+    drop(release);
+    let full = fixture.settled("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(full["status"], "ok", "{full}");
+    assert_eq!(full["days"], "R..RR");
+    assert_eq!(full["held"], "10001", "held by NIFTY alone");
+}
+
+/// **WHILE THE CENSUS IS READ AT START, A REQUEST FOR A KEY NOT QUEUED IS
+/// ANSWERED "BUILDING" WITHOUT READING IT BESIDE IT, AND A QUEUED KEY'S
+/// REQUEST WAITS ON ITS START-UP BUILD.** DB-N19.
+#[tokio::test]
+async fn while_the_census_is_read_at_start_a_request_reads_nothing_beside_it() {
+    let fixture = Fixture::new("calendar-route-census-at-start");
+    fixture.gdfl_seconds();
+    fixture.served(std::time::Duration::from_millis(5));
+    let builds = &fixture.site.calendars.builds;
+    let queued = builds
+        .queue_at_start(&(Vendor::Gdfl, None, "NIFTY".to_owned()))
+        .expect("room");
+    {
+        let _reading = builds.reading_census_at_start();
+        let (status, census) = fixture.get("feed=gdfl&symbol=BANKNIFTY").await;
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{census}");
+        assert_eq!(census["phase"], "census");
+        assert_eq!(census["by"], "start-up");
+        let (status, waiting) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{waiting}");
+        assert_eq!(waiting["phase"], "queued");
+        assert_eq!(waiting["by"], "start-up");
+    }
+    // THE START-UP BUILD RUNS under the feed's stamp, as `warm` runs it, and
+    // finishes with its answer.
+    let entered = queued.enter(Some(calendar_route::feed_stamps(
+        &fixture.root,
+        Vendor::Gdfl,
+    )));
+    drop(entered);
+    builds.finish(
+        &(Vendor::Gdfl, None, "NIFTY".to_owned()),
+        &queued,
+        crate::calendar_of::KeptAnswer {
+            status: 200,
+            body: r#"{"status":"ok","from":"the start-up build"}"#.to_owned(),
+        },
+    );
+    let (status, parked) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{parked}");
+    assert_eq!(
+        parked["from"], "the start-up build",
+        "the request told to come back is handed the start-up build's answer"
+    );
+    let banknifty = fixture.settled("feed=gdfl&symbol=BANKNIFTY").await;
+    assert_eq!(banknifty["days"], "R..RR", "once read, it is built");
+}
+
+/// **THE START-UP WARM READS THE CENSUS ONCE AND BUILDS NIFTY, THE EXCHANGE
+/// AND BANKNIFTY AT EVERY RUNG THEY ARE HELD AT, SO THE FIRST CLICK AFTER A
+/// RESTART IS HANDED A KEPT ANSWER.** DB-N19.
+#[tokio::test]
+async fn the_start_up_warm_builds_what_the_first_clicks_ask_for() {
+    let fixture = Fixture::new("calendar-route-warm");
+    fixture.gdfl_seconds();
+    fixture.daily(
+        Vendor::Zerodha,
+        Segment::Index,
+        "NIFTY",
+        &[epoch(2025, 5, 2), epoch(2025, 5, 5)],
+    );
+    fixture.series(
+        Vendor::Zerodha,
+        Segment::Index,
+        "NIFTY",
+        Timeframe::MINUTE_1,
+        &[at(epoch(2025, 5, 2), 0)],
+    );
+    let warmed = calendar_route::warm(&fixture.site, &[Vendor::Zerodha, Vendor::Gdfl]);
+    // Zerodha: NIFTY, the exchange and BANKNIFTY at the default rung and at
+    // 1min and 1day; GDFL: the same three at the default rung and at 1s.
+    assert_eq!(warmed.built, 3 + 3 * 2 + 3 + 3, "{warmed:?}");
+    assert_eq!(warmed.refused, 0, "{warmed:?}");
+    assert_eq!(warmed.unqueued, 0, "{warmed:?}");
+    assert_eq!(warmed.journal, Ok((0, 0)), "no pull journal in the fixture");
+    assert_eq!(fixture.site.calendars.builds.in_flight(), 0, "all finished");
+    assert_eq!(
+        fixture.site.calendars.builds.confirmed_answers(),
+        15 - 3,
+        "Zerodha holds no BANKNIFTY: those three are answered, withheld, and not kept"
+    );
+
+    // THE FIRST CLICK reads no census: its answer was built at start.
+    fixture.served(std::time::Duration::from_millis(5));
+    let release = fixture.census_held();
+    for query in [
+        "feed=gdfl&symbol=NIFTY",
+        "feed=gdfl",
+        "feed=gdfl&symbol=BANKNIFTY&rung=1s",
+        "feed=zerodha&symbol=NIFTY&rung=1min",
+        "feed=zerodha",
+    ] {
+        let (status, answer) = fixture.get(query).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{query}: {answer}");
+        assert_eq!(answer["status"], "ok", "{query}: {answer}");
+    }
+    drop(release);
+}
+
+/// **A FEED THE OPERATOR IS NOT OFFERED IS NOT WARMED.** D-3338.
+#[test]
+fn only_the_offered_feeds_are_warmed() {
+    let feeds = calendar_route::offered_feeds();
+    assert!(feeds.contains(&Vendor::Gdfl) && feeds.contains(&Vendor::Zerodha));
+    assert!(!feeds.contains(&Vendor::Dhan), "{feeds:?}");
+}
+
+/// **A REQUEST'S OWN BUILD IS WAITED FOR UP TO THE BUDGET, AND A START-UP
+/// BUILD STILL QUEUED BEHIND OTHERS IS NOT WAITED FOR AT ALL.** DB-N19.
+///
+/// With a budget far longer than either takes: the request that leads a quick
+/// build is answered in full, and the request that finds its key queued at
+/// start is answered `"queued"` long before that budget runs out.
+#[tokio::test]
+async fn a_requests_own_build_is_waited_for_and_a_queued_start_up_build_is_not() {
+    let fixture = Fixture::new("calendar-route-waits");
+    fixture.gdfl_seconds();
+    fixture.served(std::time::Duration::from_secs(30));
+    let (status, built) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{built}");
+    assert_eq!(
+        built["days"], "R..RR",
+        "answered in full, inside its budget"
+    );
+
+    let _queued = fixture
+        .site
+        .calendars
+        .builds
+        .queue_at_start(&(Vendor::Gdfl, None, "BANKNIFTY".to_owned()))
+        .expect("room");
+    let started = std::time::Instant::now();
+    let (status, waiting) = fixture.get("feed=gdfl&symbol=BANKNIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{waiting}");
+    assert_eq!(waiting["phase"], "queued");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "answered without waiting out a 30 s budget"
+    );
+}
+
+/// **A FULL BUILD MAP IS REFUSED BY NAME AND IS RETRYABLE.** DB-N19.
+#[test]
+fn a_full_build_map_is_refused_by_name() {
+    let (status, headers, body) = calendar_route::builds_full();
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(headers[0].1, "application/json; charset=utf-8");
+    let parsed: Value = serde_json::from_str(&body).expect("JSON");
+    let why = parsed["error"].as_str().expect("a reason");
+    assert!(
+        why.contains(&crate::calendar_of::build::MAX_BUILDS.to_string()) && why.contains("retry"),
+        "{why}"
     );
 }
