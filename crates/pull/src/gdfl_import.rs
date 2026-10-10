@@ -25,9 +25,12 @@
 //!   row of the second, high and low the extremes, close the last (file
 //!   order), volume the sum of LTQ. A second with no traded row has no bar.
 //! - **Index spot:** every row (an index row carries no quantity), volume 0.
-//! - **Open interest:** the options file's `OpenInterest`, the last of the
-//!   bucket; `OI_NULL` for the capital-market trees, which carry none.
-//! - The second is folded by [`crate::fold`], the one fold authority.
+//! - **Open interest:** the options file's `OpenInterest` of the LAST row
+//!   placed in the second, traded or not (D-3342, [`BAR_DEFINITION`] 3, the
+//!   operator's answer: bar-close semantics; definition 2 took the last
+//!   traded row's); `OI_NULL` for the capital-market trees, which carry none.
+//! - The second is folded by [`crate::fold`], the one fold authority
+//!   (`fold::fold_seconds_with_last_oi` for options).
 //!
 //! # A late row is deferred, never moved earlier (D-0805's rule, D-2802)
 //!
@@ -155,6 +158,35 @@
 //! built before D-3317 refuses the new verbs by name, loudly, rather than
 //! misreads them.
 //!
+//! # What each day also records (WP-11b)
+//!
+//! - **The day ledger** (D-3335; [`quality`]): before its close, every
+//!   admitted day the source held appends its constant-size quality lines to
+//!   `<store>/imports/gdfl.dayflags`: per index, or per kind-day of stocks or
+//!   options (only for an unfiltered run, since `*` is the whole kind-day):
+//!   the day zip's size, late and deferred rows, refused rows, zero-quote
+//!   files, leading LTQ = 1 marker rows, LTQ = 0 rows carrying a new price,
+//!   index seconds and holes, shared share holes, same-second dual values,
+//!   closing-auction prints. Bars are never altered by any of it. A ledger
+//!   that will not take the lines leaves the day `incomplete`
+//!   (`stage=journal reason=day_ledger`), so the next run writes them; a
+//!   ledger that cannot be read refuses the run before any day.
+//!   [`rescan_cm`] and [`rescan_nfo`] (`cli gdfl-dayflags`) write the same
+//!   lines, `src=rescan`, for days already imported, read-only.
+//! - **The provenance** (D-3334): when the run names its [`Origin`], each
+//!   file that committed bars appends one record to its month's `.prv`
+//!   sidecar (`store::provenance`): the archive member
+//!   (`<archive>!<day zip>!<entry>`, its size and CRC-32) or the tick-store
+//!   day file, the day, the bars appended, the bar definition, the journal's
+//!   `begin` line and the build commit. The bar file is opened read-only and
+//!   the record refused unless its commit counter is still the one the
+//!   append left. A refused record is a named failure of the file.
+//! - **The lineage** (D-3331, D-3343; [`lineage`]): an options run feeds
+//!   every day's contract-days to `gdfl_lineage::detect` and appends the
+//!   `alias`, `lineage` and `stitched` records to `<store>/imports/gdfl.lineage`
+//!   and the inferred lots to `<store>/imports/gdfl.lots`. A renamed strike
+//!   is flagged, never split: the store key has no form for two contracts.
+//!
 //! # Cost
 //!
 //! Per day: one listing (O(entries)), then per instrument file one fetch,
@@ -166,6 +198,14 @@
 //! lookup is the stored result: a bar by index is one positional read
 //! (`store::file::BarFile::read_record`, C-28/C-29), a ticker in a listing is
 //! one slot index or one hash probe (C-GI-01/02).
+//!
+//! WP-11b adds, per file, one more pass over its rows and its bars for the
+//! day ledger (O(rows + bars)) and, when the run names its origin, one
+//! read-only open of the month's bar file, as a reader opens it, and one
+//! sidecar append with one `fdatasync` (measured by WP-38a at p50
+//! 1.15 ms, p99 1.90 ms on WD_BLACK); per day one append and one `fsync` per
+//! ledger, and for options the lineage's O(contracts) (its module says
+//! more); per run one read of each ledger, O(its lines).
 //!
 //! D-3317 adds three costs, each said here. Every closing line is one
 //! append of a bounded number of fields, so the ledger is O(1) per day.
@@ -365,6 +405,29 @@ pub enum ImportRefusal {
         /// The day.
         day: Day,
     },
+    /// A landing's provenance record (D-3334) was refused by the sidecar or
+    /// could not be built: a failure of the file, never of the run. The bars
+    /// stay committed, and unrecorded.
+    Provenance {
+        /// Why, in the store's words.
+        why: String,
+    },
+    /// The GDFL day ledger (D-3335) could not be read at the start of a run,
+    /// which then stops before any day, or would not take a day's lines, a
+    /// failure that leaves the day `incomplete` so the next run writes them.
+    DayLedger {
+        /// Why.
+        why: String,
+    },
+    /// The lineage or lot ledger (D-3331, D-3343) could not be read at the
+    /// start of an options run, which then stops before any day, or would not
+    /// take a day's records, or a renamed contract's file could not be read
+    /// again: the day is left `incomplete` and its records are written by the
+    /// next run.
+    Lineage {
+        /// Why.
+        why: String,
+    },
 }
 
 impl ImportRefusal {
@@ -387,6 +450,9 @@ impl ImportRefusal {
             Self::CensusRefused { .. } => "census_refused",
             Self::Filing { .. } => "filing",
             Self::DayNotHeld { .. } => "day_not_held",
+            Self::Provenance { .. } => "provenance",
+            Self::DayLedger { .. } => "day_ledger",
+            Self::Lineage { .. } => "lineage",
         }
     }
 
@@ -475,6 +541,13 @@ impl core::fmt::Display for ImportRefusal {
             Self::DayNotHeld { day } => {
                 write!(f, "the source holds no file of {day}, a trading day")
             }
+            Self::Provenance { why } => write!(
+                f,
+                "the bars were filed and their provenance record was refused, so they stay \
+                 unrecorded: {why}"
+            ),
+            Self::DayLedger { why } => write!(f, "the GDFL day ledger: {why}"),
+            Self::Lineage { why } => write!(f, "the lineage ledger: {why}"),
         }
     }
 }
@@ -1197,9 +1270,23 @@ fn micros_at(day: Day, sod: u32) -> i64 {
     (i64::from(day.days_from_epoch()) * 86_400 + i64::from(sod) - IST_OFFSET_SECS) * 1_000_000
 }
 
-/// The rows of one file, filtered by the row rule and placed (module doc).
-/// Returns each kept row with its placed second, in file order.
-fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u32, Tick)> {
+/// One row of a file as the placement leaves it: its placed second, the row,
+/// whether the row rule keeps it as a price (every index row; a traded share
+/// or option row), and whether it was late.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacedRow {
+    second: u32,
+    tick: Tick,
+    counts: bool,
+    late: bool,
+}
+
+/// Every row of one file with the second it is placed at (module doc), in
+/// file order, untraded rows included: a row with no in-order row after it
+/// has no second and is not here. The counts are about kept rows only, as
+/// before D-3342: `ltq_zero_dropped` names the untraded rows, which build no
+/// price and since D-3342 still carry their second's open interest.
+fn place_all(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<PlacedRow> {
     // THE CLOCK IS EVERY ROW, THE BAR IS THE KEPT ROWS (D-2812). The running
     // maximum and the next in-order stamp are taken over every row, untraded
     // ones included: a trade written after a row stamped 10:00:05 was known
@@ -1237,10 +1324,25 @@ fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u3
     }
     placed.reverse();
     let mut out = Vec::with_capacity(ticks.len());
-    for (tick, second) in ticks.iter().copied().zip(placed) {
-        match (counts(&tick), second) {
-            (false, _) => placement.ltq_zero_dropped += 1,
-            (true, Some(second)) => out.push((second, tick)),
+    for ((tick, second), &ordered) in ticks.iter().copied().zip(placed).zip(&in_order) {
+        let kept = counts(&tick);
+        match (kept, second) {
+            (false, Some(second)) => {
+                placement.ltq_zero_dropped += 1;
+                out.push(PlacedRow {
+                    second,
+                    tick,
+                    counts: false,
+                    late: !ordered,
+                });
+            }
+            (false, None) => placement.ltq_zero_dropped += 1,
+            (true, Some(second)) => out.push(PlacedRow {
+                second,
+                tick,
+                counts: true,
+                late: !ordered,
+            }),
             (true, None) => placement.late_unresolved += 1,
         }
     }
@@ -1257,6 +1359,24 @@ fn place(kind: ImportKind, ticks: &[Tick], placement: &mut Placement) -> Vec<(u3
 /// past `i64::MAX`, and [`ImportRefusal::Fold`] for anything else the fold
 /// refuses.
 pub fn convert(kind: ImportKind, day: Day, ticks: &[Tick]) -> Result<Converted, ImportRefusal> {
+    convert_noted(kind, day, ticks).map(|(converted, _)| converted)
+}
+
+/// [`convert`], and what its placement deferred ([`quality::Deferred`]):
+/// how many placed seconds took at least one late kept row (D-3335's
+/// `deferred_s`) and the most seconds a kept row was deferred by.
+///
+/// Under [`BAR_DEFINITION`] 3 (D-3342) an option second's open interest is
+/// the OI of the last row PLACED in it, traded or not
+/// (`fold::fold_seconds_with_last_oi`); its prices and volume are the traded
+/// rows' exactly as before, and a second with no traded row has no bar. An
+/// index or a share second folds its kept rows with [`fold`], as before: the
+/// capital-market trees carry no open interest.
+fn convert_noted(
+    kind: ImportKind,
+    day: Day,
+    ticks: &[Tick],
+) -> Result<(Converted, quality::Deferred), ImportRefusal> {
     // Both readers hold a stamp to the day; this runtime is public and holds
     // it too, every row's, untraded ones included, since each moves the
     // placement (D-2825, D-2812).
@@ -1266,26 +1386,53 @@ pub fn convert(kind: ImportKind, day: Day, ticks: &[Tick]) -> Result<Converted, 
         }
     }
     let mut placement = Placement::default();
-    let placed = place(kind, ticks, &mut placement);
-    let mut rows = Vec::with_capacity(placed.len());
-    for (second, tick) in placed {
-        let volume = if kind.every_row_counts() {
+    let placed = place_all(kind, ticks, &mut placement);
+    let mut deferred = quality::Deferred::default();
+    let mut last_deferred: Option<u32> = None;
+    for row in placed.iter().filter(|row| row.counts && row.late) {
+        // Placed seconds never fall in file order, so a new second is a
+        // change from the last one counted.
+        if last_deferred != Some(row.second) {
+            deferred.seconds += 1;
+            last_deferred = Some(row.second);
+        }
+        // A late row lands at or after its own stamp, never before it.
+        deferred.max_s = deferred.max_s.max(row.second.saturating_sub(row.tick.sod));
+    }
+    let bar_of = |row: &PlacedRow| -> Result<Bar, ImportRefusal> {
+        let volume = if kind.every_row_counts() || !row.counts {
             0
         } else {
-            i64::try_from(tick.ltq).map_err(|_| ImportRefusal::VolumeOverflow { sod: second })?
+            i64::try_from(row.tick.ltq)
+                .map_err(|_| ImportRefusal::VolumeOverflow { sod: row.second })?
         };
-        rows.push(Bar {
-            ts_micros: micros_at(day, second),
-            open: tick.ltp,
-            high: tick.ltp,
-            low: tick.ltp,
-            close: tick.ltp,
+        Ok(Bar {
+            ts_micros: micros_at(day, row.second),
+            open: row.tick.ltp,
+            high: row.tick.ltp,
+            low: row.tick.ltp,
+            close: row.tick.ltp,
             volume,
-            open_interest: tick.oi.unwrap_or(OI_NULL),
-        });
-    }
-    let seconds = fold(&rows, Bucket::SECOND).map_err(|why| fold_refusal(why, day))?;
-    Ok(Converted { seconds, placement })
+            open_interest: row.tick.oi.unwrap_or(OI_NULL),
+        })
+    };
+    let seconds = if kind == ImportKind::Options {
+        let mut rows = Vec::with_capacity(placed.len());
+        for row in &placed {
+            rows.push(crate::fold::Placed {
+                bar: bar_of(row)?,
+                traded: row.counts,
+            });
+        }
+        crate::fold::fold_seconds_with_last_oi(&rows).map_err(|why| fold_refusal(why, day))?
+    } else {
+        let mut rows = Vec::with_capacity(placed.len());
+        for row in placed.iter().filter(|row| row.counts) {
+            rows.push(bar_of(row)?);
+        }
+        fold(&rows, Bucket::SECOND).map_err(|why| fold_refusal(why, day))?
+    };
+    Ok((Converted { seconds, placement }, deferred))
 }
 
 /// What a fold refusal is to the import: a volume sum past `i64::MAX` names
@@ -1464,6 +1611,20 @@ pub struct Report {
     /// declines is counted in `days_refused`, one the source does not hold
     /// in `days_missing`; each is journalled `refused` too.
     pub closed_refused: Vec<Day>,
+    /// Lines appended to the GDFL day ledger (D-3335): a line equal to its
+    /// key's last one, `src` aside, is not written again.
+    pub flags_lines: usize,
+    /// Records appended to the lineage ledger (D-3331): aliases, renamed
+    /// contracts and reused keys.
+    pub lineage_lines: usize,
+    /// Records appended to the inferred-lot ledger (D-3343).
+    pub lot_lines: usize,
+    /// Corporate-action adjustments the lineage detector found (D-3331).
+    pub adjustments: usize,
+    /// Provenance records written beside the months the run appended to
+    /// (D-3334): one per file that committed bars, when the run names its
+    /// origin.
+    pub provenance_records: usize,
 }
 
 /// What one run is asked to do.
@@ -1530,8 +1691,35 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
 /// by name for different ones, never writing over them.
 ///
 /// 1 is D-2802 as first written, whose placement took the running maximum
-/// of traded rows only; 2 is D-2812, which takes it over every row.
-pub const BAR_DEFINITION: u32 = 2;
+/// of traded rows only; 2 is D-2812, which takes it over every row; 3 is
+/// D-3342 (the operator's answer, 7 Oct 2026): an option bar's open interest
+/// is the OI of the LAST row placed in its second, traded or not
+/// (`fold::fold_seconds_with_last_oi`), where 2 took the last traded row's.
+pub const BAR_DEFINITION: u32 = 3;
+
+/// The definition D-3342 replaced.
+const D3342_PREVIOUS: u32 = 2;
+
+/// Whether a day of `kind` built under `definition` holds the bars this
+/// build would build (D-2822, D-3342): [`BAR_DEFINITION`], or for an index
+/// or a share also 2. Definition 3 changed only the open interest of a
+/// second, and the capital-market trees carry none (`OI_NULL`, D-3322), so
+/// their bars under 2 and 3 are the same bars, byte for byte; reading those
+/// days again would change nothing and is not asked of them. An option day
+/// built under 2 is restated: its open interest may differ.
+#[must_use]
+pub fn definition_is_current(kind: ImportKind, definition: u64) -> bool {
+    definition == u64::from(BAR_DEFINITION)
+        || (definition == u64::from(D3342_PREVIOUS) && kind != ImportKind::Options)
+}
+
+/// [`definition_is_current`] for a journal key's kind word; a word that is
+/// no kind is current only under [`BAR_DEFINITION`].
+fn current_for(kind: &str, definition: u32) -> bool {
+    ImportKind::parse(kind).map_or(definition == BAR_DEFINITION, |kind| {
+        definition_is_current(kind, u64::from(definition))
+    })
+}
 
 /// The definition the code of D-2811 and D-2812 built under. Both landed in
 /// one commit, so every journal line that code wrote was written under 2.
@@ -1681,6 +1869,11 @@ struct Journal {
     /// is not written again ([`Ctx::close`]), so a re-run over a special
     /// session or a day the source lacks writes nothing (D-2803).
     refused_close: HashMap<String, String>,
+    /// The journal's length in bytes and in whole lines as this run last
+    /// knew them, so the line a `begin` lands on can be named in a
+    /// provenance record (D-3334's `journal_ordinal`). A journal another
+    /// process appended to since is counted again before the next line.
+    known: std::cell::Cell<(u64, u64)>,
 }
 
 impl Journal {
@@ -1705,6 +1898,10 @@ impl Journal {
             path,
             ..Self::default()
         };
+        journal.known.set((
+            u64::try_from(text.len()).unwrap_or(u64::MAX),
+            newlines(text.as_bytes()),
+        ));
         let (whole, tail) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
         let shown = journal.path.display().to_string();
         let foreign = |line: &str| ImportRefusal::Journal {
@@ -1766,8 +1963,9 @@ impl Journal {
                 self.open.remove(&key);
                 self.incomplete.remove(&key);
                 // The LAST `done` of a key says which definition built what
-                // the store holds (D-2822).
-                if definition == Some(BAR_DEFINITION) {
+                // the store holds (D-2822); a capital-market day built under
+                // 2 holds the bars 3 builds (D-3342, [`definition_is_current`]).
+                if definition.is_some_and(|definition| current_for(kind, definition)) {
                     self.restated.remove(&key);
                     if refused > 0 {
                         self.with_refusals.insert(key.clone());
@@ -1820,7 +2018,7 @@ impl Journal {
                 self.open.remove(&key);
                 self.incomplete.remove(&key);
                 self.with_refusals.remove(&key);
-                if definition == Some(BAR_DEFINITION) {
+                if definition.is_some_and(|definition| current_for(kind, definition)) {
                     self.restated.remove(&key);
                     self.done.insert(key);
                 } else {
@@ -1844,9 +2042,11 @@ impl Journal {
         id
     }
 
-    /// Appends `line` and a newline, durably.
-    fn append(&self, line: &str) -> Result<(), ImportRefusal> {
-        self.write(Some(line))
+    /// Appends `line` and a newline, durably, and answers the line's number
+    /// in the file, from 1.
+    fn append(&self, line: &str) -> Result<u64, ImportRefusal> {
+        self.write(Some(line))?;
+        Ok(self.known.get().1)
     }
 
     /// Appends `line` and a newline, durably, after closing a torn last line
@@ -1870,7 +2070,19 @@ impl Journal {
             .open(&self.path)
             .map_err(refused)?;
         let mut text = String::new();
-        if file.metadata().map_err(refused)?.len() > 0 {
+        let at = file.metadata().map_err(refused)?.len();
+        if at != self.known.get().0 {
+            // Another process appended since this run last wrote: its lines
+            // are counted once, so the next line's number is the file's.
+            let mut bytes = Vec::new();
+            file.seek(std::io::SeekFrom::Start(0)).map_err(refused)?;
+            file.read_to_end(&mut bytes).map_err(refused)?;
+            self.known.set((
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                newlines(&bytes),
+            ));
+        }
+        if at > 0 {
             let mut last = [0_u8; 1];
             file.seek(std::io::SeekFrom::End(-1)).map_err(refused)?;
             file.read_exact(&mut last).map_err(refused)?;
@@ -1892,8 +2104,63 @@ impl Journal {
             return Ok(());
         }
         file.write_all(text.as_bytes()).map_err(refused)?;
-        file.sync_all().map_err(refused)
+        file.sync_all().map_err(refused)?;
+        let (bytes, lines) = self.known.get();
+        self.known.set((
+            bytes.saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX)),
+            lines.saturating_add(newlines(text.as_bytes())),
+        ));
+        Ok(())
     }
+}
+
+/// The newlines in `bytes`: the whole lines of a journal.
+fn newlines(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0_u64, |lines, &b| {
+        lines.saturating_add(u64::from(b == b'\n'))
+    })
+}
+
+/// Appends `lines`, each with a newline, to the ledger at `path`, durably:
+/// one write and one `fsync`, after closing a last line a crash left torn
+/// with a bare newline (that fragment is then one line a reader counts as a
+/// fault, never glued to the next). Creates the file and its directory.
+/// Nothing to append opens nothing. Shared by the day, lineage and lot
+/// ledgers (D-3335, D-3331, D-3343).
+///
+/// # Errors
+///
+/// The path and why.
+pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> {
+    use std::io::{Read as _, Seek as _};
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let refused = |why: std::io::Error| format!("{}: {why}", path.display());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(refused)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .map_err(refused)?;
+    let mut text = String::new();
+    if file.metadata().map_err(refused)?.len() > 0 {
+        let mut last = [0_u8; 1];
+        file.seek(std::io::SeekFrom::End(-1)).map_err(refused)?;
+        file.read_exact(&mut last).map_err(refused)?;
+        if last != *b"\n" {
+            text.push('\n');
+        }
+    }
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    file.write_all(text.as_bytes()).map_err(refused)?;
+    file.sync_all().map_err(refused)
 }
 
 /// Every day of `from..=to`.
@@ -2094,8 +2361,9 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// Appends `line`, after the run's `run` line when it is the run's first.
-    fn append(&self, line: &str) -> Result<(), ImportRefusal> {
+    /// Appends `line`, after the run's `run` line when it is the run's first,
+    /// and answers its line number in the journal, from 1.
+    fn append(&self, line: &str) -> Result<u64, ImportRefusal> {
         if !self.announced.get() {
             self.journal
                 .append(&run_line(self.id, self.started, self.options.origin))?;
@@ -2128,7 +2396,7 @@ impl Ctx<'_> {
         }
         let line = format!("{unrun} run={}", self.id);
         match self.append(&line) {
-            Ok(()) => close.outcome(),
+            Ok(_) => close.outcome(),
             Err(why) => {
                 failures.push(staged(self.run, day, "journal", Stage::Journal, &why));
                 Outcome::Incomplete
@@ -2275,6 +2543,184 @@ fn plan(kind: ImportKind, request: &BarRequest, contract: Option<Contract>) -> P
     }
 }
 
+/// One file of a day as a source's listing names it (D-3334): the entry,
+/// its uncompressed size and its CRC-32 as the archive's directory (or the
+/// tick store's index, which copies it) states them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Member {
+    entry: String,
+    bytes: u64,
+    crc32: u32,
+}
+
+/// What a source hands on beside a file's rows: its member, for the
+/// provenance record, and its reader's own counts, for the day ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FileFacts {
+    member: Option<Member>,
+    reader: quality::ReaderCounts,
+}
+
+/// One file as the runtime receives it.
+#[derive(Debug, Clone)]
+struct Handed {
+    file: TickFile,
+    facts: FileFacts,
+}
+
+/// What a source says about a day beyond its files: the day zip's size, the
+/// lineage it wrote, and the failures that are no file's (a lineage ledger
+/// that would not take its lines).
+#[derive(Debug, Default)]
+struct DayExtras {
+    member_bytes: Option<u64>,
+    lineage: lineage::Written,
+    failures: Vec<Staged>,
+}
+
+/// Where one day's files came from, for their provenance records (D-3334).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DaySource {
+    /// Members of a zip: every record's name is this prefix (the archives
+    /// that hold the member, outermost first, each followed by `!`) and the
+    /// member's entry.
+    Members {
+        /// The prefix.
+        prefix: String,
+    },
+    /// One tick-store day file: its path below the tick store's root, and
+    /// its length.
+    TickstoreDay {
+        /// The path below the root.
+        name: String,
+        /// Its length in bytes.
+        bytes: u64,
+    },
+}
+
+/// The capital-market tree of a spot kind.
+const fn cm_kind(kind: ImportKind) -> CmKind {
+    match kind {
+        ImportKind::Stocks => CmKind::Stocks,
+        ImportKind::Indices | ImportKind::Options => CmKind::Indices,
+    }
+}
+
+/// Where `day`'s files of `kind` came from, as the run's measured `origin`
+/// names its source (D-3334's naming, `docs/02-store-format.md` §8.3): a
+/// zip member by `<archive>!<day zip>!<entry>`, a tick-store day by its path
+/// below the root. One `stat` for a tick-store day; nothing else is read.
+///
+/// # Errors
+///
+/// The tick-store day file's path and why it cannot be measured.
+fn day_source(kind: ImportKind, day: Day, origin: &Origin) -> Result<DaySource, String> {
+    let month = crate::gdfl_archive::MONTHS
+        .get(usize::from(day.month()).saturating_sub(1))
+        .copied()
+        .unwrap_or_default();
+    match (origin.source, kind) {
+        (SourceKind::Zip, ImportKind::Options) => Ok(DaySource::Members {
+            prefix: format!(
+                "{}!{month}_{:04}/{}.zip!",
+                origin.path.join(format!("{:04}.zip", day.year())).display(),
+                day.year(),
+                crate::gdfl_nfo::day_folder_name(day)
+            ),
+        }),
+        (SourceKind::Zip, _) => Ok(DaySource::Members {
+            prefix: format!(
+                "{}!{}!",
+                origin.path.display(),
+                crate::gdfl_archive::day_zip_name(cm_kind(kind), day)
+            ),
+        }),
+        (SourceKind::TickStore, _) => {
+            let below = Path::new("");
+            let rel = if kind == ImportKind::Options {
+                crate::gdfl_nfo::NfoTickStore::new(below).day_path(day)
+            } else {
+                crate::gdfl_tickstore::TickStore::new(below).day_path(cm_kind(kind), day)
+            };
+            let full = origin.path.join(&rel);
+            let bytes = std::fs::metadata(&full)
+                .map_err(|why| format!("{}: {why}", full.display()))?
+                .len();
+            Ok(DaySource::TickstoreDay {
+                name: rel.display().to_string(),
+                bytes,
+            })
+        }
+    }
+}
+
+/// The store's symbol id of `symbol`: the cross-check its bar header
+/// carries, derived exactly as `ingest` derives it.
+fn symbol_id_of(symbol: &str) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the store's own fold of the name into its 32-bit cross-check: \
+                  the low half of the 64-bit FNV-1a, exactly as `ingest` takes it"
+    )]
+    let id = brutex_core::universe::fnv1a(symbol) as u32;
+    id
+}
+
+/// The UTC microsecond now; 0 before 1970, which a record refuses by name.
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Records one landing beside the month it appended to (D-3334): the month
+/// `held` names, whose append committed its last `committed` bars. The bar
+/// file is opened read-only, never written, and the record is refused unless
+/// that file's commit counter is still `held`'s, so a record never names bars
+/// another writer appended. `Ok(false)` when nothing was appended.
+///
+/// # Errors
+///
+/// The path or the store's refusal, in its words.
+fn record_provenance(
+    store_root: &Path,
+    held: &Held,
+    committed: usize,
+    landing: &store::provenance::Landing<'_>,
+) -> Result<bool, String> {
+    let key = held.entry.key;
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: key.exchange.as_str(),
+        segment: key.segment.as_str(),
+        symbol: key.symbol.as_str(),
+        contract: key.contract,
+        timeframe: key.timeframe,
+        month: key.month,
+        file: store::path::FileKind::Bars,
+    })
+    .map_err(|why| why.to_string())?;
+    let bars =
+        store::file::BarFile::open_existing(store_root, path, symbol_id_of(key.symbol.as_str()))
+            .map_err(|why| why.to_string())?;
+    let n_valid = held.entry.rows;
+    let first_index = u64::try_from(committed)
+        .ok()
+        .and_then(|committed| n_valid.checked_sub(committed))
+        .ok_or_else(|| format!("{committed} bars committed and {n_valid} held"))?;
+    let appended = store::file::Appended::Committed {
+        first_index,
+        n_valid,
+    };
+    match store::provenance::record(store_root, &bars, path, appended, landing) {
+        Ok(store::provenance::Recorded::Written(_)) => Ok(true),
+        Ok(store::provenance::Recorded::NothingAppended) => Ok(false),
+        Err(why) => Err(why.to_string()),
+    }
+}
+
 /// The day's per-file work and the census rows it collects.
 struct DayWork<'a> {
     ctx: &'a Ctx<'a>,
@@ -2282,20 +2728,56 @@ struct DayWork<'a> {
     request: &'a BarRequest,
     key: String,
     begun: bool,
+    /// The `begin` line's number in the journal, once written: the line a
+    /// provenance record names (D-3334's `journal_ordinal`).
+    begin_line: u64,
     held: Vec<Held>,
     report: &'a mut Report,
     failures: Vec<Staged>,
     /// The day's largest back-step, for its journal line.
     max_back_s: u32,
+    /// The day's quality fields (D-3335), when the day has a session.
+    ledger: Option<quality::DayLedger>,
+    /// Where the day's files came from, when the run names an origin
+    /// (D-3334), or why it could not be measured.
+    source: Option<Result<DaySource, String>>,
+}
+
+/// A file's quality (D-3335), from its rows, the bars it built and what its
+/// placement counted, folded into `ledger`.
+fn take_quality(
+    kind: ImportKind,
+    ledger: &mut quality::DayLedger,
+    handed: &Handed,
+    converted: &Converted,
+    deferred: quality::Deferred,
+) {
+    let day = ledger.day();
+    let seconds: Vec<u32> = converted
+        .seconds
+        .iter()
+        .map(|bar| second_of(bar.ts_micros, day))
+        .collect();
+    let measured = quality::measure_file(
+        kind,
+        ledger.session(),
+        &handed.file.ticks,
+        &seconds,
+        (converted.placement, deferred),
+        handed.facts.reader,
+    );
+    ledger.take(&handed.file.symbol, &measured);
 }
 
 impl DayWork<'_> {
-    /// Converts and files one instrument file.
-    fn file(&mut self, file: &TickFile) {
+    /// Converts and files one instrument file, counts its quality and
+    /// records its landing.
+    fn file(&mut self, handed: &Handed) {
         let run = self.ctx.run;
+        let file = &handed.file;
         // A file the fold refuses is counted refused and never also read
         // (D-2814): files, skips and refusals add up to the day's entries.
-        let converted = match convert(run.kind, self.day, &file.ticks) {
+        let (converted, deferred) = match convert_noted(run.kind, self.day, &file.ticks) {
             Ok(converted) => {
                 self.report.files += 1;
                 converted
@@ -2307,6 +2789,9 @@ impl DayWork<'_> {
                 return;
             }
         };
+        if let Some(ledger) = self.ledger.as_mut() {
+            take_quality(run.kind, ledger, handed, &converted, deferred);
+        }
         let p = converted.placement;
         self.report.rows += p.rows;
         self.report.ltq_zero_dropped += p.ltq_zero_dropped;
@@ -2318,10 +2803,13 @@ impl DayWork<'_> {
             return;
         }
         if !self.begun {
-            if let Err(why) = self.ctx.append(&format!("begin {}", self.key)) {
-                let refused = staged(run, self.day, "journal", Stage::Journal, &why);
-                self.failures.push(refused);
-                return;
+            match self.ctx.append(&format!("begin {}", self.key)) {
+                Ok(line) => self.begin_line = line,
+                Err(why) => {
+                    let refused = staged(run, self.day, "journal", Stage::Journal, &why);
+                    self.failures.push(refused);
+                    return;
+                }
             }
             self.begun = true;
         }
@@ -2337,6 +2825,11 @@ impl DayWork<'_> {
         self.report.outside_session += usize::try_from(done.census.total()).unwrap_or(0);
         self.report.seconds += done.bars_stored;
         self.report.seconds_committed += done.bars_committed;
+        if done.bars_committed > 0
+            && let Some(held) = done.pending.as_ref()
+        {
+            self.provenance(handed, held, done.bars_committed);
+        }
         self.held.extend(done.pending);
         for failure in done.failures {
             let refusal = ImportRefusal::Filing { why: failure.why };
@@ -2349,6 +2842,61 @@ impl DayWork<'_> {
                 .with("rows", p.rows)
                 .with("seconds", converted.seconds.len()),
         );
+    }
+
+    /// Writes the provenance record of a file's landing (D-3334) when the
+    /// run names its origin and the source named the file's member. A record
+    /// the sidecar refuses is a named failure of the day, never silence: the
+    /// bars stay committed and stay unrecorded, which `/provenance.json`
+    /// labels reconstructed.
+    fn provenance(&mut self, handed: &Handed, held: &Held, committed: usize) {
+        let run = self.ctx.run;
+        let (Some(origin), Some(member), Some(source)) = (
+            self.ctx.options.origin,
+            handed.facts.member.as_ref(),
+            self.source.as_ref(),
+        ) else {
+            return;
+        };
+        let recorded = source.clone().and_then(|source| {
+            let (kind, name, bytes, crc32) = match source {
+                DaySource::Members { prefix } => (
+                    store::provenance::SourceKind::ArchiveMember,
+                    format!("{prefix}{}", member.entry),
+                    member.bytes,
+                    member.crc32,
+                ),
+                DaySource::TickstoreDay { name, bytes } => {
+                    (store::provenance::SourceKind::TickstoreDay, name, bytes, 0)
+                }
+            };
+            let day =
+                store::provenance::Day::new(self.day.year(), self.day.month(), self.day.day())
+                    .ok_or_else(|| format!("{} is not a provenance day", self.day))?;
+            let landing = store::provenance::Landing {
+                source: store::provenance::Source {
+                    kind,
+                    name: &name,
+                    bytes,
+                    crc32,
+                },
+                day,
+                bar_definition: BAR_DEFINITION,
+                journal_ordinal: self.begin_line,
+                commit: origin.commit.as_deref(),
+                landed_at_micros: now_micros(),
+            };
+            record_provenance(run.store_root, held, committed, &landing)
+        });
+        match recorded {
+            Ok(true) => self.report.provenance_records += 1,
+            Ok(false) => {}
+            Err(why) => {
+                let refusal = ImportRefusal::Provenance { why };
+                let refused = staged(run, self.day, &handed.file.name, Stage::File, &refusal);
+                self.failures.push(refused);
+            }
+        }
     }
 }
 
@@ -2699,7 +3247,9 @@ fn now_unix_s() -> u64 {
 }
 
 /// The runtime behind [`drive`] and [`drive_from`], with the census it
-/// publishes through handed in (a test hands a double; [`Census`]).
+/// publishes through handed in (a test hands a double; [`Census`]), for a
+/// source that hands on bare [`TickFile`]s: no member, so no provenance
+/// record, and no reader counts.
 fn drive_with<F>(
     run: &Run<'_>,
     options: RunOptions<'_>,
@@ -2708,6 +3258,57 @@ fn drive_with<F>(
 ) -> Result<Report, ImportRefusal>
 where
     F: FnMut(Day, &mut dyn FnMut(TickFile)) -> DayRead,
+{
+    drive_core(run, options, census, |day, sink| {
+        let read = read_day(day, &mut |file| {
+            sink(Handed {
+                file,
+                facts: FileFacts::default(),
+            });
+        });
+        (read, DayExtras::default())
+    })
+}
+
+/// The day's quality lines (D-3335), written before its close: a ledger that
+/// will not take them is a failure of the day, which then closes
+/// `incomplete` and is read again, so its lines are written by the next run.
+fn write_flags(
+    run: &Run<'_>,
+    flags: &mut quality::Ledger,
+    (day, ledger, member_bytes): (Day, Option<quality::DayLedger>, Option<u64>),
+    report: &mut Report,
+    failures: &mut Vec<Staged>,
+) {
+    let Some(mut ledger) = ledger else {
+        return;
+    };
+    ledger.set_member_bytes(member_bytes);
+    let fresh = ledger.lines(run.only.is_empty());
+    let news = flags.news(fresh, quality::Src::Import);
+    match flags.append(&news) {
+        Ok(()) => report.flags_lines += news.len(),
+        Err(why) => failures.push(staged(
+            run,
+            day,
+            "day ledger",
+            Stage::Journal,
+            &ImportRefusal::DayLedger { why },
+        )),
+    }
+}
+
+/// The runtime: every day of the run through the calendar, the venue, the
+/// journal, the source's `read_day` and the common filing path, and each
+/// day's quality lines (D-3335) and its files' provenance (D-3334).
+fn drive_core<F>(
+    run: &Run<'_>,
+    options: RunOptions<'_>,
+    census: &mut dyn Census,
+    mut read_day: F,
+) -> Result<Report, ImportRefusal>
+where
+    F: FnMut(Day, &mut dyn FnMut(Handed)) -> (DayRead, DayExtras),
 {
     // ONE REQUEST FOR THE RUN: its window is the run's range, which is also
     // the range check, its rung the second, its listing the kind's venue. A
@@ -2727,6 +3328,8 @@ where
     };
     run.check_filter()?;
     let journal = Journal::load(journal_path(run.store_root))?;
+    let mut flags = quality::Ledger::load(quality::dayflags_path(run.store_root))
+        .map_err(|why| ImportRefusal::DayLedger { why })?;
     let filter = run.filter_key();
     let started = options
         .origin
@@ -2747,19 +3350,29 @@ where
             continue;
         }
         let before = report.clone();
+        let ledger = crate::gdfl_cm::session_of(day)
+            .ok()
+            .map(|session| quality::DayLedger::new(run.kind, day, session));
+        let source = options
+            .origin
+            .map(|origin| day_source(run.kind, day, origin));
         let mut work = DayWork {
             ctx: &ctx,
             day,
             request: &request,
             key: key.clone(),
             begun: false,
+            begin_line: 0,
             held: Vec::new(),
             report: &mut report,
             failures: Vec::new(),
             max_back_s: 0,
+            ledger,
+            source,
         };
-        let read = read_day(day, &mut |file| work.file(&file));
-        let (held, mut failures, day_back) = (work.held, work.failures, work.max_back_s);
+        let (read, extras) = read_day(day, &mut |handed| work.file(&handed));
+        let (held, mut failures, day_back, ledger) =
+            (work.held, work.failures, work.max_back_s, work.ledger);
         report.files_skipped += read.skipped;
         report.files_refused += read.refused.len();
         for refused in read.refused {
@@ -2767,10 +3380,21 @@ where
             let failure = note_failure(run.kind, day, &failure.instrument, &failure.why, cause);
             failures.push(Staged { cause, failure });
         }
+        report.lineage_lines += extras.lineage.lineage;
+        report.lot_lines += extras.lineage.lots;
+        report.adjustments += extras.lineage.actions;
+        failures.extend(extras.failures);
         if !read.held {
             close_missing(&ctx, (&key, day), &mut report, failures);
             continue;
         }
+        write_flags(
+            run,
+            &mut flags,
+            (day, ledger, extras.member_bytes),
+            &mut report,
+            &mut failures,
+        );
         if let Some(why) = census.publish(run.store_root, &held) {
             let room = census.room(run.store_root, &held);
             return Err(stop_at_census(
@@ -2832,6 +3456,16 @@ fn note_finished(ctx: &Ctx<'_>, report: &Report) {
     );
 }
 
+/// Whether a day is read to import it or rescanned for its quality only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The import: the closing-auction prints are filed in their sidecar.
+    Import,
+    /// `cli gdfl-dayflags`: nothing under `bars/` is written, not even an
+    /// auction sidecar.
+    Rescan,
+}
+
 /// The run over a capital-market source (indices or stocks), its
 /// provenance `unrecorded` ([`run_cm_from`] records it).
 ///
@@ -2862,12 +3496,14 @@ pub fn run_cm_from<S: CmSource>(
             });
         }
     };
-    drive_with(run, options, &mut StoreCensus, |day, sink| {
-        cm_day(source, run, tree, day, sink)
+    drive_core(run, options, &mut StoreCensus, |day, sink| {
+        cm_day_with(source, run, (tree, day), sink, Mode::Import)
     })
 }
 
-/// One capital-market day: every swept ticker's file, once, in listing order.
+/// One capital-market day as a bare reader hands it on: [`cm_day_with`] for
+/// the import, its files' facts dropped.
+#[cfg(test)]
 fn cm_day<S: CmSource>(
     source: &S,
     run: &Run<'_>,
@@ -2875,17 +3511,38 @@ fn cm_day<S: CmSource>(
     day: Day,
     sink: &mut dyn FnMut(TickFile),
 ) -> DayRead {
+    cm_day_with(
+        source,
+        run,
+        (tree, day),
+        &mut |handed| sink(handed.file),
+        Mode::Import,
+    )
+    .0
+}
+
+/// One capital-market day: every swept ticker's file, once, in listing order,
+/// each handed on with its member and its reader's counts.
+fn cm_day_with<S: CmSource>(
+    source: &S,
+    run: &Run<'_>,
+    (tree, day): (CmKind, Day),
+    sink: &mut dyn FnMut(Handed),
+    mode: Mode,
+) -> (DayRead, DayExtras) {
     let mut read = DayRead::default();
+    let mut extras = DayExtras::default();
     let listing = match source.day(tree, day) {
         Ok(Some(listing)) => listing,
-        Ok(None) => return read,
+        Ok(None) => return (read, extras),
         Err(why) => {
             read.held = true;
             read.refused.push(Refused::cm("listing", &why));
-            return read;
+            return (read, extras);
         }
     };
     read.held = true;
+    extras.member_bytes = listing.member_bytes();
     let mut seen = HashSet::with_capacity(listing.entries().len());
     let folder = format!("{}/", listing.folder());
     for file in listing.entries() {
@@ -2924,20 +3581,31 @@ fn cm_day<S: CmSource>(
         // `None` is refused by name rather than counted as skipped.
         // The closing auction's prints (D-3320) go to the month's sidecar
         // before the trades are filed, and a file whose prints it refuses is
-        // refused whole, so every entry stays one file, skip or refusal.
+        // refused whole, so every entry stays one file, skip or refusal. A
+        // rescan files nothing, so it never writes a sidecar.
         let read_file = read_listed(source, &listing, &key)
             .and_then(|f| f.ok_or(CmRefusal::NotSwept))
-            .and_then(|day_file| {
-                crate::gdfl_cm::auction::append(run.store_root, &key, day, &day_file.file.auction)
-                    .map(|_| day_file)
+            .and_then(|day_file| match mode {
+                Mode::Import => crate::gdfl_cm::auction::append(
+                    run.store_root,
+                    &key,
+                    day,
+                    &day_file.file.auction,
+                )
+                .map(|_| day_file),
+                Mode::Rescan => Ok(day_file),
             });
         match read_file {
-            Ok(day_file) => sink(TickFile {
-                symbol,
-                contract: None,
-                name: day_file.name,
-                ticks: day_file
-                    .file
+            Ok(day_file) => {
+                let decoded = &day_file.file;
+                let reader = quality::ReaderCounts {
+                    rows_refused: u64::from(decoded.refused.total()),
+                    zero_ltp_rows: u64::from(decoded.refused.zero_ltp),
+                    dual: decoded.dual_spread,
+                    auction_prints: u64::try_from(decoded.auction.len()).unwrap_or(u64::MAX),
+                    quoted_rows: None,
+                };
+                let ticks = decoded
                     .rows
                     .iter()
                     .map(|row| Tick {
@@ -2946,12 +3614,28 @@ fn cm_day<S: CmSource>(
                         ltq: row.ltq,
                         oi: None,
                     })
-                    .collect(),
-            }),
+                    .collect();
+                sink(Handed {
+                    file: TickFile {
+                        symbol,
+                        contract: None,
+                        name: day_file.name,
+                        ticks,
+                    },
+                    facts: FileFacts {
+                        member: Some(Member {
+                            entry: file.entry.to_string(),
+                            bytes: file.len,
+                            crc32: file.crc32,
+                        }),
+                        reader,
+                    },
+                });
+            }
             Err(why) => read.refused.push(Refused::cm(file.name(), &why)),
         }
     }
-    read
+    (read, extras)
 }
 
 /// The run over an options source, its provenance `unrecorded`
@@ -2965,11 +3649,14 @@ pub fn run_nfo<S: NfoSource>(source: &S, run: &Run<'_>) -> Result<Report, Import
 }
 
 /// [`run_nfo`] with the run's [`RunOptions`] (D-3317; DB-G56), as
-/// [`run_cm_from`].
+/// [`run_cm_from`]. Every day's option files also feed the corporate-action
+/// lineage (D-3331, D-3343; [`lineage`]), whose ledgers are read before the
+/// first day.
 ///
 /// # Errors
 ///
-/// As [`run_nfo`].
+/// As [`run_nfo`], and [`ImportRefusal::Lineage`] when a lineage ledger
+/// exists and cannot be read.
 pub fn run_nfo_from<S: NfoSource>(
     source: &S,
     run: &Run<'_>,
@@ -2980,8 +3667,10 @@ pub fn run_nfo_from<S: NfoSource>(
             word: format!("{} read from an options source", run.kind.as_str()),
         });
     }
-    drive_with(run, options, &mut StoreCensus, |day, sink| {
-        nfo_day(source, run, day, sink)
+    let mut lineage = lineage::LineageRun::load(run.store_root, run.from)
+        .map_err(|why| ImportRefusal::Lineage { why })?;
+    drive_core(run, options, &mut StoreCensus, |day, sink| {
+        nfo_day_with(source, run, day, sink, Some(&mut lineage))
     })
 }
 
@@ -3017,24 +3706,205 @@ fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
     asked.is_some_and(|asked| fno.is_none_or(|fno| asked.len() >= fno.len()))
 }
 
-/// One options day: every option file whose underlying passes the filter.
+/// The `(second of day, OI)` rows of the file at `index` of `listing`, read
+/// again for a renamed contract whose OI crossed unadjusted (D-3331).
+fn reread_oi<S: NfoSource>(
+    source: &S,
+    listing: &crate::gdfl_nfo::NfoDay<S::Locator>,
+    index: usize,
+) -> Result<Vec<(u32, i64)>, String> {
+    let file = listing
+        .entries()
+        .get(index)
+        .ok_or_else(|| format!("no entry {index} in the listing of {}", listing.day()))?;
+    read_file(source, listing, file)
+        .map(|day_file| {
+            day_file
+                .file
+                .rows
+                .iter()
+                .map(|row| (row.sod, row.oi))
+                .collect()
+        })
+        .map_err(|why| format!("{}: {why}", file.entry))
+}
+
+/// The contract-day of a read option file, for the lineage.
+fn contract_day_of(day_file: &crate::gdfl_nfo::NfoDayFile, file: usize) -> lineage::DayContract {
+    lineage::DayContract {
+        ticker: day_file.ticker.clone(),
+        day: crate::gdfl_lineage::ContractDay::from_rows(
+            &day_file.ticker,
+            day_file
+                .file
+                .rows
+                .iter()
+                .map(|row| (row.sod, row.ltq, row.oi)),
+        ),
+        file,
+    }
+}
+
+/// One read option file as the runtime receives it: its rows, its member
+/// and its quote count (D-3334, D-3335).
+fn option_handed<L>(
+    day_file: crate::gdfl_nfo::NfoDayFile,
+    file: &crate::gdfl_cm::ListedFile<L>,
+) -> Handed {
+    let reader = quality::ReaderCounts {
+        quoted_rows: Some(u64::from(day_file.file.quoted_rows)),
+        ..quality::ReaderCounts::default()
+    };
+    let ticks = day_file
+        .file
+        .rows
+        .iter()
+        .map(|row| Tick {
+            sod: row.sod,
+            ltp: row.ltp,
+            ltq: row.ltq,
+            oi: Some(row.oi),
+        })
+        .collect();
+    Handed {
+        file: TickFile {
+            symbol: day_file.ticker.underlying.as_str().to_owned(),
+            contract: Some(day_file.ticker.contract),
+            name: day_file.name,
+            ticks,
+        },
+        facts: FileFacts {
+            member: Some(Member {
+                entry: file.entry.to_string(),
+                bytes: file.len,
+                crc32: file.crc32,
+            }),
+            reader,
+        },
+    }
+}
+
+/// Folds `day`'s option `contracts`, read from `listing`, into `lineage`: a
+/// ledger that will not take the records, or a renamed contract's file that
+/// will not read again, is a failure of `run`'s day, so the day stays open
+/// and the next run writes them.
+fn fold_lineage<S: NfoSource>(
+    source: &S,
+    run: &Run<'_>,
+    (day, listing): (Day, &crate::gdfl_nfo::NfoDay<S::Locator>),
+    lineage: &mut lineage::LineageRun,
+    contracts: &[lineage::DayContract],
+    extras: &mut DayExtras,
+) {
+    match lineage.day(day, contracts, &mut |index| {
+        reread_oi(source, listing, index)
+    }) {
+        Ok(written) => extras.lineage.absorb(written),
+        Err(why) => extras.failures.push(staged(
+            run,
+            day,
+            "lineage",
+            Stage::Journal,
+            &ImportRefusal::Lineage { why },
+        )),
+    }
+}
+
+/// Folds into `lineage`, read-only, the open sessions just before `day` it
+/// holds no state for ([`lineage::warmup_days`]), so an adjustment on `day`
+/// is detected against the contracts that traded before it. Files the run
+/// does not want are not read; a file named twice on a day is left out, as
+/// the import refuses it; a day or a file the source refuses is logged and
+/// passed over, never a failure of `day` (the import of that day names it).
+fn warm_up<S: NfoSource>(
+    source: &S,
+    run: &Run<'_>,
+    day: Day,
+    lineage: &mut lineage::LineageRun,
+    extras: &mut DayExtras,
+) {
+    for prev in lineage::warmup_days(day, lineage.last_day()) {
+        let listing = match source.day(prev) {
+            Ok(Some(listing)) => listing,
+            Ok(None) => continue,
+            Err(why) => {
+                let prev_text = prev.to_string();
+                let why = why.to_string();
+                let _dropped_when_filtered = telemetry::emit(
+                    &telemetry::Event::warn(TARGET, "lineage warm-up day unread")
+                        .with("day", prev_text.as_str())
+                        .with("why", why.as_str()),
+                );
+                continue;
+            }
+        };
+        let mut contracts = Vec::new();
+        for (index, file) in listing.entries().iter().enumerate() {
+            let wanted = listing
+                .ticker_of(file)
+                .and_then(|ticker| decode_ticker(ticker, prev).ok())
+                .is_some_and(|decoded| run.wants(decoded.underlying.as_str()));
+            if !wanted {
+                continue;
+            }
+            if let Ok(day_file) = read_file(source, &listing, file) {
+                contracts.push(contract_day_of(&day_file, index));
+            }
+        }
+        let mut named: HashMap<Contract, usize> = HashMap::with_capacity(contracts.len());
+        for c in &contracts {
+            *named.entry(c.ticker.contract).or_default() += 1;
+        }
+        contracts.retain(|c| named.get(&c.ticker.contract) == Some(&1));
+        // A failure here is the warm-up day's, and keeps `day` open too.
+        fold_lineage(source, run, (prev, &listing), lineage, &contracts, extras);
+        let prev_text = prev.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::info(TARGET, "lineage warm-up day folded")
+                .with("day", prev_text.as_str())
+                .with("contracts", contracts.len()),
+        );
+    }
+}
+
+/// One options day as a bare reader hands it on: [`nfo_day_with`] with no
+/// lineage, its files' facts dropped.
+#[cfg(test)]
 fn nfo_day<S: NfoSource>(
     source: &S,
     run: &Run<'_>,
     day: Day,
     sink: &mut dyn FnMut(TickFile),
 ) -> DayRead {
+    nfo_day_with(source, run, day, &mut |handed| sink(handed.file), None).0
+}
+
+/// One options day: every option file whose underlying passes the filter,
+/// handed on with its member and its quote count, and, when `lineage` is
+/// given, folded into the corporate-action lineage after the day's files.
+fn nfo_day_with<S: NfoSource>(
+    source: &S,
+    run: &Run<'_>,
+    day: Day,
+    sink: &mut dyn FnMut(Handed),
+    mut lineage: Option<&mut lineage::LineageRun>,
+) -> (DayRead, DayExtras) {
     let mut read = DayRead::default();
+    let mut extras = DayExtras::default();
+    if let Some(lineage) = lineage.as_deref_mut() {
+        warm_up(source, run, day, lineage, &mut extras);
+    }
     let listing = match source.day(day) {
         Ok(Some(listing)) => listing,
-        Ok(None) => return read,
+        Ok(None) => return (read, extras),
         Err(why) => {
             read.held = true;
             read.refused.push(Refused::cm("listing", &why));
-            return read;
+            return (read, extras);
         }
     };
     read.held = true;
+    extras.member_bytes = listing.member_bytes();
     // Two tickers of the day naming one contract would file into one path:
     // counted first, and every one of them refused by name.
     let mut named: HashMap<(String, Contract), usize> =
@@ -3046,7 +3916,8 @@ fn nfo_day<S: NfoSource>(
                 .or_default() += 1;
         }
     }
-    for file in listing.entries() {
+    let mut contracts = Vec::new();
+    for (index, file) in listing.entries().iter().enumerate() {
         let Some(ticker) = listing.ticker_of(file) else {
             read.skipped += 1;
             continue;
@@ -3072,27 +3943,306 @@ fn nfo_day<S: NfoSource>(
             continue;
         }
         match read_file(source, &listing, file) {
-            Ok(day_file) => sink(TickFile {
-                symbol: day_file.ticker.underlying.as_str().to_owned(),
-                contract: Some(day_file.ticker.contract),
-                name: day_file.name,
-                ticks: day_file
-                    .file
-                    .rows
-                    .iter()
-                    .map(|row| Tick {
-                        sod: row.sod,
-                        ltp: row.ltp,
-                        ltq: row.ltq,
-                        oi: Some(row.oi),
-                    })
-                    .collect(),
-            }),
+            Ok(day_file) => {
+                if lineage.is_some() {
+                    contracts.push(contract_day_of(&day_file, index));
+                }
+                sink(option_handed(day_file, file));
+            }
             Err(why) => read.refused.push(Refused::nfo(ticker, &why)),
         }
     }
-    read
+    if let Some(lineage) = lineage {
+        fold_lineage(
+            source,
+            run,
+            (day, &listing),
+            lineage,
+            &contracts,
+            &mut extras,
+        );
+    }
+    (read, extras)
 }
+
+// ═══ `cli gdfl-dayflags`: the day ledger of days already imported ══════════
+
+/// What a rescan did (D-3335 §1, `cli gdfl-dayflags`): it reads the vendor's
+/// files of days the journal records as imported, writes the day ledger and,
+/// when asked, the lineage, and nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rescan {
+    /// Days read.
+    pub days_read: usize,
+    /// Days of the range the journal records no import of: not read.
+    pub days_not_imported: usize,
+    /// Days the journal records as imported that the source no longer
+    /// holds, named.
+    pub days_missing: Vec<Day>,
+    /// Files read.
+    pub files: usize,
+    /// Files the reader or the placement refused, named in `failures`.
+    pub files_refused: usize,
+    /// Day-ledger lines written.
+    pub flags_lines: usize,
+    /// Day-ledger lines already there, `src` aside, and not written again.
+    pub flags_unchanged: usize,
+    /// Lineage-ledger records written (D-3331).
+    pub lineage_lines: usize,
+    /// Lot-ledger records written (D-3343).
+    pub lot_lines: usize,
+    /// Adjustments found (D-3331).
+    pub adjustments: usize,
+    /// Every failure, named.
+    pub failures: Vec<Failure>,
+}
+
+/// The days of `kind` the import journal under `store_root` records as
+/// imported, under any filter: a key whose last closing line is `done`,
+/// `recounted` or `incomplete` (the day wrote bars). Read-only: the journal
+/// is never closed, repaired or written here, and a line this reader cannot
+/// key is passed over. O(the journal's lines).
+///
+/// # Errors
+///
+/// [`ImportRefusal::Journal`] for a journal that exists and cannot be read.
+fn imported_days(store_root: &Path, kind: ImportKind) -> Result<HashSet<Day>, ImportRefusal> {
+    let path = journal_path(store_root);
+    let text = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(why) => {
+            return Err(ImportRefusal::Journal {
+                why: format!("{}: {why}", path.display()),
+            });
+        }
+    };
+    let mut last: HashMap<(Day, &str), bool> = HashMap::new();
+    for line in text.lines() {
+        let mut words = line.split(' ');
+        let verb = words.next().unwrap_or_default();
+        let (Some(word), Some(day), Some(filter)) = (words.next(), words.next(), words.next())
+        else {
+            continue;
+        };
+        if word != kind.as_str() {
+            continue;
+        }
+        let Some(day) = crate::gdfl_lineage::parse_day(day) else {
+            continue;
+        };
+        match verb {
+            "done" | "recounted" | "incomplete" => {
+                last.insert((day, filter), true);
+            }
+            "refused" => {
+                last.insert((day, filter), false);
+            }
+            _ => {}
+        }
+    }
+    Ok(last
+        .into_iter()
+        .filter_map(|((day, _), imported)| imported.then_some(day))
+        .collect())
+}
+
+/// The rescan of every imported day of `kind` in `from..=to`, each read
+/// through `read_day` and counted into the day ledger with `src=rescan`.
+fn rescan_core<F>(
+    kind: ImportKind,
+    (from, to): (Day, Day),
+    store_root: &Path,
+    mut read_day: F,
+) -> Result<Rescan, ImportRefusal>
+where
+    F: FnMut(Day, &Run<'_>, &mut dyn FnMut(Handed)) -> (DayRead, DayExtras),
+{
+    if from > to {
+        return Err(ImportRefusal::RangeBackwards { from, to });
+    }
+    let imported = imported_days(store_root, kind)?;
+    let mut flags = quality::Ledger::load(quality::dayflags_path(store_root))
+        .map_err(|why| ImportRefusal::DayLedger { why })?;
+    let run = Run {
+        kind,
+        from,
+        to,
+        only: &[],
+        store_root,
+    };
+    let mut done = Rescan::default();
+    for day in days(from, to) {
+        if !imported.contains(&day) {
+            done.days_not_imported += 1;
+            continue;
+        }
+        let session = match crate::gdfl_cm::session_of(day) {
+            Ok(session) => session,
+            Err(why) => {
+                let cause = cm_cause(&why);
+                done.failures
+                    .push(note_failure(kind, day, "calendar", &why.to_string(), cause));
+                continue;
+            }
+        };
+        let mut ledger = quality::DayLedger::new(kind, day, session);
+        let mut failures: Vec<Failure> = Vec::new();
+        let (mut files, mut refused_files) = (0_usize, 0_usize);
+        let (read, extras) = read_day(day, &run, &mut |handed| match convert_noted(
+            kind,
+            day,
+            &handed.file.ticks,
+        ) {
+            Ok((converted, deferred)) => {
+                files += 1;
+                take_quality(kind, &mut ledger, &handed, &converted, deferred);
+            }
+            Err(why) => {
+                refused_files += 1;
+                let cause = Cause::open(Stage::File, why.code());
+                failures.push(note_failure(
+                    kind,
+                    day,
+                    &handed.file.name,
+                    &why.to_string(),
+                    cause,
+                ));
+            }
+        });
+        done.files += files;
+        done.files_refused += refused_files + read.refused.len();
+        for refused in read.refused {
+            let Refused { cause, failure } = refused;
+            failures.push(note_failure(
+                kind,
+                day,
+                &failure.instrument,
+                &failure.why,
+                cause,
+            ));
+        }
+        failures.extend(extras.failures.into_iter().map(|one| one.failure));
+        done.lineage_lines += extras.lineage.lineage;
+        done.lot_lines += extras.lineage.lots;
+        done.adjustments += extras.lineage.actions;
+        if !read.held {
+            done.days_missing.push(day);
+            done.failures.extend(failures);
+            continue;
+        }
+        done.days_read += 1;
+        ledger.set_member_bytes(extras.member_bytes);
+        let written = rescan_flags(&mut flags, ledger, &mut done, &mut failures);
+        let day_text = day.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::info(TARGET, "day rescanned")
+                .with("kind", kind.as_str())
+                .with("day", day_text.as_str())
+                .with("files", files)
+                .with("lines", written)
+                .with("failures", failures.len()),
+        );
+        done.failures.extend(failures);
+    }
+    Ok(done)
+}
+
+/// A rescanned day's lines, `src=rescan`, those that say something new
+/// appended (D-3335 §1): counted in `done`, or a named failure. Answers how
+/// many were written.
+fn rescan_flags(
+    flags: &mut quality::Ledger,
+    mut ledger: quality::DayLedger,
+    done: &mut Rescan,
+    failures: &mut Vec<Failure>,
+) -> usize {
+    let fresh = ledger.lines(true);
+    let offered = fresh.len();
+    let news = flags.news(fresh, quality::Src::Rescan);
+    match flags.append(&news) {
+        Ok(()) => {
+            done.flags_lines += news.len();
+            done.flags_unchanged += offered - news.len();
+            news.len()
+        }
+        Err(why) => {
+            let refusal = ImportRefusal::DayLedger { why };
+            failures.push(note_failure(
+                ledger.kind(),
+                ledger.day(),
+                "day ledger",
+                &refusal.to_string(),
+                Cause::open(Stage::Journal, refusal.code()),
+            ));
+            0
+        }
+    }
+}
+
+/// `cli gdfl-dayflags indices|stocks`: the day ledger of every day of
+/// `from..=to` the journal records as imported, read from `source`
+/// read-only (D-3335 §1). Nothing under `bars/` is written, the journal is
+/// read and never written, and only `imports/gdfl.dayflags` is appended to.
+///
+/// # Errors
+///
+/// [`ImportRefusal::KindUnknown`] for `options`, [`ImportRefusal::RangeBackwards`],
+/// [`ImportRefusal::Journal`] for an unreadable journal and
+/// [`ImportRefusal::DayLedger`] for an unreadable ledger; everything else is
+/// a named failure in the answer.
+pub fn rescan_cm<S: CmSource>(
+    source: &S,
+    kind: ImportKind,
+    range: (Day, Day),
+    store_root: &Path,
+) -> Result<Rescan, ImportRefusal> {
+    let tree = match kind {
+        ImportKind::Indices => CmKind::Indices,
+        ImportKind::Stocks => CmKind::Stocks,
+        ImportKind::Options => {
+            return Err(ImportRefusal::KindUnknown {
+                word: "options read from a capital-market source".to_owned(),
+            });
+        }
+    };
+    rescan_core(kind, range, store_root, |day, run, sink| {
+        cm_day_with(source, run, (tree, day), sink, Mode::Rescan)
+    })
+}
+
+/// `cli gdfl-dayflags options`: as [`rescan_cm`], and with `with_lineage`
+/// the corporate-action lineage too (D-3331, D-3343): the lineage and lot
+/// ledgers are appended to, still nothing under `bars/`.
+///
+/// # Errors
+///
+/// As [`rescan_cm`], and [`ImportRefusal::Lineage`] for an unreadable
+/// lineage ledger.
+pub fn rescan_nfo<S: NfoSource>(
+    source: &S,
+    range: (Day, Day),
+    store_root: &Path,
+    with_lineage: bool,
+) -> Result<Rescan, ImportRefusal> {
+    let mut lineage = if with_lineage {
+        Some(
+            lineage::LineageRun::load(store_root, range.0)
+                .map_err(|why| ImportRefusal::Lineage { why })?,
+        )
+    } else {
+        None
+    };
+    rescan_core(ImportKind::Options, range, store_root, |day, run, sink| {
+        nfo_day_with(source, run, day, sink, lineage.as_mut())
+    })
+}
+
+#[path = "gdfl_import_quality.rs"]
+pub mod quality;
+
+#[path = "gdfl_import_lineage.rs"]
+pub mod lineage;
 
 #[cfg(test)]
 #[path = "gdfl_import_tests.rs"]
