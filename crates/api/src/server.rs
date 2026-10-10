@@ -1553,11 +1553,12 @@ pub(crate) async fn recovery_cash_schedule(
 }
 
 // THE ROUTES THE /db FIX ROUND ADDS, REGISTERED BY THE WP-01 SEAM BEFORE ANY OF
-// THEM IS BUILT. Each module answers its routes with `not_built` until the
-// package named in it lands, and that package edits its own module and never
-// the route table below. `import_journal` (the GDFL import journal's one
-// reader) and `imports` are `pub(crate)` because `/audit.json` and `/logs.json`,
-// which live outside this module, read the journal too (WP-33a, D-3341).
+// THEM WAS BUILT, so each package edited its own module and never the route
+// table below. Every one is built now; the seam's `501 not built` answer went
+// with the last of them (`/chain.json`, WP-32). `import_journal` (the GDFL
+// import journal's one reader) and `imports` are `pub(crate)` because
+// `/audit.json` and `/logs.json`, which live outside this module, read the
+// journal too (WP-33a, D-3341).
 #[path = "aliases.rs"]
 mod aliases;
 #[path = "chain.rs"]
@@ -1573,57 +1574,7 @@ pub(crate) mod imports;
 #[path = "provenance.rs"]
 mod provenance;
 #[path = "sources.rs"]
-mod sources;
-
-/// What a route registered ahead of its implementation answers: status,
-/// content type, body.
-pub(crate) type NotBuilt = (
-    axum::http::StatusCode,
-    [(axum::http::HeaderName, &'static str); 1],
-    String,
-);
-
-/// `501 Not Implemented`, naming the route and the package that builds it.
-///
-/// # Why a route that does nothing is registered at all
-///
-/// The WP-01 seam registers every route the /db fix round adds before any of
-/// them is built, so each later package edits its own module and none of them
-/// races another to change the route table. A route that is registered and not
-/// built must say so: an empty body, a `[]` or a `404` would read as "nothing
-/// there" -- no facets, no chain, no imports -- which is exactly the answer a
-/// reader cannot tell from a real one. `CLAUDE.md` §4: refuse loudly and name
-/// the reason.
-///
-/// The reason opens with `not built: WP-xx` in the `error` key, which
-/// `web/src/lib/refusal.js` reads first, so a page quotes it verbatim.
-///
-/// # When it goes
-///
-/// When the last of the nine routes is built, nothing calls this. The package
-/// that builds that route deletes it, with `tests::assert_not_built` and the
-/// unit test beside it, in the same change.
-///
-/// Constant work: three short strings escaped into one body. No I/O.
-pub(crate) fn not_built(route: &'static str, package: &'static str) -> NotBuilt {
-    (
-        axum::http::StatusCode::NOT_IMPLEMENTED,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        format!(
-            r#"{{"error":{},"route":{},"package":{},"built":false}}"#,
-            render::json_string(&format!(
-                "not built: {package} -- {route} is registered by the WP-01 seam and \
-                 has no implementation yet. Nothing was read, and this answer says \
-                 nothing about the store."
-            )),
-            render::json_string(route),
-            render::json_string(package),
-        ),
-    )
-}
+pub mod sources;
 
 // THE ROUTES MOVED OUT OF THIS FILE (WP-01). Each is a child module, so it
 // keeps reading this file's private helpers through `super::` exactly as it
@@ -14348,8 +14299,7 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             axum::routing::get(optiongreeks::greeks_json),
         )
         // THE ROUTES THE /db FIX ROUND ADDS, REGISTERED AHEAD OF THEIR
-        // PACKAGES (WP-01). Each answers `501 not built: WP-xx` until its
-        // package lands; see `not_built`. A registered route beats the
+        // PACKAGES (WP-01) and all built now. A registered route beats the
         // front end's fallback, and none of these paths is a page.
         .route(
             "/census/facets.json",
@@ -24312,104 +24262,6 @@ mod tests {
         )
         .expect("a damaged counter");
         root
-    }
-
-    /// Asks each `(route, path)` of a route the WP-01 seam registered ahead of
-    /// its package, over the real route table, and holds it to what
-    /// [`not_built`] promises: GET answers `501` with a JSON body whose `error`
-    /// opens with `not built: {package}` and names the route, never an empty
-    /// body, and HEAD answers the same status with no body. Goes with
-    /// [`not_built`].
-    ///
-    /// # Served through the route table alone
-    ///
-    /// Not through [`router_serving`], whose request log rations failed lines
-    /// process-wide (`crate::logs::LOCAL_FAILED_LINES_PER_WINDOW` a minute). In
-    /// one test binary the rations are shared, and the eighteen `501`s these
-    /// tests send spent the share another test's sentinel `404` is written
-    /// from, so that line was suppressed and its assertion failed. What is
-    /// proven here is the registration and the answer, which is the table's.
-    pub(super) async fn assert_not_built(
-        name: &str,
-        built: Loaded,
-        asked: &[(&str, &str)],
-        package: &str,
-    ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(
-            axum::serve(listener, route_table(front(name)).with_state(built))
-                .with_graceful_shutdown(async move {
-                    let _closed = stopped.await;
-                })
-                .into_future(),
-        );
-        for &(route, path) in asked {
-            let got = get(addr, path).await;
-            assert!(got.starts_with("HTTP/1.1 501 "), "{path}: {got}");
-            assert!(
-                got.to_ascii_lowercase()
-                    .contains("content-type: application/json"),
-                "{path}: {got}"
-            );
-            let body: serde_json::Value =
-                serde_json::from_str(body_of(&got)).unwrap_or_else(|why| {
-                    panic!("{path}: a JSON body, never an empty one ({why}): {got}")
-                });
-            let error = body["error"].as_str().unwrap_or_default();
-            assert!(
-                error.starts_with(&format!("not built: {package} -- {route} ")),
-                "{path}: the reason names the package and the route: {got}"
-            );
-            assert_eq!(body["route"], route, "{got}");
-            assert_eq!(body["package"], package, "{got}");
-            assert_eq!(body["built"], false, "{got}");
-            let request =
-                format!("HEAD {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-            let head = tokio::task::spawn_blocking(move || {
-                use std::io::Read as _;
-                let mut socket = std::net::TcpStream::connect(addr).expect("connect");
-                socket.write_all(request.as_bytes()).expect("write");
-                let mut text = String::new();
-                socket.read_to_string(&mut text).expect("read");
-                text
-            })
-            .await
-            .expect("join");
-            assert!(head.starts_with("HTTP/1.1 501 "), "HEAD {route}: {head}");
-            assert!(body_of(&head).is_empty(), "HEAD {route}: {head}");
-        }
-        let _gone = stop.send(());
-        served
-            .await
-            .expect("task")
-            .expect("a graceful shutdown is not a failure");
-    }
-
-    /// **A ROUTE REGISTERED AHEAD OF ITS PACKAGE REFUSES BY NAME.** `501`, a
-    /// JSON content type, and a body that is never empty: the reason opens with
-    /// `not built: {package}`, in the `error` key the front end reads, and the
-    /// route and the package travel as fields of their own. Both are escaped,
-    /// so a name carrying a quote cannot break the body. WP-01.
-    #[test]
-    fn a_route_registered_ahead_of_its_package_refuses_by_name() {
-        let (status, [(header, value)], body) = not_built("/x\"y.json", "WP-00");
-        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(header, axum::http::header::CONTENT_TYPE);
-        assert_eq!(value, "application/json; charset=utf-8");
-        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-        let error = parsed["error"].as_str().expect("a named reason");
-        assert!(
-            error.starts_with("not built: WP-00 -- /x\"y.json "),
-            "{body}"
-        );
-        assert!(error.contains("Nothing was read"), "{body}");
-        assert_eq!(parsed["route"], "/x\"y.json");
-        assert_eq!(parsed["package"], "WP-00");
-        assert_eq!(parsed["built"], false);
     }
 
     /// Serves `site` and hands the body its address.
