@@ -63,7 +63,10 @@
 //!   ledgers, then O(refusals of the symbol) a day. **The first read in a
 //!   process walks the whole journal**, which keeps no index by instrument
 //!   (4,217,027 records, 1 GiB, on the operator's store); the answer that
-//!   pays for it says so in `notes`, with the time it took.
+//!   pays for it says so in `notes`, with the time it took. Since WP-36
+//!   (DB-N19) the served process walks it at start, off the request path, and
+//!   a request that arrives during that walk is answered without the journal
+//!   and says why, rather than paying 0.7 s.
 //!
 //! Measured p50/p99 are in the commit that built this route and go to
 //! `docs/06-limits.md` with WP-99; none is claimed here.
@@ -1665,6 +1668,132 @@ struct PullTail {
     /// The vendor the last run record named: its member failures follow it.
     vendor: Option<Vendor>,
     parsed: Arc<PullRefusals>,
+    /// When the served process began walking this journal at start, while it
+    /// walks ([`warm_pull_journal`]). A request that finds it set and records
+    /// to read is answered without them rather than walking beside it.
+    warming: Option<std::time::Instant>,
+}
+
+impl PullTail {
+    /// Nothing read yet of the journal whose `stat` gave `identity`.
+    fn fresh(identity: Option<(u64, u64)>) -> Self {
+        Self {
+            identity,
+            upto: 0,
+            vendor: None,
+            parsed: Arc::new(PullRefusals::default()),
+            warming: None,
+        }
+    }
+
+    /// Read the records past `upto` up to `whole` bytes from `file`, folding
+    /// each into `parsed`, in 4 MiB reads. The records read.
+    ///
+    /// # Errors
+    ///
+    /// A read that failed, in its own words.
+    fn advance(&mut self, path: &Path, whole: u64) -> Result<u64, String> {
+        use std::io::{Read as _, Seek as _};
+        let stride = crate::audit::RECORD_LEN_U64;
+        let mut read_now = 0u64;
+        if whole <= self.upto {
+            return Ok(0);
+        }
+        let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+        let mut file = std::fs::File::open(path).map_err(fail)?;
+        file.seek(std::io::SeekFrom::Start(self.upto))
+            .map_err(fail)?;
+        let parsed = Arc::make_mut(&mut self.parsed);
+        let chunk_records: u64 = 16_384;
+        let mut buffer = Vec::new();
+        while self.upto < whole {
+            let want = whole.saturating_sub(self.upto).min(chunk_records * stride);
+            buffer.clear();
+            (&mut file)
+                .take(want)
+                .read_to_end(&mut buffer)
+                .map_err(fail)?;
+            if buffer.is_empty() {
+                break;
+            }
+            let first = self.upto / stride;
+            for (at, image) in buffer.chunks_exact(crate::audit::RECORD_LEN).enumerate() {
+                let number = first
+                    .saturating_add(u64::try_from(at).unwrap_or(u64::MAX))
+                    .saturating_add(1);
+                pull_record(parsed, &mut self.vendor, number, image);
+            }
+            let got = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
+            let kept = got - got % stride;
+            self.upto = self.upto.saturating_add(kept);
+            read_now = read_now.saturating_add(kept / stride);
+            if kept < got {
+                break;
+            }
+        }
+        Ok(read_now)
+    }
+}
+
+/// Why a request's read of the pull journal gave no records.
+#[derive(Debug)]
+enum PullUnread {
+    /// It is there and could not be measured or read, in its own words.
+    Failed(String),
+    /// The served process is walking it at start ([`warm_pull_journal`]),
+    /// and a request does not walk it beside it (DB-N19).
+    Warming {
+        /// The journal.
+        path: PathBuf,
+        /// How long ago the walk began.
+        since: std::time::Duration,
+        /// Whole records the journal holds.
+        records: u64,
+    },
+}
+
+impl PullUnread {
+    /// The sentence an answer's notes give.
+    fn note(&self) -> String {
+        match self {
+            Self::Failed(why) => format!(
+                "The Zerodha pull journal could not be read, so no record names a pull refusal \
+                 and refused_front is judged from the gap ledger alone: {why}"
+            ),
+            Self::Warming {
+                path,
+                since,
+                records,
+            } => format!(
+                "The Zerodha pull journal at {} is being walked by this server's start \
+                 ({records} record(s), begun {} ms ago; the journal keeps no index by \
+                 instrument, so its first read walks it whole), and this answer did not wait \
+                 for it: no record names a pull refusal yet and refused_front is judged from \
+                 the gap ledger alone. Ask again in a moment.",
+                path.display(),
+                since.as_millis()
+            ),
+        }
+    }
+
+    /// Its `sources.pull_journal` entry.
+    fn json(&self) -> Value {
+        match self {
+            Self::Failed(why) => json!({ "present": null, "error": why }),
+            Self::Warming {
+                path,
+                since,
+                records,
+            } => json!({
+                "path": path.display().to_string(),
+                "present": null,
+                "state": "walking at start",
+                "since_ms": u64::try_from(since.as_millis()).unwrap_or(u64::MAX),
+                "records": records,
+                "error": null,
+            }),
+        }
+    }
 }
 
 /// One read of the pull journal.
@@ -1780,11 +1909,16 @@ fn pull_refusal(number: u64, record: &crate::audit::Record) -> Option<PullRefusa
 /// a read costs the records appended since. `api::audit_json::Attribution`
 /// already reads this file the same way for `/audit.json`.
 ///
+/// The served process walks it at start, off the request path
+/// ([`warm_pull_journal`], DB-N19), so a request pays only a tail; one that
+/// arrives while that walk runs answers without it and says so.
+///
 /// # Errors
 ///
-/// A file that is there and cannot be measured or read, in its own words.
-fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
-    use std::io::{Read as _, Seek as _};
+/// [`PullUnread::Failed`]: a file that is there and cannot be measured or
+/// read, in its own words. [`PullUnread::Warming`]: the walk at start is
+/// still running and there are records this read would have had to walk.
+fn read_pull_journal(root: &Path) -> Result<PullRead, PullUnread> {
     use std::os::unix::fs::MetadataExt as _;
     let started = std::time::Instant::now();
     let path = crate::audit::journal_path(root);
@@ -1801,7 +1935,7 @@ fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
                 parsed: Arc::new(PullRefusals::default()),
             });
         }
-        Err(e) => return Err(format!("{}: {e}", path.display())),
+        Err(e) => return Err(PullUnread::Failed(format!("{}: {e}", path.display()))),
         Ok(meta) => meta,
     };
     let identity = Some((meta.dev(), meta.ino()));
@@ -1809,51 +1943,24 @@ fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
     let stride = crate::audit::RECORD_LEN_U64;
     let whole = len - len % stride;
     let mut held = pull_tails().lock().unwrap_or_else(PoisonError::into_inner);
-    let fresh = || PullTail {
-        identity,
-        upto: 0,
-        vendor: None,
-        parsed: Arc::new(PullRefusals::default()),
-    };
-    let tail = held.entry(path.clone()).or_insert_with(fresh);
+    let tail = held
+        .entry(path.clone())
+        .or_insert_with(|| PullTail::fresh(identity));
     if tail.identity != identity || whole < tail.upto {
-        *tail = fresh();
+        *tail = PullTail::fresh(identity);
     }
-    let mut read_now = 0u64;
-    if whole > tail.upto {
-        let fail = |e: std::io::Error| format!("{}: {e}", path.display());
-        let mut file = std::fs::File::open(&path).map_err(fail)?;
-        file.seek(std::io::SeekFrom::Start(tail.upto))
-            .map_err(fail)?;
-        let parsed = Arc::make_mut(&mut tail.parsed);
-        let chunk_records: u64 = 16_384;
-        let mut buffer = Vec::new();
-        while tail.upto < whole {
-            let want = whole.saturating_sub(tail.upto).min(chunk_records * stride);
-            buffer.clear();
-            (&mut file)
-                .take(want)
-                .read_to_end(&mut buffer)
-                .map_err(fail)?;
-            if buffer.is_empty() {
-                break;
-            }
-            let first = tail.upto / stride;
-            for (at, image) in buffer.chunks_exact(crate::audit::RECORD_LEN).enumerate() {
-                let number = first
-                    .saturating_add(u64::try_from(at).unwrap_or(u64::MAX))
-                    .saturating_add(1);
-                pull_record(parsed, &mut tail.vendor, number, image);
-            }
-            let got = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
-            let kept = got - got % stride;
-            tail.upto = tail.upto.saturating_add(kept);
-            read_now = read_now.saturating_add(kept / stride);
-            if kept < got {
-                break;
-            }
-        }
+    // THE WALK AT START IS NOT REPEATED BESIDE IT (DB-N19): it reads every
+    // record once, and a request that walked too would pay the whole walk.
+    if let Some(began) = tail.warming
+        && whole > tail.upto
+    {
+        return Err(PullUnread::Warming {
+            path: path.clone(),
+            since: began.elapsed(),
+            records: whole / stride,
+        });
     }
+    let read_now = tail.advance(&path, whole).map_err(PullUnread::Failed)?;
     Ok(PullRead {
         path: path.clone(),
         present: true,
@@ -1864,6 +1971,110 @@ fn read_pull_journal(root: &Path) -> Result<PullRead, String> {
         read_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         parsed: Arc::clone(&tail.parsed),
     })
+}
+
+/// What [`warm_pull_journal`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PullWarmed {
+    /// Whether there is a journal.
+    pub present: bool,
+    /// The records the walk read.
+    pub read: u64,
+    /// How long it took, in microseconds.
+    pub micros: u64,
+}
+
+/// Walk the pull journal at `root` once, off the request path: what the
+/// served process does at start, so no Zerodha day-flags request pays the
+/// first walk (683-730 ms on the operator's store, DB-N19).
+///
+/// The walk runs without the tails' lock, into a tail of its own, and is
+/// installed under it when done; while it runs, the tail is marked, and a
+/// request that finds records to read answers without them and says why
+/// ([`PullUnread::Warming`]). Mark and install are under the lock, so a
+/// request sees either the mark or the installed tail, never neither.
+///
+/// # Errors
+///
+/// A journal that is there and could not be measured or read.
+pub(crate) fn warm_pull_journal(root: &Path) -> Result<PullWarmed, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let started = std::time::Instant::now();
+    let path = crate::audit::journal_path(root);
+    let meta = match std::fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PullWarmed {
+                present: false,
+                read: 0,
+                micros: 0,
+            });
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+        Ok(meta) => meta,
+    };
+    let identity = Some((meta.dev(), meta.ino()));
+    let len = meta.len();
+    let whole = len - len % crate::audit::RECORD_LEN_U64;
+    let mut walk = {
+        let mut held = pull_tails().lock().unwrap_or_else(PoisonError::into_inner);
+        let tail = held
+            .entry(path.clone())
+            .or_insert_with(|| PullTail::fresh(identity));
+        if tail.identity != identity || whole < tail.upto {
+            *tail = PullTail::fresh(identity);
+        }
+        if tail.upto >= whole || tail.warming.is_some() {
+            return Ok(PullWarmed {
+                present: true,
+                read: 0,
+                micros: 0,
+            });
+        }
+        tail.warming = Some(started);
+        PullTail {
+            identity,
+            upto: tail.upto,
+            vendor: tail.vendor,
+            parsed: Arc::clone(&tail.parsed),
+            warming: None,
+        }
+    };
+    // THE MARK IS TAKEN OFF WHATEVER HAPPENS, a failed or unwound walk
+    // included: a mark left behind would answer every request "walking" for
+    // the life of the process.
+    let unmark = Unmark(&path);
+    let read = walk.advance(&path, whole);
+    {
+        let mut held = pull_tails().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(tail) = held.get_mut(&path)
+            && read.is_ok()
+            && tail.identity == walk.identity
+            && tail.upto <= walk.upto
+        {
+            *tail = walk;
+        }
+    }
+    drop(unmark);
+    Ok(PullWarmed {
+        present: true,
+        read: read?,
+        micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+    })
+}
+
+/// Takes the walk-at-start mark off a journal's tail when dropped.
+struct Unmark<'a>(&'a Path);
+
+impl Drop for Unmark<'_> {
+    fn drop(&mut self) {
+        if let Some(tail) = pull_tails()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(self.0)
+        {
+            tail.warming = None;
+        }
+    }
 }
 
 /// Folds one 256-byte record into `parsed`: a run sets the vendor its member
@@ -1941,12 +2152,9 @@ fn pull_view<'a>(
 }
 
 /// The sentences an answer owes about the pull journal.
-fn pull_notes(pull: Option<&Result<PullRead, String>>) -> Vec<String> {
+fn pull_notes(pull: Option<&Result<PullRead, PullUnread>>) -> Vec<String> {
     match pull {
-        Some(Err(why)) => vec![format!(
-            "The Zerodha pull journal could not be read, so no record names a pull refusal and \
-             refused_front is judged from the gap ledger alone: {why}"
-        )],
+        Some(Err(unread)) => vec![unread.note()],
         Some(Ok(read)) if !read.present => vec![format!(
             "No Zerodha pull journal at {}: no record names a pull refusal, and a day before \
              the series' first 1day bar is not judged a refused front by it.",
@@ -3242,7 +3450,7 @@ fn sources_json(
     journal: Option<&Result<JournalRows, String>>,
     quality: Option<&Result<LedgerRead<QualityLedger>, String>>,
     gaps: &Result<LedgerRead<GapLedger>, String>,
-    pull: Option<&Result<PullRead, String>>,
+    pull: Option<&Result<PullRead, PullUnread>>,
 ) -> Value {
     let journal = journal.as_ref().map(|read| match read {
         Ok(rows) => {
@@ -3265,7 +3473,7 @@ fn sources_json(
             "kept": "Zerodha member failures whose note names a refused day or a window refused before append",
             "error": null,
         }),
-        Err(why) => json!({ "present": null, "error": why }),
+        Err(unread) => unread.json(),
     });
     json!({
         "journal": journal,
@@ -4797,6 +5005,128 @@ mod tests {
         let tail = read_pull_journal(&root).unwrap();
         assert_eq!((tail.records, tail.read_now, tail.torn), (3, 1, 4));
         assert_eq!(tail.parsed.by_symbol["ZZOIL"].len(), 1);
+    }
+
+    /// Put the walk-at-start mark on `path`'s tail, with nothing read: a walk
+    /// at start under way.
+    fn mark_walking(path: &Path) {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::metadata(path).expect("the journal");
+        let mut tail = PullTail::fresh(Some((meta.dev(), meta.ino())));
+        tail.warming = Some(std::time::Instant::now());
+        pull_tails()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf(), tail);
+    }
+
+    /// Whether `path`'s tail carries the walk-at-start mark.
+    fn walking(path: &Path) -> bool {
+        pull_tails()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .is_some_and(|tail| tail.warming.is_some())
+    }
+
+    /// **THE PULL JOURNAL IS WALKED ONCE AT START, OFF THE REQUEST PATH, AND A
+    /// REQUEST THAT ARRIVES DURING THAT WALK DOES NOT WALK IT BESIDE IT: IT IS
+    /// ANSWERED WITHOUT THE JOURNAL AND SAYS WHY.** DB-N19: the first Zerodha
+    /// spot page after a start paid the whole walk, 0.73 s on a shadow of the
+    /// operator's store.
+    #[test]
+    fn the_pull_journal_is_walked_at_start_and_a_request_during_the_walk_says_so() {
+        let root = root_of("pull-warm");
+        assert_eq!(
+            warm_pull_journal(&root),
+            Ok(PullWarmed {
+                present: false,
+                read: 0,
+                micros: 0,
+            }),
+            "no journal: nothing to walk"
+        );
+        pull_run(
+            &root,
+            "zerodha_nse_checked fixture",
+            &[(
+                "ZZOIL",
+                "2018-01-01",
+                "2026-09-30",
+                "conflicting vendor candles at 1578853800; refused before append",
+            )],
+        );
+        let path = crate::audit::journal_path(&root);
+
+        // THE WALK AT START IS UNDER WAY: its mark is on the tail, and nothing
+        // is installed yet.
+        mark_walking(&path);
+        match read_pull_journal(&root) {
+            Err(PullUnread::Warming { records, .. }) => assert_eq!(records, 2),
+            Err(PullUnread::Failed(why)) => panic!("the journal is there: {why}"),
+            Ok(read) => panic!(
+                "a request does not walk beside the start; it read {} record(s)",
+                read.read_now
+            ),
+        }
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-INDEX-ZZOIL&from=2020-01-13"),
+        );
+        assert_eq!(
+            got["sources"]["pull_journal"]["state"], "walking at start",
+            "{:#}",
+            got["sources"]
+        );
+        assert_eq!(got["sources"]["pull_journal"]["records"], 2);
+        assert!(
+            got["notes"]
+                .as_array()
+                .expect("notes")
+                .iter()
+                .any(|note| note
+                    .as_str()
+                    .is_some_and(|n| n.contains("being walked by this server's start"))),
+            "{:#}",
+            got["notes"]
+        );
+        assert_eq!(
+            record(&got, "2020-01-13")["pull"],
+            Value::Null,
+            "no journal word on the day, rather than a word read from nothing"
+        );
+
+        // THE WALK ITSELF: a second walk while one is marked reads nothing.
+        assert_eq!(
+            warm_pull_journal(&root).map(|walked| walked.read),
+            Ok(0),
+            "one walk at a time"
+        );
+        pull_tails()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&path);
+        let walked = warm_pull_journal(&root).expect("the walk at start");
+        assert!(walked.present);
+        assert_eq!(walked.read, 2, "every record, once");
+        let after = read_pull_journal(&root).expect("a tail read");
+        assert_eq!(
+            (after.records, after.read_now),
+            (2, 0),
+            "the request after the walk reads only what was appended since"
+        );
+        assert_eq!(
+            after.parsed.by_symbol["ZZOIL"].len(),
+            1,
+            "the walk was installed"
+        );
+        assert!(!walking(&path), "and its mark is off");
+        assert_eq!(
+            warm_pull_journal(&root).map(|walked| walked.read),
+            Ok(0),
+            "walked already: nothing to read"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **THE ROUTE, OVER THE REAL ROUTER STATE**: 200 with one record a day,

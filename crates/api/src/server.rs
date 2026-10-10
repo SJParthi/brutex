@@ -17112,6 +17112,13 @@ async fn run_in_over(
                 // window. It holds the same `Arc`, so pause/resume and the
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
+                // THE FIRST CLICK AFTER A RESTART DOES NOT PAY A WHOLE BUILD
+                // (DB-N19): the census and the calendars the pages ask first
+                // are built in the background, and a request waits for a
+                // build at most a budget before it is answered "building".
+                if let Err(why) = calendar_route::warm_at_start(&site) {
+                    warn_line!("Calendars NOT warmed at start: {why}");
+                }
                 if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
                     note_recovery_not_resumed(&why);
                     warn_line!("Recovery NOT resumed: {why}");

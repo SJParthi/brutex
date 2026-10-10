@@ -33,6 +33,21 @@
 //! of them without a `.tix` and so bisected). The census re-read a landing
 //! forces is shared by every census route and is not this route's: about
 //! 0.62 s on that store (WP-30 keys it per vendor).
+//!
+//! # The first request after a start (WP-36, DB-N19)
+//!
+//! That first build was paid by whoever asked first: 6.55 s for
+//! `?feed=gdfl&symbol=NIFTY` on the main session's shadow, 3.3-5.1 s on
+//! WP-36's. Now a request is handed a confirmed answer without reading the
+//! census, or joins a build and waits for it at most a budget, past which it
+//! is answered `202` `"building"` with the build's progress; and the served
+//! process reads the census and builds the answers the pages ask first at
+//! start ([`warm_at_start`]). See [`crate::calendar_of::build`]. Measured on
+//! WP-36's shadow, release build, 10 Oct 2026: the first
+//! `?feed=gdfl&symbol=NIFTY` after five restarts answered `202` in 1.9-2.4 ms
+//! and in full 1.1-3.7 s later; a confirmed answer, n=200 sequential, p50
+//! 0.43-0.47 ms, p99 0.53-0.83 ms, max 0.56-1.41 ms over eight keys; every
+//! answer byte for byte the build before WP-36's.
 
 use super::{
     CensusNow, CensusStamps, Loaded, Site, census_now_stamped, no_such_feed_json, param,
@@ -225,22 +240,299 @@ pub(super) async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> CalendarAnswer {
-    // OFF THE ASYNC WORKERS, AND ADMITTED. This ran inline: a census read on a
-    // moved stamp and, on a miss, a derivation per spot series (0.28 s each,
-    // documented) blocked a Tokio worker, and a flood or a post-pull herd
-    // blocked them all. It now runs on the blocking pool behind its own
-    // bounded admission. Saturation answers 429 with a reason rather than
-    // queueing without bound. W1-api2-11, D-1443. Since D-3336 a miss reads
-    // only the months whose census entry moved (`calendar_of::month_days`),
-    // so two concurrent misses repeat at most that much work.
-    match crate::detail::run_calendar(move || {
-        calendar_json_reading(&site, &uri, census_now_stamped)
-    })
-    .await
-    {
-        Ok(answer) => answer,
-        Err(why) => calendar_admission_refused(&why),
+    use crate::calendar_of::build::Joined;
+    // THE QUESTION FIRST: a malformed one is refused before anything is read.
+    let asked = match Asked::of(&uri) {
+        Ok(asked) => asked,
+        Err(refused) => return refused,
+    };
+    // A CONFIRMED ANSWER IS HANDED OUT WITHOUT READING THE CENSUS (DB-N19):
+    // the asked feed's stamp, one probe, and the body's copy, on this worker.
+    // It was confirmed under that very stamp when it was kept or found kept,
+    // so it is the answer the reading below would give. See
+    // `crate::calendar_of::build`.
+    let now = feed_stamps(&site.store_root, asked.feed);
+    if let Some(kept) = site.calendars.builds.confirmed(&asked.key, &now) {
+        return answered(&kept);
     }
+    // ANYTHING ELSE IS A BUILD, joined or led, and waited for at most the
+    // served budget. The reading itself is what it always was: on the
+    // calendar pool behind its admission (W1-api2-11, D-1443), the census on
+    // the manifests' stamps (D-0686, D-0695), and the answer kept under the
+    // feed's (D-3336). What changed is that the request no longer pays a
+    // whole build: past the budget it is answered "building", and the build
+    // goes on (DB-N19).
+    let build = match site.calendars.builds.join(&asked.key, Some(&now)) {
+        Joined::Parked(answer) => return answered(&answer),
+        Joined::CensusAtStart(since) => return building_census(&asked, since),
+        Joined::Full => return builds_full(),
+        Joined::Follow(build) => build,
+        Joined::Lead(build) => {
+            lead(&site, uri, &asked, &build, now);
+            build
+        }
+    };
+    // A START-UP BUILD STILL QUEUED BEHIND OTHERS will not be done within any
+    // budget, so a request that finds one is answered at once rather than
+    // after it. A request's own build is waited for: it starts at once.
+    let queued_at_start = {
+        let progress = build.progress();
+        progress.origin == crate::calendar_of::build::Origin::StartUp
+            && progress.reading_for.is_none()
+    };
+    let budget = site.calendars.builds.budget().map(|budget| {
+        if queued_at_start {
+            std::time::Duration::ZERO
+        } else {
+            budget
+        }
+    });
+    match build.wait(budget).await {
+        Some(answer) => answered(&answer),
+        None => building(&asked, &build.progress()),
+    }
+}
+
+/// Run `build`, the build a request for `asked` leads, and finish it with its
+/// answer -- whatever answer: a refusal and an admission refusal finish it too,
+/// so nobody waits on a build that will never answer.
+///
+/// OFF THE ASYNC WORKERS, AND ADMITTED. This ran inline: a census read on a
+/// moved stamp and, on a miss, a derivation per spot series (0.28 s each,
+/// documented) blocked a Tokio worker, and a flood or a post-pull herd blocked
+/// them all. It runs on the blocking pool behind its own bounded admission.
+/// Saturation answers 429 with a reason rather than queueing without bound.
+/// W1-api2-11, D-1443. Since D-3336 a miss reads only the months whose census
+/// entry moved (`calendar_of::month_days`). Spawned, so the build outlives a
+/// request that stopped waiting for it (DB-N19).
+fn lead(
+    site: &Loaded,
+    uri: axum::http::Uri,
+    asked: &Asked,
+    build: &std::sync::Arc<crate::calendar_of::build::Build>,
+    now: CensusStamps,
+) {
+    let (site, key, build) = (
+        Loaded::clone(site),
+        asked.key.clone(),
+        std::sync::Arc::clone(build),
+    );
+    drop(tokio::spawn(async move {
+        let reading = {
+            let (site, build) = (Loaded::clone(&site), std::sync::Arc::clone(&build));
+            crate::detail::run_calendar(move || {
+                let _entered = build.enter(Some(now));
+                calendar_json_reading(&site, &uri, census_now_stamped)
+            })
+        };
+        let answer = match reading.await {
+            Ok(answer) => answer,
+            Err(why) => calendar_admission_refused(&why),
+        };
+        site.calendars.builds.finish(&key, &build, kept_of(answer));
+    }));
+}
+
+/// One request's question: the feed, the rung asked for and the symbol, and
+/// the key its answer is kept under.
+#[derive(Debug, Clone)]
+pub(super) struct Asked {
+    /// The feed asked for.
+    feed: Vendor,
+    /// The rung asked for, or `None` for the feed's default.
+    rung: Option<store::path::Timeframe>,
+    /// The symbol asked for, in the case the store keeps it; empty for the
+    /// exchange.
+    symbol: String,
+    /// `(feed, rung, symbol)`.
+    key: crate::calendar_of::AnswerKey,
+}
+
+impl Asked {
+    /// Read the question off `uri`.
+    ///
+    /// # Errors
+    ///
+    /// The `400` a feed this build cannot read, or a rung it has no directory
+    /// for, is answered.
+    fn of(uri: &axum::http::Uri) -> Result<Self, CalendarAnswer> {
+        let json = "application/json; charset=utf-8";
+        let query = uri.query().unwrap_or("");
+        let named = param(query, "feed");
+        let Some(feed) = ingest::parse_vendor(&named) else {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONTENT_TYPE, json)],
+                no_such_feed_json(&named),
+            ));
+        };
+        let rung = rung_param(query).map_err(|why| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONTENT_TYPE, json)],
+                serde_json::json!({ "error": why }).to_string(),
+            )
+        })?;
+        let symbol = stored_case(param(query, "symbol"));
+        Ok(Self {
+            feed,
+            rung,
+            key: (feed, rung, symbol.clone()),
+            symbol,
+        })
+    }
+}
+
+/// The asked feed's census stamp right now, and nothing else: what a
+/// confirmed answer is handed out under ([`crate::calendar_of::build`]).
+///
+/// `manifest_stamps`' five `stat` calls, narrowed to the feed's own: an
+/// answer is read from that feed's census and bar files alone, and a landing
+/// of another feed moves only that feed's manifest. No manifest is read.
+pub(crate) fn feed_stamps(store_root: &std::path::Path, feed: Vendor) -> CensusStamps {
+    narrowed(&super::census_cache::manifest_stamps(store_root), feed)
+}
+
+/// `stamps` narrowed to `feed`'s manifest and the root.
+fn narrowed(stamps: &CensusStamps, feed: Vendor) -> CensusStamps {
+    CensusStamps {
+        manifests: stamps
+            .manifests
+            .get(feed as usize)
+            .copied()
+            .into_iter()
+            .collect(),
+        root_is_dir: stamps.root_is_dir,
+    }
+}
+
+/// A kept or built answer as the route answers it.
+fn answered(kept: &crate::calendar_of::KeptAnswer) -> CalendarAnswer {
+    (
+        axum::http::StatusCode::from_u16(kept.status)
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        kept.body.clone(),
+    )
+}
+
+/// An answer as a build keeps it. Every answer this route gives carries the
+/// one JSON content type, so the status and the body are the whole of it.
+fn kept_of(answer: CalendarAnswer) -> crate::calendar_of::KeptAnswer {
+    let (status, _, body) = answer;
+    crate::calendar_of::KeptAnswer {
+        status: status.as_u16(),
+        body,
+    }
+}
+
+/// Milliseconds in `elapsed`, saturating.
+fn millis(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The `202` a request is answered while its answer is being built: what the
+/// build is doing, how far it has got, and when to ask again. No day is
+/// claimed, so nothing here can be read as a calendar (DB-N19).
+fn building(asked: &Asked, progress: &crate::calendar_of::build::Progress) -> CalendarAnswer {
+    use crate::calendar_of::build::RETRY_AFTER_MS;
+    let phase = if progress.reading_for.is_some() {
+        "counting"
+    } else {
+        "queued"
+    };
+    let doing = match progress.reading_for {
+        Some(_) if progress.owed > 0 => format!(
+            "it has counted {} of the {} month file(s) it reads so far",
+            progress.counted, progress.owed
+        ),
+        Some(_) => "it is reading the census".to_owned(),
+        None => "it is queued behind the builds before it".to_owned(),
+    };
+    building_answer(
+        asked,
+        &serde_json::json!({
+            "phase": phase,
+            "by": progress.origin.word(),
+            "since_ms": millis(progress.queued_for),
+            "reading_ms": progress.reading_for.map(millis),
+            "months_counted": progress.counted,
+            "months_owed": progress.owed,
+            "reason": format!(
+                "This calendar is being built off the request path ({} build): {doing}. \
+                 No day is claimed until it is whole; ask again in {RETRY_AFTER_MS} ms.",
+                progress.origin.word()
+            ),
+        }),
+    )
+}
+
+/// The `202` a request is answered while the served process reads its census
+/// at start and no build for its key is queued: it does not read the census
+/// beside it.
+fn building_census(asked: &Asked, since: std::time::Duration) -> CalendarAnswer {
+    use crate::calendar_of::build::RETRY_AFTER_MS;
+    building_answer(
+        asked,
+        &serde_json::json!({
+            "phase": "census",
+            "by": "start-up",
+            "since_ms": millis(since),
+            "reading_ms": millis(since),
+            "months_counted": 0,
+            "months_owed": 0,
+            "reason": format!(
+                "The server is reading its census at start, which every calendar is built \
+                 from; this one is built once it is read. No day is claimed; ask again in \
+                 {RETRY_AFTER_MS} ms."
+            ),
+        }),
+    )
+}
+
+/// A `"building"` answer: the asked question, `fields`, and the retry hint.
+fn building_answer(asked: &Asked, fields: &serde_json::Value) -> CalendarAnswer {
+    let mut body = serde_json::json!({
+        "status": "building",
+        "feed": asked.feed.as_str(),
+        "rung": asked.rung.map(store::path::Timeframe::as_str),
+        "symbol": asked.symbol,
+        "retry_after_ms": crate::calendar_of::build::RETRY_AFTER_MS,
+    });
+    if let (Some(body), Some(fields)) = (body.as_object_mut(), fields.as_object()) {
+        body.extend(fields.clone());
+    }
+    (
+        axum::http::StatusCode::ACCEPTED,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        body.to_string(),
+    )
+}
+
+/// The `429` a request is answered when every build the map holds is queued
+/// or running.
+pub(super) fn builds_full() -> CalendarAnswer {
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "error": format!(
+                "calendar build not admitted: {} builds are queued or running, the most \
+                 this server holds at once; retry",
+                crate::calendar_of::build::MAX_BUILDS
+            )
+        })
+        .to_string(),
+    )
 }
 
 /// The answer a calendar-deriving route gives when its blocking work was not
@@ -411,8 +703,11 @@ impl Evidence<'_> {
         let entry = entry_of(self.manifest, identity);
         let mut months = Vec::new();
         let mut unopened = Vec::new();
-        for month in rungs.get(&rung).map_or(&[][..], Vec::as_slice) {
-            match crate::calendar_of::month_days(
+        let held = rungs.get(&rung).map_or(&[][..], Vec::as_slice);
+        // HOW FAR A BUILD HAS GOT is what a "building" answer says (DB-N19).
+        crate::calendar_of::build::owe(held.len());
+        for month in held {
+            let counted = crate::calendar_of::month_days(
                 &self.site.calendars,
                 &self.site.store_root,
                 self.feed,
@@ -422,7 +717,9 @@ impl Evidence<'_> {
                 rung,
                 *month,
                 entry(rung, *month),
-            ) {
+            );
+            crate::calendar_of::build::counted();
+            match counted {
                 Ok(days) => months.push((*month, Some(days))),
                 Err(crate::calendar_of::MonthFault::Unopened(why)) => unopened.push(why),
                 Err(crate::calendar_of::MonthFault::Unreadable(why)) => {
@@ -694,24 +991,14 @@ pub(super) fn calendar_json_reading(
     census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
 ) -> CalendarAnswer {
     let json = "application/json; charset=utf-8";
-    let query = uri.query().unwrap_or("");
-    let asked = param(query, "feed");
-    let Some(feed) = ingest::parse_vendor(&asked) else {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            [(axum::http::header::CONTENT_TYPE, json)],
-            no_such_feed_json(&asked),
-        );
-    };
-    let rung = match rung_param(query) {
-        Ok(rung) => rung,
-        Err(why) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                [(axum::http::header::CONTENT_TYPE, json)],
-                serde_json::json!({ "error": why }).to_string(),
-            );
-        }
+    let Asked {
+        feed,
+        rung,
+        symbol,
+        key,
+    } = match Asked::of(uri) {
+        Ok(asked) => asked,
+        Err(refused) => return refused,
     };
     // ONE STAMPED CENSUS, and a feed whose census cannot be read is refused
     // before anything is built. See `unreadable_calendar`.
@@ -726,11 +1013,18 @@ pub(super) fn calendar_json_reading(
     // it was stamped before `fresh` was read, and only when that stamp could
     // have read this feed's row. See `census_now_stamped`.
     let stamp = own.and_then(|row| stamps.modified(row));
-    let symbol = stored_case(param(query, "symbol"));
-    let key: crate::calendar_of::AnswerKey = (feed, rung, symbol.clone());
+    // AND THE STAMP A KEPT ANSWER IS CONFIRMED UNDER: the same stamps, this
+    // feed's alone, so the next request is handed it without reading the
+    // census while that feed's manifest stands still (DB-N19).
+    let confirm = |kept| {
+        site.calendars
+            .builds
+            .confirm(key.clone(), narrowed(&stamps, feed), kept);
+    };
     if let Some(at) = stamp
         && let Some(kept) = site.calendars.answer(&key, at)
     {
+        confirm(std::sync::Arc::clone(&kept));
         return (
             axum::http::StatusCode::from_u16(kept.status)
                 .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
@@ -741,17 +1035,241 @@ pub(super) fn calendar_json_reading(
     match build(site, own, feed, rung, &symbol) {
         Built::Answer { status, body, keep } => {
             if keep && let Some(at) = stamp {
-                site.calendars.keep_answer(
-                    key,
+                confirm(site.calendars.keep_answer(
+                    key.clone(),
                     at,
                     crate::calendar_of::KeptAnswer {
                         status: status.as_u16(),
                         body: body.clone(),
                     },
-                );
+                ));
             }
             (status, [(axum::http::header::CONTENT_TYPE, json)], body)
         }
         Built::Refused(refused) => refused,
     }
+}
+
+// ══ At start: the census and the answers the pages ask first (DB-N19) ═══════
+
+/// Bound every `/calendar.json` request's wait to
+/// [`crate::calendar_of::build::REQUEST_WAIT`], and build, in the background,
+/// what the first clicks after a restart ask for: see [`warm`]. The served
+/// process calls this once, after its listener is bound.
+///
+/// # Errors
+///
+/// The thread could not be started. The route still answers: a request then
+/// leads a build of its own, and is answered `"building"` past the budget.
+pub(super) fn warm_at_start(site: &Loaded) -> std::io::Result<()> {
+    site.calendars
+        .builds
+        .bound_waits(crate::calendar_of::build::REQUEST_WAIT);
+    let site = Loaded::clone(site);
+    std::thread::Builder::new()
+        .name("brutex-warm".to_owned())
+        .spawn(move || {
+            let _noted = warm(&site, &offered_feeds()).note();
+        })
+        .map(drop)
+}
+
+/// The feeds the operator is offered (D-3338): every feed whose descriptor
+/// does not exclude it and that files under a store vendor.
+pub(super) fn offered_feeds() -> Vec<Vendor> {
+    pull::vendor::Feed::ALL
+        .iter()
+        .filter(|feed| matches!(feed.descriptor().offer, pull::vendor::Offer::Offered))
+        .filter_map(|feed| feed.store_vendor())
+        .collect()
+}
+
+/// The symbols every feed's first answers are built for: NIFTY, the exchange
+/// and BANKNIFTY, in that order. `/db` opens on NIFTY (the operator's answer
+/// 11), `/ingest` asks for the exchange, and the two indices are the series
+/// the calendar of record is held by ([`REFERENCES`]).
+const FIRST_SYMBOLS: [&str; 3] = ["NIFTY", "", "BANKNIFTY"];
+
+/// The start-up builds not yet finished. Dropped -- at the end, or by a panic
+/// part way -- it abandons every build still in it, so no request waits on a
+/// build that will never answer; the next request leads a build of its own.
+struct Queue<'a> {
+    site: &'a Site,
+    builds: std::collections::VecDeque<(
+        crate::calendar_of::AnswerKey,
+        std::sync::Arc<crate::calendar_of::build::Build>,
+    )>,
+}
+
+impl Queue<'_> {
+    /// Queue `key`, once.
+    fn push(
+        &mut self,
+        key: crate::calendar_of::AnswerKey,
+        warmed: &mut crate::calendar_of::build::Warmed,
+    ) {
+        if self.builds.iter().any(|(queued, _)| *queued == key) {
+            return;
+        }
+        match self.site.calendars.builds.queue_at_start(&key) {
+            Some(build) => self.builds.push_back((key, build)),
+            None => warmed.unqueued = warmed.unqueued.saturating_add(1),
+        }
+    }
+}
+
+impl Drop for Queue<'_> {
+    fn drop(&mut self) {
+        for (key, build) in self.builds.drain(..) {
+            self.site.calendars.builds.abandon(
+                &key,
+                &build,
+                crate::calendar_of::KeptAnswer {
+                    status: axum::http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    body: serde_json::json!({
+                        "status": "refused",
+                        "feed": key.0.as_str(),
+                        "refusal": "the start-up build stopped before this answer was built; \
+                                    ask again, and the request leads a build of its own",
+                    })
+                    .to_string(),
+                },
+            );
+        }
+    }
+}
+
+/// The rungs `feeds`' censuses hold NIFTY or BANKNIFTY at, finest first.
+fn reference_rungs(
+    fresh: &[census::VendorCensus],
+    feeds: &[Vendor],
+) -> Vec<(Vendor, store::path::Timeframe)> {
+    let mut rungs = Vec::new();
+    for feed in feeds {
+        let Some(manifest) = fresh
+            .iter()
+            .find(|row| row.vendor == *feed)
+            .and_then(|row| match row.state {
+                census::Census::Held { ref manifest } => Some(manifest.as_ref()),
+                census::Census::Absent | census::Census::Unreadable { .. } => None,
+            })
+        else {
+            continue;
+        };
+        let mut held: Vec<store::path::Timeframe> = held_series(manifest, "")
+            .values()
+            .flat_map(|by_rung| by_rung.keys().copied())
+            .collect();
+        held.sort_unstable_by_key(|rung| rung.secs());
+        held.dedup();
+        rungs.extend(held.into_iter().map(|rung| (*feed, rung)));
+    }
+    rungs
+}
+
+/// The question a start-up build asks, as a request would ask it.
+fn question(key: &crate::calendar_of::AnswerKey) -> Result<axum::http::Uri, CalendarAnswer> {
+    let (feed, rung, symbol) = key;
+    let mut text = format!("/calendar.json?feed={}", feed.as_str());
+    if let Some(rung) = rung {
+        text.push_str("&rung=");
+        text.push_str(rung.as_str());
+    }
+    if !symbol.is_empty() {
+        text.push_str("&symbol=");
+        text.push_str(symbol);
+    }
+    text.parse().map_err(|why| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            serde_json::json!({
+                "status": "refused",
+                "refusal": format!("the start-up build could not spell {text:?} as a request: {why}"),
+            })
+            .to_string(),
+        )
+    })
+}
+
+/// Read the census once and build the answers the first clicks after a
+/// restart ask for, one after another, while the pull journal is walked
+/// beside them (`dayflags::warm_pull_journal`). DB-N19.
+///
+/// The first answers of every feed -- NIFTY, the exchange and BANKNIFTY at
+/// the feed's default rung -- are queued before the census is read, so a
+/// request for one joins its build rather than starting a second; then every
+/// rung the feed holds NIFTY or BANKNIFTY at, finest first. Each is built
+/// exactly as a request builds it ([`calendar_json_reading`]), kept and
+/// confirmed the same way, and finished for whoever waits on it. While the
+/// census is read, a request for any other key is answered `"building"`
+/// rather than reading it beside this.
+pub(super) fn warm(site: &Site, feeds: &[Vendor]) -> crate::calendar_of::build::Warmed {
+    let started = std::time::Instant::now();
+    let mut warmed = crate::calendar_of::build::Warmed {
+        feeds: feeds.to_vec(),
+        census_ms: 0,
+        built: 0,
+        refused: 0,
+        unqueued: 0,
+        building_ms: 0,
+        journal: Ok((0, 0)),
+        total_ms: 0,
+    };
+    let mut queue = Queue {
+        site,
+        builds: std::collections::VecDeque::new(),
+    };
+    for feed in feeds {
+        for symbol in FIRST_SYMBOLS {
+            queue.push((*feed, None, symbol.to_owned()), &mut warmed);
+        }
+    }
+    let root = site.store_root.clone();
+    let journal = std::thread::Builder::new()
+        .name("brutex-warm-journal".to_owned())
+        .spawn(move || super::dayflags::warm_pull_journal(&root));
+    let census_began = std::time::Instant::now();
+    let fresh = {
+        let _reading = site.calendars.builds.reading_census_at_start();
+        census_now_stamped(site).1.0
+    };
+    warmed.census_ms = millis(census_began.elapsed());
+    for (feed, rung) in reference_rungs(&fresh, feeds) {
+        for symbol in FIRST_SYMBOLS {
+            queue.push((feed, Some(rung), symbol.to_owned()), &mut warmed);
+        }
+    }
+    let building = std::time::Instant::now();
+    // THE BUILD STAYS IN THE QUEUE UNTIL IT IS FINISHED, so one that unwinds
+    // part way is abandoned by the queue's drop rather than left running.
+    while let Some((key, build)) = queue.builds.front().cloned() {
+        let answer = match question(&key) {
+            Ok(uri) => {
+                let _entered = build.enter(Some(feed_stamps(&site.store_root, key.0)));
+                calendar_json_reading(site, &uri, census_now_stamped)
+            }
+            Err(refused) => refused,
+        };
+        warmed.built = warmed.built.saturating_add(1);
+        if answer.0 != axum::http::StatusCode::OK {
+            warmed.refused = warmed.refused.saturating_add(1);
+        }
+        site.calendars.builds.finish(&key, &build, kept_of(answer));
+        queue.builds.pop_front();
+    }
+    warmed.building_ms = millis(building.elapsed());
+    warmed.journal = match journal {
+        Ok(walking) => match walking.join() {
+            Ok(Ok(walked)) => Ok((walked.read, walked.micros / 1_000)),
+            Ok(Err(why)) => Err(why),
+            Err(_) => Err("the pull journal's walk at start unwound".to_owned()),
+        },
+        Err(why) => Err(format!("the pull journal's walk could not start: {why}")),
+    };
+    warmed.total_ms = millis(started.elapsed());
+    warmed
 }
