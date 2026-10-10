@@ -1573,7 +1573,7 @@ pub(crate) mod imports;
 #[path = "provenance.rs"]
 mod provenance;
 #[path = "sources.rs"]
-mod sources;
+pub mod sources;
 
 /// What a route registered ahead of its implementation answers: status,
 /// content type, body.

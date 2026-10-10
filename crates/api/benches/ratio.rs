@@ -570,7 +570,7 @@ fn main() {
     ok &= census::probes_are_flat();
     ok &= window::seeks_are_flat();
     ok &= spot::probes_are_flat();
-    sources::not_built_yet();
+    ok &= sources::pages_are_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {
