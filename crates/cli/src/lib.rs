@@ -68,7 +68,7 @@ pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
-/// `cli gdfl-dayflags`: registered for WP-11b, refuses until built (D-3335).
+/// `cli gdfl-dayflags`: the GDFL day ledger of days already imported (D-3335).
 mod gdfl_dayflags;
 /// `cli gdfl-import`: GDFL one-second bars into the store (D-2802..D-2806).
 mod gdfl_import_command;
@@ -484,9 +484,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the span's census-refused gdfl import days
                                    with a `recounted` journal line each. DAY is
                                    YYYY-MM-DD (D-3316, D-3317).
-       cli gdfl-dayflags ARGS...
-                                   registered for WP-11b (D-3335); refuses,
-                                   reading and writing nothing, until built.
+       cli gdfl-dayflags KIND FROM TO [--lineage]
+                                   the GDFL day ledger (D-3335) of every day
+                                   of the range the import journal records as
+                                   imported, read-only from the vendor's zips
+                                   (BRUTEX_GDFL_CM_ARCHIVE for indices and
+                                   stocks, BRUTEX_GDFL_NFO_ARCHIVES for
+                                   options); writes imports/gdfl.dayflags only,
+                                   and with --lineage (options) the lineage
+                                   and lot ledgers (D-3331, D-3343).
        cli tix-rebuild VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG FROM TO [--dry-run]
                                    build the .tix time index of every named
                                    month of one spot series (FROM, TO are

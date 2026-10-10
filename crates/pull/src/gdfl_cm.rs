@@ -1264,6 +1264,9 @@ pub struct DayListing<L> {
     table: SlotTable<usize>,
     scope: Arc<CmScope>,
     cas: Cas,
+    /// The day zip's own size, where the source read one (D-3335's
+    /// `member_bytes`); `None` for a source that holds no zip.
+    member_bytes: Option<u64>,
 }
 
 /// Where a day's closing-auction eligibility comes from (D-3320).
@@ -1363,7 +1366,25 @@ impl<L> DayListing<L> {
             table: SlotTable::scoped(kind, Arc::clone(&scope)),
             cas: Cas::of(kind, day, &scope),
             scope,
+            member_bytes: None,
         }
+    }
+
+    /// This listing, read from a day zip of `bytes` bytes as its archive's
+    /// directory states them (D-3335's `member_bytes`, which the GDFL day
+    /// ledger records; 30 May 2019's options zip is half any other 2019
+    /// day's).
+    #[must_use]
+    pub const fn with_member_bytes(mut self, bytes: u64) -> Self {
+        self.member_bytes = Some(bytes);
+        self
+    }
+
+    /// The day zip's size, when the source read one: `None` for a source that
+    /// holds no zip (the tick store keeps each member, not the zip).
+    #[must_use]
+    pub const fn member_bytes(&self) -> Option<u64> {
+        self.member_bytes
     }
 
     /// Appends one entry in source order. Only `<folder>/<file>` is a file of

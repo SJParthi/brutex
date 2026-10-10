@@ -181,6 +181,24 @@ fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Result<Converted, ()
                 volume,
             ));
     }
+    // ADAPTED (D-3342, WP-11b): an option second's open interest is the OI
+    // of the LAST row placed in it, traded or not, written the slow way: every
+    // row's second by the same placement, the last in file order winning.
+    if kind == ImportKind::Options {
+        for i in 0..n {
+            let t = ticks[i];
+            let at = if in_order(i) {
+                Some(t.sod)
+            } else {
+                (i + 1..n).find(|&j| in_order(j)).map(|j| ticks[j].sod)
+            };
+            if let (Some(s), Some(oi)) = (at, t.oi)
+                && let Some((bar, _)) = seconds.get_mut(&s)
+            {
+                bar.open_interest = oi;
+            }
+        }
+    }
     let mut out = Vec::new();
     for (_, (mut bar, sum)) in seconds {
         bar.volume = i64::try_from(sum).map_err(|_| ())?;

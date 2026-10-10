@@ -8,6 +8,7 @@
 //! row is quoted anywhere (the licence is UNVERIFIED; D-2800), and
 //! `gdfl_cm::tests::fixtures_are_built_not_pasted` walks this file too.
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -227,11 +228,52 @@ pub(crate) fn unrun(text: &str) -> String {
     out
 }
 
-/// `bytes` as a store tree holds them at `rel`, the import journal less what
-/// names its runs ([`unrun`]): every other file as it is.
+/// `bytes` as a store tree holds them at `rel`, less what names the source
+/// or the wall clock, which two runs over one input from two sources write
+/// differently: the import journal less what names its runs ([`unrun`]); the
+/// day ledger (D-3335) less `member_bytes` and `member_src`, which a zip
+/// measures and a tick store cannot; a provenance sidecar (D-3334) as its
+/// records' day, bars, definition, journal line and generation, without the
+/// source's name and size or the time written. Every other file as it is.
 pub(crate) fn as_compared(rel: &Path, bytes: Vec<u8>) -> Vec<u8> {
     if rel == Path::new("imports/gdfl.journal") {
         unrun(&String::from_utf8_lossy(&bytes)).into_bytes()
+    } else if rel == Path::new("imports/gdfl.dayflags") {
+        let text = String::from_utf8_lossy(&bytes);
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines() {
+            let kept: Vec<&str> = line
+                .split(' ')
+                .filter(|f| !f.starts_with("member_bytes=") && !f.starts_with("member_src="))
+                .collect();
+            out.push_str(&kept.join(" "));
+            out.push('\n');
+        }
+        out.into_bytes()
+    } else if rel.extension().is_some_and(|ext| ext == "prv") {
+        let mut out = String::new();
+        let records = bytes.get(64..).unwrap_or_default().chunks_exact(256);
+        for (ordinal, chunk) in (0_u64..).zip(records) {
+            let record = <&[u8; 256]>::try_from(chunk)
+                .ok()
+                .and_then(|image| store::provenance::Record::decode(image, ordinal).ok());
+            match record {
+                Some(r) => {
+                    let _infallible = writeln!(
+                        out,
+                        "{} {} {} {} {} {}",
+                        r.day,
+                        r.first_index,
+                        r.n_bars,
+                        r.bar_definition,
+                        r.journal_ordinal,
+                        r.bar_file_generation
+                    );
+                }
+                None => out.push_str("undecodable\n"),
+            }
+        }
+        out.into_bytes()
     } else {
         bytes
     }

@@ -119,7 +119,7 @@ fn stored_option_underlyings(store: &Path) -> Result<Vec<String>, String> {
 /// # Errors
 ///
 /// What [`stored_option_underlyings`] and `CmScope::stored` refuse.
-fn scope_of(kind: ImportKind, store: &Path) -> Result<(CmScope, usize), String> {
+pub(crate) fn scope_of(kind: ImportKind, store: &Path) -> Result<(CmScope, usize), String> {
     match kind {
         ImportKind::Stocks => {
             let underlyings = stored_option_underlyings(store)?;
@@ -201,7 +201,7 @@ fn flags_of(words: &[&str]) -> (bool, bool, Vec<String>) {
 }
 
 /// `YYYY-MM-DD` as a day, or why not.
-fn day(text: &str) -> Result<Day, String> {
+pub(crate) fn day(text: &str) -> Result<Day, String> {
     let parts: Vec<&str> = text.split('-').collect();
     let number = |part: &str, width: usize| {
         (part.len() == width && part.bytes().all(|b| b.is_ascii_digit()))
@@ -218,7 +218,7 @@ fn day(text: &str) -> Result<Day, String> {
 }
 
 /// The root a variable names, or the refusal naming the variable.
-fn root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+pub(crate) fn root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
     match env(var) {
         Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
         _ => Err(format!(
