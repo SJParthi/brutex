@@ -23,7 +23,9 @@
   import { VIEWS } from '$lib/db/notes-controls.js';
   import { paisaText, windowQuery, wireSort, EXPORT_CAP, WINDOW_PAGE_MAX } from '$lib/db/bars-plan.js';
   import { readAllRows } from '$lib/database-pages.js';
-  import { optionCells, readSpots, spotKey } from '$lib/moneyness.js';
+  import { optionCells, readSpots, readRungs, spotKey, rungKey } from '$lib/moneyness.js';
+  import { rungMatches } from '$lib/db/notes-options.js';
+  import { ask } from '$lib/ask.js';
   import { readGreeks, greekCell, greekKey } from '$lib/greeks.js';
   import { dayLabel, barTimeLabel } from '$lib/dates.js';
   import DbBasisBadge from './DbBasisBadge.svelte';
@@ -249,7 +251,7 @@
     function pageContext(r) {
       return {
         feed: feeds.active ?? '',
-        oc: r.side ? optionCells(r, db.spotMap.get(spotKey(r)), db.spotChains) : null,
+        oc: r.side ? optionCells(r, db.spotMap.get(spotKey(r)), db.rungMap) : null,
         gc: r.side ? greekCell(r, db.greekMap.get(greekKey(r))) : null
       };
     }
@@ -339,12 +341,21 @@
           );
           rows = db.barRowsOf(got.bars, plan);
         }
-        const options = rows.filter((r) => r.side);
-        const spots = options.length ? await readSpots(feed, options, signal) : new Map();
-        const greeks = options.length ? (await readGreeks(feed, options, signal)).cells : new Map();
+        /* EACH BAR IN ITS OWN MONTH, AT ITS OWN INSTANT, UNDER THE PAGE'S
+           SPOT RULE, and the Moneyness pick applied as the grid applies it
+           (WP-53; D-3328, D-3329). */
+        const asof = db.spotAsof ?? 'exact';
+        let options = rows.filter((r) => r.side);
+        const rungs = options.length ? (await readRungs(feed, options, signal, ask, asof)).rungs : new Map();
+        if (db.mnyPick.size > 0) {
+          rows = rows.filter((r) => Boolean(r.side) && rungMatches(db.mnyPick, rungs.get(rungKey(r))?.rung));
+          options = rows;
+        }
+        const spots = options.length ? await readSpots(feed, options, signal, ask, asof) : new Map();
+        const greeks = options.length ? (await readGreeks(feed, options, signal, ask, asof)).cells : new Map();
         const context = (/** @type {any} */ r) => ({
           feed,
-          oc: r.side ? optionCells(r, spots.get(spotKey(r)), db.spotChains) : null,
+          oc: r.side ? optionCells(r, spots.get(spotKey(r)), rungs) : null,
           gc: r.side ? greekCell(r, greeks.get(greekKey(r))) : null
         });
         download(barCsvText(rows, context), barCsvName(feed, db.timeframe, db.picked, rows));

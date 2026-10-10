@@ -895,6 +895,16 @@ fn change_of(
                 (None, "oi_null")
             } else if before.open_interest == OI_NULL {
                 (None, "oi_null_before")
+            } else if bar.open_interest == 0 && before.open_interest > 0 {
+                // A FALL TO EXACTLY ZERO IS NOT SHOWN AS -100% (WP-53, DB-N10;
+                // D-3325's change refusals): GDFL NIFTY 2019-03-28 11,600 CE
+                // printed 8,025 / 0 / 8,325 on three consecutive bars of
+                // 2019-01-15/16, a lone zero between non-zero prints. Which
+                // zeros are real closes is not sourced (UNVERIFIED), so the
+                // change is withheld by name; the zero itself is shown as
+                // stored (`CLAUDE.md` §7: zero means zero). Only this bar and
+                // the one before are read, so nothing later decides it.
+                (None, "oi_to_zero")
             } else {
                 ratio(before.open_interest, bar.open_interest, "previous_oi_zero")
             };
@@ -3346,6 +3356,25 @@ mod window_tests {
         );
         let before_null = row(Behind::Bar(bar(10, OI_NULL)), bar(10, 10));
         assert_eq!(before_null.oichg_why, "oi_null_before");
+        // A FALL TO EXACTLY ZERO IS WITHHELD BY NAME, NOT -100% (DB-N10), and
+        // the bar after it is the existing zero-base refusal; a zero after a
+        // zero, and a fall to a non-zero value, are measured as before.
+        let to_zero = row(Behind::Bar(bar(10, 8_025)), bar(10, 0));
+        assert_eq!((to_zero.oichg, to_zero.oichg_why), (None, "oi_to_zero"));
+        assert_eq!(to_zero.chg, Some(0), "the price change is unaffected");
+        let from_zero = row(Behind::Bar(bar(10, 0)), bar(10, 8_325));
+        assert_eq!(
+            (from_zero.oichg, from_zero.oichg_why),
+            (None, "previous_oi_zero")
+        );
+        let zero_zero = row(Behind::Bar(bar(10, 0)), bar(10, 0));
+        assert_eq!(zero_zero.oichg_why, "previous_oi_zero");
+        let fall = row(Behind::Bar(bar(10, 8_000)), bar(10, 4_000));
+        assert_eq!(
+            fall.oichg,
+            Some(-5_000),
+            "a fall that stops above zero is measured"
+        );
         let wide = row(Behind::Bar(bar(1, 1)), bar(i64::MAX, i64::MAX));
         assert_eq!((wide.chg_why, wide.oichg_why), ("overflow", "overflow"));
         assert!(
