@@ -2055,7 +2055,7 @@ fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> 
     let mut out = String::with_capacity(1024);
     let _ = write!(
         out,
-        r#"{{"surveyed":{},"state":{},"paused":{},"pull_seat":{},"blocked_by":{},"why":{},"cursor":{},"since_unix":{},"due_unix":{},"journal":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"in_flight":"#,
+        r#"{{"surveyed":{},"state":{},"paused":{},"pull_seat":{},"blocked_by":{},"why":{},"cursor":{},"since_unix":{},"due_unix":{},"journal":{},"target":{{"driver":"autopilot","from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"in_flight":"#,
         !status.feeds.is_empty(),
         js(status.state()),
         paused,
@@ -2076,19 +2076,55 @@ fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> 
         js(&status.target.timeframe),
         js(&status.target.feed),
     );
+    // THE CELL, AND THE RUN IT BELONGS TO, WITH EVERYTHING `/autopilot.json`
+    // ALREADY KNEW (D-3341, DB-G19). This printed instrument, month, index and
+    // of: no feed, no rung, no elapsed time, and a month that was the window's
+    // first for every instrument of a stock pass. So a page could not tell a
+    // Zerodha 1min pull from a GDFL view of the same symbol, and marked every
+    // row of that symbol "retrying" in every feed and rung (DB-G20).
+    //
+    // `run_target` IS THE RUN IN FLIGHT'S OWN TARGET, apart from `target`,
+    // which is the autopilot's: a paused autopilot's opening target (1day, no
+    // feed, 905 instruments) stood beside a hand run's 1min cell and described
+    // it with the wrong numbers.
+    let mut run_target = String::from("null");
     match status.now {
         None => out.push_str("null"),
         Some(ref now) => {
+            let elapsed = u64::try_from(now.since.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (run_elapsed, each, eta) = now.pace();
+            let some = |n: Option<u64>| n.map_or_else(|| "null".to_owned(), |n| n.to_string());
             let _ = write!(
                 out,
-                r#"{{"instrument":{},"month":{},"index":{},"of":{}}}"#,
+                r#"{{"instrument":{},"month":{},"window":{},"feed":{},"timeframe":{},"driver":{},"elapsed_ms":{},"index":{},"of":{},"run_elapsed_ms":{},"per_instrument_ms":{},"eta_ms":{},"eta_basis":{}}}"#,
                 js(&now.instrument),
                 js(&now.month),
+                now.window_json(),
+                js(&now.feed),
+                js(&now.timeframe),
+                js(now.driver.label()),
+                elapsed,
                 now.index,
-                now.of
+                now.of,
+                run_elapsed,
+                some(each),
+                some(eta),
+                js(crate::autopilot::ETA_BASIS),
+            );
+            run_target = format!(
+                r#"{{"driver":{},"feed":{},"timeframe":{},"from":{},"to":{},"instruments":{}}}"#,
+                js(now.driver.label()),
+                js(&now.feed),
+                js(&now.timeframe),
+                now.window
+                    .map_or_else(|| "null".to_owned(), |w| js(&w.from().to_string())),
+                now.window
+                    .map_or_else(|| "null".to_owned(), |w| js(&w.to().to_string())),
+                now.of,
             );
         }
     }
+    let _ = write!(out, r#","run_target":{run_target}"#);
     out.push_str(r#","waiting_on":["#);
     for (n, feed) in status.feeds.iter().enumerate() {
         if n > 0 {
@@ -4536,7 +4572,10 @@ mod route_tests {
             instrument: String::from("NSE-NIFTY"),
             month: String::from("2020-01"),
             timeframe: String::from("1min"),
-            feed: String::from("Groww"),
+            feed: String::from("groww"),
+            window: None,
+            driver: crate::autopilot::Driver::Autopilot,
+            run_since: std::time::Instant::now(),
             since: std::time::Instant::now(),
             index: 3,
             of: 9,
@@ -4549,6 +4588,100 @@ mod route_tests {
         assert!(json.contains(r#""instrument":"NSE-NIFTY""#), "{json}");
         assert!(json.contains(r#""index":3"#), "{json}");
         assert!(json.contains(r#""of":9"#), "{json}");
+    }
+
+    /// **THE HAND RUN IN FLIGHT IS DESCRIBED BY ITS OWN NUMBERS, APART FROM THE
+    /// PAUSED AUTOPILOT'S** (D-3341, DB-G19, DB-G20, DB-G21).
+    ///
+    /// The shape measured on 7 Oct: the autopilot paused on its opening target
+    /// (`2015-01-01..2026-10-05`, 905 instruments, `1day`, no feed) while an
+    /// operator's Zerodha 1min stock pass over `2018-01-01..2026-09-30` was on
+    /// instrument 45 of 208. `in_flight` said `CHOLAFIN`, `2018-01`, 45, 208 —
+    /// no feed, no rung, no elapsed time — and `target` described the
+    /// autopilot. Now the cell names its feed by wire key, its rung, its
+    /// window, who started it, its elapsed time and the run's measured pace,
+    /// and `run_target` is the run's own target beside the autopilot's.
+    #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "reads named fields of a parsed JSON fixture; a missing one is Null and fails the assertion"
+    )]
+    fn the_run_in_flight_carries_its_feed_rung_window_and_its_own_target() {
+        let mut status = surveyed(&[]);
+        status.target = crate::autopilot::Target {
+            from: String::from("2015-01-01"),
+            to: String::from("2026-10-05"),
+            instruments: 905,
+            timeframe: String::from("1day"),
+            feed: String::new(),
+        };
+        let window = pull::session::Window::new(
+            Day::new(2018, 1, 1).expect("a real day"),
+            Day::new(2026, 9, 30).expect("a real day"),
+        )
+        .expect("an ordered window");
+        status.now = Some(crate::autopilot::InFlight {
+            instrument: String::from("CHOLAFIN"),
+            month: crate::autopilot::months_of_window(window),
+            timeframe: String::from("1min"),
+            feed: String::from("zerodha"),
+            window: Some(window),
+            driver: crate::autopilot::Driver::Hand,
+            run_since: std::time::Instant::now(),
+            since: std::time::Instant::now(),
+            index: 45,
+            of: 208,
+        });
+        let json = waiting_json(&status, true, true);
+        let body: serde_json::Value = serde_json::from_str(&json).expect("one JSON object");
+
+        let cell = &body["in_flight"];
+        assert_eq!(cell["instrument"], "CHOLAFIN", "{json}");
+        assert_eq!(
+            cell["feed"], "zerodha",
+            "the wire key a row matches on: {json}"
+        );
+        assert_eq!(cell["timeframe"], "1min", "{json}");
+        assert_eq!(cell["driver"], "hand", "{json}");
+        assert_eq!(cell["window"]["from"], "2018-01-01", "{json}");
+        assert_eq!(cell["window"]["to"], "2026-09-30", "{json}");
+        assert_eq!(
+            cell["month"], "2018-01..2026-09",
+            "the whole window's span, never its first month: {json}"
+        );
+        assert!(cell["elapsed_ms"].is_u64(), "{json}");
+        assert!(cell["run_elapsed_ms"].is_u64(), "{json}");
+        assert!(
+            cell["eta_basis"]
+                .as_str()
+                .is_some_and(|basis| basis.starts_with("extrapolated")),
+            "an extrapolated finish is labelled as one: {json}"
+        );
+
+        let run = &body["run_target"];
+        assert_eq!(run["driver"], "hand", "{json}");
+        assert_eq!(run["feed"], "zerodha", "{json}");
+        assert_eq!(run["timeframe"], "1min", "{json}");
+        assert_eq!(run["from"], "2018-01-01", "{json}");
+        assert_eq!(run["to"], "2026-09-30", "{json}");
+        assert_eq!(run["instruments"], 208, "{json}");
+
+        let autopilot = &body["target"];
+        assert_eq!(autopilot["driver"], "autopilot", "{json}");
+        assert_eq!(
+            autopilot["instruments"], 905,
+            "the autopilot's own, unchanged: {json}"
+        );
+        assert_eq!(autopilot["timeframe"], "1day", "{json}");
+
+        // NOTHING IN FLIGHT, NO RUN TARGET: never the autopilot's restated.
+        status.now = None;
+        let idle: serde_json::Value =
+            serde_json::from_str(&waiting_json(&status, true, true)).expect("one JSON object");
+        assert!(
+            idle["in_flight"].is_null() && idle["run_target"].is_null(),
+            "{idle}"
+        );
     }
 }
 

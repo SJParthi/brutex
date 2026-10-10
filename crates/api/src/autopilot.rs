@@ -272,6 +272,54 @@ pub struct Target {
     pub feed: String,
 }
 
+/// Who started the pull a [`InFlight`] cell belongs to (D-3341, DB-G19).
+///
+/// `/ingest/status.json` published the PAUSED autopilot's opening target
+/// (`2015-01-01..2026-10-05`, 905 instruments, `1day`, no feed) beside a hand
+/// run's cell (`CHOLAFIN`, the 1min stock pass), so the page described one run
+/// with another's numbers. The cell now says whose it is, and that route
+/// publishes the cell's own run as its target apart from the autopilot's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Driver {
+    /// A tick of this module's own loop.
+    Autopilot,
+    /// A pull an operator asked for on `/pull/spot`.
+    Hand,
+    /// A recovery unit (`/recovery`).
+    Recovery,
+}
+
+impl Driver {
+    /// The word the payloads carry.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Autopilot => "autopilot",
+            Self::Hand => "hand",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
+/// The months a window spans, as one word: `2020-11` for a window inside one
+/// month, `2018-01..2026-09` for one across several, empty for neither.
+///
+/// # Why a span and never the first month (D-3341, DB-G19, DB-G45)
+///
+/// A broker run asks for each instrument over its WHOLE window, so the month
+/// it is fetching is every month of that window at once. Publishing
+/// `window.from()`'s month said `2018-01` for every instrument of an 8.75-year
+/// pass, and every failure of that pass was filed under `2018-01` too. A
+/// window inside one month (the autopilot's unit) still names that month.
+#[must_use]
+pub fn months_of_window(window: pull::session::Window) -> String {
+    match (window.from().year_month(), window.to().year_month()) {
+        (Ok(from), Ok(to)) if from == to => from.to_string(),
+        (Ok(from), Ok(to)) => format!("{from}..{to}"),
+        _ => String::new(),
+    }
+}
+
 /// The one cell actually in flight, as the page's `now` object.
 ///
 /// `None` whenever nothing is on the wire, which is a legal answer for every
@@ -282,12 +330,22 @@ pub struct Target {
 pub struct InFlight {
     /// The instrument being fetched right now.
     pub instrument: String,
-    /// The month it is being fetched for.
+    /// The month it is being fetched for, or the window's month span when it
+    /// is fetched over several ([`months_of_window`]).
     pub month: String,
     /// The bar length.
     pub timeframe: String,
-    /// Which feed.
+    /// Which feed, by its wire key (`zerodha`) — the key every page matches a
+    /// row on and maps to a display name itself.
     pub feed: String,
+    /// The days the run asks each instrument for. `None` only for a cell built
+    /// without one (a test's).
+    pub window: Option<pull::session::Window>,
+    /// Who started the run this cell belongs to.
+    pub driver: Driver,
+    /// When the run this cell belongs to started, so a page can be told the
+    /// measured pace and an extrapolated finish (DB-G21).
+    pub run_since: std::time::Instant,
     /// Its position in the sweep.
     pub index: usize,
     /// How many the sweep covers.
@@ -302,13 +360,110 @@ pub struct InFlight {
     pub since: std::time::Instant,
 }
 
+impl InFlight {
+    /// The measured pace and the extrapolated finish, from the run's own clock:
+    /// `(run_elapsed_ms, per_instrument_ms, eta_ms)`. The last two are `None`
+    /// before the first instrument has finished, because a pace over nothing
+    /// is not a measurement. DB-G21.
+    ///
+    /// `eta_ms` is an EXTRAPOLATION — the instruments left times the mean of
+    /// those done — and the payloads say so beside it (`CLAUDE.md` §3 rule 6).
+    #[must_use]
+    pub fn pace(&self) -> (u64, Option<u64>, Option<u64>) {
+        let elapsed = u64::try_from(self.run_since.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let done = u64::try_from(self.index.saturating_sub(1)).unwrap_or(u64::MAX);
+        if done == 0 {
+            return (elapsed, None, None);
+        }
+        let each = elapsed / done;
+        let left =
+            u64::try_from(self.of.saturating_sub(self.index).saturating_add(1)).unwrap_or(u64::MAX);
+        (elapsed, Some(each), Some(each.saturating_mul(left)))
+    }
+
+    /// The window as `{"from":..,"to":..}`, or `null` for a cell built without
+    /// one.
+    #[must_use]
+    pub fn window_json(&self) -> String {
+        self.window.map_or_else(
+            || "null".to_owned(),
+            |window| {
+                format!(
+                    r#"{{"from":{},"to":{}}}"#,
+                    render::json_string(&window.from().to_string()),
+                    render::json_string(&window.to().to_string())
+                )
+            },
+        )
+    }
+}
+
+/// What the payloads say about an extrapolated finish, beside the number.
+pub const ETA_BASIS: &str = "extrapolated: the instruments left times the mean time of those done \
+     in this run; not a measurement of the ones left";
+
+/// What one failure is about: its own month and day when it names them, and
+/// always the window it was asked over (D-3341, DB-055, DB-G45).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct About {
+    /// The failure's own month (`2020-11`) when it names one, or the month of
+    /// its own day; otherwise the window's month span ([`months_of_window`]),
+    /// so a failure about the whole window is never filed under the window's
+    /// first month.
+    pub month: String,
+    /// `month` when it is ONE month (`2020-11`), and `None` when it is a span
+    /// (`2018-01..2026-09`) or empty: the only value a month index may key on.
+    single: Option<String>,
+    /// The failure's own day (`2020-11-14`) when it names one.
+    pub day: Option<String>,
+    /// The window it was asked over, `from..=to`.
+    pub window: String,
+}
+
+impl About {
+    /// The month and day a failure carries, over the window it was asked for.
+    ///
+    /// The month is the failure's own; failing that, its day's; failing that,
+    /// the window's own month when the window lies inside one; and otherwise
+    /// the window's span, which is no single month and is never indexed as one.
+    #[must_use]
+    pub fn of(
+        month: Option<store::path::YearMonth>,
+        day: Option<pull::session::Day>,
+        window: pull::session::Window,
+    ) -> Self {
+        let single = month
+            .or_else(|| day.and_then(|day| day.year_month().ok()))
+            .or_else(
+                || match (window.from().year_month(), window.to().year_month()) {
+                    (Ok(from), Ok(to)) if from == to => Some(from),
+                    _ => None,
+                },
+            )
+            .map(|month| month.to_string());
+        Self {
+            month: single.clone().unwrap_or_else(|| months_of_window(window)),
+            single,
+            day: day.map(|day| day.to_string()),
+            window: format!("{}..={}", window.from(), window.to()),
+        }
+    }
+
+    /// The month as an index key: `Some` only when the failure is about ONE
+    /// month, never for a span.
+    #[must_use]
+    pub fn one_month(&self) -> Option<&str> {
+        self.single.as_deref()
+    }
+}
+
 /// One instrument that did not answer, as the page's `failures` entries.
 #[derive(Debug, Clone, Default)]
 pub struct Failed {
     /// Which instrument.
     pub instrument: String,
-    /// Which month it was being fetched for.
-    pub month: String,
+    /// The month, day and window the failure is about. D-3341, DB-055.
+    pub about: About,
     /// Why, verbatim.
     pub why: String,
     /// When, as an IST day.
@@ -1847,11 +2002,13 @@ impl Status {
                 let elapsed = u64::try_from(now.since.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let _ = write!(
                     out,
-                    r#"{{"instrument":{},"month":{},"timeframe":{},"feed":{},"elapsed_ms":{},"index":{},"of":{}}}"#,
+                    r#"{{"instrument":{},"month":{},"window":{},"timeframe":{},"feed":{},"driver":{},"elapsed_ms":{},"index":{},"of":{}}}"#,
                     render::json_string(&now.instrument),
                     render::json_string(&now.month),
+                    now.window_json(),
                     render::json_string(&now.timeframe),
                     render::json_string(&now.feed),
+                    render::json_string(now.driver.label()),
                     elapsed,
                     now.index,
                     now.of,
@@ -1865,9 +2022,15 @@ impl Status {
             }
             let _ = write!(
                 out,
-                r#"{{"instrument":{},"month":{},"why":{},"at":{}}}"#,
+                r#"{{"instrument":{},"month":{},"day":{},"window":{},"why":{},"at":{}}}"#,
                 render::json_string(&failed.instrument),
-                render::json_string(&failed.month),
+                render::json_string(&failed.about.month),
+                failed
+                    .about
+                    .day
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), render::json_string),
+                render::json_string(&failed.about.window),
                 render::json_string(&failed.why),
                 render::json_string(&failed.at),
             );
@@ -2306,7 +2469,11 @@ impl Control {
     /// the journal path travels on the same payload, and every failure is in it
     /// for ever. An unbounded list would grow without limit on a route the page
     /// polls every two seconds.
-    pub fn fail(&self, instrument: &str, month: &str, why: &str) {
+    ///
+    /// **Filed under its own month and day** (D-3341, DB-055): all 40 entries
+    /// of a live stock pass said `2018-01`, the window's first month, while
+    /// their reasons named days from 2026-09-27 to 2026-09-30.
+    pub fn fail(&self, instrument: &str, about: &About, why: &str) {
         let at = ingest::ist_day(std::time::SystemTime::now())
             .map_or_else(|_| String::new(), |day| day.to_string());
         self.publish(|status| {
@@ -2314,7 +2481,7 @@ impl Control {
                 0,
                 Failed {
                     instrument: instrument.to_owned(),
-                    month: month.to_owned(),
+                    about: about.clone(),
                     why: why.to_owned(),
                     at,
                 },
@@ -3597,10 +3764,11 @@ async fn tick(
     // the census only through `ladder_refusal`, which looks up the asked
     // feed's own store vendor and no other; `read_all` read and CRC-checked
     // every vendor's whole manifest to answer that, twice a tick.
-    let run = crate::server::broker_run(
+    let mut run = crate::server::broker_run_by(
         &asked,
         site,
         &[census::read_vendor(&site.store_root, state.vendor)],
+        Driver::Autopilot,
     )
     .await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -3641,7 +3809,20 @@ async fn tick(
     // tells the operator that a failure missing from `/audit` "was never
     // written down, and that is a defect in the journal, not in this page".
     // It was a defect in this line. `CLAUDE.md` §4.
-    let journal_error = site.journal().append(&record).err();
+    let journal = site.journal();
+    let mut journal_error = journal.append(&record).err();
+    // THE RUN'S FAILURES WERE APPENDED AS EACH MEMBER LANDED, behind its
+    // opening record (D-3341, DB-055) — this tick wrote none before. Only when
+    // that opening record was refused are they appended here, after this
+    // tick's record. A refused append of either is this tick's journal error.
+    run.ledger.rest(&journal, now, &run.total.failures);
+    if journal_error.is_none() {
+        journal_error = run
+            .ledger
+            .refused
+            .clone()
+            .or_else(|| run.ledger.opened_refused.clone());
+    }
 
     // THE STORE IS THE AUTHORITY ON WHETHER THE MONTH IS DONE, not the
     // counters this run happens to hold. One census read and one probe per
@@ -6096,6 +6277,9 @@ mod tests {
             month: String::from("2026-08"),
             timeframe: String::from("1min"),
             feed: String::from("Groww"),
+            window: None,
+            driver: Driver::Hand,
+            run_since: std::time::Instant::now(),
             index: 132,
             of: 210,
             since: std::time::Instant::now(),
@@ -6304,6 +6488,9 @@ mod tests {
                 month: String::from("2020-05"),
                 timeframe: String::from("1min"),
                 feed: String::from("groww"),
+                window: None,
+                driver: Driver::Autopilot,
+                run_since: std::time::Instant::now(),
                 index: 431,
                 of: 773,
                 since: std::time::Instant::now(),
@@ -6330,7 +6517,19 @@ mod tests {
     fn the_failure_list_is_bounded_and_names_where_the_rest_are() {
         let control = Control::new();
         for n in 0..(MAX_FAILURES * 2) {
-            control.fail(&format!("SYM{n}"), "2020-05", "refused with status 500");
+            control.fail(
+                &format!("SYM{n}"),
+                &About::of(
+                    None,
+                    None,
+                    pull::session::Window::new(
+                        Day::new(2020, 5, 1).expect("a real day"),
+                        Day::new(2020, 5, 31).expect("a real day"),
+                    )
+                    .expect("an ordered window"),
+                ),
+                "refused with status 500",
+            );
         }
         control.publish(|status| {
             assert_eq!(
@@ -6351,6 +6550,147 @@ mod tests {
             "{json}"
         );
         assert!(json.contains("refused with status 500"), "{json}");
+    }
+
+    /// The operator's 1min stock window, 2018-01-01..=2026-09-30: the pass
+    /// whose every failure was filed under `2018-01` (DB-055, DB-G45).
+    fn stock_window() -> Window {
+        Window::new(day(2018, 1, 1), day(2026, 9, 30)).expect("an ordered window")
+    }
+
+    /// **A FAILURE IS FILED UNDER ITS OWN DAY AND MONTH, NEVER THE WINDOW'S
+    /// FIRST** (D-3341, DB-055, DB-G45).
+    ///
+    /// On 7 Oct all 40 entries of this ring said `NIFTY50TR2XLEV`, `2018-01`,
+    /// while their reasons named days from 2026-09-27 to 2026-09-30. Each case
+    /// below is one of the shapes a failure arrives in: its own day, its own
+    /// month, neither over a one-month window (the autopilot's unit), and
+    /// neither over the 8.75-year window, which is a span and no month at all.
+    #[test]
+    fn a_failure_is_filed_under_its_own_day_and_month_and_never_the_windows_first() {
+        let window = stock_window();
+
+        let on_day = About::of(None, Some(day(2026, 9, 30)), window);
+        assert_eq!(on_day.month, "2026-09", "the day's own month: {on_day:?}");
+        assert_eq!(on_day.one_month(), Some("2026-09"));
+        assert_eq!(on_day.day.as_deref(), Some("2026-09-30"));
+        assert_eq!(on_day.window, "2018-01-01..=2026-09-30");
+
+        let muhurat = About::of(Some(month(2020, 11)), Some(day(2020, 11, 14)), window);
+        assert_eq!(muhurat.one_month(), Some("2020-11"), "{muhurat:?}");
+        assert_eq!(muhurat.day.as_deref(), Some("2020-11-14"));
+
+        let in_month = About::of(Some(month(2026, 9)), None, window);
+        assert_eq!(in_month.one_month(), Some("2026-09"), "{in_month:?}");
+        assert_eq!(in_month.day, None);
+
+        let whole = About::of(None, None, window);
+        assert_eq!(
+            whole.month, "2018-01..2026-09",
+            "a failure about the whole window names the span: {whole:?}"
+        );
+        assert_eq!(
+            whole.one_month(),
+            None,
+            "and a span is never indexed as a month: {whole:?}"
+        );
+
+        let one_month_window =
+            Window::new(day(2020, 5, 1), day(2020, 5, 31)).expect("an ordered window");
+        let unit = About::of(None, None, one_month_window);
+        assert_eq!(unit.one_month(), Some("2020-05"), "{unit:?}");
+
+        // AND THE RING SAYS SO ON THE WIRE.
+        let control = Control::new();
+        control.fail(
+            "NIFTY50TR2XLEV",
+            &on_day,
+            "request minute coverage UNVERIFIED on 2026-09-30",
+        );
+        control.fail("NIFTY", &whole, "NIFTY: refused with status 500");
+        let json = control.json();
+        assert!(
+            json.contains(
+                r#""instrument":"NIFTY50TR2XLEV","month":"2026-09","day":"2026-09-30","window":"2018-01-01..=2026-09-30""#
+            ),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                r#""instrument":"NIFTY","month":"2018-01..2026-09","day":null,"window":"2018-01-01..=2026-09-30""#
+            ),
+            "{json}"
+        );
+        assert!(
+            !json.contains(r#""month":"2018-01""#),
+            "the window's first month was filed as a failure's month: {json}"
+        );
+    }
+
+    /// The month a window spans, as `/autopilot.json` and `/ingest/status.json`
+    /// name the cell's month (DB-G19).
+    #[test]
+    fn a_window_names_its_one_month_or_its_span_and_never_its_first_month() {
+        assert_eq!(months_of_window(stock_window()), "2018-01..2026-09");
+        assert_eq!(
+            months_of_window(Window::new(day(2020, 11, 2), day(2020, 11, 27)).expect("ordered")),
+            "2020-11"
+        );
+    }
+
+    /// **THE CELL SAYS WHOSE IT IS, OVER WHICH WINDOW, AND HOW FAST THE RUN IS
+    /// GOING** (D-3341, DB-G19, DB-G21).
+    ///
+    /// `pace` is measured from the run's own clock: 90 s for three finished
+    /// instruments is 30 s each, and the fourth of ten leaves seven to go. The
+    /// finish is an extrapolation and the payload says so beside it.
+    #[test]
+    fn the_cell_carries_its_window_driver_and_a_labelled_extrapolated_finish() {
+        let ninety = std::time::Duration::from_secs(90);
+        let run_since = std::time::Instant::now()
+            .checked_sub(ninety)
+            .expect("the clock has run for ninety seconds");
+        let cell = InFlight {
+            instrument: String::from("CHOLAFIN"),
+            month: months_of_window(stock_window()),
+            timeframe: String::from("1min"),
+            feed: String::from("zerodha"),
+            window: Some(stock_window()),
+            driver: Driver::Hand,
+            run_since,
+            index: 4,
+            of: 10,
+            since: std::time::Instant::now(),
+        };
+        let (elapsed, each, eta) = cell.pace();
+        assert!(elapsed >= 90_000, "{elapsed}");
+        let each = each.expect("three instruments are done, so a pace is measured");
+        assert!((30_000..31_000).contains(&each), "{each}");
+        assert_eq!(eta, Some(each * 7), "the current one and six more are left");
+
+        let first = InFlight {
+            index: 1,
+            ..cell.clone()
+        };
+        assert_eq!(
+            first.pace().1,
+            None,
+            "a pace over no finished instrument is not a measurement"
+        );
+
+        let busy = Status {
+            phase: Phase::Running,
+            now: Some(cell),
+            ..Status::default()
+        };
+        let json = busy.json();
+        assert!(
+            json.contains(
+                r#""instrument":"CHOLAFIN","month":"2018-01..2026-09","window":{"from":"2018-01-01","to":"2026-09-30"},"timeframe":"1min","feed":"zerodha","driver":"hand""#
+            ),
+            "{json}"
+        );
+        assert!(ETA_BASIS.starts_with("extrapolated"), "{ETA_BASIS}");
     }
 
     /// A timestamp becomes the day it falls on in IST, and 15:29 IST does not

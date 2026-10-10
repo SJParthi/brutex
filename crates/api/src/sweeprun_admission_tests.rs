@@ -53,7 +53,12 @@ fn historical_inspection_does_not_own_the_execution_lease_or_become_completed() 
             .with("phase", "completed"),
     );
     let initial = observed(&root, 0);
-    assert_eq!(initial["running"]["status"], "unknown");
+    // NEVER COMPLETED, AND NO LONGER "UNKNOWN": a store with no results
+    // ledger whose whole retained lifecycle log names only `help` says no
+    // sweep has run (D-3341, DB-G31). An old inspection command's outcome is
+    // still never rewritten into a sweep's completion.
+    assert_eq!(initial["running"]["status"], "no_sweep_has_run");
+    assert_eq!(initial["running"]["in_flight"], false);
     assert!(initial["running"]["report"].is_null());
     assert_eq!(initial["admission"]["available"], true);
     assert_eq!(initial["admission"]["scope"], "cooperating-store-writers");
