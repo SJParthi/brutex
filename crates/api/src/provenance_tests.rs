@@ -1444,3 +1444,150 @@ fn a_journal_day_after_unjournalled_bars_starts_at_its_own_first_bar() {
     assert_eq!(got.body["reconstruction"]["bars_on_no_journal_day"], 2);
     assert_eq!(got.body["reconstruction"]["commits_agree"], false);
 }
+
+/// **A RUN'S OPENING RECORD IS PAIRED WITH ITS CLOSE, AND ONE NEVER CLOSED
+/// IS LISTED AND KEEPS A WRITER FROM BEING NAMED** (D-3341): an opened run
+/// whose process stopped may have landed bars and said nothing of them, so
+/// once it began before the file's last write no run is named; one opened
+/// after that write changes nothing.
+#[test]
+fn an_opened_run_is_paired_with_its_close_and_an_unclosed_one_is_listed() {
+    use audit::{Outcome, Scope};
+    let window = || window("2015-01-01", "2020-12-31");
+    let span = Some(("2015-01-01", "2020-12-31"));
+    // 0: opened; 1: its close, which was under way when 0 was opened.
+    let paired = |root: &Path| {
+        let journal = audit::Journal::at(root);
+        journal
+            .append(&audit::Record::opened(
+                Scope::Spot,
+                at(T0 + 1),
+                KITE,
+                window(),
+                3,
+            ))
+            .unwrap();
+        journal
+            .append(&run(Scope::Spot, Outcome::Failed, T0, 1_000, KITE, span, 9))
+            .unwrap();
+    };
+
+    let root = root_of("opened-closed");
+    paired(&root);
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    let rebuilt = &got.body["reconstruction"];
+    assert_eq!(rebuilt["candidates"][0]["ordinal"], 1, "{}", got.body);
+    assert_eq!(rebuilt["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(rebuilt["opened_and_closed"], 1);
+    assert_eq!(rebuilt["opened_never_closed"], serde_json::json!([]));
+    assert_eq!(rebuilt["attributed"]["run"], 1);
+
+    // 2: a second run opened at T0 + 500 and never closed.
+    let root = root_of("opened-unclosed");
+    paired(&root);
+    audit::Journal::at(&root)
+        .append(&audit::Record::opened(
+            Scope::Spot,
+            at(T0 + 500),
+            KITE,
+            window(),
+            3,
+        ))
+        .unwrap();
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    let rebuilt = &got.body["reconstruction"];
+    let unclosed = rebuilt["opened_never_closed"].as_array().unwrap();
+    assert_eq!(unclosed.len(), 1, "{}", got.body);
+    assert_eq!(unclosed[0]["ordinal"], 2);
+    assert_eq!(unclosed[0]["outcome"], "OPENED");
+    assert_eq!(rebuilt["last_write"]["inside_runs"], serde_json::json!([1]));
+    assert!(
+        rebuilt["attributed"].is_null(),
+        "an unclosed run opened before the last write may be the writer"
+    );
+
+    // The same run opened after the file's last write blocks nothing.
+    let root = root_of("opened-after");
+    paired(&root);
+    audit::Journal::at(&root)
+        .append(&audit::Record::opened(
+            Scope::Spot,
+            at(T0 + 900),
+            KITE,
+            window(),
+            3,
+        ))
+        .unwrap();
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    let rebuilt = &got.body["reconstruction"];
+    assert_eq!(rebuilt["opened_never_closed"].as_array().unwrap().len(), 1);
+    assert_eq!(rebuilt["attributed"]["run"], 1, "{}", got.body);
+}
+
+/// **A RUN'S OPENING RECORD WRITTEN AGAIN AFTER ANOTHER WRITER IS THE SAME
+/// RUN**, never an unclosed second one: the journal's own interleaving shape,
+/// written by `audit::Journal::append_failure`, pairs with the run's one close.
+#[test]
+fn an_opening_record_written_again_is_the_same_run() {
+    use audit::{Outcome, Scope};
+    let root = root_of("opened-continues");
+    let journal = audit::Journal::at(&root);
+    let head = audit::Record::opened(
+        Scope::Spot,
+        at(T0 + 1),
+        KITE,
+        window("2015-01-01", "2020-12-31"),
+        3,
+    );
+    let mut thread = journal.open_run(&head).unwrap();
+    // Another writer appends between this run's records.
+    journal
+        .append(&run(
+            Scope::Fno,
+            Outcome::Refused,
+            T0 + 2,
+            0,
+            "other",
+            None,
+            0,
+        ))
+        .unwrap();
+    journal
+        .append_failure(
+            &mut thread,
+            &audit::Record::member_failure(
+                Scope::Spot,
+                at(T0 + 3),
+                "NIFTY",
+                window("2015-01-01", "2015-01-31"),
+                "invented",
+            ),
+            "invented",
+        )
+        .unwrap();
+    journal
+        .append(&run(
+            Scope::Spot,
+            Outcome::Failed,
+            T0,
+            1_000,
+            KITE,
+            Some(("2015-01-01", "2020-12-31")),
+            9,
+        ))
+        .unwrap();
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    let rebuilt = &got.body["reconstruction"];
+    assert_eq!(
+        rebuilt["opened_again_after_another_writer"], 1,
+        "{}",
+        got.body
+    );
+    assert_eq!(rebuilt["opened_and_closed"], 1);
+    assert_eq!(rebuilt["opened_never_closed"], serde_json::json!([]));
+    assert_eq!(rebuilt["attributed"]["run"], 4);
+}

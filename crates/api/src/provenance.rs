@@ -46,7 +46,10 @@
 //!      window and its request, never the instrument-months it wrote, so the
 //!      candidates are listed oldest first, and one is named as the writer only
 //!      when the bar file committed exactly once (generation 1) and its
-//!      modification time falls inside exactly one candidate's run.
+//!      modification time falls inside exactly one candidate's run. A run's
+//!      opening record (D-3341) is paired with its close; one never closed
+//!      (its process stopped) is listed, and blocks naming any writer once it
+//!      began before the file's last write.
 //! 4. **The operator's window** (D-3338): a Zerodha month outside
 //!    2018-01-01..2026-09-30 is labelled "outside your window", with its pull
 //!    run.
@@ -130,6 +133,11 @@ const CHUNK_RECORDS: u64 = 16_384;
 
 /// Microseconds in one second.
 const MICROS: i64 = 1_000_000;
+
+/// How the note of a run's opening record begins when the run writes it again
+/// because another writer appended in between (`audit::Journal::append_failure`,
+/// D-3341): the same run, not another.
+const CONTINUES: &str = "continues the run opened at record ";
 
 /// The content type every answer here carries.
 fn json_header() -> [(axum::http::HeaderName, &'static str); 1] {
@@ -1549,39 +1557,24 @@ fn pull_reconstruction(
     let index = &read.index;
     let month = month_number(asked.month.year(), asked.month.month());
     let filed = index.by_month.get(&month).map_or(&[][..], Vec::as_slice);
-    let mut excluded = Excluded::default();
-    let mut candidates: Vec<&PullRun> = Vec::with_capacity(filed.len());
-    for position in ascending(filed, &index.unindexed) {
-        let Some(run) = index.runs.get(position) else {
-            continue;
-        };
-        let record = &run.record;
-        if record.to_days < from.days_from_epoch() || record.from_days > to.days_from_epoch() {
-            excluded.other_day = excluded.other_day.saturating_add(1);
-        } else if run.vendor.is_none() {
-            excluded.unattributed = excluded.unattributed.saturating_add(1);
-        } else if run.vendor != Some(asked.feed) {
-            excluded.other_feed = excluded.other_feed.saturating_add(1);
-        } else if record.scope != scope_of(asked.segment) {
-            excluded.other_scope = excluded.other_scope.saturating_add(1);
-        } else if matches!(
-            record.outcome,
-            audit::Outcome::Refused | audit::Outcome::NotStarted
-        ) {
-            excluded.not_run = excluded.not_run.saturating_add(1);
-        } else if record.outcome == audit::Outcome::Empty || record.bars_stored == 0 {
-            excluded.offered_nothing = excluded.offered_nothing.saturating_add(1);
-        } else {
-            candidates.push(run);
-        }
-    }
+    let Sorted {
+        candidates,
+        closing,
+        opened,
+        continuations,
+        excluded,
+    } = sorted(index, filed, asked, (from, to));
+    let unclosed = unclosed(&opened, &closing);
+    let unclosed_before_write = unclosed
+        .iter()
+        .any(|open| modified.is_some_and(|at| open.record.at_unix_secs <= at));
     let running: Vec<u64> = candidates
         .iter()
         .filter(|run| run.ran_at(modified))
         .map(|run| run.ordinal)
         .collect();
-    let attributed = match (generation, running.as_slice()) {
-        (1, [only]) => json!({
+    let attributed = match (generation, running.as_slice(), unclosed_before_write) {
+        (1, [only], false) => json!({
             "run": only,
             "basis": "the bar file committed once (generation 1), and its modification time \
                       falls inside this run and no other candidate's",
@@ -1606,6 +1599,12 @@ fn pull_reconstruction(
             .iter()
             .map(|run| pull_record_json(run.ordinal, &run.record, Some((run, modified))))
             .collect::<Vec<_>>(),
+        "opened_never_closed": unclosed
+            .iter()
+            .map(|run| pull_record_json(run.ordinal, &run.record, Some((run, modified))))
+            .collect::<Vec<_>>(),
+        "opened_and_closed": opened.len().saturating_sub(unclosed.len()),
+        "opened_again_after_another_writer": continuations,
         "excluded": {
             "other_feed": excluded.other_feed,
             "names_no_feed": excluded.unattributed,
@@ -1624,9 +1623,118 @@ fn pull_reconstruction(
         "why": "a pull record names its window and its request, never the instrument-months it \
                 wrote; these are the runs of this feed and form whose window covers the bars \
                 and that offered bars, oldest first. One is named the writer only when the bar \
-                file committed once and was last written inside that run alone",
+                file committed once and was last written inside that run alone, and no run \
+                opened before that write is left without a closing record",
         "member_digest": "unknown",
     })
+}
+
+/// The runs that cover a month's bars, sorted by what they can say about them.
+struct Sorted<'a> {
+    /// Closing records of this feed and form that offered bars: who may have
+    /// written them.
+    candidates: Vec<&'a PullRun>,
+    /// Every closing record of this feed and form, whatever its outcome.
+    closing: Vec<&'a PullRun>,
+    /// Opening records of this feed and form (D-3341), one per run.
+    opened: Vec<&'a PullRun>,
+    /// Opening records written again after another writer: the same runs.
+    continuations: u64,
+    /// The rest, counted by why.
+    excluded: Excluded,
+}
+
+/// Sorts the runs at `filed` and every unfiled one: those whose window misses
+/// the days `(from, to)`, another feed's or none's, the other form's; then
+/// opening records apart from closing ones, and of the closing ones those that
+/// offered bars. Positions come in file order, so every list is oldest first.
+fn sorted<'a>(
+    index: &'a RunIndex,
+    filed: &[usize],
+    asked: &Asked,
+    (from, to): (Day, Day),
+) -> Sorted<'a> {
+    let mut out = Sorted {
+        candidates: Vec::with_capacity(filed.len()),
+        closing: Vec::with_capacity(filed.len()),
+        opened: Vec::with_capacity(2),
+        continuations: 0,
+        excluded: Excluded::default(),
+    };
+    let excluded = &mut out.excluded;
+    for position in ascending(filed, &index.unindexed) {
+        let Some(run) = index.runs.get(position) else {
+            continue;
+        };
+        let record = &run.record;
+        if record.to_days < from.days_from_epoch() || record.from_days > to.days_from_epoch() {
+            excluded.other_day = excluded.other_day.saturating_add(1);
+        } else if run.vendor.is_none() {
+            excluded.unattributed = excluded.unattributed.saturating_add(1);
+        } else if run.vendor != Some(asked.feed) {
+            excluded.other_feed = excluded.other_feed.saturating_add(1);
+        } else if record.scope != scope_of(asked.segment) {
+            excluded.other_scope = excluded.other_scope.saturating_add(1);
+        } else if record.outcome == audit::Outcome::Opened {
+            // A RUN'S OPENING RECORD IS NOT A VERDICT (D-3341): its counters
+            // are zero and its closing record carries what landed. Kept apart
+            // and paired with its close. The copy a run writes again when
+            // another writer interleaved (`audit::Journal::append_failure`)
+            // is the same run, not another.
+            if record.note.starts_with(CONTINUES) {
+                out.continuations = out.continuations.saturating_add(1);
+            } else {
+                out.opened.push(run);
+            }
+        } else {
+            out.closing.push(run);
+            if matches!(
+                record.outcome,
+                audit::Outcome::Refused | audit::Outcome::NotStarted
+            ) {
+                excluded.not_run = excluded.not_run.saturating_add(1);
+            } else if record.outcome == audit::Outcome::Empty || record.bars_stored == 0 {
+                excluded.offered_nothing = excluded.offered_nothing.saturating_add(1);
+            } else {
+                out.candidates.push(run);
+            }
+        }
+    }
+    out
+}
+
+/// The opening records no closing record answers.
+///
+/// AN OPENED RUN WITH NO CLOSE MAY HAVE LANDED BARS AND SAID NOTHING OF
+/// THEM: its process stopped before its closing record. Each open is paired
+/// with the first unpaired closing record after it, of the same feed, form
+/// and window, that was under way when it was opened (the close is stamped
+/// with the time its request arrived, the open a moment later). An unclosed
+/// one has no end, so it is listed, never named the writer, and keeps any run
+/// from being named once it began before the file's last write. Bounded by
+/// the runs that cover the month, both lists.
+fn unclosed<'a>(opened: &[&'a PullRun], closing: &[&PullRun]) -> Vec<&'a PullRun> {
+    let mut paired = vec![false; closing.len()];
+    let mut out: Vec<&PullRun> = Vec::with_capacity(opened.len());
+    for open in opened {
+        let mut closed = false;
+        for (close, taken) in closing.iter().zip(paired.iter_mut()) {
+            if !*taken
+                && close.ordinal > open.ordinal
+                && close.record.from_days == open.record.from_days
+                && close.record.to_days == open.record.to_days
+                && close.ran_at(Some(open.record.at_unix_secs))
+            {
+                *taken = true;
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            out.push(open);
+        }
+    }
+    out
 }
 
 /// The positions of two ascending lists, ascending: a month's filed runs and
