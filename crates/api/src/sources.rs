@@ -201,10 +201,24 @@ impl Refusal {
         }
     }
 
-    /// A `503`: the store could not be read.
+    /// A `503`: the store could not be read. A month refused because its
+    /// key was RETIRED by the re-key is no store fault: [`Self::gone`].
     fn store(why: impl Into<String>) -> Self {
+        let why = why.into();
+        if pull::gdfl_lineage::is_contract_refused(&why) {
+            return Self::gone(why);
+        }
         Self {
             status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            why,
+        }
+    }
+
+    /// A `410`: a GDFL option key the re-key RETIRED, with the ledger's
+    /// sentence, as every bar route answers it (D-3331; WP-12c, DB-A18).
+    fn gone(why: impl Into<String>) -> Self {
+        Self {
+            status: axum::http::StatusCode::GONE,
             why: why.into(),
         }
     }
@@ -212,6 +226,21 @@ impl Refusal {
     fn json(&self) -> Value {
         json!({ "error": self.why })
     }
+}
+
+/// `410` for a GDFL option key the re-key RETIRED, with the ledger's
+/// sentence, as every bar route answers it (D-3331; WP-12c, DB-A18); `Ok`
+/// for every other instrument. Asked FIRST by each route here, before any
+/// memo or walk, so nothing cached before the re-key ran serves the key. One
+/// `stat` of the ledger and one hash probe.
+fn refuse_retired(root: &Path, inst: &Instrument) -> Result<(), Refusal> {
+    if inst.segment == Segment::Fno
+        && inst.contract.is_some()
+        && let Some(why) = crate::bars::retired_refusal(root, Vendor::Gdfl, &inst.key())
+    {
+        return Err(Refusal::gone(why));
+    }
+    Ok(())
 }
 
 // ══ The instrument ═══════════════════════════════════════════════════════════
@@ -1264,6 +1293,9 @@ pub(super) fn rung_table(site: &Site, inst: &Instrument) -> Result<Value, Refusa
             root.display()
         )));
     }
+    // A KEY THE RE-KEY RETIRED IS GONE: its files are kept, so the walk
+    // below would find them and call the month uncounted.
+    refuse_retired(root, inst)?;
     let mut feeds = Vec::new();
     let mut rows = Vec::new();
     let mut notes: Vec<String> = Vec::new();
@@ -2091,6 +2123,7 @@ fn union_of(reads: &[Read], desc: bool) -> Vec<i64> {
     reason = "one page read, merged and written in the order the wire carries it"
 )]
 pub fn timeline(root: &Path, asked: &TimelineAsk) -> Result<Value, Refusal> {
+    refuse_retired(root, &asked.inst)?;
     let (sources, absent) = sources_of(root, asked)?;
     let (range_lo, range_hi) = (day_bounds(asked.from).0, day_bounds(asked.to).1);
     let bucket = bucket_of(asked.rung)?;
@@ -2977,6 +3010,9 @@ struct DayTally {
 /// The store could not be read, or the page would read more than
 /// [`MAX_ROWS_READ`] records.
 pub fn day_table(root: &Path, asked: &DayAsk) -> Result<Value, Refusal> {
+    // BEFORE THE DAY MEMO: a day table cached before the re-key retired the
+    // key is keyed on its month files, which the re-key never touches.
+    refuse_retired(root, &asked.inst)?;
     let (first, last, page, pages) = asked.span();
     let inst = &asked.inst;
     let series = DaySeries::of(root, inst)?;

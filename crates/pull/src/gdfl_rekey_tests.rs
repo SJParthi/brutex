@@ -548,6 +548,51 @@ fn applying_publishes_new_files_keeps_the_old_and_withdraws_them_from_the_census
     assert_eq!(census_keys(root).0, 2);
 }
 
+/// DB-A17's expected outcome, after the re-key: the import resumed on a
+/// D-3331 build files a LATER day of the contract under the decoded key,
+/// where it extends the one series the copied bars began, and the census
+/// lists that month under the decoded key alone. Without the re-key the same
+/// day would open a second series beside the stated key's.
+#[test]
+fn after_the_rekey_a_resumed_import_extends_the_one_decoded_series() {
+    let fixture = Fixture::new("resume");
+    fixture.counted();
+    let root = fixture.root();
+    let found = survey(root, None).unwrap();
+    let ledger = withdrawn(root).unwrap();
+    let _ = apply(root, &found, &plan(&found, &ledger), &ledger).unwrap();
+    // THE RESUMED IMPORT'S DECODER files the stated name under the settled
+    // expiry (D-3331), and its writer appends the later day there.
+    assert_eq!(
+        decoded_key(sym("NIFTY"), c(STATED)),
+        Some((c(SETTLED), AliasKind::VendorRedated))
+    );
+    let july = YearMonth::new(2020, 7).unwrap();
+    let copied = held(root, "NIFTY", STATED, july);
+    let later = [bar(d(2020, 7, 2), 34_000, 336)];
+    put(root, "NIFTY", SETTLED, &later);
+    let cycles = census_store::record(
+        root,
+        Vendor::Gdfl,
+        &[census_row_of(root, "NIFTY", SETTLED, july)],
+    )
+    .unwrap();
+    assert_eq!(cycles.iter().map(|one| one.recorded).sum::<usize>(), 1);
+    // ONE SERIES: the copied bars, then the later day, in time order.
+    let mut expected = copied.clone();
+    expected.extend(later);
+    assert_eq!(held(root, "NIFTY", SETTLED, july), expected);
+    // The stated key keeps exactly what it held, and the census lists the
+    // month under the decoded key only.
+    assert_eq!(held(root, "NIFTY", STATED, july), copied);
+    let (_, keys) = census_keys(root);
+    assert!(
+        keys.contains(&format!("NIFTY {SETTLED} 2020-07")),
+        "{keys:?}"
+    );
+    assert!(!keys.iter().any(|key| key.contains(STATED)), "{keys:?}");
+}
+
 /// A decoded key whose month already holds OTHER bars where the moved ones
 /// would go — the import resumed on a D-3331 build before the re-key ran —
 /// refuses that move by name, and nothing of it is written; a retirement in

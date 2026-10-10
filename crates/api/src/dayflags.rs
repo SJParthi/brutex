@@ -2525,6 +2525,16 @@ fn open_month(
         Ok(path) => path,
         Err(why) => return Opened::Refused(format!("{} {month:?}: {why}", inst.key())),
     };
+    // A KEY THE RE-KEY RETIRED IS NOT COUNTED (D-3331; WP-12c, DB-A18): its
+    // files are kept, and this reader refuses it by the ledger's sentence, as
+    // every bar route does with 410. One `stat` and one hash probe.
+    if feed == Vendor::Gdfl
+        && inst.segment == Segment::Fno
+        && inst.contract.is_some()
+        && let Some(why) = crate::bars::retired_refusal(root, feed, &inst.key())
+    {
+        return Opened::Refused(why);
+    }
     match BarFile::open_existing(root, path, symbol_id(&inst.symbol)) {
         Ok(file) => Opened::File(Box::new(file)),
         Err(StoreError::Missing { path: missing, .. }) if missing == path.to_path_buf(root) => {
@@ -4939,6 +4949,61 @@ mod tests {
         assert_eq!(kind["import"]["refusals"]["this_count"], 2);
         assert_eq!(kind["held"]["why"], "no_contract");
         assert_eq!(kind["peer"]["why"], "no_contract");
+    }
+
+    #[test]
+    fn a_key_the_rekey_retired_is_refused_by_the_ledgers_sentence() {
+        // D-3331; WP-12c, DB-A18. An INVENTED strike far past any ladder,
+        // one bar, and a neighbour the ledger never names.
+        let root = root_of("rekey-retired");
+        let retired_key = "NSE-FNO-NIFTY-2019-03-28-90000000-CE";
+        let kept_key = "NSE-FNO-NIFTY-2019-03-28-1150000-CE";
+        for key in [retired_key, kept_key] {
+            file_bars(
+                &root,
+                Vendor::Gdfl,
+                key,
+                Timeframe::SECOND_1,
+                vec![bar("2019-03-19", 34_000, [500; 4], 75)],
+            );
+        }
+        let asked = |key: &str| ask(&format!("feed=gdfl&instrument={key}&from=2019-03-19"));
+        // BEFORE THE RE-KEY RECORDS IT, the bar is counted like any other.
+        let before = answer(&root, &asked(retired_key));
+        assert_eq!(record(&before, "2019-03-19")["held"]["bars"], 1);
+        let record_line = pull::gdfl_lineage::RetiredRecord {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            key: Contract::parse("2019-03-28-90000000-CE").expect("a contract"),
+            why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+            day: day("2019-03-19"),
+            median: Some(1_150_000),
+            days: 1,
+            bars: 1,
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n", record_line.line()),
+        );
+        // AFTER: not counted, and the ledger's own sentence says why.
+        let after = answer(&root, &asked(retired_key));
+        let one = record(&after, "2019-03-19");
+        assert_eq!(one["held"]["bars"], Value::Null, "{one:#}");
+        assert_eq!(one["held"]["why"], "unreadable");
+        let notes: Vec<&str> = after["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let refusal = record_line.refusal();
+        assert!(
+            notes.iter().any(|note| note.ends_with(&refusal)),
+            "{refusal:?} not in {notes:#?}"
+        );
+        assert!(pull::gdfl_lineage::is_contract_refused(&refusal));
+        // A KEY THE LEDGER DOES NOT NAME is counted as before.
+        let kept = answer(&root, &asked(kept_key));
+        assert_eq!(record(&kept, "2019-03-19")["held"]["bars"], 1);
     }
 
     // ── The Zerodha pull journal ──────────────────────────────────────────

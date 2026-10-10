@@ -1536,6 +1536,64 @@ async fn a_feed_holding_nothing_of_the_instrument_is_named() {
     );
 }
 
+/// **A KEY THE RE-KEY RETIRED IS GONE ON EVERY ALL-SOURCES ROUTE** (D-3331;
+/// WP-12c, DB-A18): `410` with the ledger's sentence, as the bar routes
+/// answer it -- never a rung table that calls its kept month "uncounted",
+/// and never a `503` that reads as a store fault.
+#[tokio::test]
+async fn a_key_the_rekey_retired_is_gone_on_every_route() {
+    let fx = Fixture::empty("rekey-retired");
+    fx.bars(
+        Vendor::Gdfl,
+        "FNO",
+        "NIFTY",
+        Some(option()),
+        Timeframe::SECOND_1,
+        &[bar(
+            t(day_a(), 9, 15, 0),
+            (1_000, 1_000, 1_000, 1_000),
+            75,
+            5_000,
+        )],
+    );
+    let asked = "exchange=NSE&segment=FNO&symbol=NIFTY&contract=2019-03-28-110000-CE";
+    let routes = [
+        ("/sources.json", asked.to_owned()),
+        (
+            "/sources/bars.json",
+            format!("{asked}&rung=1s&from=2019-03-28&dir=asc"),
+        ),
+        ("/sources/day.json", format!("{asked}&from=2019-03-28")),
+    ];
+    // BEFORE THE LEDGER NAMES IT, every route serves the key.
+    for (route, query) in &routes {
+        let (status, body) = fx.get(route, query).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{route}: {body:#}");
+    }
+    let retired = pull::gdfl_lineage::RetiredRecord {
+        underlying: Symbol::new("NIFTY").expect("a symbol"),
+        key: option(),
+        why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+        day: day_a(),
+        median: Some(10_000),
+        days: 1,
+        bars: 1,
+    };
+    let ledger = pull::gdfl_lineage::lineage_path(&fx.root);
+    fs::create_dir_all(ledger.parent().expect("imports")).expect("imports dir");
+    fs::write(&ledger, format!("{}\n", retired.line())).expect("the ledger");
+    for (route, query) in &routes {
+        let (status, body) = fx.get(route, query).await;
+        assert_eq!(status, axum::http::StatusCode::GONE, "{route}: {body:#}");
+        assert_eq!(body["error"], json!(retired.refusal()), "{route}");
+    }
+    // AN INDEX OVER THE SAME STORE IS NOT THE RETIRED KEY, and is not refused.
+    let (status, _) = fx
+        .get("/sources.json", "exchange=NSE&segment=INDEX&symbol=NIFTY")
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+}
+
 /// A same-basis share whose official close is 0.5% from its last print on
 /// day A, and whose GDFL file starts at 11:57:48 on day B.
 fn same_basis_share(name: &str, with_minutes: bool) -> Fixture {

@@ -997,6 +997,20 @@ pub(crate) fn rekey_note(
     change::rekey_note(store_root, vendor, key)
 }
 
+/// The refusal a reader that opens a month ITSELF, or answers from a memo,
+/// rather than through [`open_classified`] (`/dayflags.json`, `/sources.json`
+/// and its two timelines), answers a key the re-key RETIRED
+/// with (D-3331; WP-12c, DB-A18), or `None` for every other key: the same
+/// sentence the bar routes answer 410 with. One `stat` of the lineage ledger
+/// and one hash probe.
+pub(crate) fn retired_refusal(
+    store_root: &std::path::Path,
+    vendor: Vendor,
+    key: &str,
+) -> Option<String> {
+    change::retired_refusal(store_root, vendor, key)
+}
+
 /// What the re-key says of one asked series: refused, superseded, or
 /// nothing. O(1): one ledger probe, and for a GDFL option the decoder's
 /// settlement of its stored expiry (bounded walks over compile-time tables).
