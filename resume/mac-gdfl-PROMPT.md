@@ -16,13 +16,13 @@ the end), then resume/mac-gdfl-20261009.md, then this file. Memory: ~/.claude/pr
 (MEMORY.md, gdfl-nifty-db-20261010.md, goal-self-sufficient-ingest.md). Add /Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925
 as a session folder first.
 
-HAND-OFF FACTS (10 Oct 19:00 IST): 29 of 50 /db packages merged and LIVE on :8080 (build tgt/app8, see
-work-20260925/state/fix/deploys.log). Committed but not merged at hand-off: WP-39 (1s sort), WP-81 (ops safety), IA-5 (verdict
-store), WP-12c (option re-key); half-done in worktrees: WP-16 (import speed) and others. The last run was wf_22e529d2-a94 on
-the old account - it cannot be resumed from a new account: relaunch db-fix-round-1b.js FRESH. Store steps done: census
-migrate+recount (2020 NIFTY options live), time index for 142 NIFTY/BANKNIFTY months. Zerodha repair code live (plan:
-GET /pull/repair.json?feed=zerodha&instrument=NIFTY&from=2018-01-01&to=2026-09-30 lists 42 sessions); running it needs that
-day's Kite access token.
+HAND-OFF FACTS (10 Oct 20:15 IST, weekly 97%): 33 of 50 /db packages merged on feat/db-fix (head de9f590a): WP-00 WP-01 WP-02 WP-10 WP-11a WP-11b WP-12a WP-12b WP-12c WP-13a WP-13b WP-13c WP-14 WP-15 WP-20 WP-30 WP-31 WP-32 WP-33a WP-33b WP-33c WP-34 WP-35 WP-36 WP-37 WP-38a WP-38b WP-50 WP-51 WP-52 WP-53 WP-54 WP-55.
+Committed on their branches but not merged (commits ahead): WP-39(9) WP-81(3) IA-5(3). Live on :8080: deployed app8 d73e1112543ffd1cdb7549e9ff075d6392370911 at 2026-10-10T13:05:17Z (later merges are NOT
+deployed). The 10 Oct runs (fix wf_22e529d2-a94, blind-spot hunt wf_1b621293-02b, GDFL attack wf_b419e32f-fbd, design loop
+wf_e0313932-312) belong to the old account and stop at its limit: relaunch db-fix-round-1b.js FRESH with doneExtra = the merged
+list + WP-70. Store steps done: census migrate+recount (2020 NIFTY options live), time index for 142 NIFTY/BANKNIFTY months.
+Zerodha repair code is live (GET /pull/repair.json?feed=zerodha&instrument=NIFTY&from=2018-01-01&to=2026-09-30 lists 42
+sessions); running it needs that day's Kite access token.
 
 STATE (local, never pushed): branch feat/db-fix in work-20260925/wt/DBFIX; each package fix/db-<WP> in work-20260925/wt/P-<WP>
 (half-done work stays there; the fix prompt reuses it). Plan state/board/fix-plan.json; findings state/board/audit-result.json
