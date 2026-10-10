@@ -55,6 +55,10 @@ const ROUTES = [
 	// it reports one gap per run, so a green suite after adding an entry is not
 	// evidence the list is complete.
 	'/indexmap.json',
+	// THE ALIAS TABLE /db's search reads (WP-51, D-3332): served by
+	// `crates/api/src/aliases.rs`; without it `npm run dev` answers the
+	// HTML fallback and the search says the alias table is not in force.
+	'/aliases.json',
 	// THE SELECTION V6 READER `web/src/lib/selection-v6.js` calls. Served by
 	// `crates/api/src/server.rs` and missing here, so `npm run dev` answered
 	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
