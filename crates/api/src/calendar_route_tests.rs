@@ -499,18 +499,23 @@ fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
             && lead.contains("calendar_json_reading(&site, &uri, census_now_stamped)"),
         "a build is read inside the admitted blocking pool:\n{lead}"
     );
+    // SINCE WP-36 (DB-N19) the peer vote is kept, or built by `lead_vote`
+    // inside the pool; `gaps_json` asks `voted` and never derives inline.
     let gaps = body_of("async fn gaps_json(");
-    let call = gaps
-        .find("peer_calendar(&peers_site, &asked)")
-        .expect("the peer vote, when asked for, is derived");
-    let admitted = gaps
+    assert!(
+        gaps.contains("voted(&site, &asked).await")
+            && !gaps.contains("peer_calendar(")
+            && !gaps.contains("peer_vote_reading("),
+        "/gaps.json derives no vote inline:\n{gaps}"
+    );
+    let vote = body_of("fn lead_vote(");
+    let admitted = vote
         .find("crate::detail::run_calendar(move ||")
         .expect("inside the calendar pool");
+    let call = vote
+        .find("peer_vote_reading(&site, &addressed, census_now_stamped)")
+        .expect("the peer vote, when asked for, is derived");
     assert!(admitted < call, "the peer vote is derived inside the pool");
-    assert!(
-        !gaps.contains("peer_calendar(&site, &asked)"),
-        "and never inline on the worker"
-    );
 }
 
 /// **A REFUSED ADMISSION IS ANSWERED, NAMED AND RETRYABLE.** Saturation is

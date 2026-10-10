@@ -99,30 +99,38 @@ impl Origin {
 }
 
 /// Where one [`Build`] has got to, under its lock.
-#[derive(Debug, Default)]
-struct State {
+#[derive(Debug)]
+struct State<A> {
     /// When it finished, and its answer.
-    done: Option<(Instant, KeptAnswer)>,
+    done: Option<(Instant, A)>,
     /// A request waiting on it ran out of budget and was told to ask again,
     /// so the answer is parked for the next request rather than dropped.
     told: bool,
 }
 
-/// One `/calendar.json` answer being built.
+/// How far a reading has got: what it has to count, and what it has counted.
+#[derive(Debug, Default)]
+struct Counters {
+    /// Files (or series) the reading has to count.
+    owed: AtomicU64,
+    /// Counted so far, from memory or from disk.
+    counted: AtomicU64,
+}
+
+/// One answer being built: a `/calendar.json` answer ([`KeptAnswer`]), or a
+/// peer vote for `/gaps.json` ([`Voted`]).
 #[derive(Debug)]
-pub struct Build {
+pub struct Build<A = KeptAnswer> {
     /// Who asked for it.
     origin: Origin,
     /// When it was asked for.
     queued: Instant,
-    /// When its reading began, and the asked feed's stamp at that moment.
+    /// When its reading began, and the census stamp at that moment.
     began: Mutex<Option<(Instant, Option<CensusStamps>)>>,
-    /// Month files the reading has to count.
-    owed: AtomicU64,
-    /// Month files counted so far, from memory or from disk.
-    counted: AtomicU64,
+    /// How far the reading has got.
+    counters: Arc<Counters>,
     /// Its answer, once it has one.
-    state: Mutex<State>,
+    state: Mutex<State<A>>,
     /// Woken when the answer is set.
     ready: tokio::sync::Notify,
 }
@@ -142,15 +150,17 @@ pub struct Progress {
     pub counted: u64,
 }
 
-impl Build {
+impl<A: Clone> Build<A> {
     fn new(origin: Origin) -> Self {
         Self {
             origin,
             queued: Instant::now(),
             began: Mutex::new(None),
-            owed: AtomicU64::new(0),
-            counted: AtomicU64::new(0),
-            state: Mutex::new(State::default()),
+            counters: Arc::new(Counters::default()),
+            state: Mutex::new(State {
+                done: None,
+                told: false,
+            }),
             ready: tokio::sync::Notify::new(),
         }
     }
@@ -168,14 +178,14 @@ impl Build {
             origin: self.origin,
             queued_for: self.queued.elapsed(),
             reading_for: began,
-            owed: self.owed.load(Ordering::Acquire),
-            counted: self.counted.load(Ordering::Acquire),
+            owed: self.counters.owed.load(Ordering::Acquire),
+            counted: self.counters.counted.load(Ordering::Acquire),
         }
     }
 
     /// Its answer, if it has one.
     #[must_use]
-    pub fn answer(&self) -> Option<KeptAnswer> {
+    pub fn answer(&self) -> Option<A> {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -190,7 +200,7 @@ impl Build {
     #[must_use]
     pub fn enter(self: &Arc<Self>, stamps: Option<CensusStamps>) -> Entered {
         *self.began.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), stamps));
-        CURRENT.with(|current| *current.borrow_mut() = Some(Arc::clone(self)));
+        CURRENT.with(|current| *current.borrow_mut() = Some(Arc::clone(&self.counters)));
         Entered(())
     }
 
@@ -201,7 +211,7 @@ impl Build {
     /// owing its answer to a later request, under the same lock its answer is
     /// set under, so an answer set at that very moment is handed back here
     /// rather than lost between the two.
-    pub async fn wait(&self, budget: Option<Duration>) -> Option<KeptAnswer> {
+    pub async fn wait(&self, budget: Option<Duration>) -> Option<A> {
         let deadline = budget.map(|budget| tokio::time::Instant::now() + budget);
         loop {
             let notified = self.ready.notified();
@@ -231,7 +241,7 @@ impl Build {
     /// Whether this finished build's answer may be handed to a request whose
     /// asked feed is stamped `stamps` now: finished within [`PARKED_FOR`],
     /// under exactly that stamp.
-    fn deliverable(&self, stamps: Option<&CensusStamps>) -> Option<KeptAnswer> {
+    fn deliverable(&self, stamps: Option<&CensusStamps>) -> Option<A> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let (at, answer) = state.done.as_ref()?;
         let began = self.began.lock().unwrap_or_else(PoisonError::into_inner);
@@ -306,7 +316,7 @@ impl Warmed {
 thread_local! {
     /// The build whose reading runs on this thread, if any: see
     /// [`Build::enter`].
-    static CURRENT: std::cell::RefCell<Option<Arc<Build>>> = const { std::cell::RefCell::new(None) };
+    static CURRENT: std::cell::RefCell<Option<Arc<Counters>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The guard [`Build::enter`] hands back. Dropping it ends the build's claim
@@ -324,8 +334,8 @@ impl Drop for Entered {
 /// thread no build has entered counts nothing.
 pub fn owe(months: usize) {
     CURRENT.with(|current| {
-        if let Some(build) = current.borrow().as_ref() {
-            build
+        if let Some(counters) = current.borrow().as_ref() {
+            counters
                 .owed
                 .fetch_add(u64::try_from(months).unwrap_or(u64::MAX), Ordering::AcqRel);
         }
@@ -335,21 +345,21 @@ pub fn owe(months: usize) {
 /// The reading on this thread has counted one more month file.
 pub fn counted() {
     CURRENT.with(|current| {
-        if let Some(build) = current.borrow().as_ref() {
-            build.counted.fetch_add(1, Ordering::AcqRel);
+        if let Some(counters) = current.borrow().as_ref() {
+            counters.counted.fetch_add(1, Ordering::AcqRel);
         }
     });
 }
 
 /// What [`Builds::join`] found for a request with no confirmed answer.
 #[derive(Debug)]
-pub enum Joined {
+pub enum Joined<A = KeptAnswer> {
     /// No build for the key: the request leads this one, and must run it.
-    Lead(Arc<Build>),
+    Lead(Arc<Build<A>>),
     /// A build for the key is queued or running: wait on it.
-    Follow(Arc<Build>),
+    Follow(Arc<Build<A>>),
     /// A finished build's answer, parked for this request.
-    Parked(KeptAnswer),
+    Parked(A),
     /// The served process is reading its census at start, and no build for
     /// this key is queued: how long it has been reading. A request does not
     /// read the census beside it.
@@ -358,14 +368,142 @@ pub enum Joined {
     Full,
 }
 
-/// The builds in progress, the confirmed answers, and the served budget.
+/// One build per key: the `/calendar.json` answers' and the peer votes'.
+#[derive(Debug)]
+pub struct Flights<K, A> {
+    /// One build per key, running, queued, or finished and parked.
+    map: Mutex<HashMap<K, Arc<Build<A>>>>,
+}
+
+impl<K, A> Default for Flights<K, A> {
+    fn default() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, A: Clone> Flights<K, A> {
+    /// What a request for `key` finds, its census stamped `stamps` now
+    /// (`None` when no stamp could be taken), while the served process has
+    /// been reading its census at start for `census_at_start`: see
+    /// [`Joined`].
+    fn join(
+        &self,
+        key: &K,
+        stamps: Option<&CensusStamps>,
+        census_at_start: Option<Duration>,
+    ) -> Joined<A> {
+        let mut flights = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(build) = flights.get(key) {
+            if !build.finished() {
+                return Joined::Follow(Arc::clone(build));
+            }
+            let parked = build.deliverable(stamps);
+            flights.remove(key);
+            if let Some(answer) = parked {
+                return Joined::Parked(answer);
+            }
+        }
+        if let Some(since) = census_at_start {
+            return Joined::CensusAtStart(since);
+        }
+        if !room(&mut flights) {
+            return Joined::Full;
+        }
+        let build = Arc::new(Build::new(Origin::Request));
+        flights.insert(key.clone(), Arc::clone(&build));
+        Joined::Lead(build)
+    }
+
+    /// Queue a start-up build for `key`, or hand back the one already there.
+    /// `None` when [`MAX_BUILDS`] are queued or running.
+    fn queue_at_start(&self, key: &K) -> Option<Arc<Build<A>>> {
+        let mut flights = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(build) = flights.get(key)
+            && !build.finished()
+        {
+            return Some(Arc::clone(build));
+        }
+        flights.remove(key);
+        if !room(&mut flights) {
+            return None;
+        }
+        let build = Arc::new(Build::new(Origin::StartUp));
+        flights.insert(key.clone(), Arc::clone(&build));
+        Some(build)
+    }
+
+    /// Set `build`'s answer and wake everyone waiting on it. The build stays
+    /// in the map, parked for the next request, only when a request waiting
+    /// on it was told to come back.
+    pub fn finish(&self, key: &K, build: &Arc<Build<A>>, answer: A) {
+        let told = {
+            let mut state = build.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.done = Some((Instant::now(), answer));
+            state.told
+        };
+        build.ready.notify_waiters();
+        if !told {
+            self.drop_build(key, build);
+        }
+    }
+
+    /// Set `build`'s answer, wake everyone waiting on it, and take it out of
+    /// the map whatever anyone was told: a build that stopped before it was
+    /// built. The next request leads a build of its own.
+    pub fn abandon(&self, key: &K, build: &Arc<Build<A>>, answer: A) {
+        build
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .done = Some((Instant::now(), answer));
+        build.ready.notify_waiters();
+        self.drop_build(key, build);
+    }
+
+    /// Take `build` out of the map, when it is still the one there.
+    fn drop_build(&self, key: &K, build: &Arc<Build<A>>) {
+        let mut flights = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        if flights
+            .get(key)
+            .is_some_and(|held| Arc::ptr_eq(held, build))
+        {
+            flights.remove(key);
+        }
+    }
+
+    /// How many builds the map holds: for a test.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// Make room for one more build: evict finished builds when the map is full.
+/// `false` when every build in it is queued or running.
+fn room<K, A: Clone>(flights: &mut HashMap<K, Arc<Build<A>>>) -> bool {
+    if flights.len() < MAX_BUILDS {
+        return true;
+    }
+    flights.retain(|_, build| !build.finished());
+    flights.len() < MAX_BUILDS
+}
+
+/// The builds in progress, the confirmed answers, the peer votes, and the
+/// served budget.
 #[derive(Debug, Default)]
 pub struct Builds {
-    /// One build per answer key.
-    flights: Mutex<HashMap<AnswerKey, Arc<Build>>>,
+    /// One `/calendar.json` build per answer key.
+    flights: Flights<AnswerKey, KeptAnswer>,
     /// Kept answers, each under the asked feed's stamp it was kept or found
     /// kept under: see [`Self::confirmed`].
     confirmed: Mutex<HashMap<AnswerKey, (CensusStamps, Arc<KeptAnswer>)>>,
+    /// `/gaps.json`'s peer votes: see [`Votes`].
+    pub votes: Votes,
     /// How long a request waits for a build; unset, it waits for the answer.
     budget: OnceLock<Duration>,
     /// When the served process began reading its census at start, while it
@@ -386,6 +524,16 @@ impl Builds {
     /// served process; a second call keeps the first budget.
     pub fn bound_waits(&self, budget: Duration) {
         let _first_wins = self.budget.set(budget);
+    }
+
+    /// How long the served process has been reading its census at start, or
+    /// `None` when it is not reading it.
+    #[must_use]
+    pub fn census_at_start(&self) -> Option<Duration> {
+        self.census_at_start
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|since| since.elapsed())
     }
 
     /// The kept answer for `key`, when it was confirmed under exactly
@@ -430,101 +578,34 @@ impl Builds {
             .len()
     }
 
-    /// How many builds the map holds: for a test.
+    /// How many `/calendar.json` builds the map holds: for a test.
     #[cfg(test)]
     pub(crate) fn in_flight(&self) -> usize {
-        self.flights
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.flights.len()
     }
 
     /// What a request for `key`, whose asked feed is stamped `stamps` now
     /// (`None` when no stamp could be taken), finds: see [`Joined`].
     #[must_use]
     pub fn join(&self, key: &AnswerKey, stamps: Option<&CensusStamps>) -> Joined {
-        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(build) = flights.get(key) {
-            if !build.finished() {
-                return Joined::Follow(Arc::clone(build));
-            }
-            let parked = build.deliverable(stamps);
-            flights.remove(key);
-            if let Some(answer) = parked {
-                return Joined::Parked(answer);
-            }
-        }
-        if let Some(since) = *self
-            .census_at_start
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-        {
-            return Joined::CensusAtStart(since.elapsed());
-        }
-        if !room(&mut flights) {
-            return Joined::Full;
-        }
-        let build = Arc::new(Build::new(Origin::Request));
-        flights.insert(key.clone(), Arc::clone(&build));
-        Joined::Lead(build)
+        self.flights.join(key, stamps, self.census_at_start())
     }
 
     /// Queue a start-up build for `key`, or hand back the one already there.
     /// `None` when [`MAX_BUILDS`] are queued or running.
     #[must_use]
     pub fn queue_at_start(&self, key: &AnswerKey) -> Option<Arc<Build>> {
-        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(build) = flights.get(key)
-            && !build.finished()
-        {
-            return Some(Arc::clone(build));
-        }
-        flights.remove(key);
-        if !room(&mut flights) {
-            return None;
-        }
-        let build = Arc::new(Build::new(Origin::StartUp));
-        flights.insert(key.clone(), Arc::clone(&build));
-        Some(build)
+        self.flights.queue_at_start(key)
     }
 
-    /// Set `build`'s answer and wake everyone waiting on it. The build stays
-    /// in the map, parked for the next request, only when a request waiting
-    /// on it was told to come back.
+    /// See [`Flights::finish`].
     pub fn finish(&self, key: &AnswerKey, build: &Arc<Build>, answer: KeptAnswer) {
-        let told = {
-            let mut state = build.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.done = Some((Instant::now(), answer));
-            state.told
-        };
-        build.ready.notify_waiters();
-        if !told {
-            self.drop_build(key, build);
-        }
+        self.flights.finish(key, build, answer);
     }
 
-    /// Set `build`'s answer, wake everyone waiting on it, and take it out of
-    /// the map whatever anyone was told: a build that stopped before it was
-    /// built. The next request leads a build of its own.
+    /// See [`Flights::abandon`].
     pub fn abandon(&self, key: &AnswerKey, build: &Arc<Build>, answer: KeptAnswer) {
-        build
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .done = Some((Instant::now(), answer));
-        build.ready.notify_waiters();
-        self.drop_build(key, build);
-    }
-
-    /// Take `build` out of the map, when it is still the one there.
-    fn drop_build(&self, key: &AnswerKey, build: &Arc<Build>) {
-        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-        if flights
-            .get(key)
-            .is_some_and(|held| Arc::ptr_eq(held, build))
-        {
-            flights.remove(key);
-        }
+        self.flights.abandon(key, build, answer);
     }
 
     /// Mark the served process's census read at start, until the guard drops.
@@ -536,16 +617,6 @@ impl Builds {
             .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
         CensusAtStart(self)
     }
-}
-
-/// Make room for one more build: evict finished builds when the map is full.
-/// `false` when every build in it is queued or running.
-fn room(flights: &mut HashMap<AnswerKey, Arc<Build>>) -> bool {
-    if flights.len() < MAX_BUILDS {
-        return true;
-    }
-    flights.retain(|_, build| !build.finished());
-    flights.len() < MAX_BUILDS
 }
 
 /// The guard [`Builds::reading_census_at_start`] hands back: the census read
@@ -560,6 +631,117 @@ impl Drop for CensusAtStart<'_> {
             .census_at_start
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+// ══ /gaps.json's peer vote (calendar=peers) ═════════════════════════════════
+
+/// A calendar for auditing one series, built from everything EXCEPT that
+/// series.
+///
+/// # Why the audited series may not vote
+///
+/// `calendar_of` reads a session's windows off contiguous runs of minute bars,
+/// so a series with a hole derives a calendar in which that hole is a window
+/// boundary. Auditing a series against its own derivation therefore answers
+/// "no losses" for every possible input — measured, in one test run: one minute
+/// deleted mid-session produced `expected 8,249, held 8,249, lost 0` with the
+/// missing minute reported as `outside-window`.
+///
+/// `agree` is a UNION — a day is a session if ANY reading saw one, and the
+/// session taken is the LONGEST any reading measured — so a peer's own hole
+/// cannot shorten the day for everybody, and one honest peer is enough to
+/// establish what the exchange did.
+///
+/// # When there are no peers
+///
+/// A store holding one feed's copy of one symbol has nothing independent to
+/// compare against. That returns `None`, `gaps::classify_against` falls back to
+/// the typed table, and `source` says `table` so the answer names what decided
+/// it. Substituting the series' own derivation there would be the §4 fallback
+/// that hides a failure: it would answer, confidently, zero.
+#[derive(Debug, Clone)]
+pub struct PeerCalendar {
+    /// The agreed calendar, or `None` when nothing independent could vote.
+    pub calendar: Option<pull::calendar::Calendar>,
+    /// The `feed:symbol` readings that voted, sorted, for the answer to name.
+    pub from: Vec<String>,
+    /// Every feed whose census could not be read, in `Vendor::ALL` order.
+    ///
+    /// Such a census contributes no series, so without this list a damaged
+    /// counter fell back to the table with `voted_by: []` -- the same answer
+    /// as a store with no peers at all, which is the failure `CLAUDE.md` §4
+    /// bans. A peer that might have voted and could not be read is named.
+    ///
+    /// Then, as `feed:symbol` in the order they were walked, every peer series
+    /// with a bar file its census holds and its derivation could not open. Its
+    /// calendar lacks what that file would have proved, so it does not vote,
+    /// and `calendar_of::cached` does not keep it. D-0695.
+    pub unreadable: Vec<String>,
+}
+
+/// Which peer vote: the audited series' feed, exchange, segment and symbol,
+/// the only parts of its address the vote reads.
+pub type VoteKey = (Vendor, String, String, String);
+
+/// What a peer-vote build answers: the vote, or the status and body of the
+/// refusal its admission met (`crate::detail::run_calendar`, D-1443).
+pub type Voted = Result<Arc<PeerCalendar>, (u16, String)>;
+
+/// The most peer votes kept at once. A vote is kept under its audited
+/// series' address, which a request names, so the map is bounded here rather
+/// than by the census: past it a vote is answered and not kept.
+pub const MAX_KEPT_VOTES: usize = 1_024;
+
+/// `/gaps.json`'s peer votes: kept under the census stamps they were read
+/// under, and built once per series off the request path (DB-N19).
+///
+/// The first `calendar=peers` audit after a start derived every peer series'
+/// calendar (343 on the operator's Zerodha store): 17.9 s on WP-36's shadow.
+/// Every later one walked and sorted every vendor's census entries and agreed
+/// every peer again: about 0.26-0.40 s. A vote kept under the stamps of every
+/// vendor's manifest -- the vote reads every feed's census -- is now handed
+/// out with one `stat` per vendor and one probe.
+#[derive(Debug, Default)]
+pub struct Votes {
+    /// One vote build per audited series.
+    pub flights: Flights<VoteKey, Voted>,
+    /// Votes, each under the census stamps it was read under.
+    kept: Mutex<HashMap<VoteKey, (CensusStamps, Arc<PeerCalendar>)>>,
+}
+
+impl Votes {
+    /// The vote kept for `key` under exactly `stamps`: one lock, one probe.
+    #[must_use]
+    pub fn kept(&self, key: &VoteKey, stamps: &CensusStamps) -> Option<Arc<PeerCalendar>> {
+        self.kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .filter(|(under, _)| under == stamps)
+            .map(|(_, vote)| Arc::clone(vote))
+    }
+
+    /// Keep `vote` for `key` under `stamps`, replacing one kept under older
+    /// stamps. Not kept once [`MAX_KEPT_VOTES`] other votes are: `false`.
+    pub fn keep(&self, key: VoteKey, stamps: CensusStamps, vote: Arc<PeerCalendar>) -> bool {
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() >= MAX_KEPT_VOTES && !kept.contains_key(&key) {
+            return false;
+        }
+        kept.insert(key, (stamps, vote));
+        true
+    }
+
+    /// What a request for `key`, the census stamped `stamps` now, finds.
+    #[must_use]
+    pub fn join(
+        &self,
+        key: &VoteKey,
+        stamps: Option<&CensusStamps>,
+        census_at_start: Option<Duration>,
+    ) -> Joined<Voted> {
+        self.flights.join(key, stamps, census_at_start)
     }
 }
 
@@ -768,7 +950,7 @@ mod tests {
     /// ENTERED ITS THREAD, AND ONLY WHILE IT HAS.**
     #[test]
     fn progress_is_counted_against_the_build_on_this_thread() {
-        let build = Arc::new(Build::new(Origin::Request));
+        let build = Arc::new(Build::<KeptAnswer>::new(Origin::Request));
         owe(3);
         counted();
         assert_eq!(

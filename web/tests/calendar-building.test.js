@@ -7,7 +7,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CALENDAR_BUILDING_TRIES, readCalendar } from '../src/lib/calendar-owed.js';
+import { readFileSync } from 'node:fs';
+import { parse } from 'svelte/compiler';
+
+import { CALENDAR_BUILDING_TRIES, askCalendar, readCalendar } from '../src/lib/calendar-owed.js';
+import { calendarOf } from '../src/lib/db/selection-model.js';
 
 // 2021-02-22 (Mon) .. 2021-02-28 (Sun), invented counts.
 const FROM = 18_680;
@@ -118,4 +122,89 @@ test('a refusal is still a refusal, read once', async () => {
   assert.equal(asked.length, 1);
   assert.equal(calendar.owed.size, 0);
   assert.match(calendar.why, /Saturated/);
+});
+
+test('askCalendar hands back a whole calendar after the building answers, and a refusal unread', async () => {
+  const { asked, request } = transport([
+    () => Response.json(building, { status: 202 }),
+    () => Response.json(whole)
+  ]);
+  const settled = await askCalendar('/calendar.json?feed=gdfl&rung=1s', request, new AbortController().signal, async () => {});
+  assert.equal(asked.length, 2);
+  assert.equal(settled.response.status, 200);
+  assert.deepEqual(settled.body, whole);
+
+  const refused = transport([() => Response.json({ error: 'no such feed' }, { status: 400 })]);
+  const answer = await askCalendar('/calendar.json?feed=x', refused.request, new AbortController().signal, async () => {});
+  assert.equal(answer.response.status, 400);
+  assert.equal(answer.body, null, 'a refusal is not a calendar body');
+  assert.deepEqual(await answer.response.json(), { error: 'no such feed' }, 'and its reason is left to read');
+});
+
+/**
+ * /db's calendar-of-record read (WP-50's date fields), cut out of
+ * `selection.svelte.js` exactly as the page runs it: the callback handed to
+ * `calReads.run`, run over a plain `db` and a ticket.
+ *
+ * @param {(url: string, init: RequestInit) => Promise<Response>} ask
+ */
+async function dbCalendarRead(ask) {
+  const wrapped = '<script module>' +
+    readFileSync(new URL('../src/lib/db/selection.svelte.js', import.meta.url), 'utf8') + '</script>';
+  /** @type {any} */
+  let callback = null;
+  /** @param {any} node */
+  const walk = (node) => {
+    if (callback || !node || typeof node !== 'object') return;
+    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression' &&
+      node.callee.object?.name === 'calReads' && node.callee.property?.name === 'run') {
+      callback = node.arguments[0];
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'parent' || key === 'loc' || key === 'metadata') continue;
+      if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value === 'object') walk(value);
+    }
+  };
+  walk(parse(wrapped).module?.content);
+  if (!callback) throw new Error('the /db calendar read moved out of calReads.run');
+  const run = new Function('feed', 'rung', 'db', 'ask', 'askCalendar', 'calendarOf',
+    `return (${wrapped.slice(callback.start, callback.end)});`);
+  const db = { calendar: /** @type {any} */ (undefined), calWhy: 'unset' };
+  const quick = (/** @type {string} */ url, /** @type {any} */ request, /** @type {AbortSignal} */ signal) =>
+    askCalendar(url, request, signal, async () => {});
+  await run('gdfl', '1s', db, ask, quick, calendarOf)({
+    signal: new AbortController().signal,
+    current: () => true
+  });
+  return db;
+}
+
+test('/db reads a building calendar of record again and shows it once whole (DB-N19)', async () => {
+  const { asked, request } = transport([
+    () => Response.json(building, { status: 202 }),
+    () => Response.json(whole)
+  ]);
+  const db = await dbCalendarRead(request);
+  assert.deepEqual(asked, ['/calendar.json?feed=gdfl&rung=1s', '/calendar.json?feed=gdfl&rung=1s']);
+  assert.equal(db.calWhy, '');
+  assert.deepEqual(db.calendar, calendarOf(whole));
+});
+
+test('/db names a calendar still building after every try as building, never "no day string"', async () => {
+  const { asked, request } = transport([() => Response.json(building, { status: 202 })]);
+  const db = await dbCalendarRead(request);
+  assert.equal(asked.length, CALENDAR_BUILDING_TRIES);
+  assert.equal(db.calendar, null);
+  assert.match(db.calWhy, /^\/calendar\.json is still being built \(This calendar is being built/);
+  assert.doesNotMatch(db.calWhy, /no day string/);
+});
+
+test('/db still names a refusal by its HTTP status, read once', async () => {
+  const { asked, request } = transport([() => Response.json({ error: 'busy' }, { status: 429 })]);
+  const db = await dbCalendarRead(request);
+  assert.equal(asked.length, 1);
+  assert.equal(db.calendar, null);
+  assert.equal(db.calWhy, '/calendar.json answered HTTP 429');
 });

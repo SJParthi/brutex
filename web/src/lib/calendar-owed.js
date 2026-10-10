@@ -232,6 +232,32 @@ async function settledCalendar(url, request, signal, wait) {
 }
 
 /**
+ * `/calendar.json` at `url` for any page, asked again while the server answers
+ * `202` `"building"` (DB-N19), at its hint, at most [`CALENDAR_BUILDING_TRIES`]
+ * times. `/db` reads its calendar of record through this (WP-50's date
+ * fields): read once with a bare `fetch`, a `202` is `ok`, so the first click
+ * after a restart showed "answered with no day string" for good instead of
+ * the calendar a moment later.
+ *
+ * The last response, and its body: the parsed JSON of an `ok` answer -- a
+ * calendar, or one still `"building"` after every try, which the caller must
+ * show as building -- and `null` for a refusal, whose body is left unread for
+ * the caller's own reason. Throws what the request or the wait throws (an
+ * abort among them).
+ *
+ * @param {string} url
+ * @param {(url: string, init: RequestInit) => Promise<Response>} request
+ * @param {AbortSignal} signal
+ * @param {(ms: number, signal: AbortSignal) => Promise<void>} [wait]
+ * @returns {Promise<{ response: Response, body: any }>}
+ */
+export async function askCalendar(url, request, signal, wait = pause) {
+  const { response, body } = await settledCalendar(url, request, signal, wait);
+  if (!response.ok) return { response, body: null };
+  return { response, body: body ?? (await response.json()) };
+}
+
+/**
  * Read one feed's `/calendar.json` into the page's calendar. Never throws: a
  * refusal or a failure is an empty calendar that names its reason. A calendar
  * the server is still building is asked for again at its hint, and one still
