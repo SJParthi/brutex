@@ -276,7 +276,11 @@ const ROUTES = [
 	// GDFL line was merged onto the mainline, whose widened scanner in
 	// `tests/proxy.test.js` caught both.
 	'/spot.json',
-	'/greeks.json'
+	'/greeks.json',
+	// EACH OPTION BAR'S RUNG at its own instant, over the strikes stored by
+	// then (`web/src/lib/moneyness.js` readRungs; `crates/api/src/chain.rs`,
+	// D-3329). WP-53.
+	'/chain.json'
 ];
 
 export default {

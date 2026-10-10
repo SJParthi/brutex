@@ -1353,12 +1353,9 @@ export function selectionState(db) {
     if (strikePick.size > 0) {
       out = out.filter((/** @type {any} */ r) => r.strike !== null && strikePick.has(String(r.strike)));
     }
-    if (mnyPick.size > 0) {
-      out = out.filter((/** @type {any} */ r) => {
-        const k = db.rungKeyOf(r);
-        return k !== null && mnyPick.has(k);
-      });
-    }
+    /* NO MONEYNESS NARROWING HERE (WP-53; D-3329, DB-075): a rung belongs to
+       a bar at its own instant, not to an instrument-month, so the pick keeps
+       BARS in the grid (`db.rungKeep`) and leaves these rows whole. */
     return out;
   });
 
@@ -1457,12 +1454,7 @@ export function selectionState(db) {
         (/** @type {any} */ r) => r.strike !== null && strikePick.has(String(r.strike))
       );
     }
-    if (mnyPick.size > 0) {
-      out = out.filter((/** @type {any} */ r) => {
-        const k = db.rungKeyOf(r);
-        return k !== null && mnyPick.has(k);
-      });
-    }
+    /* The Moneyness pick narrows bars, not instrument-months (WP-53, D-3329). */
     return out;
   });
 
