@@ -22,11 +22,11 @@
   import { UNIVERSES, SEG_VIEW } from '$lib/db/notes-controls.js';
   import { fmt, tfNote } from '$lib/db/notes-labels.js';
   import DayField from '$lib/DayField.svelte';
-  import { spanFloor } from '$lib/db/bars-plan.js';
   import { dayLabel } from '$lib/dates.js';
   import { strikeText } from '$lib/db/decoration.js';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
-  import { feedPickerRow } from '$lib/feed-row.js';
+  import { feedPickerRow, offeredFeeds, excludedSentence } from '$lib/feed-row.js';
+  import { SECONDS } from '$lib/db/selection-model.js';
   import { survey } from '$lib/store.svelte.js';
   import DbSearch from './DbSearch.svelte';
   import DbMoneyness from './DbMoneyness.svelte';
@@ -105,7 +105,7 @@
           ? db.universeCount.get(u.key)
             ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held`
             : 'not counted'
-          : `${fmt(db.deco.length)} held`,
+          : `${fmt(db.deco.length)} instrument-month(s) held`,
         why: u.key ? undefined : 'The only setting that reaches stored data whose instrument this feed\u2019s master no longer lists.'
       }))}
       selected={new Set([db.universe])}
@@ -131,16 +131,23 @@
          THE `{#if}` IS OUTSIDE THE SPAN, not inside it. A `.note` carries
          its marker as `::before`, so an emptied one is not invisible — it is
          a bare `·` under a control. /ingest learned this the hard way. -->
-    {#if db.universeRefusal || (db.outsideMaster && db.outsideMaster.months > 0)}
+    {#if db.universeRefusal || db.noMaster || (db.outsideMaster && db.outsideMaster.months > 0)}
       <span class="note" class:warn={Boolean(db.universeRefusal)}>
         {#if db.universeRefusal}
           {db.chosenUniverse.label} is not narrowing this table — {db.universeRefusal}
         {/if}
+        <!-- A FEED WITH NO MASTER SAYS SO (DB-041). GDFL publishes none; its
+             list is its census, with membership from core::universe's own
+             lists, so the tiers join and no row claims "in this master". -->
+        {#if db.noMaster}
+          {db.feedName} has no instrument master: the list is its census (stored, no master) and the
+          tiers are core::universe's own membership lists.
+        {/if}
         {#if db.outsideMaster && db.outsideMaster.months > 0}
           {fmt(db.outsideMaster.months)} stored instrument-month(s) across {fmt(
             db.outsideMaster.instruments
-          )} instrument(s) are not listed by {db.feedName}'s master — they are held, no membership
-          universe can reach them, and Everything is where they show.
+          )} underlying(s) are not listed by {db.feedName}'s instrument list — they are held, no
+          membership universe can reach them, and Everything is where they show.
         {/if}
       </span>
     {/if}
@@ -187,11 +194,9 @@
         single
         filter
         label="instruments"
-        summary={db.picked
-          ? (db.instrumentOffered.find((/** @type {any} */ r) => r.key === db.picked)?.sym ?? db.picked)
-          : db.typed
-            ? `Typed · ${fmt(db.instrumentRows.length)} held`
-            : `${fmt(db.instrumentOffered.length)} offered`}
+        summary={db.filter
+          ? (db.instrumentOffered.find((/** @type {any} */ r) => r.key === db.filter)?.sym ?? db.filter)
+          : `${fmt(db.instrumentOffered.length)} offered`}
         rows={[
           /* NO "ALL INSTRUMENTS" ROW, for the reason `All rungs` went from
              Timeframe: this rung is `single`, so "all of them" is not a
@@ -207,14 +212,25 @@
                The held count is a fact about THIS page and belongs on the
                row's title beside it, not in the column /ingest fills with
                the instrument's type. */
-            detail: r.kind || (r.months === 0 ? 'nothing stored' : 'in this master'),
+            /* WHAT IT IS AND WHAT IS HELD OF IT (DB-041). "in this master"
+               was printed for every GDFL row, which has no master; an
+               option-only underlying (ACC, DHFL) says so instead of reading
+               like a spot series, and the counts are split by segment —
+               "11,668 month(s) held, 4,84,12,39,862 short" summed a 1s index
+               denominator over option contract-months. */
+            detail:
+              r.months === 0
+                ? 'nothing stored'
+                : r.spotMonths === 0
+                  ? 'contracts only'
+                  : r.kind || (r.contractMonths > 0 ? 'spot + contracts' : 'spot'),
             title:
               r.months === 0
                 ? `${r.sym} — ${r.key}. Nothing stored for it at this selection.`
-                : `${r.sym} — ${r.key}. ${fmt(r.months)} month(s) held${r.short > 0 ? `, ${fmt(r.short)} short` : ''}.`
+                : `${r.sym} — ${r.key}. ${fmt(r.spotMonths)} spot month(s)${r.short > 0 ? ` (${fmt(r.short)} bar(s) short of the fullest series)` : ''} and ${fmt(r.contractMonths)} contract-month(s) held.${r.master === null && db.noMaster ? ` ${db.feedName} has no instrument master; this row is its census.` : ''}`
           }))
         ]}
-        selected={new Set([db.picked])}
+        selected={new Set([db.filter])}
         onchange={(/** @type {Set<string>} */ sel) => (db.filter = [...sel][0] ?? '')}
       />
       <!-- RESTATEMENT, BOTH WAYS. `1 instrument(s) held here` under a
@@ -285,9 +301,7 @@
       single
       filter
       label="segments"
-      title={db.kinds.length < 2
-        ? `${db.kinds.length === 1 ? db.kinds[0][0] : 'Nothing'} is the only segment this store holds, so there is nothing to narrow. The store's own second field — INDEX, CASH, FNO.`
-        : `${fmt(db.segmented.length)} instrument-month(s) across ${fmt(db.kinds.length)} segment(s). The store's own second field — INDEX, CASH, FNO.`}
+      title={`${db.filter || 'This selection'} holds ${fmt(db.instrumentMatched.length)} instrument-month(s) in ${db.feedName}'s store, under ${fmt(db.kinds.length)} of the store's segments (${db.kinds.map((/** @type {any} */ k) => `${k[0]} ${fmt(k[1])}`).join(', ') || 'none'}). Spot is every series with no expiry; a contract is expired, settled after the archive ended, or unexpired, by its expiry against today's IST day (${db.today}).`}
       summary={db.kind
         ? (SEG_VIEW.find((s) => s.key === db.kind)?.name ?? db.kind)
         : `${fmt(SEG_VIEW.length)} offered`}
@@ -371,11 +385,12 @@
     {/if}
   </div>
   <!-- ==================================================================
-       THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
-       A spot series runs forever, so "show me the 12th" is a real question.
-       A CONTRACT is defined by its expiry and its bars stop there, so a
-       second date range asks something the contract has already answered.
-       Gated on `dayWindowApplies`, which is simply "no expiry chosen".
+       THE DAY WINDOW — FOR SPOT AND FOR A CONTRACT (DB-046, DB-G89).
+       It said "spot only"; the server has always narrowed a contract's bars
+       to the chosen days, and now the words say so. The fields open on the
+       span the census says the selection holds and are bounded by it (or by
+       the feed's era before anything is counted); closed days are struck
+       from the calendar of record (DB-044, DB-045, DB-N04).
        ================================================================== -->
   <!-- THE TWO ENDS ARE ONE RUNG, AND THE RUNG TAKES THE WHOLE ROW.
        As two independent grid items they were placed like any other pair,
@@ -416,27 +431,25 @@
          the same argument `Picker` settles for every other rung here. -->
     <div
       class="dates"
-      title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
+      title={`The window in days, IST. It narrows a spot series and a contract alike: a contract shows only its bars on the chosen days, within its life. ${db.dayReason}`}
     >
       <DayField
         label="From date"
         value={db.fromDay}
-        min={spanFloor}
-        max={db.toDay || db.spanCeil}
+        min={db.dayBounds2.lo}
+        max={db.toDay || db.dayBounds2.hi}
+        closed={db.dayClosed}
         onchange={(/** @type {string} */ d) => (db.fromDay = d)}
-        boundsReason={db.dayBounds[0]
-          ? `This store holds ${dayLabel(db.dayBounds[0])} to ${dayLabel(db.dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or after this day — spot only, since a contract's window is its expiry.`
-          : 'No bar is loaded, so there is no held range to bound this field with. Only bars on or after this day.'}
+        boundsReason={`${db.dayReason} Only bars on or after this day.`}
       />
       <DayField
         label="To date"
         value={db.toDay}
-        min={db.fromDay || spanFloor}
-        max={db.spanCeil}
+        min={db.fromDay || db.dayBounds2.lo}
+        max={db.dayBounds2.hi}
+        closed={db.dayClosed}
         onchange={(/** @type {string} */ d) => (db.toDay = d)}
-        boundsReason={db.dayBounds[1]
-          ? `This store holds ${dayLabel(db.dayBounds[0])} to ${dayLabel(db.dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or before this day — spot only, since a contract's window is its expiry.`
-          : 'No bar is loaded, so there is no held range to bound this field with. Only bars on or before this day.'}
+        boundsReason={`${db.dayReason} Only bars on or before this day.`}
       />
 
       <!-- THE MINUTE, WHICH THE DATE FIELDS CANNOT REACH.
@@ -468,6 +481,14 @@
              on nothing. And `.pbtn` is already 48px here — measured, the
              same as the day fields beside it — so the alignment comes for
              free rather than being re-derived. -->
+        <!-- THE RUNG'S SESSION GRID, NOT THE ROWS ON SCREEN (DB-074). The
+             lists offered only the minutes of the fifty loaded rows — "15:29"
+             and nothing else on a 1s page — so 09:15 could not be asked for
+             without paging. They now list every minute a bar of this rung can
+             open on, 09:15 to 15:29 (charter §3, pull::session), plus any
+             pre-open or closing-auction minute the loaded rows hold. On the
+             1s rung a bound carries its second (HH:MM:SS): the minute picks
+             :00 for From and :59 for To, and the second beside it narrows. -->
         <div class="times">
           <div class="tcell">
             <span class="tlbl" id="lab-tfrom">From time</span>
@@ -475,41 +496,68 @@
               single
               filter
               label="minutes"
-              disabled={db.timeOptions.length === 0}
+              disabled={db.sessionRows.length === 0}
               summary={db.fromTime || 'Any'}
-              rows={db.timeBounds}
-              selected={new Set([db.fromTime])}
-              onchange={(/** @type {Set<string>} */ s) => (db.fromTime = [...s][0] ?? '')}
+              rows={[{ key: '', name: 'Any', detail: 'no bound' }, ...db.sessionRows]}
+              selected={new Set([db.fromTime.slice(0, 5)])}
+              onchange={(/** @type {Set<string>} */ s) =>
+                db.setTimeBound('from', [...s][0] ?? '', db.fromTime.length === 8 ? db.fromTime.slice(6, 8) : null)}
             />
           </div>
+          {#if db.secondRung && db.fromTime}
+            <div class="tcell sec">
+              <span class="tlbl">Second</span>
+              <Picker
+                single
+                filter
+                label="seconds"
+                summary={`:${db.fromTime.slice(6, 8) || '00'}`}
+                rows={SECONDS.map((x) => ({ key: x, name: `:${x}` }))}
+                selected={new Set([db.fromTime.slice(6, 8)])}
+                onchange={(/** @type {Set<string>} */ s) => db.setTimeBound('from', db.fromTime.slice(0, 5), [...s][0] ?? '00')}
+              />
+            </div>
+          {/if}
           <div class="tcell">
             <span class="tlbl" id="lab-tto">To time</span>
             <Picker
               single
               filter
               label="minutes"
-              disabled={db.timeOptions.length === 0}
+              disabled={db.sessionRows.length === 0}
               summary={db.toTime || 'Any'}
-              rows={db.timeBounds}
-              selected={new Set([db.toTime])}
-              onchange={(/** @type {Set<string>} */ s) => (db.toTime = [...s][0] ?? '')}
+              rows={[{ key: '', name: 'Any', detail: 'no bound' }, ...db.sessionRows]}
+              selected={new Set([db.toTime.slice(0, 5)])}
+              onchange={(/** @type {Set<string>} */ s) =>
+                db.setTimeBound('to', [...s][0] ?? '', db.toTime.length === 8 ? db.toTime.slice(6, 8) : null)}
             />
           </div>
+          {#if db.secondRung && db.toTime}
+            <div class="tcell sec">
+              <span class="tlbl">Second</span>
+              <Picker
+                single
+                filter
+                label="seconds"
+                summary={`:${db.toTime.slice(6, 8) || '59'}`}
+                rows={SECONDS.map((x) => ({ key: x, name: `:${x}` }))}
+                selected={new Set([db.toTime.slice(6, 8)])}
+                onchange={(/** @type {Set<string>} */ s) => db.setTimeBound('to', db.toTime.slice(0, 5), [...s][0] ?? '59')}
+              />
+            </div>
+          {/if}
           <div class="tcell gocell">
             <span class="tlbl" id="lab-goto">Go to</span>
-            <!-- SELECTING IS THE WHOLE GESTURE. The `Go` button beside the
-                 old box existed because typing has no moment of
-                 completion; picking a row does, so a second press to
-                 confirm the press just made is furniture. Re-choosing the
-                 same minute jumps again, which is what a reader who has
-                 paged away and wants to come back will try. -->
+            <!-- THE SAME GRID. A minute the loaded rows do not hold lands on the
+                 nearest loaded bar and the line under the strip says how far
+                 away it is — never a silent jump. -->
             <Picker
               single
               filter
               label="minutes"
-              disabled={db.timeOptions.length === 0}
+              disabled={db.sessionRows.length === 0}
               summary={db.goTime || 'Pick a minute'}
-              rows={db.timeOptions}
+              rows={db.sessionRows}
               selected={new Set([db.goTime])}
               onchange={(/** @type {Set<string>} */ s) => {
                 const at = [...s][0] ?? '';
@@ -536,6 +584,32 @@
     {/if}
     {#if db.jumpWhy}
       <p class="jwhy" role="status">{db.jumpWhy}</p>
+    {/if}
+    <!-- MONTHS OUTSIDE THE OPERATOR'S WINDOW (D-3338): hidden by default,
+         counted, and one press away — labelled "outside your window" when
+         shown. Nothing is deleted. -->
+    {#if db.oow || db.oowHere > 0}
+      <p class="jwhy" role="status">
+        {#if db.oow}
+          Showing months <b>outside your window</b> ({db.activeFeed?.window?.from} to
+          {db.activeFeed?.window?.to}): {fmt(db.oowHere)} of this selection's, {fmt(db.oowMonths)}
+          instrument-month(s) across the feed.
+          <button class="btn ghost sm" type="button" onclick={() => (db.oow = false)}>Hide them</button>
+        {:else}
+          {fmt(db.oowHere)} of this selection's months ({fmt(db.oowHidden)} instrument-month(s) across
+          the feed) lie outside your window ({db.activeFeed?.window?.from} to
+          {db.activeFeed?.window?.to}); they are held and hidden.
+          <button class="btn ghost sm" type="button" onclick={() => (db.oow = true)}>Show them, labelled</button>
+        {/if}
+      </p>
+    {/if}
+    {#if db.linkNotes.length > 0}
+      <p class="jwhy warn" role="status">
+        The link asked for something this page could not read: {db.linkNotes.join('; ')}.
+      </p>
+    {/if}
+    {#if db.urlWhy}
+      <p class="jwhy warn" role="status">This selection is not in the address bar: {db.urlWhy}.</p>
     {/if}
   </div>
   
@@ -787,12 +861,19 @@
                 ? 'This is a refusal, not an empty store. Indices and equities carry no expiry and are unaffected — they are in the table below already.'
                 : undefined
           },
-          ...db.expiryOffered.map((/** @type {any} */ d) => ({
-            key: d,
-            name: dayLabel(d),
-            detail: `${fmt(db.expiryCount.get(d) ?? 0)} instrument-month(s)`,
-            title: `Contracts expiring ${dayLabel(d)} — the store's own key for it is ${d}.`
-          }))
+          /* WEEKLY OR MONTHLY, THE WEEKDAY, AND ANY SHIFT (DB-076), each
+             measured from this underlying's stored expiries and the calendar
+             of record (`expiryTags`) — never a written weekday rule. */
+          ...db.expiryOffered.map((/** @type {any} */ d) => {
+            const t = db.expiryTagMap.get(d);
+            return {
+              key: d,
+              name: dayLabel(d),
+              detail: `${t ? `${t.weekday} · ${t.cadence} · ` : ''}${fmt(db.expiryCount.get(d) ?? 0)} instrument-month(s)`,
+              why: t?.shift ? `${t.shift.from ? 'Shifted' : 'Off its neighbours'}: ${t.shift.why}.` : undefined,
+              title: `Contracts expiring ${dayLabel(d)}${t ? `, a ${t.weekday}, the ${t.cadence} expiry (${t.cadence === 'monthly' ? 'the last stored expiry of its month' : 'not the last stored expiry of its month'})` : ''} — the store's own key for it is ${d}.`
+            };
+          })
         ]}
         selected={new Set(db.expiry ? [db.expiry] : [])}
         onchange={(/** @type {Set<string>} */ sel) => (db.expiry = [...sel][0] ?? '')}
@@ -811,18 +892,31 @@
           so nothing is being held back
         {/if}
       </span>
+      {#if db.lifeNote}
+        <span class="note warn" title={db.lifeNote}>{db.lifeNote}</span>
+      {/if}
     </div>
   {/if}
 
   {#if db.contractRungs.strike}
     <div class="field mcell" class:off={Boolean(db.strikeRefusal)} title={db.strikeRefusal ?? undefined}>
       <span class="lab" title="An absolute price on the chain.">Strike</span>
+      <!-- MULTI-SELECT (DB-G98): 11,500 and 11,600 can be picked together.
+           `strikePick` was always a Set and `matched` always filtered by one;
+           only `single` stood in the way. -->
       <Picker
-        single
         filter
         label="strikes"
         disabled={db.chainAll.length === 0}
-        summary={db.strikeSummary}
+        summary={db.strikePick.size > 1
+          ? `${fmt(db.strikePick.size)} strikes: ${[...db.strikePick]
+              .map(Number)
+              .sort((/** @type {number} */ a, /** @type {number} */ b) => a - b)
+              .map((/** @type {number} */ p) => strikeText(p))
+              .join(', ')}`
+          : db.strikePick.size === 1
+            ? db.strikeSummary
+            : `Any strike · ${fmt(db.strikesHere.list.length)} here`}
         rows={db.strikeRows}
         selected={db.strikePick}
         onchange={(/** @type {Set<string>} */ sel) => (db.strikePick = new Set(sel))}
@@ -830,11 +924,16 @@
       <span class="note" class:warn={Boolean(db.strikeRefusal)}>
         {#if db.strikeRefusal}
           No strike chain — {db.strikeRefusal}
+        {:else if db.strikesHere.list.length === 0}
+          no strike in this selection{#if !db.expiry && db.expiryHeld > 0}
+            — choose an expiry and its chain is listed{/if}
         {:else}
-          {fmt(db.chainAll.length)} strike(s) · {strikeText(db.chainAll[0].strike)} to {strikeText(
-            db.chainAll[db.chainAll.length - 1].strike
-          )}{#if db.chainStep !== null}
-            · grid {strikeText(db.chainStep)} apart{/if}<!--
+          <!-- THE STRIKES THIS SELECTION REACHES — this underlying, this
+               expiry — not the whole store's 1,211 strikes on a 0.05 grid. -->
+          {fmt(db.strikesHere.list.length)} strike(s) · {strikeText(db.strikesHere.list[0])} to {strikeText(
+            db.strikesHere.list[db.strikesHere.list.length - 1]
+          )}{#if db.strikesHere.step !== null}
+            · grid {strikeText(db.strikesHere.step)} apart{/if}<!--
             WHY EVERY ROW IN THE PANEL READS `no bars` WHILE THE GATE IS
             SHUT. The counts here are taken over `expiryGated`, so with no
             expiry chosen they are all zero — correctly, because that is what
@@ -1016,7 +1115,7 @@
           : feeds.active
             ? db.feedName
             : 'Select a feed'}
-      rows={feeds.all.map((f) => feedPickerRow(f, survey.byFeed.get(f.wire), fmt))}
+      rows={offeredFeeds(feeds.all).map((f) => feedPickerRow(f, survey.byFeed.get(f.wire), fmt))}
       selected={new Set([feeds.active])}
       onchange={(/** @type {Set<string>} */ sel) => {
         const next = [...sel][0];
@@ -1035,6 +1134,12 @@
          carries its marker as `::before`, so "empty" paints a bare `·` under the
          control. Emptying the element and keeping the element is how a cut
          leaves litter. -->
+    <!-- ONLY THE OPERATOR'S FEEDS (DB-051, D-3338). The others are not
+         listed, and one line says they exist and why — never a silent
+         omission. -->
+    {#if excludedSentence(feeds.all)}
+      <span class="note" title={excludedSentence(feeds.all)}>{excludedSentence(feeds.all)}</span>
+    {/if}
     {#if feeds.error || db.error || !feeds.active || (db.loading && db.rows.length === 0)}
       <span class="note" class:warn={Boolean(db.error) || Boolean(feeds.error) || !feeds.active}>
         {#if feeds.error}
@@ -1140,6 +1245,10 @@
      nothing has gone wrong when the market had no print at the minute asked
      for. */
   .jwhy {
+    /* A WHOLE ROW OF THE STRIP. The wrapper is `display: contents`, so a
+       sentence here is a grid item; left to auto-placement it took one narrow
+       track beside Go to and wrapped to a column of words. */
+    grid-column: 1 / -1;
     margin: var(--s3) 0 0;
     color: var(--dim);
     font-size: var(--fs-mini);

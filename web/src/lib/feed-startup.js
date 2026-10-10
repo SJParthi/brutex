@@ -74,7 +74,9 @@ export function createFeedStartup(state, request, storage) {
         return;
       }
       try {
-        const held = await surveyFeedHeaders(list, request);
+        // ONLY THE OFFERED FEEDS ARE SURVEYED (D-3338): a feed the operator
+        // excluded is never the default, so its census is not asked for.
+        const held = await surveyFeedHeaders(list.filter((feed) => /** @type {any} */ (feed).offered !== false), request);
         if (selectionRevision === revision) state.active = pickDefaultFeed(held);
       } catch (why) {
         if (selectionRevision === revision) throw why;

@@ -16,7 +16,7 @@
    *
    * Owner after WP-00: WP-52 (bars data path, pager, go-to, extremes, export).
    */
-  import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, pooled, IN_FLIGHT, WINDOW_SORTS, paisaText, daysBetween, spanFloor, minuteOf, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
+  import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, pooled, IN_FLIGHT, WINDOW_SORTS, paisaText, daysBetween, minuteOf, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
   import { untrack } from 'svelte';
   import { TF_SECS, txt, tfCmp, fmt } from '$lib/db/notes-labels.js';
   import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText } from '$lib/db/notes-bars.js';
@@ -1388,7 +1388,8 @@
         if (db.fromDay && b.day < db.fromDay) return false;
         if (db.toDay && b.day > db.toDay) return false;
         if (!useTime) return true;
-        const at = timeLabel(b.ts);
+        /* AT THE RUNG'S RESOLUTION (WP-50, DB-074): a 1s bound is HH:MM:SS. */
+        const at = barTimeLabel(b.ts, TF_SECS.get(db.timeframe));
         if (db.fromTime && at < db.fromTime) return false;
         if (db.toTime && at > db.toTime) return false;
         return true;
@@ -1584,9 +1585,9 @@
      * the operator had touched either. Only a value differing from the full span
      * narrows.
      */
-    const dayWindowNarrows = $derived(
-      dayWindowApplies && Boolean(spanCeil) && (db.fromDay !== spanFloor || db.toDay !== spanCeil)
-    );
+    /* AGAINST THE SPAN THE FIELDS WERE SEEDED WITH (WP-50, DB-045): they open
+       on the census span of the selection now, not on 2015 and today. */
+    const dayWindowNarrows = $derived(dayWindowApplies && db.dayNarrowing);
 
     /* AND A DAY WINDOW IS THE SECOND CONDITION THIS TEST CANNOT SURVIVE.
        The paragraph above has the principle exactly right — the comparison means

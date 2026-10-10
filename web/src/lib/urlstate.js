@@ -203,3 +203,182 @@ export function same(a, b) {
 function encodeAgain(search) {
   return encode(decode(search));
 }
+
+/* ======================================================================
+   /db's SELECTION IN THE ADDRESS BAR (WP-50; D-3337 item 4, D-3338)
+   ----------------------------------------------------------------------
+   No /db selection was in the URL (DB-077): a reload returned to the first
+   instrument, nothing could be bookmarked or shared, and no log, audit or gap
+   row could open the series it names. The names are D-3337's, in its order:
+
+     feed  seg  sym  key  tf  exp  k (repeatable, a strike in paisa)  side
+     from  to (YYYY-MM-DD)  tfrom  tto (HH:MM or HH:MM:SS)
+     sort  dir  page  view  oow (D-3338)
+
+   `sym` is the exact underlying the Instrument rung picked. `key` is an
+   instrument key (`NSE-FNO-NIFTY-2019-03-28-1150000-CE`, `NSE-INDEX-NIFTY`)
+   for a link from a row elsewhere; the page reads its rungs off it. A field
+   is written only when it carries something, and a default (page 1, the Bars
+   view, newest first, hidden out-of-window months) is not written, so a
+   bookmark names exactly the choices that differ from opening the page.
+
+   UNLIKE `decode` ABOVE, THIS ONE CHECKS SHAPES AND NAMES WHAT IT REFUSED.
+   A malformed day or strike cannot be honoured, and dropping it silently
+   would narrow nothing while the address claims it does; `refused` lists
+   each one with its reason so the page can say so (CLAUDE.md §4). Whether a
+   well-formed value exists in this feed's store is the page's question.
+   ====================================================================== */
+
+/** /db's query keys, in the order `encodeDb` writes them. */
+export const DB_KEYS = [
+  'feed', 'seg', 'sym', 'key', 'tf', 'exp', 'k', 'side', 'from', 'to',
+  'tfrom', 'tto', 'sort', 'dir', 'page', 'view', 'oow'
+];
+
+/** The values `encodeDb` leaves out because the page opens on them. */
+export const DB_DEFAULTS = { sort: 'ts', dir: 'desc', page: 1, view: 'bars', oow: false };
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const TIME = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
+const PAISA = /^\d{1,15}$/;
+
+/**
+ * @typedef {object} DbSelection
+ * @property {string} [feed]
+ * @property {string} [seg]   a segment key (`spot`, `options`, `options-live`, …)
+ * @property {string} [sym]   the exact underlying
+ * @property {string} [key]   an instrument key, for a link from elsewhere
+ * @property {string} [tf]    the store's rung spelling (`1s`, `1min`, `1day`)
+ * @property {string} [exp]   `YYYY-MM-DD`
+ * @property {Iterable<string|number>} [k] strikes in paisa
+ * @property {string} [side]  `CE` or `PE`
+ * @property {string} [from]  `YYYY-MM-DD`
+ * @property {string} [to]    `YYYY-MM-DD`
+ * @property {string} [tfrom] `HH:MM` or `HH:MM:SS`
+ * @property {string} [tto]   `HH:MM` or `HH:MM:SS`
+ * @property {string} [sort]  a bar column key
+ * @property {'asc'|'desc'} [dir]
+ * @property {number} [page]
+ * @property {string} [view]  `bars` or `census`
+ * @property {boolean} [oow]  show months outside the operator's window
+ */
+
+/**
+ * A /db selection as a query string, no leading `?`. Idempotent: one
+ * selection is one address, byte for byte — strikes are sorted numerically
+ * and deduplicated, and keys are written in `DB_KEYS` order.
+ *
+ * @param {DbSelection} sel
+ * @returns {string}
+ */
+export function encodeDb(sel) {
+  const p = new URLSearchParams();
+  /** @param {string} k @param {unknown} v */
+  const put = (k, v) => {
+    const s = v === null || v === undefined ? '' : String(v).trim();
+    if (s) p.append(k, s);
+  };
+  put('feed', sel?.feed);
+  put('seg', sel?.seg);
+  put('sym', sel?.sym);
+  put('key', sel?.key);
+  put('tf', sel?.tf);
+  put('exp', sel?.exp);
+  const strikes = [...new Set([...(sel?.k ?? [])].map((x) => String(x).trim()).filter((x) => PAISA.test(x)))]
+    .sort((a, b) => Number(a) - Number(b));
+  for (const k of strikes) p.append('k', k);
+  put('side', sel?.side);
+  put('from', sel?.from);
+  put('to', sel?.to);
+  put('tfrom', sel?.tfrom);
+  put('tto', sel?.tto);
+  const sort = sel?.sort || DB_DEFAULTS.sort;
+  const dir = sel?.dir || DB_DEFAULTS.dir;
+  if (sort !== DB_DEFAULTS.sort || dir !== DB_DEFAULTS.dir) {
+    put('sort', sort);
+    put('dir', dir);
+  }
+  if (Number.isSafeInteger(sel?.page) && /** @type {number} */ (sel?.page) > 1) put('page', sel?.page);
+  if (sel?.view && sel.view !== DB_DEFAULTS.view) put('view', sel.view);
+  if (sel?.oow) put('oow', '1');
+  return p.toString();
+}
+
+/**
+ * A query string back to a /db selection, plus every field it could not read.
+ * Absent fields are absent (the page keeps its default); a malformed one is
+ * left out of `sel` and named in `refused`.
+ *
+ * @param {string | null | undefined} search
+ * @returns {{sel: DbSelection & {k?: string[]}, refused: Array<{key: string, value: string, why: string}>}}
+ */
+export function decodeDb(search) {
+  const p = new URLSearchParams(String(search ?? '').replace(/^\?/, ''));
+  /** @type {Record<string, any>} */
+  const sel = {};
+  /** @type {Array<{key: string, value: string, why: string}>} */
+  const refused = [];
+  /** @param {string} k */
+  const text = (k) => (p.has(k) ? String(p.get(k)).trim() : '');
+  for (const k of ['feed', 'seg', 'sym', 'key', 'tf', 'sort', 'view']) {
+    const v = text(k);
+    if (v) sel[k] = v;
+  }
+  if (sel.sym) sel.sym = sel.sym.toUpperCase();
+  for (const k of ['exp', 'from', 'to']) {
+    const v = text(k);
+    if (!v) continue;
+    if (DAY.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v) sel[k] = v;
+    else refused.push({ key: k, value: v, why: 'not a calendar day in YYYY-MM-DD form' });
+  }
+  for (const k of ['tfrom', 'tto']) {
+    const v = text(k);
+    if (!v) continue;
+    if (TIME.test(v)) sel[k] = v;
+    else refused.push({ key: k, value: v, why: 'not a time in HH:MM or HH:MM:SS form' });
+  }
+  const strikes = [];
+  for (const raw of p.getAll('k')) {
+    const v = String(raw).trim();
+    if (!v) continue;
+    if (PAISA.test(v)) strikes.push(v);
+    else refused.push({ key: 'k', value: v, why: 'not a strike in whole paisa' });
+  }
+  if (strikes.length) sel.k = [...new Set(strikes)].sort((a, b) => Number(a) - Number(b));
+  const side = text('side').toUpperCase();
+  if (side) {
+    if (side === 'CE' || side === 'PE') sel.side = side;
+    else refused.push({ key: 'side', value: side, why: 'a side is CE or PE' });
+  }
+  const dir = text('dir');
+  if (dir) {
+    if (dir === 'asc' || dir === 'desc') sel.dir = dir;
+    else refused.push({ key: 'dir', value: dir, why: 'a direction is asc or desc' });
+  }
+  const page = text('page');
+  if (page) {
+    if (/^\d{1,9}$/.test(page) && Number(page) >= 1) sel.page = Number(page);
+    else refused.push({ key: 'page', value: page, why: 'a page is a whole number from 1' });
+  }
+  const oow = text('oow');
+  if (oow) {
+    if (oow === '1' || oow === '0') sel.oow = oow === '1';
+    else refused.push({ key: 'oow', value: oow, why: 'oow is 1 or 0' });
+  }
+  if (sel.view && sel.view !== 'bars' && sel.view !== 'census') {
+    refused.push({ key: 'view', value: sel.view, why: 'a view is bars or census' });
+    delete sel.view;
+  }
+  return { sel, refused };
+}
+
+/**
+ * A link into /db for one selection — what /gaps, /audit, /logs and /sources
+ * put on a row (D-3337 item 4).
+ *
+ * @param {DbSelection} sel
+ */
+export function dbHref(sel) {
+  const q = encodeDb(sel);
+  return q ? `/db?${q}` : '/db';
+}
