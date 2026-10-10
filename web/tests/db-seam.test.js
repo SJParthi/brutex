@@ -27,11 +27,12 @@ import { parse } from 'svelte/compiler';
 import { DB_PAGE_FILES, dbSource } from './database-page-fixture.js';
 
 const SHELL = '../src/routes/db/+page.svelte';
-// DbExtremes WAS FILLED BY ITS OWNER, WP-52 (DB-G95), and DbProvenance and
-// DbBasisBadge by theirs, WP-55 (DB-078, DB-A40, DB-017); each left this list
-// in the same change, as the note above asks, and stays mounted exactly once.
-const PLACEHOLDERS = ['DbDayFlags', 'DbCalendar', 'DbChart'];
-const FILLED = ['DbExtremes', 'DbProvenance', 'DbBasisBadge'];
+// DbExtremes WAS FILLED BY ITS OWNER, WP-52 (DB-G95), and left this list in
+// the same change, as the note above asks; it stays mounted exactly once.
+// DbDayFlags and DbCalendar WERE FILLED BY WP-54 (DB-025, DB-012) the same way,
+// and DbProvenance and DbBasisBadge by WP-55 (DB-078, DB-A40, DB-017).
+const PLACEHOLDERS = ['DbChart'];
+const FILLED = ['DbExtremes', 'DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge'];
 const COMPONENTS = DB_PAGE_FILES.filter((path) => path.endsWith('.svelte'));
 
 /** The number of times `<Name {db} />` is written across the page's components. */

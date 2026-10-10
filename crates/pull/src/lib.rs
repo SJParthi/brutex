@@ -166,6 +166,10 @@ pub mod gdfl_lineage;
 /// GDFL NSE options tick files and the contract each ticker names, read from
 /// the yearly zips or the tick store. D-2806.
 pub mod gdfl_nfo;
+/// The re-key: stored GDFL option keys the current decoder files under
+/// another key (moved, as new files, the old key pointing at the new) or
+/// refuses (retired, by name). D-3331, D-3316; WP-12c.
+pub mod gdfl_rekey;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;

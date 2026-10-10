@@ -268,6 +268,12 @@ const ROUTES = [
 	// SILENTLY (`if (!response.ok) { sweptSurface = null; return; }` and a bare
 	// `catch {}`), so the swept-target sentence just vanishes.
 	'/calendar.json',
+	// THE DAY FLAGS AND THE IMPORT JOURNAL /db's day band, coverage calendar
+	// and contract-life marks read (WP-54; `crates/api/src/dayflags.rs`,
+	// `crates/api/src/imports.rs`). Without them `npm run dev` answers the
+	// HTML fallback and the band reports a JSON error for a routing gap.
+	'/dayflags.json',
+	'/imports.json',
 	'/vocab.json',
 	'/universes.json',
 	// THE OPTION BAR'S SPOT AND GREEKS `/db` reads per page of rows
