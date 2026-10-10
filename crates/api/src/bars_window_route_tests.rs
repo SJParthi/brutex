@@ -1543,15 +1543,17 @@ fn missing_months_are_counted_holes_named_and_days_covered_reported() {
     let got = store.window(&asked);
     assert_eq!(got.months_read, 2);
     assert_eq!(got.months_missing, 5);
+    // AN INDEX NEVER EXPIRES, so a missing month after its newest file, inside
+    // Zerodha's span (the operator's window, 2018-01 to 2026-09, D-3338), is a
+    // hole the feed owes — not yet pulled — as much as one between files
+    // (DB-B47). Before its first file it may not have been launched, so those
+    // stay expected absences.
     assert_eq!(
         got.missing_months,
-        vec!["2019-02".to_owned()],
-        "the hole inside its life"
+        ["2019-02", "2019-04", "2019-05"].map(str::to_owned),
+        "every hole after the index's first file"
     );
-    assert_eq!(
-        got.months_outside_life, 4,
-        "2018-11, 2018-12, 2019-04, 2019-05"
-    );
+    assert_eq!(got.months_outside_life, 2, "2018-11 and 2018-12");
     let covered: Vec<_> = got
         .coverage
         .iter()

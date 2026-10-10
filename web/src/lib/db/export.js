@@ -78,36 +78,114 @@ export const CSV_COLS = [
   { label: 'side', v: (r) => r.side ?? '' }
 ];
 
-/* THE BAR GRID EXPORTS BARS, NOT THE CENSUS. Writing instrument-months out
-   of a screen showing bars would be a file that does not match the grid it
-   was taken from, which is worse than no button. Every value is the store's
-   own wire form: paisa integers, raw ISO expiries, integer basis points,
-   an EMPTY FIELD for an unknown and never a zero.
+/* THE BAR GRID EXPORTS BARS, NOT THE CENSUS — WITH THE GRID'S OWN COLUMNS.
+   Writing instrument-months out of a screen showing bars would be a file that
+   does not match the grid it was taken from. Every value is the wire form:
+   paisa integers, raw ISO expiries, integer basis points, an EMPTY FIELD for
+   an unknown beside its reason code, and never a zero.
 
-   THE TEN UNSOURCED COLUMNS ARE NOT IN THIS FILE. A column of empty fields
-   under a `delta` heading is a promise that the number could arrive; the
-   reason it cannot is on the grid, where it can be read. */
+   THE FEED IS THE FIRST COLUMN AND THE OPTION ANALYTICS ARE IN IT (DB-047,
+   DB-G101, D-3326). The file used to carry no feed — a Zerodha and a GDFL
+   export of NSE-INDEX-NIFTY were indistinguishable once renamed — and left
+   out spot, moneyness, intrinsic, extrinsic, IV and the five greeks under a
+   comment calling them "the ten unsourced columns", stale since D-2807 and
+   D-2830 sourced them. They are written here exactly as the grid shows them:
+   the underlying's close at the bar's own instant on its own feed, and the
+   server's solve — or the reason each is not a number.
+
+   Each column reads the row and its context: `{ feed, oc, gc }`, the feed
+   and the row's option cells (`optionCells`) and greek cell (`greekCell`),
+   `null` on a row that is not an option. */
+/** @typedef {{ feed: string, oc: any, gc: any }} BarCsvContext */
+/** @type {{ label: string, v: (r: any, x: BarCsvContext) => string }[]} */
 export const BAR_CSV_COLS = [
-  { label: 'instrument', v: (/** @type {any} */ r) => r.instrument },
-  { label: 'month', v: (/** @type {any} */ r) => r.month },
-  { label: 'timeframe', v: (/** @type {any} */ r) => r.tf },
-  { label: 'ts_micros', v: (/** @type {any} */ r) => String(r.ts * 1000) },
-  { label: 'ist_day', v: (/** @type {any} */ r) => r.day },
-  { label: 'open_paisa', v: (/** @type {any} */ r) => String(r.o) },
-  { label: 'high_paisa', v: (/** @type {any} */ r) => String(r.h) },
-  { label: 'low_paisa', v: (/** @type {any} */ r) => String(r.l) },
-  { label: 'close_paisa', v: (/** @type {any} */ r) => String(r.c) },
-  { label: 'volume', v: (/** @type {any} */ r) => String(r.vol) },
-  { label: 'chg_bps', v: (/** @type {any} */ r) => (r.chg === null ? '' : String(r.chg)) },
-  { label: 'chg_why', v: (/** @type {any} */ r) => r.chgWhy ?? '' },
-  { label: 'open_interest', v: (/** @type {any} */ r) => (r.oi === null ? '' : String(r.oi)) },
-  { label: 'oi_chg_bps', v: (/** @type {any} */ r) => (r.oichg === null ? '' : String(r.oichg)) },
-  { label: 'oi_chg_why', v: (/** @type {any} */ r) => r.oichgWhy ?? '' },
-  { label: 'expiry', v: (/** @type {any} */ r) => r.exp ?? '' },
-  { label: 'days_to_expiry', v: (/** @type {any} */ r) => (r.dte === null ? '' : String(r.dte)) },
-  { label: 'side', v: (/** @type {any} */ r) => r.side ?? '' },
-  { label: 'strike_paisa', v: (/** @type {any} */ r) => (r.strike === null ? '' : String(r.strike)) }
+  { label: 'feed', v: (_r, x) => x.feed },
+  { label: 'instrument', v: (r) => r.instrument },
+  { label: 'month', v: (r) => r.month },
+  { label: 'timeframe', v: (r) => r.tf },
+  { label: 'ts_micros', v: (r) => String(r.ts * 1000) },
+  { label: 'ist_day', v: (r) => r.day },
+  { label: 'ist_time', v: (r) => istClock(r.ts) },
+  { label: 'open_paisa', v: (r) => String(r.o) },
+  { label: 'high_paisa', v: (r) => String(r.h) },
+  { label: 'low_paisa', v: (r) => String(r.l) },
+  { label: 'close_paisa', v: (r) => String(r.c) },
+  /* AN INDEX'S VOLUME IS NOT A MEASUREMENT (D-3322): empty, with the reason. */
+  { label: 'volume_shares', v: (r) => (r.vWhy ? '' : String(r.vol)) },
+  { label: 'volume_why', v: (r) => r.vWhy ?? '' },
+  { label: 'chg_bps', v: (r) => (r.chg === null ? '' : String(r.chg)) },
+  { label: 'chg_why', v: (r) => r.chgWhy ?? '' },
+  { label: 'open_interest_shares', v: (r) => (r.oi === null ? '' : String(r.oi)) },
+  { label: 'open_interest_why', v: (r) => r.oiWhy ?? '' },
+  { label: 'oi_chg_bps', v: (r) => (r.oichg === null ? '' : String(r.oichg)) },
+  { label: 'oi_chg_why', v: (r) => r.oichgWhy ?? '' },
+  { label: 'expiry', v: (r) => r.exp ?? '' },
+  { label: 'days_to_expiry', v: (r) => (r.dte === null ? '' : String(r.dte)) },
+  { label: 'side', v: (r) => r.side ?? '' },
+  { label: 'strike_paisa', v: (r) => (r.strike === null ? '' : String(r.strike)) },
+  { label: 'spot_paisa', v: (_r, x) => (x.oc?.spot === null || x.oc?.spot === undefined ? '' : String(x.oc.spot)) },
+  { label: 'moneyness', v: (_r, x) => x.oc?.mny ?? '' },
+  { label: 'intrinsic_paisa', v: (_r, x) => (x.oc?.intr === null || x.oc?.intr === undefined ? '' : String(x.oc.intr)) },
+  { label: 'extrinsic_paisa', v: (_r, x) => (x.oc?.extr === null || x.oc?.extr === undefined ? '' : String(x.oc.extr)) },
+  { label: 'spot_why', v: (_r, x) => (x.oc ? (x.oc.mny === null ? (x.oc.mnyWhy ?? x.oc.why ?? '') : (x.oc.why ?? '')) : '') },
+  /* THE SERVER'S FIGURES AS IT SENT THEM: IV as a fraction (0.1834, not
+     18.34), the greeks in the units their columns name on the grid. */
+  { label: 'iv', v: (_r, x) => num(x.gc?.iv) },
+  { label: 'delta', v: (_r, x) => num(x.gc?.delta) },
+  { label: 'gamma', v: (_r, x) => num(x.gc?.gamma) },
+  { label: 'theta', v: (_r, x) => num(x.gc?.theta) },
+  { label: 'vega', v: (_r, x) => num(x.gc?.vega) },
+  { label: 'rho', v: (_r, x) => num(x.gc?.rho) },
+  { label: 'greeks_why', v: (_r, x) => (x.gc ? (x.gc.why ?? '') : '') }
 ];
+
+/** A server figure as written, or the empty field. @param {unknown} v */
+function num(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? String(v) : '';
+}
+
+/** `HH:MM:SS` in IST of an epoch-millisecond instant. @param {number} ms */
+export function istClock(ms) {
+  const s = Math.floor(ms / 1000) + 19_800;
+  const d = ((s % 86_400) + 86_400) % 86_400;
+  const hh = String(Math.floor(d / 3600)).padStart(2, '0');
+  const mm = String(Math.floor((d % 3600) / 60)).padStart(2, '0');
+  const ss = String(d % 60).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+/**
+ * The bar CSV's text: a header of words, then one record per row, CRLF.
+ * @param {any[]} rows @param {(r: any) => BarCsvContext} context
+ */
+export function barCsvText(rows, context) {
+  const lines = [BAR_CSV_COLS.map((c) => csvQuote(c.label)).join(',')];
+  for (const r of rows) {
+    const x = context(r);
+    lines.push(BAR_CSV_COLS.map((c) => csvQuote(c.v(r, x))).join(','));
+  }
+  return `${lines.join('\r\n')}\r\n`;
+}
+
+/**
+ * THE FILE IS NAMED FOR THE ROWS IT HOLDS (DB-047). It used to be named for
+ * every matched month — `…_2023-01_2026-09.csv` over eight rows of one day.
+ * Now: the feed, the rung, the instrument (or `selection`), the first and
+ * last IST day the written rows hold, and how many rows that is — built from
+ * keys only, so two exports of the same rows share a name on every machine.
+ *
+ * @param {string} feed @param {string} tf @param {string} what @param {any[]} rows
+ */
+export function barCsvName(feed, tf, what, rows) {
+  let lo = '';
+  let hi = '';
+  for (const r of rows) {
+    if (lo === '' || r.day < lo) lo = r.day;
+    if (hi === '' || r.day > hi) hi = r.day;
+  }
+  const safe = String(what || 'selection').replace(/[^A-Za-z0-9._-]+/g, '-');
+  return `brutex-db-bars_${feed || 'no-feed'}_${tf || 'all-rungs'}_${safe}_${lo || 'none'}_${hi || 'none'}_${rows.length}rows.csv`;
+}
 
 /**
  * RFC 4180 quoting, and the test is on the four characters that break a
