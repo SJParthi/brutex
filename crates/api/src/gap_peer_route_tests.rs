@@ -365,3 +365,131 @@ async fn the_default_denominator_is_the_record_and_no_peer_moves_it() {
     assert_eq!(voted["calendar"]["source"], "peers", "asked for by name");
     assert_eq!(voted["lost_minutes"], 1);
 }
+
+// ══ WP-36: the peer vote off the request path (DB-N19) ══════════════════════
+
+impl Fixture {
+    /// The audit of Dhan's SUBJECT for January 2024 with `extra` appended,
+    /// whatever its status.
+    async fn raw(&self, extra: &str) -> (axum::http::StatusCode, Value) {
+        let uri = format!(
+            "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=SUBJECT&timeframe=1min&month=2024-01{extra}"
+        )
+        .parse()
+        .expect("fixture URI");
+        let (status, _, body) =
+            gaps_json(axum::extract::State(Loaded::clone(&self.site)), uri).await;
+        (status, serde_json::from_str(&body).expect("a JSON answer"))
+    }
+
+    /// The peer-vote audit, asked again while it is `"building"`, until it is
+    /// answered in full.
+    #[expect(clippy::panic, reason = "a vote that never finishes fails the test")]
+    async fn settled(&self) -> Value {
+        for _ in 0..1_000 {
+            let (status, answer) = self.raw("&calendar=peers").await;
+            if status == axum::http::StatusCode::OK {
+                return answer;
+            }
+            assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{answer}");
+            assert_eq!(answer["status"], "building", "{answer}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the peer vote was still building after 1,000 asks");
+    }
+
+    /// Hold the census cache's lock on another thread until the returned
+    /// sender is dropped: anything that reads the census blocks meanwhile.
+    fn census_held(&self) -> std::sync::mpsc::Sender<()> {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (taken, held) = std::sync::mpsc::channel::<()>();
+        let site = Loaded::clone(&self.site);
+        std::thread::spawn(move || {
+            let _guard = site
+                .census
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            taken.send(()).expect("the test waits for the lock");
+            let _ = released.recv();
+        });
+        held.recv().expect("the census lock is taken");
+        release
+    }
+}
+
+/// **A PEER VOTE IS BUILT OFF THE REQUEST PATH, KEPT UNDER EVERY FEED'S CENSUS
+/// STAMP AND HANDED OUT WITHOUT READING A CENSUS, AND BUILT AGAIN WHEN ANY
+/// FEED LANDS.** DB-N19: the first `calendar=peers` audit after a start derived
+/// every peer series on the request, 17.9 s for Zerodha NIFTY on a shadow of
+/// the operator's store, and every later one walked and agreed them all again.
+#[tokio::test]
+async fn a_peer_vote_is_built_off_the_request_kept_and_built_again_on_a_landing() {
+    let mut fixture = Fixture::named("gap-peer-vote-kept");
+    let hole = pull::calendar::OPEN_MINUTE + 10;
+    fixture.write(
+        Vendor::Dhan,
+        Exchange::Nse,
+        Segment::Index,
+        "SUBJECT",
+        Some(hole),
+    );
+    fixture.write(
+        Vendor::Groww,
+        Exchange::Nse,
+        Segment::Index,
+        "SUBJECT",
+        None,
+    );
+    fixture
+        .site
+        .calendars
+        .builds
+        .bound_waits(std::time::Duration::from_millis(20));
+
+    // THE CENSUS CANNOT BE READ, so the vote cannot be built: the audit is
+    // answered "building" within its budget, and audits nothing.
+    let release = fixture.census_held();
+    let started = std::time::Instant::now();
+    let (status, building) = fixture.raw("&calendar=peers").await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{building}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(building["status"], "building");
+    assert_eq!(building["calendar"], "peers");
+    assert_eq!(building["symbol"], "SUBJECT");
+    assert_eq!(building["retry_after_ms"], 250);
+    assert!(
+        building.get("lost_minutes").is_none(),
+        "no minute is audited"
+    );
+    drop(release);
+    let voted = fixture.settled().await;
+    assert_eq!(voted["calendar"]["source"], "peers", "{voted}");
+    assert_eq!(
+        voted["calendar"]["voted_by"],
+        serde_json::json!(["groww:SUBJECT"])
+    );
+    assert_eq!(voted["lost_minutes"], 1);
+
+    // KEPT: with the census lock held again, the next audit is answered in
+    // full at once, because the vote is not read again.
+    let release = fixture.census_held();
+    let (status, again) = fixture.raw("&calendar=peers").await;
+    drop(release);
+    assert_eq!(status, axum::http::StatusCode::OK, "{again}");
+    assert_eq!(again, voted, "the kept vote, the same audit");
+
+    // A LANDING OF ANY FEED moves the stamps the vote is kept under.
+    fixture.write(
+        Vendor::Zerodha,
+        Exchange::Nse,
+        Segment::Index,
+        "SUBJECT",
+        None,
+    );
+    let landed = fixture.settled().await;
+    assert_eq!(
+        landed["calendar"]["voted_by"],
+        serde_json::json!(["groww:SUBJECT", "zerodha:SUBJECT"]),
+        "{landed}"
+    );
+}
