@@ -2473,6 +2473,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk.crc".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.tix".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.prv".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.srt".to_owned(),
         ],
     );
 
@@ -2484,9 +2485,12 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // the existing month lock still serializes their writers. The eighth is
     // the bar file's time index (D-2329), which is not a record stream. The
     // ninth is the provenance sidecar (D-3334): a record stream of its own,
-    // self-checked per record, with no checksum sibling.
-    assert_eq!(FileKind::ALL.len(), 9);
+    // self-checked per record, with no checksum sibling. The tenth is the
+    // sort index (D-3349): derived from the bars like the time index, its runs
+    // and blocks self-checked, with no checksum sibling.
+    assert_eq!(FileKind::ALL.len(), 10);
     assert_eq!(FileKind::Provenance.checksums(), None);
+    assert_eq!(FileKind::SortIndex.checksums(), None);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);
