@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createFeedStartup, FEED_PREFERENCE_KEY } from '../src/lib/feed-startup.js';
+import { createFeedStartup, FEED_PREFERENCE_KEY, urlFeedOf } from '../src/lib/feed-startup.js';
 
 const descriptors = [{ wire: 'first', ready: false }, { wire: 'ready', ready: true }];
 /** @param {unknown} [body] */
@@ -166,4 +167,53 @@ test('an empty descriptor list has no invented selection', async () => {
   assert.deepEqual(feeds.all, []);
   assert.equal(feeds.active, null);
   assert.equal(feeds.error, null);
+});
+
+// DB-B54: opening /ingest?feed=gdfl with Zerodha saved downloaded both
+// censuses and rewrote the shared preference. The address is resolved before
+// any census, and a feed it names is never saved.
+test('the address feed is chosen before any census and never overwrites the saved preference', async () => {
+  const feeds = state();
+  const storage = preferences('"first"');
+  /** @type {string[]} */
+  const urls = [];
+  const loader = createFeedStartup(feeds, async (url) => {
+    urls.push(url);
+    return response();
+  }, () => storage, () => urlFeedOf('?feed=ready&tf=1s'));
+  await loader.load();
+  assert.equal(feeds.active, 'ready', 'the address outranks the saved preference');
+  assert.deepEqual(urls, ['/feeds.json'], 'no census was asked for the saved feed first');
+  assert.equal(storage.getItem(FEED_PREFERENCE_KEY), '"first"', 'the shared default is untouched');
+  loader.select('first', { persist: false });
+  assert.equal(feeds.active, 'first');
+  assert.equal(storage.getItem(FEED_PREFERENCE_KEY), '"first"');
+  loader.select('ready');
+  assert.equal(storage.getItem(FEED_PREFERENCE_KEY), '"ready"', 'a picker choice is remembered');
+});
+
+test('an address naming no feed, an unknown one or a broken reader falls back to the saved one', async () => {
+  for (const reader of [() => urlFeedOf(''), () => urlFeedOf('?feed=removed'), () => { throw new Error('no location'); }]) {
+    const feeds = state();
+    await createFeedStartup(feeds, async () => response(), () => preferences('"first"'), reader).load();
+    assert.equal(feeds.active, 'first');
+  }
+  assert.equal(urlFeedOf('?feed=gdfl,zerodha'), 'gdfl');
+  assert.equal(urlFeedOf('?feed='), null);
+  assert.equal(urlFeedOf(undefined), null);
+});
+
+test('WP-61 (DB-B54): the address is read when the feed module loads, before a page can rewrite it', () => {
+  // /ingest writes its selection back to the address before /feeds.json
+  // answers, with an empty feed set at that moment: a lazy read saw `?feed=`
+  // where the page was opened as `?feed=gdfl`, so the saved feed's census was
+  // downloaded first. The read is a module constant, taken once.
+  const source = readFileSync(new URL('../src/lib/feeds.svelte.js', import.meta.url), 'utf8');
+  assert.match(source, /\nconst addressedAtLoad = urlFeedOf\(globalThis\.location\?\.search\);\n/);
+  assert.match(source, /\(\) => addressedAtLoad\n\);/);
+  assert.doesNotMatch(source, /\(\) => urlFeedOf\(globalThis\.location\?\.search\)/, 'never a read deferred to /feeds.json');
+  // And the page shows a feed its address names without saving it.
+  const page = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
+  assert.equal((page.match(/selectFeed\(named\[0\], \{ persist: false \}\)/g) ?? []).length, 2);
+  assert.doesNotMatch(page, /selectFeed\(named\[0\]\);/);
 });

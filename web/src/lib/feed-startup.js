@@ -4,28 +4,62 @@ import { surveyFeedHeaders } from './feed-summary.js';
 export const FEED_PREFERENCE_KEY = 'brutex.feed.v1';
 
 /**
+ * THE FEED A PAGE'S ADDRESS NAMES, as `?feed=<wire>` (the first of a
+ * comma-separated list), or `null` when it names none. Pure, so the startup can
+ * resolve it BEFORE any census request (DB-B54).
+ *
+ * @param {string | null | undefined} search a `location.search`
+ * @returns {string | null}
+ */
+export function urlFeedOf(search) {
+  if (typeof search !== 'string' || search === '') return null;
+  let named = null;
+  try {
+    named = new URLSearchParams(search).get('feed');
+  } catch {
+    return null;
+  }
+  const first = (named ?? '').split(',')[0].trim();
+  return first === '' ? null : first;
+}
+
+/**
  * A saved selection needs only the small descriptor response. On a first
  * visit, manifest headers preserve the data-backed default without fetching
  * every feed's full inventory.
+ *
+ * THE ADDRESS OUTRANKS THE SAVED PREFERENCE, AND IS NEVER SAVED (DB-B54).
+ * Opening `/ingest?feed=gdfl` with Zerodha saved used to apply the saved feed
+ * first, start Zerodha's whole census download (15.7 MB), then switch to GDFL
+ * (32.6 MB more) and WRITE `gdfl` to the shared preference, so every other
+ * tab's next load opened on GDFL. `urlFeed` is read before the first
+ * selection, and a feed taken from it or from any non-explicit source is
+ * selected with `{ persist: false }`: only a picker choice is remembered.
  *
  * @template {{wire: string, ready: boolean}} F
  * @param {{all: F[], active: string | null, error: string | null}} state
  * @param {import('./ask.js').ask} request
  * @param {() => Pick<Storage, 'getItem' | 'setItem'>} storage
+ * @param {() => string | null} [urlFeed] the feed the page's address names
  */
-export function createFeedStartup(state, request, storage) {
+export function createFeedStartup(state, request, storage, urlFeed = () => null) {
   let selectionRevision = 0;
   /** @type {Promise<void> | null} */
   let flight = null;
 
-  /** @param {string | null} wire */
-  function select(wire) {
+  /**
+   * @param {string | null} wire
+   * @param {{ persist?: boolean }} [how] `persist: false` for a feed the page
+   *   took from its address rather than from the operator's own pick.
+   */
+  function select(wire, how = {}) {
     if (wire !== null && !state.all.some((feed) => feed.wire === wire)) {
       throw new Error('The selected feed is absent from /feeds.json');
     }
     selectionRevision += 1;
     state.active = wire;
     state.error = null;
+    if (how.persist === false) return;
     try {
       storage().setItem(FEED_PREFERENCE_KEY, JSON.stringify(wire));
     } catch {
@@ -38,6 +72,13 @@ export function createFeedStartup(state, request, storage) {
     if (state.active !== null && list.some((feed) => feed.wire === state.active)) {
       return state.active;
     }
+    let addressed = null;
+    try {
+      addressed = urlFeed();
+    } catch {
+      addressed = null;
+    }
+    if (addressed !== null && list.some((feed) => feed.wire === addressed)) return addressed;
     try {
       const saved = storage().getItem(FEED_PREFERENCE_KEY);
       if (saved !== null) {

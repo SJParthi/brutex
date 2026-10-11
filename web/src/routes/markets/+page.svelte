@@ -108,6 +108,10 @@
    */
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { pooled, IN_FLIGHT } from '$lib/pooled.js';
+  // THE BOUNDED BAR PAGE (WP-61; DB-041, DB-080): a month file too big to read
+  // whole is read as its newest bars, a thousand at a time.
+  import { readWindowPage } from '$lib/database-pages.js';
+  import { tailPlan, TAIL_PAGE } from '$lib/markets-tail.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { onDestroy } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
@@ -920,6 +924,27 @@
   );
 
   /**
+   * A MONTH FILE TOO BIG TO READ WHOLE IS CHARTED FROM ITS NEWEST BARS, AND
+   * THE PAGE SAYS SO (WP-61; DB-041, DB-080).
+   *
+   * `/bars.json` answers one whole month file. That is about 8,600 bars for a
+   * one-minute series and it was the only read this page had; a one-second
+   * month is 380,000 to 500,000 bars and 52.8 MB of JSON (measured 11 Oct 2026:
+   * NIFTY 1s 2026-09, 382,496 bars, 52,784,449 bytes), so a feed filed at one
+   * second could be listed here and never charted. The rule is the SIZE the
+   * census states, not the feed or the rung: when any month asked for holds
+   * more than `tailPlan`'s bound, the chart reads the newest bars of the asked
+   * months through `/bars/window.json` (1,000 rows a page, a seek and not a
+   * scan: 7 ms and 213 KB measured for the same series) and names how many of
+   * how many it drew. `$lib/markets-tail.js` holds the rule and its test.
+   */
+  const tail = $derived(
+    tailPlan(monthsAtBase.filter((m) => wantMonths.includes(m.month)).map((m) => ({ month: m.month, rows: m.rows })))
+  );
+  /** What the bounded read drew, in the server's own counts; `null` for a whole read. */
+  let tailRead = $state(/** @type {{ drawn: number, total: number, from: string, to: string } | null} */ (null));
+
+  /**
    * @param {string} month `YYYY-MM`
    * @param {string} rung the timeframe the month is pinned AT — a pin is the
    *        pair, never a bare month.
@@ -1040,13 +1065,50 @@
     return { bars, faults: Array.isArray(body) ? null : (body?.faults ?? null) };
   }
 
+  /**
+   * The newest bars of `plan`'s months, bounded: `plan.pages` requests of
+   * `TAIL_PAGE` rows, newest first, stopped early when the series is shorter.
+   *
+   * @param {import('$lib/index.svelte.js').MasterRow} row
+   * @param {{ from: string, to: string, pages: number }} plan
+   * @param {string} feed
+   * @param {string} rung
+   * @param {AbortSignal} signal
+   * @returns {Promise<{ bars: Bar[], faults: string | null, total: number }>}
+   */
+  async function readTail(row, plan, feed, rung, signal) {
+    const { exchange, segment, symbol } = row;
+    if (typeof exchange !== 'string' || typeof segment !== 'string' || typeof symbol !== 'string')
+      throw new Error('this row does not name an exchange, a segment and a symbol, so there is no series to ask for.');
+    /** @type {Bar[]} */
+    const bars = [];
+    /** @type {string[]} */
+    const faults = [];
+    let total = 0;
+    for (let page = 0; page < plan.pages; page += 1) {
+      const q = new URLSearchParams({
+        feed, exchange, segment, symbol, timeframe: rung,
+        from: plan.from, to: plan.to, sort: 'ts', dir: 'desc',
+        offset: String(page * TAIL_PAGE), limit: String(TAIL_PAGE)
+      });
+      const body = await readWindowPage(q.toString(), TAIL_PAGE, signal);
+      total = body.total;
+      if (body.faults) faults.push(String(body.faults));
+      bars.push(...body.bars);
+      if (body.bars.length < TAIL_PAGE) break;
+    }
+    return { bars, faults: faults.join('; ') || null, total };
+  }
+
   $effect(() => {
     const row = picked;
     const feed = feeds.active;
     const rung = base;
     const months = wantMonths;
+    const plan = tail;
     void barsRetry; // READ, NOT USED — it is what makes "Retry the read" a read
     chartRequests.cancel();
+    tailRead = null;
 
     if (!row || !feed || !rung || months.length === 0) {
       barsLoading = false;
@@ -1059,9 +1121,19 @@
     barsError = null;
     void chartRequests.run(async (ticket) => {
       try {
-        const parts = await pooled(months, IN_FLIGHT,
-          (m) => readMonth(row, m, feed, rung, ticket.signal), ticket.signal);
-        if (!ticket.current()) return;
+        /** @type {{ bars: Bar[], faults: string | null }[]} */
+        let parts;
+        if (plan.bounded) {
+          const got = await readTail(row, plan, feed, rung, ticket.signal);
+          if (!ticket.current()) return;
+          parts = [got];
+          tailRead = { drawn: got.bars.length, total: got.total, from: plan.from, to: plan.to };
+        } else {
+          parts = await pooled(months, IN_FLIGHT,
+            (m) => readMonth(row, m, feed, rung, ticket.signal), ticket.signal);
+          if (!ticket.current()) return;
+          tailRead = null;
+        }
         rawBars = parts.flatMap((p) => p.bars).sort((a, b) => cmp(a.t, b.t));
         barsFaults = parts.map((p) => p.faults).filter(Boolean).join('; ') || null;
         barsError = null;
@@ -2222,7 +2294,18 @@
           <span class="arrow">—</span>
           <span class="whyshort">{chartReason.why}</span>
         {:else}
-          <span class="seg"><u>read</u><b>{group(wantRecords)} × {base} bars</b></span>
+          {#if tail.bounded}
+            <span
+              class="seg warn"
+              data-markets-tail={tailRead ? 'read' : 'reading'}
+              title={`${tail.why} The whole series is on /db, paged.`}
+              ><u>read · newest only</u><b
+                >{tailRead ? group(tailRead.drawn) : '…'} of {group(tailRead?.total ?? wantRecords)} × {base} bars</b
+              ></span
+            >
+          {:else}
+            <span class="seg"><u>read</u><b>{group(wantRecords)} × {base} bars</b></span>
+          {/if}
           <span class="arrow">from</span>
           <span class="seg">
             <u>files</u>

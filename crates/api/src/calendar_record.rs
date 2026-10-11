@@ -858,6 +858,142 @@ pub fn answer(
     .to_string()
 }
 
+/// `body`, a held-span answer of [`answer`], widened to the calendar of
+/// record's whole span (`/calendar.json?span=record`, DB-B42): the record's
+/// day codes for every day of `SOURCED_FIRST_DAY..=SOURCED_LAST_DAY` the feed
+/// holds no bar on, with `held` a `-` there, so a page asking about a day the
+/// store does not reach reads the record (2026-10-02 closed) rather than
+/// guessing a weekday is a session. What the feed HOLDS is unchanged: `held`,
+/// `heldBy`, `sessions` and the held span (`heldSpan`) are the store's facts.
+///
+/// `None` when `body` is not an `ok` answer with a day string (a withheld or
+/// refused answer is answered as it is).
+///
+/// # Cost
+///
+/// One parse of the kept answer and one pass over the days added: at most the
+/// record's 3,199 days. O(1) per request in the store's size.
+#[must_use]
+pub fn widen_to_record(body: &str, rung: Option<Timeframe>) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
+        return None;
+    }
+    let from = value.get("from")?.as_i64()?;
+    let to = value.get("to")?.as_i64()?;
+    let days = value.get("days")?.as_str()?.to_owned();
+    let held = value.get("held")?.as_str()?.to_owned();
+    let rung = rung
+        .or_else(|| {
+            let word = value.get("rung").and_then(serde_json::Value::as_str)?;
+            Timeframe::KNOWN
+                .iter()
+                .copied()
+                .find(|known| known.as_str() == word)
+        })
+        .unwrap_or(Timeframe::MINUTE_1);
+    let first = from.min(pull::calendar::SOURCED_FIRST_DAY);
+    let last = to.max(pull::calendar::SOURCED_LAST_DAY);
+    let code_of = |day: i64| record_code(day).unwrap_or(OUTSIDE);
+    let mut added_sessions = 0_u64;
+    let mut before = Listed::default();
+    let mut after = Listed::default();
+    let mut widened_days = String::with_capacity(usize::try_from(last - first + 1).unwrap_or(0));
+    let mut widened_held = String::with_capacity(widened_days.capacity());
+    for day in first..from {
+        let code = code_of(day);
+        if is_session(code) {
+            added_sessions = added_sessions.saturating_add(1);
+            before.push(day, code);
+        }
+        widened_days.push(char::from(code));
+        widened_held.push(char::from(OUTSIDE));
+    }
+    widened_days.push_str(&days);
+    widened_held.push_str(&held);
+    for day in to.saturating_add(1)..=last {
+        let code = code_of(day);
+        if is_session(code) {
+            added_sessions = added_sessions.saturating_add(1);
+            after.push(day, code);
+        }
+        widened_days.push(char::from(code));
+        widened_held.push(char::from(OUTSIDE));
+    }
+    let unread = merged_list(before, value.get("sessionsUnread"), after);
+    let object = value.as_object_mut()?;
+    let calendar_sessions = object
+        .get("calendarSessions")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(added_sessions);
+    let mut set = |key: &str, field: serde_json::Value| {
+        let _replaced = object.insert(key.to_owned(), field);
+    };
+    set("from", first.into());
+    set("to", last.into());
+    set("firstDay", first.into());
+    set("lastDay", last.into());
+    set("fromDate", iso(first).into());
+    set("toDate", iso(last).into());
+    set("days", widened_days.into());
+    set("held", widened_held.into());
+    set("calendarSessions", calendar_sessions.into());
+    set("sessionsUnread", unread);
+    set("special", specials_json(first, last, rung).into());
+    set("halts", halts_json(first, last).into());
+    set("span", "record".into());
+    set(
+        "heldSpan",
+        serde_json::json!({ "from": iso(from), "to": iso(to), "firstDay": from, "lastDay": to }),
+    );
+    set(
+        "spanNote",
+        format!(
+            "widened to the calendar of record ({} to {}): a day outside the held span {} to {} \
+             carries the record's own code and a held digit of -, so a session there is owed \
+             and unread, never assumed and never held",
+            iso(pull::calendar::SOURCED_FIRST_DAY),
+            iso(pull::calendar::SOURCED_LAST_DAY),
+            iso(from),
+            iso(to)
+        )
+        .into(),
+    );
+    Some(value.to_string())
+}
+
+/// `before`, the list `middle` already holds, and `after`, as one bounded list
+/// in day order.
+fn merged_list(
+    before: Listed,
+    middle: Option<&serde_json::Value>,
+    after: Listed,
+) -> serde_json::Value {
+    let middle_count = middle
+        .and_then(|list| list.get("count"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let middle_days: Vec<serde_json::Value> = middle
+        .and_then(|list| list.get("days"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let count = before
+        .count
+        .saturating_add(middle_count)
+        .saturating_add(after.count);
+    let days: Vec<serde_json::Value> = before
+        .days
+        .into_iter()
+        .chain(middle_days)
+        .chain(after.days)
+        .take(MAX_LISTED)
+        .collect();
+    let truncated = u64::try_from(days.len()).unwrap_or(u64::MAX) < count;
+    serde_json::json!({ "count": count, "truncated": truncated, "days": days })
+}
+
 #[cfg(test)]
 #[path = "calendar_record_tests.rs"]
 mod tests;

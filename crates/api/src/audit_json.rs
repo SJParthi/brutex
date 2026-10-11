@@ -376,10 +376,41 @@ fn journal_block(site: &Site, feed: Vendor, page: usize, out: &mut String) {
         render::json_string(&holds_sentence(feed)),
     );
 
+    // THE NEWEST RUNS THEMSELVES, WHEREVER THEIR MEMBERS PUT THEM (WP-61,
+    // DB-G21). Page 0 is the newest 200 RECORDS, and a run that refused
+    // 223,900 members is 1,120 pages of member failures after its own record,
+    // so the outcome of the last run was on no page a reader would open. The
+    // attribution already knows every run's ordinal, so the newest few are one
+    // positional read each: O(1), whatever follows them.
+    let last = scoped
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|runs| runs.last_runs(&journal, feed, total));
     let entries = match scoped {
         Ok(ref runs) => runs.page(&journal, feed, total, skip, per_page),
         Err(why) => Err(why),
     };
+    match last {
+        Ok(last) => {
+            out.push_str(r#","last_runs":["#);
+            for (n, (entry, members_after)) in last.iter().enumerate() {
+                if n > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, r#"{{"members_after":{members_after},"record":"#);
+                run(entry, out);
+                out.push('}');
+            }
+            out.push_str(r#"],"last_runs_error":null"#);
+        }
+        Err(why) => {
+            let _ = write!(
+                out,
+                r#","last_runs":[],"last_runs_error":{}"#,
+                render::json_string(&why)
+            );
+        }
+    }
     match entries {
         Ok(entries) => {
             out.push_str(r#","runs":["#);
@@ -557,6 +588,34 @@ impl Attribution {
         Ok(out)
     }
 
+    /// The newest [`LAST_RUNS`] RUN records of `feed`, newest first, each with
+    /// the count of records that follow it up to the next run record (its
+    /// member failures, as a run appends them after its own record). One
+    /// positional read per run listed; O(runs) to find them, which the
+    /// attribution already holds in memory. WP-61, DB-G21.
+    fn last_runs(
+        &self,
+        journal: &audit::Journal,
+        feed: Vendor,
+        total: u64,
+    ) -> Result<Vec<(audit::Entry, u64)>, String> {
+        let mut out = Vec::with_capacity(LAST_RUNS);
+        for (first, end, vendor) in self.spans(total) {
+            if out.len() == LAST_RUNS {
+                break;
+            }
+            if vendor != Some(feed) {
+                continue;
+            }
+            let record = journal.page(first.saturating_add(1), 0, 1)?;
+            let Some(entry) = record.into_iter().next() else {
+                continue;
+            };
+            out.push((entry, end.saturating_sub(first).saturating_sub(1)));
+        }
+        Ok(out)
+    }
+
     /// Decodes the records `[scanned, total)` of the file at `path`.
     fn advance(&mut self, path: &std::path::Path, total: u64) -> Result<(), String> {
         use std::io::{Read as _, Seek as _};
@@ -606,6 +665,12 @@ impl Attribution {
         Ok(())
     }
 }
+
+/// How many of a feed's newest run records `/audit.json` lists under
+/// `last_runs`: a run that finished is two records (its `OPENED` record, then
+/// its closing one), so four is the last two runs, or one in flight and the
+/// one before it.
+pub(crate) const LAST_RUNS: usize = 4;
 
 /// Every pull journal attributed so far, by path.
 fn attributions()
@@ -1577,6 +1642,88 @@ mod tests {
             .iter()
             .map(|run| run["source"].as_str().unwrap_or("").to_owned())
             .collect()
+    }
+
+    /// **THE NEWEST RUNS ARE NAMED WHATEVER FOLLOWS THEM** (WP-61, DB-G21): a
+    /// run that refused 250 members is more than a page of member failures
+    /// after its own record, so page 0 holds no run record at all, and
+    /// `last_runs` still names it, with how many records follow it. Empty,
+    /// single, more than [`LAST_RUNS`], and another feed's runs between.
+    #[test]
+    fn the_newest_runs_are_listed_even_when_their_members_fill_the_page() {
+        let site = site("last-runs");
+        let journal = site.journal();
+        let kite = "https://api.kite.trade/instruments/historical/:instrument_token/:interval";
+        let none: serde_json::Value =
+            serde_json::from_str(&body(&site, Vendor::Zerodha, 0, moment(), Ok(day()))).unwrap();
+        assert_eq!(
+            none["last_runs"],
+            serde_json::json!([]),
+            "no journal, no run"
+        );
+        assert!(none["last_runs_error"].is_null());
+
+        pulled(&journal, kite, 1);
+        let one: serde_json::Value =
+            serde_json::from_str(&body(&site, Vendor::Zerodha, 0, moment(), Ok(day()))).unwrap();
+        assert_eq!(one["last_runs"].as_array().unwrap().len(), 1);
+        assert_eq!(one["last_runs"][0]["members_after"], 1);
+        assert_eq!(one["last_runs"][0]["record"]["kind"], "run");
+        assert_eq!(one["last_runs"][0]["record"]["ordinal"], 0);
+
+        for _ in 0..4 {
+            pulled(&journal, kite, 0);
+        }
+        pulled(&journal, "https://api.groww.in/v1/historical/candle", 2);
+        pulled(&journal, "zerodha_nse_checked fixture policy", 250);
+        let text = body(&site, Vendor::Zerodha, 0, moment(), Ok(day()));
+        let many: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            many["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|record| record["kind"] == "member"),
+            "page 0 is all member failures: the run record is on no page a reader opens"
+        );
+        let last = many["last_runs"].as_array().unwrap();
+        assert_eq!(last.len(), LAST_RUNS, "bounded, newest first");
+        assert_eq!(last[0]["members_after"], 250);
+        assert_eq!(last[0]["record"]["kind"], "run");
+        assert_eq!(last[0]["record"]["outcome"], "FAILED");
+        assert_eq!(last[0]["record"]["failures"], 250);
+        assert!(
+            last[0]["record"]["source"]
+                .as_str()
+                .unwrap()
+                .starts_with("zerodha_nse_checked")
+        );
+        // THE GROWW RUN BETWEEN IS NOT ZERODHA'S, and its two failures are not
+        // counted after any Zerodha run.
+        for run in last.iter().skip(1) {
+            assert_eq!(run["members_after"], 0, "{run}");
+            assert!(
+                run["record"]["source"]
+                    .as_str()
+                    .unwrap()
+                    .contains("api.kite.trade")
+            );
+        }
+        let ordinals: Vec<u64> = last
+            .iter()
+            .map(|run| run["record"]["ordinal"].as_u64().unwrap())
+            .collect();
+        assert!(
+            ordinals.windows(2).all(|pair| pair[0] > pair[1]),
+            "{ordinals:?}"
+        );
+        let gdfl: serde_json::Value =
+            serde_json::from_str(&body(&site, Vendor::Gdfl, 0, moment(), Ok(day()))).unwrap();
+        assert_eq!(
+            gdfl["last_runs"],
+            serde_json::json!([]),
+            "gdfl is never pulled"
+        );
     }
 
     /// **EACH FEED SEES ITS OWN RUNS AND THE FAILURES THEY APPENDED, AND NO
