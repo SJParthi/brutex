@@ -179,6 +179,63 @@ fn months_are_built_kept_and_named_and_a_rerun_writes_nothing() {
     assert_eq!(before, after, "a rerun changes no byte");
 }
 
+/// **THE RECEIPT NEVER SAYS `kept` OR `indexed` FOR AN INDEX A READER
+/// REFUSES.** One byte of a built month's fence table is flipped. The server
+/// sets such a month aside and prints this verb's command for it; the verb
+/// answered `kept ... every month in the span is indexed`, exit 0, and the
+/// dry run `indexed`, so the damage could never be repaired. Now the dry run
+/// says it would build it and why, writing nothing; the build writes the
+/// month whole again — the bytes it had before the damage — and no bar file
+/// changes.
+#[test]
+fn a_damaged_index_is_rebuilt_not_kept_and_the_dry_run_says_so() {
+    let root = Root::new();
+    root.month(None, ym(2033, 1), 3, false);
+    let span = ["gdfl", "NSE/INDEX/NIFTY", "1s", "2033-01", "2033-01"];
+    let (code, out) = root.run(&span);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2033-01  built"), "{out}");
+    let srt = root.file(None, ym(2033, 1), FileKind::SortIndex);
+    let good = fs::read(&srt).unwrap();
+    let bars = fs::read(root.file(None, ym(2033, 1), FileKind::Bars)).unwrap();
+    let mut bad = good.clone();
+    bad[600] ^= 0x40;
+    fs::write(&srt, &bad).unwrap();
+
+    let (code, out) = root.run(&[
+        "gdfl",
+        "NSE/INDEX/NIFTY",
+        "1s",
+        "2033-01",
+        "2033-01",
+        "--dry-run",
+    ]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("2033-01  would build") && out.contains("fails the checksum"),
+        "{out}"
+    );
+    assert!(!out.contains("2033-01  indexed"), "{out}");
+    assert_eq!(fs::read(&srt).unwrap(), bad, "a dry run writes nothing");
+
+    let (code, out) = root.run(&span);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("2033-01  built") && out.contains("fails the checksum"),
+        "{out}"
+    );
+    assert!(!out.contains("2033-01  kept"), "{out}");
+    assert_eq!(fs::read(&srt).unwrap(), good, "written whole again");
+    assert_eq!(
+        fs::read(root.file(None, ym(2033, 1), FileKind::Bars)).unwrap(),
+        bars,
+        "no bar file is touched"
+    );
+    let (code, out) = root.run(&span);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2033-01  kept"), "{out}");
+}
+
 /// `--dry-run` says what it would build and writes nothing.
 #[test]
 fn a_dry_run_writes_nothing() {

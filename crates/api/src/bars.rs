@@ -1525,7 +1525,7 @@ pub fn window_cancellable(
             cancel,
         )?);
     }
-    tally(&mut out, &mut plans);
+    let unplanned = tally(&mut out, &mut plans);
     note_holes(&plans);
     if let Some(at) = query.at {
         let index = at_index(store_root, &mut plans, at, query.desc, out.total)?;
@@ -1609,8 +1609,15 @@ pub fn window_cancellable(
         )?;
         out.scan_rows = scanned.rows;
         out.bars = scanned.page;
-        if query.want_extremes {
+        if query.want_extremes && scanned.unread == 0 {
             out.extremes = Some(scanned.extremes);
+        } else if query.want_extremes {
+            // NEVER THE EXTREMES OF THE MONTHS THAT HAPPENED TO READ.
+            out.extremes_why = Some(format!(
+                "months_unread: {} kept rows of this window would not read, so its extremes are \
+                 not known and none is served",
+                scanned.unread
+            ));
         }
     } else {
         out.bars = seek(
@@ -1648,6 +1655,19 @@ pub fn window_cancellable(
         note_unreadable_records(file, &record_faults, out.bars.len(), out.offset);
     }
     out.faults.append(&mut record_faults);
+    // A HELD MONTH THE PLAN COULD NOT READ IS IN NO TOTAL AND NO FOLD (it
+    // would not open: another process holds it, or its header is refused).
+    // The extremes of the months that did read are not the window's, and
+    // served beside a null `extremes_why` they would look exactly like it.
+    if let Some((months, first)) = unplanned
+        && out.extremes.is_some()
+    {
+        out.extremes = None;
+        out.extremes_why = Some(format!(
+            "months_unread: {months} held month(s) of this window would not open, so its \
+             extremes are not known and none is served (the first: {first})"
+        ));
+    }
     if query.coverage {
         out.coverage = coverage_of(store_root, &mut plans, &mut out.faults);
     }
@@ -1669,10 +1689,17 @@ fn root_is_a_directory(store_root: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Folds every series' months, faults and total into the answer.
-fn tally(out: &mut Window, plans: &mut [SeriesPlan]) {
+/// Folds every series' months, faults and total into the answer. Returns the
+/// held months no plan could read — their count and the first's reason —
+/// when there is one: they are in no total, and no extreme covers them.
+fn tally(out: &mut Window, plans: &mut [SeriesPlan]) -> Option<(usize, String)> {
     let several = plans.len() > 1;
+    let mut unplanned: Option<(usize, String)> = None;
     for plan in plans.iter_mut() {
+        if let Some(first) = plan.faults.first() {
+            let held = unplanned.get_or_insert_with(|| (0, first.clone()));
+            held.0 += plan.faults.len();
+        }
         out.months_read += plan.slots.len();
         out.months_missing += plan.holes.len() + plan.outside_life;
         out.months_outside_life += plan.outside_life;
@@ -1692,6 +1719,7 @@ fn tally(out: &mut Window, plans: &mut [SeriesPlan]) {
         });
         out.total = out.total.saturating_add(plan.total());
     }
+    unplanned
 }
 
 /// Whether a non-time sort over `total` kept rows, serving `limit` rows from
@@ -2010,6 +2038,8 @@ struct Scanned {
     page: Vec<WindowBar>,
     extremes: Extremes,
     rows: u64,
+    /// Kept rows that would not read, each month of them one fault.
+    unread: u64,
 }
 
 /// The total order a non-time page is in: the column (open interest nulls
@@ -2052,10 +2082,13 @@ fn scan(
     let mut bar_to_beat: Option<Candidate> = None;
     let mut extremes = Extremes::default();
     let mut rows = 0_u64;
+    let mut unread = 0_u64;
+    let mut since = 0_u64;
     for (series, plan) in plans.iter_mut().enumerate() {
         let Some(series_rules) = rules.get(series) else {
             continue;
         };
+        plan.clear_unread();
         let volume = !series_rules.index_no_volume();
         let oi_absent = series_rules.not_a_derivative();
         let (Ok(series_at), Ok(runs)) = (u32::try_from(series), u32::try_from(plan.runs.len()))
@@ -2066,40 +2099,46 @@ fn scan(
             let Some(run) = plan.runs.get(run_at as usize).copied() else {
                 continue;
             };
-            rows = rows.saturating_add(run.end - run.start);
             // THE CLIENT IS ASKED AFTER EVERY RUN — a month, or under a
-            // time-of-day bound a day's window (DB-N15).
+            // time-of-day bound a day's window — and every few thousand rows
+            // of one (DB-N15).
             cancel.check()?;
-            for row in run.start..run.end {
-                let bar = match plan.read(root, run.slot, row) {
-                    Ok(bar) => bar,
-                    Err(why) => {
-                        faults.push(why);
-                        continue;
+            // ONE FAULT A MONTH THAT WILL NOT READ, never one a row, and a
+            // month that will not open is not tried row by row (see
+            // `SeriesPlan::read_stretch`).
+            let missed = plan.read_stretch(
+                root,
+                run.slot,
+                (run.start, run.end),
+                cancel,
+                &mut since,
+                |row, bar| {
+                    if query.want_extremes {
+                        extremes.fold(bar, series, volume);
                     }
-                };
-                if query.want_extremes {
-                    extremes.fold(&bar, series, volume);
-                }
-                let candidate = Candidate {
-                    value: query.sort.of(&bar),
-                    ts: bar.ts_micros,
-                    series: series_at,
-                    run: run_at,
-                    row,
-                    null: matches!(query.sort, SortKey::OpenInterest)
-                        && (oi_absent || bar.open_interest == OI_NULL),
-                };
-                if bar_to_beat.is_some_and(|worst| order(&candidate, &worst).is_ge()) {
-                    continue;
-                }
-                kept.push(candidate);
-                if kept.len() >= depth.saturating_mul(2) {
-                    kept = page_of(std::mem::take(&mut kept), 0, depth, order);
-                    bar_to_beat = kept.last().copied();
-                }
-            }
+                    let candidate = Candidate {
+                        value: query.sort.of(bar),
+                        ts: bar.ts_micros,
+                        series: series_at,
+                        run: run_at,
+                        row,
+                        null: matches!(query.sort, SortKey::OpenInterest)
+                            && (oi_absent || bar.open_interest == OI_NULL),
+                    };
+                    if bar_to_beat.is_some_and(|worst| order(&candidate, &worst).is_ge()) {
+                        return;
+                    }
+                    kept.push(candidate);
+                    if kept.len() >= depth.saturating_mul(2) {
+                        kept = page_of(std::mem::take(&mut kept), 0, depth, order);
+                        bar_to_beat = kept.last().copied();
+                    }
+                },
+            )?;
+            rows = rows.saturating_add((run.end - run.start).saturating_sub(missed));
+            unread = unread.saturating_add(missed);
         }
+        let _counted_above = plan.take_unread(faults);
     }
     let mut page = Vec::with_capacity(limit);
     for chosen in page_of(kept, offset, limit, order) {
@@ -2127,6 +2166,7 @@ fn scan(
         page,
         extremes,
         rows,
+        unread,
     })
 }
 

@@ -99,9 +99,6 @@ pub(super) const fn column_of(sort: SortKey) -> Option<Column> {
 /// The most reasons the answer names one by one; the counts are always whole.
 const MAX_NAMED: usize = 12;
 
-/// Rows read between two looks at the cancellation flag.
-const CANCEL_STRIDE: u64 = 4_096;
-
 /// The most rows no index orders that one request orders WHOLE, so any page
 /// of them is served however deep (D-3349): forty bytes a row, 40 MB at the
 /// bound. Past it a page is served within [`MAX_SORT_DEPTH`] of the front, or
@@ -164,6 +161,15 @@ pub struct SortReport {
     /// a share (D-3322) — so the page is the rows in time order, served by
     /// seeking, with nothing read beyond it.
     pub by_time: bool,
+    /// Kept rows that were to be read and were NOT: their month would not
+    /// open (another process holds it), or the record would not read. They
+    /// are in neither `indexed_rows` nor `scanned_rows`, the page is ordered
+    /// without them, and the extremes are withheld.
+    pub unread_rows: u64,
+    /// Held months with any such row.
+    pub unread_months: usize,
+    /// Up to [`MAX_NAMED`] of those months, each with its rows and why.
+    pub unread_why: Vec<String>,
 }
 
 /// What a value sort answers.
@@ -187,8 +193,10 @@ enum Unindexed {
     TimeOfDay,
     /// The month's `.srt` is absent or refused, for this reason.
     NoIndex(String),
-    /// The index orders rows `0..coverage`; these were appended after it.
-    PastIndex(u64),
+    /// The index orders rows `0..coverage` and these lie past it: appended
+    /// after it, or — when the walk found bytes that are not a run — behind
+    /// a tear, named.
+    PastIndex { coverage: u64, torn: Option<String> },
     /// A day bound cuts through a run whose entries would not serve the
     /// stretch it keeps, for this reason (see [`Piece::Cut`]).
     CutUnserved(String),
@@ -199,9 +207,21 @@ impl Unindexed {
         match self {
             Self::TimeOfDay => "a time-of-day bound keeps windows no index run is cut to".into(),
             Self::NoIndex(why) => why.clone(),
-            Self::PastIndex(coverage) => {
+            Self::PastIndex {
+                coverage,
+                torn: None,
+            } => {
                 format!("appended after its sort index, which orders rows 0..{coverage}")
             }
+            // A TORN INDEX IS SAID TO BE TORN: these rows were not appended
+            // after it; the bytes that would have ordered them are not a run.
+            Self::PastIndex {
+                coverage,
+                torn: Some(why),
+            } => format!(
+                "its sort index is torn ({why}) and orders only rows 0..{coverage}; a rebuild \
+                 writes it whole"
+            ),
             Self::CutUnserved(why) => {
                 format!("a day bound cuts a sort index run whose entries would not serve it: {why}")
             }
@@ -504,7 +524,12 @@ fn cut(root: &Path, plans: &mut [SeriesPlan], query: &WindowQuery, views: &mut V
                             slot: run.slot,
                             start: at,
                             end: run.end,
-                            why: Unindexed::PastIndex(walked.coverage()),
+                            why: Unindexed::PastIndex {
+                                coverage: walked.coverage(),
+                                torn: walked.torn.as_ref().map(|(at, why)| {
+                                    format!("the bytes from {at} are not a run: {why}")
+                                }),
+                            },
                         });
                     }
                 }
@@ -1579,24 +1604,18 @@ fn cut_extremes_held(plan: &SeriesPlan, slot: usize, start: u64, end: u64) -> bo
 /// The extremes of rows `[start, end)` of `slot` — a stretch a day bound cuts,
 /// whose run summary covers more than it keeps — from the memo, or read and
 /// then held when every row read. Returns them, renamed to `series`, and the
-/// rows read (none from the memo).
+/// rows read (none from the memo). Rows that would not read are left in the
+/// plan's unread ledger, one entry a month.
 ///
 /// # Errors
 ///
 /// `cancelled`, by name.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the stretch (plan, slot, rows), what to fold (series, volume) and \
-              the request's faults, flag and stride: each is one of the read's \
-              own inputs"
-)]
 fn cut_extremes(
     root: &Path,
     plan: &mut SeriesPlan,
     slot: usize,
     (start, end): (u64, u64),
     (series, volume): (usize, bool),
-    faults: &mut Vec<String>,
     cancel: &Cancel,
     since: &mut u64,
 ) -> Result<(Extremes, u64), String> {
@@ -1610,27 +1629,19 @@ fn cut_extremes(
         return Ok((out, 0));
     }
     let mut month = Extremes::default();
-    let mut all_read = true;
-    for row in start..end {
-        *since += 1;
-        if *since >= CANCEL_STRIDE {
-            *since = 0;
-            cancel.check()?;
-        }
-        match plan.read(root, slot, row) {
-            Ok(bar) => month.fold(&bar, 0, volume),
-            Err(why) => {
-                all_read = false;
-                faults.push(why);
-            }
-        }
-    }
-    if all_read && let Some(key) = key {
+    // A ROW THAT WILL NOT READ IS THE PLAN'S TO NAME, once a month (see
+    // `SeriesPlan::read_stretch`); a fold that missed one is never held.
+    let missed = plan.read_stretch(root, slot, (start, end), cancel, since, |_, bar| {
+        month.fold(bar, 0, volume);
+    })?;
+    if missed == 0
+        && let Some(key) = key
+    {
         CUT_EXTREMES.put(key, month);
     }
     let mut out = Extremes::default();
     out.merge(&month, Some(series));
-    Ok((out, end - start))
+    Ok((out, (end - start).saturating_sub(missed)))
 }
 
 /// The build command for months that had no usable index.
@@ -1749,6 +1760,11 @@ fn page_once(
         ));
     };
     let desc = query.desc;
+    // ONE ATTEMPT, ONE COUNT: a page asked again (see `page`) starts its
+    // unread ledger again.
+    for plan in plans.iter_mut() {
+        plan.clear_unread();
+    }
     let mut views = HashMap::with_capacity(plans.iter().map(|plan| plan.slots.len()).sum());
     let mut cuts = cut(root, plans, query, &mut views);
     cancel.check()?;
@@ -1942,6 +1958,7 @@ fn page_once(
     let mut kept_valued = 0_u64;
     let mut scanned_extremes = Extremes::default();
     let mut since = 0_u64;
+    let mut unread_sorted = 0_u64;
     for cut in &cuts {
         let Some(series_rules) = rules.get(cut.series) else {
             continue;
@@ -1961,52 +1978,44 @@ fn page_once(
             let Some(plan) = plans.get_mut(cut.series) else {
                 continue;
             };
-            for row in start..end {
-                since += 1;
-                if since >= CANCEL_STRIDE {
-                    since = 0;
-                    cancel.check()?;
-                }
-                let bar = match plan.read(root, slot, row) {
-                    Ok(bar) => bar,
-                    Err(why) => {
-                        faults.push(why);
-                        continue;
+            // A MONTH THAT WILL NOT OPEN IS NOT TRIED ROW BY ROW, and a row
+            // that will not read is counted, not named: one fault a month
+            // (see `SeriesPlan::read_stretch`).
+            unread_sorted +=
+                plan.read_stretch(root, slot, (start, end), cancel, &mut since, |row, bar| {
+                    if query.want_extremes {
+                        scanned_extremes.fold(bar, cut.series, volume);
                     }
-                };
-                if query.want_extremes {
-                    scanned_extremes.fold(&bar, cut.series, volume);
-                }
-                if !joins {
-                    continue;
-                }
-                let v = column.of(&bar);
-                let null = column.nullable() && v == OI_NULL;
-                if !null {
-                    kept_valued += 1;
-                }
-                joined += 1;
-                let candidate = Kept {
-                    key: Key {
-                        null,
-                        vkey: if null { 0 } else { vkey(v, desc) },
-                        ts: bar.ts_micros,
-                        series,
-                    },
-                    run: cut.run,
-                    row,
-                };
-                if worst
-                    .as_ref()
-                    .is_some_and(|worst| order(&candidate, worst).is_ge())
-                {
-                    continue;
-                }
-                if kept.len() == capacity {
-                    worst = keep_best(&mut kept, keep, order);
-                }
-                kept.push(candidate);
-            }
+                    if !joins {
+                        return;
+                    }
+                    let v = column.of(bar);
+                    let null = column.nullable() && v == OI_NULL;
+                    if !null {
+                        kept_valued += 1;
+                    }
+                    joined += 1;
+                    let candidate = Kept {
+                        key: Key {
+                            null,
+                            vkey: if null { 0 } else { vkey(v, desc) },
+                            ts: bar.ts_micros,
+                            series,
+                        },
+                        run: cut.run,
+                        row,
+                    };
+                    if worst
+                        .as_ref()
+                        .is_some_and(|worst| order(&candidate, worst).is_ge())
+                    {
+                        return;
+                    }
+                    if kept.len() == capacity {
+                        worst = keep_best(&mut kept, keep, order);
+                    }
+                    kept.push(candidate);
+                })?;
         }
     }
     keep_best(&mut kept, keep, order);
@@ -2186,7 +2195,6 @@ fn page_once(
                         slot,
                         (start, end),
                         (cut.series, volume),
-                        faults,
                         cancel,
                         &mut since,
                     )?;
@@ -2197,6 +2205,17 @@ fn page_once(
                 }
             }
         }
+    }
+    // WHAT WOULD NOT READ: one fault a month, the months named on the wire as
+    // NOT read, and no extreme served — an extreme folded from the months
+    // that did read is not the window's, and would look exactly like it.
+    let unread = unread_of(plans, faults, &mut report);
+    report.scanned_rows = read_rows.saturating_sub(unread_sorted);
+    if let Some(why) = unread.withheld()
+        && extremes.is_some()
+    {
+        extremes = None;
+        extremes_why = Some(why);
     }
     let k = u64::try_from(offset).unwrap_or(u64::MAX);
     let chosen = if k >= total {
@@ -2253,7 +2272,7 @@ fn page_once(
                 match plan.read(root, slot, row) {
                     Ok(bar) => (series, run, row, bar),
                     Err(why) => {
-                        faults.push(why);
+                        push_once(faults, why);
                         continue;
                     }
                 }
@@ -2280,14 +2299,14 @@ fn page_once(
                 let row = match plan.locate(root, slot, ts) {
                     Ok(row) => row,
                     Err(why) => {
-                        faults.push(why);
+                        push_once(faults, why);
                         continue;
                     }
                 };
                 let bar = match plan.read(root, slot, row) {
                     Ok(bar) => bar,
                     Err(why) => {
-                        faults.push(why);
+                        push_once(faults, why);
                         continue;
                     }
                 };
@@ -2330,7 +2349,7 @@ fn page_once(
         page,
         extremes,
         extremes_why,
-        scanned: read_rows + extremes_read,
+        scanned: read_rows.saturating_sub(unread_sorted) + extremes_read,
         report,
     })
 }
@@ -2358,6 +2377,9 @@ pub(super) fn extremes_of(
     faults: &mut Vec<String>,
     cancel: &Cancel,
 ) -> Result<(Extremes, u64), String> {
+    for plan in plans.iter_mut() {
+        plan.clear_unread();
+    }
     let mut views = HashMap::with_capacity(plans.iter().map(|plan| plan.slots.len()).sum());
     let cuts = cut(root, plans, query, &mut views);
     let mut extremes = Extremes::default();
@@ -2436,7 +2458,6 @@ pub(super) fn extremes_of(
                 slot,
                 (start, end),
                 (series, volume),
-                faults,
                 cancel,
                 &mut since,
             )?;
@@ -2445,28 +2466,86 @@ pub(super) fn extremes_of(
             continue;
         }
         let mut month = Extremes::default();
-        let mut all_read = true;
-        for row in start..end {
-            since += 1;
-            if since >= CANCEL_STRIDE {
-                since = 0;
-                cancel.check()?;
-            }
-            match plan.read(root, slot, row) {
-                Ok(bar) => month.fold(&bar, 0, volume),
-                Err(why) => {
-                    all_read = false;
-                    faults.push(why);
-                }
-            }
-        }
-        rows += end - start;
-        if all_read && let Some(at) = plan.slots.get(slot) {
+        let missed =
+            plan.read_stretch(root, slot, (start, end), cancel, &mut since, |_, bar| {
+                month.fold(bar, 0, volume);
+            })?;
+        rows += (end - start).saturating_sub(missed);
+        if missed == 0
+            && let Some(at) = plan.slots.get(slot)
+        {
             super::MONTH_EXTREMES.put((at.path.clone(), at.stamp), month);
         }
         extremes.merge(&month, Some(series));
     }
-    Ok((extremes, rows))
+    // A MONTH THAT WOULD NOT READ WITHHOLDS THE EXTREMES, by name: what the
+    // other months fold to is not the window's extreme.
+    let unread = unread_of(plans, faults, &mut SortReport::default());
+    match unread.withheld() {
+        Some(why) => Err(why),
+        None => Ok((extremes, rows)),
+    }
+}
+
+/// What a request's stretch reads left unread, drained from every plan: one
+/// fault a month into `faults`, the first [`MAX_NAMED`] months and the counts
+/// into `report`.
+fn unread_of(
+    plans: &mut [SeriesPlan],
+    faults: &mut Vec<String>,
+    report: &mut SortReport,
+) -> Unread {
+    let mut out = Unread::default();
+    for plan in plans.iter_mut() {
+        let before = faults.len();
+        let left = plan.take_unread(faults);
+        out.rows = out.rows.saturating_add(left.rows);
+        out.months += left.months;
+        for line in faults.get(before..).unwrap_or_default() {
+            if out.first.is_none() {
+                out.first = Some(line.clone());
+            }
+            if report.unread_why.len() < MAX_NAMED {
+                report
+                    .unread_why
+                    .push(format!("{} {line}", plan.key.text()));
+            }
+        }
+    }
+    report.unread_rows = out.rows;
+    report.unread_months = out.months;
+    out
+}
+
+/// What [`unread_of`] drained.
+#[derive(Debug, Default)]
+struct Unread {
+    rows: u64,
+    months: usize,
+    first: Option<String>,
+}
+
+impl Unread {
+    /// Why the extremes are withheld, when any row would not read.
+    fn withheld(&self) -> Option<String> {
+        (self.rows > 0).then(|| {
+            format!(
+                "months_unread: {} kept rows in {} held month(s) of this window would not read, \
+                 so its extremes are not known and none is served (the first: {})",
+                self.rows,
+                self.months,
+                self.first.as_deref().unwrap_or("")
+            )
+        })
+    }
+}
+
+/// Adds `why` to `faults` unless it is the fault just added: a month that
+/// will not open answers every row of a page in the same words, once.
+fn push_once(faults: &mut Vec<String>, why: String) {
+    if faults.last() != Some(&why) {
+        faults.push(why);
+    }
 }
 
 #[cfg(test)]

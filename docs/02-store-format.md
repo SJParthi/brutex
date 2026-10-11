@@ -811,7 +811,15 @@ append is written WHOLE as one run into `<yyyy-mm>.new.srt`, synced, and
 renamed over the name; a file is never edited in place, and the only bytes an
 append may overwrite are those past the last valid run, which no reader used.
 `cli srt-build` writes named months whole the same way, beside the generation
-every reader opens (D-3350). A failed run never refuses the commit before it:
+every reader opens (D-3350). **It keeps a month as it is only after reading
+its run's body against the body checksum in the run header** (one read of the
+file, about 20 MB for a one-second month): a walk reads headers, so a flipped
+byte in a fence table or a block passes a walk, and a month kept on its
+headers alone would be reported indexed while every reader that reached the
+byte set it aside. A month whose body fails is written whole again, its
+`store.srt` line saying so; `--dry-run` makes the same check and writes
+nothing. A `<yyyy-mm>.new.srt` a dead build left beside a kept index is
+removed under the month's lock. A failed run never refuses the commit before it:
 it is a `store.srt` warning, and a reader reads the uncovered rows itself.
 
 **Only the last appended run can be torn, and every walk checks it.** An

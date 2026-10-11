@@ -529,6 +529,15 @@ pub enum Why {
     Empty,
     /// Reading or writing the file was refused.
     Unreadable(String),
+    /// The body of a run — every byte after its header — fails the checksum
+    /// the header holds: a fence table or a block of it is damaged, and a
+    /// reader that reaches the damage refuses the month.
+    Body {
+        /// The run's first row.
+        start: u64,
+        /// One past its last.
+        end: u64,
+    },
 }
 
 impl fmt::Display for Why {
@@ -573,6 +582,11 @@ impl fmt::Display for Why {
             }
             Self::Empty => f.write_str("a sort run of no rows is never written"),
             Self::Unreadable(why) => write!(f, "the .srt sort index would not read: {why}"),
+            Self::Body { start, end } => write!(
+                f,
+                "the body of the .srt run ordering rows {start}..{end} fails the checksum its \
+                 header holds: a fence table or a block of it is damaged"
+            ),
         }
     }
 }
@@ -981,6 +995,34 @@ fn body_whole(
     Ok(crc == run.body_crc)
 }
 
+/// Checks the body of every run in `runs` against the checksum its header
+/// holds: the whole file read once, in pieces of at most `BODY_READ` bytes.
+///
+/// [`walk`] reads headers only (and the body of a last appended run, the one
+/// a crash can tear), so a flipped byte in a fence table or a block is found
+/// by the reader that reaches it and by nothing sooner. This is the check a
+/// REBUILD makes before it keeps a month as it is: O(file), about 20 MB for a
+/// one-second month, and never run by a reader serving a page.
+///
+/// # Errors
+///
+/// [`Why::Body`] naming the first run whose body fails; [`Why::Unreadable`]
+/// for a read the host refused.
+pub fn verify_bodies(
+    mut read: impl FnMut(u64, &mut [u8]) -> io::Result<()>,
+    runs: &[RunInfo],
+) -> Result<(), Why> {
+    for run in runs {
+        if !body_whole(&mut read, run).map_err(|why| Why::Unreadable(why.to_string()))? {
+            return Err(Why::Body {
+                start: run.start,
+                end: run.end,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// What a walk of a sort index file found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Walked {
@@ -1227,6 +1269,19 @@ impl SortIndex {
     #[must_use]
     pub const fn walked(&self) -> &Walked {
         &self.walked
+    }
+
+    /// Checks every run's body against its header's checksum: see
+    /// [`verify_bodies`]. O(file) — a rebuild's check, not a page's.
+    ///
+    /// # Errors
+    ///
+    /// [`Why::Body`], or [`Why::Unreadable`].
+    pub fn verify(&self) -> Result<(), Why> {
+        verify_bodies(
+            |at, buf| self.file.read_exact_at(buf, at),
+            &self.walked.runs,
+        )
     }
 
     /// The valid runs, in row order.

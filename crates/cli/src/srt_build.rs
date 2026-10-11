@@ -375,10 +375,18 @@ impl Line {
 
 /// How a reader now sees the month's index: one run over every row, or why
 /// not.
+///
+/// `body` also reads the run's body against the checksum its header holds
+/// (one read of the file): a reader that reaches a damaged fence table or
+/// block refuses the month, so a receipt that looked at headers alone would
+/// call `indexed` an index every reader sets aside. The build step passes
+/// `false` only for a month the store has just kept, which made the same
+/// check under the month's lock.
 fn reader_view(
     root: &Path,
     path: StorePath<'_>,
     symbol_id: u32,
+    body: bool,
 ) -> Result<(u64, Option<String>), StoreError> {
     // THE GENERATION EVERY READER OPENS (D-3350): `open_existing` resolves
     // it, and the `.srt` a reader reads sits beside the `.bin` it opened.
@@ -402,6 +410,7 @@ fn reader_view(
                         .map_err(|why| why.to_string())
                 },
             )
+            .and_then(|_| if body { index.verify() } else { Ok(()) })
             .err()
             .map(|why| why.to_string())
         }
@@ -437,6 +446,9 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         }
     };
     let n_valid = done.n_valid;
+    // A KEPT MONTH'S BODY WAS JUST CHECKED BY THE STORE, under the lock; a
+    // built one is read back whole here.
+    let read_back_body = !matches!(done.outcome, Resorted::Kept);
     let line = match done.outcome {
         Resorted::Kept => Line::Kept { n_valid },
         Resorted::Built(because) => Line::Built { n_valid, because },
@@ -448,7 +460,7 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
             };
         }
     };
-    match reader_view(root, path, symbol_id) {
+    match reader_view(root, path, symbol_id, read_back_body) {
         Ok((_, None)) => line,
         Ok((_, Some(reader))) => Line::NotIndexed { n_valid, reader },
         Err(why) => Line::Refused {
@@ -459,7 +471,7 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
 
 /// One month as a reader sees it, writing nothing.
 fn inspect(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
-    match reader_view(root, path, symbol_id) {
+    match reader_view(root, path, symbol_id, true) {
         Ok((0, _)) => Line::Empty,
         Ok((n_valid, None)) => Line::Indexed { n_valid },
         Ok((n_valid, Some(why))) => Line::WouldBuild { n_valid, why },
@@ -475,7 +487,7 @@ fn render_line(out: &mut String, label: &str, line: &Line) {
     let _ = match line {
         Line::Kept { n_valid } => writeln!(
             out,
-            "  {label}  kept          {n_valid:>9} bars  already one run; nothing written"
+            "  {label}  kept          {n_valid:>9} bars  already one run, its body whole; nothing written"
         ),
         Line::Built { n_valid, because } => writeln!(
             out,

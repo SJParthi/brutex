@@ -863,6 +863,51 @@ fn note_cancelled<T>(route: &str, answered: &Result<T, String>) {
     }
 }
 
+/// Faults one answer names in full; past it the rest are counted.
+///
+/// **The body is bounded whatever went wrong.** The readers name a month
+/// once however many of its rows would not read, and this is the second
+/// bound, for a window of many series: `MAX_FAULTS_NAMED` reasons of at most
+/// `MAX_FAULT_BYTES` each, then one count.
+const MAX_FAULTS_NAMED: usize = 64;
+
+/// Bytes of one fault an answer carries; a longer one is cut and says so.
+const MAX_FAULT_BYTES: usize = 512;
+
+/// The `faults` field: `null` for none, else the reasons joined, capped at
+/// [`MAX_FAULTS_NAMED`] with the count of the rest.
+fn faults_json(faults: &[&str]) -> String {
+    if faults.is_empty() {
+        return "null".to_owned();
+    }
+    let mut named: Vec<String> = faults
+        .iter()
+        .take(MAX_FAULTS_NAMED)
+        .map(|fault| {
+            if fault.len() <= MAX_FAULT_BYTES {
+                (*fault).to_owned()
+            } else {
+                let mut cut = MAX_FAULT_BYTES;
+                while !fault.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!(
+                    "{} [cut: {} more bytes]",
+                    fault.get(..cut).unwrap_or_default(),
+                    fault.len() - cut
+                )
+            }
+        })
+        .collect();
+    if faults.len() > MAX_FAULTS_NAMED {
+        named.push(format!(
+            "and {} more fault(s) not listed here",
+            faults.len() - MAX_FAULTS_NAMED
+        ));
+    }
+    render::json_string(&named.join("; "))
+}
+
 /// What a value sort served from sort indexes and what it read, as JSON, or
 /// `null` for a time-ordered page (D-3349).
 fn sort_index_json(report: Option<&bars::SortReport>) -> String {
@@ -874,7 +919,7 @@ fn sort_index_json(report: Option<&bars::SortReport>) -> String {
                 format!("[{}]", joined.join(","))
             };
             format!(
-                r#"{{"column":{},"by_time":{},"indexed_rows":{},"indexed_runs":{},"cut_runs":{},"scanned_rows":{},"scanned_months":{},"scanned_why":{},"build":{}}}"#,
+                r#"{{"column":{},"by_time":{},"indexed_rows":{},"indexed_runs":{},"cut_runs":{},"scanned_rows":{},"scanned_months":{},"scanned_why":{},"unread_rows":{},"unread_months":{},"unread_why":{},"build":{}}}"#,
                 render::json_string(report.column),
                 report.by_time,
                 report.indexed_rows,
@@ -883,6 +928,9 @@ fn sort_index_json(report: Option<&bars::SortReport>) -> String {
                 report.scanned_rows,
                 report.scanned_months,
                 list(&report.scanned_why),
+                report.unread_rows,
+                report.unread_months,
+                list(&report.unread_why),
                 list(&report.build),
             )
         },
@@ -1121,11 +1169,7 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
             .extremes_why
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
-        if faults.is_empty() {
-            "null".to_owned()
-        } else {
-            render::json_string(&faults.join("; "))
-        }
+        faults_json(&faults)
     );
     (body, withheld.len(), !window.faults.is_empty())
 }
@@ -1141,6 +1185,36 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
 )]
 mod tests {
     use super::*;
+
+    /// **THE `faults` FIELD IS BOUNDED WHATEVER WENT WRONG.** None is `null`;
+    /// a few are joined as they are; 100,000 are the first
+    /// `MAX_FAULTS_NAMED` and a count of the rest; one of a megabyte is cut
+    /// and says how much was cut. The field was `faults.join("; ")` of
+    /// everything — 59 MB for a month another process held.
+    #[test]
+    fn the_faults_field_is_bounded_whatever_went_wrong() {
+        assert_eq!(faults_json(&[]), "null");
+        assert_eq!(faults_json(&["a", "b"]), r#""a; b""#);
+        let one = "2025-03: another writer holds the month";
+        let many = vec![one; 100_000];
+        let field = faults_json(&many);
+        assert_eq!(field.matches(one).count(), MAX_FAULTS_NAMED);
+        assert!(
+            field.contains(&format!(
+                "and {} more fault(s) not listed here",
+                100_000 - MAX_FAULTS_NAMED
+            )),
+            "{}",
+            &field[field.len() - 80..]
+        );
+        let bound = MAX_FAULTS_NAMED * (MAX_FAULT_BYTES + 40) + 80;
+        assert!(field.len() < bound, "{} bytes", field.len());
+        // 1,000,001 BYTES WHOSE 512TH IS INSIDE A CHARACTER: cut at 511.
+        let long = format!("x{}", "é".repeat(500_000));
+        let field = faults_json(&[long.as_str(); 200]);
+        assert!(field.len() < bound, "{} bytes", field.len());
+        assert!(field.contains("[cut: 999490 more bytes]"), "a cut is named");
+    }
     use crate::server::Site;
     use crate::server::tests::{masters, store_root};
     use brutex_core::vendor::Vendor;

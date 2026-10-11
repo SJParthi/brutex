@@ -357,9 +357,12 @@ impl BarFile {
     /// non-blocking, so a writer or a reader mid-request is
     /// [`StoreError::Locked`] and nothing is written; no link below the root
     /// is followed. A month already held as one run that describes these bars
-    /// is [`Resorted::Kept`] after its header reads, so a rerun is safe and
-    /// changes no byte. Anything else is written whole into a NEW file renamed
-    /// over the name — never edited in place.
+    /// AND whose body matches the checksum its header holds is
+    /// [`Resorted::Kept`] — its headers and one read of the file — so a rerun
+    /// is safe and changes no byte of it (a `.new.srt` a dead build left
+    /// beside it is removed). Anything else — a damaged body among it — is
+    /// written whole into a NEW file renamed over the name, never edited in
+    /// place.
     ///
     /// # Errors
     ///
@@ -403,11 +406,23 @@ impl BarFile {
                 Ok(coverage)
                     if coverage == n_valid && walked.runs.len() == 1 && walked.torn.is_none() =>
                 {
-                    return Ok(SortIndexed {
-                        n_valid,
-                        runs: 1,
-                        outcome: Resorted::Kept,
-                    });
+                    // KEPT ONLY WHEN ITS BODY IS WHOLE. The walk read headers:
+                    // a flipped byte in a fence table or a block passes it, a
+                    // reader that reaches the byte refuses the month and
+                    // prints this door's command, and a door that answered
+                    // `kept` would be the repair that hides the damage. One
+                    // read of the file (about 20 MB a one-second month).
+                    match damaged(&sidecar, &walked).map_err(refused)? {
+                        None => {
+                            clear_staging(&sidecar).map_err(refused)?;
+                            return Ok(SortIndexed {
+                                n_valid,
+                                runs: 1,
+                                outcome: Resorted::Kept,
+                            });
+                        }
+                        Some(why) => why.to_string(),
+                    }
                 }
                 Ok(coverage) if coverage < n_valid => {
                     format!("its runs order rows 0..{coverage} of {n_valid}")
@@ -468,6 +483,46 @@ fn write_image(sidecar: &SortSidecar, run: &[u8]) -> Result<(), String> {
     )
     .map_err(io)?;
     fsync_dir(sidecar.path.parent().unwrap_or(&sidecar.path)).map_err(io)
+}
+
+/// Why the walked index's bodies are not whole, or `None` when every run's
+/// body matches the checksum its header holds
+/// ([`sort_index::verify_bodies`]).
+fn damaged(sidecar: &SortSidecar, walked: &Walked) -> Result<Option<Why>, String> {
+    let file = open_read(&sidecar.path).map_err(|why| why.refusal(&sidecar.path).to_string())?;
+    match sort_index::verify_bodies(|at, buf| file.read_exact_at(buf, at), &walked.runs) {
+        Ok(()) => Ok(None),
+        Err(Why::Unreadable(why)) => Err(format!("{}: {why}", sidecar.path.display())),
+        Err(why) => Ok(Some(why)),
+    }
+}
+
+/// Removes `<yyyy-mm>.new.srt` when a build that died left one beside an
+/// index that is kept: the staging name is never a month's index (only a
+/// rename makes one), the month's lock is held, and a build that writes
+/// would have cut it. Nothing is removed that is not a regular file.
+fn clear_staging(sidecar: &SortSidecar) -> Result<(), String> {
+    let staging = sidecar.staging();
+    match fs::symlink_metadata(&staging) {
+        Ok(meta) if meta.is_file() => {
+            fs::remove_file(&staging).map_err(|why| format!("{}: {why}", staging.display()))?;
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::info("store.srt", "staging file of a dead build removed")
+                    .with(
+                        "file",
+                        telemetry::Value::Str(&staging.display().to_string()),
+                    )
+                    .with("bytes", telemetry::Value::Uint(meta.len())),
+            );
+            Ok(())
+        }
+        Ok(_) => Err(format!(
+            "{} is not a regular file; it is left as it is",
+            staging.display()
+        )),
+        Err(why) if why.kind() == ErrorKind::NotFound => Ok(()),
+        Err(why) => Err(format!("{}: {why}", staging.display())),
+    }
 }
 
 /// The month's index, walked: `None` when there is none, the refusal

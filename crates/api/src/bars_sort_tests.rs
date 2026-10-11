@@ -583,6 +583,262 @@ fn a_month_without_its_index_is_read_named_and_given_its_build_command() {
     );
 }
 
+/// Holds `month` of the first contract EXCLUSIVE, as an import writer or
+/// `cli srt-build` holds it, without writing a byte.
+fn hold(root: &Root, month: YearMonth) -> store::flock::Flock<std::fs::File> {
+    let [ce, ..] = keys();
+    let lock = path(&ce, month, FileKind::Lock).to_path_buf(&root.0);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)
+        .unwrap();
+    store::flock::Flock::try_lock(file, lock)
+        .unwrap_or_else(|_| panic!("the month's lock is free in this test"))
+}
+
+/// **A MONTH THAT WILL NOT OPEN IS ONE FAULT, NOT ONE A ROW.** February is
+/// held by another writer while a value sort has to READ it (no month of the
+/// contract has an index). Every row of the month was tried and each pushed
+/// the same refusal: 360 fault strings here, 424,558 and a 59 MB answer on
+/// one-second bars, `MAX_SCAN_BARS` of them by the budget's arithmetic — and
+/// the extremes were folded from the other two months with `extremes_why`
+/// null. Now: one fault naming the month and its 360 rows; the report says
+/// those rows were NOT read; the page is the brute force of the months that
+/// did read; the extremes are withheld by name. The same under a time-of-day
+/// bound (one stretch a day, still one fault a month), for the extremes of a
+/// time-ordered page, and for an INDEXED month whose page rows will not
+/// open. Released, the whole order and its extremes come back.
+#[test]
+fn a_month_that_will_not_open_is_one_fault_and_withholds_the_extremes() {
+    let root = Root::new("held");
+    write(&root);
+    let [ce, ..] = keys();
+    let feb = months()[1];
+    let unindex = |root: &Root| {
+        for month in months() {
+            let _ =
+                std::fs::remove_file(path(&ce, month, FileKind::SortIndex).to_path_buf(&root.0));
+        }
+    };
+    unindex(&root);
+    let rest: Vec<(u32, Bar)> = every(&[0])
+        .into_iter()
+        .filter(|(_, b)| {
+            !(feb.ist_bounds_micros().0..feb.ist_bounds_micros().1).contains(&b.ts_micros)
+        })
+        .collect();
+    assert_eq!(rest.len(), 720);
+    // THE SERVER HAS SEEN THE MONTH: its header facts are held by the file's
+    // stamp, so the plan counts February's rows without opening it and the
+    // refusal is met by the read.
+    window(
+        &root.0,
+        &query(&[0], Column::Close, true, 0, Filter::default()),
+    )
+    .unwrap();
+    let held = hold(&root, feb);
+    for column in [Column::Close, Column::Volume] {
+        let mut ask = query(&[0], column, true, 0, Filter::default());
+        ask.want_extremes = true;
+        let answer = window(&root.0, &ask).unwrap();
+        assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+        let fault = &answer.faults[0];
+        assert!(
+            fault.contains("2031-02") && fault.contains("none of its 360 kept rows"),
+            "{fault}"
+        );
+        let report = answer.sort_index.clone().unwrap();
+        assert_eq!(
+            (report.unread_rows, report.unread_months),
+            (360, 1),
+            "{report:?}"
+        );
+        assert_eq!(report.scanned_rows, 720, "{report:?}");
+        assert_eq!(report.unread_why.len(), 1);
+        assert!(report.unread_why[0].contains("2031-02"), "{report:?}");
+        assert_eq!(answer.scan_rows, 720);
+        let want: Vec<(i64, u32)> = brute(&rest, &[0], column, true)
+            .into_iter()
+            .take(37)
+            .collect();
+        assert_eq!(served(&answer), want, "{}", column.as_str());
+        assert!(
+            answer.extremes.is_none(),
+            "never the readable months' extremes"
+        );
+        let why = answer.extremes_why.unwrap();
+        assert!(
+            why.starts_with("months_unread: 360 kept rows in 1 held month(s)"),
+            "{why}"
+        );
+    }
+    // RELEASED: the whole order, and its extremes.
+    drop(held);
+    unindex(&root);
+    let mut ask = query(&[0], Column::Close, true, 0, Filter::default());
+    ask.want_extremes = true;
+    let answer = window(&root.0, &ask).unwrap();
+    assert!(answer.faults.is_empty(), "{:?}", answer.faults);
+    let report = answer.sort_index.clone().unwrap();
+    assert_eq!((report.unread_rows, report.scanned_rows), (0, 1_080));
+    assert!(answer.extremes.is_some() && answer.extremes_why.is_none());
+    let want: Vec<(i64, u32)> = brute(&every(&[0]), &[0], Column::Close, true)
+        .into_iter()
+        .take(37)
+        .collect();
+    assert_eq!(served(&answer), want);
+}
+
+/// **ONE FAULT A MONTH HOWEVER THE ROWS ARE REACHED.** February held as
+/// above: under a time-of-day bound a value sort reads one stretch a day, and
+/// the month is still one fault; the extremes of a TIME-ordered page are
+/// withheld by the same name; and when the months are indexed but February's
+/// bars will not open, no row of it is on the page and it is named once.
+#[test]
+fn a_held_month_is_one_fault_under_a_time_of_day_bound_and_in_time_order() {
+    let root = Root::new("held-tod");
+    write(&root);
+    let [ce, ..] = keys();
+    let feb = months()[1];
+    let srt: Vec<Vec<u8>> = months()
+        .iter()
+        .map(|&m| std::fs::read(path(&ce, m, FileKind::SortIndex).to_path_buf(&root.0)).unwrap())
+        .collect();
+    for month in months() {
+        std::fs::remove_file(path(&ce, month, FileKind::SortIndex).to_path_buf(&root.0)).unwrap();
+    }
+    let tod = Filter {
+        from: None,
+        to: None,
+        tod: Some((9 * 3_600 + 40 * 60, 10 * 3_600 + 5 * 60)),
+    };
+    // SEEN BEFORE IT IS HELD, under both shapes asked below.
+    window(&root.0, &query(&[0], Column::High, true, 0, tod)).unwrap();
+    window(
+        &root.0,
+        &query(&[0], Column::Close, true, 0, Filter::default()),
+    )
+    .unwrap();
+    let _held = hold(&root, feb);
+    // A TIME-OF-DAY BOUND READS ONE STRETCH A DAY: still one fault a month.
+    let answer = window(&root.0, &query(&[0], Column::High, true, 0, tod)).unwrap();
+    assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+    let report = answer.sort_index.unwrap();
+    assert_eq!(report.unread_months, 1, "{report:?}");
+    assert!(report.unread_rows > 0 && report.unread_rows + report.scanned_rows == answer.total);
+    // THE EXTREMES OF A TIME-ORDERED PAGE: withheld the same way.
+    let mut by_time = query(&[0], Column::Close, false, 0, Filter::default());
+    by_time.sort = SortKey::Ts;
+    by_time.want_extremes = true;
+    let answer = window(&root.0, &by_time).unwrap();
+    assert!(answer.extremes.is_none());
+    assert!(
+        answer
+            .extremes_why
+            .as_deref()
+            .is_some_and(|why| why.starts_with("months_unread: 360 kept rows")),
+        "{:?}",
+        answer.extremes_why
+    );
+    assert_eq!(
+        answer
+            .faults
+            .iter()
+            .filter(|f| f.contains("2031-02"))
+            .count(),
+        1,
+        "{:?}",
+        answer.faults
+    );
+    // INDEXED, AND ITS BARS HELD: the page rows of February name it once.
+    for (month, bytes) in months().iter().zip(&srt) {
+        std::fs::write(
+            path(&ce, *month, FileKind::SortIndex).to_path_buf(&root.0),
+            bytes,
+        )
+        .unwrap();
+    }
+    let mut indexed = query(&[0], Column::Close, true, 0, Filter::default());
+    indexed.limit = 500;
+    let answer = window(&root.0, &indexed).unwrap();
+    let (lo, hi) = feb.ist_bounds_micros();
+    assert!(
+        answer
+            .bars
+            .iter()
+            .all(|row| !(lo..hi).contains(&row.bar.ts_micros)),
+        "no row of February is on the page"
+    );
+    assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+    assert!(answer.faults[0].contains("2031-02"), "{:?}", answer.faults);
+}
+
+/// **A HELD MONTH NO PLAN COULD READ WITHHOLDS THE EXTREMES TOO.** A server
+/// that has not seen February before it is held cannot read its header: the
+/// month is one fault from the plan and is in no total. The extremes were
+/// served all the same, folded from January and March, with `extremes_why`
+/// null. They are withheld by name, for a value order and a time order.
+#[test]
+fn a_month_the_plan_cannot_read_withholds_the_extremes() {
+    let root = Root::new("held-cold");
+    write(&root);
+    let _held = hold(&root, months()[1]);
+    for sort in [SortKey::Close, SortKey::Ts] {
+        let mut ask = query(&[0], Column::Close, false, 0, Filter::default());
+        ask.sort = sort;
+        ask.want_extremes = true;
+        let answer = window(&root.0, &ask).unwrap();
+        assert_eq!(answer.total, 720, "February is in no total");
+        assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+        assert!(answer.faults[0].contains("2031-02"), "{:?}", answer.faults);
+        assert!(answer.extremes.is_none(), "{sort:?}");
+        assert!(
+            answer.extremes_why.as_deref().is_some_and(|why| why
+                .starts_with("months_unread: 1 held month(s) of this window would not open")),
+            "{sort:?}: {:?}",
+            answer.extremes_why
+        );
+        assert_eq!(answer.bars.len(), 37);
+    }
+}
+
+/// **A TORN INDEX IS SAID TO BE TORN.** March's `.srt` is cut in the middle
+/// of its last run: the walk keeps the runs before the tear and the rows
+/// behind it are read. They were reported as "appended after its sort
+/// index" — rows no one appended; the reason now says the index is torn,
+/// where, and that a rebuild writes it whole.
+#[test]
+fn rows_behind_a_torn_index_are_said_to_be_behind_a_tear() {
+    let root = Root::new("torn");
+    write(&root);
+    let [ce, ..] = keys();
+    let march = path(&ce, months()[2], FileKind::SortIndex).to_path_buf(&root.0);
+    let len = std::fs::metadata(&march).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&march)
+        .unwrap()
+        .set_len(len - 40)
+        .unwrap();
+    let answer = window(
+        &root.0,
+        &query(&[0], Column::Close, false, 0, Filter::default()),
+    )
+    .unwrap();
+    let report = answer.sort_index.unwrap();
+    assert_eq!(report.scanned_rows, 360 - 260, "{report:?}");
+    let why = &report.scanned_why[0];
+    assert!(
+        why.contains("2031-03") && why.contains("is torn") && why.contains("0..260"),
+        "{why}"
+    );
+    assert!(!why.contains("appended after"), "{why}");
+    assert!(answer.faults.is_empty(), "{:?}", answer.faults);
+}
+
 /// **A MONTH WHOSE INDEX FAILS WHILE IT IS READ IS SET ASIDE, NOT SERVED AND
 /// NOT FATAL.** A block of February's first run fails its checksum (the walk
 /// does not read an earlier run whole): the page is asked again with

@@ -50,7 +50,7 @@ use store::file::BarFile;
 use store::format::Bar;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
-use super::{OpenRefusalKind, open_classified};
+use super::{Cancel, OpenRefusalKind, open_classified};
 
 /// Microseconds in one second.
 pub(super) const MICROS: i64 = 1_000_000;
@@ -585,6 +585,40 @@ pub(super) struct SeriesPlan {
     pub(super) outside_life: usize,
     /// Months that are held and would not read, named.
     pub(super) faults: Vec<String>,
+    /// Months a stretch read ([`Self::read_stretch`]) left rows of unread,
+    /// one entry a month whatever the rows.
+    unread: Vec<UnreadMonth>,
+}
+
+/// Rows between two looks at the client's cancellation flag during a read
+/// (DB-N15).
+pub(super) const CANCEL_STRIDE: u64 = 4_096;
+
+/// A month a request asked to read rows of and could not: named ONCE, with
+/// the rows left out, whatever their number.
+///
+/// A month another process holds (an import writer, `cli srt-build`) refuses
+/// to open for every row alike. Named a row at a time, that was one fault
+/// string per row — a 59 MB answer for six months of one-second bars, and up
+/// to `MAX_SCAN_BARS` strings by the budget's own arithmetic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnreadMonth {
+    slot: usize,
+    /// Rows asked for and not read.
+    rows: u64,
+    /// The first reason.
+    why: String,
+    /// The month never opened, so none of its rows was attempted.
+    unopened: bool,
+}
+
+/// What [`SeriesPlan::take_unread`] drained: the rows and months left unread.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Unread {
+    /// Kept rows asked for and not read.
+    pub(super) rows: u64,
+    /// Held months with any such row.
+    pub(super) months: usize,
 }
 
 impl SeriesPlan {
@@ -629,6 +663,7 @@ impl SeriesPlan {
             holes: Vec::new(),
             outside_life: 0,
             faults: Vec::new(),
+            unread: Vec::new(),
         };
         let life = life_of(&plan.key, vendor, &held_all);
         let mut held = held_all.iter().copied().peekable();
@@ -1096,6 +1131,105 @@ impl SeriesPlan {
         let file = self.file(root, slot)?;
         file.read_record(row)
             .map_err(|why| format!("{} record {row}: {why}", file.path().display()))
+    }
+
+    /// Rows `[start, end)` of `slot`, each handed to `each` with its row
+    /// number; the client is asked every [`CANCEL_STRIDE`] rows. Returns the
+    /// rows NOT read.
+    ///
+    /// **A month that will not open is one entry, and none of its rows is
+    /// attempted**: the refusal is the month's, not a row's. A record of an
+    /// open month that will not read is counted under the month's first such
+    /// reason. Either way the month is named once by [`Self::take_unread`],
+    /// so what a read leaves out costs one line a month and the answer stays
+    /// bounded whatever the stretch holds.
+    ///
+    /// # Errors
+    ///
+    /// `cancelled`, by name.
+    pub(super) fn read_stretch(
+        &mut self,
+        root: &Path,
+        slot: usize,
+        (start, end): (u64, u64),
+        cancel: &Cancel,
+        since: &mut u64,
+        mut each: impl FnMut(u64, &Bar),
+    ) -> Result<u64, String> {
+        if end <= start {
+            return Ok(0);
+        }
+        if let Err(why) = self.file(root, slot).map(|_| ()) {
+            self.note_unread(slot, end - start, why, true);
+            return Ok(end - start);
+        }
+        let mut missed = 0_u64;
+        let mut first = None;
+        for row in start..end {
+            *since += 1;
+            if *since >= CANCEL_STRIDE {
+                *since = 0;
+                cancel.check()?;
+            }
+            match self.read(root, slot, row) {
+                Ok(bar) => each(row, &bar),
+                Err(why) => {
+                    missed += 1;
+                    first.get_or_insert(why);
+                }
+            }
+        }
+        if let Some(why) = first {
+            self.note_unread(slot, missed, why, false);
+        }
+        Ok(missed)
+    }
+
+    /// Counts `rows` of `slot` as unread for `why`. Stretches are read in
+    /// slot order, so a month's entry is the last one: one comparison.
+    fn note_unread(&mut self, slot: usize, rows: u64, why: String, unopened: bool) {
+        match self.unread.last_mut() {
+            Some(at) if at.slot == slot => at.rows = at.rows.saturating_add(rows),
+            _ => self.unread.push(UnreadMonth {
+                slot,
+                rows,
+                why,
+                unopened,
+            }),
+        }
+    }
+
+    /// Forgets what earlier stretch reads left unread: a request that asks a
+    /// page again starts its count again.
+    pub(super) fn clear_unread(&mut self) {
+        self.unread.clear();
+    }
+
+    /// Empties the unread ledger into `faults` — ONE line a month, saying the
+    /// reason and the rows not read — and returns what it held.
+    pub(super) fn take_unread(&mut self, faults: &mut Vec<String>) -> Unread {
+        let mut out = Unread::default();
+        for at in std::mem::take(&mut self.unread) {
+            out.rows = out.rows.saturating_add(at.rows);
+            out.months += 1;
+            let month = self
+                .slots
+                .get(at.slot)
+                .map_or_else(String::new, |slot| slot.month.to_string());
+            faults.push(if at.unopened {
+                format!(
+                    "{}; the month did not open, so none of its {} kept rows in this window \
+                     was read",
+                    at.why, at.rows
+                )
+            } else {
+                format!(
+                    "{}; {} kept rows of {month} in this window would not read, this the first",
+                    at.why, at.rows
+                )
+            });
+        }
+        out
     }
 
     /// The last record of the held month `month`, which may lie outside the

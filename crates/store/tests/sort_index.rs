@@ -340,6 +340,73 @@ fn a_run_that_cannot_be_written_never_refuses_the_commit() {
     assert!(matches!(root.index(), Err(Why::Unreadable(_))));
 }
 
+/// **THE REBUILD DOOR NEVER KEEPS AN INDEX A READER REFUSES.** A walk reads
+/// headers, so one flipped byte in a WHOLE run's body — a fence table just
+/// past the run header, or a block near the end — passes it: `coverage` and
+/// the run count are right. A reader that reaches the byte refuses the month
+/// and names this door's command, and the door answered `Kept`: the repair
+/// reported success for a state every reader set aside. Now the body is
+/// checked against the checksum its header holds before a month is kept, and
+/// a damaged one is written whole again — the same bytes as before the
+/// damage — with the reason. A `.new.srt` a dead build left beside a kept
+/// index is removed.
+#[test]
+fn the_rebuild_door_rebuilds_a_whole_run_whose_body_is_damaged() {
+    let root = Root::new();
+    {
+        let mut writer = root.writer();
+        append(&mut writer, &bars(0, 500));
+        append(&mut writer, &bars(500, 1_200));
+    }
+    let first = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
+    assert!(matches!(first.outcome, Resorted::Built(_)));
+    let srt = root.file(FileKind::SortIndex);
+    let good = fs::read(&srt).unwrap();
+    assert_eq!(root.index().unwrap().runs()[0].kind, RunKind::Whole);
+    assert_eq!(root.index().unwrap().verify(), Ok(()));
+    let bars_before = root.digest(FileKind::Bars);
+    for at in [64 + 512 + 24, good.len() - 100] {
+        let mut bad = good.clone();
+        bad[at] ^= 0x40;
+        fs::write(&srt, &bad).unwrap();
+        // THE WALK PASSES IT: headers only.
+        let index = root.index().unwrap();
+        assert_eq!((index.runs().len(), index.coverage()), (1, 1_200));
+        assert!(index.torn().is_none());
+        assert_eq!(
+            index.verify(),
+            Err(Why::Body {
+                start: 0,
+                end: 1_200
+            }),
+            "byte {at}"
+        );
+        let again = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
+        assert!(
+            matches!(&again.outcome, Resorted::Built(why) if why.contains("fails the checksum")),
+            "byte {at}: {:?}",
+            again.outcome
+        );
+        assert_eq!(
+            fs::read(&srt).unwrap(),
+            good,
+            "byte {at}: written whole again"
+        );
+        assert_eq!(root.index().unwrap().verify(), Ok(()));
+    }
+    let staging = srt.with_extension("new.srt");
+    fs::write(&staging, b"half a build").unwrap();
+    let kept = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
+    assert_eq!(kept.outcome, Resorted::Kept);
+    assert!(!staging.exists(), "a dead build's staging file is removed");
+    assert_eq!(
+        fs::read(&srt).unwrap(),
+        good,
+        "a kept index changes no byte"
+    );
+    assert_eq!(root.digest(FileKind::Bars), bars_before);
+}
+
 /// The rebuild door: absent → written whole as one run in a new file;
 /// rerun → kept with no byte changed; several runs → written as one; the bar
 /// file, checksums and time index untouched throughout.
