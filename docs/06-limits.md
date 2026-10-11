@@ -16240,3 +16240,80 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   1.86 ms, p99 6.21 ms, max 8.15 ms; NIFTY 28 Nov 2019 12000 CE p50 1.48 ms,
   p99 2.21 ms, max 5.96 ms (the journal's 2 `run` lines: L-IA-39's term is
   not visible at that size).
+
+## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
+
+Rows landed by WP-81 with the code they bound. Every figure is a closed-loop
+measurement of the release build of commit 9665ee3a over a scratch store
+(`bars/` a real directory of copy-on-write clones; the census is the
+operator's 385,442 GDFL months, nearly all of them `missing` there, which is
+what makes the ledger large): python threads, one connection a client, GET
+only, on a machine also running other builds. Latencies are p50 / p99 / max.
+
+- **L-WP81-1. The first findings index after a start is O(ledger), at most
+  16 MiB a request.** `/scrub.json` and `/disk.json` index the scrub ledger
+  from its start once per process (`scrub_route::INDEX_STEP_BYTES`). Measured
+  on a 160.7 MB ledger (five passes of 385,440 findings): 10 requests of
+  95–160 ms each, every one answering `truncated: true` — and a
+  `standing_findings` of only what was indexed so far, 0 until the newest
+  passes are reached — before the eleventh answered in 0.8 ms. The requests
+  behind an indexing one wait in the operations pool (4 slots, 250 ms, then
+  429 with `Retry-After`), never in the bar seeks' pool. NOT bounded by
+  anything but the ledger's length: see L-WP81-2.
+- **L-WP81-2. The ledger is append-only for ever, and each pass re-appends
+  every standing finding.** 32.1 MB a pass at 385,440 findings; nine passes
+  were 257 MB. Nothing compacts it (append-only law); the index holds one
+  entry per distinct finding the ledger ever named, for the life of the
+  process. A store whose findings are few — the expected case: the operator's
+  store has never been scrubbed, and a healthy pass writes one `run` line —
+  never meets this row.
+- **L-WP81-3. After the first index every answer is bounded, whatever the
+  ledger holds.** Unchanged 32 MB ledger: `/scrub.json` 1 client, n=200,
+  0.11 / 0.21 / 1.74 ms; 20 clients, n=800, 0.90 / 4.11 / 10.41 ms (a second
+  run on the 160 MB ledger with a test suite compiling beside it: 0.76 /
+  34.14 / 37.86 ms). WHILE `cli scrub-blocks` appended three passes (17 s,
+  160 MB to 257 MB): `/scrub.json` 20 clients, n=240,000, all 200, 1.26 /
+  4.18 / 11.81 ms; `/bars/window.json` seeks 16 clients at the same time,
+  n=192,000, all 200, 1.17 / 3.78 / 9.86 ms (16 x 60 with nothing else
+  running: 0.79 / 3.18 / 4.23 ms); `/disk.json` 2 clients, n=12,000, all
+  200, 0.25 / 3.13 / 8.29 ms. Before the repair the same load refused 205 of
+  800 `/scrub.json` answers and 283 of 960 seeks (second agent, 12 Oct), and
+  with the copy removed but the ledger still measured outside the lock,
+  1,055 of 80,000 with waits of up to 869 ms. A request that finds the
+  ledger longer reads and indexes the bytes appended since the last request
+  under the vendor's lock: O(appended), at most 16 MiB.
+- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One `df -Pk`,
+  a stat of each census file, each feed's scrub state. Its uncached
+  measurement at 385,440 standing findings: 3.1–4.5 ms (it was 84–92 ms: a
+  walk and a sort of every finding for 16 names); cached, n=200, 0.06 / 0.17
+  / 1.79 ms.
+- **L-WP81-5. `/bars.json` of a whole month whose `.crc` sidecar is lost is
+  O(blocks of that month) in TIME; its answer is constant-size.** Every block
+  is asked for and refused. GDFL NIFTY 1s 2020-07, 517,292 records, sidecar
+  moved aside: 206, 524 bytes (it was 188.6 MB), n=100, 178.84 / 201.59 /
+  201.59 ms. The newest 50 of that month by `/bars/window.json`: 206, 844
+  bytes, n=200, 0.18 / 0.34 / 1.85 ms; sorted by close with no sort index:
+  206, 1,753 bytes, one sentence for the month and `faulted_records`
+  517,292. Remembering a month's refusal by its file stamp, so the second
+  read costs nothing, is NOT DONE.
+- **L-WP81-6. A scrub pass is O(store), and each run re-reads and sorts the
+  whole census.** 385,442 entries read and sorted per run; a run over the
+  scratch store (19,605 blocks on disk, the rest `missing`) took 6.2 s. Over
+  the operator's ~437 GB a pass is hours at the default 64 MiB/s —
+  extrapolated from the rate, NOT MEASURED. Months an import adds behind the
+  cursor during a pass are the next pass's (`docs/36-ops-runbook.md` §6).
+- **L-WP81-7. A start that writes nothing reads what recovery is in flight:
+  O(records of the activation history and of one plan), once a start.**
+  `recovery::at_start` under `BRUTEX_READ_ONLY=1` or an unstamped build; a
+  shared lock on read-only handles. A store with no `audit/recovery-v1`
+  (the operator's, today) costs one `stat`.
+- **L-WP81-8. A full admission queue refuses.** Every bounded read pool
+  queues a request at most 250 ms among at most 32 waiters, then answers 429
+  with `Retry-After: 1`. Measured on a shadow of the operator's store
+  (bars linked, read-only): `/bars/window.json` NIFTY 1s 2020-07 limit 50 —
+  16 x 30, n=480, 0.92 / 4.85 / 5.84 ms; 64 x 16, n=1,024, 1.57 / 6.07 /
+  8.75; 256 x 8, n=2,048, 1.03 / 4.46 / 7.80 — all 200.
+  `/census/facets.json` NIFTY: all 200 at the same three shapes (p99 4.22,
+  6.78, 5.48 ms). A value sort of a month with no sort index goes to the
+  scan pool of 2 (D-3349's row): 16 x 5 answered 70 x 429, every one with
+  `Retry-After`, and 10 x 200; 16 x 30 seeks straight after: 480 of 480.
