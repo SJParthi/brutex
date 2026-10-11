@@ -124,3 +124,38 @@ export async function readAllRows(queryAt, total, budget, page, signal, request 
   }
   return { bars, faults };
 }
+
+/**
+ * WHAT A VALUE SORT READ INSTEAD OF SERVING FROM SORT INDEXES (D-3349,
+ * DB-N14), as one sentence for the notes under the grid — `null` when every
+ * kept row came from an index, or when the order is not a value sort.
+ *
+ * `/bars/window.json` orders a price, the volume or the open interest from
+ * each month's `.srt` sort index; rows no index orders (a month without one
+ * yet, rows appended after it, any order under a time-of-day bound) are READ,
+ * under a cap, and the answer's `sort_index` names how many, in which months,
+ * why, and the `cli srt-build` command that indexes them. Never a silent slow
+ * sort: the page says what the server said.
+ *
+ * @param {any} answer a `/bars/window.json` body
+ * @returns {string | null}
+ */
+export function sortIndexNote(answer) {
+  const report = answer?.sort_index;
+  if (!report || typeof report !== 'object') return null;
+  const count = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) && Number(v) > 0 ? Number(v) : 0);
+  const text = (/** @type {number} */ n) => n.toLocaleString('en-IN');
+  if (report.by_time === true) {
+    return 'No row of this selection carries open interest (an index or a share has none), so ordering by it is time order.';
+  }
+  const read = count(report.scanned_rows);
+  if (read === 0) return null;
+  const why = Array.isArray(report.scanned_why) ? report.scanned_why.filter((w) => typeof w === 'string') : [];
+  const months = Math.max(count(report.scanned_months), why.length);
+  const more = months > why.length ? `; and ${text(months - why.length)} more month(s)` : '';
+  const build = Array.isArray(report.build) ? report.build.filter((b) => typeof b === 'string') : [];
+  const column = typeof report.column === 'string' ? report.column : 'this column';
+  return `Ordered by ${column}: ${text(count(report.indexed_rows))} row(s) came from sort indexes and ` +
+    `${text(read)} row(s) in ${text(months)} month(s) were read instead${why.length ? ` — ${why.join('; ')}${more}` : ''}.` +
+    (build.length ? ` Index them with: ${build.join(' ; ')}` : '');
+}

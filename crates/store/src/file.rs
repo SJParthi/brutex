@@ -724,6 +724,14 @@ pub enum StoreError {
         /// What went wrong, as `crate::time_index::Why` says it.
         reason: String,
     },
+    /// The month's `.srt` sort index could not be written by the rebuild
+    /// door, for the reason given. The bar file is untouched. D-3349.
+    SortIndex {
+        /// The `.srt` file.
+        path: PathBuf,
+        /// What went wrong.
+        reason: String,
+    },
     /// A bar file whose header region is gone while its checksum sidecar
     /// proves records were committed. audit-20261003 attackdata-1, D-1520.
     ///
@@ -937,6 +945,11 @@ fn write_time_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fm
     write!(f, "{}: time index refused: {reason}", path.display())
 }
 
+/// The [`StoreError::SortIndex`] sentence.
+fn write_sort_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(f, "{}: sort index not written: {reason}", path.display())
+}
+
 /// The [`StoreError::NotABarPath`] sentence.
 ///
 /// Lifted out for [`write_impossible_count`]'s reason and no other: that match
@@ -1117,6 +1130,7 @@ impl fmt::Display for StoreError {
                 timeframe_secs,
             } => write_off_grid(f, *at, *ts_micros, *timeframe_secs),
             Self::TimeIndex { path, reason } => write_time_index(f, path, reason),
+            Self::SortIndex { path, reason } => write_sort_index(f, path, reason),
             Self::CommittedRecordsLost {
                 path,
                 sidecar,
@@ -1306,6 +1320,10 @@ pub struct BarFile {
     /// in-module test harness, whose lookups bisect as they always have.
     /// D-2329.
     tix: Option<Tix>,
+    /// The month's `.srt` sort index, for a BAR file opened by a door that
+    /// keeps it — the writer's and `Self::sort_index_existing`; `None` for
+    /// every reader, which never writes. D-3349.
+    srt: Option<sort_writer::SortSidecar>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1660,6 +1678,13 @@ impl BarFile {
             table_of(path.file()),
             Access::Write,
         )
+        .map(|mut file| {
+            // THE SORT INDEX IS THE WRITER'S TO KEEP, after the bars it orders
+            // are committed — at open for rows an earlier writer left
+            // unordered, and after every commit (D-3349).
+            file.attach_sort_index(root, path);
+            file
+        })
     }
 
     /// Open a month that already exists, **without creating anything**.
@@ -2310,6 +2335,7 @@ impl BarFile {
             verified: Mutex::new(VerifiedBlock::EMPTY),
             admission: Admission::new(month, timeframe_secs),
             tix,
+            srt: None,
             _lock: lock,
         };
         // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
@@ -2763,6 +2789,12 @@ impl BarFile {
         barrier(&self.bars, &self.bars_path)?;
 
         self.header = commit.header;
+        // THE SORT INDEX, AFTER THE COMMIT AND NEVER BEFORE IT (D-3349): a
+        // run is written only over bars already durable, so no index ever
+        // claims a bar that is not committed. It cannot refuse them either:
+        // a run that would not write is a `store.srt` warning, and readers
+        // read the rows it would have ordered themselves.
+        self.keep_sort_index();
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
         // never before. An event emitted ahead of the commit would claim a
         // durability the file does not have yet, and a crash between the two
@@ -4712,6 +4744,12 @@ mod tests {
     thread_local! {
         /// Barriers to let pass on this thread before one fails.
         static SYNC_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Arms the fault: `skip` hooked syncs pass on this thread, the next one
+    /// fails, once. For a sibling test module that cannot name the cell.
+    pub(super) fn arm_sync_fault(skip: u32) {
+        SYNC_FAULT.with(|armed| armed.set(Some(skip)));
     }
 
     /// Whether the armed barrier fault fires now; it fires once.
@@ -7652,6 +7690,11 @@ enum Access {
     /// `open_existing`: the reader's door, which creates nothing.
     Read,
 }
+
+/// The writer's half of the `.srt` sort index. D-3349.
+#[path = "sort_index_writer.rs"]
+mod sort_writer;
+pub use sort_writer::{Resorted, SortIndexed};
 
 #[cfg(test)]
 #[path = "sidecar_checksum_tests.rs"]
