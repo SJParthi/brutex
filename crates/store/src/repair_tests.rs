@@ -241,8 +241,18 @@ fn repair_refusals_name_the_reason_path_and_publication_visibility() {
             "repair revision ordinal outside 1..=1024",
         ),
         (
-            RepairError::RowLimit,
-            "repair exceeds the 2678400-row ceiling",
+            RepairError::RowLimit {
+                rows: 44_641,
+                ceiling: 44_640,
+            },
+            "repair exceeds the row ceiling: 44641 rows against 44640, the most this month holds on its timeframe; nothing was written",
+        ),
+        (
+            RepairError::BeforePromote {
+                revision_root: PathBuf::from("store/bar-revisions-v1/3"),
+                why: "the step's own words".to_owned(),
+            },
+            "repair refused before promotion: the step's own words; the revision at store/bar-revisions-v1/3 is published and not served, and the same repair offered again runs this step again before it promotes",
         ),
         (
             RepairError::StaleSource,
@@ -499,7 +509,7 @@ fn a_post_preflight_directory_obstruction_refuses_without_publication() {
     let directory = physical.parent().expect("revision month directory");
     let reservation = physical.with_extension("reserved-v1");
     super::survey(&merged).expect("valid merged batch");
-    super::check_header(expected).expect("sealed bounded source");
+    super::check_header(path(), expected).expect("sealed bounded source");
     assert!(!super::exists(&reservation).expect("preflight can inspect the absent reservation"));
     let lock_path = path().with_file(FileKind::Lock).to_path_buf(&fixture.root);
     let held = super::shared_lock(lock_path.clone()).expect("preflight shared lock");
@@ -571,4 +581,98 @@ fn a_post_preflight_directory_obstruction_refuses_without_publication() {
     for (path, bytes) in &original {
         assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
     }
+}
+
+/// The days of `month` in `year`, by the Gregorian rule and nothing in this
+/// crate: the independent side of the two ceiling tests below.
+fn days_in(year: u16, month: u8) -> u64 {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn path_in(year: u16, month: u8, timeframe: Timeframe) -> StorePath<'static> {
+    StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "FIXTUREIDX",
+        contract: None,
+        timeframe,
+        month: YearMonth::new(year, month).expect("a legal month"),
+        file: FileKind::Bars,
+    })
+    .expect("a legal path")
+}
+
+/// D-4875 (1), D-4898: the ceiling is the month's days times the bars one day
+/// holds on the rung, at every rung the store files and every month a path
+/// can name. On an intraday rung that is the writer's own bound
+/// (`Admission::slots`), so a month the writer filled is never refused for
+/// its size; on the daily rung the writer's grid is one second, and the
+/// ceiling is that bound over the day's seconds, the month's days.
+#[test]
+fn the_row_ceiling_is_the_months_length_over_the_rungs_width() {
+    for year in 1970..=9999u16 {
+        for month in 1..=12u8 {
+            let days = days_in(year, month);
+            for timeframe in Timeframe::KNOWN.iter().copied() {
+                let path = path_in(year, month, timeframe);
+                let ceiling = super::row_ceiling(path);
+                assert_eq!(
+                    ceiling,
+                    days * 86_400 / u64::from(timeframe.secs()),
+                    "{year}-{month} {}",
+                    timeframe.as_str()
+                );
+                let slots = crate::file::Admission::new(path.month(), timeframe.secs()).slots();
+                if timeframe == Timeframe::DAY_1 {
+                    assert_eq!(ceiling * 86_400, slots);
+                } else {
+                    assert_eq!(ceiling, slots);
+                }
+            }
+        }
+    }
+    // THE THREE THE DECISION NAMES, for a 31-day month.
+    for (timeframe, rows) in [
+        (Timeframe::SECOND_1, 2_678_400),
+        (Timeframe::MINUTE_1, 44_640),
+        (Timeframe::DAY_1, 31),
+    ] {
+        assert_eq!(super::row_ceiling(path_in(2024, 7, timeframe)), rows);
+    }
+}
+
+/// `MAX_ROWS` is not a second truth: it is the largest ceiling any path has,
+/// a 31-day month on the finest rung in `Timeframe::KNOWN`. A finer rung
+/// added to that list fails here until the constant follows it.
+#[test]
+fn the_flat_maximum_is_the_largest_ceiling_any_path_has() {
+    let largest = Timeframe::KNOWN
+        .iter()
+        .flat_map(|timeframe| {
+            (1..=12u8).map(|month| super::row_ceiling(path_in(2024, month, *timeframe)))
+        })
+        .max()
+        .expect("the store files at least one rung");
+    assert_eq!(largest, super::MAX_ROWS as u64);
+}
+
+/// A revision's writer never commits so often that the sort index beside it
+/// is rewritten whole, which would read the whole month back at once and put
+/// the memory `WRITE_BATCH` bounds straight back (L-IA-26): the largest month
+/// there is takes fewer commits than `COMPACT_AT` allows runs.
+#[test]
+fn a_revision_is_written_in_commits_the_sort_index_never_compacts() {
+    let commits = super::MAX_ROWS.div_ceil(super::WRITE_BATCH);
+    assert_eq!(commits, 6);
+    // A MONTH OF A FULL REGULAR SESSION CALENDAR IS ONE COMMIT, as it was.
+    let session_month: usize = 23 * 22_500;
+    assert_eq!(session_month.div_ceil(super::WRITE_BATCH), 1);
+    assert!(commits + 1 < crate::sort_index::COMPACT_AT);
 }

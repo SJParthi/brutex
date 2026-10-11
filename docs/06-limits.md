@@ -16281,3 +16281,92 @@ None of this is on a read path: it is the options import's, once per day.
   every window it answers the trade-day row, not proved per contract.
 - **`TATAGLOBAL/TATACONSUM` and `KPIT/BSOFT` options stay two keys** until
   NSE's symbol-change file has a row for each (D-3354 item 3).
+
+## Ingest automation: what a month repair reads, holds and keeps — D-4875, D-4898, 12 October 2026
+
+Row L-IA-26 of the ingest automation design (its §10.2), landed by IA-17's
+first part with the code it bounds (`store::repair`: the row ceiling and the
+step before the promotion). The design's second half of the row, one repair
+per (instrument, month) per run, is IA-17's second part (D-4899) and is NOT
+BUILT; what that costs until it is, is the disk item below.
+
+- **L-IA-26. A month repair is O(held + offered) bars. It is not O(1) and it
+  is on no read path.** `repair::repair_month` and `repair_month_with` read
+  the served month whole, merge the offered bars into it in one ordered walk
+  (nothing is sorted) and write a whole successor as a new revision, which is
+  then promoted. **Bounded, and refused past the bound, never cut:** the
+  offered bars, the held count and the merged series are each at most
+  `repair::row_ceiling(path)`, the month's length over the rung's width
+  (2,678,400 rows for a 31-day one-second month, 2,419,200 for a 28-day one,
+  44,640 for a 31-day one-minute month, 31 for a 31-day daily one). One row
+  more is `RepairError::RowLimit { rows, ceiling }`, before a bar is read and
+  before anything is written. A month has at most 1,024 revisions
+  (`MAX_REVISIONS`); past them `RevisionLimit`, and no page shows how many a
+  month has used (rules audit RA-266; not this package's).
+- **L-IA-26, time, measured.** Bench C-RP-01
+  (`crates/store/benches/ratio.rs`), 12 Oct 2026, the operator's Mac under the
+  load of the other build agents, each repair of a fresh copy of the held
+  month in the host's temporary directory, only `repair_month` inside the
+  clock. A month of real size (448,317 merged rows: 425,817 held, one session
+  of 22,500 offered): n = 15, p50 11.83 s, p99 17.95 s, max 17.95 s. A month
+  filled to its ceiling (2,678,400 merged rows: 30 days of every second held,
+  the 31st offered): n = 5, p50 39.79 s, p99 107.63 s, max 107.63 s. With n
+  under 100 the p99 is the slowest sample. The cost of one merged row at the
+  fastest run was 18,263 ns at the real-sized month and 4,254 ns at the full
+  one (ratio 0.232, held under the gate's 3.0): **the time is the host's
+  syncs, not the rows.** The same two repairs, once each in a process of
+  their own on the store's own volume a few minutes earlier, took 245 ms and
+  1,327 ms (n = 3 each: 236, 239, 245 ms and 1,327, 1,345, 1,349 ms); the
+  whole bench used 7.6 s of user and 17.7 s of system time in 645 s of wall
+  clock. A commit is a round of syncs and a full month is written in 6
+  (`WRITE_BATCH`, 524,288 rows; a month of 23 regular sessions, 517,500
+  bars, is one). A time lookup on the repaired full month cost 273.66 address
+  floors against C-TIX-02's 800: the revision's `.tix` is its writer's own.
+- **L-IA-26, memory, measured, and over the design's sum.** One repair in a
+  process of its own, 12 Oct 2026, macOS, `/usr/bin/time -l`, maximum
+  resident set size: **537,411,584 bytes at the full month, 152,879,104 at
+  the real-sized month.** A private copy of the real GDFL NIFTY one-second
+  month 2019-10 (409,590 held bars, the 3,100 of 27 Oct offered), repaired
+  and compared with the store's own revision bar for bar inside the same
+  process, peaked at 160,628,736, which includes that comparison's two
+  copies of the month. The whole C-RP-01 bench process peaked at 529,072,128.
+  The design summed type sizes to at most 471 MB for the full month, and
+  about 75 MB for a real one; **neither sum is met and neither is claimed.**
+  What is held: the merged series (56 B a row: 150 MB at the ceiling), the
+  caller's offered bars (56 B each), the stamps added (8 B each), and what
+  the store's writer holds per commit, which this module now bounds by
+  writing a revision in commits of at most 524,288 rows (the same full month
+  written as ONE commit peaked at 1,160,118,272 bytes on 11 Oct). **One term
+  is not `store::repair`'s and still grows with the month:** writing the
+  2,592,000 held rows of the full month in thirty commits of 86,400, with no
+  repair at all, peaked at 159,383,552 bytes by the same tool, where one
+  such commit's bars are 4.8 MB. Which part of the writer holds it is NOT
+  PROVED here (the sort index's step runs after every commit and is the
+  likely holder; it is WP-39's). Bench C-RP-01 holds the full month's repairs
+  to 640 MiB where the host reports a peak (Linux `VmHWM`, restarted before
+  them). **NOT MEASURED: that figure on a Linux host.** The bench's memory
+  line read "NOT MEASURED on this host" on every run so far, so the 640 MiB
+  allowance has never been checked by the bench itself, only against
+  `/usr/bin/time -l` on macOS.
+- **L-IA-26, disk: one whole copy of the month per repair, kept for ever.**
+  A revision is a complete month under `bar-revisions-v1/<n>/`, never
+  rewritten and never removed, and there is no rule yet that prunes one
+  (rules audit RA-018, NEW-31). Until the once-per-month gather is built
+  (D-4899), a run that back-fills a month a file at a time writes one copy
+  per file it lands, up to the 1,024 a month allows. On the operator's store
+  on 12 Oct 2026 there were 24 revised months, all one-second GDFL months at
+  revision 1 (`find bar-revisions-v1 -name '*.bin'`).
+- **L-IA-26, the read path is unchanged and O(1).** Opening a month served
+  from a revision checks the revision's and the source's header counts
+  against the same ceiling: two comparisons, no I/O beyond the open it
+  already did. On the daily rung the ceiling is the month's days, where the
+  writer admits any whole second, so a daily revision holding more bars than
+  its month has days would now be refused at open as `RowLimit`, named. None
+  exists: no
+  revision on the operator's store is on any rung but one second, and
+  `publish` refuses to write one.
+- **L-IA-26, the step before the promotion.** `repair_month_with` runs one
+  step of the caller's between publication and promotion, at most once per
+  call. Its cost is the caller's and is not bounded here. No caller passes
+  one yet: the CASH auction-file writer it is for is IA-17's second part, so
+  a repaired CASH month still has no auction file beside its served bars.
