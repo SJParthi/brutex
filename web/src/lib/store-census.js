@@ -1,5 +1,6 @@
 import { ask } from './ask.js';
-import { decodeCensus, mergeCensus, measureCensus, censusMeasureOf, noteCensusMeasure } from './store-census-wire.js';
+import { decodeCensus, mergeCensus, measureCensus, censusMeasureOf, noteCensusMeasure, CENSUS_ENCODING } from './store-census-wire.js';
+import { denomKey } from './completeness.js';
 import { inSlices } from './census-worker.js';
 import { fetchWithBusyRetry } from '../../saved-backtest/requests.js';
 import { reasonOf } from './refusal.js';
@@ -32,7 +33,11 @@ export const STORE_CENSUS_MS = 30_000;
  *   `unchanged`  the server said nothing changed (an empty delta, or a 304),
  *                and the rows are the ones this page already held.
  *
- * @typedef {{kind: 'whole' | 'delta' | 'unchanged', since: string | null, rows: number,
+ *   `scoped`     only the census rows of the instrument on screen were read,
+ *                from `/census/facets.json` (`readScope`): the first paint of
+ *                /db (WP-56b). `rows` of them; the whole census was not read.
+ *
+ * @typedef {{kind: 'whole' | 'delta' | 'unchanged' | 'scoped', since: string | null, rows: number,
  *   added: number, replaced: number, why: string | null}} CensusHow
  */
 
@@ -813,6 +818,210 @@ export function createFacetsLoader(request = ask, { keep = 8, ms = FACETS_MS, no
 }
 
 /* ======================================================================
+   THE FIRST PAINT FROM FACETS (WP-56b; DB-060, DB-G59, DB-G70, DB-A31)
+   ----------------------------------------------------------------------
+   A cold /db read the whole census (33,349,105 B on GDFL, 16,060,547 B on
+   Zerodha on 11 Oct 2026) before it drew one bar of one instrument. The
+   server now answers ONE INSTRUMENT'S census rows, in the census's own wire,
+   with the feed's denominators for the months they name
+   (`/census/facets.json?...&rows=census-tuples-v1`, `facets.rs`,
+   `rows_answer`). `readScope` reads the root (which segments the feed holds;
+   no list of segments lives here) and then that instrument's rows in each
+   segment, and hands back rows the page prepares exactly as it prepares the
+   whole census.
+
+   IT ANSWERS THE CENSUS'S ROWS OR IT SAYS WHY NOT. A segment whose rows
+   pass the server's cap (an underlying's whole option chain) is asked again
+   at the expiry on screen, and is otherwise named in `unread`, never left
+   out in silence. Anything else that goes wrong (a refusal, answers read at
+   two generations, counts that do not add up) is `{ok: false, reason}`, and
+   the caller reads the census whole and says that it did and why.
+   ====================================================================== */
+
+/**
+ * @typedef {{underlying: string, expiry?: string | null}} ScopeWanted
+ * @typedef {{segment: string, expiry: string | null, months: number, rows: number, generation: number}} ScopeRead
+ * @typedef {{segment: string, why: string}} ScopeUnread
+ * @typedef {{underlying: string, expiry: string | null, read: ScopeRead[], unread: ScopeUnread[], months: number}} CensusScope
+ * @typedef {{fullest: Map<string, number>, support: Map<string, number>}} Observed
+ * @typedef {{ok: true, rows: any[], observed: Observed, lag: CensusLag, readAt: number, scope: CensusScope}
+ *   | {ok: false, reason: string}} ScopeAnswer
+ */
+
+/** The URL of one instrument's census rows. @param {FacetQuery} query */
+export const rowsUrl = (query) => `${facetsUrl(query)}&rows=${CENSUS_ENCODING}`;
+
+/**
+ * Why a body is not the rows answer for `query`, or null.
+ * @param {any} body @param {FacetQuery} query @returns {string | null}
+ */
+export function rowsFault(body, query) {
+  if (!body || typeof body !== 'object' || body.schema !== 1) return 'it is not a schema-1 facets answer';
+  if (body.feed !== query.feed || body.segment !== query.segment) return `it answers ${body.feed}/${body.segment}, not ${query.feed}/${query.segment}`;
+  if ((body.underlying ?? null) !== (query.underlying ?? null) || (body.expiry ?? null) !== (query.expiry ?? null)) return 'it answers another underlying or expiry';
+  if (!Number.isSafeInteger(body.generation) || body.generation < 0) return 'its generation is not a whole number';
+  if (!body.held || !Number.isSafeInteger(body.held.months) || body.held.months < 0 || !Number.isSafeInteger(body.held.rows) || body.held.rows < 0) return 'it does not count the rows it holds';
+  if (!body.census || typeof body.census !== 'object') return 'it carries no census rows (an API older than the rows answer)';
+  if (!Array.isArray(body.denominators)) return 'it carries no denominators';
+  for (const row of body.denominators) {
+    if (!Array.isArray(row) || row.length !== 4 || typeof row[0] !== 'string' || typeof row[1] !== 'string' ||
+        !Number.isSafeInteger(row[2]) || row[2] < 0 || !Number.isSafeInteger(row[3]) || row[3] < 1) return 'a denominator is not [month, rung, fullest, keys]';
+  }
+  return null;
+}
+
+/**
+ * The census rows of ONE instrument, from `/census/facets.json`, with the
+ * feed's denominators for them. See the block above.
+ *
+ * @param {typeof ask} request
+ * @param {string} feed
+ * @param {ScopeWanted} wanted
+ * @param {{ms?: number, now?: () => number, signal?: AbortSignal}} [options]
+ * @returns {Promise<ScopeAnswer>}
+ */
+export async function readScope(request, feed, wanted, { ms = FACETS_MS, now = Date.now, signal = new AbortController().signal } = {}) {
+  /** @param {string} reason @returns {ScopeAnswer} */
+  const fail = (reason) => ({ ok: false, reason });
+  const underlying = wanted.underlying;
+  const expiry = wanted.expiry ?? null;
+  /** A facets refusal's code and sentence (`{"error", "why"}`). @param {Response} response */
+  const refusalOf = async (response) => {
+    /** @type {any} */
+    let refusal = null;
+    try { refusal = await response.json(); } catch { refusal = null; }
+    return { code: typeof refusal?.error === 'string' ? refusal.error : null,
+      why: typeof refusal?.why === 'string' && refusal.why !== '' ? refusal.why
+        : typeof refusal?.error === 'string' ? refusal.error : `HTTP ${response.status} and no reason named` };
+  };
+  const rootResponse = await request(facetsUrl({ feed, segment: /** @type {any} */ (null) }), { cache: 'no-store', ms });
+  if (!rootResponse.ok) {
+    return fail(`/census/facets.json?feed=${feed} answered HTTP ${rootResponse.status}: ${(await refusalOf(rootResponse)).why}`);
+  }
+  const root = await rootResponse.json();
+  const rootWhy = rootFault(root, feed);
+  if (rootWhy) return fail(`/census/facets.json?feed=${feed}: ${rootWhy}`);
+  const lag = censusLag(rootResponse.headers);
+  // A DEGRADED CENSUS IS NOT DRAWN FROM (CE-77): the whole read refuses it
+  // in its own words, so the scope steps aside for it.
+  if (lag.degraded || root.degraded) return fail(`the census is degraded (${lag.degraded ?? root.degraded})`);
+  if (root.segments.length === 0) return fail(`${feed} holds no census row`);
+
+  /** @param {string} segment @param {string | null} at */
+  const rowsOf = async (segment, at) => {
+    /** @type {FacetQuery} */
+    const query = { feed, segment, underlying, ...(at ? { expiry: at } : {}) };
+    const response = await request(rowsUrl(query), { cache: 'no-store', ms });
+    if (!response.ok) return { ok: false, ...(await refusalOf(response)), query, body: null, headers: response.headers };
+    const body = await response.json();
+    const fault = rowsFault(body, query);
+    return fault
+      ? { ok: false, code: null, why: fault, query, body: null, headers: response.headers }
+      : { ok: true, code: null, why: '', query, body, headers: response.headers };
+  };
+  const answers = await Promise.all(root.segments.map(async (/** @type {any} */ row) => {
+    let answer = await rowsOf(row.segment, null);
+    // A CHAIN TOO LONG TO LIST WHOLE IS ASKED AT THE EXPIRY ON SCREEN.
+    if (!answer.ok && answer.code === 'rows_too_many' && expiry) answer = await rowsOf(row.segment, expiry);
+    return { row, answer };
+  }));
+
+  /** @type {ScopeRead[]} */
+  const read = [];
+  /** @type {ScopeUnread[]} */
+  const unread = [];
+  /** @type {any[]} */
+  const rows = [];
+  const fullest = new Map();
+  const support = new Map();
+  for (const { row, answer } of answers) {
+    if (!answer.ok && answer.code === 'rows_too_many') {
+      unread.push({ segment: row.segment, why: answer.why });
+      continue;
+    }
+    if (!answer.ok) return fail(`${underlying} in ${row.segment}: ${answer.why}`);
+    const body = answer.body;
+    // ONE CENSUS, OR NONE: every answer must be of the generation the root
+    // was, vendor-wide and for its own part.
+    const at = censusLag(answer.headers).generation;
+    if (at !== lag.generation || body.generation !== row.generation) {
+      return fail(`the census moved between the answers (${row.segment}: generation ${group(row.generation)}, then ${group(body.generation)})`);
+    }
+    const decoded = await decodeCensus(body.census, feed, signal);
+    let bars = 0;
+    const head = `${body.exchange}-${row.segment}-${underlying}`;
+    for (const item of decoded) {
+      if (item.instrument !== head && !String(item.instrument).startsWith(`${head}-`)) {
+        return fail(`${row.segment} answered a row of ${item.instrument}, which is not ${underlying}`);
+      }
+      bars += item.rows;
+    }
+    if (decoded.length !== body.held.months || bars !== body.held.rows) {
+      return fail(`${row.segment} counts ${group(body.held.months)} row(s) of ${group(body.held.rows)} bars and carries ${group(decoded.length)} of ${group(bars)}`);
+    }
+    for (const [month, rung, most, keys] of body.denominators) {
+      const key = denomKey(month, rung);
+      if (fullest.has(key) && (fullest.get(key) !== most || support.get(key) !== keys)) {
+        return fail(`two answers disagree on the fullest row of ${month} at ${rung}`);
+      }
+      fullest.set(key, most);
+      support.set(key, keys);
+    }
+    for (const item of decoded) {
+      const most = fullest.get(denomKey(item.month, item.timeframe));
+      if (most === undefined || most < item.rows) return fail(`${row.segment} names no fullest row for ${item.month} at ${item.timeframe} that holds its own`);
+    }
+    read.push({ segment: row.segment, expiry: body.expiry ?? null, months: decoded.length, rows: bars, generation: body.generation });
+    for (const item of decoded) rows.push(item);
+  }
+  if (rows.length === 0) {
+    return fail(unread.length > 0
+      ? `${underlying}'s rows could not be listed (${unread.map((u) => `${u.segment}: ${u.why}`).join('; ')})`
+      : `${feed} holds no census row of ${underlying}`);
+  }
+  // THE WHOLE BODY'S ORDER: newest month first, and within a month the
+  // segments in the order the root listed them (each answer is already in
+  // the census's order, and the sort is stable).
+  rows.sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
+  return { ok: true, rows, observed: { fullest, support }, lag, readAt: now(),
+    scope: { underlying, expiry, read, unread, months: rows.length } };
+}
+
+/**
+ * WHAT ONE READ OF THE SHARED STORE DOES (WP-56b), decided in one place so
+ * it can be held to its rules by a test:
+ *
+ *   - `scoped`: read one instrument's rows. Only when the caller named an
+ *     instrument (`first`), no subscriber has asked this feed's WHOLE census
+ *     (`wholeAsked`), and the store is cold for the feed or already holds a
+ *     scope (a refresh of it).
+ *   - `clear`: drop the value before the request leaves. Always on a feed
+ *     change; and when the value is one instrument's rows and the caller
+ *     wants the whole census, unless the caller is the page that drew them
+ *     (`keep`). No other page is ever shown one instrument's rows as the
+ *     store's.
+ *   - `key`: what makes two calls the same request. A scope and a whole
+ *     read of one (feed, generation) are different requests.
+ *
+ * @param {{feed: string, generation: number, first: ScopeWanted | null, valueFeed: string | null,
+ *   valueScoped: boolean, wholeAsked: boolean, keep?: boolean}} call
+ */
+export function planRead({ feed, generation, first, valueFeed, valueScoped, wholeAsked, keep = false }) {
+  const scoped = first !== null && !wholeAsked && (valueFeed !== feed || valueScoped);
+  const wholeKey = `${feed}#${generation}`;
+  return { scoped, wholeKey,
+    key: scoped ? `${wholeKey}#scope:${/** @type {ScopeWanted} */ (first).underlying}:${/** @type {ScopeWanted} */ (first).expiry ?? ''}` : wholeKey,
+    clear: valueFeed !== feed || (valueScoped && !scoped && !keep) };
+}
+
+/**
+ * The scope as one clause: `INDEX 93 row(s)`, `FNO at 2019-06-27 412 row(s)`.
+ * @param {CensusScope} scope
+ */
+export const scopeText = (scope) => scope.read.filter((part) => part.months > 0)
+  .map((part) => `${part.segment}${part.expiry ? ` at ${part.expiry}` : ''} ${group(part.months)} row(s)`).join(', ');
+
+/* ======================================================================
    THE REFRESH LOG (WP-56b; the WP-56 second agent's follow-up 11)
    ----------------------------------------------------------------------
    How a read of the census ended (a first read, a delta merged, unchanged,
@@ -832,7 +1041,7 @@ export const REFRESH_LOG_KEY = 'brutex.census.refreshes.v1';
 export const REFRESH_LOG_KEEP = 200;
 
 /**
- * @typedef {{at: number, feed: string, kind: 'first' | 'delta' | 'unchanged' | 'whole' | 'failed', why: string | null,
+ * @typedef {{at: number, feed: string, kind: 'first' | 'delta' | 'unchanged' | 'whole' | 'failed' | 'scoped', why: string | null,
  *   since: string | null, rows: number, added: number, replaced: number, generation: number | null, held: number | null,
  *   worker: string | null}} RefreshEntry
  */
@@ -844,14 +1053,15 @@ export const REFRESH_LOG_KEEP = 200;
  * @returns {RefreshEntry}
  */
 export function refreshEntry({ feed, at, how: read = null, lag = null, held = null, worker = null, error = null, first = false }) {
-  const kind = error !== null ? 'failed' : first && (read === null || read.kind === 'whole') && !read?.why ? 'first' : read?.kind ?? 'whole';
+  const kind = error !== null ? 'failed' : first && (read === null || read.kind === 'whole') ? 'first' : read?.kind ?? 'whole';
   return { at, feed, kind, why: error ?? read?.why ?? null, since: read?.since ?? null, rows: read?.rows ?? 0,
     added: read?.added ?? 0, replaced: read?.replaced ?? 0, generation: lag?.generation ?? null, held, worker };
 }
 
 /** One entry as the sentence the log lists and a filter searches. @param {RefreshEntry} entry */
 export function refreshText(entry) {
-  const what = entry.kind === 'first' ? 'read the whole census (the first read of this feed on this page)'
+  const what = entry.kind === 'scoped' ? `read only the census rows of the instrument on screen from /census/facets.json (${entry.why ?? 'no instrument named'}; ${group(entry.rows)} row(s)), not the whole census`
+    : entry.kind === 'first' ? `read the whole census (the first read of this feed on this page${entry.why ? `; ${entry.why}` : ''})`
     : entry.kind === 'delta' ? `read only the ${group(entry.rows)} row(s) changed since ${entry.since ?? 'the generation held'} (${group(entry.added)} new, ${group(entry.replaced)} changed in place)`
       : entry.kind === 'unchanged' ? (entry.why
         ? `asked for the whole census (${entry.why}) and the server answered that the census held is current; no body was read`
@@ -961,11 +1171,18 @@ const partsText = (parts) => Object.entries(parts).map(([segment, n]) => `${segm
  * nothing changed says so, and one that had to read the whole census again
  * says why, as a warning: a 33 MB read is never silent.
  *
+ * `scope` (optional) is set while the page holds ONE INSTRUMENT'S rows and
+ * not the whole census (`readScope`): the line then says exactly that, what
+ * was and was not read, and that the lists below cover that instrument
+ * alone. `scopeWhy` is why a first paint could not be drawn that way.
+ * `reading` is true while the whole census is being read behind a scope.
+ *
  * @param {{feed: string, at: number | null, lag: CensusLag | null, worker: string | null,
- *   head: HeadCheck | null, how?: CensusHow | null}} census
+ *   head: HeadCheck | null, how?: CensusHow | null, scope?: CensusScope | null,
+ *   scopeWhy?: string | null, reading?: boolean}} census
  * @returns {BannerLine[]}
  */
-export function censusLines({ feed, at, lag, worker, head, how: read = null }) {
+export function censusLines({ feed, at, lag, worker, head, how: read = null, scope = null, scopeWhy = null, reading = false }) {
   /** @type {BannerLine[]} */
   const out = [];
   const moved = censusMoved({ feed, lag }, head);
@@ -976,17 +1193,32 @@ export function censusLines({ feed, at, lag, worker, head, how: read = null }) {
     : read?.kind === 'unchanged'
       ? `Census checked at ${clockOf(at)} and unchanged since this page read it,`
       : `Census read at ${clockOf(at)},`;
-  out.push({ key: 'read', tone: 'info', text: verb +
-    (generation === null ? ' at a generation this API does not name' : ` generation ${group(generation)}`) +
-    (lag?.parts ? ` (${partsText(lag.parts)})` : '') +
-    `: every list, total and offset on this page is that snapshot.${checked}` });
+  if (scope) {
+    // ONE INSTRUMENT, SAID AS ONE (WP-56b): the lists and totals below are
+    // that instrument's alone, and the line says so and what was left out.
+    out.push({ key: 'read', tone: 'info', text: `Read at ${clockOf(at)},` +
+      (generation === null ? ' at a generation this API does not name' : ` generation ${group(generation)}`) +
+      (lag?.parts ? ` (${partsText(lag.parts)})` : '') +
+      `: only the census rows of ${scope.underlying} (${scopeText(scope)}) from /census/facets.json, not the whole census.` +
+      ` Every list, total and offset on this page covers ${scope.underlying} alone until the whole census is read` +
+      `${reading ? ', which is being read now.' : ', which happens when a control outside the bar rows is used.'}` +
+      `${scope.unread.length > 0 ? ` Not read yet: ${scope.unread.map((part) => `${part.segment} (${part.why})`).join('; ')}.` : ''}${checked}` });
+  } else {
+    out.push({ key: 'read', tone: 'info', text: verb +
+      (generation === null ? ' at a generation this API does not name' : ` generation ${group(generation)}`) +
+      (lag?.parts ? ` (${partsText(lag.parts)})` : '') +
+      `: every list, total and offset on this page is that snapshot.${checked}` });
+  }
+  if (!scope && scopeWhy) {
+    out.push({ key: 'scope', tone: 'info', text: `This page read the whole census before its first paint, not only the instrument on screen: ${scopeWhy}.` });
+  }
   if (read?.why && read.kind === 'unchanged') {
     // NO BODY WAS READ (WP-56b): the delta could not be asked or was not
     // believed, the whole census was asked for, and the server answered
     // that the copy this page holds is current. Saying "read the whole
     // census again" beside "unchanged" said two things, one of them false.
     out.push({ key: 'whole', tone: 'info', text: `This refresh could not ask for only what changed (${read.why}), so it asked for the whole census; the server answered that the census this page holds is current, and no body was read.` });
-  } else if (read?.why) {
+  } else if (read?.why && read.kind !== 'scoped') {
     out.push({ key: 'whole', tone: 'warn', text: `This refresh read the whole census again, not only what changed: ${read.why}.` });
   }
   if (!lag || lag.state === null) {

@@ -779,3 +779,352 @@ fn the_root_answers_the_segments_a_feed_holds_and_the_order() {
     assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(body.contains("census_unreadable"), "{body}");
 }
+
+/* ======================================================================
+ONE INSTRUMENT'S CENSUS ROWS (WP-56b; DB-060, DB-G59, DB-G70, DB-A31)
+====================================================================== */
+
+/// A site whose GDFL census holds `rows`, written to its store root.
+fn site_holding(name: &str, rows: &[Held]) -> crate::server::Site {
+    let dir = agreeing(name);
+    let built_site = site(name, &dir);
+    let mut manifest = Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+    for row in rows {
+        let _append = manifest.record_held(*row).expect("records");
+    }
+    std::fs::write(
+        manifest_path(&built_site.store_root, Vendor::Gdfl),
+        manifest.image(),
+    )
+    .expect("written");
+    built_site
+}
+
+/// A tuples body expanded to one JSON row per census row: the instrument,
+/// month and rung spelled out, then the seven fields after them.
+fn expanded(wire: &serde_json::Value) -> Vec<serde_json::Value> {
+    let word = |list: &str, at: &serde_json::Value| {
+        wire[list][usize::try_from(at.as_u64().expect("an index")).expect("small")].clone()
+    };
+    wire["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| {
+            let reason = |at: usize| {
+                if row[at].is_null() {
+                    serde_json::Value::Null
+                } else {
+                    word("reasons", &row[at])
+                }
+            };
+            serde_json::json!([
+                word("instruments", &row[0]),
+                word("months", &row[1]),
+                word("timeframes", &row[2]),
+                row[3],
+                row[4],
+                row[5],
+                row[6],
+                reason(7),
+                row[8],
+                reason(9)
+            ])
+        })
+        .collect()
+}
+
+/// The whole census of `site`'s GDFL store on the tuples wire, expanded.
+fn whole_census(built_site: &crate::server::Site) -> Vec<serde_json::Value> {
+    let (_stamps, now) = vendor_census(built_site, Vendor::Gdfl);
+    let census = now.census().expect("a census").clone();
+    let entries = census::held_entries(std::slice::from_ref(&census));
+    let wire =
+        crate::server::store_wire::compact(std::slice::from_ref(&census), &entries, Vendor::Gdfl)
+            .expect("encodes");
+    expanded(&json(&wire))
+}
+
+#[test]
+fn one_instruments_rows_are_its_slice_of_the_whole_census_with_the_feeds_denominators() {
+    // The denominators must count all three segments, not the one asked.
+    let rows = three_segments();
+    let built_site = site_holding("facets-rows", &rows);
+    let whole = whole_census(&built_site);
+    assert_eq!(whole.len(), rows.len());
+
+    for (query, keeps) in [
+        (
+            "feed=gdfl&segment=INDEX&underlying=NIFTY&rows=census-tuples-v1",
+            "NSE-INDEX-NIFTY",
+        ),
+        (
+            "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28&rows=census-tuples-v1",
+            "NSE-FNO-NIFTY-2019-03-28-",
+        ),
+        (
+            "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1",
+            "NSE-FNO-NIFTY-",
+        ),
+        (
+            "feed=gdfl&segment=CASH&underlying=ACC&rows=census-tuples-v1",
+            "NSE-CASH-ACC",
+        ),
+    ] {
+        let (code, headers, body) = answer(&built_site, query);
+        assert_eq!(code, axum::http::StatusCode::OK, "{query}: {body}");
+        let value = json(&body);
+        let got = expanded(&value["census"]);
+        let want: Vec<serde_json::Value> = whole
+            .iter()
+            .filter(|row| {
+                let name = row[0].as_str().expect("a name");
+                name == keeps || (keeps.ends_with('-') && name.starts_with(keeps))
+            })
+            .cloned()
+            .collect();
+        assert!(!want.is_empty(), "{query}: the fixture holds the selection");
+        assert_eq!(got, want, "{query}: the rows, in the whole body's order");
+        assert_eq!(value["census"]["feed"], "gdfl");
+        assert_eq!(value["census"]["encoding"], "census-tuples-v1");
+        assert_eq!(value["exchange"], "NSE");
+        assert_eq!(value["cap"], ROWS_CAP);
+        assert_eq!(value["held"]["months"], got.len());
+        let bars: u64 = got.iter().map(|row| row[3].as_u64().expect("rows")).sum();
+        assert_eq!(value["held"]["rows"], bars);
+        assert_eq!(
+            headers["x-brutex-census-part-generation"]
+                .to_str()
+                .expect("ascii"),
+            value["generation"].to_string(),
+            "{query}: the part generation, in the header and the body"
+        );
+        // EVERY (month, rung) the rows name has its denominators, and each
+        // equals a recount over the whole census.
+        let denominators = value["denominators"].as_array().expect("a list");
+        let named: BTreeSet<(String, String)> = got
+            .iter()
+            .map(|row| {
+                (
+                    row[1].as_str().expect("m").to_owned(),
+                    row[2].as_str().expect("t").to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(denominators.len(), named.len(), "{query}");
+        for denominator in denominators {
+            let at: Vec<&serde_json::Value> = whole
+                .iter()
+                .filter(|row| row[1] == denominator[0] && row[2] == denominator[1])
+                .collect();
+            let fullest = at.iter().map(|row| row[3].as_u64().expect("rows")).max();
+            assert_eq!(denominator[2].as_u64(), fullest, "{query}: {denominator}");
+            assert_eq!(denominator[3], at.len(), "{query}: {denominator}");
+        }
+    }
+}
+
+/// [`chain`] with a second index fuller than NIFTY at the same month and
+/// rung, a cash share there too, and an earlier NIFTY month.
+fn three_segments() -> Vec<Held> {
+    let march = month(2019, 3);
+    let mut rows = chain();
+    rows.push(held(
+        spot(Segment::Index, "BANKNIFTY", Timeframe::MINUTE_1, march),
+        75,
+        0,
+        600,
+        2_900_007,
+    ));
+    rows.push(held(
+        spot(Segment::Cash, "ACC", Timeframe::MINUTE_1, march),
+        70,
+        0,
+        600,
+        150_008,
+    ));
+    rows.push(held(
+        spot(Segment::Index, "NIFTY", Timeframe::MINUTE_1, month(2019, 2)),
+        55,
+        -2_600_000,
+        -2_500_000,
+        1_140_009,
+    ));
+    rows
+}
+
+#[test]
+fn the_denominators_are_the_whole_feeds_and_an_instrument_not_held_answers_no_row() {
+    let built_site = site_holding("facets-rows-denoms", &three_segments());
+    // NIFTY's 1min March row is not the fullest of its month: BANKNIFTY's is,
+    // and three keys are held there (two indices and a share).
+    let (_, _, body) = answer(
+        &built_site,
+        "feed=gdfl&segment=INDEX&underlying=NIFTY&rows=census-tuples-v1",
+    );
+    let value = json(&body);
+    let march_minute = value["denominators"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|row| row[0] == "2019-03" && row[1] == "1min")
+        .expect("named");
+    assert_eq!(march_minute[2], 75);
+    assert_eq!(march_minute[3], 3);
+
+    // AN UNDERLYING THE FEED DOES NOT HOLD: no row and no exchange, said as
+    // an answer, so a reader can tell it from a refusal.
+    let (code, _, body) = answer(
+        &built_site,
+        "feed=gdfl&segment=INDEX&underlying=SENSEX&rows=census-tuples-v1",
+    );
+    assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+    let value = json(&body);
+    assert_eq!(value["held"]["months"], 0);
+    assert_eq!(value["exchange"], serde_json::Value::Null);
+    assert_eq!(value["census"]["rows"], serde_json::json!([]));
+    // An expiry the underlying does not hold: the same.
+    let (code, _, body) = answer(
+        &built_site,
+        "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-04-25&rows=census-tuples-v1",
+    );
+    assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["held"]["months"], 0);
+}
+
+#[test]
+fn a_rows_request_that_cannot_be_answered_is_refused_by_name() {
+    for (query, why) in [
+        (
+            "feed=gdfl&segment=INDEX&rows=census-tuples-v1",
+            "rows needs an underlying",
+        ),
+        (
+            "feed=gdfl&segment=INDEX&underlying=NIFTY&rows=census-tuples-v1&since=3",
+            "rows takes no since",
+        ),
+        (
+            "feed=gdfl&segment=INDEX&underlying=NIFTY&rows=1",
+            "is not an encoding this route writes",
+        ),
+        ("feed=gdfl&rows=census-tuples-v1", "segment"),
+    ] {
+        let (code, body) = asked(query).expect_err(query);
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}");
+        assert!(body.contains(why), "{query}: {body}");
+    }
+    // A garbage encoding is repeated capped, never whole.
+    let long = "x".repeat(5_000);
+    let (_, body) = asked(&format!(
+        "feed=gdfl&segment=INDEX&underlying=NIFTY&rows={long}"
+    ))
+    .expect_err("refused");
+    assert!(body.len() < 600, "{}", body.len());
+}
+
+#[test]
+fn a_rows_answer_is_bounded_by_its_cap_and_refused_past_it() {
+    // EXACTLY THE CAP ANSWERS; ONE KEY MORE IS REFUSED. One expiry holding
+    // ROWS_CAP option keys, then one more strike.
+    let march = month(2019, 3);
+    let strike = |n: usize| {
+        held(
+            fno(
+                &format!("2019-03-28-{}-CE", 1_000_000 + n * 5_000),
+                Timeframe::SECOND_1,
+                march,
+            ),
+            1,
+            0,
+            1,
+            901,
+        )
+    };
+    let mut rows: Vec<Held> = (0..ROWS_CAP).map(strike).collect();
+    let slot = slot_of(&rows);
+    let index = built(Segment::Fno, &slot);
+    let query = "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28&rows=census-tuples-v1";
+    let (exchange, keys, sums) = rows_keys(&index, &asked_for(query)).expect("at the cap");
+    assert_eq!(exchange, Some(Exchange::Nse));
+    assert_eq!(keys.len(), ROWS_CAP);
+    assert_eq!(
+        sums[&Timeframe::SECOND_1],
+        u64::try_from(ROWS_CAP).expect("small")
+    );
+
+    rows.push(strike(ROWS_CAP));
+    let slot = slot_of(&rows);
+    let index = built(Segment::Fno, &slot);
+    for query in [
+        query,
+        "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1",
+    ] {
+        let (code, body) = rows_keys(&index, &asked_for(query)).expect_err("past the cap");
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        let value = json(&body);
+        assert_eq!(value["error"], "rows_too_many");
+        assert_eq!(value["cap"], ROWS_CAP);
+        assert_eq!(value["reached"], ROWS_CAP + 1);
+        assert!(
+            value["why"].as_str().expect("why").contains("/store.json"),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_key_the_index_cannot_name_refuses_the_rows_rather_than_leaving_it_out() {
+    // A contract text that is not the store's spelling is counted by the
+    // index and never listed: its underlying's rows are refused.
+    let mut index = built(Segment::Fno, &slot_of(&chain()));
+    assert!(
+        rows_keys(
+            &index,
+            &asked_for("feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1")
+        )
+        .is_ok()
+    );
+    // Make the index hold one unread contract, the way `apply` counts one.
+    index
+        .underlyings
+        .get_mut(&(Exchange::Nse, Symbol::new("NIFTY").expect("a symbol")))
+        .expect("held")
+        .unread_contracts = 1;
+    let (code, body) = rows_keys(
+        &index,
+        &asked_for("feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1"),
+    )
+    .expect_err("refused");
+    assert_eq!(code, axum::http::StatusCode::CONFLICT);
+    assert_eq!(json(&body)["error"], "rows_unreadable");
+}
+
+#[test]
+fn the_denominators_of_a_moved_index_equal_a_fresh_builds() {
+    let rows = chain();
+    let (first, rest) = rows.split_at(3);
+    let mut disk = OnDisk::new("denoms-moved", first);
+    let before = disk.read(None);
+    let mut index = built(Segment::Fno, &before);
+    let march = month(2019, 3);
+    assert_eq!(index.denoms[&(march, Timeframe::SECOND_1)], (30, 3));
+
+    // The rest lands and one key GROWS past the fullest: counted once, and
+    // the maximum follows it.
+    let mut appended: Vec<Held> = rest.to_vec();
+    appended.push(held(
+        fno("2019-03-28-1150000-CE", Timeframe::SECOND_1, march),
+        95,
+        0,
+        120,
+        7_101,
+    ));
+    disk.append(&appended);
+    let after = disk.read(Some(before.census()));
+    advance(&mut index, Segment::Fno, &after);
+    let fresh = built(Segment::Fno, &after);
+    assert_eq!(index.denoms, fresh.denoms);
+    assert_eq!(index.denoms[&(march, Timeframe::SECOND_1)], (95, 5));
+    // The INDEX keys of the same census are another segment's: not counted here.
+    assert!(!index.denoms.contains_key(&(march, Timeframe::MINUTE_1)));
+}

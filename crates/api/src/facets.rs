@@ -205,6 +205,14 @@ pub(crate) struct Index {
     /// by the same `apply` as the nodes, so the root reads one node per
     /// segment and never walks the underlyings (WP-56b).
     total: Agg,
+    /// Per (month, rung): the most rows any one key of the segment holds
+    /// there, and how many keys the segment holds there. What a page needs
+    /// beside one instrument's rows to say whether a short month is that
+    /// instrument's hole or the whole store's (`denominators`, the rows
+    /// answer below). Exact under `apply`: a key's rows only grow, so the
+    /// maximum never has to come down, and a key is counted once, when it is
+    /// first seen.
+    denoms: BTreeMap<(YearMonth, Timeframe), (u64, u64)>,
 }
 
 impl Index {
@@ -258,6 +266,14 @@ impl Index {
     fn apply(&mut self, old: Option<&Held>, new: &Held) {
         let key = new.entry.key;
         self.total.apply(old, new);
+        let denom = self
+            .denoms
+            .entry((key.month, key.timeframe))
+            .or_insert((0, 0));
+        denom.0 = denom.0.max(new.entry.rows);
+        if old.is_none() {
+            denom.1 = denom.1.saturating_add(1);
+        }
         let under = self
             .underlyings
             .entry((key.exchange, key.symbol))
@@ -384,6 +400,9 @@ struct Asked {
     exchange: Option<Exchange>,
     expiry: Option<Day>,
     since: Option<u64>,
+    /// `rows=census-tuples-v1`: the census rows of the selection themselves
+    /// ([`rows_answer`]), not its lists.
+    rows: bool,
 }
 
 /// Reads the query, or names the parameter it cannot read.
@@ -438,6 +457,31 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
                 .map_err(|_| bad(format!("since {word:?} is not a generation")))?,
         ),
     };
+    let rows = match param(query, "rows").as_str() {
+        "" => false,
+        word if word == super::store_wire::ENCODING => {
+            if underlying.is_none() {
+                return Err(bad(
+                    "rows needs an underlying: the census rows of one instrument".to_owned(),
+                ));
+            }
+            if since.is_some() {
+                return Err(bad(
+                    "rows takes no since: it is one instrument's rows as the census holds \
+                     them now; a delta of the census is /store.json?since="
+                        .to_owned(),
+                ));
+            }
+            true
+        }
+        word => {
+            return Err(bad(format!(
+                "rows {:?} is not an encoding this route writes; the one it writes is {}",
+                super::store_route::since_echo(word),
+                super::store_wire::ENCODING
+            )));
+        }
+    };
     Ok(Asked {
         feed,
         segment,
@@ -445,6 +489,7 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
         exchange,
         expiry,
         since,
+        rows,
     })
 }
 
@@ -506,9 +551,16 @@ fn root_feed(query: &str) -> Option<Vendor> {
     // An empty feed word is not a feed (`parse_vendor` reads it as its
     // default): it goes to `asked`, which refuses it by name.
     (!feed.is_empty()
-        && ["segment", "underlying", "exchange", "expiry", "since"]
-            .iter()
-            .all(|name| param(query, name).is_empty()))
+        && [
+            "segment",
+            "underlying",
+            "exchange",
+            "expiry",
+            "since",
+            "rows",
+        ]
+        .iter()
+        .all(|name| param(query, name).is_empty()))
     .then(|| ingest::parse_vendor(&feed))
     .flatten()
 }
@@ -608,12 +660,16 @@ pub(super) fn answer(
     // were committed, and a reader of the lists alone must be able to say so.
     let degraded = census.and_then(census::VendorCensus::degraded);
     let slot = now.slot();
-    let (body, generation) = index(site, asked.feed, asked.segment, slot, |index| {
-        (
-            render_answer(index, &asked, state, degraded.as_deref()),
-            index.generation,
-        )
-    });
+    let (body, generation) = if asked.rows {
+        rows_answer(site, &asked, census, slot, state, degraded.as_deref())
+    } else {
+        index(site, asked.feed, asked.segment, slot, |index| {
+            (
+                render_answer(index, &asked, state, degraded.as_deref()),
+                index.generation,
+            )
+        })
+    };
     // THE GENERATION A `since` IS SPELLED IN, in a header as well as the
     // body, so a client never keys a delta on the vendor-wide sum (WP-56;
     // DB-B56): this part's own, the body's `generation`.
@@ -626,6 +682,341 @@ pub(super) fn answer(
         Ok(body) => (axum::http::StatusCode::OK, headers, body),
         Err((code, body)) => (code, headers, body),
     }
+}
+
+/// The most census rows one rows answer carries, and the most keys it
+/// probes to find them. Past it the answer is a refusal that names the count
+/// reached, never a body sized by the store (D-3327; WP-56b).
+pub(crate) const ROWS_CAP: usize = 4_096;
+
+/// A refusal of a rows answer: the status and the body.
+type RowsRefusal = (axum::http::StatusCode, String);
+
+/// The keys the census may hold for the selection `asked` names, read off
+/// the index's own nodes (no walk of the census), and the rows per rung
+/// those nodes say they sum to. `None` for the exchange when the feed holds
+/// no such underlying in the segment.
+///
+/// INDEX and CASH: one key per (month, rung) of the underlying. FNO: one
+/// candidate per (contract, month of its expiry, rung of the contract); a
+/// candidate the census does not hold is dropped by the probe that follows.
+/// Counting stops at [`ROWS_CAP`], so a refusal costs no more than an answer.
+fn rows_keys(
+    index: &Index,
+    asked: &Asked,
+) -> Result<(Option<Exchange>, Vec<EntryKey>, Rows), RowsRefusal> {
+    let bad = axum::http::StatusCode::BAD_REQUEST;
+    let Some(symbol) = asked.underlying else {
+        return Ok((None, Vec::new(), Rows::new()));
+    };
+    let chosen: Vec<(&(Exchange, Symbol), &Underlying)> = EXCHANGES
+        .into_iter()
+        .filter(|exchange| asked.exchange.is_none_or(|wanted| wanted == *exchange))
+        .filter_map(|exchange| index.underlyings.get_key_value(&(exchange, symbol)))
+        .collect();
+    if chosen.len() > 1 {
+        let exchanges: Vec<&str> = chosen
+            .iter()
+            .map(|((exchange, _), _)| exchange.as_str())
+            .collect();
+        return Err((
+            bad,
+            error_json(
+                "ambiguous_underlying",
+                &format!(
+                    "{} is held on {}; name one with exchange=",
+                    symbol.as_str(),
+                    exchanges.join(", ")
+                ),
+            ),
+        ));
+    }
+    let Some(((exchange, _), under)) = chosen.first().copied() else {
+        return Ok((None, Vec::new(), Rows::new()));
+    };
+    let key = |contract, month, timeframe| EntryKey {
+        contract,
+        exchange: *exchange,
+        segment: asked.segment,
+        symbol,
+        timeframe,
+        month,
+    };
+    if asked.segment == Segment::Fno {
+        let (keys, sums) = chain_keys(under, asked, symbol, &key)?;
+        return Ok((Some(*exchange), keys, sums));
+    }
+    let mut keys: Vec<EntryKey> = Vec::new();
+    for (month, agg) in &under.months {
+        for timeframe in agg.rows.keys() {
+            if keys.len() >= ROWS_CAP {
+                return Err(rows_too_many(asked, symbol));
+            }
+            keys.push(key(None, *month, *timeframe));
+        }
+    }
+    Ok((Some(*exchange), keys, under.agg.rows.clone()))
+}
+
+/// The refusal of a selection that names more than [`ROWS_CAP`] keys: the
+/// cap, the count reached when counting stopped, and what to ask instead.
+fn rows_too_many(asked: &Asked, symbol: Symbol) -> RowsRefusal {
+    let reached = ROWS_CAP.saturating_add(1);
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        format!(
+            r#"{{"error":"rows_too_many","why":{},"cap":{ROWS_CAP},"reached":{reached}}}"#,
+            render::json_string(&format!(
+                "{} in {} names more than {ROWS_CAP} census rows{}: narrow it with \
+                 expiry=, or read the census whole from /store.json",
+                symbol.as_str(),
+                asked.segment.as_str(),
+                if asked.expiry.is_some() {
+                    " at this expiry"
+                } else {
+                    ""
+                }
+            ))
+        ),
+    )
+}
+
+/// [`rows_keys`] for a segment whose keys name contracts: the candidate keys
+/// of the expiry asked (or of every expiry), and the rows per rung those
+/// expiries' nodes sum to.
+fn chain_keys(
+    under: &Underlying,
+    asked: &Asked,
+    symbol: Symbol,
+    key: &dyn Fn(Option<brutex_core::instrument::Contract>, YearMonth, Timeframe) -> EntryKey,
+) -> Result<(Vec<EntryKey>, Rows), RowsRefusal> {
+    let mut keys: Vec<EntryKey> = Vec::new();
+    // A KEY THIS INDEX CANNOT NAME IS NOT LEFT OUT IN SILENCE: its contract
+    // text is not the store's spelling, so no candidate would find it.
+    if under.unread_contracts > 0 {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            error_json(
+                "rows_unreadable",
+                &format!(
+                    "{} key(s) of {} carry a contract text this index cannot read, so its \
+                     rows cannot be listed from the index; read the census whole from \
+                     /store.json",
+                    under.unread_contracts,
+                    symbol.as_str()
+                ),
+            ),
+        ));
+    }
+    let chains: Vec<(&Day, &Expiry)> = match asked.expiry {
+        Some(day) => under.expiries.get_key_value(&day).into_iter().collect(),
+        None => under.expiries.iter().collect(),
+    };
+    let mut sums = Rows::new();
+    for (expiry, chain) in chains {
+        for (timeframe, rows) in &chain.agg.rows {
+            let sum = sums.entry(*timeframe).or_insert(0);
+            *sum = sum.saturating_add(*rows);
+        }
+        for (id, agg) in &chain.contracts {
+            let text = match *id {
+                ContractId::Future => format!("{expiry}-FUT"),
+                ContractId::Option { strike, call } => {
+                    format!("{expiry}-{strike}-{}", if call { "CE" } else { "PE" })
+                }
+            };
+            // The index read this id FROM a contract of the store's own
+            // spelling, so the same text parses; one that did not would be
+            // a key left out, and is refused by name instead.
+            let Some(contract) = brutex_core::instrument::Contract::parse(&text) else {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    error_json(
+                        "rows_unreadable",
+                        &format!("contract {text:?} of the index does not parse back"),
+                    ),
+                ));
+            };
+            for month in chain.months.keys() {
+                for timeframe in agg.rows.keys() {
+                    if keys.len() >= ROWS_CAP {
+                        return Err(rows_too_many(asked, symbol));
+                    }
+                    keys.push(key(Some(contract), *month, *timeframe));
+                }
+            }
+        }
+    }
+    Ok((keys, sums))
+}
+
+/// **ONE INSTRUMENT'S CENSUS ROWS** (WP-56b; DB-060, DB-G59, DB-G70, DB-A31):
+/// `GET /census/facets.json?feed=&segment=&underlying=[&expiry=]&rows=census-tuples-v1`
+/// answers the census rows of that selection in the SAME wire `/store.json`
+/// writes (`census`, read by the same decoder), with what a page needs
+/// beside them: the fullest row and the key count of the whole feed at each
+/// (month, rung) the rows name (`denominators`), the rows counted (`held`),
+/// and the part generation they were read at.
+///
+/// A page draws its first paint from this answer (11,822 B of lists and
+/// about as much of rows for GDFL NIFTY spot) instead of the whole census
+/// (33,349,105 B on 11 Oct 2026).
+///
+/// COST: the keys are read off the index's nodes ([`rows_keys`]), each is
+/// one probe of the census, and the answer is refused past [`ROWS_CAP`]
+/// keys: bounded by the cap, whatever the store holds. The denominators are
+/// one probe per (segment, month, rung) named.
+///
+/// IT EQUALS THE CENSUS OR IT IS REFUSED: the rows found must sum, per rung,
+/// to what the index's node says the selection holds; a difference (a key
+/// the candidates missed) is `rows_incomplete`, never a short list.
+fn rows_answer(
+    site: &Site,
+    asked: &Asked,
+    census: Option<&census::VendorCensus>,
+    slot: &Arc<Slot>,
+    state: &str,
+    degraded: Option<&str>,
+) -> (Result<String, RowsRefusal>, u64) {
+    let (found, generation) = index(site, asked.feed, asked.segment, slot, |index| {
+        (rows_keys(index, asked), index.generation)
+    });
+    let (exchange, keys, sums) = match found {
+        Ok(found) => found,
+        Err(refusal) => return (Err(refusal), generation),
+    };
+    let part = part_of(slot, asked.segment);
+    let mut entries: Vec<(census::Series, YearMonth)> = Vec::with_capacity(keys.len());
+    let mut counted = Rows::new();
+    let mut bars = 0_u64;
+    for key in &keys {
+        let Some(held) = part.and_then(|part| part.held(key)) else {
+            continue;
+        };
+        let sum = counted.entry(key.timeframe).or_insert(0);
+        *sum = sum.saturating_add(held.entry.rows);
+        bars = bars.saturating_add(held.entry.rows);
+        entries.push((census::Series::of(key), key.month));
+    }
+    if counted != sums {
+        return (
+            Err((
+                axum::http::StatusCode::CONFLICT,
+                error_json(
+                    "rows_incomplete",
+                    "the rows this index can name do not sum to what the census holds for \
+                     the selection (a key outside the index's reading); read the census \
+                     whole from /store.json",
+                ),
+            )),
+            generation,
+        );
+    }
+    // THE WHOLE BODY'S ORDER (`census::held_entries`): newest month first,
+    // then the series' own, so these rows read like a slice of /store.json.
+    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let denoms = feed_denominators(site, asked.feed, slot, &entries);
+    let rows = match census {
+        Some(census) => {
+            super::store_wire::compact(std::slice::from_ref(census), &entries, asked.feed)
+        }
+        None => super::store_wire::compact(&[], &entries, asked.feed),
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(why) => {
+            return (
+                Err((
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error_json("census_encoding_failed", &why),
+                )),
+                generation,
+            );
+        }
+    };
+    let held = (entries.len(), bars);
+    (
+        Ok(rows_body(
+            asked, exchange, generation, state, degraded, held, &denoms, &rows,
+        )),
+        generation,
+    )
+}
+
+/// Per (month, rung) named by `entries`: the fullest row and the key count
+/// of the WHOLE feed there, summed over every segment's index. One probe
+/// per (segment, month, rung).
+fn feed_denominators(
+    site: &Site,
+    feed: Vendor,
+    slot: &Arc<Slot>,
+    entries: &[(census::Series, YearMonth)],
+) -> BTreeMap<(YearMonth, Timeframe), (u64, u64)> {
+    let wanted: BTreeSet<(YearMonth, Timeframe)> = entries
+        .iter()
+        .map(|(series, month)| (*month, series.timeframe))
+        .collect();
+    let mut denoms: BTreeMap<(YearMonth, Timeframe), (u64, u64)> = BTreeMap::new();
+    for segment in SEGMENTS {
+        index(site, feed, segment, slot, |index| {
+            for at in &wanted {
+                if let Some((fullest, support)) = index.denoms.get(at) {
+                    let sum = denoms.entry(*at).or_insert((0, 0));
+                    sum.0 = sum.0.max(*fullest);
+                    sum.1 = sum.1.saturating_add(*support);
+                }
+            }
+        });
+    }
+    denoms
+}
+
+/// The rows answer's body: what was asked, the part generation, the rows
+/// counted (`held`: census rows, then bars), the denominators, and the
+/// tuples (`census`, already encoded).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one body written from the eight things it states; a struct would be built \
+              once, here, to be taken apart on the next line"
+)]
+fn rows_body(
+    asked: &Asked,
+    exchange: Option<Exchange>,
+    generation: u64,
+    state: &str,
+    degraded: Option<&str>,
+    (months, bars): (usize, u64),
+    denoms: &BTreeMap<(YearMonth, Timeframe), (u64, u64)>,
+    census_rows: &str,
+) -> String {
+    let word =
+        |text: Option<String>| text.map_or_else(|| "null".to_owned(), |t| render::json_string(&t));
+    let mut out = format!(
+        r#"{{"schema":1,"feed":{},"segment":{},"underlying":{},"exchange":{},"expiry":{},"generation":{generation},"state":{},"degraded":{},"order":{},"cap":{ROWS_CAP},"held":{{"months":{months},"rows":{bars}}},"denominators":["#,
+        render::json_string(asked.feed.as_str()),
+        render::json_string(asked.segment.as_str()),
+        word(asked.underlying.map(|symbol| symbol.as_str().to_owned())),
+        word(exchange.map(|exchange| exchange.as_str().to_owned())),
+        word(asked.expiry.map(|day| day.to_string())),
+        render::json_string(state),
+        word(degraded.map(str::to_owned)),
+        order_json(),
+    );
+    for (at, ((month, timeframe), (fullest, support))) in denoms.iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "[{},{},{fullest},{support}]",
+            render::json_string(&month.to_string()),
+            render::json_string(timeframe.as_str())
+        );
+    }
+    out.push_str(r#"],"census":"#);
+    out.push_str(census_rows);
+    out.push('}');
+    out
 }
 
 /// The selection's lists out of one index, or the refusal of a `since` it

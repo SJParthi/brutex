@@ -123,7 +123,13 @@
 
 <svelte:window onkeydown={db.onWindowKey} onpointerdown={db.onWindowDown} />
 
-<div class="pane db">
+<!-- A CONTROL OUTSIDE THE BAR ROWS NEEDS EVERY ROW (WP-56b): the first paint
+     is drawn from the census rows of the instrument on screen, and the lists
+     of every other instrument are read when a control that shows them is
+     reached for (a press or a focus anywhere but the bar rows and the
+     census banner). `db.censusReach` is a no-op once the whole census is
+     held. -->
+<div class="pane db" onpointerdowncapture={db.censusReach} onfocusincapture={db.censusReach}>
   {#if store.busy}<p class="inline-note" role="status">{store.busy}</p>{/if}
   <DbCensusBanner {db} />
   <!-- THE PANE HEAD IS GONE FROM THIS PAGE, ON THE OPERATORS CALL. It carried
@@ -232,10 +238,17 @@
     {#if db.view === 'census'}
     <DbCoverageGrid {db} />
     {:else}
+    <!-- THE BAR ROWS AND THEIR PAGER NEED ONLY THE SERIES ON SCREEN: paging,
+         sorting and Go to never ask for the whole census. `display:
+         contents` keeps the board's flex column exactly as it was. -->
+    <div data-census-rows style="display: contents">
     <DbBarsGrid {db} />
+    </div>
     {/if}
 
+    <div data-census-rows style="display: contents">
     {@render pager(db)}
+    </div>
     </div>
   {/if}
 </div>

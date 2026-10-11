@@ -407,7 +407,7 @@
   <h1
     class="sym"
     title={db.picked
-      ? `${db.picked} — one instrument of the ${fmt(db.instrumentRows.length)} the rungs above leave, in the store's own spelling.`
+      ? `${db.picked} — one instrument of the ${fmt(db.instrumentRows.length)} the rungs above leave, in the store's own spelling.${db.censusScopeNote}`
       : `${db.feedName}'s whole store at this selection. No single instrument is named: the Find box holds ${db.typed ? `“${db.filter.trim()}”, which is not one of the ${fmt(db.instrumentRows.length)} instrument keys on offer` : 'nothing'}.`}
   >
     {db.picked || db.feedName}
