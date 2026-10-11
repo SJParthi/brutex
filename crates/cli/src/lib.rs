@@ -75,6 +75,10 @@ mod gdfl_import_command;
 /// `cli gdfl-rekey`: stored GDFL option keys the decoder files elsewhere or
 /// refuses, moved as new files or retired by name (D-3331, D-3316; WP-12c).
 mod gdfl_rekey;
+/// `cli series-identity`: every stored minute of a series judged against its
+/// own stored day bars, read-only: the minutes a landing refuses today and the
+/// months that hold them (WP-13d).
+mod series_identity;
 /// `cli srt-build`: the `.srt` sort index for named months of a series (D-3349).
 mod srt_build;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
@@ -529,6 +533,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    a month not held is not created, a month
                                    another process holds is refused. --dry-run
                                    writes nothing (D-3340).
+       cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED]
+                                   read-only: every stored 1min bar of a series
+                                   judged against its own stored 1day bars; the
+                                   minutes a landing refuses today (before the
+                                   first served day bar, or wholly outside
+                                   their own day's range) and the months that
+                                   hold them. ALL prints one line per series
+                                   and names each with no minute rung (WP-13d).
        cli zerodha-repair INSTRUMENT|ALL FROM TO [--segment INDEX|CASH]
                           [--rung RUNG] [--from-store ROOT --reason TEXT]
                                    the Zerodha month holes (FROM, TO are
@@ -2669,6 +2681,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
             zerodha_repair::command(arguments, out)
         }
+        ["series-identity", arguments @ ..] if !arguments.is_empty() => {
+            series_identity::command(arguments, out)
+        }
         ["gdfl-dayflags", arguments @ ..] if !arguments.is_empty() => {
             gdfl_dayflags::command(arguments, out)
         }
@@ -2740,7 +2755,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 44] = [
+const COMMANDS: [&str; 45] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2776,6 +2791,7 @@ const COMMANDS: [&str; 44] = [
     "research-plan",
     "results",
     "screen",
+    "series-identity",
     "srt-build",
     "sweep",
     "sweep-all",
