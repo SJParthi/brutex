@@ -495,14 +495,41 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Answer {
             }
         },
     };
-    let modified = modified_secs(&meta);
-    let sidecar = read_sidecar(root, bars_path, &bars);
+    // THE GENERATION EVERY READER OPENS (D-3350; DB-N26, WP-12d).
+    served_answer(root, asked, (bars_path, relative, &meta), &bars, at_bar)
+}
+
+/// The answer for the open month `bars` at `bars_path` (below the root,
+/// `relative`): resolved to the generation every reader opens
+/// ([`served_month`]), its sidecar read beside it, and the provenance built.
+fn served_answer(
+    root: &Path,
+    asked: &Asked,
+    (bars_path, relative, meta): (StorePath<'_>, String, &std::fs::Metadata),
+    bars: &BarFile,
+    at_bar: Option<u64>,
+) -> Answer {
+    use axum::http::StatusCode;
+    let (served, served_root, modified) = match served_month(root, bars_path, meta) {
+        Ok(served) => served,
+        Err(why) => {
+            return Answer::refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                asked,
+                &why,
+                json!({ "path": relative }),
+            );
+        }
+    };
+    let sidecar = read_sidecar(root, bars_path, bars, &served_root);
     let body = provenance(
         root,
         asked,
         &Month {
-            relative,
-            bars: &bars,
+            relative: bars_path.to_path_buf(&served_root).display().to_string(),
+            original: (served > 0).then_some(relative),
+            served,
+            bars,
             modified,
             at_bar,
         },
@@ -514,10 +541,42 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Answer {
     }
 }
 
+/// The generation of `bars_path`'s month every reader opens (D-3350; DB-N26,
+/// WP-12d): its ordinal (`0` the original), its root below the store root,
+/// and its bar file's modification time. A month served from a repair
+/// revision is named by the revision's path and time, never the superseded
+/// original's, which no reader opens; `meta` is the original's, already
+/// read by the path probe. One pointer read, and one `metadata` call for a
+/// revision.
+///
+/// # Errors
+///
+/// The store's refusal of the month's pointer, in its words.
+fn served_month(
+    root: &Path,
+    bars_path: StorePath<'_>,
+    meta: &std::fs::Metadata,
+) -> Result<(u32, PathBuf, Option<i64>), String> {
+    let served = store::generation::served(root, bars_path).map_err(|why| why.to_string())?;
+    let modified = if served.ordinal() == 0 {
+        modified_secs(meta)
+    } else {
+        std::fs::metadata(bars_path.to_path_buf(&served.root(root)))
+            .ok()
+            .and_then(|meta| modified_secs(&meta))
+    };
+    Ok((served.ordinal(), served.root(Path::new("")), modified))
+}
+
 /// What the answer knows about the month file itself.
 struct Month<'a> {
-    /// The bar file's path below the store root.
+    /// The served bar file's path below the store root: the original's, or
+    /// its repair revision's (D-3350).
     relative: String,
+    /// The original's path below the store root, when a revision is served.
+    original: Option<String>,
+    /// The generation served: `0` the original, else the revision ordinal.
+    served: u32,
     /// The bar file, open.
     bars: &'a BarFile,
     /// Its modification time, UNIX seconds, when the host says.
@@ -537,6 +596,21 @@ fn provenance(root: &Path, asked: &Asked, month: &Month<'_>, sidecar: &SidecarRe
         notes.push(format!(
             "the sidecar beside this month was refused, so none of its records is served and \
              every bar below is {RECONSTRUCTED}: {why}"
+        ));
+    }
+    // A REPAIRED MONTH IS SAID AT THE TOP TOO (D-3350; DB-N26): its bars are
+    // a revision written whole by the repair, so its commits are not landings
+    // and it has no sidecar; every bar is answered from the journals.
+    if month.served > 0 {
+        notes.push(format!(
+            "this month is served from repair revision {} (D-3350): its bars, header and \
+             modification time are the revision's, which the repair that published it wrote in \
+             one commit; the original at {} is kept byte-identical and no reader opens it. A \
+             revision carries no .prv sidecar, so every bar is {RECONSTRUCTED}, and \
+             audit/{}.repairs names each repair and why",
+            month.served,
+            month.original.as_deref().unwrap_or("?"),
+            asked.feed.as_str()
         ));
     }
     // A KEY THE RE-KEY MOVED, COPIED INTO OR RETIRED IS SAID (D-3331;
@@ -565,8 +639,14 @@ fn provenance(root: &Path, asked: &Asked, month: &Month<'_>, sidecar: &SidecarRe
         .collect();
     let reconstruction = if rebuild {
         match asked.feed {
-            Vendor::Gdfl => gdfl_reconstruction(&journals, asked, month.bars),
-            _ => pull_reconstruction(root, asked, header.generation, month.modified, &mut notes),
+            Vendor::Gdfl => gdfl_reconstruction(&journals, asked, month.bars, month.served),
+            _ => pull_reconstruction(
+                root,
+                asked,
+                (header.generation, month.served),
+                month.modified,
+                &mut notes,
+            ),
         }
     } else {
         Value::Null
@@ -585,6 +665,8 @@ fn provenance(root: &Path, asked: &Asked, month: &Month<'_>, sidecar: &SidecarRe
                 "held": true,
                 "bars": {
                     "path": month.relative,
+                    "served_generation": month.served,
+                    "original_path": month.original,
                     "n_valid": header.n_valid,
                     "generation": header.generation,
                     "first_ts_micros": header.first_ts_micros,
@@ -750,14 +832,22 @@ impl SidecarRead {
     }
 }
 
-/// Reads the sidecar beside `bars_path` and checks it against `bars`.
-fn read_sidecar(root: &Path, bars_path: StorePath<'_>, bars: &BarFile) -> SidecarRead {
+/// Reads the sidecar beside `bars_path`'s served generation, whose root below
+/// the store root is `served_root` (empty for the original, D-3350), and
+/// checks it against `bars`. `store::provenance::read` resolves the same
+/// generation; the path named is the one it read.
+fn read_sidecar(
+    root: &Path,
+    bars_path: StorePath<'_>,
+    bars: &BarFile,
+    served_root: &Path,
+) -> SidecarRead {
     let prv = bars_path.with_file(FileKind::Provenance);
-    let path = prv.to_string();
+    let path = prv.to_path_buf(served_root).display().to_string();
     match store::provenance::read(root, bars_path) {
         Ok(Found::Absent) => SidecarRead::Absent { path },
         Ok(Found::Unborn { bytes }) => SidecarRead::Unborn { path, bytes },
-        Ok(Found::Present(sidecar)) => match sidecar.check_bars(&prv.to_path_buf(root), bars) {
+        Ok(Found::Present(sidecar)) => match sidecar.check_bars(&root.join(&path), bars) {
             Ok(()) => SidecarRead::Present { path, sidecar },
             Err(why) => SidecarRead::Refused {
                 path,
@@ -926,8 +1016,10 @@ fn filter_holds(filter: &str, symbol: &str) -> bool {
 }
 
 /// The month (or `t`'s day) rebuilt from `imports/gdfl.journal`, each import
-/// day beside the bars of this month stamped on that day.
-fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile) -> Value {
+/// day beside the bars of this month stamped on that day. `served` is the
+/// generation served (D-3350): a repair revision is written in one commit,
+/// so its commits are not compared with the journal's days.
+fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile, served: u32) -> Value {
     let source = "imports/gdfl.journal";
     let snapshot = match &journals.gdfl {
         Some(Ok(snapshot)) => snapshot,
@@ -980,6 +1072,9 @@ fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile) -> Va
         }
     }
     let whole_month = asked.t.is_none();
+    // A REPAIR REVISION'S ONE COMMIT IS THE REPAIR'S, not an import day's
+    // (D-3350; DB-N26): no comparison, and the reason in its place.
+    let compared = whole_month && served == 0;
     json!({
         "source": source,
         "journal": {
@@ -1000,16 +1095,24 @@ fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile) -> Va
         "bars_on_no_journal_day": whole_month.then(|| header.n_valid.saturating_sub(held_on_days)),
         "bar_lookup_errors": lookup_errors,
         "bar_file_commits": generation,
-        "commits_agree": whole_month.then(|| u64::try_from(with_bars).ok() == Some(generation)),
+        "commits_agree": compared.then(|| u64::try_from(with_bars).ok() == Some(generation)),
         // ONE COMMIT PER IMPORT DAY THAT FILED A BAR, as measured on the
         // operator's store on 10 Oct 2026: GDFL NIFTY 1s 2019-03 is at
         // generation 19, and 19 journal days of that month hold its bars.
-        "commits_why": whole_month.then_some(
-            "an import day that files bars for this instrument appends them to the month in one \
-             commit, so the commits equal the journal days holding its bars; a re-run that \
-             appended part of a day again, or bars landed by something other than the import, \
-             makes them differ"
-        ),
+        "commits_why": if served > 0 {
+            whole_month.then_some(
+                "the month is served from a repair revision (D-3350), written whole in one \
+                 commit by the repair that published it, so its commits do not count the \
+                 import days that landed its bars; audit/gdfl.repairs names each repair",
+            )
+        } else {
+            whole_month.then_some(
+                "an import day that files bars for this instrument appends them to the month in \
+                 one commit, so the commits equal the journal days holding its bars; a re-run \
+                 that appended part of a day again, or bars landed by something other than the \
+                 import, makes them differ",
+            )
+        },
         "archive": {
             "recorded": unnamed == 0 && missing == 0 && !rows.is_empty(),
             "runs": runs,
@@ -1536,11 +1639,14 @@ const fn scope_of(segment: Segment) -> audit::Scope {
     }
 }
 
-/// The month (or `t`'s day) rebuilt from `audit/pull.journal`.
+/// The month (or `t`'s day) rebuilt from `audit/pull.journal`. `generation`
+/// is the served bar file's commit count and `served` the generation served
+/// (D-3350): a repair revision's one commit and modification time are the
+/// repair's, so no pull run is named its writer.
 fn pull_reconstruction(
     root: &Path,
     asked: &Asked,
-    generation: u64,
+    (generation, served): (u64, u32),
     modified: Option<i64>,
     notes: &mut Vec<String>,
 ) -> Value {
@@ -1579,8 +1685,13 @@ fn pull_reconstruction(
         .filter(|run| run.ran_at(modified))
         .map(|run| run.ordinal)
         .collect();
-    let attributed = match (generation, running.as_slice(), unclosed_before_write) {
-        (1, [only], false) => json!({
+    let attributed = match (
+        served,
+        generation,
+        running.as_slice(),
+        unclosed_before_write,
+    ) {
+        (0, 1, [only], false) => json!({
             "run": only,
             "basis": "the bar file committed once (generation 1), and its modification time \
                       falls inside this run and no other candidate's",
@@ -1630,7 +1741,8 @@ fn pull_reconstruction(
                 wrote; these are the runs of this feed and form whose window covers the bars \
                 and that offered bars, oldest first. One is named the writer only when the bar \
                 file committed once and was last written inside that run alone, and no run \
-                opened before that write is left without a closing record",
+                opened before that write is left without a closing record; never for a month \
+                served from a repair revision (D-3350), whose one commit is the repair's",
         "member_digest": "unknown",
     })
 }

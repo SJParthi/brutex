@@ -685,3 +685,93 @@ fn a_file_where_the_pointer_tree_belongs_is_refused() {
     );
     assert!(BarFile::open_existing(&store.0, month(), SYMBOL).is_err());
 }
+
+/// THE DB-N26 SHAPE: A ONE-SECOND MONTH PAST THE OLD 100,000-ROW CEILING TAKES
+/// A DAY IT LACKS AS A NEW GENERATION (WP-12d). Five held "sessions" of 22,500
+/// one-second bars (the regular session's length) are 112,500 bars, which
+/// `repair_month` refused `RowLimit` before the ceiling became the most one
+/// month can hold; a GDFL NIFTY one-second month holds about 409,000. The
+/// day between them lands, every held bar is kept, and the original is
+/// byte-identical.
+#[test]
+fn a_one_second_month_past_the_old_ceiling_takes_a_missing_day_as_a_new_generation() {
+    const SESSION: i64 = 22_500;
+    let store = Store::new();
+    let seconds = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "FIXTUREIDX",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: YearMonth::new(2024, 6).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    // An invented one-second bar `second` seconds after 09:15 IST on day
+    // `day` of June 2024.
+    let at = |day: i64, second: i64| {
+        let price = 2_000_000 + day * 10_000 + second % 997;
+        Bar {
+            ts_micros: (JUNE_IST_MIDNIGHT + (day - 1) * 86_400 + 555 * 60 + second) * 1_000_000,
+            open: price,
+            high: price + 3,
+            low: price - 3,
+            close: price + 1,
+            volume: 0,
+            open_interest: OI_NULL,
+        }
+    };
+    let day_of = |day: i64| (0..SESSION).map(move |second| at(day, second));
+    let held: Vec<Bar> = [3, 4, 5, 7, 10].into_iter().flat_map(day_of).collect();
+    assert!(held.len() > 100_000, "past the ceiling this replaced");
+    let mut writer = BarFile::open_or_create(&store.0, seconds, SYMBOL).unwrap();
+    writer.append(&held).unwrap();
+    drop(writer);
+    let original = (
+        fs::read(seconds.to_path_buf(&store.0)).unwrap(),
+        fs::read(seconds.with_file(FileKind::Checksums).to_path_buf(&store.0)).unwrap(),
+    );
+    let missing: Vec<Bar> = day_of(6).collect();
+    let repaired =
+        repair::repair_month(&store.0, seconds, SYMBOL, &missing, INDEX).expect("repaired");
+    let MonthRepair::Repaired {
+        from,
+        to,
+        held: kept,
+        added,
+        added_at,
+        ..
+    } = repaired
+    else {
+        panic!("{repaired:?}");
+    };
+    assert_eq!((from, to.ordinal()), (0, 1));
+    assert_eq!((kept, added), (112_500, 22_500));
+    assert_eq!(added_at.first(), Some(&missing[0].ts_micros));
+    let served = BarFile::open_existing(&store.0, seconds, SYMBOL).unwrap();
+    assert_eq!(served.header().n_valid, 135_000);
+    let expected: Vec<Bar> = [3, 4, 5, 6, 7, 10].into_iter().flat_map(day_of).collect();
+    for (index, bar) in expected.iter().enumerate().step_by(1_009) {
+        assert_eq!(
+            served.read_record(u64::try_from(index).unwrap()).unwrap(),
+            *bar
+        );
+    }
+    assert_eq!(
+        served.read_record(134_999).unwrap(),
+        *expected.last().unwrap()
+    );
+    assert_eq!(
+        served.first_at_or_after(missing[0].ts_micros).unwrap(),
+        3 * 22_500
+    );
+    assert_eq!(
+        (
+            fs::read(seconds.to_path_buf(&store.0)).unwrap(),
+            fs::read(seconds.with_file(FileKind::Checksums).to_path_buf(&store.0)).unwrap(),
+        ),
+        original,
+        "never in place"
+    );
+}

@@ -133,7 +133,11 @@ alternate root with the general `BarFile` writer is outside this protocol.
 
 ## Bounds and cost
 
-Source and revised rows are each capped at 100,000. Ordinals are 1..=1,024 per
+Source and revised rows are each capped at `MAX_ROWS`, 2,678,400: 31 days of
+one-second bars, the most one month can hold on the finest rung the store
+files. It was 100,000, under which no one-second month of a full session
+calendar fits (a GDFL NIFTY one-second month holds about 409,000 bars), so no
+GDFL month could be repaired (DB-N26, WP-12d). Ordinals are 1..=1,024 per
 logical month; no free-ordinal search or implicit latest lookup is performed.
 Each publication or completed retry is O(source + revised rows), with a fixed
 number of directory operations and bounded buffers besides caller-owned rows.
