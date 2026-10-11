@@ -33,6 +33,8 @@
   import DbOptionCells from './DbOptionCells.svelte';
   import DbOptionNotes from './DbOptionNotes.svelte';
   import DbProvenance from './DbProvenance.svelte';
+  // WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES ON THE PAGE (DB-B74, WP-81).
+  import DbScrubNote from './DbScrubNote.svelte';
 
   /**
    * THE BAR GRID'S MEASURED FIT — the box height, the fold and the automatic
@@ -2211,6 +2213,7 @@
     {/if}
   </div>
 <DbProvenance {db} />
+<DbScrubNote {db} />
 
 {#snippet pager(/** @type {any} */ db)}
   <!-- ==================================================================

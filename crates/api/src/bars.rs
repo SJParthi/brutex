@@ -37,6 +37,8 @@ use core::fmt::Write as _;
 use brutex_core::vendor::Vendor;
 use pull::session::Day;
 use store::file::BarFile;
+
+use crate::fault_log::FaultLog;
 use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
@@ -431,14 +433,19 @@ pub(crate) fn open_classified(
 ///
 /// Silent on a clean page: a request where every record read costs one branch on
 /// an empty `Vec` and emits nothing.
-fn note_unreadable_records(file: &str, faults: &[String], rows: usize, skip: usize) {
-    let Some(first) = faults.first() else {
+fn note_unreadable_records(file: &str, faults: &FaultLog, rows: usize, skip: usize) {
+    if faults.is_empty() {
         return;
-    };
+    }
+    // THE FIRST SENTENCE OF A CLONE, NOT OF THE LOG: the caller still renders
+    // the log, and a run is only a sentence once it is closed. At most
+    // `MAX_NAMED_FAULTS` sentences are built, so the clone is bounded (DB-B75).
+    let said = faults.clone().sentences();
+    let first = said.first().map_or("", String::as_str);
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn("api.bars", "records unreadable")
             .with("file", telemetry::Value::Str(file))
-            .with("faults", telemetry::Value::Uint(faults.len() as u64))
+            .with("faults", telemetry::Value::Uint(faults.records()))
             .with("rows", telemetry::Value::Uint(rows as u64))
             .with("skip", telemetry::Value::Uint(skip as u64))
             // THE FIRST REASON ONLY, and the count says how many there were.
@@ -457,8 +464,13 @@ fn note_unreadable_records(file: &str, faults: &[String], rows: usize, skip: usi
 /// unreadable row in the middle of a month should not blank the other 199, and
 /// the caller reports the gap. The refusal is returned beside the rows so it can
 /// be named on the page — `CLAUDE.md` §4, degrade loudly.
+/// The refusals come back as a [`FaultLog`]: consecutive records refused for
+/// one reason are ONE sentence naming the file once, at most
+/// [`crate::fault_log::MAX_NAMED_FAULTS`] are named, and
+/// [`FaultLog::records`] counts every one (DB-B75). A month whose `.crc` was
+/// lost answered 188 MB of the same sentence before.
 #[must_use]
-pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>) {
+pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, FaultLog) {
     let (read, faults) = slots(file, skip, take);
     let rows: Vec<Bar> = read.into_iter().flatten().collect();
     note_unreadable_records(
@@ -476,10 +488,10 @@ pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>)
 /// record has no readable predecessor, and a page that met an unreadable
 /// record has still used that position up. [`page`] drops the `None`s, and
 /// with them both facts; W1-api1-10 found the window paying for that (D-0730).
-fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, Vec<String>) {
+fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, FaultLog) {
     let n = file.header().n_valid;
     let mut rows = Vec::with_capacity(take.min(PAGE_BARS));
-    let mut faults = Vec::new();
+    let mut faults = FaultLog::default();
     for i in skip..skip.saturating_add(take) {
         let Ok(index) = u64::try_from(i) else {
             break;
@@ -493,9 +505,11 @@ fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, Vec<Str
             // per-record loop, and `slots` itself runs once per month file of
             // a window; a line placed at either would be bounded by the data
             // and not by the request. The caller emits the aggregate once.
+            // COALESCED, NOT FORMATTED PER RECORD (DB-B75): a run of one
+            // reason over consecutive records is one sentence.
             Err(why) => {
                 rows.push(None);
-                faults.push(format!("record {index}: {why}"));
+                faults.record(file.path(), index, why);
             }
         }
     }
@@ -1128,7 +1142,10 @@ pub struct Window {
     /// The rows asked for, each with its change decided.
     pub bars: Vec<WindowBar>,
     /// Records and months that would not read, named. Never silently dropped.
+    /// A run of records refused for one cause is ONE sentence (DB-B75).
     pub faults: Vec<String>,
+    /// Every record the request could not read, named or not (DB-B75).
+    pub faulted_records: u64,
     /// Present only when asked for, because it costs a scan.
     pub extremes: Option<Extremes>,
     /// Why the extremes asked for are not given, when they are not.
@@ -1349,7 +1366,7 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             usize::try_from(last).map_or(0, |last| last - last % limit.max(1))
         })
     });
-    let mut record_faults = Vec::new();
+    let mut record_faults = FaultLog::default();
     if query.sort.scans() {
         scan_admitted(out.total, query.sort, out.offset, limit)?;
         let scanned = scan(
@@ -1384,15 +1401,18 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             }
         }
     }
-    if let Some(first) = record_faults.first() {
-        // THE FILE IS THE FAULT'S OWN PREFIX: every record fault names its
-        // path before the record number.
-        let file = first
-            .split_once(" record ")
-            .map_or(first.as_str(), |(path, _)| path);
+    if !record_faults.is_empty() {
+        // THE FILE IS THE FAULT'S OWN PREFIX: a record and a run both name
+        // their path before ` record`.
+        let said = record_faults.clone().sentences();
+        let first = said.first().map_or("", String::as_str);
+        let file = first.split_once(" record").map_or(first, |(path, _)| path);
         note_unreadable_records(file, &record_faults, out.bars.len(), out.offset);
     }
-    out.faults.append(&mut record_faults);
+    // COALESCED AND CAPPED (DB-B75): a scan over a month whose sidecar is
+    // lost refuses every record, and each used to be its own sentence.
+    out.faulted_records = record_faults.records();
+    out.faults.extend(record_faults.sentences());
     if query.coverage {
         out.coverage = coverage_of(store_root, &mut plans, &mut out.faults);
     }
@@ -1571,7 +1591,7 @@ fn seek(
     rules: &[change::Rules],
     query: &WindowQuery,
     (offset, limit): (usize, usize),
-    faults: &mut Vec<String>,
+    faults: &mut FaultLog,
 ) -> Result<Vec<WindowBar>, String> {
     let total: u64 = plans.iter().map(SeriesPlan::total).sum();
     let (a, b) = ascending_span(total, offset, limit, query.desc);
@@ -1788,7 +1808,7 @@ fn scan(
     rules: &[change::Rules],
     query: &WindowQuery,
     (offset, limit): (usize, usize),
-    faults: &mut Vec<String>,
+    faults: &mut FaultLog,
 ) -> Scanned {
     let order = candidate_order(query.desc);
     let depth = offset.saturating_add(limit).max(1);
@@ -1886,7 +1906,7 @@ fn extremes_of(
     root: &std::path::Path,
     plans: &mut [SeriesPlan],
     rules: &[change::Rules],
-    faults: &mut Vec<String>,
+    faults: &mut FaultLog,
 ) -> Result<(Extremes, u64), String> {
     let mut extremes = Extremes::default();
     let mut owed = 0_u64;
@@ -3410,9 +3430,14 @@ mod window_tests {
             "no row is borrowed from February"
         );
         assert_eq!(
-            first.faults.len(),
-            7,
-            "records 73..80 are named: {:?}",
+            (first.faults.len(), first.faulted_records),
+            (1, 7),
+            "records 73..80 are one named run of seven (DB-B75): {:?}",
+            first.faults
+        );
+        assert!(
+            first.faults[0].contains("records 73–79 (7)"),
+            "{:?}",
             first.faults
         );
 
@@ -3423,7 +3448,7 @@ mod window_tests {
                 let got = ts_page(&root, feb, desc, offset, 10);
                 assert!(got.bars.len() <= 10);
                 seen.extend(got.bars.iter().map(|r| r.bar.close));
-                faults += got.faults.len();
+                faults += usize::try_from(got.faulted_records).expect("small");
             }
             let mut expected: Vec<i64> = (1_000..1_073).chain(2_000..2_100).collect();
             if desc {
@@ -3433,7 +3458,10 @@ mod window_tests {
                 seen, expected,
                 "desc={desc}: each readable row once, in order"
             );
-            assert_eq!(faults, 27, "desc={desc}: each unreadable record named once");
+            assert_eq!(
+                faults, 27,
+                "desc={desc}: each unreadable record counted once"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3466,7 +3494,12 @@ mod window_tests {
             got.bars[1].chg.is_some(),
             "record 146 read, so 147 is measured"
         );
-        assert_eq!(got.faults.len(), 73, "every unreadable record is named");
+        assert_eq!(
+            (got.faults.len(), got.faulted_records),
+            (1, 73),
+            "every unreadable record is counted, and one block is one run (DB-B75): {:?}",
+            got.faults
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3578,7 +3611,10 @@ mod window_tests {
 
         let from = crate::emitted::mark();
         let (rows, faults) = page(&file, 0, 200);
-        assert_eq!((rows.len(), faults.len()), (127, 73));
+        assert_eq!((rows.len(), faults.records()), (127, 73));
+        let said = faults.sentences();
+        assert_eq!(said.len(), 1, "one damaged block is one run: {said:?}");
+        assert!(said[0].contains("records 73–145 (73)"), "{said:?}");
 
         // FILTERED ON THIS FIXTURE'S OWN DIRECTORY: a sibling test damages the
         // same block of a month the same size, in parallel.

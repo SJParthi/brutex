@@ -158,6 +158,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "research-plan"
                 | "policy-check"
                 | "results"
+                | "scrub-blocks"
                 | "top"
                 | "verify"
                 // The Zerodha month-hole plan and versioned repair (D-3350,

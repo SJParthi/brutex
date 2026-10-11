@@ -1,7 +1,10 @@
 //! Shared bounded admission for blocking sweep detail, live and status reads.
 //! Cold fixed-stride indexes cost O(history); refreshed indexes consume new
 //! records. Neither blocking file reads nor formatting occupies a Tokio worker.
-//! Admission limits queued plus running tasks, and readers enforce byte/row caps.
+//! Admission limits running tasks per pool; a request that finds its pool full
+//! waits at most [`ADMISSION_WAIT_MS`] in a queue of at most [`MAX_WAITING`]
+//! before it is refused with 429 and `Retry-After` (DB-B51, WP-81). Readers
+//! enforce byte/row caps.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -59,42 +62,203 @@ pub const MAX_STORE_READ_CONCURRENT: usize = 8;
 /// D-2327.
 pub const MAX_LOG_READ_CONCURRENT: usize = 4;
 
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-static STORE_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-static LOG_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// `/store.json` census reads that may be queued or running at once on the
+/// blocking pool (DB-B51, WP-81; D-3327).
+///
+/// A pool of its own for the reason [`MAX_CALENDAR_CONCURRENT`] has one. The
+/// census read used [`run`]'s four slots, which the audit journal of every
+/// audited route (`/backtest/run`, `/live.json` …) also takes: ten `/db` tabs
+/// opening at once answered 429 on the census to 18 of 30 requests and held
+/// the slots a backtest launch needed. A first encode of the GDFL census is
+/// about 1.9 s; every later read of an unchanged census is served from the
+/// wire cache in milliseconds.
+pub const MAX_CENSUS_CONCURRENT: usize = 4;
 
-/// One admitted request in one pool.  Dropping it always returns the slot.
-pub(crate) struct Permit(&'static AtomicUsize);
+/// How long a request waits for a slot in a full pool before it is refused,
+/// in milliseconds (DB-B51, WP-81).
+///
+/// A choice, not a measurement of anything outside this process. The reads
+/// these pools admit are short — a seek, a facet, a page of imports answers
+/// in about a millisecond on the real store — so a quarter of a second turns
+/// the refusals ten tabs met (271 of 480 seeks, 279 of 480 facets) into a
+/// short wait, while a pool held by genuinely long work still refuses within
+/// a quarter second, naming its bound, with `Retry-After`.
+pub const ADMISSION_WAIT_MS: u64 = 250;
+
+/// The most requests that may WAIT for one pool at once (DB-B51, WP-81).
+/// Past it a request is refused at once: the queue is bounded, so a burst
+/// cannot park an unbounded number of tasks on one pool.
+pub const MAX_WAITING: usize = 32;
+
+/// How often a pool's clock wakes its waiters so each can read its deadline,
+/// in milliseconds. A waiter is refused at most this long past
+/// [`ADMISSION_WAIT_MS`].
+const CLOCK_TICK_MS: u64 = 10;
+
+/// One bounded pool: the slots running, the requests waiting, the wake-up a
+/// returned slot sends to one waiter, and the clock that ends a wait.
+pub(crate) struct Pool {
+    active: AtomicUsize,
+    waiting: AtomicUsize,
+    freed: tokio::sync::Notify,
+    max: usize,
+    /// The thread that wakes this pool's waiters every [`CLOCK_TICK_MS`]
+    /// while any wait; started by the first wait, parked while none does.
+    /// `None` inside: the thread could not be started, and nothing waits.
+    clock: std::sync::OnceLock<Option<std::thread::Thread>>,
+}
+
+impl Pool {
+    /// A pool of `max` slots, none taken. `const` so it can back a `static`.
+    pub(crate) const fn new(max: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
+            freed: tokio::sync::Notify::const_new(),
+            max,
+            clock: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// This pool's clock, started on the first wait; `None` when the thread
+    /// could not be started.
+    ///
+    /// THE WAIT IS TIMED BY A THREAD OF THIS PROCESS, NOT BY THE RUNTIME'S
+    /// TIMER. It was `tokio::time::timeout_at`, which PANICS on a runtime
+    /// built without a timer ("timers are disabled") — and only when the pool
+    /// is full, so the panic came and went with the load: on the merged tree
+    /// a test that drives a route on such a runtime died in two of four runs
+    /// of the suite, whenever other tests held the slots at that instant.
+    /// Before the wait existed a full pool refused at once on any runtime;
+    /// a wait must not turn that refusal into a panic. The clock asks nothing
+    /// of the runtime: it wakes the waiters, and each reads its own deadline
+    /// on `std::time::Instant`.
+    ///
+    /// Cost: one thread per pool that has ever waited (five in the server),
+    /// parked while nobody waits; while somebody does, one wake-up per waiter
+    /// every [`CLOCK_TICK_MS`], each one failed `try_take` — at most
+    /// [`MAX_WAITING`] of them, for at most [`ADMISSION_WAIT_MS`].
+    fn clock(&'static self) -> Option<&'static std::thread::Thread> {
+        self.clock
+            .get_or_init(|| {
+                std::thread::Builder::new()
+                    .name("admission-clock".to_owned())
+                    .spawn(move || {
+                        self.tick();
+                    })
+                    .ok()
+                    .map(|handle| handle.thread().clone())
+            })
+            .as_ref()
+    }
+
+    /// The clock thread's whole life: parked while nobody waits, and while
+    /// somebody does, every waiter woken once per [`CLOCK_TICK_MS`].
+    fn tick(&'static self) -> ! {
+        loop {
+            if self.waiting.load(Ordering::Acquire) == 0 {
+                // Nobody waits: sleep until a waiter unparks this thread. An
+                // `unpark` sent just before this `park` makes it return at
+                // once, so a waiter that arrives in between is not missed.
+                std::thread::park();
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(CLOCK_TICK_MS));
+            self.freed.notify_waiters();
+        }
+    }
+
+    /// A slot now, or `None` when every slot is taken.
+    fn try_take(&'static self) -> Option<Permit> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.max).then_some(active.saturating_add(1))
+            })
+            .ok()
+            .map(|_| Permit(self))
+    }
+
+    /// A slot now, or within [`ADMISSION_WAIT_MS`] when one is returned, or
+    /// `None`: at once when [`MAX_WAITING`] requests already wait, else when
+    /// the wait ends with every slot still taken (DB-B51).
+    ///
+    /// O(1) per wake-up: a returned slot wakes one waiter, which takes it or
+    /// waits again until its deadline. A newcomer may take a returned slot
+    /// before the waiter it woke; the waiter then waits on, never past its
+    /// deadline by more than one tick of the pool's clock, so nothing waits
+    /// unboundedly. It needs no timer of the runtime it is polled on
+    /// ([`Pool::clock`]).
+    async fn take(&'static self) -> Option<Permit> {
+        if let Some(permit) = self.try_take() {
+            return Some(permit);
+        }
+        self.waiting
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |waiting| {
+                (waiting < MAX_WAITING).then_some(waiting.saturating_add(1))
+            })
+            .ok()?;
+        let _queued = Queued(&self.waiting);
+        // NO CLOCK, NO WAIT: a wait nothing can end is refused at once, as a
+        // full pool was before the wait existed.
+        let clock = self.clock()?;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(ADMISSION_WAIT_MS);
+        // Counted in `waiting` above, so the clock ticks until this request
+        // leaves the queue; one `unpark` starts it if it was parked.
+        clock.unpark();
+        loop {
+            // REGISTERED BEFORE THE CHECK, so a slot returned, or a tick
+            // sent, between the check and the wait still wakes this waiter.
+            let freed = self.freed.notified();
+            let mut freed = std::pin::pin!(freed);
+            freed.as_mut().enable();
+            if let Some(permit) = self.try_take() {
+                return Some(permit);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            // Woken by a returned slot or by the clock's next tick.
+            freed.await;
+        }
+    }
+}
+
+/// One waiting request; dropping it leaves the queue.
+struct Queued(&'static AtomicUsize);
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+static ACTIVE: Pool = Pool::new(MAX_CONCURRENT);
+static CALENDAR: Pool = Pool::new(MAX_CALENDAR_CONCURRENT);
+static STORE_READ: Pool = Pool::new(MAX_STORE_READ_CONCURRENT);
+static LOG_READ: Pool = Pool::new(MAX_LOG_READ_CONCURRENT);
+static CENSUS: Pool = Pool::new(MAX_CENSUS_CONCURRENT);
+
+/// One admitted request in one pool.  Dropping it always returns the slot,
+/// and wakes one request waiting for it.
+pub(crate) struct Permit(&'static Pool);
 
 impl Permit {
-    fn try_take() -> Option<Self> {
-        Self::try_take_from(&ACTIVE, MAX_CONCURRENT)
-    }
-
-    fn try_take_from(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
-        pool.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-            (active < max).then_some(active.saturating_add(1))
-        })
-        .ok()
-        .map(|_| Self(pool))
-    }
-
     /// A slot for work an already-admitted request owes, taken past the cap.
     ///
     /// It is never refused, and it still counts: while it is held,
-    /// [`Permit::try_take`] sees one more active task and refuses new work
-    /// sooner. D-1445.
+    /// [`run`] sees one more active task and refuses new work sooner. D-1445.
     fn owed() -> Self {
-        ACTIVE.fetch_add(1, Ordering::AcqRel);
+        ACTIVE.active.fetch_add(1, Ordering::AcqRel);
         Self(&ACTIVE)
     }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.0.active.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "a detail permit is released exactly once");
+        self.0.freed.notify_one();
     }
 }
 
@@ -111,14 +275,33 @@ pub enum RunError {
 ///
 /// # Errors
 ///
-/// Returns [`RunError::Saturated`] before queueing when all four slots are
-/// occupied, or [`RunError::Join`] when Tokio cannot join the blocking task.
+/// Returns [`RunError::Saturated`] when all four slots stay occupied for
+/// [`ADMISSION_WAIT_MS`] (or [`MAX_WAITING`] requests already wait), or
+/// [`RunError::Join`] when Tokio cannot join the blocking task.
 pub async fn run<T, F>(work: F) -> Result<T, RunError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Permit::try_take().ok_or(RunError::Saturated)?;
+    let permit = ACTIVE.take().await.ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a `/store.json` census read outside Tokio's worker pool, in the
+/// census pool of [`MAX_CENSUS_CONCURRENT`] slots, apart from [`run`]'s
+/// (DB-B51, WP-81).
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] when every census slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or [`RunError::Join`] when Tokio cannot join the
+/// blocking task.
+pub async fn run_census<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = CENSUS.take().await.ok_or(RunError::Saturated)?;
     admitted(permit, work).await
 }
 
@@ -127,15 +310,14 @@ where
 ///
 /// # Errors
 ///
-/// [`RunError::Saturated`] before queueing when every calendar slot is
-/// occupied, or [`RunError::Join`] when Tokio cannot join the blocking task.
+/// [`RunError::Saturated`] when every calendar slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or [`RunError::Join`] when Tokio cannot join the blocking task.
 pub async fn run_calendar<T, F>(work: F) -> Result<T, RunError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Permit::try_take_from(&CALENDAR_ACTIVE, MAX_CALENDAR_CONCURRENT)
-        .ok_or(RunError::Saturated)?;
+    let permit = CALENDAR.take().await.ok_or(RunError::Saturated)?;
     admitted(permit, work).await
 }
 
@@ -145,15 +327,15 @@ where
 ///
 /// # Errors
 ///
-/// [`RunError::Saturated`] before queueing when every slot is occupied, or
+/// [`RunError::Saturated`] when every slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or
 /// [`RunError::Join`] when Tokio cannot join the blocking task.
 pub async fn run_store_read<T, F>(work: F) -> Result<T, RunError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
-        .ok_or(RunError::Saturated)?;
+    let permit = STORE_READ.take().await.ok_or(RunError::Saturated)?;
     admitted(permit, work).await
 }
 
@@ -162,15 +344,15 @@ where
 ///
 /// # Errors
 ///
-/// [`RunError::Saturated`] before queueing when every slot is occupied, or
+/// [`RunError::Saturated`] when every slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or
 /// [`RunError::Join`] when Tokio cannot join the blocking task.
 pub async fn run_log_read<T, F>(work: F) -> Result<T, RunError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT)
-        .ok_or(RunError::Saturated)?;
+    let permit = LOG_READ.take().await.ok_or(RunError::Saturated)?;
     admitted(permit, work).await
 }
 
@@ -518,6 +700,14 @@ pub(crate) async fn apart_from_slot_owners() -> tokio::sync::MutexGuard<'static,
     TEST_SERIAL.lock().await
 }
 
+/// [`apart_from_slot_owners`] for a test that is not async and drives its
+/// requests on runtimes of its own: the same guard, taken on this thread.
+/// Never call it inside a runtime (`blocking_lock` panics there).
+#[cfg(test)]
+pub(crate) fn apart_from_slot_owners_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_SERIAL.blocking_lock()
+}
+
 /// Takes every slot that is free right now, for a test that must saturate the
 /// pool from inside a request it is already running.
 ///
@@ -526,7 +716,7 @@ pub(crate) async fn apart_from_slot_owners() -> tokio::sync::MutexGuard<'static,
 /// this takes what is free rather than exactly [`MAX_CONCURRENT`].
 #[cfg(test)]
 pub(crate) fn take_every_free_slot(_apart: &tokio::sync::MutexGuard<'static, ()>) -> Vec<Permit> {
-    std::iter::from_fn(Permit::try_take).collect()
+    std::iter::from_fn(|| ACTIVE.try_take()).collect()
 }
 
 #[cfg(test)]
@@ -539,7 +729,11 @@ pub(crate) struct HeldSlots {
 pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
     let serial = TEST_SERIAL.lock().await;
     let permits = (0..MAX_CONCURRENT)
-        .map(|_| Permit::try_take().ok_or("the test did not own every detail slot"))
+        .map(|_| {
+            ACTIVE
+                .try_take()
+                .ok_or("the test did not own every detail slot")
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(HeldSlots {
         _serial: serial,
@@ -555,8 +749,7 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 pub(crate) fn take_every_log_read_slot(
     _apart: &tokio::sync::MutexGuard<'static, ()>,
 ) -> Vec<Permit> {
-    std::iter::from_fn(|| Permit::try_take_from(&LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT))
-        .collect()
+    std::iter::from_fn(|| LOG_READ.try_take()).collect()
 }
 
 /// One long-lived read handle on a results file, refreshed per request.
@@ -934,11 +1127,11 @@ impl<T> Drop for Checkout<'_, T> {
 )]
 mod tests {
     use super::{
-        Cached, IDENTITY_REFUSAL, LOG_READ_ACTIVE, MAX_LOG_READ_CONCURRENT, MAX_PAGE,
-        MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_RESULT_ROWS, MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT,
-        Ordering, Page, Permit, RunError, STORE_READ_ACTIVE, Selector, admission_refused,
-        must_admit, preflight, run, run_calendar, run_log_read, run_store_read, seek_window,
-        window,
+        ACTIVE, ADMISSION_WAIT_MS, CENSUS, Cached, IDENTITY_REFUSAL, LOG_READ,
+        MAX_CENSUS_CONCURRENT, MAX_LOG_READ_CONCURRENT, MAX_PAGE, MAX_PAGE_ROWS, MAX_QUERY_BYTES,
+        MAX_RESULT_ROWS, MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT, MAX_WAITING, Ordering, Page,
+        Permit, Pool, RunError, STORE_READ, Selector, admission_refused, must_admit, preflight,
+        run, run_calendar, run_census, run_log_read, run_store_read, seek_window, window,
     };
 
     /// locks-2, D-1912: a request that finds the retained reader taken out is
@@ -1018,29 +1211,170 @@ mod tests {
     /// route test sharing the real pools can see it.
     #[test]
     fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static POOL: AtomicUsize = AtomicUsize::new(0);
-        let first = super::Permit::try_take_from(&POOL, 2).expect("one of two");
-        let second = super::Permit::try_take_from(&POOL, 2).expect("two of two");
-        assert!(
-            super::Permit::try_take_from(&POOL, 2).is_none(),
-            "a third is refused"
-        );
-        assert_eq!(POOL.load(Ordering::Acquire), 2);
+        static POOL: Pool = Pool::new(2);
+        static NONE: Pool = Pool::new(0);
+        let first = POOL.try_take().expect("one of two");
+        let second = POOL.try_take().expect("two of two");
+        assert!(POOL.try_take().is_none(), "a third is refused");
+        assert_eq!(POOL.active.load(Ordering::Acquire), 2);
         drop(first);
-        assert_eq!(POOL.load(Ordering::Acquire), 1);
-        let third = super::Permit::try_take_from(&POOL, 2).expect("the freed slot");
+        assert_eq!(POOL.active.load(Ordering::Acquire), 1);
+        let third = POOL.try_take().expect("the freed slot");
         drop((second, third));
-        assert_eq!(POOL.load(Ordering::Acquire), 0, "every slot returned");
-        assert!(
-            super::Permit::try_take_from(&POOL, 0).is_none(),
-            "a zero bound admits nothing"
-        );
         assert_eq!(
-            POOL.load(Ordering::Acquire),
+            POOL.active.load(Ordering::Acquire),
+            0,
+            "every slot returned"
+        );
+        assert!(NONE.try_take().is_none(), "a zero bound admits nothing");
+        assert_eq!(
+            NONE.active.load(Ordering::Acquire),
             0,
             "and a refusal takes nothing"
         );
+    }
+
+    /// **A FULL POOL QUEUES A SHORT READ INSTEAD OF REFUSING IT (DB-B51).**
+    /// Ten tabs met 429 on 271 of 480 seeks, each a read of about a
+    /// millisecond, because a full pool refused before it queued. A request
+    /// that finds every slot taken now waits, and is admitted the moment a
+    /// slot is returned.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_full_pool_admits_a_waiter_when_a_slot_is_returned() {
+        static POOL: Pool = Pool::new(1);
+        let held = POOL.try_take().expect("the only slot");
+        let started = tokio::time::Instant::now();
+        let waiter = tokio::spawn(POOL.take());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(POOL.waiting.load(Ordering::Acquire), 1, "it is queued");
+        drop(held);
+        let admitted = waiter.await.expect("joined");
+        assert!(admitted.is_some(), "the returned slot is the waiter's");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(ADMISSION_WAIT_MS),
+            "admitted on the return, not at the deadline"
+        );
+        assert_eq!(POOL.waiting.load(Ordering::Acquire), 0, "the queue is left");
+        drop(admitted);
+        assert_eq!(POOL.active.load(Ordering::Acquire), 0);
+    }
+
+    /// **THE WAIT IS BOUNDED IN TIME AND IN LENGTH (DB-B51).** A pool held
+    /// past [`ADMISSION_WAIT_MS`] refuses at the deadline, never later; and
+    /// past [`MAX_WAITING`] waiters a request is refused at once, without
+    /// waiting at all.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_waiter_is_refused_at_its_deadline_and_a_full_queue_refuses_at_once() {
+        static POOL: Pool = Pool::new(1);
+        let held = POOL.try_take().expect("the only slot");
+        let started = tokio::time::Instant::now();
+        assert!(POOL.take().await.is_none(), "still held at the deadline");
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(ADMISSION_WAIT_MS),
+            "{waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_millis(ADMISSION_WAIT_MS * 4),
+            "{waited:?}"
+        );
+
+        let waiters: Vec<_> = (0..MAX_WAITING)
+            .map(|_| tokio::spawn(POOL.take()))
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(POOL.waiting.load(Ordering::Acquire), MAX_WAITING);
+        let at_once = tokio::time::Instant::now();
+        assert!(POOL.take().await.is_none(), "the queue is full");
+        assert!(
+            at_once.elapsed() < std::time::Duration::from_millis(ADMISSION_WAIT_MS / 2),
+            "refused without waiting"
+        );
+        drop(held);
+        let admitted = futures_count(waiters).await;
+        assert_eq!(admitted, 1, "one slot returned admits exactly one waiter");
+        assert_eq!(POOL.waiting.load(Ordering::Acquire), 0);
+        assert_eq!(POOL.active.load(Ordering::Acquire), 0);
+    }
+
+    /// How many of `waiters` were admitted. Every permit is kept until all
+    /// are counted, so no waiter can take a slot an admitted one returned.
+    async fn futures_count(waiters: Vec<tokio::task::JoinHandle<Option<Permit>>>) -> usize {
+        let mut admitted = 0;
+        let mut kept = Vec::new();
+        for waiter in waiters {
+            if let Some(permit) = waiter.await.expect("joined") {
+                admitted += 1;
+                kept.push(permit);
+            }
+        }
+        admitted
+    }
+
+    /// **A WAIT ASKS NOTHING OF THE RUNTIME'S TIMER.** On a runtime built with
+    /// no timer a full pool refuses its waiter at the deadline, and admits it
+    /// when a slot is returned sooner. The wait was `tokio::time::timeout_at`,
+    /// which panics there ("timers are disabled") — only when the pool was
+    /// full, so a test driving a route on such a runtime died whenever other
+    /// tests held the slots.
+    #[test]
+    fn a_wait_is_timed_on_a_runtime_that_has_no_timer() {
+        static POOL: Pool = Pool::new(1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime with no timer and no I/O driver");
+        let held = POOL.try_take().expect("the one slot");
+        let started = std::time::Instant::now();
+        assert!(
+            runtime.block_on(POOL.take()).is_none(),
+            "still held at the deadline"
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(ADMISSION_WAIT_MS),
+            "refused after {waited:?}, before the wait was over"
+        );
+        assert!(
+            waited < std::time::Duration::from_millis(ADMISSION_WAIT_MS * 4),
+            "refused only after {waited:?}"
+        );
+        assert_eq!(POOL.waiting.load(Ordering::Acquire), 0, "it left the queue");
+
+        // A slot returned during the wait admits the waiter there too.
+        let returner = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        let admitted = runtime.block_on(POOL.take());
+        assert!(admitted.is_some(), "the returned slot was not taken");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(ADMISSION_WAIT_MS),
+            "admitted only at the deadline: {:?}",
+            started.elapsed()
+        );
+        returner.join().expect("the returning thread");
+        assert_eq!(POOL.active.load(Ordering::Acquire), 1);
+        drop(admitted);
+        assert_eq!(POOL.active.load(Ordering::Acquire), 0);
+    }
+
+    /// **THE CENSUS HAS ITS OWN POOL (DB-B51).** With every detail slot taken
+    /// — the slots the audit journal of a backtest launch needs — a census
+    /// read is still admitted, and the reverse.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_census_pool_is_apart_from_the_detail_pool() {
+        let apart = super::apart_from_slot_owners().await;
+        let detail = super::take_every_free_slot(&apart);
+        assert_eq!(run_census(|| 5).await, Ok(5), "detail full, census free");
+        drop(detail);
+        let census: Vec<Permit> = std::iter::from_fn(|| CENSUS.try_take()).collect();
+        assert_eq!(census.len(), MAX_CENSUS_CONCURRENT);
+        assert_eq!(run(|| 6).await, Ok(6), "census full, detail free");
+        assert_eq!(run_census(|| ()).await, Err(RunError::Saturated));
+        drop(census);
+        assert_eq!(run_census(|| 7).await, Ok(7));
+        assert_eq!(ACTIVE.active.load(Ordering::Acquire), 0);
     }
 
     /// **A CALENDAR DERIVATION RUNS OFF THE ASYNC WORKER.** W1-api2-11,
@@ -1481,24 +1815,21 @@ mod tests {
             .await
             .expect("admitted store read");
         assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
-        // Hold every slot; the next is refused before it queues, and a
-        // released slot admits again. D-1508.
+        // Hold every slot; the next is refused once its wait ends (DB-B51),
+        // and a released slot admits again. D-1508.
         let held: Vec<Permit> = (0..MAX_STORE_READ_CONCURRENT)
-            .map(|_| {
-                Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
-                    .expect("a free slot")
-            })
+            .map(|_| STORE_READ.try_take().expect("a free slot"))
             .collect();
         assert_eq!(run_store_read(|| ()).await, Err(RunError::Saturated));
         // The other pools are not this one's.
         assert_eq!(run_calendar(|| 7).await, Ok(7));
         drop(held);
         assert_eq!(run_store_read(|| 9).await, Ok(9));
-        assert_eq!(STORE_READ_ACTIVE.load(Ordering::Acquire), 0);
+        assert_eq!(STORE_READ.active.load(Ordering::Acquire), 0);
     }
 
     /// A log read runs on a blocking thread, and past
-    /// [`MAX_LOG_READ_CONCURRENT`] it is refused before it queues, without
+    /// [`MAX_LOG_READ_CONCURRENT`] it is refused once its wait ends, without
     /// touching the other pools. log-3, P1-04-02, D-2327.
     #[tokio::test(flavor = "current_thread")]
     async fn a_log_read_runs_off_the_worker_and_refuses_past_its_bound() {
@@ -1516,7 +1847,7 @@ mod tests {
         assert_eq!(run_calendar(|| 7).await, Ok(7));
         drop(held);
         assert_eq!(run_log_read(|| 9).await, Ok(9));
-        assert_eq!(LOG_READ_ACTIVE.load(Ordering::Acquire), 0);
+        assert_eq!(LOG_READ.active.load(Ordering::Acquire), 0);
     }
 
     #[test]

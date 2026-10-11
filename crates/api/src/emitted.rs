@@ -1393,7 +1393,7 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
 
     let (rows, faults) = crate::bars::page(&reader, 0, 1);
     assert!(rows.is_empty(), "a record that will not read is not a row");
-    assert_eq!(faults.len(), 1, "and the page names the gap");
+    assert_eq!(faults.records(), 1, "and the page names the gap");
 }
 
 /// **EVERY EMIT SITE THIS BINARY CAN REACH PUTS A RECORD IN THE FILE.**
@@ -1409,6 +1409,12 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
 /// defect this whole module exists to remove.
 #[test]
 fn every_reachable_emit_site_puts_a_record_in_the_file() {
+    // APART FROM THE TESTS THAT HOLD EVERY ADMISSION SLOT. Several rows below
+    // drive an audited route and assert its own answer (a 400, a 200); a test
+    // that saturates the process-wide pool at that instant turned the answer
+    // into the pool's refusal — `left: 503, right: 400`, one run of the suite
+    // in five on 2026-10-11. Those tests take this guard; so does this one.
+    let _apart = crate::detail::apart_from_slot_owners_blocking();
     let sink = sink();
     assert_eq!(
         sink.health().dropped,

@@ -27,6 +27,11 @@ const API = `http://127.0.0.1:${process.env.BRUTEX_API_PORT ?? 8080}`;
 // tidier; these routes are not under one.
 const ROUTES = [
 	'/inspection.json',
+	// FREE SPACE, STORE SIZE, CENSUS RETENTION AND THE BACKUP RECEIPT for the
+	// /ingest disk line (DB-B73, WP-81).
+	'/disk.json',
+	// WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES /db SHOWS (DB-B74, WP-81).
+	'/scrub.json',
 	'/instruments.json',
 	'/feeds.json',
 	'/bars.json',
@@ -66,7 +71,8 @@ const ROUTES = [
 	'/store.json',
 	// THE SELECTION'S FACETS (D-3327 item 3, WP-30) and their `?since=`
 	// deltas, read by /db's census banner (WP-56) for what moved for the
-	// instrument on screen.
+	// instrument on screen; and one underlying's months and rungs for
+	// /backtest's rung switcher, in place of the whole census (DB-B58, WP-81).
 	'/census/facets.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.

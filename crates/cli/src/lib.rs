@@ -75,6 +75,18 @@ mod gdfl_import_command;
 /// `cli gdfl-rekey`: stored GDFL option keys the decoder files elsewhere or
 /// refuses, moved as new files or retired by name (D-3331, D-3316; WP-12c).
 mod gdfl_rekey;
+/// `cli scrub-blocks`: every block of every census month read whole and checked,
+/// with a durable ledger of what would not verify (DB-B74, WP-81).
+mod scrub_blocks;
+pub use scrub_blocks::{
+    CursorLine as ScrubCursorLine, TOTAL_NAMES as SCRUB_TOTAL_NAMES,
+    cursor_line as scrub_cursor_line, cursor_name as scrub_cursor_name,
+    ledger_name as scrub_ledger_name, whole_lines as scrub_whole_lines,
+};
+/// One rule for every verb that writes the store: an unstamped build does
+/// not, unless told to (DB-B71, WP-81).
+mod store_write;
+pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuild;
 /// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
@@ -476,14 +488,17 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    (BRUTEX_GDFL_TICKSTORE) or the vendor zips
                                    (BRUTEX_GDFL_CM_ARCHIVE, BRUTEX_GDFL_NFO_ARCHIVES);
                                    days YYYY-MM-DD; incremental, resumable.
-       cli census-migrate VENDOR
+       cli census-migrate VENDOR [--seal]
                                    move VENDOR's single-file census to version
                                    4: epoch 000001 of one directory per segment
                                    under manifest/v4/VENDOR/, compacted to one
                                    row per key, capacity in its own header. The
-                                   single file is left exactly as it was. Run it
-                                   only once the API serving the store reads
-                                   version 4 (D-3316).
+                                   single file's bytes are kept as
+                                   VENDOR.man.v3-superseded and its name is
+                                   sealed against readers built before version
+                                   4. Run it only once the API serving the store
+                                   reads version 4 (D-3316). --seal seals an
+                                   already-migrated VENDOR (DB-B68).
        cli census-recount VENDOR --from DAY [--to DAY]
                                    rebuild VENDOR's census rows from the bar
                                    files' own headers for every month the days
@@ -510,6 +525,16 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    names a refused key `retired`, and installs
                                    the census's next FNO epoch without either.
                                    Old files never change (D-3331, D-3316).
+       cli scrub-blocks VENDOR [--months N] [--mib-per-s N]
+                                   read every block of every month VENDOR's
+                                   census holds and check it against its stored
+                                   checksum, at most N MiB/s (64), resuming
+                                   where the last run stopped; each damaged
+                                   block is a line of
+                                   audit/scrub-blocks.VENDOR.log, and the pass
+                                   and its totals are the last line of
+                                   audit/scrub-blocks.VENDOR.cursor. Writes
+                                   those two files and nothing else (DB-B74).
        cli tix-rebuild VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG FROM TO [--dry-run]
                                    build the .tix time index of every named
                                    month of one spot series (FROM, TO are
@@ -2652,6 +2677,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["tix-rebuild", arguments @ ..] if !arguments.is_empty() => {
             tix_rebuild::command(arguments, out)
         }
+        ["scrub-blocks", arguments @ ..] if !arguments.is_empty() => {
+            scrub_blocks::command(arguments, out)
+        }
         ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
             zerodha_repair::command(arguments, out)
         }
@@ -2726,7 +2754,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 43] = [
+const COMMANDS: [&str; 44] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2762,6 +2790,7 @@ const COMMANDS: [&str; 43] = [
     "research-plan",
     "results",
     "screen",
+    "scrub-blocks",
     "sweep",
     "sweep-all",
     "sweep-audited-stored",

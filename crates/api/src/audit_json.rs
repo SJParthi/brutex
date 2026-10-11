@@ -995,10 +995,10 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
 
     let _ = write!(
         out,
-        r#","store":{{"feed":{},"state":{},"census_state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"capacity":{},"headroom":{},"behind_days":{},"behind_from":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
+        r#","store":{{"feed":{},"state":{},"census_state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"capacity":{},"headroom":{},"behind_days":{},"behind_from":{},"legacy_drift":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
         render::json_string(feed.as_str()),
         render::json_string(census.map_or("absent", |c| c.state.name())),
-        render::json_string(census.map_or("absent", |c| c.state_word(behind.days))),
+        render::json_string(census.map_or("absent", |c| c.state_word(behind.state_days()))),
         render::json_string(&census.map_or_else(
             || format!("no census row for {} in this build", feed.as_str()),
             crate::census::VendorCensus::note
@@ -1032,6 +1032,11 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
             || "null".to_owned(),
             |day| render::json_string(&day.to_string())
         ),
+        // A PRE-VERSION-4 WRITER, NAMED (DB-B70): `null` when nothing drifted.
+        behind
+            .legacy
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
     );
     for (n, (month, (held, rows))) in months.iter().enumerate() {
         if n > 0 {

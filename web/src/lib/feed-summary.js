@@ -1,3 +1,4 @@
+import { fetchAdmitted } from './admitted-fetch.js';
 import { censusLag } from './store-census.js';
 import { pooled } from './pooled.js';
 
@@ -66,9 +67,11 @@ export function readFeedHeader(wire, request) {
   if (held) return held;
   const reads = pending;
   const reading = (async () => {
-    const response = await request(`/store.json?feed=${encodeURIComponent(wire)}`, {
-      method: 'HEAD', cache: 'no-store', ms: 15_000
-    });
+    // A BUSY CENSUS IS ASKED AGAIN (DB-B51): a first visit's five-feed HEAD
+    // survey met 429 while other tabs loaded, and one refusal threw.
+    const response = await fetchAdmitted(`/store.json?feed=${encodeURIComponent(wire)}`,
+      { signal: new AbortController().signal },
+      (target, options) => request(target, { ...options, method: 'HEAD', cache: 'no-store', ms: 15_000 }));
     return readFeedSummary(wire, response);
   })().finally(() => {
     if (reads.get(wire) === reading) reads.delete(wire);

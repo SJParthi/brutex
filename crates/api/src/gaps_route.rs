@@ -1285,7 +1285,7 @@ fn audit_one(
             let (rows, faults) = bars::page(&file, 0, n);
             (rows, faults, None)
         }
-        Err(why) => (Vec::new(), Vec::new(), Some(why)),
+        Err(why) => (Vec::new(), crate::fault_log::FaultLog::default(), Some(why)),
     };
     // ONE SECOND FOLDS TO ONE MINUTE THROUGH THE ONE FOLD AUTHORITY. A fold
     // that refuses (rows out of order) is input this audit cannot certify: it
@@ -1410,7 +1410,9 @@ fn audit_one(
         // missing minutes" — opposite faults wanting opposite fixes.
         absent_file,
         evidence_error: None,
-        unreadable: faults.len(),
+        // RECORDS, NOT SENTENCES: `page` coalesces a run of refusals into
+        // one sentence (DB-B75) and counts every record.
+        unreadable: usize::try_from(faults.records()).unwrap_or(usize::MAX),
         truncated: ledger.truncated,
         runs,
         seconds: members,

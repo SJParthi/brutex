@@ -1081,10 +1081,21 @@ impl SeriesPlan {
     /// # Errors
     ///
     /// The file would not open, or the record would not read.
-    pub(super) fn read(&mut self, root: &Path, slot: usize, row: u64) -> Result<Bar, String> {
+    pub(super) fn read(
+        &mut self,
+        root: &Path,
+        slot: usize,
+        row: u64,
+    ) -> Result<Bar, crate::fault_log::ReadFault> {
         let file = self.file(root, slot)?;
+        // THE RECORD'S FAULT KEPT AS A VALUE, NOT A SENTENCE (DB-B75), so a
+        // run of them over one file coalesces into one line.
         file.read_record(row)
-            .map_err(|why| format!("{} record {row}: {why}", file.path().display()))
+            .map_err(|why| crate::fault_log::ReadFault::Record {
+                file: file.path().display().to_string(),
+                row,
+                why,
+            })
     }
 
     /// The last record of the held month `month`, which may lie outside the
@@ -1101,7 +1112,7 @@ impl SeriesPlan {
             if let Some(slot) = self.slot_of(month) {
                 let n_valid = self.slots.get(slot).map_or(0, |s| s.held.n_valid);
                 if let Some(last) = n_valid.checked_sub(1) {
-                    return self.read(root, slot, last).map(Some);
+                    return self.read(root, slot, last).map(Some).map_err(String::from);
                 }
             } else {
                 let file =
