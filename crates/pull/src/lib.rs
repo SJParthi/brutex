@@ -223,6 +223,9 @@ pub mod rolling;
 /// crate entitled to say a month is verified rather than merely counted.
 pub mod scrub;
 pub mod secret;
+/// Whose bars a minute answer holds: every minute judged against the day bar
+/// the same series was served (WP-13d).
+pub mod series_identity;
 pub mod session;
 pub mod ssm;
 pub mod tenor;

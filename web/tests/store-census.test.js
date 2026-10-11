@@ -309,7 +309,8 @@ test('the moved lines name the generations, the snapshot and what moved for the 
   const query = { feed: 'example', segment: 'FNO', underlying: 'SAMPLE' };
   const changed = movedLines(moved, head, at, 'SAMPLE', [{ ok: true, status: 200, query, reason: null,
     body: { underlyings: [{ symbol: 'SAMPLE', last_ts: Date.UTC(2020, 8, 15, 9, 59, 59) * 1000 }], months: [{}, {}], expiries: [{}], strikes: [], futures: [] } }]);
-  assert.equal(changed[1].text, 'SAMPLE FNO: 2 month(s) and 1 expiry(ies) changed since this snapshot; its newest bar is now 15 Sep 2020, 15:29:59 IST.');
+  assert.equal(changed[1].text, 'SAMPLE FNO: import or pull in progress through 15 Sep 2020: 2 month(s) and 1 expiry(ies) changed since this snapshot; its newest bar is now 15 Sep 2020, 15:29:59 IST.');
+  assert.equal(Number.isFinite(changed[1].through), true, 'the stamp the series now reaches rides beside the sentence');
   const none = movedLines(moved, head, at, 'SAMPLE', [{ ok: true, status: 200, query, reason: null,
     body: { underlyings: [], months: [], expiries: [], strikes: [], futures: [] } }]);
   assert.equal(none[1].text, 'Nothing changed for SAMPLE (FNO): what moved is other instruments.');
@@ -334,7 +335,7 @@ test('the census loader publishes every header and when this browser received th
 
 /* ---- the facets client ---------------------------------------------- */
 const facetsBody = (/** @type {any} */ over = {}) => ({ schema: 1, feed: 'example', segment: 'FNO', underlying: 'SAMPLE', expiry: null,
-  generation: 30, since: null, state: 'held', degraded: null,
+  generation: 30, since: null, state: 'held', degraded: null, order: { exchanges: ['NSE', 'BSE'], segments: ['INDEX', 'CASH', 'FNO'] },
   underlyings: [{ exchange: 'NSE', symbol: 'SAMPLE', months: 2, expiries: 1, rows: { '1s': 5 }, first_ts: 1, last_ts: 2 }],
   months: [{ month: '2020-01', rows: { '1s': 2 } }, { month: '2020-02', rows: { '1s': 3 } }],
   expiries: [{ expiry: '2020-02-27', contracts: 2, rows: { '1s': 5 } }], strikes: [], futures: [], ...over });
@@ -451,7 +452,7 @@ function wire(lines, more = {}) {
  * @param {{parts?: boolean, old?: boolean}} [shape] `parts`: a partitioned census; `old`: an API that reads no `since`
  */
 function fixtureApi(lines, shape = {}) {
-  const before = censusOrder();
+  const before = censusOrder({ exchanges: ['NSE', 'BSE'], segments: ['INDEX', 'CASH', 'FNO'], contracts: ['FNO'] });
   const row = (/** @type {Line} */ [text]) => { const [month, instrument, timeframe] = text.split(' '); return { month, instrument, timeframe }; };
   let held = [...lines].sort((a, b) => before(row(a), row(b)));
   let generation = 40;
@@ -541,7 +542,8 @@ for (const parts of [false, true]) {
     assert.equal(fresh.lag?.generation, parts ? 82 : 41);
     assert.equal(fresh.headers.get('etag'), null, 'merged rows have no validator: none names their bytes');
     assert.equal(fresh.body?.[2], first.body?.[1], 'a row nothing changed is the same object');
-    assert.deepEqual(censusMeasureOf(/** @type {any[]} */ (fresh.body)), { order: null, bars: api.bars() });
+    assert.deepEqual(censusMeasureOf(/** @type {any[]} */ (fresh.body)), { order: null, bars: api.bars(),
+      ranks: { exchanges: ['NSE'], segments: ['INDEX', 'CASH', 'FNO'], contracts: ['FNO'] } });
 
     // AND AGAIN, FROM THE MERGED CENSUS: the next delta is asked since ITS generation.
     api.commit([['2019-03 NSE-CASH-RELIANCE 1s', 21]]);
@@ -635,9 +637,11 @@ test('a delta that does not add up, is out of order, or answers another since is
 });
 
 test('a census that is not in the order a delta is merged by is never patched: its refresh is a whole read', async () => {
-  // The whole body arrives with two rows swapped: an order this page does not know.
+  // The whole body arrives with its last two rows swapped, an older month
+  // before a newer one's contract: no order of exchanges and segments this
+  // page could learn from it explains that.
   const api = fixtureApi(CENSUS);
-  const swapped = /** @type {Line[]} */ ([CENSUS[1], CENSUS[0], CENSUS[2], CENSUS[3]]);
+  const swapped = /** @type {Line[]} */ ([CENSUS[0], CENSUS[1], CENSUS[3], CENSUS[2]]);
   api.answerWith((url) => (url.includes('since=') ? null : Response.json(wire(swapped), {
     headers: { 'x-brutex-census-state': 'held', 'x-brutex-census-degraded': '', 'x-brutex-census-generation': '40', 'x-brutex-census-part-generations': '', etag: '"swapped"' } })));
   const loader = createCensusLoader(api.request);
@@ -645,7 +649,7 @@ test('a census that is not in the order a delta is merged by is never patched: i
   assert.deepEqual(namesOf(first.body), swapped.map(([text]) => text), 'drawn as it was sent');
   const again = await loader.load('example', 1);
   assert.equal(again.how?.kind, 'whole');
-  assert.match(again.how?.why ?? '', /^the census held is not in the order a delta is merged by \(row 2 \(2019-03 NSE-INDEX-NIFTY 1min\) does not follow row 1 \(2019-03 NSE-CASH-RELIANCE 1s\)/);
+  assert.match(again.how?.why ?? '', /^the census held is not in the order a delta is merged by \(row 4 \(2019-03 NSE-FNO-NIFTY-2019-03-28-1150000-CE 1s\) does not follow row 3 \(2019-02 NSE-INDEX-NIFTY 1min\)/);
   assert.ok(api.asked.every(({ url }) => !url.includes('since=')), 'no delta is asked for a census that cannot be merged into');
 });
 

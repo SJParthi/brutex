@@ -1749,3 +1749,294 @@ fn a_year_zip_is_indexed_once_and_each_day_is_one_lookup() {
     assert!(zips.day(day(2025, 4, 1)).unwrap().is_some());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// WP-12e (DB-B02, DB-B03, DB-B13) against the operator's REAL options zips,
+/// read-only: the unchanged-lot arm of the detector on ex-dates the audit
+/// measured, with the vendor day after each as the control, and on ordinary
+/// NIFTY and BANKNIFTY days (which must declare nothing). The pre-ex state is
+/// the latest contract-day of every key over `BRUTEX_WP12E_LOOKBACK` days
+/// (default 30). `BRUTEX_WP12E_ONLY` runs the cases whose underlying it
+/// names. Only counts are printed; no vendor row reaches the repository.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_NFO_ARCHIVES (the vendor's yearly options zips); read-only"]
+fn the_real_unchanged_lot_events_are_detected_and_ordinary_days_are_not() {
+    use crate::gdfl_lineage::{ContractDay, EventKind, detect};
+    let dir = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES").expect("BRUTEX_GDFL_NFO_ARCHIVES");
+    let only = std::env::var("BRUTEX_WP12E_ONLY").ok();
+    let lookback: u32 = std::env::var("BRUTEX_WP12E_LOOKBACK")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(30);
+    let zips = NfoZips::new(Path::new(&dir));
+    let day_of = |under: &str, on: Day| {
+        let mut out: Vec<ContractDay> = Vec::new();
+        let Some(listing) = zips.day(on).unwrap() else {
+            return out;
+        };
+        for file in listing.entries() {
+            let Some(name) = listing.ticker_of(file) else {
+                continue;
+            };
+            let Ok(ticker) = decode_ticker(name, on) else {
+                continue;
+            };
+            if ticker.underlying.as_str() != under {
+                continue;
+            }
+            let read = read_file(&zips, &listing, file).unwrap();
+            out.push(ContractDay::from_rows(
+                &read.ticker,
+                read.file.rows.iter().map(|r| (r.sod, r.ltq, r.oi)),
+            ));
+        }
+        out
+    };
+    // (underlying, the vendor day before, the ex-date, the vendor day after,
+    // the kind expected, the shift in paisa for an offset).
+    let offset = |shift| Some(EventKind::StrikeOffset { shift });
+    let cases = [
+        (
+            "OIL",
+            day(2020, 2, 19),
+            day(2020, 2, 20),
+            day(2020, 2, 24),
+            offset(900),
+        ),
+        (
+            "COALINDIA",
+            day(2020, 3, 18),
+            day(2020, 3, 19),
+            day(2020, 3, 20),
+            offset(1_200),
+        ),
+        (
+            "VEDL",
+            day(2022, 7, 25),
+            day(2022, 7, 26),
+            day(2022, 7, 27),
+            offset(1_950),
+        ),
+        (
+            "HEROMOTOCO",
+            day(2023, 2, 16),
+            day(2023, 2, 17),
+            day(2023, 2, 20),
+            offset(6_500),
+        ),
+        (
+            "VEDL",
+            day(2024, 9, 9),
+            day(2024, 9, 10),
+            day(2024, 9, 11),
+            offset(2_000),
+        ),
+        (
+            "TATACHEM",
+            day(2020, 3, 3),
+            day(2020, 3, 4),
+            day(2020, 3, 5),
+            Some(EventKind::Relisted),
+        ),
+        // Ordinary days: an index across a weekly expiry, and the last full
+        // options day the store holds.
+        (
+            "NIFTY",
+            day(2020, 9, 10),
+            day(2020, 9, 11),
+            day(2020, 9, 14),
+            None,
+        ),
+        (
+            "BANKNIFTY",
+            day(2020, 9, 14),
+            day(2020, 9, 15),
+            day(2020, 9, 16),
+            None,
+        ),
+        (
+            "RELIANCE",
+            day(2020, 9, 14),
+            day(2020, 9, 15),
+            day(2020, 9, 16),
+            None,
+        ),
+    ];
+    for (under, before, ex, next, want) in cases {
+        if only.as_deref().is_some_and(|name| name != under) {
+            continue;
+        }
+        let symbol = brutex_core::symbol::Symbol::new(under).unwrap();
+        // An index day is hundreds of files: its pre-ex state is the eve.
+        let back = if want.is_none() && under != "RELIANCE" {
+            0
+        } else {
+            lookback
+        };
+        let mut latest: std::collections::BTreeMap<String, ContractDay> =
+            std::collections::BTreeMap::new();
+        let mut on = Day::from_days(before.days_from_epoch() - back).unwrap();
+        while on <= before {
+            for c in day_of(under, on) {
+                if c.expiry >= ex {
+                    latest.insert(c.contract().unwrap().to_string(), c);
+                }
+            }
+            on = on.succ().unwrap();
+        }
+        let pre: Vec<ContractDay> = latest.into_values().collect();
+        let (post, later) = (day_of(under, ex), day_of(under, next));
+        let at = std::time::Instant::now();
+        let got = detect(symbol, ex, &pre, &post);
+        let took = at.elapsed();
+        eprintln!(
+            "{under} {ex}: pre-ex keys {}, ex-date keys {}, detect {} us -> {}",
+            pre.len(),
+            post.len(),
+            took.as_micros(),
+            got.as_ref().map_or_else(
+                || "none".to_owned(),
+                |a| format!(
+                    "{:?} lot {}->{} pairs {} unpaired {} stitched {} reused {}",
+                    a.kind,
+                    a.lot_before,
+                    a.lot_after,
+                    a.lineage.len(),
+                    a.unpaired.len(),
+                    a.stitched.len(),
+                    a.lineage.iter().filter(|l| l.reused).count()
+                )
+            )
+        );
+        assert_eq!(got.as_ref().map(|a| a.kind), want, "{under} {ex}");
+        if let Some(action) = &got {
+            assert_eq!(
+                action.lot_before, action.lot_after,
+                "{under}: the lot is unchanged"
+            );
+            for pair in &action.lineage {
+                let line = pair.record(&[]).line();
+                assert!(
+                    crate::gdfl_lineage::LineageRecord::parse(&line).is_some(),
+                    "{line}"
+                );
+            }
+        }
+        // The day after is an ordinary day.
+        let control = detect(symbol, next, &post, &later);
+        assert_eq!(
+            control.map(|a| a.kind),
+            None,
+            "{under} {next}: the control day"
+        );
+    }
+}
+
+/// WP-12e against the operator's REAL options zips, read-only: the whole
+/// detector over EVERY stock underlying of every vendor day in
+/// `BRUTEX_WP12E_FROM..=BRUTEX_WP12E_TO`, carrying each underlying's pre-ex
+/// state from day to day as the import does. It lists every event declared
+/// (the false positives and the misses are read off that list against the
+/// audit's) and the cost of each `detect` call. `BRUTEX_WP12E_INDICES=1`
+/// includes the index underlyings. Only counts are printed.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_NFO_ARCHIVES and BRUTEX_WP12E_FROM/TO; read-only"]
+fn the_real_window_sweep_lists_every_event_the_detector_declares() {
+    use crate::gdfl_lineage::{ContractDay, detect};
+    use std::collections::{BTreeMap, HashMap};
+    let dir = std::env::var_os("BRUTEX_GDFL_NFO_ARCHIVES").expect("BRUTEX_GDFL_NFO_ARCHIVES");
+    let bound = |var: &str| {
+        let text = std::env::var(var).expect(var);
+        let parts: Vec<u16> = text.split('-').map(|p| p.parse().unwrap()).collect();
+        day(
+            parts[0],
+            u8::try_from(parts[1]).unwrap(),
+            u8::try_from(parts[2]).unwrap(),
+        )
+    };
+    let (from, to) = (bound("BRUTEX_WP12E_FROM"), bound("BRUTEX_WP12E_TO"));
+    let indices = std::env::var_os("BRUTEX_WP12E_INDICES").is_some();
+    let zips = NfoZips::new(Path::new(&dir));
+    let mut state: HashMap<String, HashMap<(Day, i64, OptionSide), ContractDay>> = HashMap::new();
+    let (mut days, mut underlying_days, mut unread) = (0_u32, 0_u32, 0_u32);
+    let mut events: Vec<String> = Vec::new();
+    let mut nanos: Vec<u128> = Vec::new();
+    let mut on = from;
+    while on <= to {
+        if let Some(listing) = zips.day(on).unwrap() {
+            days += 1;
+            let mut by: BTreeMap<String, Vec<ContractDay>> = BTreeMap::new();
+            for file in listing.entries() {
+                let Some(name) = listing.ticker_of(file) else {
+                    continue;
+                };
+                let Ok(ticker) = decode_ticker(name, on) else {
+                    continue;
+                };
+                let under = ticker.underlying.as_str();
+                if !indices && brutex_core::alias::index_by_fno(under).is_some() {
+                    continue;
+                }
+                let Ok(read) = read_file(&zips, &listing, file) else {
+                    unread += 1;
+                    continue;
+                };
+                by.entry(under.to_owned())
+                    .or_default()
+                    .push(ContractDay::from_rows(
+                        &read.ticker,
+                        read.file.rows.iter().map(|r| (r.sod, r.ltq, r.oi)),
+                    ));
+            }
+            for (under, todays) in by {
+                let latest = state.entry(under.clone()).or_default();
+                latest.retain(|key, _| key.0 >= on);
+                let before: Vec<ContractDay> = latest.values().copied().collect();
+                let symbol = brutex_core::symbol::Symbol::new(&under).unwrap();
+                let at = std::time::Instant::now();
+                let got = detect(symbol, on, &before, &todays);
+                nanos.push(at.elapsed().as_nanos());
+                underlying_days += 1;
+                if let Some(action) = got {
+                    events.push(format!(
+                        "{on} {under} {:?} lot {}->{} pairs {} unpaired {} stitched {} (pre-ex keys {}, day keys {})",
+                        action.kind,
+                        action.lot_before,
+                        action.lot_after,
+                        action.lineage.len(),
+                        action.unpaired.len(),
+                        action.stitched.len(),
+                        before.len(),
+                        todays.len()
+                    ));
+                    latest.clear();
+                }
+                for c in todays {
+                    latest.insert((c.expiry, c.strike, c.side), c);
+                }
+            }
+        }
+        on = on.succ().unwrap();
+    }
+    nanos.sort_unstable();
+    let at = |q: usize| {
+        nanos
+            .get(nanos.len().saturating_sub(1) * q / 100)
+            .copied()
+            .unwrap_or(0)
+    };
+    eprintln!(
+        "{from}..={to}: {days} vendor days, {underlying_days} underlying-days, {unread} files not read, {} events",
+        events.len()
+    );
+    eprintln!(
+        "detect per underlying-day, n={}: p50 {} ns, p99 {} ns, max {} ns",
+        nanos.len(),
+        at(50),
+        at(99),
+        at(100)
+    );
+    for event in &events {
+        eprintln!("  {event}");
+    }
+    assert!(days > 0 && underlying_days > 0, "no vendor day in range");
+}

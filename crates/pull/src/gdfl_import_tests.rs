@@ -4130,6 +4130,14 @@ fn ex_lineage() -> Vec<String> {
         "stitched {} ex=2019-03-19 before=2019-03-28-12500-CE after=2019-03-28-18000-CE v=1",
         k("15000", "CE")
     ));
+    // The event itself (D-3355), written on the ex-date: a lot step that
+    // paired all five pre-ex keys.
+    want.push(
+        "event NSE-FNO-NTPC ex=2019-03-19 kind=lot_step shift=0 lot_old=4000 lot_new=4800 \
+         paired=5 stopped=0 v=1"
+            .to_owned(),
+    );
+    // The reused `150PE` text first trades again on the day after.
     want.push(format!(
         "stitched {} ex=2019-03-19 before=2019-03-28-12500-PE after=- v=1",
         k("15000", "PE")
@@ -4206,7 +4214,8 @@ fn the_options_import_records_a_renamed_contract_and_a_reused_key() {
         assert!(
             line.starts_with("alias ")
                 || crate::gdfl_lineage::LineageRecord::parse(&line).is_some()
-                || crate::gdfl_lineage::StitchedRecord::parse(&line).is_some(),
+                || crate::gdfl_lineage::StitchedRecord::parse(&line).is_some()
+                || crate::gdfl_lineage::EventRecord::parse(&line).is_some(),
             "{line}"
         );
     }

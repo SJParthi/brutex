@@ -69,7 +69,7 @@ import { foldWindow, foldKey } from '$lib/fold.js';
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
-import { createCensusLoader, censusFailure, censusLag, createFacetsLoader, readOnPage, STORE_CENSUS_MS } from '$lib/store-census.js';
+import { createCensusLoader, censusFailure, censusLag, createFacetsLoader, createRefreshLog, refreshEntry, readOnPage, readScope, planRead, scopeText, STORE_CENSUS_MS } from '$lib/store-census.js';
 import { decodeCensus } from '$lib/store-census-wire.js';
 import { createCensusWorker, inSlices } from '$lib/census-worker.js';
 import { ask } from '$lib/ask.js';
@@ -324,7 +324,10 @@ const empty = () => ({
  *   lag: import('$lib/store-census.js').CensusLag | null,
  *   worker: string | null,
  *   head: import('$lib/store-census.js').HeadCheck | null,
- *   how: import('$lib/store-census.js').CensusHow | null
+ *   how: import('$lib/store-census.js').CensusHow | null,
+ *   scope: import('$lib/store-census.js').CensusScope | null,
+ *   observed: import('$lib/store-census.js').Observed | null,
+ *   scopeWhy: string | null
  * }} StoreReading
  */
 
@@ -340,6 +343,16 @@ const empty = () => ({
 // its accessor remains reactive when the complete snapshot is replaced.
 /** @type {StoreRow[]} */
 let rawRows = $state.raw([]);
+/* THE SCOPE OF THE ROWS (WP-56b): `null` when `rows` is the whole census;
+   otherwise the one instrument they are the census rows of, what was read
+   for it and what was not (`readScope`). With it, the feed's fullest row and
+   key count at each (month, rung) those rows name, which only the whole
+   census could otherwise say. Raw, like the rows: replaced whole, never
+   edited. */
+/** @type {import('$lib/store-census.js').CensusScope | null} */
+let rawScope = $state.raw(null);
+/** @type {import('$lib/store-census.js').Observed | null} */
+let rawObserved = $state.raw(null);
 /** @type {StoreReading} */
 export const store = $state({
   state: 'none',
@@ -354,9 +367,20 @@ export const store = $state({
   worker: null,
   head: null,
   how: null,
+  // THE REFRESH LOG (WP-56b): how every read of the census ended, oldest
+  // first, and why the log could not be saved if it could not.
+  refreshes: /** @type {import('./store-census.js').RefreshEntry[]} */ ([]),
+  refreshFault: /** @type {string | null} */ (null),
+  // WHY A FIRST PAINT WAS NOT DRAWN FROM ONE INSTRUMENT'S ROWS (WP-56b), in
+  // words, beside the whole census that was read instead; null otherwise.
+  scopeWhy: /** @type {string | null} */ (null),
   ...empty(),
   get rows() { return rawRows; },
-  set rows(value) { rawRows = value; }
+  set rows(value) { rawRows = value; },
+  get scope() { return rawScope; },
+  set scope(value) { rawScope = value; },
+  get observed() { return rawObserved; },
+  set observed(value) { rawObserved = value; }
 });
 
 /* ======================================================================
@@ -413,6 +437,23 @@ const census = createCensusLoader(ask, STORE_CENSUS_MS, ({ nextAttempt, delayMs 
  */
 export const facets = createFacetsLoader(ask);
 
+/* THE REFRESH LOG (WP-56b): every read of the census leaves one entry, kept
+   in the browser's storage, listed and filtered on /db. See
+   `$lib/store-census.js`. A browser that refuses storage is named there. */
+const refreshLog = createRefreshLog((() => {
+  try { return typeof localStorage === 'undefined' ? null : localStorage; } catch { return null; }
+})());
+/** Feeds this page has read at least once: a later read of one is a refresh. */
+const readOnce = new Set();
+/** @param {Parameters<typeof refreshEntry>[0]} read */
+function noteRefresh(read) {
+  refreshLog.note(refreshEntry(read));
+  store.refreshes = [...refreshLog.list()];
+  store.refreshFault = refreshLog.fault;
+}
+store.refreshes = [...refreshLog.list()];
+store.refreshFault = refreshLog.fault;
+
 /**
  * Shared selected-feed response, including its HTTP status and headers. The
  * request and JSON body have one 30-second deadline. Refresh advances the same
@@ -455,11 +496,48 @@ let wanted = null;
 /** @type {string | null} */
 let valueFeed = null;
 
+/* ======================================================================
+   THE FIRST PAINT FROM ONE INSTRUMENT'S ROWS (WP-56b; DB-060, DB-G59,
+   DB-G70, DB-A31)
+   ----------------------------------------------------------------------
+   A page that draws ONE instrument (/db) passes `syncStore` the instrument
+   on screen. A cold read then asks `/census/facets.json` for that
+   instrument's census rows (`readScope`: a few kilobytes) and publishes
+   them with `store.scope` set, instead of reading the whole census (33 MB
+   on GDFL) before the first bar is drawn. The whole census is read when
+   something needs it: `wholeStore(why)` from the page, or any subscriber
+   that passes no instrument (every other page), which is NEVER handed one
+   instrument's rows as the store's: the value is cleared first.
+
+   A scope that cannot be read (a refusal, a census that moved between its
+   answers, no row of the instrument) is not papered over: the whole census
+   is read in the same flight and `store.scopeWhy` says why.
+   ====================================================================== */
+/** Feeds whose WHOLE census a subscriber asked for: never scoped again. */
+const wholeFeeds = new Set();
+/* WHETHER THE CURRENT VALUE IS ONE INSTRUMENT'S ROWS, mirrored outside the
+   `$state` for the reason `valueFeed` is: `read` runs inside an effect. */
+let valueScoped = false;
+/* The instrument the last `syncStore` asked with, so Refresh and the poll
+   re-read what the page reads. */
+/** @type {import('$lib/store-census.js').ScopeWanted | null} */
+let wantedFirst = null;
+/** What asked for the whole census behind a scope (`wholeStore`), for the log. */
+/** @type {string | null} */
+let wholeWhy = null;
+/** Why the scope of a feed could not be read, until its whole read lands. */
+/** @type {{feed: string, reason: string} | null} */
+let scopeFailed = null;
+
 function clearValue() {
   Object.assign(store, empty());
   store.lag = null;
   store.worker = null;
   store.how = null;
+  store.scope = null;
+  store.observed = null;
+  store.scopeWhy = null;
+  valueScoped = false;
 }
 
 /**
@@ -565,10 +643,15 @@ export async function foldCensus(rows, signal) {
  * @returns {Promise<void>} the SHARED request — the same promise every other
  *        caller of this (feed, generation) is given.
  */
-function read(feed, generation) {
-  const key = `${feed}#${generation}`;
+function read(feed, generation, first = null, keep = false) {
+  // SCOPED ONLY FOR A COLD FEED, or to refresh a value that is already one
+  // instrument's rows; never once any subscriber asked for the whole census.
+  const plan = planRead({ feed, generation, first, valueFeed, valueScoped, wholeAsked: wholeFeeds.has(feed), keep });
+  const { scoped, wholeKey } = plan;
+  let key = plan.key;
   if (asked === key) return flight ?? Promise.resolve();
   asked = key;
+  if (!scoped) wholeFeeds.add(feed);
 
   // A FEED CHANGE DROPS THE VALUE BEFORE THE REQUEST LEAVES. Leaving the
   // previous feed's counts standing under the new feed's name is the stale
@@ -576,7 +659,10 @@ function read(feed, generation) {
   // really counted — from the wrong store. A REFRESH of the same feed keeps the
   // value: `state` reads 'reading' and the page shows it under a "refreshing"
   // mark, because it is that feed's own previous answer and is labelled as one.
-  if (valueFeed !== feed) {
+  // A SUBSCRIBER THAT WANTS THE WHOLE CENSUS IS NOT SHOWN ONE INSTRUMENT'S
+  // ROWS WHILE IT WAITS (WP-56b): only the page that drew them (`keep`,
+  // `wholeStore`) keeps them on screen, under its own "one instrument" line.
+  if (plan.clear) {
     clearValue();
     valueFeed = null;
     store.feed = null;
@@ -591,7 +677,7 @@ function read(feed, generation) {
   flightAbort?.abort();
   const abort = new AbortController();
   flightAbort = abort;
-  const mine = census.load(feed, generation)
+  const whole = () => census.load(feed, generation)
     .then(async (r) => {
       if (!r.ok) return Promise.reject(new Error(censusFailure(r)));
       const body = r.body;
@@ -605,6 +691,12 @@ function read(feed, generation) {
       if (asked !== key || flightToken !== token) return;
       if (folded) Object.assign(store, folded);
       valueFeed = feed;
+      valueScoped = false;
+      store.scope = null;
+      store.observed = null;
+      const failed = scopeFailed?.feed === feed ? scopeFailed.reason : null;
+      scopeFailed = null;
+      store.scopeWhy = failed;
       store.feed = feed;
       store.at = r.readAt ?? Date.now();
       store.lag = r.lag ?? censusLag(r.headers);
@@ -615,7 +707,51 @@ function read(feed, generation) {
       store.busy = null;
       store.reads += 1;
       store.lastOk = { at: store.at, feed };
-    })
+      const after = wholeWhy;
+      wholeWhy = null;
+      noteRefresh({ feed, at: store.at, lag: store.lag, held: body.length, worker: decodedHow, first: !readOnce.has(feed),
+        how: store.how && (failed || after) ? { ...store.how, why: failed
+          ? `the instrument on screen could not be read alone from /census/facets.json (${failed})`
+          : `one instrument's rows were on screen and ${after}` } : store.how });
+      readOnce.add(feed);
+    });
+  const mine = (scoped
+    ? readScope(ask, feed, /** @type {import('$lib/store-census.js').ScopeWanted} */ (first), { signal: abort.signal })
+      .catch((why) => /** @type {import('$lib/store-census.js').ScopeAnswer} */ ({ ok: false, reason: String(why?.message ?? why) }))
+      .then(async (answer) => {
+        if (asked !== key || flightToken !== token) return;
+        if (!answer.ok) {
+          // NOT PAPERED OVER: the whole census is read in this same flight,
+          // and the page says that it was and why.
+          scopeFailed = { feed, reason: answer.reason };
+          wholeFeeds.add(feed);
+          key = wholeKey;
+          asked = key;
+          return whole();
+        }
+        const folded = await foldCensus(answer.rows, abort.signal);
+        if (asked !== key || flightToken !== token) return;
+        Object.assign(store, folded);
+        valueFeed = feed;
+        valueScoped = true;
+        store.scope = answer.scope;
+        store.observed = answer.observed;
+        store.scopeWhy = null;
+        store.feed = feed;
+        store.at = answer.readAt;
+        store.lag = answer.lag;
+        store.worker = null;
+        store.how = { kind: 'scoped', since: null, rows: answer.rows.length, added: 0, replaced: 0,
+          why: `${answer.scope.underlying}: ${scopeText(answer.scope)}${answer.retried
+            ? `; ${answer.retried} request(s) asked twice (the server's census readers were saturated)` : ''}` };
+        store.state = 'ready';
+        store.error = null;
+        store.busy = null;
+        store.reads += 1;
+        store.lastOk = { at: store.at, feed };
+        noteRefresh({ feed, at: store.at, how: store.how, lag: store.lag, held: answer.rows.length, worker: null, first: false });
+      })
+    : whole())
     .catch((why) => {
       if (asked !== key || flightToken !== token) return;
       // NAMED, NOT SHRUGGED, AND THE STAMP GOES WITH IT. A page that says
@@ -632,6 +768,7 @@ function read(feed, generation) {
       // The key is released so a Refresh press can retry the same
       // (feed, generation) without needing a bump nobody asked for.
       asked = null;
+      noteRefresh({ feed, at: Date.now(), error: store.error });
     });
 
   // The token, not the promise, decides whether this read is still the current
@@ -664,9 +801,10 @@ function read(feed, generation) {
  *        it is recorded in `wanted` so a later Refresh knows there is nothing
  *        to re-read either.
  */
-export function syncStore(feed) {
+export function syncStore(feed, first = null) {
   const generation = store.generation; // TRACKED — this is the shared clock
   wanted = feed ?? null;
+  wantedFirst = first;
   if (!feed) {
     /* NO FEED NOW CLEARS, BECAUSE NULL STOPPED MEANING ONLY "NOT YET".
        The parameter doc above is accurate for the case it was written for — a
@@ -702,7 +840,24 @@ export function syncStore(feed) {
     store.state = 'none';
     return;
   }
-  read(feed, generation);
+  read(feed, generation, first);
+}
+
+/**
+ * READ THE WHOLE CENSUS BEHIND ONE INSTRUMENT'S ROWS (WP-56b). Called by the
+ * page that drew a scope, when something on it needs every row (another
+ * instrument's list, a universe count, the Coverage grid). The scoped rows
+ * stay on screen under their own line until the whole census has landed.
+ * A no-op when the value is not a scope or the whole read is already asked.
+ *
+ * @param {string} why what needed the whole census, for the refresh log.
+ * @returns {Promise<void>}
+ */
+export function wholeStore(why) {
+  if (!wanted || !valueScoped || valueFeed !== wanted || wholeFeeds.has(wanted)) return flight ?? Promise.resolve();
+  wholeFeeds.add(wanted);
+  wholeWhy = why;
+  return read(wanted, store.generation, wantedFirst, true);
 }
 
 /**
@@ -718,7 +873,7 @@ export function syncStore(feed) {
 export function refreshStore() {
   store.generation += 1;
   if (!wanted) return Promise.resolve();
-  return read(wanted, store.generation);
+  return read(wanted, store.generation, wantedFirst);
 }
 
 /* ======================================================================

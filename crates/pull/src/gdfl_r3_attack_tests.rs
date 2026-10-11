@@ -610,6 +610,10 @@ fn nfo_name(on: Day, ticker: &str) -> String {
 /// `NIFTY` run must skip it, never claim it as its own broken file. Before
 /// the fix the longest-prefix rule read `LTI06APR24…` as `LT`'s (D-2818);
 /// D-2815 says an undecodable name belongs to its WHOLE underlying.
+///
+/// Since D-3354 an option is filed under the newest symbol its name reaches,
+/// so `LTI`'s broken file is the `LTM` filter's, and an `LTI` filter is
+/// refused by name (it would match no file). `LT` still never claims it.
 #[test]
 fn r3_03_an_undecodable_name_belongs_to_the_underlying_its_shape_spells() {
     let on = day(2024, 4, 1);
@@ -649,7 +653,9 @@ fn r3_03_an_undecodable_name_belongs_to_the_underlying_its_shape_spells() {
     let source = NfoTickStore::new(&root.join("ts"));
     for (only, refused) in [
         (vec!["LT"], vec!["LT06APR24100CE"]),
-        (vec!["LTI"], vec!["LTI06APR24100CE"]),
+        // `LTI` became `LTIM` and then `LTM`: its options are filed under
+        // `LTM` (D-3354), so that is the filter that owns its broken file.
+        (vec!["LTM"], vec!["LTI06APR24100CE"]),
         (vec!["NIFTY"], vec!["NIFTY06APR24100PE", "NIFTYJUNK"]),
         (vec!["NIFTYIT"], vec!["NIFTYIT06APR24100CE"]),
         (
@@ -684,6 +690,25 @@ fn r3_03_an_undecodable_name_belongs_to_the_underlying_its_shape_spells() {
         );
         std::fs::remove_dir_all(store).unwrap();
     }
+    // The old symbol as a filter is refused before any day is read.
+    let old = ["LTI".to_owned()];
+    let store = scratch("r3-shape-old");
+    let run = Run {
+        kind: ImportKind::Options,
+        from: on,
+        to: on,
+        only: &old,
+        store_root: &store,
+    };
+    assert_eq!(
+        run_nfo(&source, &run).unwrap_err(),
+        ImportRefusal::FilterRenamed {
+            name: "LTI".into(),
+            filed: "LTM".into(),
+        }
+    );
+    assert!(!journal_path(&store).exists());
+    std::fs::remove_dir_all(store).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1353,7 +1378,9 @@ fn r3_07_a_run_of_filters_over_one_store_converges_on_the_unfiltered_store() {
         }
         let mut claimed = 0_usize;
         for under in &order {
-            let only = vec![(*under).to_owned()];
+            // A filter names the key an underlying's options are FILED under
+            // (D-3354): `LTI`'s, renamed twice since, are `LTM`'s to claim.
+            let only = vec![brutex_core::alias::LINEAGE.current(under).to_owned()];
             let got = run_nfo_world(&root, &world, &s1, &only);
             assert_eq!(
                 got.files + got.files_skipped + got.files_refused,

@@ -450,3 +450,43 @@ fn the_receipt_counts_the_months_a_back_fill_repaired() {
         assert!(out.contains(line), "{out}");
     }
 }
+
+/// An ex-date event the options import detected is on the receipt, with the
+/// ledger lines it wrote (D-3355; DB-B13): before, a detected re-listing
+/// showed nowhere a person reads. A run that found none says 0.
+#[test]
+fn the_receipt_counts_the_adjustments_and_the_ledger_lines_they_wrote() {
+    let report = Report {
+        adjustments: 2,
+        lineage_lines: 41,
+        lot_lines: 7,
+        ..Report::default()
+    };
+    let mut out = String::new();
+    render(
+        &mut out,
+        ImportKind::Options,
+        "zip",
+        Path::new("store"),
+        &report,
+    );
+    for line in [
+        "  adjustments found   2 (ex-date events; imports/gdfl.lineage)\n",
+        "  lineage records     41\n",
+        "  lot records         7\n",
+    ] {
+        assert!(out.contains(line), "{out}");
+    }
+    let mut none = String::new();
+    render(
+        &mut none,
+        ImportKind::Options,
+        "zip",
+        Path::new("store"),
+        &Report::default(),
+    );
+    assert!(
+        none.contains("  adjustments found   0 (ex-date events; imports/gdfl.lineage)\n"),
+        "{none}"
+    );
+}

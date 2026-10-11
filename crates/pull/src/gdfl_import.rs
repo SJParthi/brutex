@@ -576,6 +576,26 @@ pub enum ImportRefusal {
         /// in it; the day is not in `days_imported`.
         done: Box<Report>,
     },
+    /// An options filter names a symbol the lineage files under another key
+    /// (D-3354): the decoder files `NIITTECH...` under `COFORGE`, so the
+    /// name as given would match no file, and the day would be journaled
+    /// `done` with nothing read.
+    FilterRenamed {
+        /// The name as given.
+        name: String,
+        /// The key its option files are filed under.
+        filed: String,
+    },
+    /// The store holds live option series under a symbol the lineage files
+    /// elsewhere (D-3354): the run would open a second key for contracts
+    /// the store already holds under the old one, on a day the exchange
+    /// changed nothing. Refused before any day is read. A directory whose
+    /// every contract the ledger records superseded or retired is history
+    /// and is not named.
+    UnderlyingSplit {
+        /// Each old symbol with a directory, and the key it is filed under.
+        held: Vec<(String, String)>,
+    },
 }
 
 impl ImportRefusal {
@@ -602,6 +622,8 @@ impl ImportRefusal {
             Self::DayLedger { .. } => "day_ledger",
             Self::Lineage { .. } => "lineage",
             Self::Durability { .. } => "durability",
+            Self::FilterRenamed { .. } => "filter_renamed",
+            Self::UnderlyingSplit { .. } => "underlying_split",
         }
     }
 
@@ -616,6 +638,27 @@ impl ImportRefusal {
             _ => None,
         }
     }
+}
+
+/// [`ImportRefusal::UnderlyingSplit`]'s sentence: every old-symbol directory
+/// with the key its files are filed under, then the remedy.
+fn split_said(f: &mut core::fmt::Formatter<'_>, held: &[(String, String)]) -> core::fmt::Result {
+    write!(
+        f,
+        "the store holds option series under {} old symbol(s) the import now files elsewhere \
+         (D-3354):",
+        held.len()
+    )?;
+    for (old, filed) in held {
+        write!(f, " {old} (filed under {filed});")?;
+    }
+    write!(
+        f,
+        " importing would open a second key for contracts the store already holds. Supersede \
+         each bars/gdfl/NSE/FNO/<old symbol> first (its months re-imported under the filed key \
+         as new generations and the old keys recorded superseded), then run again. Nothing was \
+         read or written"
+    )
 }
 
 impl core::fmt::Display for ImportRefusal {
@@ -710,6 +753,14 @@ impl core::fmt::Display for ImportRefusal {
                 kind.as_str(),
                 done.days_imported
             ),
+            Self::FilterRenamed { name, filed } => write!(
+                f,
+                "{name} is filed under {filed} (D-3354: an option is filed under the newest \
+                 symbol its name's dated changes reach); ask for {filed}, which reads the \
+                 {name} files of the days before the change too. Refused: the name as given \
+                 matches no file"
+            ),
+            Self::UnderlyingSplit { held } => split_said(f, held),
         }
     }
 }
@@ -902,6 +953,9 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
         // Settled against the calendar (D-3331), which can learn the day.
         NfoRefusal::ExpiryUnsettled { .. } => Cause::open(Stage::Calendar, "expiry_unsettled"),
         NfoRefusal::UnderlyingRefused { .. } => Cause::open(Stage::File, "underlying_refused"),
+        // Judged against the dated symbol-change table (D-3333), which can
+        // learn a row (WP-12e).
+        NfoRefusal::UnderlyingStale { .. } => Cause::open(Stage::File, "underlying_stale"),
         NfoRefusal::ContractUnrenderable { .. } => {
             Cause::open(Stage::File, "contract_unrenderable")
         }
@@ -1988,6 +2042,13 @@ pub struct Run<'a> {
 impl Run<'_> {
     /// Refuses a filter name that is not a symbol as the store files it
     /// (D-2811): the journal key and the match are both by exact bytes.
+    ///
+    /// An OPTIONS filter is matched against the key a file is filed under,
+    /// which for a renamed underlying is its newest symbol (D-3354). An old
+    /// symbol there matched no file and still journaled the day `done` with
+    /// `files=0`, so it is refused with the key to ask for. A capital-market
+    /// filter is not refused: `cli`'s stored scope hands both names of a
+    /// renamed share, and the day's key is those names as given.
     fn check_filter(&self) -> Result<(), ImportRefusal> {
         for name in self.only {
             let filed = brutex_core::symbol::Symbol::new(name)
@@ -1995,8 +2056,95 @@ impl Run<'_> {
             if !filed {
                 return Err(ImportRefusal::FilterName { name: name.clone() });
             }
+            let current = brutex_core::alias::LINEAGE.current(name);
+            if self.kind == ImportKind::Options && current != name.as_str() {
+                return Err(ImportRefusal::FilterRenamed {
+                    name: name.clone(),
+                    filed: current.to_owned(),
+                });
+            }
         }
         Ok(())
+    }
+
+    /// The old symbols the store holds LIVE option series under whose files
+    /// this run would file under another key (D-3354), each with that key.
+    /// Empty for a spot run.
+    ///
+    /// One directory open per applied row of `core::alias::SYMBOL_CHANGES`
+    /// whose newest symbol the filter wants. A directory that is there is
+    /// walked until its first contract the lineage ledger has neither
+    /// superseded nor retired (the re-key's records, D-3331): that one
+    /// contract is what the run would split. A directory whose every
+    /// contract is withdrawn, or that holds none, is history and blocks
+    /// nothing, so superseding the old keys is what lifts the refusal; the
+    /// walk is then the directory's length, once per run. A name in it that
+    /// is no contract segment is not a contract the store holds.
+    ///
+    /// A directory or an entry that cannot be looked at counts as held: that
+    /// is not proof of absence.
+    ///
+    /// # Errors
+    ///
+    /// [`ImportRefusal::Lineage`] when an old-symbol directory exists and
+    /// the ledger that would say whether it is superseded cannot be read.
+    fn split_underlyings(&self) -> Result<Vec<(String, String)>, ImportRefusal> {
+        use brutex_core::instrument::{Exchange, Segment};
+        if self.kind != ImportKind::Options {
+            return Ok(Vec::new());
+        }
+        let base = self
+            .store_root
+            .join(store::path::STORE_ROOT)
+            .join(Vendor::Gdfl.as_str())
+            .join(Exchange::Nse.as_str())
+            .join(Segment::Fno.as_str());
+        let mut held = Vec::new();
+        let mut ledger: Option<crate::gdfl_rekey::Withdrawn> = None;
+        for row in brutex_core::alias::LINEAGE.rows() {
+            let filed = brutex_core::alias::LINEAGE.current(row.old);
+            if !row.status.applies() || filed == row.old || !self.wants(filed) {
+                continue;
+            }
+            let entries = match std::fs::read_dir(base.join(row.old)) {
+                Ok(entries) => entries,
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    held.push((row.old.to_owned(), filed.to_owned()));
+                    continue;
+                }
+            };
+            let withdrawn = match &mut ledger {
+                Some(read) => read,
+                slot => slot.insert(
+                    crate::gdfl_rekey::withdrawn(self.store_root)
+                        .map_err(|why| ImportRefusal::Lineage { why })?,
+                ),
+            };
+            let symbol = brutex_core::symbol::Symbol::new(row.old).ok();
+            let live = entries.into_iter().any(|entry| {
+                let Ok(entry) = entry else {
+                    return true;
+                };
+                let name = entry.file_name();
+                let contract = name
+                    .to_str()
+                    .and_then(|name| Contract::parse(name).filter(|c| c.as_str() == name));
+                match (symbol, contract) {
+                    (Some(symbol), Some(contract)) => {
+                        withdrawn.superseded(symbol, contract).is_none()
+                            && withdrawn.retired(symbol, contract).is_none()
+                    }
+                    // Not a contract the store files, or a table symbol the
+                    // store cannot spell: nothing here to split.
+                    _ => false,
+                }
+            });
+            if live {
+                held.push((row.old.to_owned(), filed.to_owned()));
+            }
+        }
+        Ok(held)
     }
 
     /// Whether `symbol` passes the filter.
@@ -5071,7 +5219,11 @@ where
 /// # Errors
 ///
 /// As [`run_nfo`], and [`ImportRefusal::Lineage`] when a lineage ledger
-/// exists and cannot be read.
+/// exists and cannot be read; [`ImportRefusal::FilterRenamed`] for a filter
+/// name the lineage files under another key, and
+/// [`ImportRefusal::UnderlyingSplit`] while the store holds option series
+/// under an old symbol whose files the run would file elsewhere (D-3354),
+/// both before any day is read.
 pub fn run_nfo_from<S>(
     source: &S,
     run: &Run<'_>,
@@ -5085,6 +5237,24 @@ where
         return Err(ImportRefusal::KindUnknown {
             word: format!("{} read from an options source", run.kind.as_str()),
         });
+    }
+    // BEFORE ANYTHING IS READ OR JOURNALED (D-3354): a name the lineage files
+    // elsewhere, then an old-symbol directory the run would split from. Each
+    // is logged as well as returned: a refused run leaves a line to find.
+    let refused = match run.check_filter().and_then(|()| run.split_underlyings()) {
+        Ok(held) if held.is_empty() => None,
+        Ok(held) => Some(ImportRefusal::UnderlyingSplit { held }),
+        Err(refusal) => Some(refusal),
+    };
+    if let Some(refusal) = refused {
+        let why = refusal.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::error(TARGET, "run refused")
+                .with("kind", run.kind.as_str())
+                .with("code", refusal.code())
+                .with("why", why.as_str()),
+        );
+        return Err(refusal);
     }
     let mut lineage = lineage::LineageRun::load(run.store_root, run.from)
         .map_err(|why| ImportRefusal::Lineage { why })?;
@@ -5153,7 +5323,10 @@ fn longest_prefix<'a>(ticker: &str, names: impl IntoIterator<Item = &'a str>) ->
 /// undecodable name, on the refusal path only.
 fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
     if let Some(underlying) = crate::gdfl_nfo::shaped_underlying(ticker) {
-        return run.wants(underlying);
+        // By the key it would be FILED under (D-3354), as a name that does
+        // decode is matched: an undecodable `NIITTECH...` is a `COFORGE`
+        // filter's to refuse, never nobody's.
+        return run.wants(brutex_core::alias::LINEAGE.current(underlying));
     }
     let fno = longest_prefix(ticker, brutex_core::universe::FNO_UNDERLYINGS);
     let asked = longest_prefix(ticker, run.only.iter().map(String::as_str));
@@ -5847,6 +6020,10 @@ pub mod quality;
 
 #[path = "gdfl_import_lineage.rs"]
 pub mod lineage;
+
+#[cfg(test)]
+#[path = "gdfl_wp12e_tests.rs"]
+mod wp12e_tests;
 
 #[cfg(test)]
 #[path = "gdfl_import_tests.rs"]

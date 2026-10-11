@@ -97,7 +97,7 @@ use brutex_core::price::Paisa;
 use crate::day::TradeDay;
 use crate::error::{CostError, Refusal};
 use crate::fill::{Bar, Direction, Fills, worst_case_fills};
-use crate::lot::{contract_quantity, lot_size_on};
+use crate::lot::{contract_quantity, lot_size_of, lot_size_on};
 use crate::money::{levy_ceiling, narrow, statutory_levy};
 use crate::rate::{
     BpsX100, Broker, GST_ON_FEE_BASE, OrderSide, SEBI_TURNOVER_FEE, brokerage_per_order, ipft,
@@ -170,16 +170,41 @@ impl core::fmt::Display for Outcome {
 pub struct Contract {
     underlying: SweptSlot,
     segment: Segment,
+    /// The contract's expiry, when the caller knows it (DB-B04).
+    expiry: Option<TradeDay>,
 }
 
 impl Contract {
-    /// A contract on a swept underlying.
+    /// A contract on a swept underlying, its expiry not stated. A lot-sized
+    /// trip of it is sized by the trade-day lot, which is every contract's
+    /// lot except while a revision is in transition; state the expiry with
+    /// [`Self::expiring`] wherever it is known.
     #[must_use]
     pub const fn new(underlying: SweptSlot, segment: Segment) -> Self {
         Self {
             underlying,
             segment,
+            expiry: None,
         }
+    }
+
+    /// A contract on a swept underlying that expires on `expiry` (the day
+    /// its name states or the day it settled). NSE revises a lot per
+    /// contract, so [`RoundTrip::in_lots`] sizes it by
+    /// [`crate::lot::lot_size_of`] (DB-B04).
+    #[must_use]
+    pub const fn expiring(underlying: SweptSlot, segment: Segment, expiry: TradeDay) -> Self {
+        Self {
+            underlying,
+            segment,
+            expiry: Some(expiry),
+        }
+    }
+
+    /// The expiry, when stated.
+    #[must_use]
+    pub const fn expiry(self) -> Option<TradeDay> {
+        self.expiry
     }
 
     /// Which of `core`'s swept underlyings this is.
@@ -583,7 +608,13 @@ impl RoundTrip {
                 segment: contract.segment().as_str(),
             });
         }
-        let lot_size = lot_size_on(contract.underlying(), entry.day())?;
+        // The lot is the CONTRACT's (DB-B04): a revision leaves the
+        // contracts that already existed on the previous lot, so the entry
+        // day alone mis-sized them by up to three times.
+        let lot_size = match contract.expiry() {
+            Some(expiry) => lot_size_of(contract.underlying(), expiry, entry.day())?.lot,
+            None => lot_size_on(contract.underlying(), entry.day())?,
+        };
         let quantity = contract_quantity(lots, lot_size)?;
         Self::new(contract, direction, broker, outcome, entry, exit, quantity)
     }
@@ -1853,6 +1884,57 @@ mod tests {
         let refusal = refusal_of(refused).expect("a lot-size refusal carries its window");
         assert_eq!(refusal.charge(), "options lot size (NIFTY)");
         assert!(refusal.remediation().contains("crates/costs/src/lot.rs"));
+    }
+
+    /// DB-B04. A contract that states its expiry is sized by ITS lot. On
+    /// 2024-12-10 the NIFTY January monthly (listed before the revision)
+    /// carried 25 and the 2-Jan weekly 75; sized by the entry day alone both
+    /// read 75, three times the January contract's quantity and every charge
+    /// that scales with it.
+    #[test]
+    fn a_contract_that_states_its_expiry_is_sized_by_its_own_lot() {
+        let on = day(2024, 12, 10);
+        let sized = |contract: Contract, lots: i64| {
+            RoundTrip::in_lots(
+                contract,
+                Direction::Long,
+                Broker::Groww,
+                Outcome::NormalClose,
+                leg(on, 100_00),
+                leg(on, 120_00),
+                lots,
+            )
+            .expect("well formed")
+        };
+        let expiring = |underlying: &str, y, m, d| {
+            Contract::expiring(slot(underlying), Segment::IndexOption, day(y, m, d))
+        };
+        let january = expiring("NIFTY", 2025, 1, 30);
+        assert_eq!(january.expiry(), Some(day(2025, 1, 30)));
+        assert_eq!(option_contract("NIFTY").expiry(), None);
+        assert_eq!(sized(january, 1).quantity(), 25);
+        assert_eq!(sized(january, 4).quantity(), 100);
+        assert_eq!(sized(expiring("NIFTY", 2025, 1, 2), 1).quantity(), 75);
+        assert_eq!(sized(expiring("BANKNIFTY", 2025, 1, 29), 1).quantity(), 15);
+        assert_eq!(sized(expiring("BANKNIFTY", 2025, 2, 26), 1).quantity(), 30);
+        // The unstated contract is the trade-day row, as before.
+        assert_eq!(sized(option_contract("NIFTY"), 1).quantity(), 75);
+        // The mis-sizing the entry-day key made: three times the charges.
+        let right = sized(january, 1);
+        let wrong = sized(option_contract("NIFTY"), 1);
+        assert_eq!(wrong.quantity(), 3 * right.quantity());
+        // A stated expiry does not rescue a pre-history entry.
+        let refused = RoundTrip::in_lots(
+            expiring("NIFTY", 2021, 1, 28),
+            Direction::Long,
+            Broker::Groww,
+            Outcome::NormalClose,
+            leg(day(2020, 12, 31), 100_00),
+            leg(day(2020, 12, 31), 120_00),
+            1,
+        )
+        .expect_err("the pre-history window has no lot size");
+        assert!(refusal_of(refused).is_some());
     }
 
     #[test]

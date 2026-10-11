@@ -237,6 +237,15 @@ pub enum NfoRefusal {
         /// The ticker.
         ticker: String,
     },
+    /// The file is named for a symbol the exchange was not using on the trade
+    /// day: an old symbol on or after its dated change, or a new one before
+    /// it (`crate::gdfl_lineage::filed_underlying`; DB-B05, DB-B11, DB-B62).
+    UnderlyingStale {
+        /// The ticker.
+        ticker: String,
+        /// The dated change the name is on the wrong side of.
+        why: brutex_core::alias::Stale,
+    },
     /// The contract does not render into the store's contract segment.
     ContractUnrenderable {
         /// The ticker.
@@ -326,6 +335,15 @@ impl core::fmt::Display for NfoRefusal {
                     "{ticker}: the underlying is not a symbol the store can file"
                 )
             }
+            Self::UnderlyingStale { ticker, why } => {
+                let (brutex_core::alias::Stale::AfterChange(change)
+                | brutex_core::alias::Stale::BeforeChange(change)) = why;
+                write!(
+                    f,
+                    "{ticker}: named for a symbol the exchange was not using that day: {} became {} on {} (NSE symbolchange.csv); refused, never filed under a guessed underlying",
+                    change.old, change.new, change.effective
+                )
+            }
             Self::ContractUnrenderable { ticker } => {
                 write!(
                     f,
@@ -388,7 +406,10 @@ pub enum TickerForm {
 /// The contract one option ticker names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionTicker {
-    /// The underlying's symbol, exactly as the ticker spells it.
+    /// The underlying the contract is FILED under (D-3354): the newest
+    /// symbol the ticker's own spelling reaches through the dated symbol
+    /// changes (`crate::gdfl_lineage::filed_underlying`), which is the
+    /// ticker's spelling for every symbol that was never renamed.
     pub underlying: Symbol,
     /// The store's contract segment, keyed on the SETTLED expiry (D-3331).
     pub contract: Contract,
@@ -666,7 +687,7 @@ fn single(
 /// [`NfoRefusal::TickerUnparsed`] (no reading), [`NfoRefusal::TickerAmbiguous`]
 /// (more than one), [`NfoRefusal::MonthlyExpiryUnmeasured`],
 /// [`NfoRefusal::ExpiryPassed`], [`NfoRefusal::UnderlyingRefused`],
-/// [`NfoRefusal::ExpiryUnsettled`] and [`NfoRefusal::ContractUnrenderable`].
+/// [`NfoRefusal::UnderlyingStale`], [`NfoRefusal::ExpiryUnsettled`] and [`NfoRefusal::ContractUnrenderable`].
 /// The strike's plausibility needs the day's ladder and is checked by
 /// [`read_file`] ([`NfoDay::check_strike`]), not here.
 pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusal> {
@@ -693,6 +714,17 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
         .ok_or_else(|| NfoRefusal::UnderlyingRefused {
             ticker: ticker.to_owned(),
         })?;
+    // ONE CONTRACT ACROSS A SYMBOL CHANGE (DB-B05, DB-B11, DB-B62; D-3333):
+    // the file is filed under the newest symbol the name's dated changes
+    // reach, as the cash side files an old stem, so a contract alive across
+    // `NIITTECH -> COFORGE` is one series. The vendor's text stays the alias
+    // (`brutex_core::alias::LINEAGE.backward`).
+    let underlying = crate::gdfl_lineage::filed_underlying(underlying, trade).map_err(|why| {
+        NfoRefusal::UnderlyingStale {
+            ticker: ticker.to_owned(),
+            why,
+        }
+    })?;
     // THE SETTLED EXPIRY IS THE IDENTITY (D-3331). A re-dated contract is one
     // series under its final day; a closed stated day no row names settles on
     // the previous open session the calendar records (the charter's rule),

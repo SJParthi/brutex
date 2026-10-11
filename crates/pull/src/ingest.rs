@@ -130,6 +130,8 @@ use std::fs;
 /// next epoch, migration and recount. D-3316 (WP-10).
 #[path = "census_store.rs"]
 pub mod census_store;
+#[path = "identity_screen.rs"]
+pub mod identity_screen;
 /// What a versioned repair of a series' months would do, read-only: the one
 /// answer `/pull/repair.json` and `cli zerodha-repair` give. D-3350, WP-13c.
 #[path = "repair_plan.rs"]
@@ -1237,6 +1239,10 @@ fn from_window_mode(
     // refused the whole answer, and a whole answer refused while the next one
     // landed is how a month was opened part-way for ever (DB-N20).
     let (rows, screened, duplicates) = screen_candles(raw, plan);
+    // A MINUTE THAT IS NOT THIS SERIES ON THIS DAY IS REFUSED BY NAME AND THE
+    // REST LANDS (WP-13d; DB-B07, DB-B08, DB-B10, DB-B60, DB-B64): before the
+    // series' first served day bar, or wholly outside its own day's range.
+    let (rows, foreign) = identity_screen::screen(raw, rows, instrument, store_root, plan);
     let member = Member {
         path: std::path::PathBuf::from(origin),
         instrument: instrument.to_owned(),
@@ -1244,10 +1250,14 @@ fn from_window_mode(
     };
     let (mut done, mut refusals) =
         from_members_mode(std::slice::from_ref(&member), store_root, plan, mode);
-    done.rows_read += screened.rows();
+    done.rows_read += screened.rows() + foreign.rows();
     done.failures
         .extend(refused_row_failures(instrument, &screened, plan.encoding));
+    done.failures
+        .extend(refused_row_failures(instrument, &foreign, plan.encoding));
     refusals.seconds.push(screened.local_seconds);
+    // Its own time-ordered list: the gap ledger merges one list per source.
+    refusals.seconds.push(foreign.local_seconds);
     // ONE EVENT AND ONE FAILURE PER (MONTH, REASON), AND ONE LEDGER LINE PER
     // DAY (D-3335, D-3341, WP-13b). It was one event and one failure per gap
     // (OD-2, D-2371), and each failure one `pull.spot` line besides. A minute
@@ -3847,6 +3857,30 @@ fn check_day(
     };
     let month = into.month.to_string();
     let _dropped_when_filtered = telemetry::emit(&daycheck_event(&found, instrument, &month));
+    // THE RULE `vendor_truncated` HAS ITS OWN LINE (WP-13d, DB-B19): the line
+    // above is at `telemetry::MAX_FIELDS`, and a count that fell off its end
+    // would be the silence this rule exists to end.
+    if let Ok(report) = &found
+        && report.vendor_truncated > 0
+    {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.daycheck",
+                "pulled 1day holds fields one paisa under its own 1min on the 5-paisa grid",
+            )
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("month", telemetry::Value::Str(&month))
+            .with("rule", telemetry::Value::Str("vendor_truncated"))
+            .with(
+                "fields",
+                telemetry::Value::Uint(u64::try_from(report.vendor_truncated).unwrap_or(u64::MAX)),
+            )
+            .with(
+                "why",
+                telemetry::Value::Str(report.first_truncated.as_deref().unwrap_or("")),
+            ),
+        );
+    }
 }
 
 /// The one `pull.daycheck` line for what [`check_day`] found (D-3347).
