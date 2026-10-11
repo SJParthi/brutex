@@ -66595,8 +66595,9 @@ every run still logs to `logs/cli`. **Findings** F78.
 **The closed set.** Under `<store>/logs`: `cli`, `gdfl/indices`, `gdfl/stocks`,
 `gdfl/options` (the kind lock), `gdfl/store` (the store lock: the census verbs
 and every v3 run), `verify/zerodha` and `verify/merge`; with the server's own
-directory, 8 (`api::logs::RUN_DIRS`). A run of a GDFL kind can write `cli`,
-`gdfl/<kind>` and `gdfl/store` (`IMPORT_DIRS`).
+directory, 8 (`api::logs::run_dirs`, read from the table D-4897 puts in
+`telemetry`). A run of a GDFL kind can write `cli`, `gdfl/<kind>` and
+`gdfl/store` (`api::logs::import_dirs`).
 
 **What was wrong.** `/logs` read the server's directory and `logs/cli`. The
 importer-evidence readers (`logs::import_refusals`,
@@ -66632,3 +66633,83 @@ streams under one budget of `MAX_KEYED_READS` = 2,000 line reads
 `…::dayflags_day_band_reads_importer_evidence_where_the_run_logged`,
 `…::store_behind_reads_importer_evidence_where_the_run_logged`; and
 `api::logs::tests::the_run_directories_name_every_import_kind`. Bench C-LG-01.
+
+### D-4897 — One table of run directories, in `telemetry`: the readers read it and the writers choose through it (continues D-4862) — 2026-10-11
+
+**Implemented by** IA-11r (the table, and the readers that read it; round-7
+critic IA-11r-2). IA-1, IA-9 and IA-10a choose a run's directory through it
+when they land the directory switch; until then every run still logs to
+`logs/cli`. **Continues** D-4862, which this entry does not edit beyond the two
+names it gave the readers' lists.
+
+**What was wrong.** D-4862's closed set was declared by the readers only:
+`api::logs` spelt the seven run directories and the five importer directories,
+the api's bench spelt the seven again, and the packages that start runs would
+each have spelt their own (`cli/src/main.rs` for a verb, the api for its child,
+`pull` for a verification run). Four or five hand-kept copies of one list,
+which the operator's rule 2 bans, and a reader looking where no writer logs is
+the fault D-4862 was written against.
+
+**The table.** `telemetry::run_dirs` (a new file of names; it opens nothing):
+`ALL: [RunDir; 6]`, each entry its path beneath `<store>/logs`, the lock file
+beneath `<store>` whose exclusive holder is the one process that logs there,
+and, for a kind's own directory, the kind. `GDFL_KINDS` (`gdfl/indices`,
+`gdfl/stocks`, `gdfl/options`; locks `imports/gdfl.<kind>.lock`), `GDFL_STORE`
+(`gdfl/store`; `imports/gdfl.lock`), `VERIFY_ZERODHA` (`verify/zerodha`;
+`verify/zerodha.lock`), `VERIFY_MERGE` (`verify/merge`; `verify/merge.lock`).
+`for_gdfl(kind, layout)` answers where a GDFL run logs: `GDFL_STORE` on v3, the
+kind's own on v4, and `None` for a word that is not a kind, which the caller
+refuses. `gdfl_evidence(kind)` answers the directories a reader of that kind
+reads (`cli`, the kind's own, `gdfl/store`) and `gdfl_evidence_all()` the five.
+`CLI` and `LOGS` are the two names every reader and `cli` already used.
+`telemetry` is where it lives because every crate that logs already names it
+and it depends on nothing (gate 21 holds it to that).
+
+**The lock paths are the design's, and the locks are not built.** They are the
+names the ingest automation design gives in its §4 ("the locks"). No lock of
+that table exists at this head; IA-1 and IA-9 take them. The table records
+which lock makes a directory one process's, so the package that takes the lock
+and the package that reads the directory cannot disagree about the pairing.
+
+**What changed.** `api::logs::run_dirs()` is `CLI` then `ALL` in the table's
+order, `import_dirs()` is `gdfl_evidence_all()`, a kind's three directories are
+`gdfl_evidence(kind)`, and `halves_of`, `import_refusals`,
+`audited_import_refusals` and `run_lifecycle` read those. The api's bench
+(C-LG-01) builds its store from the table and refuses to run if the table and
+`docs/06-limits.md` L-IA-13's 8 disagree. Nothing in `api` spells a run
+directory any more. `cli`'s own `log_dir` still spells `logs/cli` (not this
+package's file); it is one name, equal to `telemetry::run_dirs::CLI`, and IA-1
+replaces it when it chooses the directory from the verb.
+
+**The three kinds are the importer's.** `telemetry` may not depend on `pull`,
+so the table names the kinds as words and
+`api::logs::tests::the_run_directories_name_every_import_kind` holds them to
+`pull::gdfl_import::ImportKind::ALL`, in order, where both are in scope: a
+fourth kind fails there until it is a row.
+
+**Also fixed here, in D-4862's own rule ("`none` only when every directory was
+read").** A directory's state is asked of the disk on every call and no longer
+depends on what the api process read before (`api::logs::DirState::of`: the
+directory, then its current ring file by name). Before, a run directory first
+seen absent or empty and then made unreadable read `read` with no error, and
+its rows said `"none"`, until the api restarted: the importer-evidence tail
+remembered "no such file" and "permission denied" as one value
+(`logs::refusals_in`), and `/logs.json` asked `metadata` of the directory
+alone, which a directory without search permission answers. Now each ring
+file's `metadata` answer is kept as absent, there, or failed in its own words;
+a change between them reads the ring again; a file that stays unreadable is
+named once, not once a request; and `telemetry::audit_state` uses `try_exists`,
+so a stream that cannot be looked for is an error and no longer "never
+written".
+
+**Proof.** `api::logs::tests::the_readers_read_the_table_of_run_directories`
+(the readers' set equals `logs/`, `logs/cli/` and `ALL`; where the table sends
+a run of a kind, on both layouts, is one of the directories that kind is read
+from); `telemetry::run_dirs::tests::every_run_directory_and_lock_is_named_once`,
+`…::a_gdfl_run_logs_where_its_lock_is`,
+`…::a_kinds_evidence_is_in_its_three_directories`;
+`api::logs::tests::a_directory_that_turns_unreadable_is_never_answered_as_read`,
+`…::a_ring_file_that_stays_unreadable_is_named_once`,
+`telemetry::sink::tests::an_audit_stream_that_cannot_be_looked_for_is_an_error`
+(`docs/04-invariants.md` IA-LG-04, IA-LG-05). IA-GR-24's writer half (a run
+logged where `for_gdfl` says) is IA-1's.

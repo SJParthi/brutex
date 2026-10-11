@@ -478,42 +478,31 @@ pub fn quoted(raw: &str) -> String {
 /// which is NOT this one."* Its doc names the fix in the same breath — *"until
 /// it walks `logs/` and `logs/cli/` the page shows the server's half"* — and
 /// this is that walk.
-const CLI_SUBDIR: &str = "cli";
+const CLI_SUBDIR: &str = telemetry::run_dirs::CLI;
 
 /// The closed set of directories a run process logs to, under `<store>/logs`
-/// (D-4862): each belongs to the one lock that makes its writer alone there.
-/// `cli` (every cli verb, and every run until the directory switch), the
-/// three GDFL kinds' own (the kind lock), `gdfl/store` (the store lock: the
-/// census verbs and every v3 run), `verify/zerodha` and `verify/merge`.
-/// With the server's own directory these are the 8 `/logs` reads; a ninth
-/// writer needs a row here, a lock, and `docs/06-limits.md` L-IA-13's bound
-/// recomputed. The three kinds are `pull::gdfl_import::ImportKind::ALL`'s
-/// names, which `the_run_directories_name_every_import_kind` holds it to.
-pub(crate) const RUN_DIRS: [&str; 7] = [
-    CLI_SUBDIR,
-    "gdfl/indices",
-    "gdfl/stocks",
-    "gdfl/options",
-    "gdfl/store",
-    "verify/zerodha",
-    "verify/merge",
-];
+/// (D-4862): `cli` (every cli verb, and every run until the directory
+/// switch) and every row of `telemetry::run_dirs::ALL`, each of which
+/// belongs to the one lock that makes its writer alone there. With the
+/// server's own directory these are the 8 `/logs` reads.
+///
+/// **The table is `telemetry`'s, not this module's (D-4897).** The writers
+/// choose a run's directory through the same table, so a reader cannot look
+/// where no writer logs and a ninth writer is a row there, a lock, and
+/// `docs/06-limits.md` L-IA-13's bound recomputed.
+/// `the_readers_read_the_table_of_run_directories` holds this function to
+/// it, and `the_run_directories_name_every_import_kind` holds the table's
+/// three kinds to `pull::gdfl_import::ImportKind::ALL`.
+pub(crate) fn run_dirs() -> impl Iterator<Item = &'static str> {
+    std::iter::once(CLI_SUBDIR).chain(telemetry::run_dirs::ALL.iter().map(|dir| dir.sub))
+}
 
-/// Of [`RUN_DIRS`], the five a GDFL run can write, so the five the importer's
-/// evidence is read from: for one kind `cli`, `gdfl/<kind>` and `gdfl/store`.
-pub(crate) const IMPORT_DIRS: [&str; 5] = [
-    CLI_SUBDIR,
-    "gdfl/indices",
-    "gdfl/stocks",
-    "gdfl/options",
-    "gdfl/store",
-];
-
-/// What a GDFL run's own directory starts with, under `logs/`.
-const GDFL_PREFIX: &str = "gdfl/";
-
-/// The directory, under [`GDFL_PREFIX`], of the store lock's runs.
-const STORE_RUNS: &str = "store";
+/// Of [`run_dirs`], the five a GDFL run can write, so the five the
+/// importer's evidence is read from: for one kind `cli`, `gdfl/<kind>` and
+/// `gdfl/store` (`telemetry::run_dirs::gdfl_evidence`).
+pub(crate) fn import_dirs() -> impl Iterator<Item = &'static str> {
+    telemetry::run_dirs::gdfl_evidence_all()
+}
 
 /// Whether a directory a reader was asked to read could answer. A reader
 /// names every directory that is not [`Self::Read`], and says "none" only
@@ -540,10 +529,28 @@ impl DirState {
         }
     }
 
-    /// The state of `path`: one `metadata` call.
-    fn of(path: &std::path::Path) -> Self {
+    /// The state of `path`, asked of the disk and never of what this
+    /// process read before: one `metadata` call for the directory and, when
+    /// it is one, one for its current ring file BY NAME.
+    ///
+    /// # Why the second call
+    ///
+    /// `metadata` of a directory answers from its parent, so a directory
+    /// nobody may search (mode `000`, or one without its `x` bit) is "there,
+    /// and a directory" and used to read `read` while every file in it
+    /// answered `EACCES`: `/logs.json` named it `read` beside its own
+    /// `errors[]` saying `Permission denied`. A reader reaches a ring file by
+    /// its name, so that is what is asked: a name that is not there is a
+    /// directory that could answer and holds nothing, and any other failure
+    /// is the directory's, in the failure's own words (D-4862: `"none"` only
+    /// when every directory was read).
+    pub(crate) fn of(path: &std::path::Path) -> Self {
         match std::fs::metadata(path) {
-            Ok(meta) if meta.is_dir() => Self::Read,
+            Ok(meta) if meta.is_dir() => match std::fs::metadata(telemetry::current_path(path)) {
+                Ok(_) => Self::Read,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Read,
+                Err(e) => Self::Unreadable(e.to_string()),
+            },
             Ok(_) => Self::Unreadable("it is there and is not a directory".to_owned()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Absent,
             Err(e) => Self::Unreadable(e.to_string()),
@@ -552,7 +559,7 @@ impl DirState {
 }
 
 /// One directory a `/logs` request reads: its name on the wire (`served` for
-/// the server's own, else one of [`RUN_DIRS`]) and where it is.
+/// the server's own, else one of [`run_dirs`]) and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Half {
     /// The name rows and postings carry.
@@ -562,7 +569,7 @@ pub(crate) struct Half {
 }
 
 /// Every directory a `/logs` request reads: the server's own, when its sink
-/// resolved one, then each of [`RUN_DIRS`] under the store, when a store root
+/// resolved one, then each of [`run_dirs`] under the store, when a store root
 /// resolved: 8 at most (D-4862). The two roots are resolved apart, for the
 /// reason [`cli_half`] gives.
 pub(crate) fn halves_of(
@@ -575,10 +582,10 @@ pub(crate) fn halves_of(
             path,
         })
         .into_iter()
-        .chain(RUN_DIRS.iter().filter_map(|name| {
+        .chain(run_dirs().filter_map(|name| {
             store.map(|root| Half {
                 name,
-                path: root.join("logs").join(name),
+                path: root.join(telemetry::run_dirs::LOGS).join(name),
             })
         }))
         .collect()
@@ -597,7 +604,8 @@ fn named_pair(halves: &[Half]) -> Option<(&std::path::Path, Option<&std::path::P
 }
 
 /// `"dirs":[...]`: every directory the request read, by name, with its state
-/// (`read`, `absent`, `unreadable` and why). One `metadata` call each.
+/// (`read`, `absent`, `unreadable` and why). At most two `metadata` calls
+/// each ([`DirState::of`]).
 fn dirs_json(halves: &[Half]) -> String {
     let mut out = String::from("\"dirs\":[");
     for (n, half) in halves.iter().enumerate() {
@@ -3426,14 +3434,90 @@ fn pace_of(stamps: &[i64]) -> Option<(usize, i64, i64)> {
     Some((gaps.len(), at(50), at(90)))
 }
 
+/// What one `metadata` call said of a ring file.
+///
+/// # Why three answers and not two
+///
+/// The tail used to keep `(0, None)` for every failure, so "no such file"
+/// and "you may not look" were one remembered value. A directory first seen
+/// absent or empty and then made unreadable compared equal to what was
+/// remembered, was never read again, and kept answering "read, nothing
+/// held" for as long as the api process lived, while the same directory in
+/// the same state read `unreadable` after a restart. The failure is kept
+/// apart, in its own words, so the change is seen and the error is the
+/// directory's from that call on (D-4862).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    /// No such file.
+    Absent,
+    /// It is there: its length, its modification time, and its device and
+    /// inode.
+    There {
+        /// Bytes.
+        len: u64,
+        /// When it last changed, where the file system says.
+        modified: Option<std::time::SystemTime>,
+        /// `(dev, ino)`.
+        identity: (u64, u64),
+    },
+    /// The question itself failed, in the failure's own words.
+    Failed(String),
+}
+
+impl Seen {
+    /// One `metadata` call.
+    fn of(path: &std::path::Path) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::metadata(path) {
+            Ok(meta) => Self::There {
+                len: meta.len(),
+                modified: meta.modified().ok(),
+                identity: (meta.dev(), meta.ino()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(e) => Self::Failed(e.to_string()),
+        }
+    }
+
+    /// Its length; 0 for a file that is not there or could not be asked.
+    const fn len(&self) -> u64 {
+        match self {
+            Self::There { len, .. } => *len,
+            Self::Absent | Self::Failed(_) => 0,
+        }
+    }
+
+    /// The same file in the same readable-or-not state, whatever its length:
+    /// what the growing current file is compared by.
+    fn same_file(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::There { identity: mine, .. },
+                Self::There {
+                    identity: theirs, ..
+                },
+            ) => mine == theirs,
+            (mine, theirs) => mine == theirs,
+        }
+    }
+}
+
 /// What [`import_refusals`] keeps between calls for one directory.
 #[derive(Debug)]
 struct RefusalTail {
-    /// `(length, modified)` of every rolled ring file, oldest first.
-    rolled: Vec<(u64, Option<std::time::SystemTime>)>,
-    /// The current file's identity and the bytes parsed through its last
-    /// newline.
-    current: (Option<(u64, u64)>, u64),
+    /// Every rolled ring file as last seen, oldest first.
+    rolled: Vec<Seen>,
+    /// The current file as last seen.
+    current: Seen,
+    /// The bytes of the current file parsed, through its last newline.
+    parsed: u64,
+    /// Whether the current file is counted among `built.files`.
+    counted: bool,
+    /// The failure of the last read of the current file's new bytes, as it
+    /// stands in `built.errors`: one slot, replaced and never appended to,
+    /// so a file that stays unreadable does not grow the list by one line a
+    /// request.
+    read_error: Option<String>,
     built: std::sync::Arc<DirRefusals>,
 }
 
@@ -3449,7 +3533,7 @@ fn refusal_tails()
 /// One directory of the importer's evidence, as one read found it.
 #[derive(Debug, Clone)]
 pub(crate) struct DirEvidence {
-    /// The directory's name under `logs/`: one of [`IMPORT_DIRS`].
+    /// The directory's name under `logs/`: one of [`import_dirs`].
     pub(crate) half: &'static str,
     /// Where it is.
     pub(crate) path: std::path::PathBuf,
@@ -3465,15 +3549,12 @@ impl DirEvidence {
     /// `logs/gdfl/store` (a v3 run, the census verbs) and the kind's own
     /// `logs/gdfl/<kind>` (D-4862).
     fn serves(&self, kind: &str) -> bool {
-        match self.half.strip_prefix(GDFL_PREFIX) {
-            None | Some(STORE_RUNS) => true,
-            Some(own) => own == kind,
-        }
+        telemetry::run_dirs::gdfl_evidence(kind).any(|sub| sub == self.half)
     }
 
     /// The directory as `/imports.json` names it: `logs/<half>`.
     pub(crate) fn name(&self) -> String {
-        format!("logs/{}", self.half)
+        format!("{}/{}", telemetry::run_dirs::LOGS, self.half)
     }
 
     /// Ring files read.
@@ -3498,7 +3579,7 @@ impl DirEvidence {
 }
 
 /// The importer's evidence over every directory a GDFL run can log to
-/// ([`IMPORT_DIRS`]), each read through its own tail and merged at the
+/// ([`import_dirs`]), each read through its own tail and merged at the
 /// question (D-4862 round 6; IA-11r R5).
 ///
 /// # Why merged, and why by kind
@@ -3520,7 +3601,7 @@ impl DirEvidence {
 /// per-directory reads.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ImportRefusals {
-    /// One per directory of [`IMPORT_DIRS`], in that order.
+    /// One per directory of [`import_dirs`], in that order.
     dirs: Vec<DirEvidence>,
 }
 
@@ -3549,7 +3630,7 @@ pub(crate) struct Pace {
 }
 
 impl ImportRefusals {
-    /// Every directory read, in [`IMPORT_DIRS`] order.
+    /// Every directory read, in [`import_dirs`] order.
     pub(crate) fn dirs(&self) -> &[DirEvidence] {
         &self.dirs
     }
@@ -3749,36 +3830,42 @@ fn evidence_kept() -> &'static std::sync::Mutex<
 }
 
 /// The GDFL importer's evidence under `store_root`: every directory a GDFL
-/// run can log to ([`IMPORT_DIRS`]: `logs/cli`, `logs/gdfl/<kind>` and
+/// run can log to ([`import_dirs`]: `logs/cli`, `logs/gdfl/<kind>` and
 /// `logs/gdfl/store`), each named `read`, `absent` or `unreadable`
 /// (D-4862 round 6; IA-11r R5; IA-LG-02).
 ///
 /// # Cost
 ///
-/// Per directory one `metadata` call and [`refusals_in`]'s tail: its whole
-/// ring once per api process, then only the bytes appended since. Five
-/// directories, so at most five rings of at most 64 MiB each read once
-/// (`docs/06-limits.md` L-IA-37), and a call that finds nothing new is five
-/// `metadata` calls, five tail checks and one pointer comparison each. The
-/// merge happens at the question, never here.
+/// Per directory at most two `metadata` calls for its state
+/// ([`DirState::of`], asked of the disk on every call) and
+/// [`refusals_in`]'s tail: its whole ring once per api process, then only
+/// the bytes appended since. Five directories, so at most five rings of at
+/// most 64 MiB each read once (`docs/06-limits.md` L-IA-37), and a call that
+/// finds nothing new is at most 10 `metadata` calls per directory (2 for the
+/// state, one per ring file), five tail checks and one pointer comparison
+/// each. The merge happens at the question, never here.
+///
+/// # The state is the disk's, whatever this process read before
+///
+/// A directory first seen absent or empty and then made unreadable answers
+/// `unreadable` with the OS error on the next call, exactly as it does after
+/// a restart: the order production meets, since the api starts before any
+/// run creates its directory
+/// (`a_directory_that_turns_unreadable_is_never_answered_as_read`).
 pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
-    let read: Vec<DirEvidence> = IMPORT_DIRS
-        .iter()
+    let read: Vec<DirEvidence> = import_dirs()
         .map(|half| {
-            let path = store_root.join("logs").join(half);
+            let path = store_root.join(telemetry::run_dirs::LOGS).join(half);
             let held = refusals_in(&path);
-            let state = match std::fs::metadata(&path) {
-                Ok(meta) if !meta.is_dir() => {
-                    DirState::Unreadable("it is there and is not a directory".to_owned())
-                }
-                // A RING FILE THAT COULD NOT BE READ leaves the directory
-                // unread in part: it cannot vouch for "none".
-                Ok(_) => held
+            // THE DISK'S ANSWER FIRST, then the tail's: a directory that can
+            // be searched whose ring file could not be read is unread in
+            // part, and cannot vouch for "none" either.
+            let state = match DirState::of(&path) {
+                DirState::Read => held
                     .errors
                     .first()
                     .map_or(DirState::Read, |why| DirState::Unreadable(why.clone())),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => DirState::Absent,
-                Err(e) => DirState::Unreadable(e.to_string()),
+                other @ (DirState::Absent | DirState::Unreadable(_)) => other,
             };
             DirEvidence {
                 half,
@@ -3808,93 +3895,156 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
 /// The first call reads the directory's whole ring once (at most its 64 MiB
 /// ceiling; `logs/cli` held 1,158,202 bytes on the operator's store, 9 Oct
 /// 2026). After that, while only the current file grows, a call reads only
-/// the bytes appended since; a roll, or a file replaced, reads the ring
-/// again. A line is decoded only when it names the importer's target.
-/// `docs/06-limits.md` L-IA-37.
+/// the bytes appended since; a roll, a file replaced, or a file whose
+/// `metadata` answers differently (there, not there, or failing, in other
+/// words than before) reads the ring again. A line is decoded only when it
+/// names the importer's target. One `metadata` call per ring file per call
+/// (8). `docs/06-limits.md` L-IA-37.
+///
+/// # Errors are the read's, not the process's
+///
+/// `errors` names every ring file that could not be asked or read AS OF
+/// THIS CALL: a file that turns unreadable is a change the tail sees
+/// ([`Seen`]), a file that stays unreadable is named once however many
+/// calls find it so, and one that becomes readable again is read and its
+/// error dropped.
 fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
-    use std::io::{Read as _, Seek as _};
-    use std::os::unix::fs::MetadataExt as _;
     let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
     let Some((current, rolled_paths)) = paths.split_first() else {
         return std::sync::Arc::default();
     };
-    let rolled: Vec<(u64, Option<std::time::SystemTime>)> = rolled_paths
+    // OLDEST FIRST, as the ring was written.
+    let rolled: Vec<(&std::path::PathBuf, Seen)> = rolled_paths
         .iter()
         .rev()
-        .map(|path| {
-            std::fs::metadata(path).map_or((0, None), |meta| (meta.len(), meta.modified().ok()))
-        })
+        .map(|path| (path, Seen::of(path)))
         .collect();
-    let (identity, len) = std::fs::metadata(current).map_or((None, 0), |meta| {
-        (Some((meta.dev(), meta.ino())), meta.len())
-    });
+    let now = Seen::of(current);
+    let len = now.len();
     let mut held = refusal_tails()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tail = held
         .entry(dir.to_path_buf())
-        .or_insert_with(|| RefusalTail {
-            rolled: Vec::new(),
-            current: (None, 0),
-            built: std::sync::Arc::default(),
-        });
-    let fresh = tail.rolled != rolled || tail.current.0 != identity || len < tail.current.1;
+        .or_insert_with(RefusalTail::unread);
+    let fresh = !tail.rolled.iter().eq(rolled.iter().map(|(_, seen)| seen))
+        || !tail.current.same_file(&now)
+        || len < tail.parsed;
     if fresh {
-        let mut built = DirRefusals::default();
-        for path in rolled_paths.iter().rev() {
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    built.files = built.files.saturating_add(1);
-                    built.bytes = built
-                        .bytes
-                        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                    for line in bytes.split(|&byte| byte == b'\n') {
-                        built.fold(line);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => built.errors.push(format!("{}: {e}", path.display())),
-            }
-        }
-        *tail = RefusalTail {
-            rolled,
-            current: (identity, 0),
-            built: std::sync::Arc::new(built),
-        };
+        *tail = RefusalTail::read_ring(&rolled, current, now);
     }
-    if len > tail.current.1 {
-        let mut bytes = Vec::new();
-        let read = std::fs::File::open(current).and_then(|mut file| {
-            file.seek(std::io::SeekFrom::Start(tail.current.1))?;
-            file.take(len.saturating_sub(tail.current.1))
-                .read_to_end(&mut bytes)
-        });
-        let built = std::sync::Arc::make_mut(&mut tail.built);
-        match read {
-            Ok(_) => {
-                if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
-                    for line in bytes
-                        .get(..last)
-                        .unwrap_or_default()
-                        .split(|&byte| byte == b'\n')
-                    {
-                        built.fold(line);
-                    }
-                    tail.current.1 = tail
-                        .current
-                        .1
-                        .saturating_add(u64::try_from(last).unwrap_or(u64::MAX))
-                        .saturating_add(1);
-                }
-                built.files = built.files.saturating_add(u64::from(fresh));
-                built.bytes = built
-                    .bytes
-                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-            }
-            Err(e) => built.errors.push(format!("{}: {e}", current.display())),
-        }
+    if len > tail.parsed {
+        tail.read_appended(current, len);
     }
     std::sync::Arc::clone(&tail.built)
+}
+
+impl RefusalTail {
+    /// A directory nothing has been read from yet: its first question reads
+    /// its ring.
+    fn unread() -> Self {
+        Self {
+            rolled: Vec::new(),
+            current: Seen::Absent,
+            parsed: 0,
+            counted: false,
+            read_error: None,
+            built: std::sync::Arc::default(),
+        }
+    }
+
+    /// The ring read afresh: every rolled file that is there, oldest first,
+    /// and the current file left for [`Self::read_appended`] to read from its
+    /// start. A file that could not be asked about, rolled or current, is
+    /// named in `errors` and not read.
+    fn read_ring(
+        rolled: &[(&std::path::PathBuf, Seen)],
+        current: &std::path::Path,
+        now: Seen,
+    ) -> Self {
+        let mut built = DirRefusals::default();
+        for (path, seen) in rolled {
+            match seen {
+                Seen::Absent => {}
+                Seen::Failed(why) => built.errors.push(format!("{}: {why}", path.display())),
+                Seen::There { .. } => match std::fs::read(path) {
+                    Ok(bytes) => {
+                        built.files = built.files.saturating_add(1);
+                        built.bytes = built
+                            .bytes
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        for line in bytes.split(|&byte| byte == b'\n') {
+                            built.fold(line);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => built.errors.push(format!("{}: {e}", path.display())),
+                },
+            }
+        }
+        if let Seen::Failed(why) = &now {
+            built.errors.push(format!("{}: {why}", current.display()));
+        }
+        Self {
+            rolled: rolled.iter().map(|(_, seen)| seen.clone()).collect(),
+            current: now,
+            parsed: 0,
+            counted: false,
+            read_error: None,
+            built: std::sync::Arc::new(built),
+        }
+    }
+
+    /// Reads the current file's bytes from [`Self::parsed`] to `len` and
+    /// folds its whole lines in. A read that fails is named in `errors` in
+    /// one slot, replaced and never appended to; one that succeeds drops it.
+    fn read_appended(&mut self, current: &std::path::Path, len: u64) {
+        use std::io::{Read as _, Seek as _};
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(current).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(self.parsed))?;
+            file.take(len.saturating_sub(self.parsed))
+                .read_to_end(&mut bytes)
+        });
+        let why = match read {
+            Ok(_) => None,
+            Err(e) => Some(format!("{}: {e}", current.display())),
+        };
+        if why.is_some() && why == self.read_error {
+            // THE SAME FAILURE AS LAST TIME: the same answer, by pointer.
+            return;
+        }
+        let built = std::sync::Arc::make_mut(&mut self.built);
+        if let Some(was) = self.read_error.take() {
+            built.errors.retain(|error| *error != was);
+        }
+        if let Some(why) = why {
+            built.errors.push(why.clone());
+            self.read_error = Some(why);
+            return;
+        }
+        if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
+            for line in bytes
+                .get(..last)
+                .unwrap_or_default()
+                .split(|&byte| byte == b'\n')
+            {
+                built.fold(line);
+            }
+            self.parsed = self
+                .parsed
+                .saturating_add(u64::try_from(last).unwrap_or(u64::MAX))
+                .saturating_add(1);
+        }
+        // THE CURRENT FILE IS ONE FILE, counted the first time any of it is
+        // read, whether or not the ring was read afresh in this call: a ring
+        // first seen empty used to stay at 0 files while its bytes grew.
+        built.files = built.files.saturating_add(u64::from(!self.counted));
+        self.counted = true;
+        built.bytes = built
+            .bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    }
 }
 
 /// `/logs.json`'s body over directories a caller names: the server's own
@@ -3944,6 +4094,20 @@ pub fn import_evidence_over(store_root: &std::path::Path, kind: &str, day: &str)
 pub fn imports_json_over(store_root: &std::path::Path, query: &str) -> Result<String, String> {
     let asked = crate::server::imports::asked(query)?;
     crate::server::imports::answer(store_root, &asked).map(|body| body.to_string())
+}
+
+/// `/dayflags.json`'s body over a store a caller names.
+///
+/// Public for `crates/api/benches/ratio/logs_dirs.rs`, which times the day
+/// band's read of the import journal beside the runs page (C-LG-02): that
+/// read still decodes every `run` line per request, which is
+/// `docs/06-limits.md` L-IA-39 and is printed there, never gated.
+///
+/// # Errors
+///
+/// A query the route refuses, in the route's own words.
+pub fn dayflags_json_over(store_root: &std::path::Path, query: &str) -> Result<String, String> {
+    crate::server::imports::day_band_json(store_root, query)
 }
 
 /// What a keyed read of the importer's audit streams found, and what it
@@ -4017,16 +4181,10 @@ fn audited_in(
     out
 }
 
-/// The directories a run of `kind` can write, of [`IMPORT_DIRS`].
+/// The directories a run of `kind` can write, of [`import_dirs`]: the
+/// table's own answer (`telemetry::run_dirs::gdfl_evidence`).
 fn import_dirs_of(kind: &str) -> Vec<&'static str> {
-    IMPORT_DIRS
-        .iter()
-        .copied()
-        .filter(|half| match half.strip_prefix(GDFL_PREFIX) {
-            None | Some(STORE_RUNS) => true,
-            Some(own) => own == kind,
-        })
-        .collect()
+    telemetry::run_dirs::gdfl_evidence(kind).collect()
 }
 
 /// The GDFL importer's refusals of one kind and day that the audit streams
@@ -4058,7 +4216,7 @@ pub(crate) const RUN_LIFECYCLE_TARGET: &str = "gdfl.import.lifecycle";
 pub(crate) fn run_lifecycle(store_root: &std::path::Path, run: u64) -> Audited {
     audited_in(
         store_root,
-        &IMPORT_DIRS,
+        &import_dirs().collect::<Vec<_>>(),
         "run",
         &run.to_string(),
         |record| record.target == RUN_LIFECYCLE_TARGET,
@@ -6221,34 +6379,33 @@ mod tests {
             .expect("opens")
     }
 
-    /// **THE CLOSED SET NAMES EVERY IMPORT KIND**: the three kind directories
-    /// are `ImportKind::ALL`'s names in its order, so a fourth kind fails here
-    /// until its directory is a row; every importer directory is a run
-    /// directory; and with the server's own there are 8 (D-4862).
+    /// **THE CLOSED SET NAMES EVERY IMPORT KIND**: the table's three kind
+    /// directories are `ImportKind::ALL`'s names in its order, so a fourth
+    /// kind fails here until its directory is a row of
+    /// `telemetry::run_dirs`; every importer directory is a run directory;
+    /// and with the server's own there are 8 (D-4862, D-4897).
     #[test]
     fn the_run_directories_name_every_import_kind() {
-        let kinds: Vec<String> = pull::gdfl_import::ImportKind::ALL
+        let kinds: Vec<&str> = pull::gdfl_import::ImportKind::ALL
             .iter()
-            .map(|kind| format!("{GDFL_PREFIX}{}", kind.as_str()))
+            .map(|kind| kind.as_str())
             .collect();
-        let own: Vec<&str> = IMPORT_DIRS
+        let own: Vec<&str> = telemetry::run_dirs::GDFL_KINDS
             .iter()
-            .copied()
-            .filter(|dir| {
-                dir.strip_prefix(GDFL_PREFIX)
-                    .is_some_and(|rest| rest != STORE_RUNS)
-            })
+            .filter_map(|dir| dir.gdfl_kind)
             .collect();
-        assert_eq!(own, kinds);
-        assert!(IMPORT_DIRS.iter().all(|dir| RUN_DIRS.contains(dir)));
-        assert_eq!(RUN_DIRS.len() + 1, 8, "the server's own and these");
+        assert_eq!(own, kinds, "the table's kinds are the importer's, in order");
+        let read: Vec<&str> = run_dirs().collect();
+        assert!(import_dirs().all(|dir| read.contains(&dir)));
+        assert_eq!(read.len() + 1, 8, "the server's own and these");
         for kind in pull::gdfl_import::ImportKind::ALL {
+            let word = kind.as_str();
             assert_eq!(
-                import_dirs_of(kind.as_str()),
+                import_dirs_of(word),
                 [
                     CLI_SUBDIR.to_owned(),
-                    format!("{GDFL_PREFIX}{}", kind.as_str()),
-                    format!("{GDFL_PREFIX}{STORE_RUNS}"),
+                    format!("gdfl/{word}"),
+                    "gdfl/store".to_owned(),
                 ],
                 "a kind's evidence is read from three directories"
             );
@@ -6257,6 +6414,329 @@ mod tests {
         assert_eq!(halves_of(Some(root.join("logs")), Some(root)).len(), 8);
         assert_eq!(halves_of(None, Some(root)).len(), 7, "no server sink");
         assert!(halves_of(None, None).is_empty());
+    }
+
+    /// **THE READERS READ THE WRITERS' TABLE** (D-4897, which continues
+    /// D-4862): what `/logs` reads is `logs/`, `logs/cli/` and every row of
+    /// `telemetry::run_dirs::ALL`, in the table's order and nothing else;
+    /// the importer's evidence is read from a subset of it; and wherever the
+    /// table sends a GDFL run of a kind, on either layout, is one of the
+    /// directories that kind's evidence is read from. A directory added to
+    /// the table is read here without an edit, and one a reader spelt itself
+    /// fails the equality.
+    #[test]
+    fn the_readers_read_the_table_of_run_directories() {
+        let root = std::path::Path::new("/zz-no-such-store");
+        let read: Vec<std::path::PathBuf> = halves_of(Some(root.join("logs")), Some(root))
+            .into_iter()
+            .map(|half| half.path)
+            .collect();
+        let table: Vec<std::path::PathBuf> = [
+            root.join(telemetry::run_dirs::LOGS),
+            root.join(telemetry::run_dirs::LOGS)
+                .join(telemetry::run_dirs::CLI),
+        ]
+        .into_iter()
+        .chain(telemetry::run_dirs::ALL.iter().map(|dir| dir.beneath(root)))
+        .collect();
+        assert_eq!(read, table);
+
+        // THE EVIDENCE READ names the same directories the walk does.
+        let evidence = import_refusals(root);
+        let named: Vec<String> = evidence.dirs().iter().map(DirEvidence::name).collect();
+        let walked: Vec<String> = import_dirs().map(|dir| format!("logs/{dir}")).collect();
+        assert_eq!(named, walked);
+        assert_eq!(named.len(), 5);
+        for dir in evidence.dirs() {
+            assert!(
+                read.contains(&dir.path),
+                "{} is not a /logs read",
+                dir.name()
+            );
+            assert_eq!(dir.state, DirState::Absent, "{}", dir.name());
+        }
+
+        // WHERE A RUN LOGS IS WHERE ITS KIND IS READ, on both layouts.
+        for kind in pull::gdfl_import::ImportKind::ALL {
+            for layout in [
+                telemetry::run_dirs::GdflLayout::V3,
+                telemetry::run_dirs::GdflLayout::V4,
+            ] {
+                let written = telemetry::run_dirs::for_gdfl(kind.as_str(), layout)
+                    .expect("every import kind has a run directory");
+                assert!(
+                    import_dirs_of(kind.as_str()).contains(&written.sub),
+                    "a {layout:?} run of {} logs to {}, which its readers do not read",
+                    kind.as_str(),
+                    written.sub
+                );
+                assert!(
+                    evidence
+                        .unread(kind.as_str())
+                        .contains(&format!("{} absent", written.name())),
+                    "{}",
+                    written.name()
+                );
+            }
+        }
+    }
+
+    /// Makes `dir` unsearchable for the life of the guard and gives it back
+    /// its mode when dropped, so a failed assertion still cleans up.
+    struct Locked(std::path::PathBuf);
+
+    impl Locked {
+        fn new(dir: &std::path::Path) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000))
+                .expect("a directory with no permissions");
+            // WHERE THE MODE BITS DO NOT BIND (a process that may read
+            // anything) this test cannot make its case, and says so rather
+            // than passing on nothing.
+            assert!(
+                std::fs::metadata(telemetry::current_path(dir))
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied),
+                "mode 000 does not stop this process from searching {}: run the tests as a \
+                 user the mode bits bind",
+                dir.display()
+            );
+            Self(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for Locked {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _restored =
+                std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// **A DIRECTORY THAT TURNS UNREADABLE IS NEVER ANSWERED AS `read`**,
+    /// whatever this process read before (D-4862; IA-LG-02). The api starts
+    /// before any run creates its directory, so the order production meets
+    /// is: first seen ABSENT, or first seen EMPTY, or first seen HOLDING A
+    /// REFUSAL, and only then unreadable. Each of the three read `read` with
+    /// no error, and the row said `"none"`, until the process restarted: the
+    /// tail remembered "no such file" and "permission denied" as one value.
+    /// Each must answer `unreadable` with the OS error on `/imports.json`'s
+    /// evidence and on `/logs.json`'s and `/logs`'s `dirs`, name the
+    /// directory in a kind's `unread`, and read again once it can be.
+    #[test]
+    fn a_directory_that_turns_unreadable_is_never_answered_as_read() {
+        let root = crate::scratch::path("logs-dir-turns-unreadable");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).expect("mkdir");
+        let state_of = |half: &str| -> DirState {
+            import_refusals(&root)
+                .dirs()
+                .iter()
+                .find(|dir| dir.half == half)
+                .unwrap_or_else(|| panic!("{half} is not read"))
+                .state
+                .clone()
+        };
+        let denied = |state: &DirState, half: &str| {
+            let DirState::Unreadable(why) = state else {
+                panic!("{half} reads {state:?}, not unreadable");
+            };
+            assert!(why.contains("Permission denied"), "{half}: {why}");
+        };
+        let refusal = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"stocks\",\"day\":\"2019-11-13\",\"about\":\"ZZ FIXTURE.csv\",\
+             \"why\":\"a fixture\"}}\n";
+
+        // FIRST SEEN: absent, empty, and holding one refusal.
+        let absent_first = logs.join("gdfl").join("store");
+        let empty_first = logs.join("gdfl").join("options");
+        let held_first = logs.join("gdfl").join("stocks");
+        std::fs::create_dir_all(&empty_first).expect("mkdir");
+        std::fs::create_dir_all(&held_first).expect("mkdir");
+        std::fs::write(telemetry::current_path(&held_first), refusal).expect("a ring");
+        assert_eq!(state_of("gdfl/store"), DirState::Absent);
+        assert_eq!(state_of("gdfl/options"), DirState::Read);
+        assert_eq!(state_of("gdfl/stocks"), DirState::Read);
+        let before = import_refusals(&root);
+        assert_eq!(before.of("stocks", "2019-11-13").len(), 1);
+        assert_eq!(
+            before.unread("options"),
+            ["logs/cli absent", "logs/gdfl/store absent"]
+        );
+
+        // THEN UNREADABLE, in the same process.
+        std::fs::create_dir_all(&absent_first).expect("mkdir");
+        {
+            let _a = Locked::new(&absent_first);
+            let _b = Locked::new(&empty_first);
+            let _c = Locked::new(&held_first);
+            for half in ["gdfl/store", "gdfl/options", "gdfl/stocks"] {
+                denied(&state_of(half), half);
+            }
+            let after = import_refusals(&root);
+            assert!(
+                !std::sync::Arc::ptr_eq(&before, &after),
+                "an answer kept against the earlier read is not this one"
+            );
+            let unread = after.unread("stocks");
+            assert_eq!(unread.len(), 3, "{unread:?}");
+            assert_eq!(unread[0], "logs/cli absent");
+            for (said, dir) in unread[1..]
+                .iter()
+                .zip(["logs/gdfl/stocks", "logs/gdfl/store"])
+            {
+                assert!(
+                    said.starts_with(&format!("{dir} unreadable: "))
+                        && said.contains("Permission denied"),
+                    "{said}"
+                );
+            }
+            assert!(
+                after.of("stocks", "2019-11-13").is_empty(),
+                "what can no longer be read is not answered from memory"
+            );
+            for dir in after
+                .dirs()
+                .iter()
+                .filter(|dir| dir.half != CLI_SUBDIR && dir.half != "gdfl/indices")
+            {
+                assert!(!dir.errors().is_empty(), "{} names no error", dir.name());
+            }
+
+            // ASKED AGAIN, it is the same answer and the same errors: a
+            // directory that stays unreadable does not grow its list.
+            let errors = |evidence: &ImportRefusals| -> usize {
+                evidence.dirs().iter().map(|dir| dir.errors().len()).sum()
+            };
+            let again = import_refusals(&root);
+            assert!(std::sync::Arc::ptr_eq(&after, &again));
+            assert_eq!(errors(&after), errors(&again));
+        }
+
+        // READABLE AGAIN: read, the refusal back, the errors gone.
+        assert_eq!(state_of("gdfl/store"), DirState::Read);
+        assert_eq!(state_of("gdfl/options"), DirState::Read);
+        assert_eq!(state_of("gdfl/stocks"), DirState::Read);
+        let restored = import_refusals(&root);
+        assert_eq!(restored.of("stocks", "2019-11-13").len(), 1);
+        assert!(restored.dirs().iter().all(|dir| dir.errors().is_empty()));
+        assert_eq!(restored.unread("stocks"), ["logs/cli absent"]);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`/logs.json` AND `/logs` NAME AN UNREADABLE DIRECTORY TOO, FROM THE
+    /// DISK** (D-4862; IA-LG-04): their `dirs` asked `metadata` of the
+    /// directory alone, which a directory without search permission answers,
+    /// so it read `read` beside the same answer's `errors[]` saying
+    /// `Permission denied`. An absent one, an empty one and one holding a
+    /// ring each read `unreadable` with the OS error while they are, and
+    /// `read` once they are not.
+    #[test]
+    fn logs_names_a_directory_it_may_not_search() {
+        let root = crate::scratch::path("logs-dirs-unsearchable");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let logs = root.join("logs");
+        let locked = ["gdfl/store", "gdfl/options", "gdfl/stocks"];
+        for half in locked {
+            std::fs::create_dir_all(logs.join(half)).expect("mkdir");
+        }
+        std::fs::write(telemetry::current_path(&logs.join("gdfl/stocks")), "{}\n").expect("a ring");
+        let halves = halves_of(Some(logs.clone()), Some(&root));
+        assert!(!dirs_json(&halves).contains("unreadable"));
+        {
+            let _guards: Vec<Locked> = locked
+                .iter()
+                .map(|half| Locked::new(&logs.join(half)))
+                .collect();
+            let body: serde_json::Value =
+                serde_json::from_str(&format!("{{{}}}", dirs_json(&halves))).expect("json");
+            for half in ["gdfl/store", "gdfl/options", "gdfl/stocks"] {
+                let dir = body["dirs"]
+                    .as_array()
+                    .expect("dirs")
+                    .iter()
+                    .find(|dir| dir["half"] == half)
+                    .unwrap_or_else(|| panic!("{half} is not named"));
+                assert_eq!(dir["state"], "unreadable", "{dir:#}");
+                assert!(
+                    dir["error"]
+                        .as_str()
+                        .is_some_and(|why| why.contains("Permission denied")),
+                    "{dir:#}"
+                );
+                assert_eq!(DirState::of(&logs.join(half)).word(), "unreadable");
+            }
+            let note = dirs_note(&halves);
+            assert_eq!(
+                note.matches("unreadable (Permission denied").count(),
+                3,
+                "{note}"
+            );
+            assert!(note.contains("<code>served</code> read;"), "{note}");
+        }
+        let after = dirs_json(&halves);
+        assert!(!after.contains("unreadable"), "{after}");
+        assert_eq!(after.matches("\"state\":\"read\"").count(), 4, "{after}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RING FILE THAT CANNOT BE READ IS NAMED ONCE, AND COUNTED WHEN IT
+    /// CAN BE.** The directory is searchable and its current file is not
+    /// readable: every call used to append the same error again (one line a
+    /// request, for ever, and a new answer identity each time). And a ring
+    /// first seen empty stayed at 0 files while its bytes grew.
+    #[test]
+    fn a_ring_file_that_stays_unreadable_is_named_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::scratch::path("logs-ring-file-unreadable");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let empty = refusals_in(&dir);
+        assert_eq!((empty.files, empty.bytes), (0, 0));
+        let line = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"options\",\"day\":\"2019-11-14\",\"about\":\"census\",\
+             \"why\":\"a fixture\"}}\n";
+        let current = telemetry::current_path(&dir);
+        std::fs::write(&current, line).expect("a ring");
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        if std::fs::read(&current).is_ok() {
+            let _restored =
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
+            panic!("mode 000 does not stop this process from reading: run as a user it binds");
+        }
+        let first = refusals_in(&dir);
+        let second = refusals_in(&dir);
+        let third = refusals_in(&dir);
+        let _restored = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
+        assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
+        assert!(
+            first.errors[0].contains("Permission denied"),
+            "{:?}",
+            first.errors
+        );
+        assert_eq!(
+            third.errors, first.errors,
+            "named once, however often asked"
+        );
+        assert!(std::sync::Arc::ptr_eq(&second, &third), "and the same read");
+        assert_eq!(
+            DirState::of(&dir),
+            DirState::Read,
+            "the directory can be searched"
+        );
+
+        // READABLE: read, counted as one file, and the error dropped.
+        let readable = refusals_in(&dir);
+        assert!(readable.errors.is_empty(), "{:?}", readable.errors);
+        assert_eq!(readable.of("options", "2019-11-14").len(), 1);
+        assert_eq!(
+            (readable.files, readable.bytes),
+            (1, line.len() as u64),
+            "a ring first seen empty counts its file when it reads it"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 
     /// A store whose server logged to `logs/`, an older run to `logs/cli`

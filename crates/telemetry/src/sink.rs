@@ -2473,7 +2473,15 @@ fn postings_of(keys: &impl Keyed) -> [Option<std::borrow::Cow<'_, str>>; 8] {
 ///
 /// As [`audit_serial`].
 pub fn audit_state(dir: &Path) -> Result<Option<u64>, String> {
-    if !audit_current_path(dir).exists() && !audit_serial_path(dir).exists() {
+    // `try_exists`, NOT `exists`: `exists` answers `false` for a path that
+    // could not be asked about, so the stream of a directory nobody may
+    // search read as "never written" and its reader said "nothing audited"
+    // where it had to say "could not look" (D-4862).
+    let there = |path: PathBuf| {
+        path.try_exists()
+            .map_err(|e| format!("{}: cannot be looked for — {e}", path.display()))
+    };
+    if !there(audit_current_path(dir))? && !there(audit_serial_path(dir))? {
         return Ok(None);
     }
     audit_serial(dir).map(Some)
@@ -2805,6 +2813,28 @@ impl Reap {
     }
 }
 
+/// Whether `gone` (a sink's `audit.idx.gone`) is there, asked WITHOUT
+/// following a link: `Ok(false)` when nothing has that name.
+///
+/// # Errors
+///
+/// When the name is taken by something that is not a directory (a symbolic
+/// link, even one to a directory, or a file), or cannot be asked about: the
+/// sink renames nothing into it and deletes nothing from it. The words are
+/// the reason alone; the caller says what it could not do, and to what.
+fn audit_gone_is_ours(gone: &Path) -> Result<bool, String> {
+    match gone.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(
+            "it is not a directory (a symbolic link or a file is in its place), so no retired \
+             index generation is renamed into it and nothing in it is deleted; remove it"
+                .to_owned(),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// The reaper: deletes each retired index generation it is sent, until the
 /// stream that owns the channel is dropped (D-4838).
 ///
@@ -2937,28 +2967,10 @@ impl Audit {
         }
         // WHAT AN EARLIER PROCESS LEFT ASIDE, listed before anything this
         // start renames there, so no entry is handed over twice.
-        let gone = self.dir.join(AUDIT_GONE_DIR);
-        let listed = match std::fs::read_dir(&gone) {
-            Ok(entries) => {
-                for entry in entries {
-                    match entry {
-                        Ok(entry) => self.hand_over(entry.path()),
-                        Err(e) => {
-                            let why = format!("{}: cannot list — {e}", gone.display());
-                            self.health.last_error = Some(why.clone());
-                            return Err(why);
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => {
-                let why = format!("{}: cannot list — {e}", gone.display());
-                self.health.last_error = Some(why.clone());
-                Err(why)
-            }
-        };
+        let listed = self.hand_over_what_waits();
+        if let Err(ref why) = listed {
+            self.health.last_error = Some(why.clone());
+        }
         // A PROCESS KILLED AFTER IT RECORDED A SERIAL AND BEFORE IT RENAMED
         // THE GENERATION THAT SERIAL ENDED left that one generation in
         // `audit.idx/`, where no later roll looks for it. Retired here: one
@@ -2968,6 +2980,59 @@ impl Audit {
             .checked_sub(u64::from(AUDIT_KEEP_FILES))
             .map_or(Ok(()), |gone| self.retire(gone));
         started.and(stranded).and(listed)
+    }
+
+    /// Lists `audit.idx.gone/` once and hands every retired generation in it
+    /// to the reaper.
+    ///
+    /// # What is not handed over
+    ///
+    /// **The directory itself, when it is not one.** `read_dir` follows a
+    /// symbolic link, so a link planted under this name would have had the
+    /// reaper delete another directory's entries. Asked without following
+    /// ([`audit_gone_is_ours`]), and refused by name: nothing in it is listed.
+    ///
+    /// **An entry that is not a directory.** A retired generation is a
+    /// directory; a file there (a `.DS_Store` a file browser left) is not
+    /// this sink's, and handing it over made a delete that fails at every
+    /// start and a health that is loud for ever. It is left where it is,
+    /// never counted as waiting or as a failed delete, and named apart in
+    /// [`AuditHealth::last_error`] when the writer has no error of its own.
+    fn hand_over_what_waits(&mut self) -> Result<(), String> {
+        let gone = self.dir.join(AUDIT_GONE_DIR);
+        let there = audit_gone_is_ours(&gone)
+            .map_err(|why| format!("{}: cannot list — {why}", gone.display()))?;
+        if !there {
+            return Ok(());
+        }
+        let cannot_list = |e: std::io::Error| format!("{}: cannot list — {e}", gone.display());
+        let mut strays = 0u64;
+        let mut first_stray = None;
+        for entry in std::fs::read_dir(&gone).map_err(cannot_list)? {
+            let entry = entry.map_err(cannot_list)?;
+            if entry.file_type().map_err(cannot_list)?.is_dir() {
+                self.hand_over(entry.path());
+            } else {
+                strays = strays.saturating_add(1);
+                let _kept = first_stray.get_or_insert_with(|| entry.path());
+            }
+        }
+        if let Some(stray) = first_stray
+            && self.health.last_error.is_none()
+        {
+            self.health.last_error = Some(format!(
+                "{}: is not a retired index generation (it is not a directory), and {} such \
+                 entr{} in {AUDIT_GONE_DIR}/ left where {}: nothing here made {}, so nothing \
+                 here deletes {}",
+                stray.display(),
+                strays,
+                if strays == 1 { "y is" } else { "ies are" },
+                if strays == 1 { "it is" } else { "they are" },
+                if strays == 1 { "it" } else { "them" },
+                if strays == 1 { "it" } else { "them" },
+            ));
+        }
+        Ok(())
     }
 
     /// Counts one entry of `audit.idx.gone/` as waiting and sends it to the
@@ -2999,6 +3064,12 @@ impl Audit {
     fn retire(&self, gone: u64) -> Result<(), String> {
         let generation = audit_generation_path(&self.dir, gone);
         let aside = self.dir.join(AUDIT_GONE_DIR);
+        // A LINK UNDER THIS NAME IS NOT A PLACE TO RENAME INTO: the
+        // generation would leave the sink's directory and the next start
+        // would not find it. Refused by name; the generation stays in
+        // `audit.idx/`, where a reader already takes it for rolled off.
+        let _there = audit_gone_is_ours(&aside)
+            .map_err(|why| format!("{}: cannot create — {why}", aside.display()))?;
         std::fs::create_dir_all(&aside)
             .map_err(|e| format!("{}: cannot create — {e}", aside.display()))?;
         let stamped = format!("{gone}.{}.{}", self.health.rotations, now_millis());
@@ -7017,6 +7088,140 @@ mod tests {
         );
         let _ignored = std::fs::remove_dir_all(&blocked);
         let _ignored = std::fs::remove_dir_all(&filed);
+    }
+
+    /// **A FILE IN `audit.idx.gone/` IS NOT A RETIRED GENERATION** (D-4838).
+    /// A `.DS_Store` a file browser left there was handed to the reaper, its
+    /// delete failed, and the health was loud at every start for ever. It is
+    /// left where it is, counted neither as waiting nor as a failed delete,
+    /// and named apart; the real generation beside it is still deleted. At
+    /// the second start too, when nothing but the stray is there.
+    #[test]
+    fn a_stray_file_in_the_graveyard_is_named_and_never_a_failed_delete() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-stray");
+        fifteen_rolls_old(&dir, 0);
+        let gone = dir.join(super::AUDIT_GONE_DIR);
+        std::fs::create_dir_all(gone.join("0").join("day")).expect("a retired generation");
+        std::fs::write(gone.join("0").join("day").join("2022-03-07.idx"), b"x").expect("a file");
+        std::fs::write(gone.join(".DS_Store"), b"not this sink's").expect("a stray");
+        for start in 0..2u64 {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let health = reaped(&sink);
+            assert_eq!(
+                (health.reap_failures, health.gone_waiting, health.reaped),
+                (0, 0, 1 - start),
+                "start {start}: {health:?}"
+            );
+            assert_eq!(health.reap_error, None, "no delete failed");
+            assert!(!health.is_loud(), "start {start}: {health:?}");
+            let said = health.last_error.clone().expect("the stray is named");
+            assert!(said.contains(".DS_Store"), "{said}");
+            assert!(said.contains("is not a retired index generation"), "{said}");
+            assert!(said.contains("1 such entry is"), "{said}");
+            assert_eq!(gone_entries(&dir), [".DS_Store"], "left where it is");
+            assert!(sink.emit(&Event::error("x", "refused")).is_written());
+        }
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LINK NAMED `audit.idx.gone` IS REFUSED, AND NOTHING BEHIND IT IS
+    /// DELETED** (D-4838). The start's listing followed the link, so the
+    /// reaper deleted every entry of the directory it pointed at; and a roll
+    /// renamed its generation through it, out of the sink's directory. Both
+    /// are refused by name: the other directory is untouched, the generation
+    /// stays in `audit.idx/`, and no line is lost.
+    #[test]
+    fn a_linked_graveyard_is_refused_by_name_and_nothing_behind_it_is_deleted() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-linked");
+        let elsewhere = scratch("audit-reap-linked-elsewhere");
+        fifteen_rolls_old(&dir, 2);
+        let kept = elsewhere.join("someone-elses").join("file");
+        std::fs::create_dir_all(kept.parent().expect("a parent")).expect("a directory");
+        std::fs::write(&kept, b"not this sink's").expect("a file");
+        std::os::unix::fs::symlink(&elsewhere, dir.join(super::AUDIT_GONE_DIR)).expect("a link");
+
+        let sink = Sink::open(&Config::new(&dir)).expect("opens anyway");
+        let health = sink.audit_health().expect("a stream");
+        let said = health.last_error.clone().expect("the listing is refused");
+        assert!(said.contains("cannot list"), "{said}");
+        assert!(said.contains("a symbolic link or a file"), "{said}");
+        assert!(said.contains(super::AUDIT_GONE_DIR), "{said}");
+        assert_eq!(health.gone_waiting, 0, "nothing behind the link is counted");
+
+        // A ROLL DOES NOT RENAME THROUGH IT EITHER.
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 1;
+        for i in 0..3u32 {
+            assert!(
+                sink.emit(&Event::error("x", "refused").with("i", i))
+                    .is_written()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let health = sink.audit_health().expect("a stream");
+        assert_eq!(health.rotation_failures, 1, "{health:?}");
+        let said = health.last_error.clone().expect("the roll's failure");
+        assert!(said.contains("cannot create"), "{said}");
+        assert!(said.contains("a symbolic link or a file"), "{said}");
+        assert_eq!(
+            (health.gone_waiting, health.reaped, health.dropped),
+            (0, 0, 0)
+        );
+        assert!(
+            super::audit_generation_path(&dir, 0).exists(),
+            "not renamed out of the sink's directory"
+        );
+        assert_eq!(
+            std::fs::read(&kept).expect("still there"),
+            b"not this sink's",
+            "nothing behind the link was deleted"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).expect("lists").count(),
+            1,
+            "and nothing was renamed into it"
+        );
+        assert_eq!(probed(&dir, "target", "x").len(), 3, "every line is found");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// **A STREAM NOBODY MAY LOOK FOR IS NOT "NEVER WRITTEN"** (D-4862):
+    /// `audit_state` answered `Ok(None)` for a directory without search
+    /// permission, so a reader said "nothing audited" where it could not
+    /// look. It is an error, in the failure's own words; a directory that
+    /// can be searched and holds no stream is still `Ok(None)`.
+    #[test]
+    fn an_audit_stream_that_cannot_be_looked_for_is_an_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("audit-state-unsearchable");
+        std::fs::create_dir_all(&dir).expect("a directory");
+        assert_eq!(
+            super::audit_state(&dir),
+            Ok(None),
+            "searchable, never written"
+        );
+        assert_eq!(super::audit_state(&dir.join("absent")), Ok(None));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let answer = super::audit_state(&dir);
+        let bound = std::fs::metadata(audit_current_path(&dir)).is_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(
+            bound,
+            "mode 000 does not bind this process: run as a user it binds"
+        );
+        let said = answer.expect_err("it could not be looked for");
+        assert!(said.contains("cannot be looked for"), "{said}");
+        assert!(said.contains("Permission denied"), "{said}");
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------

@@ -16062,10 +16062,11 @@ a neighbour (PROOF.md, scratch state).
   lines were gone; the classification above is from the store and a replay of
   the shipped derive over it, and from the share pull's surviving lines.
 
-## Ingest automation: the audit roll's reaper, log search over the run directories and the importer-evidence tails — D-4813, D-4838, D-4862, 11 October 2026
+## Ingest automation: the audit roll's reaper, log search over the run directories, the importer-evidence tails and the day band's run list — D-4813, D-4838, D-4862, D-4897, 11 October 2026
 
 Rows L-IA-13, L-IA-36 and L-IA-37 of the ingest automation design (its §10.2),
-landed by IA-11r with the code they bound.
+landed by IA-11r with the code they bound, and row L-IA-39, which the design's
+round-7 review added (it cites D-4896, which lands with IA-10a).
 
 - **L-IA-13. Keyed log search over the closed set of 8 directories.** A keyed
   `/logs.json` request probes every directory's posting for its key: at most
@@ -16076,28 +16077,37 @@ landed by IA-11r with the code they bound.
   `MAX_KEYED_READS` = 2,000 lines across all its streams. So at most
   24 × 55 + 2,000 = 3,320 file operations and 1,536,000 B of pointers per
   request, whatever the streams hold, with `capped` set when the line budget
-  runs out. Each request also makes one `metadata` call per directory to name
-  its state. An unkeyed request walks each directory's ring to at most
+  runs out. Each request also makes at most two `metadata` calls per directory
+  to name its state (the directory, then its current ring file by name: a
+  directory nobody may search answers the first and fails the second, and
+  reads `unreadable`). The 8 are `logs/`, `logs/cli/` and the 6 rows of
+  `telemetry::run_dirs::ALL` (D-4897): a seventh row is a ninth directory and
+  this bound recomputed, which bench C-LG-01 refuses to run without. An
+  unkeyed request walks each directory's ring to at most
   `SCAN_BYTES`, so 8 walks where it made 2. `ring=1` on a keyed first page
   adds the same 8 walks. A cursor (`before=`) taken from the two-directory
   build names 2 × probes slots and is refused by name
   (`cursor_refused`), never read as another page. Bench C-LG-01.
-- **L-IA-13, measured.** Bench C-LG-01 and C-LG-02, 11 Oct 2026, on the
-  operator's M4 Pro inside the build sandbox with a load average near 20
+- **L-IA-13, measured.** Bench C-LG-01 and C-LG-02, 11 Oct 2026 (the full
+  committed `cargo bench -p api`, exit 0, after the directory-state repair),
+  on the operator's M4 Pro inside the build sandbox with other builds running
   (single calls, n as stated; a ratio is the minimum of 20 trial means). A
   keyed `/logs.json` request for 20 rows of one run over 8 directories, each
-  holding a real audit stream: p50 626 µs, p99 871 µs, max 873 µs (n=200)
-  with 200 audited lines a directory, and p50 665 µs, p99 951 µs, max 963 µs
-  with 2,000; ratio 0.998x. The importer-evidence tails with nothing new:
-  82.7 µs and 82.2 µs a call, ratio 0.994x. The keyed probe of one day's 48
-  refusals in a kind's three directories: p50 663 µs, p99 879 µs, max 882 µs
-  at both sizes, ratio 0.986x. The first evidence read of a store (5 rings
-  parsed once): 5.9 ms at 200 lines a directory, 10.0 ms at 2,000.
-  `/imports.json`'s runs page over 1,000, 10,000 and 100,000 `run` lines: p50
-  85, 86 and 88 µs, p99 137, 132 and 155 µs, max 163, 165 and 156 µs
-  (n=300 each), ratios 0.953x and 0.981x; `run=<id>`: p50 99, 102 and 101 µs,
-  p99 172, 163 and 193 µs, max 223, 209 and 217 µs, ratios 0.982x and
-  1.005x. The first read of each journal (parsed once): 0.6, 2.4 and 25.8 ms.
+  holding a real audit stream: p50 634 µs, p99 974 µs, max 1,067 µs (n=200)
+  with 200 audited lines a directory, and p50 694 µs, p99 1,065 µs, max
+  1,190 µs with 2,000; ratio 1.105x. The importer-evidence tails with nothing
+  new: 97.2 µs and 95.0 µs a call, ratio 0.977x (82.7 and 82.2 µs before the
+  state was asked of the disk on every call: one more `metadata` call a
+  directory). The keyed probe of one day's 48 refusals in a kind's three
+  directories: p50 663 µs, p99 1,055 µs, max 1,071 µs at 200 lines and p50
+  661 µs, p99 1,108 µs, max 1,145 µs at 2,000, ratio 1.007x. The first
+  evidence read of a store (5 rings parsed once): 1.8 ms at 200 lines a
+  directory, 10.5 ms at 2,000. `/imports.json`'s runs page over 1,000, 10,000
+  and 100,000 `run` lines: p50 81, 83 and 82 µs, p99 216, 194 and 188 µs, max
+  427, 224 and 237 µs (n=300 each), ratios 0.999x and 1.002x; `run=<id>`: p50
+  96, 98 and 99 µs, p99 216, 213 and 164 µs, max 228, 237 and 245 µs, ratios
+  1.030x and 1.024x. The first read of each journal (parsed once): 0.4, 2.3
+  and 22.7 ms.
 - **L-IA-36. Audit index generations awaiting deletion.** A roll renames the
   retired generation to `audit.idx.gone/` and the sink's reaper thread deletes
   it off the emit path. The directory holds the generations rolled since the
@@ -16111,8 +16121,22 @@ landed by IA-11r with the code they bound.
   directory; it is not retried in the process that failed, so a tree that can
   never be deleted holds its disk until someone removes it. A process that
   never rolls again and never restarts leaves what it renamed aside where it
-  is. One `read_dir` of `audit.idx.gone/` per sink start. Bench C-AU-01 gates
-  the roll's emit; C-AU-02 times the delete and gates nothing.
+  is. So the bound is per directory, until a process next opens a sink on it:
+  at most one generation per roll, and one roll per 64 MiB of audited lines
+  (`AUDIT_MAX_FILE_BYTES`). A run directory used once (a one-off
+  `logs/verify/zerodha` run that rolled and exited) keeps that generation
+  until something logs there again, and while no process holds a sink on the
+  directory nothing counts it: the counters are a live sink's, shown in a
+  keyed `/logs.json` answer's `audit_stream` for the server's own sink only. A
+  per-directory reading of what waits, for a directory no process has open, is
+  NOT BUILT (`/audit.json` is not this package's file). One `read_dir` of
+  `audit.idx.gone/` per sink start. An entry there that is not a directory (a
+  file a file browser left) is not a retired generation: it is left, counted
+  neither as waiting nor as a failed delete, and named in `last_error`. A
+  symbolic link or a file named `audit.idx.gone` is refused by name at the
+  start's listing and at a roll, whose failure stops rotation as any failed
+  roll does; nothing behind a link is listed, deleted or renamed into. Bench
+  C-AU-01 gates the roll's emit; C-AU-02 times the delete and gates nothing.
 - **L-IA-36, measured.** Bench C-AU-01 and C-AU-02, 11 Oct 2026, on the
   operator's M4 Pro inside the build sandbox with a load average near 20,
   where one file create or delete cost about 1.7 to 3 ms (measured beside the
@@ -16139,8 +16163,14 @@ landed by IA-11r with the code they bound.
   roll of a ring, or a ring file replaced, reads that directory's ring again.
   Each new batch of lines copies that directory's folded evidence once
   (`Arc::make_mut` while an answer is kept against it), which is O(the
-  directory's refusals and attempts), not O(1). A call with nothing new is 5
-  `metadata` calls for the states and 5 tail checks.
+  directory's refusals and attempts), not O(1). A call with nothing new is at
+  most 10 `metadata` calls per directory (2 for its state, one per ring file
+  of `DEFAULT_KEEP_FILES` = 8), so at most 50, and 5 tail checks. Each ring
+  file's answer is remembered as absent, there or failed in its own words, and
+  a change between them reads that directory's ring again: a directory that
+  turns unreadable is read as such on the next call, at the cost of one ring
+  read when it turns and one when it turns back, and what it held is not
+  answered from memory while it cannot be read.
 - **The audit-stream probe behind a row is bounded, not O(1).**
   `logs::audited_import_refusals` reads the `day` posting of each of the
   kind's 3 directories, at most `MAX_KEYED_READS` = 2,000 pointers and line
@@ -16148,15 +16178,37 @@ landed by IA-11r with the code they bound.
   `/imports.json` has at most 200 rows. `run=<id>`'s lifecycle read is 5
   probes of the `run` posting under the same cap, shows the newest 64 events
   and says `capped` when a posting held more than one read takes.
-- **`/imports.json`'s runs page is O(page); the day band's run list is
-  not.** The route decodes at most 20 `run` lines and `run=<id>` the id's own
-  (bench C-LG-02). `/dayflags.json`'s day band resolves a refusal's run by
-  time over the whole list (`dayflags::refusals_of`), so the crate-internal
-  `imports::answer` it calls still decodes every `run` line per page: O(runs),
-  2 lines on the operator's journal on 11 Oct 2026. Making that a lookup needs
-  `dayflags.rs`, which is not this package's file. The journal's `Parsed` is
-  also copied once per new batch of journal lines while an answer is kept
-  against it, the cost it had before this change.
+- **L-IA-39. `/dayflags.json`'s day band decodes every `run` line of the
+  import journal on every request: O(runs), not O(1).** `/imports.json`'s
+  route decodes at most 20 `run` lines and `run=<id>` the id's own (D-4813,
+  bench C-LG-02). The day band cannot take that page: it attributes a logged
+  refusal to the run that was running when it was logged, by time, over the
+  whole list (`dayflags::refusals_of`), and a page of 20 would silently drop
+  the runs older refusals belong to. So the crate-internal read it makes
+  (`imports::answer` with `RunsAsked::Every`) decodes, renders and sorts every
+  `run` line, once per page of days of every `/dayflags.json?feed=gdfl`
+  request. `/dayflags.json` is what `/db` draws its day band from. The bound
+  is the journal: 2 `run` lines on the operator's store on 11 Oct 2026, one
+  more per import run. It stops being a limit when the band resolves a run
+  from the refusal event's own `run` field through the run-id index, O(1),
+  which is D-4896 and lands with IA-10a (after IA-16 gives every `refused`
+  event that field); until then this row is IA-11r's. Nothing gates it: a
+  ratio gate would only restate the row.
+- **L-IA-39, measured.** Bench C-LG-02's day-band rows, the same run as
+  above (`/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2019-10&to=2019-10`
+  through `api::logs::dayflags_json_over`, single calls, n=100 each, so the
+  p99 printed is the slowest call), over journals holding only `run` lines:
+  1,000 lines p50 1.17 ms, p99 1.44 ms, max 1.44 ms; 10,000 lines p50
+  8.69 ms, p99 9.86 ms, max 9.86 ms; 100,000 lines p50 97.5 ms, p99 121.3 ms,
+  max 121.3 ms. So about 1 µs a `run` line a request, linear, where the runs
+  page beside it stayed at 82 µs at every size. The second agent's check of
+  this package measured the same read over HTTP on a shadow of the operator's
+  store with 100,000 `run` lines appended to the shadow's journal: p50
+  103.85 ms, p99 115.65 ms, max 125.21 ms (n=200), against 1.74, 3.71 and
+  4.89 ms with the journal's own 2 lines. Printed by the bench at every run
+  and gated by nothing.
+  The journal's `Parsed` is also copied once per new batch of journal lines
+  while an answer is kept against it, the cost it had before this change.
 - **`/imports.json`'s day rows are still a walk of the asked range**
   (`imports::walk`), unchanged here: O(rows in range) per request.
 - **Measured on the operator's store (a shadow of it, GET only).** 200
@@ -16179,3 +16231,12 @@ landed by IA-11r with the code they bound.
   max 16.96 ms; BANKNIFTY spot p50 2.14 ms, p99 4.36 ms, max 4.53 ms; RELIANCE
   p50 2.21 ms, p99 3.33 ms, max 3.92 ms; NIFTY 28 Nov 2019 8000 PE p50
   1.81 ms, p99 3.25 ms, max 3.62 ms. Not a gate: one machine, one run.
+  Measured again after the directory-state repair, the same way against a
+  fresh shadow (outside the sandbox, load average 22.8): `/logs.json?limit=20`
+  p50 1.38 ms, p99 10.12 ms, max 39.87 ms; `/logs.json?run=1791602895&durable=1`
+  p50 0.75 ms, p99 3.62 ms, max 19.06 ms; `/imports.json?feed=gdfl` p50
+  4.85 ms, p99 10.37 ms, max 12.05 ms; one stocks day (2019-11-13) p50
+  0.91 ms, p99 6.95 ms, max 8.50 ms; `/dayflags.json` NIFTY spot 2019-10 p50
+  1.86 ms, p99 6.21 ms, max 8.15 ms; NIFTY 28 Nov 2019 12000 CE p50 1.48 ms,
+  p99 2.21 ms, max 5.96 ms (the journal's 2 `run` lines: L-IA-39's term is
+  not visible at that size).

@@ -2144,6 +2144,13 @@ jobs:
           #   fs::write        x1  the staged audit serial
           #   File::open       x1  the ring's own files, read once to seed a new
           #                        audit stream
+          #
+          # NOT COUNTED, AND SAID SO: this list is of `std::fs::` paths. A
+          # question asked through `Path` (`exists`, and since IA-11r's repair
+          # `try_exists` on the audit file and its serial, D-4862, and
+          # `symlink_metadata` on `audit.idx.gone`, D-4838) is a stat of a
+          # name built from the sink's own directory: it opens, reads and
+          # writes nothing, and it is not a site here.
           declared='sink.rs:std::fs::File::open:1
           sink.rs:std::fs::OpenOptions::new:6
           sink.rs:std::fs::create_dir_all:5

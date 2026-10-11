@@ -1018,11 +1018,24 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
             "read": format!(
                 "the `run` posting of the audit stream of each of {}: keyed, at most {} \
                  pointers a directory, the newest {MAX_LIFECYCLE_SHOWN} events shown",
-                crate::logs::IMPORT_DIRS.map(|dir| format!("logs/{dir}")).join(", "),
+                crate::logs::import_dirs()
+                    .map(|dir| format!("logs/{dir}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 crate::logs::MAX_KEYED_READS,
             ),
         },
     })
+}
+
+/// `/dayflags.json`'s body for `query` over the store at `root`: the day
+/// band's read, which calls [`answer`] with [`RunsAsked::Every`]. Here, and
+/// not in `dayflags`, only because this module is the one of the two that a
+/// caller outside `server` can reach; `logs::dayflags_json_over` is that
+/// caller, for the bench that measures `docs/06-limits.md` L-IA-39.
+pub(crate) fn day_band_json(root: &std::path::Path, query: &str) -> Result<String, String> {
+    let asked = super::dayflags::asked(query)?;
+    Ok(super::dayflags::answer(root, &asked).to_string())
 }
 
 /// How many of a run's lifecycle events `run=` shows: the newest.
@@ -1089,8 +1102,14 @@ fn runs_page(parsed: &Parsed, asked: RunsAsked) -> RunsPage {
                 0,
                 RUNS_PAGE,
                 Some(format!(
-                    "runs_before={id}.{nth} names no `run` line this journal holds, so no older \
-                     page is shown; ask without runs_before for the newest runs"
+                    "runs_before={} names no `run` line this journal holds, so no older page is \
+                     shown; ask without runs_before for the newest runs",
+                    // AS IT WAS ASKED: a bare id is not echoed as `<id>.0`.
+                    if nth == 0 {
+                        id.to_string()
+                    } else {
+                        format!("{id}.{nth}")
+                    }
                 )),
             ),
         },

@@ -22,6 +22,10 @@
 //! **Printed, not asserted:** each figure's p50, p99 and max over single
 //! calls, and the first read of each store (the ring read once, the journal
 //! parsed once), which is bounded by the files and paid once per process.
+//! And, beside C-LG-02, `/dayflags.json`'s day band over the same three
+//! journals: its read of the journal keeps every `run` line, so it tracks
+//! the journal and is `docs/06-limits.md` L-IA-39, measured here at 1,000,
+//! 10,000 and 100,000 `run` lines and gated by nothing.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -44,17 +48,18 @@ const POSTING_SIZES: [usize; 2] = [200, 2_000];
 /// `run` lines per journal.
 const JOURNAL_SIZES: [usize; 3] = [1_000, 10_000, 100_000];
 
-/// The directories a run process logs to, under `logs/`: the closed set of
-/// D-4862, spelt here as the store spells it.
-const RUN_DIRS: [&str; 7] = [
-    "cli",
-    "gdfl/indices",
-    "gdfl/stocks",
-    "gdfl/options",
-    "gdfl/store",
-    "verify/zerodha",
-    "verify/merge",
-];
+/// The directories a run process logs to, under `logs/`: `cli` and every row
+/// of the one table the writers and the readers share
+/// (`telemetry::run_dirs`, D-4897). Never spelt here.
+fn run_dirs() -> impl Iterator<Item = &'static str> {
+    std::iter::once(telemetry::run_dirs::CLI)
+        .chain(telemetry::run_dirs::ALL.iter().map(|dir| dir.sub))
+}
+
+/// The `/dayflags.json` request whose day band is timed beside the runs
+/// page: one month of one instrument of a kind, so the answer reads the
+/// import journal through the crate-internal caller that keeps every run.
+const DAY_BAND: &str = "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2019-10&to=2019-10";
 
 /// A scratch store of this process's own, emptied first.
 fn root_of(name: &str) -> PathBuf {
@@ -102,15 +107,24 @@ fn logs_store(lines: usize) -> PathBuf {
     let root = root_of(&format!("dirs-{lines}"));
     let logs = root.join("logs");
     fill(&logs, "served", lines);
-    for dir in RUN_DIRS {
-        // `logs/cli`, `logs/gdfl/indices` and `logs/gdfl/store` all hold
-        // indices refusals, so the indices probe merges three directories.
-        let kind = match dir {
-            "gdfl/stocks" => "stocks",
-            "gdfl/options" => "options",
-            _ => "indices",
-        };
+    let mut filled = 1usize;
+    for dir in run_dirs() {
+        // A KIND'S OWN DIRECTORY holds that kind's refusals; every other one
+        // (`logs/cli`, `logs/gdfl/store`, the verify pair) holds indices
+        // refusals, so the indices probe merges three directories.
+        let kind = telemetry::run_dirs::GDFL_KINDS
+            .iter()
+            .find(|own| own.sub == dir)
+            .and_then(|own| own.gdfl_kind)
+            .unwrap_or("indices");
         fill(&logs.join(dir), kind, lines);
+        filled += 1;
+    }
+    if filled != 8 {
+        refuse(&format!(
+            "the table names {filled} log directories with the server's own, and \
+             docs/06-limits.md L-IA-13 is computed for 8: recompute it with the table"
+        ));
     }
     root
 }
@@ -264,6 +278,24 @@ fn the_runs_page_is_flat(id: &str) -> bool {
         spread(&format!("{id} run=<id>, {runs} runs"), 300, || {
             api::logs::imports_json_over(&root, &one).map_or(0, |body| body.len())
         });
+        // THE DAY BAND'S READ OF THE SAME JOURNAL (L-IA-39): it resolves a
+        // refusal's run by time, so it keeps every `run` line and its cost
+        // tracks the journal. Printed at every size and NEVER gated: it is a
+        // named limit until the run comes from the event's own field
+        // (D-4896), and a ratio gate here would only say what the row says.
+        let Ok(band) = api::logs::dayflags_json_over(&root, DAY_BAND) else {
+            refuse("the day band's request was refused");
+        };
+        if !band.contains("\"instrument\":\"NSE-INDEX-NIFTY\"") || !band.contains("\"days\":[") {
+            refuse(&format!(
+                "the day band over {runs} runs is not a /dayflags.json answer"
+            ));
+        }
+        spread(
+            &format!("{id} day band (L-IA-39), {runs} runs"),
+            100,
+            || api::logs::dayflags_json_over(&root, DAY_BAND).map_or(0, |body| body.len()),
+        );
         roots.push(root);
     }
     let flat = |label: &str, costs: &[u128]| -> bool {
