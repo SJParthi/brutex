@@ -1591,3 +1591,182 @@ fn an_opening_record_written_again_is_the_same_run() {
     assert_eq!(rebuilt["opened_never_closed"], serde_json::json!([]));
     assert_eq!(rebuilt["attributed"]["run"], 4);
 }
+
+// ══ A month served from a repair revision (D-3350; DB-N26, WP-12d) ══════════
+
+/// The repair door's policy for an index: open interest is no measurement,
+/// and the feeds here are not back-adjusted.
+const INDEX_REPAIR: store::repair::Policy = store::repair::Policy {
+    open_interest_applies: false,
+    basis_witness: false,
+};
+
+/// **A BACK-FILLED GDFL MONTH IS ANSWERED FROM THE GENERATION EVERY READER
+/// OPENS, AND SAYS SO.** NIFTY 1s 2019-03 holds the 1st and the 5th in two
+/// commits; the import then lands the 4th, a day inside what it holds, as
+/// repair revision 1. The answer names the revision's path and its sidecar
+/// path, the original's path beside it, the revision's header, and ties the
+/// 4th's bars to its journal line between the others; the revision's one
+/// commit is not compared with the import days, and the reason is given in
+/// its place and at the top. The original's bytes are untouched.
+#[test]
+fn a_repaired_gdfl_month_is_answered_from_its_served_revision() {
+    let root = root_of("gdfl-repaired");
+    let _month = nifty_march(&root);
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    let original = std::fs::read(path.to_path_buf(&root)).unwrap();
+    let repaired = store::repair::repair_month(
+        &root,
+        path,
+        symbol_id("NIFTY"),
+        &seconds("2019-03-04", 4),
+        INDEX_REPAIR,
+    )
+    .unwrap();
+    assert!(
+        matches!(repaired, store::repair::MonthRepair::Repaired { .. }),
+        "{repaired:?}"
+    );
+    gdfl_journal(
+        &root,
+        &format!(
+            "{NIFTY_MARCH}begin indices 2019-03-04 NIFTY\n\
+             done indices 2019-03-04 NIFTY definition=3 files=1 seconds=4 failures=0 late=0 \
+             late_unresolved=0 max_back_s=0\n"
+        ),
+    );
+
+    let got = get(&root, GDFL_NIFTY);
+
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let body = &got.body;
+    let bars = &body["bars"];
+    assert_eq!(
+        bars["path"],
+        "bar-revisions-v1/1/bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"
+    );
+    assert_eq!(bars["served_generation"], 1);
+    assert_eq!(
+        bars["original_path"],
+        "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"
+    );
+    assert_eq!(bars["n_valid"], 9);
+    assert_eq!(bars["generation"], 1, "the revision's one commit");
+    assert_eq!(
+        body["sidecar"]["path"],
+        "bar-revisions-v1/1/bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.prv"
+    );
+    assert_eq!(body["sidecar"]["state"], "absent");
+    assert_eq!(body["label"], RECONSTRUCTED);
+    let note = body["notes"][0].as_str().unwrap();
+    assert!(note.contains("repair revision 1 (D-3350)"), "{note}");
+    assert!(note.contains("audit/gdfl.repairs"), "{note}");
+    let rebuilt = &body["reconstruction"];
+    assert!(rebuilt["commits_agree"].is_null(), "{rebuilt}");
+    assert!(
+        rebuilt["commits_why"]
+            .as_str()
+            .unwrap()
+            .contains("repair revision"),
+        "{rebuilt}"
+    );
+    let days: Vec<(&str, Value)> = rebuilt["days"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (row["day"].as_str().unwrap(), row["bars"].clone()))
+        .collect();
+    assert_eq!(
+        days,
+        [
+            (
+                "2019-03-01",
+                serde_json::json!({ "first_index": 0, "end": 3, "count": 3 })
+            ),
+            (
+                "2019-03-04",
+                serde_json::json!({ "first_index": 3, "end": 7, "count": 4 })
+            ),
+            (
+                "2019-03-05",
+                serde_json::json!({ "first_index": 7, "end": 9, "count": 2 })
+            ),
+        ]
+    );
+    assert_eq!(rebuilt["bars_on_journal_days"], 9);
+    assert_eq!(rebuilt["bars_on_no_journal_day"], 0);
+    assert_eq!(std::fs::read(path.to_path_buf(&root)).unwrap(), original);
+}
+
+/// **NO PULL RUN IS NAMED THE WRITER OF A MONTH SERVED FROM A REPAIR
+/// REVISION.** Zerodha NIFTY 1day 2015-01 committed once inside the
+/// 2015..2020 Kite run, which is named its writer; a repair then lands the
+/// 2nd as revision 1, also written inside that run's span. A revision's one
+/// commit and modification time are the repair's, so the rule "committed
+/// once, last written inside one run" no longer names anyone, and the last
+/// write reported is the revision's.
+#[test]
+fn a_month_served_from_a_repair_revision_names_no_pull_run_its_writer() {
+    let root = root_of("zerodha-repaired");
+    pull_journal(&root);
+    zerodha_days(&root, "2015-01", &["2015-01-01", "2015-01-05"], 1, T0 + 7);
+    let before = get(&root, ZERODHA_2015);
+    assert_eq!(
+        before.body["reconstruction"]["attributed"]["run"], 2,
+        "{}",
+        before.body
+    );
+    let path = path_of(
+        Vendor::Zerodha,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::DAY_1,
+        "2015-01",
+    );
+    let repaired = store::repair::repair_month(
+        &root,
+        path,
+        symbol_id("NIFTY"),
+        &[bar(ist_midnight("2015-01-02"), 5_55)],
+        INDEX_REPAIR,
+    )
+    .unwrap();
+    assert!(
+        matches!(repaired, store::repair::MonthRepair::Repaired { .. }),
+        "{repaired:?}"
+    );
+    std::fs::File::options()
+        .write(true)
+        .open(path.to_path_buf(&root.join("bar-revisions-v1").join("1")))
+        .unwrap()
+        .set_modified(at(T0 + 9))
+        .unwrap();
+
+    let got = get(&root, ZERODHA_2015);
+
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let body = &got.body;
+    assert_eq!(body["bars"]["served_generation"], 1);
+    assert_eq!(body["bars"]["n_valid"], 3);
+    assert_eq!(body["bars"]["modified_unix"], T0 + 9);
+    let rebuilt = &body["reconstruction"];
+    assert_eq!(rebuilt["last_write"]["modified_unix"], T0 + 9);
+    assert_eq!(rebuilt["last_write"]["inside_runs"], serde_json::json!([2]));
+    assert!(rebuilt["attributed"].is_null(), "{rebuilt}");
+    assert!(
+        body["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("audit/zerodha.repairs")),
+        "{body}"
+    );
+}
