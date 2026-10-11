@@ -522,11 +522,12 @@ export function censusFailure(answer) {
 export const FACETS_MS = 15_000;
 /* THE CEILING OF ONE REQUEST OF THE FIRST PAINT'S SCOPE (`readScope`), its
    own and shorter (WP-56b, the second check's follow-up): these answers are
-   a few kilobytes read off an index (p99 under 25 ms measured over n=200 on
-   the real store), and a scope that does not answer falls back to the whole
-   census, so every second waited here is a second before the first paint.
-   Three seconds is more than a hundred times the measured p99; past it the
-   scope is given up, the whole census is read, and the banner says why. */
+   read off an index (p99 between 6 and 44 ms per selection, n=200 each on
+   the real store at machine load 19-21; the largest answer 285 KB), and a
+   scope that does not answer falls back to the whole census, so every
+   second waited here is a second before the first paint. Three seconds is
+   more than sixty times the worst p99 measured; past it the scope is given
+   up, the whole census is read, and the banner says why. */
 export const SCOPE_MS = 3_000;
 /** The longest one request of a scope waits before it is asked again after a 429. */
 export const SCOPE_RETRY_MAX_MS = 1_500;
